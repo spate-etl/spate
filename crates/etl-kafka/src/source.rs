@@ -63,6 +63,12 @@ pub struct KafkaSource {
     metrics: Option<SourceMetrics>,
     /// Lanes of the current assignment, by id.
     assignment: HashMap<LaneId, i32>,
+    /// Lanes surfaced as revoked but not yet released by `unassign`. The
+    /// member still owns these partitions (the rebalance is not acknowledged
+    /// until `unassign`), so the post-drain final commit must still store
+    /// their offsets — `commit` consults this alongside `assignment`. Cleared
+    /// when `unassign` completes the revocation.
+    revoking: HashMap<LaneId, i32>,
     next_lane: u32,
     opened_at: Option<Instant>,
     saw_first_assignment: bool,
@@ -93,6 +99,7 @@ impl KafkaSource {
             issuer: None,
             metrics: None,
             assignment: HashMap::new(),
+            revoking: HashMap::new(),
             next_lane: 0,
             opened_at: None,
             saw_first_assignment: false,
@@ -136,6 +143,27 @@ impl KafkaSource {
 
     fn lanes_tpl(&self, lanes: &[LaneId]) -> TopicPartitionList {
         self.tpl_for(lanes.iter().filter_map(|l| self.assignment.get(l).copied()))
+    }
+
+    /// Partitions still owned (the current assignment), as `PartitionId`s.
+    /// Used to prune per-partition metric series when partitions are revoked
+    /// so a moved-away partition's lag gauge does not persist forever.
+    fn retained_partition_ids(&self) -> Vec<PartitionId> {
+        self.assignment
+            .values()
+            .map(|p| PartitionId(u32::try_from(*p).unwrap_or(0)))
+            .collect()
+    }
+
+    /// Partitions whose offsets this member may still store: the live
+    /// assignment plus partitions being revoked but not yet released by
+    /// `unassign` (ownership stays valid until the rebalance is acknowledged).
+    fn committable_partitions(&self) -> Vec<i32> {
+        self.assignment
+            .values()
+            .chain(self.revoking.values())
+            .copied()
+            .collect()
     }
 
     /// Accept an assignment: assign → pause → split → resume → lanes.
@@ -269,6 +297,9 @@ impl Source for KafkaSource {
             if let Err(e) = consumer.unassign() {
                 tracing::warn!(error = %e, "unassign after drained revocation");
             }
+            // The revoked partitions are now released; any late commit for
+            // them must be refused again.
+            self.revoking.clear();
         }
 
         let consumer = Arc::clone(self.consumer()?);
@@ -300,8 +331,11 @@ impl Source for KafkaSource {
                     let _ = consumer.resume(&tpl);
                 }
                 Err(e) => {
+                    // Permanent broker-side failures (authorization revoked,
+                    // deleted topic, unsupported protocol) must fail fast
+                    // rather than retry forever behind a green health probe.
                     return Err(SourceError::Client {
-                        class: ErrorClass::Retryable,
+                        class: crate::error::classify_poll_error(&e, self.saw_first_assignment),
                         reason: format!("consumer poll: {e}"),
                     });
                 }
@@ -326,6 +360,13 @@ impl Source for KafkaSource {
                     }
                     if tpl.count() == 0 {
                         // Empty assignment (no partitions for this member).
+                        // The rebalance protocol still MUST be acknowledged:
+                        // under deferred completion librdkafka keeps the
+                        // rebalance in progress until we call `assign`, even
+                        // for an empty set. Skipping it wedges the member —
+                        // it can never complete a later rebalance.
+                        let consumer = Arc::clone(self.consumer()?);
+                        consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
                         return Ok(SourceEvent::Idle);
                     }
@@ -344,8 +385,22 @@ impl Source for KafkaSource {
                         .filter(|(_, p)| revoked.contains(p))
                         .map(|(l, _)| *l)
                         .collect();
+                    // Move revoked lanes out of the live assignment but keep
+                    // them in `revoking`: the member still owns these
+                    // partitions until `unassign`, so the runtime's post-drain
+                    // final commit must be allowed to store their offsets.
+                    // `commit` consults `revoking`; the next `poll_events`
+                    // clears it once `unassign` releases the partitions.
                     for lane in &lanes {
-                        self.assignment.remove(lane);
+                        if let Some(p) = self.assignment.remove(lane) {
+                            self.revoking.insert(*lane, p);
+                        }
+                    }
+                    // The revoked partitions have moved to another member;
+                    // drop their per-partition lag series so it does not
+                    // persist frozen at its last value.
+                    if let Some(m) = &self.metrics {
+                        m.retain_partitions(&self.retained_partition_ids());
                     }
                     // Complete with unassign on the next call, after the
                     // runtime drained and committed.
@@ -373,18 +428,23 @@ impl Source for KafkaSource {
             return Ok(());
         }
         let consumer = Arc::clone(self.consumer()?);
-        let assigned: Vec<i32> = self.assignment.values().copied().collect();
+        // Partitions this member still owns: the live assignment plus any
+        // being revoked but not yet released by `unassign`. The revocation
+        // choreography drains and commits those partitions while ownership is
+        // still valid — filtering them out here would silently drop exactly
+        // the offsets the drain produced, replaying that work after the move.
+        let owned = self.committable_partitions();
         let mut tpl = TopicPartitionList::new();
         for (p, offset) in watermarks {
             let partition = i32::try_from(p.0).unwrap_or(-1);
-            if assigned.contains(&partition) {
+            if owned.contains(&partition) {
                 tpl.add_partition_offset(&self.config.topic, partition, Offset::Offset(*offset))
                     .map_err(fatal("build offset list"))?;
             } else {
                 tracing::debug!(
                     partition = p.0,
                     offset,
-                    "skipping store for partition no longer assigned"
+                    "skipping store for partition no longer owned"
                 );
             }
         }
@@ -464,5 +524,86 @@ impl Drop for KafkaSource {
                 tracing::warn!(error = %e, "unassign during source teardown failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> KafkaSourceConfig {
+        KafkaSourceConfig {
+            brokers: "localhost:9092".into(),
+            topic: "orders".into(),
+            group_id: "test".into(),
+            commit_interval: Duration::from_secs(5),
+            startup_timeout: Duration::from_secs(30),
+            statistics_interval: Duration::ZERO,
+            rdkafka: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Reproduces the assignment bookkeeping of a partial revocation: lanes
+    /// for the revoked partitions move from `assignment` into `revoking`.
+    fn revoke_lanes(source: &mut KafkaSource, revoked: &[i32]) {
+        let lanes: Vec<LaneId> = source
+            .assignment
+            .iter()
+            .filter(|(_, p)| revoked.contains(p))
+            .map(|(l, _)| *l)
+            .collect();
+        for lane in &lanes {
+            if let Some(p) = source.assignment.remove(lane) {
+                source.revoking.insert(*lane, p);
+            }
+        }
+    }
+
+    /// After a revocation the offsets of the partitions being revoked must
+    /// still be committable — they are drained and committed while the member
+    /// still owns them — while truly unowned partitions stay filtered out.
+    #[test]
+    fn committable_partitions_include_revoking_until_released() {
+        let mut source = KafkaSource::new(test_config());
+        for (lane, part) in [(0u32, 0i32), (1, 1), (2, 2), (3, 3)] {
+            source.assignment.insert(LaneId(lane), part);
+        }
+
+        revoke_lanes(&mut source, &[2, 3]);
+
+        let mut owned = source.committable_partitions();
+        owned.sort_unstable();
+        assert_eq!(
+            owned,
+            vec![0, 1, 2, 3],
+            "revoked partitions stay committable until unassign releases them"
+        );
+
+        // Releasing the revocation (what `unassign` completion does) removes
+        // them: a late commit for a released partition is refused.
+        source.revoking.clear();
+        let mut owned = source.committable_partitions();
+        owned.sort_unstable();
+        assert_eq!(owned, vec![0, 1]);
+    }
+
+    /// The retained set that prunes per-partition metric series must exclude
+    /// revoked partitions so their lag gauge does not persist after the move.
+    #[test]
+    fn retained_partition_ids_drop_revoked_partitions() {
+        let mut source = KafkaSource::new(test_config());
+        for (lane, part) in [(0u32, 0i32), (1, 1), (2, 2)] {
+            source.assignment.insert(LaneId(lane), part);
+        }
+
+        revoke_lanes(&mut source, &[2]);
+
+        let mut kept: Vec<u32> = source
+            .retained_partition_ids()
+            .iter()
+            .map(|p| p.0)
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![0, 1], "revoked partition 2 is not retained");
     }
 }

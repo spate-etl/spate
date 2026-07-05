@@ -10,6 +10,17 @@ use std::time::Duration;
 /// rejected at load time with an explanation, because overriding them
 /// silently breaks the framework's delivery guarantees or its threading
 /// model.
+///
+/// librdkafka accepts several property names that write the same underlying
+/// setting (`_RK_C_ALIAS` entries in `rdkafka_conf.c`). Because the
+/// passthrough and the framework's own values are distinct `ClientConfig`
+/// map keys applied in unspecified order, an alias of an owned property would
+/// non-deterministically override it. Every alias of a reserved property is
+/// therefore denied alongside its canonical name. Auditing the reserved set
+/// against librdkafka's config table yields two alias names to add — the
+/// other reserved properties (`group.id`, `enable.auto.offset.store`,
+/// `auto.commit.interval.ms`, `enable.partition.eof`, `statistics.interval.ms`,
+/// `group.protocol`, `partition.assignment.strategy`) have no alias.
 const DENYLIST: &[(&str, &str)] = &[
     (
         "enable.auto.offset.store",
@@ -22,6 +33,14 @@ const DENYLIST: &[(&str, &str)] = &[
          mechanism; disabling it means nothing is ever committed",
     ),
     (
+        // librdkafka's deprecated topic-level alias that `enable.auto.commit`
+        // maps to; denied so auto-commit cannot be disabled by the back door.
+        "auto.commit.enable",
+        "deprecated librdkafka alias of `enable.auto.commit`; interval \
+         auto-commit of framework-stored offsets is the commit mechanism, \
+         disabling it means nothing is ever committed",
+    ),
+    (
         "auto.commit.interval.ms",
         "owned by the typed `commit_interval` field",
     ),
@@ -30,6 +49,14 @@ const DENYLIST: &[(&str, &str)] = &[
         "EOF events would pollute the partition queues the pipeline polls",
     ),
     ("bootstrap.servers", "owned by the typed `brokers` field"),
+    (
+        // librdkafka's canonical name for `bootstrap.servers`; both write the
+        // same broker list, so denying only one leaves the framework's
+        // broker list overridable through the other.
+        "metadata.broker.list",
+        "librdkafka alias of `bootstrap.servers`, owned by the typed \
+         `brokers` field",
+    ),
     ("group.id", "owned by the typed `group_id` field"),
     (
         "statistics.interval.ms",
@@ -194,9 +221,11 @@ mod tests {
         for key in [
             "enable.auto.offset.store",
             "enable.auto.commit",
+            "auto.commit.enable",
             "auto.commit.interval.ms",
             "enable.partition.eof",
             "bootstrap.servers",
+            "metadata.broker.list",
             "group.id",
             "statistics.interval.ms",
             "group.protocol",
@@ -206,6 +235,29 @@ mod tests {
             let msg = err.to_string();
             assert!(msg.contains(key), "error names the key: {msg}");
         }
+    }
+
+    /// Regression: the librdkafka alias `metadata.broker.list` writes the same
+    /// underlying broker list as `bootstrap.servers`. Left un-denied, a
+    /// passthrough value would race the framework-owned broker list at client
+    /// creation (`ClientConfig` applies its map in unspecified order), so some
+    /// process restarts would silently consume from the wrong cluster.
+    #[test]
+    fn broker_list_alias_cannot_override_framework_brokers() {
+        let body = format!(
+            "{}  rdkafka:\n    metadata.broker.list: \"staging-kafka:9092\"\n",
+            minimal()
+        );
+        let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metadata.broker.list"),
+            "error names the key: {msg}"
+        );
+        assert!(
+            msg.contains("bootstrap.servers"),
+            "error explains the alias: {msg}"
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@
 
 mod config;
 mod context;
+mod error;
 mod lane;
 mod source;
 

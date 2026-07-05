@@ -308,3 +308,143 @@ fn startup_without_brokers_times_out_fatally() {
         }
     }
 }
+
+/// Drive one source one step, mirroring the runtime driver: apply a new
+/// assignment (opening an epoch), or complete a revocation (barrier + final
+/// commit). Returns how many lanes the source now owns, or `None` on an idle
+/// tick.
+fn drive_step(
+    source: &mut KafkaSource,
+    lanes: &mut Vec<<KafkaSource as Source>::Lane>,
+    cp: &mut Checkpointer,
+    epoch: &mut u32,
+    timeout: Duration,
+) -> Option<usize> {
+    match source.poll_events(timeout).expect("poll_events") {
+        SourceEvent::LanesAssigned(new) => {
+            let parts: Vec<PartitionId> = new.iter().map(SourceLane::partition).collect();
+            *epoch += 1;
+            cp.begin_epoch(&parts, *epoch);
+            let n = new.len();
+            *lanes = new;
+            Some(n)
+        }
+        SourceEvent::LanesRevoked {
+            lanes: ids,
+            barrier,
+        } => {
+            lanes.clear();
+            for _ in &ids {
+                barrier.arrive();
+            }
+            source.commit(&[]).expect("commit");
+            source.flush_commits().expect("flush");
+            Some(0)
+        }
+        _ => None,
+    }
+}
+
+/// Regression: a member that is offered an empty assignment (more group
+/// members than partitions) must still acknowledge the rebalance with
+/// `assign()`. Under the deferred-completion protocol, skipping that leaves
+/// librdkafka's rebalance in progress forever, so the member can never
+/// complete a later rebalance — it sits idle and cannot pick up partitions
+/// even after the owner leaves. Two same-group members share a single
+/// partition: whichever ends up empty must still be able to take the
+/// partition over once the owner departs.
+#[test]
+fn empty_assignment_completes_rebalance_protocol() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 5, 1, "e");
+
+    let mut cp_a = Checkpointer::new();
+    let mut cp_b = Checkpointer::new();
+    let mut a = KafkaSource::new(config(&brokers, "empty"));
+    let mut b = KafkaSource::new(config(&brokers, "empty"));
+    a.open(SourceCtx::new(cp_a.handle())).expect("open a");
+    b.open(SourceCtx::new(cp_b.handle())).expect("open b");
+
+    let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
+    let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
+    let (mut a_ep, mut b_ep) = (0u32, 0u32);
+    let (mut a_count, mut b_count) = (0usize, 0usize);
+
+    // Round-robin both members from this thread until the group settles with
+    // one owner and one empty member (stable for several quiet ticks).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut quiet = 0;
+    while Instant::now() < deadline && quiet < 25 {
+        let sa = drive_step(
+            &mut a,
+            &mut a_lanes,
+            &mut cp_a,
+            &mut a_ep,
+            Duration::from_millis(100),
+        );
+        let sb = drive_step(
+            &mut b,
+            &mut b_lanes,
+            &mut cp_b,
+            &mut b_ep,
+            Duration::from_millis(100),
+        );
+        if let Some(n) = sa {
+            a_count = n;
+        }
+        if let Some(n) = sb {
+            b_count = n;
+        }
+        if sa.is_none() && sb.is_none() {
+            quiet += 1;
+        } else {
+            quiet = 0;
+        }
+    }
+    assert_eq!(
+        a_count + b_count,
+        1,
+        "exactly one member owns the single partition (the other is empty)"
+    );
+
+    // Drop the owner (it leaves the group) and keep driving the previously
+    // empty member. If its empty-assignment rebalance was completed, it now
+    // acquires the partition; if it was wedged, it never does.
+    let (mut src, mut lanes, mut cp, mut ep) = if a_count == 1 {
+        drop(a_lanes);
+        drop(a);
+        (b, b_lanes, cp_b, b_ep)
+    } else {
+        drop(b_lanes);
+        drop(b);
+        (a, a_lanes, cp_a, a_ep)
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut acquired = 0usize;
+    while Instant::now() < deadline {
+        if let Some(n) = drive_step(
+            &mut src,
+            &mut lanes,
+            &mut cp,
+            &mut ep,
+            Duration::from_millis(200),
+        ) {
+            acquired = n;
+            if n == 1 {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        acquired, 1,
+        "previously-empty member acquired the partition after the owner left \
+         (its rebalance protocol was not wedged)"
+    );
+
+    // Sanity: the recovered member can actually consume the partition.
+    let rows = drain_lane(&mut lanes[0], 5);
+    assert_eq!(rows.len(), 5, "recovered member drains the partition");
+}

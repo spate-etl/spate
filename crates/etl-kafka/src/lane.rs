@@ -20,7 +20,7 @@
 
 use crate::context::SourceContext;
 use etl_core::checkpoint::{AckIssuer, AckRef};
-use etl_core::error::{ErrorClass, SourceError};
+use etl_core::error::SourceError;
 use etl_core::record::{PartitionId, RawPayload};
 use etl_core::source::{LaneId, PayloadBatch, SourceLane};
 use rdkafka::Message;
@@ -112,8 +112,10 @@ impl SourceLane for KafkaLane {
         match self.queue.poll(timeout) {
             None => return Ok(None),
             Some(Err(e)) => {
+                // A lane only exists after its partition was assigned, so
+                // any permanent condition here is genuinely post-startup.
                 return Err(SourceError::Client {
-                    class: ErrorClass::Retryable,
+                    class: crate::error::classify_poll_error(&e, true),
                     reason: format!("partition {} poll: {e}", self.partition.0),
                 });
             }

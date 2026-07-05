@@ -1,8 +1,8 @@
 //! Batch acknowledgement handles (Vector-finalizer style).
 
+use crate::checkpoint::sync::{Arc, AtomicU8, Ordering};
 use crate::record::PartitionId;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::fmt;
 
 /// Identity of one source poll batch within a partition and assignment
 /// epoch. Epochs are bumped on every rebalance so acknowledgements from
@@ -43,6 +43,39 @@ pub struct AckMsg {
     pub status: AckStatus,
 }
 
+/// Where a batch's resolution message is delivered: normally the
+/// checkpointer's unbounded channel; under `--cfg loom` an additional
+/// recorder variant lets the drop/fail races be model-checked without an
+/// unmodelled channel implementation.
+#[derive(Clone)]
+pub(crate) enum AckTx {
+    /// The checkpointer's unbounded channel.
+    Channel(crossbeam_channel::Sender<AckMsg>),
+    /// Loom-test recorder.
+    #[cfg(loom)]
+    Recorder(Arc<loom::sync::Mutex<Vec<AckMsg>>>),
+}
+
+impl AckTx {
+    fn send(&self, msg: AckMsg) {
+        match self {
+            // A send error means the checkpointer is gone (shutdown
+            // teardown); there is nothing left to acknowledge to.
+            AckTx::Channel(tx) => {
+                let _ = tx.send(msg);
+            }
+            #[cfg(loom)]
+            AckTx::Recorder(rec) => rec.lock().unwrap().push(msg),
+        }
+    }
+}
+
+impl fmt::Debug for AckTx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AckTx")
+    }
+}
+
 /// Shared acknowledgement state of one source poll batch.
 ///
 /// Dropping the final handle sends an [`AckMsg`] on the checkpointer's
@@ -54,7 +87,7 @@ struct AckState {
     id: BatchId,
     last_offset: i64,
     status: AtomicU8,
-    tx: crossbeam_channel::Sender<AckMsg>,
+    tx: AckTx,
 }
 
 impl Drop for AckState {
@@ -64,9 +97,7 @@ impl Drop for AckState {
         } else {
             AckStatus::Failed
         };
-        // A send error means the checkpointer is gone (shutdown teardown);
-        // there is nothing left to acknowledge to.
-        let _ = self.tx.send(AckMsg {
+        self.tx.send(AckMsg {
             id: self.id,
             last_offset: self.last_offset,
             status,
@@ -82,11 +113,7 @@ pub struct AckRef(Arc<AckState>);
 impl AckRef {
     /// Create the handle for a new batch. Called by the source driver once
     /// per poll batch; everything downstream only clones.
-    pub(crate) fn new(
-        id: BatchId,
-        last_offset: i64,
-        tx: crossbeam_channel::Sender<AckMsg>,
-    ) -> Self {
+    pub(crate) fn new(id: BatchId, last_offset: i64, tx: AckTx) -> Self {
         AckRef(Arc::new(AckState {
             id,
             last_offset,
@@ -123,14 +150,14 @@ impl AckRef {
                     seq: 0,
                 },
                 0,
-                tx,
+                AckTx::Channel(tx),
             ),
             rx,
         )
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
@@ -142,7 +169,7 @@ mod tests {
                 seq,
             },
             last_offset,
-            tx,
+            AckTx::Channel(tx),
         )
     }
 

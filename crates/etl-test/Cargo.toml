@@ -1,0 +1,21 @@
+[package]
+name = "etl-test"
+description = "Testing utilities for the etl-rs framework: in-memory sources and sinks with scripting handles for exercising pipelines without external infrastructure."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+etl-core = { workspace = true }
+
+[features]
+default = []
+# Property-testing strategies for framework types.
+proptest = []
+
+[lints]
+workspace = true

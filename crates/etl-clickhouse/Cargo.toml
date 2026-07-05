@@ -1,0 +1,16 @@
+[package]
+name = "etl-clickhouse"
+description = "ClickHouse sink for the etl-rs framework: direct-to-shard writes with replica rotation, batch flushing, and insert deduplication tokens. Applications should depend on the `etl` facade crate with the `clickhouse` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+etl-core = { workspace = true }
+
+[lints]
+workspace = true

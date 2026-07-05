@@ -1,0 +1,15 @@
+[package]
+name = "etl-core"
+description = "Engine for the etl-rs framework: records, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, and the pipeline runtime. Applications should depend on the `etl` facade crate instead."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

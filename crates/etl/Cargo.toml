@@ -1,0 +1,30 @@
+[package]
+name = "etl"
+description = "High-performance at-least-once ETL pipeline framework with a chaining operator API, checkpoint-driven source commits, sharded asynchronous sinks, backpressure, and Prometheus metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+etl-core = { workspace = true }
+etl-avro = { workspace = true, optional = true }
+etl-kafka = { workspace = true, optional = true }
+etl-clickhouse = { workspace = true, optional = true }
+
+[features]
+default = []
+avro = ["dep:etl-avro"]
+avro-fast = ["avro", "etl-avro/fast"]
+kafka = ["dep:etl-kafka"]
+clickhouse = ["dep:etl-clickhouse"]
+full = ["avro", "kafka", "clickhouse"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

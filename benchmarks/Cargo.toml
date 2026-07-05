@@ -1,0 +1,13 @@
+[package]
+name = "benchmarks"
+description = "Benchmark harnesses for the etl-rs framework (not published)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

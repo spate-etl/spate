@@ -1,0 +1,22 @@
+[package]
+name = "etl-avro"
+description = "Avro deserialization for the etl-rs framework: Confluent wire format, schema registry integration, and pluggable codec backends. Applications should depend on the `etl` facade crate with the `avro` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+etl-core = { workspace = true }
+
+[features]
+default = []
+# Zero-copy backend built on `serde_avro_fast` (license verification pending;
+# see the crate documentation before enabling in distributed binaries).
+fast = []
+
+[lints]
+workspace = true

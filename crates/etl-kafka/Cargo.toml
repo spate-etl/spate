@@ -1,0 +1,16 @@
+[package]
+name = "etl-kafka"
+description = "Kafka source for the etl-rs framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads. Applications should depend on the `etl` facade crate with the `kafka` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+etl-core = { workspace = true }
+
+[lints]
+workspace = true

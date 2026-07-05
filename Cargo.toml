@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/etl",
+    "crates/etl-core",
+    "crates/etl-avro",
+    "crates/etl-kafka",
+    "crates/etl-clickhouse",
+    "crates/etl-test",
+    "benchmarks",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcuskainth/etl-rs"
+keywords = ["etl", "pipeline", "streaming", "kafka", "clickhouse"]
+categories = ["asynchronous", "data-structures"]
+
+[workspace.dependencies]
+# Internal crates — exact pins, versions move in lockstep via workspace.package.
+etl-core = { version = "=0.1.0", path = "crates/etl-core" }
+etl-avro = { version = "=0.1.0", path = "crates/etl-avro" }
+etl-kafka = { version = "=0.1.0", path = "crates/etl-kafka" }
+etl-clickhouse = { version = "=0.1.0", path = "crates/etl-clickhouse" }
+etl-test = { version = "=0.1.0", path = "crates/etl-test" }
+
+# Async runtime and I/O edge.
+tokio = { version = "1.52", default-features = false }
+hyper = "1.10"
+hyper-util = "0.1"
+http-body-util = "0.1"
+
+# Serialization and config.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = { package = "yaml_serde", version = "0.10" }
+serde_path_to_error = "0.1"
+humantime-serde = "1.1"
+bytesize = { version = "2.4", features = ["serde"] }
+
+# Errors, logging, metrics.
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+metrics-process = "2.4"
+
+# Concurrency.
+crossbeam-channel = "0.5.15"
+
+# Connector dependencies. 0.x crates with breaking minors are held to a
+# single minor; Cargo.lock pins exact patches.
+rdkafka = "0.39"
+clickhouse = "0.15"
+apache-avro = "0.21"
+serde_avro_fast = "2.1"
+schema_registry_converter = { version = "4.9", default-features = false }
+
+# Test and bench tooling.
+testcontainers = "0.27"
+testcontainers-modules = "0.15"
+proptest = "1.11"
+loom = "0.7"
+criterion = "0.8"
+divan = "0.1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.release]
+lto = "thin"
+
+[profile.bench]
+debug = true

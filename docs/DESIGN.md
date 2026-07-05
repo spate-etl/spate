@@ -76,9 +76,34 @@ The Kafka source uses a **single consumer per process** with
 fast rebalances), partitions mapped m:n onto pipeline threads under local
 control, borrows kept thread-local. Consumption parallelism is still bounded
 by partition count — identical to per-thread consumers — the win is group
-scale and unified drain choreography. A per-thread-consumer fallback remains
-possible behind the same traits if split-queue semantics ever bite
-(benchmarked and validated in `docs/BENCHMARKS.md`).
+scale and unified drain choreography. Validated empirically (see
+`docs/BENCHMARKS.md`): split-queue polls reset `max.poll.interval.ms`, so
+group liveness never depends on the controller; at realistic per-record work
+the throughput delta vs per-thread consumers is ~3%; a per-thread-consumer
+fallback remains a documented escape hatch behind the same traits.
+
+Proven choreography etl-kafka must implement (spike-verified):
+
+- **Assign**: `post_rebalance(Assign)` runs on the controller's main-queue
+  poll and only gets `&BaseConsumer` — `pause()` all assigned partitions
+  there (stops fetch before it starts, preventing pre-split messages from
+  landing on the main queue), then after the callback returns the controller
+  (holding the consumer `Arc`) splits every partition queue, distributes
+  them to pipeline threads, and `resume()`s. Any message that still appears
+  on the main queue is routed defensively, never dropped.
+- **Revoke**: `pre_rebalance(Revoke)` → trip the drain barrier for owning
+  threads → flush and ack → synchronous store+commit → drop the revoked
+  `PartitionQueue`s → return from the callback. Dropping a `PartitionQueue`
+  restores forwarding to the main queue, so queues are dropped only once
+  revocation is complete. Queues are re-split after **every** rebalance;
+  retained-partition queues happen to keep working across eager rebalances
+  but this is not relied upon.
+- The consumer lives in an `Arc` from the start (`split_partition_queue`
+  requires it; each `PartitionQueue` keeps a clone). Rebalance and
+  statistics callbacks fire only on the main-queue polling thread — stats
+  parsing stays off pipeline threads. Idle lanes must block briefly on
+  their queue (zero-timeout polling busy-spins); `set_nonempty_callback` is
+  the planned refinement. `enable.partition.eof=false` is forced.
 
 ## Frozen v1 contracts
 

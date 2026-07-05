@@ -202,7 +202,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
-    let mut cp = Checkpointer::new();
+    let cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "grp"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let lanes = await_assignment(&mut source);
@@ -272,7 +272,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
 
     assert!(revoked, "revocation observed");
     assert!(
-        reassigned >= 1 && reassigned < 4,
+        (1..4).contains(&reassigned),
         "re-assignment shares partitions with the second member (got {reassigned})"
     );
     drop(lanes); // old lanes drop cleanly after revocation completed
@@ -282,7 +282,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
 fn startup_without_brokers_times_out_fatally() {
     let mut cfg = config("127.0.0.1:1", "nope");
     cfg.startup_timeout = Duration::from_secs(2);
-    let mut cp = Checkpointer::new();
+    let cp = Checkpointer::new();
     let mut source = KafkaSource::new(cfg);
     source.open(SourceCtx::new(cp.handle())).expect("open");
 

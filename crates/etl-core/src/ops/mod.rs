@@ -80,6 +80,17 @@ pub trait RunnableChain: Send {
     /// buffers) downstream. Called by the driver on drain, on linger
     /// deadlines, and before commit ticks.
     fn flush(&mut self) -> PushOutcome;
+
+    /// Discard any per-batch replay/resume state after the driver failed the
+    /// current batch's acknowledgement (a shutdown-time abandonment of a
+    /// batch blocked mid-push). Terminal parked chunks — which carry their
+    /// own acks — are unaffected; only the chain's own mid-batch cursor and
+    /// any stashed not-ready payload are cleared, so the next `push_batch` of
+    /// a fresh batch starts clean instead of tripping the resume-cursor
+    /// asserts or replaying the stale payload under the new batch's ack.
+    ///
+    /// The default is a no-op for chains that keep no cross-call batch state.
+    fn abandon_batch(&mut self) {}
 }
 
 /// Push-model stage: receives one record, forwards 0..N downstream.

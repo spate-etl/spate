@@ -299,6 +299,11 @@ fn drive_batch(
                         "shutdown during a blocked batch; abandoning it for replay"
                     );
                     ack.fail();
+                    // Discard the chain's mid-batch cursor / not-ready stash;
+                    // otherwise the Shutdown-triggered flush (or any stray
+                    // poll before the Shutdown message arrives) trips the
+                    // resume asserts or replays the stale payload.
+                    chain.abandon_batch();
                     return Ok(());
                 }
                 // Only genuine sink pressure engages the backpressure

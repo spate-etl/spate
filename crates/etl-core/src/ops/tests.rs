@@ -858,3 +858,66 @@ fn not_ready_blocks_then_replays_without_loss_or_duplication() {
     let msg = ack_rx.try_recv().expect("batch resolved");
     assert_eq!(msg.status, AckStatus::Delivered);
 }
+
+/// After the driver abandons a batch blocked mid-push at shutdown,
+/// `abandon_batch` must clear the chain's mid-batch cursor and not-ready
+/// stash so a fresh batch pushed from index 0 neither trips the resume
+/// asserts (debug) nor replays the stale payload under the new ack
+/// (release). Terminal chunks already parked from the abandoned batch keep
+/// their own (now failed) acks.
+#[test]
+fn abandon_batch_resets_mid_batch_state_for_the_next_batch() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+    let mut c = chain(FlakyDeser {
+        inner: LogDeser,
+        // Never becomes ready during this test: the flaky payload always
+        // reports NotReady and stays stashed until we abandon it.
+        not_ready_remaining: 9,
+        attempts_on_flaky: 0,
+    })
+    .flat_map::<SubF, _>(split_body)
+    .sink(
+        SubEncoder,
+        ToZero,
+        ChunkConfig::default(),
+        queues,
+        Arc::clone(&budget),
+    )
+    .build();
+
+    // Batch 1: payload 0 ("a:one") flows into the terminal, payload 1
+    // ("b:two|wait") reports NotReady → blocked mid-batch at cursor 1 with
+    // the payload stashed.
+    let b1 = payloads(&["a:one", "b:two|wait"]);
+    let (mut batch1, _ack1_rx) = TestBatch::new(&b1);
+    let PushOutcome::Blocked { resume_at, reason } = c.push_batch(&mut batch1, 0) else {
+        panic!("expected Blocked NotReady");
+    };
+    assert_eq!(resume_at, 1);
+    assert_eq!(reason, BlockReason::NotReady);
+
+    // The driver's shutdown-abandon path: fail the ack, then discard the
+    // chain's per-batch state.
+    batch1.ack().fail();
+    c.abandon_batch();
+    drop(batch1);
+
+    // A fresh batch from index 0. Without abandon_batch this would panic on
+    // `debug_assert_eq!(from, self.cursor)` (0 != 1) or replay "b:two|wait".
+    let b2 = payloads(&["c:three", "d:four"]);
+    let (mut batch2, ack2_rx) = TestBatch::new(&b2);
+    assert!(matches!(c.push_batch(&mut batch2, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let rows = drain_rows(&mut rxs[0]);
+    // "one" is batch 1's already-parked terminal row (kept, with its failed
+    // ack); the stashed "two"/"wait" is gone; batch 2's rows follow. No
+    // duplication, no misattributed replay.
+    assert_eq!(
+        rows,
+        vec![b"one".to_vec(), b"three".to_vec(), b"four".to_vec()]
+    );
+    drop(batch2);
+    assert_eq!(ack2_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}

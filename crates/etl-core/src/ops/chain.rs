@@ -750,4 +750,15 @@ where
             },
         }
     }
+
+    fn abandon_batch(&mut self) {
+        // Drop the mid-batch cursor and any stashed not-ready payload. The
+        // terminal stage's parked chunks (with their own acks) are left
+        // alone; only this chain's per-batch bookkeeping is reset so the
+        // next fresh push_batch neither asserts nor replays the stale
+        // payload under a new batch's ack.
+        self.mid_batch = false;
+        self.cursor = 0;
+        self.pending = None;
+    }
 }

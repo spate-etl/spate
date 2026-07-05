@@ -408,11 +408,11 @@ MPL-2.0 — it stays out of the dependency tree until verified (enforced by
 
 | Crate | Role |
 |---|---|
-| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `avro-fast`, `full`). The only crate applications depend on. |
+| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `full`). The only crate applications depend on. |
 | `etl-core` | Engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline runtime, config, metrics, admin server, telemetry. |
 | `etl-kafka` | Kafka source (single consumer + partition queues). |
 | `etl-clickhouse` | ClickHouse `ShardWriter`. |
-| `etl-avro` | Avro deserializer: `apache-avro` backend (default), zero-copy backend (feature `fast`), Confluent wire format, registry client + per-thread schema cache. |
+| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. (A zero-copy `serde_avro_fast` backend was evaluated but is **not shipped** — license-metadata gated; see the crate docs and the dependency-policy note above.) |
 | `etl-test` | Public in-memory source/sink mocks with scripting handles. |
 | `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |
 

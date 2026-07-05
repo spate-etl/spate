@@ -100,3 +100,67 @@ Transport parity (~20M rows/s locally); typed-path validation costs
 `insert_deduplicate=1`, `wait_end_of_query=1`, and on plain `MergeTree` a
 non-zero `non_replicated_deduplication_window` (server default 0 silently
 disables dedup; replicated tables default to a window of 100).
+
+### Framework baselines (permanent harness, 2026-07)
+
+Environment: M5 Max 18-core / 128 GB (dev laptop), quiet machine, Rust
+1.96.1, release build. Harness: `benchmarks/` binaries; raw JSON in
+`benchmarks/results/`. Reproduce per the usage headers in each binary.
+
+**Framework ceiling** (`pipeline_synthetic`: generator source → real chain
+(filter, zero-work) → real sink pool → null writer; 256 B payloads,
+2 shards, 2 I/O threads, 64 KiB chunks, 65,536-row batches, 5 ms linger):
+
+| Pipeline threads | Records/s | Per thread |
+|---|---|---|
+| 1 | 37.0M | 37.0M |
+| 2 | 58.9M | 29.5M |
+| 4 | 48.4M | 12.1M |
+
+Interpretation: ~27 ns/record full-framework cost at one thread (lane
+poll, ack issue/resolve, chain, encode, chunk, queue handoff, batching,
+checkpoint commits — the pure chain alone is ~9 ns). Zero-work records
+saturate the fixed egress side (2 shard workers) near 59M records/s, so
+4 threads regresses — this is a ceiling harness, not a scaling proof;
+with real per-record work the pipeline threads dominate and the sink side
+stops being the limiter.
+
+⚠ Finding for tuning documentation: with the *default* sink batch config
+(500k rows) and an unthrottled source, the 256 MiB in-flight budget fills
+in tens of milliseconds while a batch needs hundreds of thousands of rows
+to seal — per-thread pause controllers then sit in 500 ms `min_pause`
+cycles and throughput collapses ~24× (measured 2.5M rec/s in that state).
+Real sources rarely outrun the budget this way, but the interaction
+(batch-seal thresholds vs budget watermarks vs `min_pause`) deserves a
+documented sizing rule; recorded for the hardening pass.
+
+**Consumer topology confirmation** (`kafka_topology`, 16 partitions ×
+4 threads × 10 µs/record × 10M × 256 B, single local broker, 2 reps/mode):
+
+| Mode | Records/s (reps) | vs per-thread |
+|---|---|---|
+| Per-thread consumers | 384.5k / 385.1k | — |
+| Single + split queues | 376.2k / 376.8k | **−2.2%** |
+
+Reproduces the spike's −3.2% at realistic work on the permanent harness.
+(A contaminated earlier run under concurrent compile load showed −24% —
+single-instance fetch is more sensitive to CPU starvation; benchmark on a
+quiet machine.)
+
+**Full pipeline smoke** (`e2e_kafka_clickhouse`, local containers, 60 s @
+100k records/s target, 4 partitions, 2 threads, 64 B rows):
+
+| Metric | Value |
+|---|---|
+| Produced (60 s window) | 6.02M |
+| Rows in ClickHouse (window + 30 s grace) | 5.37M (89.4k rows/s) |
+| Sink flush p99 | 24.7 ms |
+| Backpressure pauses | 0 |
+
+The un-drained tail replays on the next run — at-least-once, as designed.
+Known gap: `etl_e2e_latency_seconds` renders no samples — the instrument
+exists but observation is not yet wired into the sink ack path (recorded
+framework TODO). Related harness lesson now encoded in the binaries:
+metric handles created before `metrics::install` bind to the noop
+recorder and silently render nothing — the harnesses install the recorder
+first and the examples should be audited for the same pattern.

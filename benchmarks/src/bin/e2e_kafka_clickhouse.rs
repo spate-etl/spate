@@ -17,9 +17,9 @@ use benchmarks::{docker, ensure_topic, env_str, env_u64, prom, report};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::{ComponentConfig, PipelineConfig};
 use etl_core::deser::BytesPassthrough;
-use etl_core::metrics::{ComponentLabels, SinkShardMetrics};
+use etl_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl_core::ops::{ChunkConfig, chain_owned};
-use etl_core::pipeline::{DrainReport, PipelineRuntime, RuntimeOptions, SinkRuntime};
+use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 use etl_core::sink::{KeyHashRouter, SinkPool, shard_queues};
 use etl_kafka::{KafkaSource, KafkaSourceConfig};
 use rdkafka::config::ClientConfig;
@@ -223,6 +223,7 @@ clickhouse:
                 &labels,
                 u32::try_from(s).expect("shard"),
                 &[format!("replica-{s}-0")],
+                E2eBasis::Ingest,
             )
         })
         .collect();
@@ -238,15 +239,7 @@ clickhouse:
     );
     let sink = SinkRuntime {
         queues: queues.clone(),
-        drain: Box::new(move |deadline| {
-            Box::pin(async move {
-                let r = pool.drain(deadline).await;
-                DrainReport {
-                    flushed_batches: r.flushed,
-                    abandoned_batches: r.abandoned,
-                }
-            })
-        }),
+        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
         probe: None,
     };
 

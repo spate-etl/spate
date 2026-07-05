@@ -14,7 +14,13 @@ checkpoint:
   drain_timeout: 25s    # keep below terminationGracePeriodSeconds
 
 backpressure:
-  max_inflight_bytes: 256MiB
+  # Sizing rule (docs/DESIGN.md § Backpressure): the budget's low watermark
+  # must hold ~2x (shards x inflight x batch.max_bytes + queued chunks), or
+  # a saturated source lives above the high watermark and throughput
+  # collapses into min_pause duty cycles. With one shard and the batch
+  # settings below: 2x (1 x 2 x 128MiB) = 512MiB -> 1GiB budget at low=0.5.
+  # Throttled sources that never fill batches are fine with far less.
+  max_inflight_bytes: 1GiB
 
 metrics:
   exporter: prometheus

@@ -15,9 +15,9 @@ use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, S
 use benchmarks::{busy_work, env_str, env_u64, prom, report};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::PipelineConfig;
-use etl_core::metrics::{ComponentLabels, SinkShardMetrics};
+use etl_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl_core::ops::{ChunkConfig, chain};
-use etl_core::pipeline::{DrainReport, PipelineRuntime, RuntimeOptions, SinkRuntime};
+use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 use etl_core::sink::{KeyHashRouter, SinkPool, SinkPoolConfig, shard_queues};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +83,7 @@ sink: {{ nullsink: {{}} }}
                 &labels,
                 u32::try_from(s).expect("shard"),
                 &[format!("null-{s}")],
+                E2eBasis::Ingest,
             )
         })
         .collect();
@@ -107,15 +108,7 @@ sink: {{ nullsink: {{}} }}
     );
     let sink = SinkRuntime {
         queues: queues.clone(),
-        drain: Box::new(move |deadline| {
-            Box::pin(async move {
-                let r = pool.drain(deadline).await;
-                DrainReport {
-                    flushed_batches: r.flushed,
-                    abandoned_batches: r.abandoned,
-                }
-            })
-        }),
+        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
         probe: None,
     };
 
@@ -165,8 +158,20 @@ sink: {{ nullsink: {{}} }}
     shutdown.trigger();
     let exit = pipeline.join().expect("pipeline thread").expect("run");
 
+    // Two windows, reported separately so they can never be conflated:
+    // `records` covers the steady-state measurement window only, while the
+    // lifetime figures (produced_total / sink_rows_total) also include
+    // warmup and drain. Comparing window records against lifetime rows is
+    // what once made the sink look like it double-counted.
     let records = c1 - c0;
     let rate = records as f64 / window;
+    let produced_total = produced.load(Ordering::Relaxed);
+    assert!(
+        writer.rows() <= produced_total,
+        "conservation: rows written ({}) must never exceed records produced ({})",
+        writer.rows(),
+        produced_total,
+    );
     report(&serde_json::json!({
         "bench": "pipeline_synthetic",
         "threads": threads,
@@ -179,6 +184,7 @@ sink: {{ nullsink: {{}} }}
         "records_per_s_per_thread": rate / threads as f64,
         "e2e_p50_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.5),
         "e2e_p99_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.99),
+        "produced_total": produced_total,
         "sink_rows_total": writer.rows(),
         "sink_batches_total": writer.batches(),
         "commits": commits.load(Ordering::Relaxed),

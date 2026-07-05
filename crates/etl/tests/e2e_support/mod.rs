@@ -24,7 +24,7 @@ use etl::clickhouse::ClickHouseEncoder;
 use etl::config::PipelineConfig;
 use etl::error::ErrorPolicy;
 use etl::kafka::KafkaSource;
-use etl::metrics::{ComponentLabels, SinkShardMetrics};
+use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl::ops::{ChunkConfig, chain_owned};
 use etl::pipeline::{
     ExitReport, PipelineRuntime, RuntimeOptions, ShutdownHandle, SinkProbeFn, SinkRuntime,
@@ -292,6 +292,10 @@ impl Harness {
 
     pub fn spawn_pipeline(&self, params: &PipelineParams) -> RunningPipeline {
         let config = PipelineConfig::from_str(&params.yaml(self)).expect("pipeline config parses");
+        // Exporter before handles: the sink metrics below must bind to the
+        // real recorder (install is idempotent across scenarios).
+        let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))
+            .expect("metrics install");
         let admin: SocketAddr = config.metrics.listen;
         let pipeline_name = config.pipeline.name.clone();
 
@@ -320,7 +324,12 @@ impl Harness {
             .enumerate()
             .map(|(shard, replicas)| {
                 let urls: Vec<String> = replicas.iter().map(|e| e.url().to_string()).collect();
-                SinkShardMetrics::new(&sink_labels, u32::try_from(shard).unwrap_or(0), &urls)
+                SinkShardMetrics::new(
+                    &sink_labels,
+                    u32::try_from(shard).unwrap_or(0),
+                    &urls,
+                    E2eBasis::Ingest,
+                )
             })
             .collect();
 
@@ -356,15 +365,7 @@ impl Harness {
 
         let sink_runtime = SinkRuntime {
             queues: queues.clone(),
-            drain: Box::new(move |deadline| {
-                Box::pin(async move {
-                    let r = pool.drain(deadline).await;
-                    etl::pipeline::DrainReport {
-                        flushed_batches: r.flushed,
-                        abandoned_batches: r.abandoned,
-                    }
-                })
-            }),
+            drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
             probe: Some(probe),
         };
 

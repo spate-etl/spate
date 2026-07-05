@@ -15,7 +15,7 @@
 
 use etl::backpressure::InflightBudget;
 use etl::config::PipelineConfig;
-use etl::metrics::{ComponentLabels, SinkShardMetrics};
+use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl::ops::{ChunkConfig, chain_owned};
 use etl::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 use etl::record::PartitionId;
@@ -38,6 +38,9 @@ sink: { capture: {} }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     etl::telemetry::init(etl::telemetry::LogFormat::Pretty, "info");
     let config = PipelineConfig::from_str(CONFIG)?;
+    // Exporter first, handles second — handles built before the exporter
+    // exists would record into the void (see `metrics::install`).
+    let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))?;
 
     // ── Source ──────────────────────────────────────────────────────────
     // The in-memory source pairs with a handle that scripts assignments
@@ -74,21 +77,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &sink_labels,
             0,
             &["memory-0".to_string()],
+            E2eBasis::Ingest,
         )],
         "memory-demo",
         io.handle(),
     );
     let sink = SinkRuntime {
         queues: queues.clone(),
-        drain: Box::new(move |deadline| {
-            Box::pin(async move {
-                let r = pool.drain(deadline).await;
-                etl::pipeline::DrainReport {
-                    flushed_batches: r.flushed,
-                    abandoned_batches: r.abandoned,
-                }
-            })
-        }),
+        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
         probe: None, // in-memory sink: nothing to probe
     };
 

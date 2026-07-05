@@ -25,7 +25,7 @@ use etl::checkpoint::{AckIssuer, AckRef};
 use etl::config::PipelineConfig;
 use etl::deser::Owned;
 use etl::error::{SinkError, SourceError};
-use etl::metrics::{ComponentLabels, SinkShardMetrics};
+use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl::ops::{ChunkConfig, chain_owned};
 use etl::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 use etl::record::{PartitionId, RawPayload, Record};
@@ -234,6 +234,9 @@ sink: { stdout: {} }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     etl::telemetry::init(etl::telemetry::LogFormat::Pretty, "info");
     let config = PipelineConfig::from_str(CONFIG)?;
+    // Exporter first, handles second — handles built before the exporter
+    // exists would record into the void (see `metrics::install`).
+    let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))?;
 
     let per_partition = 100;
     let commits = Arc::new(Mutex::new(BTreeMap::new()));
@@ -254,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let labels = ComponentLabels::new("counter-demo", "sink", "stdout");
     let metrics = (0..2u32)
-        .map(|s| SinkShardMetrics::new(&labels, s, &[format!("stdout-{s}")]))
+        .map(|s| SinkShardMetrics::new(&labels, s, &[format!("stdout-{s}")], E2eBasis::Ingest))
         .collect();
     let pool_cfg = {
         let mut cfg = SinkPoolConfig::default();
@@ -273,15 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let sink = SinkRuntime {
         queues: queues.clone(),
-        drain: Box::new(move |deadline| {
-            Box::pin(async move {
-                let r = pool.drain(deadline).await;
-                etl::pipeline::DrainReport {
-                    flushed_batches: r.flushed,
-                    abandoned_batches: r.abandoned,
-                }
-            })
-        }),
+        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
         probe: None,
     };
 

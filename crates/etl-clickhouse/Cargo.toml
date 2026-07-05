@@ -10,7 +10,22 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+bytesize = { workspace = true }
+clickhouse = { workspace = true, features = ["lz4", "rustls-tls"] }
 etl-core = { workspace = true }
+humantime-serde = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+clickhouse = { workspace = true, features = ["lz4", "rustls-tls", "test-util"] }
+crossbeam-channel = { workspace = true }
+hyper = { workspace = true }
+serde_yaml = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["clickhouse"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

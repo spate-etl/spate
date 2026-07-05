@@ -10,12 +10,20 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+crossbeam-channel = { workspace = true }
 etl-core = { workspace = true }
+proptest = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 
 [features]
 default = []
-# Property-testing strategies for framework types.
-proptest = []
+# Property-testing strategies for framework types (payload vectors, lane
+# layouts, source scripts, writer outcomes).
+proptest = ["dep:proptest"]
 
 [lints]
 workspace = true

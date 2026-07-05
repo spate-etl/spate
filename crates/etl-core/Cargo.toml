@@ -36,7 +36,10 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 
-[target.'cfg(loom)'.dev-dependencies]
+# A real (not dev) target dependency: the library itself swaps to loom
+# atomics under `--cfg loom`, which dev-dependencies cannot provide. Absent
+# from all normal builds.
+[target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
 [lints]

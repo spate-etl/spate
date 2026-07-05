@@ -276,7 +276,14 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
             }
         })
     });
-    (SinkRuntime { queues, drain }, drained)
+    (
+        SinkRuntime {
+            queues,
+            drain,
+            probe: None,
+        },
+        drained,
+    )
 }
 
 fn test_config(threads: usize) -> PipelineConfig {

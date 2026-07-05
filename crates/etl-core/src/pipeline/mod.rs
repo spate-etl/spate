@@ -94,6 +94,11 @@ pub struct SinkRuntime {
     /// Drain the sink: flush what's pending within the budget, fail the
     /// acknowledgements of anything abandoned, and report.
     pub drain: SinkDrainFn,
+    /// Optional connectivity probe (e.g. `SinkPool::probe_all`). The
+    /// runtime probes at startup and then periodically, driving the
+    /// sinks-connected half of `/readyz`. Without a probe the flag is set
+    /// unconditionally.
+    pub probe: Option<SinkProbeFn>,
 }
 
 impl std::fmt::Debug for SinkRuntime {
@@ -107,6 +112,13 @@ impl std::fmt::Debug for SinkRuntime {
 /// Boxed sink drain hook: budget in, report out.
 pub type SinkDrainFn =
     Box<dyn FnOnce(Duration) -> Pin<Box<dyn Future<Output = DrainReport> + Send>> + Send>;
+
+/// Boxed, repeatable sink connectivity probe (readiness).
+pub type SinkProbeFn = Box<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), crate::error::SinkError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Terminal state of a pipeline run.
 #[derive(Clone, Debug, PartialEq, Eq)]

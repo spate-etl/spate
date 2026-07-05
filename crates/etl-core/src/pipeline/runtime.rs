@@ -216,6 +216,34 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             });
         }
 
+        // Sink readiness: probe at startup and periodically (tighter while
+        // failing), driving the sinks-connected half of `/readyz`. No probe
+        // hook means nothing to check — report connected.
+        match self.sink.probe.take() {
+            Some(probe) => {
+                let health_probe = Arc::clone(&health);
+                io.spawn(async move {
+                    loop {
+                        let connected = match probe().await {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "sink probe failed");
+                                false
+                            }
+                        };
+                        health_probe.set_sinks_connected(connected);
+                        let recheck = if connected {
+                            Duration::from_secs(30)
+                        } else {
+                            Duration::from_secs(5)
+                        };
+                        tokio::time::sleep(recheck).await;
+                    }
+                });
+            }
+            None => health.set_sinks_connected(true),
+        }
+
         // Wiring.
         let (events_tx, events_rx) = crossbeam_channel::unbounded::<DriverEvent>();
         let (to_main_tx, to_main_rx) = crossbeam_channel::unbounded::<ControllerSignal>();

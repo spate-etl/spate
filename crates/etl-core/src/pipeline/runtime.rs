@@ -282,7 +282,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     self.config.metrics.per_partition_detail,
                 ),
             };
-            let core = core_ids[i];
+            let core = core_ids.get(i).copied().flatten();
             let handle = std::thread::Builder::new()
                 .name(format!("etl-pipeline-{i}"))
                 .spawn(move || {

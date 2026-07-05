@@ -1,0 +1,90 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (etl-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri test -p etl-core --lib
+        env:
+          # tokio's I/O driver needs isolation off for its epoll shim.
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+  loom:
+    name: Loom models (etl-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p etl-core --release --lib
+        env:
+          RUSTFLAGS: --cfg loom
+
+  docker-integration:
+    name: Container integration suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p etl --test e2e -- --ignored
+      - run: cargo test -p etl-kafka -- --ignored
+      - run: cargo test -p etl-clickhouse -- --ignored
+
+  bench:
+    name: Criterion + divan micro benches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Alloc-count benches are hard assertions: a per-record allocation on
+      # the hot path fails this job.
+      - run: cargo test -p etl-core --release --test chain_alloc
+      - run: cargo bench -p etl-core -- --save-baseline nightly
+      - name: Fetch previous baseline
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: criterion-baseline
+          path: previous-criterion
+      - name: Compare against previous baseline
+        continue-on-error: true
+        run: |
+          cargo install critcmp --locked || true
+          if [ -d previous-criterion ]; then
+            cp -r previous-criterion/* target/criterion/ 2>/dev/null || true
+            critcmp nightly || true
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: criterion-baseline
+          path: target/criterion
+
+  synthetic-trend:
+    name: pipeline_synthetic trend run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p benchmarks
+      - run: RUN_ONE=1 THREADS=2 DURATION_S=60 RESULTS=synthetic-trend.jsonl ./target/release/pipeline_synthetic
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-trend-${{ github.run_id }}
+          path: synthetic-trend.jsonl

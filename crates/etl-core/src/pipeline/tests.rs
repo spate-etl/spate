@@ -38,6 +38,9 @@ struct SourceLog {
 enum Script {
     Assign(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
+    /// Panic inside `poll_events` — models a source bug that kills the
+    /// controller thread outside its drain choreography.
+    PanicPoll,
 }
 
 struct LaneSpec {
@@ -105,6 +108,7 @@ impl Source for FakeSource {
                     lanes: ids,
                 })
             }
+            Some(Script::PanicPoll) => panic!("scripted poll_events panic"),
             None => {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 Ok(SourceEvent::Idle)
@@ -745,4 +749,76 @@ fn source_error_classification() {
             ..
         }
     ));
+}
+
+/// If the controller thread panics (here, a source whose `poll_events`
+/// panics), it never runs the drain choreography, never tells the drivers to
+/// stop, and never sets the shutdown flag. `run()` must detect the dead
+/// controller, stop the drivers itself, and return `Failed` — not wedge on
+/// an untimed driver join.
+#[test]
+fn controller_panic_stops_drivers_and_fails_instead_of_hanging() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::BlockForever,
+        batches_seen: 0,
+    });
+    {
+        let mut script = h.script.lock().unwrap();
+        // Assign a lane so the driver wedges on the never-unblocking batch,
+        // then panic the next poll_events.
+        script.push_back(Script::Assign(vec![LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        }]));
+        script.push_back(Script::PanicPoll);
+    }
+    // Bounded wait: without the fix, main's untimed driver join hangs here.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !h.join.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "run() hung after the controller thread panicked"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a controller panic must fail the run");
+    };
+    assert_eq!(failure.component, "controller");
+}
+
+/// A fallible startup step after the driver threads are spawned (here, the
+/// admin bind, forced to fail by occupying its port) must stop the drivers
+/// and return the error promptly — never leak the running pinned threads.
+#[test]
+fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe port");
+    let addr = occupied.local_addr().unwrap();
+    let mut cfg = test_config(1);
+    cfg.metrics.listen = addr;
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    // Prompt return proves the driver join completed (threads did not leak).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !h.join.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "run() did not return promptly on a bind failure"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let result = h.join.join().unwrap();
+    assert!(
+        matches!(result, Err(StartError::Io(_))),
+        "expected StartError::Io, got {result:?}"
+    );
+    drop(occupied);
 }

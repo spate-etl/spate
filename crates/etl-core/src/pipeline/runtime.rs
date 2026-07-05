@@ -1,7 +1,7 @@
 //! Process assembly: threads, runtimes, observability, and the run loop.
 
 use super::controller::{ControllerContext, ControllerSignal, run_controller};
-use super::driver::{DriverContext, DriverParams, run_driver};
+use super::driver::{DriverContext, DriverExit, DriverParams, run_driver};
 use super::{DriverEvent, ExitReport, ExitState, FatalErrorReport, SinkRuntime, ThreadControl};
 use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
@@ -12,7 +12,7 @@ use crate::metrics::{
     MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
-use crate::source::Source;
+use crate::source::{DrainBarrier, Source};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -194,18 +194,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             .enable_all()
             .build()?;
 
-        let admin = io.block_on(AdminServer::bind(
-            self.config.metrics.listen,
-            handle.render_fn(),
-            Arc::clone(&health),
-        ))?;
-        let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
-        io.spawn(admin.run(admin_stop_rx));
-        {
-            // spawn_upkeep uses tokio::spawn internally; enter the runtime.
-            let _guard = io.enter();
-            let _upkeep = handle.spawn_upkeep(Duration::from_secs(5));
-        }
+        // Admin bind, upkeep, and the controller thread are started *after*
+        // the driver threads (below) so a failure in any of them can stop
+        // the already-running drivers instead of leaking them.
 
         if self.options.handle_signals {
             let shutdown = Arc::clone(&self.shutdown);
@@ -279,6 +270,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 vec![None; threads]
             };
 
+        // Short grace for cleanup-time driver stops (startup errors, a
+        // controller panic): the same budget the drain barrier uses.
+        let drain_timeout = self.config.checkpoint.drain_timeout;
+
         let mut control_txs = Vec::with_capacity(threads);
         let mut driver_handles = Vec::with_capacity(threads);
         for i in 0..threads {
@@ -312,7 +307,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 shutdown: Arc::clone(&self.shutdown),
             };
             let core = core_ids.get(i).copied().flatten();
-            let handle = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name(format!("etl-pipeline-{i}"))
                 .spawn(move || {
                     if let Some(core) = core
@@ -321,8 +316,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         tracing::warn!(core = core.id, "failed to pin pipeline thread");
                     }
                     run_driver(ctx)
-                })?;
-            driver_handles.push(handle);
+                });
+            match spawned {
+                Ok(handle) => driver_handles.push(handle),
+                Err(e) => {
+                    // Stop the drivers already spawned before bailing out.
+                    stop_drivers(&self.shutdown, &control_txs, driver_handles, drain_timeout);
+                    return Err(StartError::Io(e));
+                }
+            }
         }
 
         // The chain factory has served its purpose. Factories naturally
@@ -330,6 +332,37 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // sink only drains once every queue clone is gone — holding the
         // factory through the drain would deadlock shutdown.
         drop(self.chains);
+
+        // A cloned set of driver control senders kept by main, so it can stop
+        // the drivers itself if a later startup step fails or the controller
+        // thread dies (the originals are moved into the controller below).
+        let control_txs_for_stop = control_txs.clone();
+
+        // Admin bind now that the drivers are live: a bind failure (e.g. the
+        // metrics port is taken) stops them instead of leaking them.
+        let admin = match io.block_on(AdminServer::bind(
+            self.config.metrics.listen,
+            handle.render_fn(),
+            Arc::clone(&health),
+        )) {
+            Ok(admin) => admin,
+            Err(e) => {
+                stop_drivers(
+                    &self.shutdown,
+                    &control_txs_for_stop,
+                    driver_handles,
+                    drain_timeout,
+                );
+                return Err(StartError::Io(e));
+            }
+        };
+        let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
+        io.spawn(admin.run(admin_stop_rx));
+        {
+            // spawn_upkeep uses tokio::spawn internally; enter the runtime.
+            let _guard = io.enter();
+            let _upkeep = handle.spawn_upkeep(Duration::from_secs(5));
+        }
 
         let controller_ctx = ControllerContext {
             source: self.source,
@@ -355,9 +388,21 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             ),
             pipeline_metrics,
         };
-        let controller_handle = std::thread::Builder::new()
+        let controller_handle = match std::thread::Builder::new()
             .name("etl-controller".into())
-            .spawn(move || run_controller(controller_ctx))?;
+            .spawn(move || run_controller(controller_ctx))
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                stop_drivers(
+                    &self.shutdown,
+                    &control_txs_for_stop,
+                    driver_handles,
+                    drain_timeout,
+                );
+                return Err(StartError::Io(e));
+            }
+        };
 
         // Main: wait for the controller's choreography.
         let mut sink_drain = None;
@@ -367,7 +412,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         drop(sink_runtime.queues);
 
         let (mut state, final_watermarks) = loop {
-            match to_main_rx.recv() {
+            match to_main_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(ControllerSignal::LanesDrained { sink_deadline }) => {
                     for (i, h) in driver_handles.drain(..).enumerate() {
                         if h.join().is_err() {
@@ -386,12 +431,31 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 Ok(ControllerSignal::Finished(report)) => {
                     break (report.state, report.final_watermarks);
                 }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout)
+                    if !controller_handle.is_finished() =>
+                {
+                    // Controller still working; keep waiting on the 100ms tick.
+                }
                 Err(_) => {
-                    // Controller died without a report: fail loudly.
+                    // The controller thread ended without a Finished report
+                    // (a timeout with a finished handle, or the signal
+                    // channel disconnected): it panicked. It never told the
+                    // drivers to stop and never set the shutdown flag, so an
+                    // untimed join here would wedge forever — stop them
+                    // ourselves, drain the sink, and fail the run.
+                    stop_drivers(
+                        &self.shutdown,
+                        &control_txs_for_stop,
+                        std::mem::take(&mut driver_handles),
+                        drain_timeout,
+                    );
+                    if let Some(drain) = drain_fn.take() {
+                        sink_drain = Some(io.block_on(drain(drain_timeout)));
+                    }
                     break (
                         ExitState::Failed(FatalErrorReport {
                             component: "controller".into(),
-                            reason: "controller thread exited without a report".into(),
+                            reason: "controller thread panicked".into(),
                         }),
                         Vec::new(),
                     );
@@ -418,6 +482,35 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             sink_drain,
             final_watermarks,
         })
+    }
+}
+
+/// Set the shutdown flag, tell every driver thread to stop within a bounded
+/// drain barrier, and join them. Shared by the startup-error paths and the
+/// controller-death path so an early failure or a controller panic never
+/// leaves running pinned pipeline threads behind (`run` is a library API).
+///
+/// Joining is what actually bounds this — a driver observes the shutdown
+/// flag (abandoning any blocked batch) and the `Shutdown` control message
+/// (flushing within `grace`), then exits and drops its chain, closing the
+/// shard queues so the sink can drain afterwards.
+fn stop_drivers<L>(
+    shutdown: &AtomicBool,
+    control_txs: &[crossbeam_channel::Sender<ThreadControl<L>>],
+    driver_handles: Vec<std::thread::JoinHandle<DriverExit>>,
+    grace: Duration,
+) {
+    shutdown.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + grace;
+    let barrier = DrainBarrier::new(control_txs.len());
+    for tx in control_txs {
+        let _ = tx.send(ThreadControl::Shutdown {
+            barrier: barrier.clone(),
+            deadline,
+        });
+    }
+    for handle in driver_handles {
+        let _ = handle.join();
     }
 }
 

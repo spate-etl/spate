@@ -693,3 +693,67 @@ fn stages_flush_batch_metrics() {
         "flat_map stage present: {rendered}"
     );
 }
+
+// ---- teardown safety --------------------------------------------------------
+
+#[test]
+fn dropping_a_blocked_chain_fails_unsent_acks() {
+    // Queue capacity 1 and per-row chunk sealing: the first chunk fills the
+    // queue, the second parks. Tearing the chain down without draining must
+    // resolve the batch Failed — never Delivered — or offsets would commit
+    // for rows that no sink ever wrote.
+    let (queues, rxs) = shard_queues(1, 1);
+    let budget = Arc::new(InflightBudget::new());
+    let cfg = ChunkConfig {
+        target_bytes: 1,
+        ..ChunkConfig::default()
+    };
+    let c = chain(LogDeser)
+        .filter(non_empty)
+        .flat_map::<SubF, _>(split_body)
+        .sink(SubEncoder, ToZero, cfg, queues, Arc::clone(&budget));
+    let mut c = c.build();
+
+    let bufs = payloads(&["a:one", "b:two"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+    let _ = c.flush();
+    drop(batch);
+    drop(c);
+    // The successfully-queued first chunk still holds an ack clone; the
+    // batch resolves once the sink side lets go of it too.
+    drop(rxs);
+    let msg = ack_rx.try_recv().expect("batch resolves at teardown");
+    assert_eq!(
+        msg.status,
+        AckStatus::Failed,
+        "unsent output must fail the batch so its offsets never commit"
+    );
+}
+
+#[test]
+fn dropping_a_chain_with_partial_buffers_fails_their_acks() {
+    // Default chunk config: rows accumulate in the shard buffer and are
+    // never sealed. Dropping the chain without flush() must fail the batch.
+    let (queues, _rxs) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+    let mut c = chain(LogDeser)
+        .filter(non_empty)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::clone(&budget),
+        )
+        .build();
+
+    let bufs = payloads(&["a:one|two"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    drop(batch);
+    drop(c); // no flush: rows still buffered
+    let msg = ack_rx.try_recv().expect("batch resolves at teardown");
+    assert_eq!(msg.status, AckStatus::Failed);
+}

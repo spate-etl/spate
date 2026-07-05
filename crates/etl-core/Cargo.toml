@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }
+core_affinity = { workspace = true }
 crossbeam-channel = { workspace = true }
 http-body-util = { workspace = true }
 humantime-serde = { workspace = true }

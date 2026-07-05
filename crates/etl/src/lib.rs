@@ -12,6 +12,8 @@
 //! | `avro-fast` | Opt-in zero-copy Avro backend |
 //! | `full` | All of the above |
 
+pub use etl_core::*;
+
 /// Avro deserialization support (Confluent wire format, schema registry).
 #[cfg(feature = "avro")]
 pub use etl_avro as avro;

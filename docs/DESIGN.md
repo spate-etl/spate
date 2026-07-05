@@ -201,6 +201,19 @@ At-least-once invariant: **never commit past unacknowledged data.** A failed
 batch stalls its partition's watermark (alert on
 `etl_checkpoint_watermark_age_seconds`), it never silently advances.
 
+Two contracts guard the drop-resolves-Delivered convention:
+
+- **Teardown fails unsent output.** Any component holding acknowledgement
+  handles for data not yet durably written must `fail()` them in its `Drop`
+  (the chain's terminal stage does this for parked chunks and partial
+  buffers; sink workers fail abandoned batches). Over-failing is always
+  safe — it costs replay, never loss.
+- **Eager assignment.** `Checkpointer::begin_epoch` replaces all trackers,
+  so `LanesAssigned` must describe the full assignment following a full
+  revocation. Incremental/cooperative assignment requires an additive
+  checkpointer extension (future work); the controller defensively drains
+  and commits live lanes if a source violates this.
+
 ## Operator chain
 
 Push/collector model (Neumann-style): each operator implements a push
@@ -213,7 +226,15 @@ dispatch would defeat cross-operator inlining and vectorization.
 
 Partial-push handling: if the terminal router's `try_send` fails mid-batch,
 the boundary records the exact resume index; already-pushed records are never
-re-processed.
+re-processed (sealed-but-unsendable chunks park inside the terminal stage and
+drain first on resume).
+
+Builder ergonomics note: bare closures infer everywhere for owned-record
+chains; for **borrowing** families, `map`/`try_map` closures hit a language
+limit (E0582 — higher-ranked lifetimes must appear in an associated-type
+projection), so those two combinators offer a `map_rec`/`try_map_rec` tier
+that takes plain `fn` items (naturally higher-ranked). `filter`, `inspect`,
+and `flat_map` are unaffected.
 
 ## Backpressure
 

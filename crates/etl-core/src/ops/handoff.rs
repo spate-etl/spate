@@ -142,6 +142,30 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
     }
 }
 
+/// Teardown safety: an `AckRef` dropped without intervention resolves
+/// *Delivered*, so a handoff dropped while still holding un-sent output
+/// (parked chunks after a drain deadline, partial shard buffers) would
+/// commit offsets for data that never reached the sink. Fail every ack we
+/// still hold so those watermarks stall and the records replay after
+/// restart — at-least-once over completeness, always.
+impl<F: RecFamily, E, R> Drop for SinkHandoff<F, E, R> {
+    fn drop(&mut self) {
+        for (_, chunk) in self.parked.drain(..) {
+            self.budget.sub(chunk.frame.len());
+            for ack in &chunk.acks {
+                ack.fail();
+            }
+        }
+        for shard in &mut self.shards {
+            if shard.rows > 0 {
+                for ack in &shard.acks {
+                    ack.fail();
+                }
+            }
+        }
+    }
+}
+
 impl<'buf, F, E, R> Collector<<F as RecFamily>::Rec<'buf>> for SinkHandoff<F, E, R>
 where
     F: RecFamily,

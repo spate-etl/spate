@@ -56,7 +56,7 @@ pub trait Deserializer<F: RecFamily>: Send {
 
 /// Passthrough deserializer: yields the raw bytes as owned `Vec<u8>`
 /// records. Useful for byte-oriented pipelines and tests.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BytesPassthrough;
 
 impl Deserializer<Owned<Vec<u8>>> for BytesPassthrough {

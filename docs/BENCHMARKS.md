@@ -35,6 +35,14 @@ Conclusions: zero-copy justifies the design; erase once per batch, never per
 stage; the +9% dyn-per-batch delta amortizes to ~1–2% at realistic
 per-record cost.
 
+Production chain (post-merge, `crates/etl-core/benches/chain.rs`, batch 512
+payloads → 1,536 records via flat_map, full metrics accumulators on):
+borrowed **~9.2 ns/record, 109M records/s, 0 allocations/record** (5/iter
+fixed); owned equivalent ~23.5 ns/record with one allocation per record —
+2.5× slower on small payloads, consistent with the spike's 3.7× at larger
+sizes. The counting-allocator integration test (`tests/chain_alloc.rs`)
+hard-fails if per-iteration allocations scale with record count.
+
 ### Kafka consumer topology A/B (decision gate, 2026-07)
 
 Environment: M5 Max 18-core / 128 GB, single local Kafka 4.1 broker

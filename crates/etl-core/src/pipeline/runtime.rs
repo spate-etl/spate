@@ -230,12 +230,26 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             self.config.backpressure.min_pause,
         );
 
-        if self.config.pipeline.pinning == PinningMode::Compact {
-            tracing::warn!(
-                "pipeline.pinning=compact requested; core pinning is not \
-                 wired yet and threads run unpinned"
-            );
-        }
+        // Compact pinning: thread i on core i, low cores first, leaving the
+        // remaining cores for the I/O runtime and librdkafka's threads.
+        // Note for Kubernetes: exclusive cores require the kubelet static
+        // CPU manager with Guaranteed QoS and integer CPU requests;
+        // otherwise pinning only sets affinity within the shared cpuset.
+        let core_ids: Vec<Option<core_affinity::CoreId>> =
+            if self.config.pipeline.pinning == PinningMode::Compact {
+                let mut ids = core_affinity::get_core_ids().unwrap_or_default();
+                ids.sort_by_key(|c| c.id);
+                if ids.len() < threads {
+                    tracing::warn!(
+                        cores = ids.len(),
+                        threads,
+                        "fewer cores than pipeline threads; surplus threads run unpinned"
+                    );
+                }
+                (0..threads).map(|i| ids.get(i).copied()).collect()
+            } else {
+                vec![None; threads]
+            };
 
         let mut control_txs = Vec::with_capacity(threads);
         let mut driver_handles = Vec::with_capacity(threads);
@@ -268,9 +282,17 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     self.config.metrics.per_partition_detail,
                 ),
             };
+            let core = core_ids[i];
             let handle = std::thread::Builder::new()
                 .name(format!("etl-pipeline-{i}"))
-                .spawn(move || run_driver(ctx))?;
+                .spawn(move || {
+                    if let Some(core) = core
+                        && !core_affinity::set_for_current(core)
+                    {
+                        tracing::warn!(core = core.id, "failed to pin pipeline thread");
+                    }
+                    run_driver(ctx)
+                })?;
             driver_handles.push(handle);
         }
 

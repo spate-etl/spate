@@ -1,0 +1,4 @@
+{"consumed":10000000,"elapsed_s":26.008780833,"mb_per_s":98.42829682934872,"mode":"perthread","p99_gap_us":12,"partitions":16,"payload_bytes":256,"records_per_s":384485.53448964347,"threads":4,"work_us":10}
+{"consumed":10000000,"elapsed_s":26.578845167,"mb_per_s":96.31720204226433,"mode":"split","p99_gap_us":13,"partitions":16,"payload_bytes":256,"records_per_s":376239.070477595,"threads":4,"work_us":10}
+{"consumed":10000000,"elapsed_s":25.968843875,"mb_per_s":98.57966770960071,"mode":"perthread","p99_gap_us":12,"partitions":16,"payload_bytes":256,"records_per_s":385076.8269906278,"threads":4,"work_us":10}
+{"consumed":10000000,"elapsed_s":26.539496208,"mb_per_s":96.46000737679113,"mode":"split","p99_gap_us":13,"partitions":16,"payload_bytes":256,"records_per_s":376796.9038155903,"threads":4,"work_us":10}

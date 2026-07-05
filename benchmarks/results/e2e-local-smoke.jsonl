@@ -1,0 +1,1 @@
+{"backpressure_pauses":0.0,"bench":"e2e_kafka_clickhouse","e2e_p50_s":null,"e2e_p99_s":null,"exit":"Completed","note":"tail replayed on next run (at-least-once)","partitions":4,"records_produced":6020831,"rows_in_clickhouse":5366551,"rows_per_s":89442.51666666666,"sink_flush_p99_s":0.02468846153846154,"target_rate":100000,"threads":2,"window_s":60}

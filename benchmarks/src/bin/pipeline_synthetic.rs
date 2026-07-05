@@ -12,7 +12,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, SyntheticSource};
-use benchmarks::{busy_work, env_str, env_u64, http_get, prom, report};
+use benchmarks::{busy_work, env_str, env_u64, prom, report};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::PipelineConfig;
 use etl_core::metrics::{ComponentLabels, SinkShardMetrics};
@@ -38,16 +38,25 @@ fn run_one() {
     let payload = env_u64("PAYLOAD", 256) as usize;
     let work_us = env_u64("WORK_US", 0);
     let shards = env_u64("SHARDS", 2) as usize;
-    let queue_cap = env_u64("QUEUE_CAP", 8) as usize;
+    let queue_cap = env_u64("QUEUE_CAP", 64) as usize;
     let checkpoint_ms = env_u64("CHECKPOINT_INTERVAL_MS", 200);
-    let port = env_u64("METRICS_PORT", 19095) as u16;
     WORK_US.store(work_us, Ordering::Relaxed);
+
+    // Install the recorder before ANY metric handle exists: handles
+    // created before install bind to the noop recorder and render nothing.
+    // The pipeline config uses `exporter: none` so the runtime doesn't
+    // fight over the global recorder; we render our own handle directly.
+    let metrics_handle = etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
+        exporter: etl_core::metrics::Exporter::Prometheus,
+        ..Default::default()
+    })
+    .expect("install metrics recorder");
 
     let config = PipelineConfig::from_str(&format!(
         r"
 pipeline: {{ name: synthetic, threads: {threads} }}
 checkpoint: {{ interval: {checkpoint_ms}ms }}
-metrics: {{ exporter: prometheus, listen: 127.0.0.1:{port} }}
+metrics: {{ exporter: none }}
 source: {{ synthetic: {{}} }}
 sink: {{ nullsink: {{}} }}
 "
@@ -77,11 +86,20 @@ sink: {{ nullsink: {{}} }}
             )
         })
         .collect();
+    // Small, fast-cycling batches: the null writer completes instantly, so
+    // sealing often keeps the in-flight byte budget low and measures the
+    // framework rather than backpressure duty cycles (see BENCHMARKS.md).
+    let pool_cfg = {
+        let mut cfg = SinkPoolConfig::default();
+        cfg.batch.max_rows = 65_536;
+        cfg.batch.linger = Duration::from_millis(5);
+        cfg
+    };
     let pool = SinkPool::spawn(
         Arc::clone(&writer),
         endpoints,
         receivers,
-        SinkPoolConfig::default(),
+        pool_cfg,
         Arc::clone(&budget),
         metrics,
         "synthetic",
@@ -143,7 +161,7 @@ sink: {{ nullsink: {{}} }}
     let c1 = produced.load(Ordering::Relaxed);
     let window = t0.elapsed().as_secs_f64();
 
-    let metrics_text = http_get("127.0.0.1", port, "/metrics").unwrap_or_default();
+    let metrics_text = metrics_handle.render();
     shutdown.trigger();
     let exit = pipeline.join().expect("pipeline thread").expect("run");
 

@@ -13,7 +13,7 @@
 //! PAYLOAD (64) TOPIC (bench-e2e) METRICS_PORT (19096) RESULTS (JSONL path)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use benchmarks::{docker, ensure_topic, env_str, env_u64, http_get, prom, report};
+use benchmarks::{docker, ensure_topic, env_str, env_u64, prom, report};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::{ComponentConfig, PipelineConfig};
 use etl_core::deser::BytesPassthrough;
@@ -102,13 +102,13 @@ fn produce_load(
 }
 
 fn main() {
+    etl_core::telemetry::init(etl_core::telemetry::LogFormat::Pretty, "info");
     let duration = Duration::from_secs(env_u64("DURATION_S", 60));
     let rate = env_u64("RATE", 100_000);
     let partitions = env_u64("PARTITIONS", 4) as i32;
     let threads = env_u64("THREADS", 2) as usize;
     let payload_size = env_u64("PAYLOAD", 64) as usize;
-    let topic = env_str("TOPIC", "bench-e2e");
-    let port = env_u64("METRICS_PORT", 19096) as u16;
+    let topic = env_str("TOPIC", &format!("bench-e2e-{}", std::process::id()));
 
     // ── Infrastructure ──────────────────────────────────────────────────
     let external_kafka = std::env::var("KAFKA_BROKERS").ok();
@@ -162,11 +162,21 @@ fn main() {
     };
 
     // ── Pipeline ────────────────────────────────────────────────────────
+    // Install the recorder before ANY metric handle exists: handles
+    // created before install bind to the noop recorder and render nothing.
+    // The pipeline config uses `exporter: none` so the runtime doesn't
+    // fight over the global recorder; we render our own handle directly.
+    let metrics_handle = etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
+        exporter: etl_core::metrics::Exporter::Prometheus,
+        ..Default::default()
+    })
+    .expect("install metrics recorder");
+
     let config = PipelineConfig::from_str(&format!(
         r"
 pipeline: {{ name: bench-e2e, threads: {threads} }}
 checkpoint: {{ interval: 1s }}
-metrics: {{ exporter: prometheus, listen: 127.0.0.1:{port} }}
+metrics: {{ exporter: none }}
 source: {{ kafka: {{}} }}
 sink: {{ clickhouse: {{}} }}
 "
@@ -285,7 +295,7 @@ clickhouse:
         last = now;
     }
 
-    let metrics_text = http_get("127.0.0.1", port, "/metrics").unwrap_or_default();
+    let metrics_text = metrics_handle.render();
     shutdown.trigger();
     let exit = pipeline.join().expect("pipeline").expect("run");
 

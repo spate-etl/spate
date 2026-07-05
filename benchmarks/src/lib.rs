@@ -156,23 +156,12 @@ pub fn report(value: &serde_json::Value) {
     }
 }
 
-/// Plain HTTP/1.1 GET over a `TcpStream` (localhost admin/ClickHouse
-/// endpoints only). Returns the response body.
-pub fn http_get(host: &str, port: u16, path: &str) -> std::io::Result<String> {
-    use std::io::{Read, Write};
-    let mut stream = std::net::TcpStream::connect((host, port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
+/// Decode an HTTP/1.1 response: split headers, un-chunk when needed.
+fn decode_http(raw: &str) -> String {
     let body = raw
         .split_once("\r\n\r\n")
         .map(|(_, b)| b.to_owned())
         .unwrap_or_default();
-    // Tolerate chunked transfer encoding by stripping hex size lines.
     if raw
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked")
@@ -187,7 +176,38 @@ pub fn http_get(host: &str, port: u16, path: &str) -> std::io::Result<String> {
             out.push_str(tail.get(..size).unwrap_or(""));
             rest = tail.get(size + 2..).unwrap_or("");
         }
-        return Ok(out);
+        return out;
     }
-    Ok(body)
+    body
+}
+
+/// Plain HTTP/1.1 POST over a `TcpStream` (localhost only): returns the
+/// decoded response body.
+pub fn http_post(host: &str, port: u16, path: &str, body: &str) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect((host, port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    Ok(decode_http(&raw))
+}
+
+/// Plain HTTP/1.1 GET over a `TcpStream` (localhost admin/ClickHouse
+/// endpoints only). Returns the response body.
+pub fn http_get(host: &str, port: u16, path: &str) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect((host, port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    Ok(decode_http(&raw))
 }

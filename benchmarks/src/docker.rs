@@ -20,11 +20,14 @@ fn container_running(name: &str) -> bool {
 }
 
 fn tcp_open(host: &str, port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &format!("{host}:{port}").parse().expect("addr"),
-        Duration::from_millis(300),
-    )
-    .is_ok()
+    use std::net::ToSocketAddrs;
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+        })
 }
 
 /// Ensure a Kafka broker is reachable on `localhost:9092`, starting an
@@ -102,7 +105,11 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
     (host, port, creds.0, creds.1)
 }
 
-/// Run one SQL statement against ClickHouse over HTTP; returns the body.
+/// Run one SQL statement against ClickHouse over HTTP.
+///
+/// Uses POST: ClickHouse treats HTTP GET as readonly and silently rejects
+/// DDL/inserts. Panics on a server exception so a misconfigured bench
+/// fails loudly instead of producing a zero-row "result".
 pub fn clickhouse_sql(
     host: &str,
     port: u16,
@@ -110,19 +117,18 @@ pub fn clickhouse_sql(
     password: &str,
     sql: &str,
 ) -> std::io::Result<String> {
-    let query: String = sql
-        .bytes()
-        .flat_map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                vec![b as char]
-            }
-            b' ' => vec!['+'],
-            other => format!("%{other:02X}").chars().collect(),
-        })
-        .collect();
-    crate::http_get(
+    let body = crate::http_post(
         host,
         port,
-        &format!("/?user={user}&password={password}&query={query}"),
-    )
+        &format!("/?user={user}&password={password}"),
+        sql,
+    )?;
+    if std::env::var("BENCH_SQL_DEBUG").is_ok() {
+        eprintln!("SQL {sql:?} @ {host}:{port} -> {body:?}");
+    }
+    assert!(
+        !body.contains("DB::Exception"),
+        "clickhouse error for {sql:?}: {body}"
+    );
+    Ok(body)
 }

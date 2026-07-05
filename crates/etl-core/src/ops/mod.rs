@@ -10,9 +10,6 @@
 
 mod chain;
 
-#[allow(unused_imports, unreachable_pub)] // chain.rs is filled in the engine workstream
-pub use chain::*;
-
 use crate::deser::RecFamily;
 use crate::error::FatalError;
 use crate::record::{Flow, Record};

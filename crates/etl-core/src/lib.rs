@@ -23,6 +23,8 @@ pub mod error;
 pub mod metrics;
 #[cfg(not(loom))]
 pub mod ops;
+#[cfg(not(loom))]
+pub mod pipeline;
 pub mod record;
 #[cfg(not(loom))]
 pub mod sink;

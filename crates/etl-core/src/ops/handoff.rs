@@ -103,7 +103,12 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
     ) -> Self {
         assert!(cfg.target_bytes > 0, "chunk target must be non-zero");
         let shards = (0..queues.num_shards())
-            .map(|_| ShardBuf::default())
+            .map(|_| ShardBuf {
+                // Pre-size so the first chunk fills a target-sized buffer
+                // instead of regrowing (realloc + memcpy) from zero.
+                buf: BytesMut::with_capacity(cfg.target_bytes),
+                ..ShardBuf::default()
+            })
             .collect();
         SinkHandoff {
             encoder,
@@ -130,6 +135,12 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
             return;
         }
         let frame = shard.buf.split().freeze();
+        // `split()` left the emptied buffer sharing the frozen frame's
+        // allocation, so growing it in place is impossible while that frame is
+        // in flight. Reserve a fresh target-sized allocation now (one alloc
+        // per seal) so the next chunk accumulates without repeatedly
+        // reallocating and copying the partial frame.
+        shard.buf.reserve(self.cfg.target_bytes);
         self.budget.add(frame.len());
         let chunk = EncodedChunk {
             frame,

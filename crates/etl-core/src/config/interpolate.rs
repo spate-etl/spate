@@ -15,6 +15,22 @@
 //! strings — exactly like Vector; there is no YAML-aware skipping.
 //! Variable names are `[A-Za-z0-9_]+`; a default/message runs to the first
 //! `}` (no nesting).
+//!
+//! # Values are spliced verbatim — mind YAML-special characters
+//!
+//! Substitution happens on the raw text *before* YAML parsing, so a
+//! substituted value is not escaped for YAML. A value that contains a
+//! **newline or carriage return** is rejected with an
+//! [`InterpolationError`](ConfigError::Interpolation): it would change the
+//! document structure (start a sibling key, break out of a quoted scalar) and
+//! quoting the site cannot rescue it — mount such secrets as files and
+//! reference the path instead.
+//!
+//! Other YAML-significant characters (`#`, `:`, `"`, leading `-`, `{`, `}`,
+//! ...) inside a value are **your** responsibility to contain: quote the
+//! interpolation site so the value lands in a quoted scalar. For example a
+//! password `p@ss #1` must be written `password: "${PASSWORD}"`, not
+//! `password: ${PASSWORD}` (where ` #1` would become a YAML comment).
 
 use super::ConfigError;
 
@@ -118,6 +134,23 @@ where
             }
             _ => return Err(unclosed(input, dollar, name)),
         };
+
+        // A newline or carriage return spliced verbatim into the raw text
+        // changes the YAML structure (it can start a sibling key or break out
+        // of a quoted scalar), so an injected value could add or alter config
+        // keys. Quoting the interpolation site cannot save a value containing
+        // these, so reject them outright.
+        if value.contains(['\n', '\r']) {
+            return Err(err_at(
+                input,
+                dollar,
+                format!(
+                    "interpolated value for `{name}` contains a newline or carriage \
+                     return, which would corrupt the YAML structure; mount multi-line \
+                     secrets as files and reference the file path instead"
+                ),
+            ));
+        }
 
         out.push_str(&value);
         i = close + 1;
@@ -247,6 +280,33 @@ mod tests {
         );
         // No nesting: the default ends at the FIRST `}`.
         assert_eq!(run("${A:-${B}}", &[]).unwrap(), "${B}");
+    }
+
+    #[test]
+    fn values_with_newline_or_cr_are_rejected() {
+        // A newline in the value would inject sibling keys / break the scalar.
+        let err = run("password: ${SECRET}", &[("SECRET", "p@ss\n  evil: 1")]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("newline or carriage return"), "{text}");
+        assert!(text.contains("mount multi-line secrets as files"), "{text}");
+        // A carriage return is rejected too.
+        let err = run("password: ${SECRET}", &[("SECRET", "a\rb")]).unwrap_err();
+        assert!(
+            err.to_string().contains("newline or carriage return"),
+            "{err}"
+        );
+        // A default value carrying a newline is rejected as well.
+        let err = run("x: ${MISSING:-a\nb}", &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("newline or carriage return"),
+            "{err}"
+        );
+        // Single-line values with other special characters still substitute
+        // (the config author must quote the site; see the module docs).
+        assert_eq!(
+            run("x: \"${OK}\"", &[("OK", "p@ss #1")]).unwrap(),
+            "x: \"p@ss #1\""
+        );
     }
 
     #[test]

@@ -18,8 +18,21 @@
 //! rate_limited_warn!(DESER_WARN, reason = "malformed", "payload skipped");
 //! ```
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Monotonic reference point shared by every [`RateLimit`], so a window
+/// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
+/// on the lock-free fast path.
+fn base_instant() -> Instant {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    *BASE.get_or_init(Instant::now)
+}
+
+fn nanos_since_base(now: Instant) -> u64 {
+    now.saturating_duration_since(base_instant()).as_nanos() as u64
+}
 
 /// Output format for logs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -82,14 +95,30 @@ struct RateLimitState {
 /// suppression with a count carried into the first event of the next
 /// window.
 ///
-/// `const`-constructible for use in `static`s. The mutex is uncontended in
-/// practice (one callsite, brief hold) and only reached at all when code
-/// decides to log — the happy path of a healthy pipeline never gets here.
+/// `const`-constructible for use in `static`s. Under a poison storm every
+/// pinned pipeline thread hits the *same* limiter once per failing record, so
+/// the exact-accounting mutex is genuinely contended — exactly the case the
+/// limiter exists for. To keep steady-state suppression off the shared lock,
+/// a relaxed-atomic fast path short-circuits while the window stays
+/// saturated: a single relaxed load of `saturated` plus a deadline compare,
+/// no mutex. The mutex path remains the source of truth for allow decisions
+/// and window rolls; suppressed events counted on the fast path are folded
+/// back in at the next roll, so the carried `suppressed` count is exact in
+/// practice (best-effort under concurrent rolls).
 #[derive(Debug)]
 pub struct RateLimit {
     capacity: u32,
     window: Duration,
     state: Mutex<RateLimitState>,
+    /// Set while the current window is exhausted; lets the fast path suppress
+    /// without the mutex. Cleared on a window roll (or superseded by
+    /// `window_end_nanos` once the deadline passes).
+    saturated: AtomicBool,
+    /// Deadline of the saturated window, nanoseconds since [`base_instant`].
+    window_end_nanos: AtomicU64,
+    /// Events suppressed on the lock-free fast path this window, folded into
+    /// the carried count when the window rolls.
+    fast_suppressed: AtomicU64,
 }
 
 impl RateLimit {
@@ -104,6 +133,9 @@ impl RateLimit {
                 allowed_in_window: 0,
                 suppressed: 0,
             }),
+            saturated: AtomicBool::new(false),
+            window_end_nanos: AtomicU64::new(0),
+            fast_suppressed: AtomicU64::new(0),
         }
     }
 
@@ -114,21 +146,33 @@ impl RateLimit {
 
     /// Decide for an event at `now` (injectable for tests).
     pub fn check_at(&self, now: Instant) -> Decision {
+        // Fast path: while the window stays saturated, suppress with a single
+        // relaxed load and a deadline compare — no mutex. Once the deadline
+        // passes the compare fails and we fall through to roll the window.
+        if self.saturated.load(Ordering::Relaxed)
+            && nanos_since_base(now) < self.window_end_nanos.load(Ordering::Relaxed)
+        {
+            self.fast_suppressed.fetch_add(1, Ordering::Relaxed);
+            return Decision::Suppress;
+        }
+
         let mut s = self.state.lock().expect("rate limit lock");
         let window_expired = match s.window_start {
             None => true,
             Some(start) => now.saturating_duration_since(start) >= self.window,
         };
         if window_expired {
-            let suppressed_before = s.suppressed;
+            let suppressed_before = s.suppressed + self.fast_suppressed.swap(0, Ordering::Relaxed);
             s.window_start = Some(now);
             s.suppressed = 0;
             if self.capacity == 0 {
                 s.allowed_in_window = 0;
                 s.suppressed = 1;
+                self.arm(now);
                 return Decision::Suppress;
             }
             s.allowed_in_window = 1;
+            self.saturated.store(false, Ordering::Relaxed);
             return Decision::Allow { suppressed_before };
         }
         if s.allowed_in_window < self.capacity {
@@ -138,8 +182,20 @@ impl RateLimit {
             }
         } else {
             s.suppressed += 1;
+            if let Some(start) = s.window_start {
+                self.arm(start);
+            }
             Decision::Suppress
         }
+    }
+
+    /// Arm the fast path for the window that started at `window_start`.
+    fn arm(&self, window_start: Instant) {
+        self.window_end_nanos.store(
+            nanos_since_base(window_start + self.window),
+            Ordering::Relaxed,
+        );
+        self.saturated.store(true, Ordering::Relaxed);
     }
 }
 
@@ -205,6 +261,32 @@ mod tests {
         assert_eq!(
             limit.check_at(t0 + Duration::from_secs(12)),
             Decision::Suppress
+        );
+    }
+
+    #[test]
+    fn fast_path_suppression_preserves_the_carried_count() {
+        // After saturation, most suppressions take the lock-free fast path;
+        // their count must still be folded into the next window's first event.
+        let limit = RateLimit::new(1, Duration::from_secs(10));
+        let t0 = Instant::now();
+        assert_eq!(
+            limit.check_at(t0),
+            Decision::Allow {
+                suppressed_before: 0
+            }
+        );
+        for i in 1..=100 {
+            assert_eq!(
+                limit.check_at(t0 + Duration::from_millis(i)),
+                Decision::Suppress
+            );
+        }
+        assert_eq!(
+            limit.check_at(t0 + Duration::from_secs(10)),
+            Decision::Allow {
+                suppressed_before: 100
+            }
         );
     }
 

@@ -15,14 +15,18 @@
 //! checkpoint: { interval: 5s, max_pending_batches: 1024 }
 //! backpressure: { max_inflight_bytes: 256MiB }
 //! source:
-//!   kafka:
+//!   kafka:                                   # KafkaSourceConfig
 //!     brokers: ${KAFKA_BROKERS:-localhost:9092}
 //!     topic: orders
+//!     group_id: orders-etl                   # required (no default)
 //! deserializer:
-//!   avro: { registry_url: ${SCHEMA_REGISTRY_URL:?schema registry required} }
+//!   avro:                                    # AvroSettings (confluent mode)
+//!     registry:
+//!       url: ${SCHEMA_REGISTRY_URL:?schema registry required}
 //! sink:
-//!   clickhouse:
+//!   clickhouse:                              # ClickHouseSinkConfig
 //!     table: orders_local
+//!     columns: [id, amount, ts]              # required; order is the wire contract
 //!     shards:
 //!       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
 //! metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
@@ -343,6 +347,14 @@ sink: { memory: {} }
 
     #[test]
     fn full_design_doc_example_parses() {
+        // The connector bodies below mirror the module-doc example and use the
+        // real connector field names. etl-core has no dependency on the
+        // connector crates, so this test can only parse the framework layer;
+        // the connector body shapes are verified by hand against
+        // crates/etl-kafka/src/config.rs (brokers/topic/group_id),
+        // crates/etl-avro/src/config.rs (registry.url), and
+        // crates/etl-clickhouse/src/config.rs (table/columns/shards) — and
+        // stay consistent with crates/etl/examples/kafka_avro_to_clickhouse.yaml.
         let yaml = r#"
 pipeline: { name: orders, threads: 4, io_threads: 2 }
 checkpoint: { interval: 5s, max_pending_batches: 1024 }
@@ -351,12 +363,17 @@ source:
   kafka:
     brokers: ${KAFKA_BROKERS:-localhost:9092}
     topic: orders
+    group_id: orders-etl
     rdkafka: { fetch.message.max.bytes: "1048576" }
 deserializer:
-  avro: { registry_url: "${SCHEMA_REGISTRY_URL:-http://sr:8081}", backend: apache }
+  avro:
+    mode: confluent
+    registry:
+      url: "${SCHEMA_REGISTRY_URL:-http://sr:8081}"
 sink:
   clickhouse:
     table: orders_local
+    columns: [id, amount, ts]
     shards:
       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
       - { replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"] }
@@ -371,15 +388,43 @@ metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
         assert_eq!(cfg.deserializer.as_ref().unwrap().type_tag(), "avro");
         assert_eq!(cfg.sink.type_tag(), "clickhouse");
 
-        // Interpolated default landed inside the opaque body.
+        // Interpolated default landed inside the opaque body, and the kafka
+        // body carries the required group_id.
         #[derive(Debug, serde::Deserialize)]
         struct KafkaProbe {
             brokers: String,
+            group_id: String,
             #[serde(flatten)]
             _rest: serde_yaml::Value,
         }
         let kafka: KafkaProbe = cfg.source.deserialize_into().unwrap();
         assert_eq!(kafka.brokers, "localhost:9092");
+        assert_eq!(kafka.group_id, "orders-etl");
+
+        // The avro body uses the nested `registry.url` shape, and the
+        // clickhouse body carries the required `columns`.
+        #[derive(Debug, serde::Deserialize)]
+        struct AvroProbe {
+            registry: RegistryProbe,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct RegistryProbe {
+            url: String,
+        }
+        let avro: AvroProbe = cfg
+            .deserializer
+            .as_ref()
+            .unwrap()
+            .deserialize_into()
+            .unwrap();
+        assert_eq!(avro.registry.url, "http://sr:8081");
+
+        #[derive(Debug, serde::Deserialize)]
+        struct ChProbe {
+            columns: Vec<String>,
+        }
+        let ch: ChProbe = cfg.sink.deserialize_into().unwrap();
+        assert_eq!(ch.columns, ["id", "amount", "ts"]);
     }
 
     #[test]

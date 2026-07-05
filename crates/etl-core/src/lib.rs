@@ -11,6 +11,9 @@
 //! The architecture and its invariants are documented in `docs/DESIGN.md`;
 //! the metric taxonomy in `docs/METRICS.md`.
 
+// tokio's own sources change shape under `--cfg loom` (net disappears), so
+// anything touching tokio::net is compiled out of loom model builds.
+#[cfg(not(loom))]
 pub mod admin;
 pub mod backpressure;
 pub mod checkpoint;

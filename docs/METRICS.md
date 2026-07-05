@@ -70,7 +70,7 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|
 | `etl_backpressure_paused` | gauge | | 1 while the source is paused by the watermark controller. |
-| `etl_backpressure_paused_seconds_total` | counter | | Cumulative paused time. |
+| `etl_backpressure_paused_seconds_total` | gauge (monotonic) | | Cumulative paused time. Exported as a gauge because the `metrics` facade's counter is integer-only; treat as a counter in queries (`rate()` works). |
 | `etl_backpressure_pause_events_total` | counter | | Pause transitions (flapping indicator when high). |
 | `etl_backpressure_inflight_bytes` | gauge | | Current global in-flight byte budget usage. |
 

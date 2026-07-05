@@ -235,7 +235,7 @@ pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))] // exporter internals (quanta) are loom-aware; not our model
 mod tests {
     use super::*;
     use crate::error::ErrorClass;

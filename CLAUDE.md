@@ -17,7 +17,10 @@ RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
 ```
 
 The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
-construct loom-typed primitives outside a model and abort.
+construct loom-typed primitives outside a model and abort. The same applies
+to any test or module touching loom-aware dependencies outside a model —
+tokio (net disappears under the cfg), quanta via the prometheus exporter,
+and `AckRef` internals — gate those with `#[cfg(not(loom))]`.
 
 Docker-backed integration tests (testcontainers) are `#[ignore]`d by default;
 run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.

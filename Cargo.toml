@@ -71,6 +71,7 @@ criterion = "0.8"
 divan = "0.1"
 
 [workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
 missing_docs = "warn"

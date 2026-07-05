@@ -47,8 +47,6 @@
 //! }
 //! ```
 
-#![allow(unexpected_cfgs)] // `--cfg loom` is set only by the loom CI job.
-
 use std::time::{Duration, Instant};
 
 #[cfg(loom)]

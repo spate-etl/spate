@@ -23,8 +23,6 @@
 //! RUSTFLAGS="--cfg loom" cargo test -p etl-core --release checkpoint::loom_tests
 //! ```
 
-#![allow(unexpected_cfgs)] // `--cfg loom` is set only by the loom CI job.
-
 mod ack;
 #[cfg(not(loom))]
 mod checkpointer;

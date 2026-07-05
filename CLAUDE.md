@@ -13,7 +13,11 @@ cargo test --workspace --all-features          # unit + integration (no docker)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 cargo bench -p etl-core                        # criterion + divan micro benches
+RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
 ```
+
+The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
+construct loom-typed primitives outside a model and abort.
 
 Docker-backed integration tests (testcontainers) are `#[ignore]`d by default;
 run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.

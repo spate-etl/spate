@@ -115,6 +115,9 @@ pub fn stable_key_hash(key: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
+    // Constructs an AckRef, whose internals are loom types under the loom
+    // cfg and may only be touched inside a loom model.
+    #[cfg(not(loom))]
     #[test]
     fn record_map_preserves_meta_and_ack() {
         let (ack, _rx) = crate::checkpoint::AckRef::test_pair();

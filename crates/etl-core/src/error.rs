@@ -32,6 +32,18 @@ pub enum ErrorClass {
     Fatal,
 }
 
+/// An unrecoverable pipeline failure: an invariant was violated or a
+/// `Fail`-policy stage tripped. The pipeline transitions to `Failed`, the
+/// partition watermarks stop advancing, and the process exits non-zero.
+#[derive(Debug, thiserror::Error)]
+#[error("fatal error in {component}: {reason}")]
+pub struct FatalError {
+    /// Component id where the failure originated.
+    pub component: String,
+    /// Human-readable cause.
+    pub reason: String,
+}
+
 /// A payload could not be deserialized.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

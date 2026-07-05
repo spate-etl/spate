@@ -18,10 +18,17 @@ pub mod admin;
 pub mod backpressure;
 pub mod checkpoint;
 pub mod config;
+pub mod deser;
 pub mod error;
 pub mod metrics;
+#[cfg(not(loom))]
+pub mod ops;
 pub mod record;
+#[cfg(not(loom))]
+pub mod sink;
+#[cfg(not(loom))]
+pub mod source;
 pub mod telemetry;
 
-pub use error::{DeserError, ErrorClass, ErrorPolicy, SinkError, SourceError};
+pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};
 pub use record::{Flow, PartitionId, RawPayload, Record, RecordMeta};

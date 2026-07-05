@@ -30,6 +30,9 @@
 //! complete (bounded by `checkpoint.drain_timeout`), offsets commit —
 //! at-least-once end to end. Probes: `curl localhost:9090/readyz`.
 
+// Examples talk to their user on stdout/stderr by design.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use etl::avro::AvroDeserializerBuilder;
 use etl::backpressure::InflightBudget;
 use etl::clickhouse::ClickHouseEncoder;

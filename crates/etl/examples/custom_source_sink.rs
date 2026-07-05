@@ -17,6 +17,9 @@
 //!
 //! [`AckRef`]: etl::checkpoint::AckRef
 
+// Examples talk to their user on stdout/stderr by design.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use etl::backpressure::InflightBudget;
 use etl::checkpoint::{AckIssuer, AckRef};
 use etl::config::PipelineConfig;

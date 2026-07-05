@@ -10,6 +10,9 @@
 //! cargo run -p etl --example memory_pipeline
 //! ```
 
+// Examples talk to their user on stdout/stderr by design.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use etl::backpressure::InflightBudget;
 use etl::config::PipelineConfig;
 use etl::metrics::{ComponentLabels, SinkShardMetrics};

@@ -14,6 +14,9 @@
 //! cargo run -p etl --example custom_operator
 //! ```
 
+// Examples talk to their user on stdout/stderr by design.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use etl::backpressure::InflightBudget;
 use etl::checkpoint::Checkpointer;
 use etl::deser::Owned;

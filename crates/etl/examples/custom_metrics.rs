@@ -14,6 +14,9 @@
 //!
 //! [`PipelineRuntime::run`]: etl::pipeline::PipelineRuntime::run
 
+// Examples talk to their user on stdout/stderr by design.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use etl::metrics::{ComponentLabels, DeserMetrics, MetricsSettings, install};
 use std::time::Duration;
 

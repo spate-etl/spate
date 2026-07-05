@@ -14,7 +14,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 cargo bench -p etl-core                        # criterion + divan micro benches
 RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
+cargo check -p etl --examples --all-features   # all five examples compile
+cargo run -p etl --example memory_pipeline     # runnable without infrastructure
+docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
 ```
+
+Verify gates by **explicit exit codes** (redirect to a log, check `$?`);
+piped `grep`/`tail` chains have masked real failures in this repo. The
+full etl-kafka suite takes ~50s (MockCluster timing).
 
 The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
 construct loom-typed primitives outside a model and abort. The same applies

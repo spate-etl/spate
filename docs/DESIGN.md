@@ -377,4 +377,7 @@ MPL-2.0 — it stays out of the dependency tree until verified (enforced by
 | Metrics | `metrics` facade + prometheus exporter | facade *is* the MeterRegistry pattern; backend-pluggable |
 | Config | YAML (`yaml_serde`), opaque passthrough | serde_yaml archived; serde-yml has RUSTSEC advisory |
 | Error policy | Skip / Fail only, metrics-surfaced | no owned DLQ topic in target environments |
+| Kafka teardown | rebalance completes inline once closing | consumer close triggers a final revoke inside `BaseConsumer::drop`'s close-poll; a deferred intent there deadlocks teardown forever |
+| Kafka startup deadline | checked before transport errors in `poll_events` | unreachable brokers surface endless Retryable errors; checked last, the fatal fail-fast would never fire |
+| Sink readiness | `SinkRuntime.probe` hook polled by the runtime | `/readyz` needs live sink connectivity; nothing else could ever set it |
 | MSRV | 1.94 (rolling N-2), edition 2024 | library-consumer reach; absorbs dep MSRV ratchets |

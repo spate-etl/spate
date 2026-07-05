@@ -757,3 +757,94 @@ fn dropping_a_chain_with_partial_buffers_fails_their_acks() {
     let msg = ack_rx.try_recv().expect("batch resolves at teardown");
     assert_eq!(msg.status, AckStatus::Failed);
 }
+
+// ---- not-ready replay -------------------------------------------------------
+
+/// Wraps LogDeser; payloads whose body starts with `wait:` return NotReady
+/// a fixed number of times before decoding normally.
+struct FlakyDeser {
+    inner: LogDeser,
+    not_ready_remaining: u32,
+    attempts_on_flaky: u32,
+}
+
+impl Deserializer<LogF> for FlakyDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
+    ) -> Result<(), DeserError> {
+        if raw.bytes.ends_with(b"|wait") {
+            self.attempts_on_flaky += 1;
+            if self.not_ready_remaining > 0 {
+                self.not_ready_remaining -= 1;
+                return Err(DeserError::NotReady {
+                    reason: "schema fetch in flight".into(),
+                });
+            }
+        }
+        self.inner.deserialize(raw, ack, out)
+    }
+}
+
+#[test]
+fn not_ready_blocks_then_replays_without_loss_or_duplication() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+    let mut c = chain(FlakyDeser {
+        inner: LogDeser,
+        not_ready_remaining: 2,
+        attempts_on_flaky: 0,
+    })
+    .filter(non_empty)
+    .flat_map::<SubF, _>(split_body)
+    .sink(
+        SubEncoder,
+        ToZero,
+        ChunkConfig::default(),
+        queues,
+        Arc::clone(&budget),
+    )
+    .build();
+
+    // Payload 1 is the flaky one; payloads 0 and 2 decode immediately.
+    let bufs = payloads(&["a:one", "b:two|wait", "c:three"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+
+    // First push: payload 0 flows, payload 1 reports NotReady → Blocked at
+    // index 1, and the payload is stashed for replay.
+    let PushOutcome::Blocked { resume_at } = c.push_batch(&mut batch, 0) else {
+        panic!("expected Blocked while the schema is not ready");
+    };
+    assert_eq!(resume_at, 1);
+
+    // Still not ready: Blocked again at the same index.
+    let PushOutcome::Blocked { resume_at } = c.push_batch(&mut batch, 1) else {
+        panic!("expected Blocked on second attempt");
+    };
+    assert_eq!(resume_at, 1);
+
+    // Ready now: the replayed payload decodes and the rest of the batch
+    // completes.
+    assert!(matches!(c.push_batch(&mut batch, 1), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let rows = drain_rows(&mut rxs[0]);
+    assert_eq!(
+        rows,
+        vec![
+            b"one".to_vec(),
+            b"two".to_vec(),
+            b"wait".to_vec(),
+            b"three".to_vec()
+        ],
+        "every record exactly once, in order"
+    );
+
+    // NotReady is not an error: the batch resolves Delivered.
+    drop(batch);
+    drop(c);
+    let msg = ack_rx.try_recv().expect("batch resolved");
+    assert_eq!(msg.status, AckStatus::Delivered);
+}

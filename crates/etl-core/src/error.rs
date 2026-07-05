@@ -60,6 +60,22 @@ pub enum DeserError {
         /// Human-readable cause.
         reason: String,
     },
+    /// The payload cannot be decoded *yet*: a required resource (typically
+    /// a schema fetched from a registry) is still being obtained, and the
+    /// deserializer has already triggered the asynchronous work that will
+    /// make it available. The chain reports the batch `Blocked` at this
+    /// payload and the driver's retry loop re-pushes it — the record is
+    /// neither dropped nor counted as an error, and the stage's
+    /// [`ErrorPolicy`] does not apply.
+    ///
+    /// Contract: a deserializer must return this **before emitting any
+    /// record** for the payload; records emitted ahead of a `NotReady`
+    /// would be duplicated when the payload is replayed.
+    #[error("not ready: {reason}")]
+    NotReady {
+        /// What is being waited for.
+        reason: String,
+    },
 }
 
 /// A source failed to poll, commit, or manage its assignment.

@@ -16,9 +16,9 @@
 use super::{Collector, CollectorFor, PushOutcome, RunnableChain};
 use crate::checkpoint::AckRef;
 use crate::deser::{Deserializer, EmitRecord, RecFamily};
-use crate::error::{ErrorClass, ErrorPolicy, FatalError};
+use crate::error::{DeserError, ErrorClass, ErrorPolicy, FatalError};
 use crate::metrics::{DeserMetrics, OperatorMetrics};
-use crate::record::{Flow, Record, RecordMeta};
+use crate::record::{Flow, RawPayload, Record, RecordMeta};
 use crate::source::PayloadBatch;
 use crate::telemetry::RateLimit;
 use std::marker::PhantomData;
@@ -458,6 +458,56 @@ where
 
 static DESER_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
 
+/// An owned copy of a payload whose deserialization returned
+/// [`DeserError::NotReady`], replayed on the next push. Owned because the
+/// chain is `'static`-erased and cannot hold `'buf` data across calls; the
+/// copy happens only on the rare not-ready path, which already implies an
+/// asynchronous round-trip (e.g. a schema-registry fetch).
+#[derive(Debug)]
+struct PendingPayload {
+    bytes: Vec<u8>,
+    key: Option<Vec<u8>>,
+    partition: crate::record::PartitionId,
+    offset: i64,
+    timestamp_ms: i64,
+}
+
+impl PendingPayload {
+    fn from_raw(raw: &RawPayload<'_>) -> Self {
+        PendingPayload {
+            bytes: raw.bytes.to_vec(),
+            key: raw.key.map(<[u8]>::to_vec),
+            partition: raw.partition,
+            offset: raw.offset,
+            timestamp_ms: raw.timestamp_ms,
+        }
+    }
+
+    fn as_raw(&self) -> RawPayload<'_> {
+        RawPayload {
+            bytes: &self.bytes,
+            key: self.key.as_deref(),
+            partition: self.partition,
+            offset: self.offset,
+            timestamp_ms: self.timestamp_ms,
+        }
+    }
+}
+
+/// Outcome of pushing one payload through deserializer + operator stack.
+enum Step {
+    /// Payload fully processed; keep going.
+    Continue,
+    /// Payload fully processed (output parked as needed); downstream is
+    /// backed up — stop accepting further payloads.
+    Backpressure,
+    /// Payload untouched: deserialization reported
+    /// [`DeserError::NotReady`]; replay it later.
+    NotReady,
+    /// A stage failed fatally.
+    Fatal(FatalError),
+}
+
 /// A concrete chain: deserializer + statically composed operator stack,
 /// erased behind [`RunnableChain`]. `Ops` must accept the family's record
 /// type at every buffer lifetime — the HRTB is what makes borrowed records
@@ -470,6 +520,9 @@ pub struct TypedChain<F: RecFamily, D, Ops> {
     /// Payloads fully processed from the batch currently in progress.
     cursor: usize,
     mid_batch: bool,
+    /// Not-ready payload awaiting replay (always belongs to the batch in
+    /// progress; carries no ack — the batch's handle covers it).
+    pending: Option<PendingPayload>,
     _family: PhantomData<fn() -> F>,
 }
 
@@ -487,8 +540,77 @@ impl<F: RecFamily, D, Ops> TypedChain<F, D, Ops> {
             deser_metrics,
             cursor: 0,
             mid_batch: false,
+            pending: None,
             _family: PhantomData,
         }
+    }
+}
+
+impl<F, D, Ops> TypedChain<F, D, Ops>
+where
+    F: RecFamily,
+    D: Deserializer<F>,
+    Ops: for<'buf> Collector<<F as RecFamily>::Rec<'buf>> + StageLifecycle + Send,
+{
+    /// Push one payload through the deserializer and operator stack.
+    fn deser_step(
+        &mut self,
+        raw: &RawPayload<'_>,
+        ack: &AckRef,
+        ok: &mut u64,
+        errors: &mut u64,
+    ) -> Step {
+        let mut flow = Flow::Continue;
+        let mut emitted = 0u64;
+        let result = self.deser.deserialize(
+            raw,
+            ack,
+            &mut OpsEmit {
+                ops: &mut self.ops,
+                emitted: &mut emitted,
+                flow: &mut flow,
+            },
+        );
+        *ok += emitted;
+        match result {
+            Err(DeserError::NotReady { .. }) => {
+                debug_assert_eq!(
+                    emitted, 0,
+                    "NotReady after emitting records would duplicate them on replay"
+                );
+                return Step::NotReady;
+            }
+            Err(e) => {
+                *errors += 1;
+                match self.deser_policy {
+                    ErrorPolicy::Skip => {
+                        crate::rate_limited_warn!(
+                            DESER_SKIP_WARN,
+                            partition = raw.partition.0,
+                            offset = raw.offset,
+                            error = %e,
+                            "payload skipped by deserializer error policy"
+                        );
+                    }
+                    _ => {
+                        return Step::Fatal(FatalError {
+                            component: "deserializer".to_string(),
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+            Ok(()) => {}
+        }
+        if let Some(fatal) = self.ops.take_fatal() {
+            return Step::Fatal(fatal);
+        }
+        // The terminal never rejects mid-payload; pressure surfaces
+        // between payloads, so operators never re-run for a record.
+        if flow == Flow::Blocked || self.ops.relieve() == Flow::Blocked {
+            return Step::Backpressure;
+        }
+        Step::Continue
     }
 }
 
@@ -515,7 +637,12 @@ where
             );
         } else {
             debug_assert_eq!(from, 0, "fresh batches start at payload 0");
+            debug_assert!(
+                self.pending.is_none(),
+                "a not-ready payload must not survive its batch"
+            );
             self.cursor = 0;
+            self.pending = None;
             self.mid_batch = true;
         }
 
@@ -530,55 +657,51 @@ where
         let started = Instant::now();
         let mut ok: u64 = 0;
         let mut errors: u64 = 0;
-        let outcome = loop {
-            let Some(raw) = batch.next_payload() else {
-                break None;
-            };
-            let mut flow = Flow::Continue;
-            let mut emitted = 0u64;
-            let result = self.deser.deserialize(
-                &raw,
-                batch.ack(),
-                &mut OpsEmit {
-                    ops: &mut self.ops,
-                    emitted: &mut emitted,
-                    flow: &mut flow,
-                },
-            );
-            ok += emitted;
-            if let Err(e) = result {
-                errors += 1;
-                match self.deser_policy {
-                    ErrorPolicy::Skip => {
-                        crate::rate_limited_warn!(
-                            DESER_SKIP_WARN,
-                            partition = raw.partition.0,
-                            offset = raw.offset,
-                            error = %e,
-                            "payload skipped by deserializer error policy"
-                        );
-                    }
-                    _ => {
-                        break Some(PushOutcome::Fatal(FatalError {
-                            component: "deserializer".to_string(),
-                            reason: e.to_string(),
-                        }));
-                    }
-                }
-            }
-            self.cursor += 1;
+        let mut outcome: Option<PushOutcome> = None;
 
-            if let Some(fatal) = self.ops.take_fatal() {
-                break Some(PushOutcome::Fatal(fatal));
+        // Replay a stashed not-ready payload before pulling new ones. Its
+        // index is `cursor`; the batch iterator is already past it.
+        if let Some(p) = self.pending.take() {
+            let raw = p.as_raw();
+            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors) {
+                Step::Continue => self.cursor += 1,
+                Step::Backpressure => {
+                    self.cursor += 1;
+                    outcome = Some(PushOutcome::Blocked {
+                        resume_at: self.cursor,
+                    });
+                }
+                Step::NotReady => {
+                    self.pending = Some(p);
+                    outcome = Some(PushOutcome::Blocked {
+                        resume_at: self.cursor,
+                    });
+                }
+                Step::Fatal(f) => outcome = Some(PushOutcome::Fatal(f)),
             }
-            // The terminal never rejects mid-payload; pressure surfaces
-            // between payloads, so operators never re-run for a record.
-            if flow == Flow::Blocked || self.ops.relieve() == Flow::Blocked {
-                break Some(PushOutcome::Blocked {
-                    resume_at: self.cursor,
-                });
+        }
+
+        while outcome.is_none() {
+            let Some(raw) = batch.next_payload() else {
+                break;
+            };
+            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors) {
+                Step::Continue => self.cursor += 1,
+                Step::Backpressure => {
+                    self.cursor += 1;
+                    outcome = Some(PushOutcome::Blocked {
+                        resume_at: self.cursor,
+                    });
+                }
+                Step::NotReady => {
+                    self.pending = Some(PendingPayload::from_raw(&raw));
+                    outcome = Some(PushOutcome::Blocked {
+                        resume_at: self.cursor,
+                    });
+                }
+                Step::Fatal(f) => outcome = Some(PushOutcome::Fatal(f)),
             }
-        };
+        }
 
         let elapsed = started.elapsed();
         if let Some(m) = &self.deser_metrics {
@@ -593,6 +716,7 @@ where
             Some(PushOutcome::Fatal(f)) => {
                 batch.ack().fail();
                 self.mid_batch = false;
+                self.pending = None;
                 PushOutcome::Fatal(f)
             }
             Some(blocked) => blocked,

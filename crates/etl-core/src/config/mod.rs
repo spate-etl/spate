@@ -60,6 +60,17 @@ mod interpolate;
 pub use component::ComponentConfig;
 pub use error::ConfigError;
 
+/// Re-export of `serde_yaml::Value`, the opaque body type carried by a
+/// [`ComponentConfig`]. `serde_yaml` is a 0.x dependency, so exposing its
+/// `Value` directly in `etl-core`'s public API would tie our semver to
+/// theirs; this alias is the documented exemption (mirroring the [`bytes`]
+/// and `AvroValue` re-export pattern — see `docs/DESIGN.md` § Dependency
+/// policy). A major bump of the YAML crate becomes a breaking change here,
+/// and only here.
+///
+/// [`bytes`]: crate::bytes
+pub use serde_yaml::Value as YamlValue;
+
 use bytesize::ByteSize;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -139,6 +150,15 @@ pub struct CheckpointSection {
     /// `terminationGracePeriodSeconds`.
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
+    /// A partition watermark stalled behind a failed batch for longer than
+    /// this fails the pipeline. Failed batches only stall watermarks
+    /// permanently (their data replays after restart), so this converts a
+    /// permanent sink failure — a dropped table, revoked credentials — into
+    /// a clean `Failed` exit and a restart instead of a process that runs on
+    /// forever, consuming the source but committing nothing for that
+    /// partition.
+    #[serde(with = "humantime_serde")]
+    pub stalled_fail_after: Duration,
 }
 
 impl Default for CheckpointSection {
@@ -147,6 +167,7 @@ impl Default for CheckpointSection {
             interval: Duration::from_secs(5),
             max_pending_batches: 1024,
             drain_timeout: Duration::from_secs(25),
+            stalled_fail_after: Duration::from_secs(120),
         }
     }
 }
@@ -291,14 +312,28 @@ impl PipelineConfig {
         if self.pipeline.threads == Some(0) {
             return fail("pipeline.threads must be at least 1 when set".into());
         }
-        if self.checkpoint.interval.is_zero() {
-            return fail("checkpoint.interval must be greater than zero".into());
+        // The commit loop fires whenever `last_commit.elapsed() >= interval`,
+        // so an interval below a poll cycle commits on nearly every loop.
+        // A floor keeps sub-100ms intervals from hammering the source's
+        // offset store for no durability gain (checkpointing is not the
+        // durability boundary — the sink write is).
+        const MIN_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
+        if self.checkpoint.interval < MIN_COMMIT_INTERVAL {
+            return fail(format!(
+                "checkpoint.interval must be at least 100ms (got {:?}): the commit \
+                 loop fires every interval, so sub-100ms intervals hammer the \
+                 source's offset store without improving durability",
+                self.checkpoint.interval
+            ));
         }
         if self.checkpoint.max_pending_batches == 0 {
             return fail("checkpoint.max_pending_batches must be at least 1".into());
         }
         if self.checkpoint.drain_timeout.is_zero() {
             return fail("checkpoint.drain_timeout must be greater than zero".into());
+        }
+        if self.checkpoint.stalled_fail_after.is_zero() {
+            return fail("checkpoint.stalled_fail_after must be greater than zero".into());
         }
         if self.backpressure.max_inflight_bytes.as_u64() == 0 {
             return fail("backpressure.max_inflight_bytes must be greater than zero".into());
@@ -334,6 +369,7 @@ sink: { memory: {} }
         assert_eq!(cfg.checkpoint.interval, Duration::from_secs(5));
         assert_eq!(cfg.checkpoint.max_pending_batches, 1024);
         assert_eq!(cfg.checkpoint.drain_timeout, Duration::from_secs(25));
+        assert_eq!(cfg.checkpoint.stalled_fail_after, Duration::from_secs(120));
         assert_eq!(cfg.backpressure.max_inflight_bytes, ByteSize::mib(256));
         assert_eq!(cfg.backpressure.high_ratio, 0.8);
         assert_eq!(cfg.backpressure.low_ratio, 0.5);
@@ -480,12 +516,20 @@ metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
                 "interval",
             ),
             (
+                "pipeline: { name: x }\ncheckpoint: { interval: 50ms }\nsource: { m: {} }\nsink: { m: {} }",
+                "at least 100ms",
+            ),
+            (
                 "pipeline: { name: x }\ncheckpoint: { max_pending_batches: 0 }\nsource: { m: {} }\nsink: { m: {} }",
                 "max_pending_batches",
             ),
             (
                 "pipeline: { name: x }\ncheckpoint: { drain_timeout: 0s }\nsource: { m: {} }\nsink: { m: {} }",
                 "drain_timeout",
+            ),
+            (
+                "pipeline: { name: x }\ncheckpoint: { stalled_fail_after: 0s }\nsource: { m: {} }\nsink: { m: {} }",
+                "stalled_fail_after",
             ),
             (
                 "pipeline: { name: x }\nbackpressure: { max_inflight_bytes: 0 }\nsource: { m: {} }\nsink: { m: {} }",

@@ -221,6 +221,16 @@ enum ChainMode {
     BlockForever,
     FatalAtBatch(usize),
     PanicAtBatch(usize),
+    /// Fail the ack of the n-th batch (1-based) after consuming it, stalling
+    /// that partition's watermark permanently — as a fatal sink write does.
+    FailAckAtBatch(usize),
+    /// Clone-and-stash every batch's ack so watermarks never advance and the
+    /// checkpointer's pending count climbs. Setting `release` stops stashing;
+    /// the test then drops the stash to resolve the batches Delivered.
+    HoldAcks {
+        held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
+        release: Arc<AtomicBool>,
+    },
 }
 
 struct FakeChain {
@@ -261,6 +271,13 @@ impl RunnableChain for FakeChain {
         }
         while let Some(_p) = batch.next_payload() {
             self.shared.consumed.fetch_add(1, Ordering::Relaxed);
+        }
+        match &self.mode {
+            ChainMode::FailAckAtBatch(n) if self.batches_seen == *n => batch.ack().fail(),
+            ChainMode::HoldAcks { held, release } if !release.load(Ordering::Relaxed) => {
+                held.lock().unwrap().push(batch.ack().clone());
+            }
+            _ => {}
         }
         PushOutcome::Done
     }
@@ -305,6 +322,7 @@ fn test_config(threads: usize) -> PipelineConfig {
             interval: Duration::from_millis(20),
             max_pending_batches: 1024,
             drain_timeout: Duration::from_secs(3),
+            stalled_fail_after: Duration::from_secs(120),
         },
         backpressure: BackpressureSection {
             min_pause: Duration::from_millis(10),
@@ -361,6 +379,13 @@ struct Harness {
 fn start(
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
+    start_with_config(test_config(1), mode_factory)
+}
+
+fn start_with_config(
+    config: PipelineConfig,
+    mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
+) -> Harness {
     let (source, shared, script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let (sink, drained) = test_sink();
@@ -368,7 +393,7 @@ fn start(
     let cs = Arc::clone(&chain_shared);
     let log = Arc::clone(&shared);
     let runtime = PipelineRuntime::new(
-        test_config(1),
+        config,
         source,
         move |_thread| {
             Box::new(mode_factory(Arc::clone(&cs), Arc::clone(&log))) as Box<dyn RunnableChain>
@@ -588,6 +613,87 @@ fn panicking_chain_fails_pipeline() {
     let log = h.shared.lock().unwrap();
     let committed = log.committed.get(&PartitionId(0)).copied();
     assert!(committed == Some(10) || committed.is_none());
+}
+
+/// A watermark permanently stalled behind a failed batch (as a fatal sink
+/// write produces) must fail the pipeline once it has been stalled past
+/// `stalled_fail_after`. Otherwise a broken sink leg leaves the pipeline
+/// Running forever, consuming the source but committing nothing.
+#[test]
+fn permanent_watermark_stall_fails_pipeline_as_checkpoint() {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.stalled_fail_after = Duration::from_millis(50);
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::FailAckAtBatch(1),
+        batches_seen: 0,
+    });
+    // The first batch's ack fails, stalling the partition; later batches
+    // deliver but their watermark can never pass the failure.
+    assign_one_lane(&h, &[0..10, 10..20, 20..30]);
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a permanent stall must fail the pipeline");
+    };
+    assert_eq!(failure.component, "checkpoint");
+    assert!(failure.reason.contains("stalled"), "{}", failure.reason);
+}
+
+/// When per-partition pending batches exceed `max_pending_batches`, the
+/// controller pauses the assigned lanes; once acknowledgements drain the
+/// pending count below half the limit, it resumes them.
+#[test]
+fn pending_batch_limit_pauses_then_resumes_lanes() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 3;
+    let h = start_with_config(cfg, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        },
+        batches_seen: 0,
+    });
+    // Six batches whose acks are all withheld: pending climbs past the
+    // limit of 3 and the controller pauses the lane.
+    assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
+    wait_for(
+        "controller pauses under pending pressure",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .pauses
+                .iter()
+                .any(|p| p.contains(&LaneId(0)))
+        },
+    );
+    // Stop withholding and resolve everything held: pending drains to zero
+    // and the controller resumes the lane.
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    wait_for(
+        "controller resumes after pending clears",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .resumes
+                .iter()
+                .any(|r| r.contains(&LaneId(0)))
+        },
+    );
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
 }
 
 #[test]

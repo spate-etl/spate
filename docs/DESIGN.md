@@ -356,6 +356,11 @@ exactly-once.
 - **Panic policy**: user-code panics are caught per batch, the batch resolves
   as Failed (watermark stalls), the pipeline transitions to Failed and the
   process exits non-zero. Kubernetes restarts it. No thread resurrection.
+- **Stalled watermarks**: a fatal sink write abandons its batch (acks fail,
+  the partition watermark stalls permanently); if any partition stays stalled
+  behind a failed batch longer than `checkpoint.stalled_fail_after`
+  (default 120s), the controller fails the pipeline so it restarts and
+  replays instead of running on committing nothing for that partition.
 - **Shutdown**: SIGTERM trips the same drain barrier as a full revocation:
   stop lanes → flush chain → sinks force-seal and drain in-flight under
   `drain_timeout` (default 25s, must be < `terminationGracePeriodSeconds`) →

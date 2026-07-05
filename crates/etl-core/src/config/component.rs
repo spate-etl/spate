@@ -63,7 +63,11 @@ impl ComponentConfig {
 
     /// Build a component config programmatically (primarily for tests and
     /// `etl-test` pipelines that skip YAML).
-    pub fn new(type_tag: impl Into<String>, raw: serde_yaml::Value) -> Self {
+    ///
+    /// `raw` is the opaque connector body as a [`YamlValue`](super::YamlValue)
+    /// (an `etl-core` re-export of `serde_yaml::Value` — see its docs for the
+    /// dependency-policy exemption).
+    pub fn new(type_tag: impl Into<String>, raw: super::YamlValue) -> Self {
         ComponentConfig {
             type_tag: type_tag.into(),
             raw,

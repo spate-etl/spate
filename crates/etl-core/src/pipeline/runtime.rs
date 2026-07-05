@@ -343,6 +343,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             commit_interval: self.config.checkpoint.interval,
             drain_timeout: self.config.checkpoint.drain_timeout,
             event_poll_timeout: self.options.event_poll_timeout,
+            max_pending_batches: self.config.checkpoint.max_pending_batches,
+            stalled_fail_after: self.config.checkpoint.stalled_fail_after,
             checkpoint_metrics: CheckpointMetrics::new(
                 &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
                 self.config.metrics.per_partition_detail,

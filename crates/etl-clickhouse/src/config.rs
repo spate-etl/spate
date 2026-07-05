@@ -302,9 +302,16 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     if cfg.columns.is_empty() {
         return fail("`columns` must list the insert columns in field order".into());
     }
+    let mut seen = std::collections::HashSet::with_capacity(cfg.columns.len());
     for col in &cfg.columns {
         if !is_identifier(col) {
             return fail(format!("column `{col}` is not a valid identifier"));
+        }
+        // Duplicate columns emit e.g. `INSERT INTO t (`id`, `id`)`, which
+        // ClickHouse rejects with DUPLICATE_COLUMN — a code the writer
+        // classifies retryable, so it would loop forever. Reject at load.
+        if !seen.insert(col.as_str()) {
+            return fail(format!("column `{col}` is listed more than once"));
         }
     }
     let table_parts: Vec<&str> = cfg.table.split('.').collect();
@@ -328,6 +335,43 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     if cfg.inflight.max_per_shard == 0 {
         return fail("inflight.max_per_shard must be at least 1".into());
     }
+
+    // Retry policy: these values flow unchecked into `Duration::mul_f64` in
+    // the backoff, which panics on non-finite, negative, or overflowing
+    // results — and a sub-1.0 multiplier or a zero delay yields a zero-delay
+    // hot-retry loop hammering an already-failing replica. Validate at load.
+    let retry = &cfg.retry;
+    if !retry.multiplier.is_finite() || !(1.0..=1e9).contains(&retry.multiplier) {
+        return fail(format!(
+            "retry.multiplier must be a finite number in [1.0, 1e9] (got {})",
+            retry.multiplier
+        ));
+    }
+    if !retry.jitter.is_finite() || !(0.0..=1.0).contains(&retry.jitter) {
+        return fail(format!(
+            "retry.jitter must be a finite fraction in [0.0, 1.0] (got {})",
+            retry.jitter
+        ));
+    }
+    if retry.initial.is_zero() || retry.max.is_zero() {
+        return fail("retry.initial and retry.max must be non-zero".into());
+    }
+    if retry.initial > retry.max {
+        return fail(format!(
+            "retry.initial ({:?}) must not exceed retry.max ({:?})",
+            retry.initial, retry.max
+        ));
+    }
+
+    // Circuit breaker: a zero failure threshold opens on the first outcome
+    // and zero half-open probes never lets a replica recover.
+    if cfg.breaker.failure_threshold == 0 {
+        return fail("breaker.failure_threshold must be at least 1".into());
+    }
+    if cfg.breaker.half_open_probes == 0 {
+        return fail("breaker.half_open_probes must be at least 1".into());
+    }
+
     for reserved in [
         "insert_deduplication_token",
         "insert_deduplicate",
@@ -466,6 +510,54 @@ settings: { insert_quorum: "auto" }
                 "expected `{needle}` in error for {yaml}: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn validation_rejects_bad_retry_and_breaker() {
+        // Every one of these previously reached `Duration::mul_f64` (or a
+        // broken breaker) at runtime instead of failing at load.
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let cases = [
+            ("retry: { multiplier: 0.5 }", "multiplier"),
+            ("retry: { multiplier: -2.0 }", "multiplier"),
+            ("retry: { multiplier: .nan }", "multiplier"),
+            ("retry: { multiplier: .inf }", "multiplier"),
+            ("retry: { jitter: 1.5 }", "jitter"),
+            ("retry: { jitter: -0.1 }", "jitter"),
+            ("retry: { jitter: .nan }", "jitter"),
+            ("retry: { initial: 0s }", "non-zero"),
+            ("retry: { max: 0s }", "non-zero"),
+            ("retry: { initial: 10s, max: 1s }", "must not exceed"),
+            ("breaker: { failure_threshold: 0 }", "failure_threshold"),
+            ("breaker: { half_open_probes: 0 }", "half_open_probes"),
+        ];
+        for (extra, needle) in cases {
+            let yaml = format!("{base}{extra}");
+            let err = from_component_config(&component(&yaml)).unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "expected `{needle}` for `{extra}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_retry_and_breaker_still_build() {
+        let sink = from_component_config(&component(
+            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n\
+             retry: { initial: 100ms, max: 10s, multiplier: 1.0, jitter: 0.0 }\n\
+             breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
+        ));
+        assert!(sink.is_ok(), "boundary-valid config must build: {sink:?}");
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_columns() {
+        let err = from_component_config(&component(
+            "table: t\ncolumns: [id, name, id]\nshards: [{replicas: [\"http://a\"]}]",
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     #[test]

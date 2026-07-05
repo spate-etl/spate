@@ -9,7 +9,7 @@
 //! Empty payloads (Kafka tombstones) decode to **zero records** in every
 //! mode.
 
-use crate::cache::{CompiledSchema, Lookup};
+use crate::cache::{CacheSnapshot, CompiledSchema, Lookup};
 use crate::registry::RegistryHandle;
 use crate::wire;
 use apache_avro::Schema;
@@ -34,7 +34,13 @@ pub type AvroValue = apache_avro::types::Value;
 pub(crate) enum SchemaSourceMode {
     /// Confluent wire format: writer schema fetched from the registry by
     /// the id embedded in each payload.
-    Confluent { registry: RegistryHandle },
+    Confluent {
+        registry: RegistryHandle,
+        /// Per-deserializer lock-free memo of the shared cache. Consulted
+        /// first on every payload so a repeated (already-`Ready`) schema id
+        /// costs no shared-lock acquisition; refreshed only on a miss.
+        memo: CacheSnapshot,
+    },
     /// The whole payload is a bare datum; the writer schema is fixed.
     Raw { schema: Arc<CompiledSchema> },
     /// Avro single-object encoding; the header fingerprint must match the
@@ -57,14 +63,14 @@ pub(crate) struct DecoderCore {
 
 impl DecoderCore {
     /// Decode one payload to an [`AvroValue`], or `None` for a tombstone.
-    fn decode(&self, raw: &RawPayload<'_>) -> Result<Option<AvroValue>, DeserError> {
+    fn decode(&mut self, raw: &RawPayload<'_>) -> Result<Option<AvroValue>, DeserError> {
         if raw.bytes.is_empty() {
             return Ok(None);
         }
-        let (writer, mut datum): (Arc<CompiledSchema>, &[u8]) = match &self.mode {
-            SchemaSourceMode::Confluent { registry } => {
+        let (writer, mut datum): (Arc<CompiledSchema>, &[u8]) = match &mut self.mode {
+            SchemaSourceMode::Confluent { registry, memo } => {
                 let (id, datum) = wire::parse_confluent(raw.bytes)?;
-                match registry.cache.get(id) {
+                match registry.cache.lookup(memo, id) {
                     Lookup::Ready(schema) => (schema, datum),
                     Lookup::Missing => {
                         registry.request(id);
@@ -104,9 +110,10 @@ impl DecoderCore {
 }
 
 /// Dynamically-typed deserializer: emits [`AvroValue`] records. Use when
-/// the schema is only known at runtime; the typed
-/// [`AvroSerdeDeserializer`] is faster and keeps `apache-avro` types out
-/// of your pipeline.
+/// the schema is only known at runtime, or as the lower-allocation path —
+/// it decodes each datum exactly once. The typed [`AvroSerdeDeserializer`]
+/// keeps `apache-avro` types out of your pipeline, but it is **not** faster:
+/// it decodes to an [`AvroValue`] and then re-decodes that into `T`.
 #[derive(Clone, Debug)]
 pub struct AvroValueDeserializer {
     core: DecoderCore,
@@ -138,6 +145,18 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 
 /// Typed deserializer: decodes each datum into `T` via serde. The record
 /// type is plain Rust — no Avro types leak into the pipeline.
+///
+/// # Performance
+///
+/// This path is **not** faster than [`AvroValueDeserializer`]. `apache-avro`
+/// 0.21 exposes no single-pass datum-to-`T` decode, so each record is decoded
+/// twice — once into an intermediate [`AvroValue`] via `from_avro_datum`,
+/// then again into `T` via `from_value` — roughly doubling the per-record
+/// allocations and CPU of the dynamically-typed path. Choose it for the clean
+/// typed API (no `apache-avro` types in your pipeline), not for throughput.
+///
+/// Future work: decode straight into `T` in one pass if/when the upstream
+/// crate offers a serde deserializer over the raw wire bytes.
 #[derive(Clone, Debug)]
 pub struct AvroSerdeDeserializer<T> {
     core: DecoderCore,
@@ -164,6 +183,9 @@ where
         out: &mut dyn EmitRecord<'buf, T>,
     ) -> Result<(), DeserError> {
         if let Some(value) = self.core.decode(raw)? {
+            // Second decode pass: apache-avro 0.21 has no single-pass
+            // datum→T path, so we re-decode the intermediate Value into T.
+            // See the type-level `# Performance` note.
             let payload =
                 apache_avro::from_value::<T>(&value).map_err(|e| DeserError::Malformed {
                     reason: format!("avro record does not match the target type: {e}"),

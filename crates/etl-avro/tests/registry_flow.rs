@@ -15,7 +15,7 @@ use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,10 @@ struct StubRegistry {
     routes: Arc<Mutex<HashMap<String, Vec<Scripted>>>>,
     hits: Arc<AtomicUsize>,
     paths: Arc<Mutex<Vec<String>>>,
+    /// While `true`, requests to `hold_path` block until released — used to
+    /// prove one slow id does not head-of-line-block other fetches.
+    hold: Arc<AtomicBool>,
+    hold_path: Option<String>,
 }
 
 impl StubRegistry {
@@ -98,7 +102,14 @@ impl StubRegistry {
                     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
                         let stub = stub.clone();
                         async move {
-                            let (status, body) = stub.respond(req.uri().path());
+                            let path = req.uri().path().to_string();
+                            // Gate: block this path until the test releases it.
+                            if stub.hold_path.as_deref() == Some(path.as_str()) {
+                                while stub.hold.load(Ordering::Relaxed) {
+                                    tokio::time::sleep(Duration::from_millis(5)).await;
+                                }
+                            }
+                            let (status, body) = stub.respond(&path);
                             Ok::<_, std::convert::Infallible>(
                                 Response::builder()
                                     .status(StatusCode::from_u16(status).unwrap())
@@ -223,8 +234,10 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retriable_registry_errors_are_retried() {
     let stub = StubRegistry::default();
-    // Only 502/503 (and transport errors) are retriable in the
-    // registry client; 500s negative-cache immediately.
+    // 502/503 are retriable in the registry client, but every transient
+    // failure now leaves the id absent and is retried by the deserializer
+    // replaying the payload (bounded by per-id fetch backoff), never
+    // negatively cached.
     stub.script("/schemas/ids/9", 503, "shard warming up", 2);
     stub.script("/schemas/ids/9", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
@@ -297,6 +310,129 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     .unwrap()
     .unwrap();
     assert_eq!(rows.len(), 1, "expired negative entry allows a refetch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_503s_then_success_decodes_and_never_drops() {
+    // The critical regression (registry.rs poison-cache): three transient
+    // 503s must not poison the id. Each leaves it absent; the deserializer's
+    // replay refetches (bounded by per-id backoff) until the schema resolves.
+    // The record is never dropped/acked as poison.
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/42", 503, "shard warming up", 3);
+    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value();
+    let payload = confluent_payload(42, 7);
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rows.len(), 1, "record decodes after the transient blips");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_retriable_5xx_is_transient_not_poison() {
+    // A single non-retriable 500 (the registry restarting behind an LB) must
+    // NOT be negatively cached: doing so would surface SchemaUnavailable for
+    // the whole TTL and silently drop valid records under ErrorPolicy::Skip.
+    // The id is left absent and refetched — this fails on the old code, which
+    // called insert_failed on any non-retriable error.
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/7", 500, "internal error", 1);
+    stub.script("/schemas/ids/7", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value();
+    let payload = confluent_payload(7, 1);
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .expect("a transient 500 must never poison the id");
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_fetch_does_not_block_other_ids() {
+    // Regression for the serial-fetcher head-of-line block: id 100's fetch is
+    // gated (a black-holed registry node); id 200's fetch must still resolve
+    // concurrently rather than waiting behind it. On the old serial fetcher,
+    // id 200 would never resolve while 100 is stuck.
+    let mut stub = StubRegistry::default();
+    stub.script("/schemas/ids/100", 200, &schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/200", 200, &schema_body(SCHEMA_V1), 0);
+    stub.hold.store(true, Ordering::Relaxed);
+    stub.hold_path = Some("/schemas/ids/100".into());
+    let released = Arc::clone(&stub.hold);
+    let addr = stub.clone().serve().await;
+
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value();
+    let slow = confluent_payload(100, 1);
+    let fast = confluent_payload(200, 2);
+
+    // Kick off the slow (gated) fetch first, then the fast one.
+    let (ack, _rx) = AckRef::test_pair();
+    let mut sink = Collected(Vec::new());
+    assert!(matches!(
+        deser.deserialize(&raw(&slow), &ack, &mut sink).unwrap_err(),
+        DeserError::NotReady { .. }
+    ));
+
+    let slow_probe = slow.clone();
+    let mut deser = tokio::task::spawn_blocking(move || {
+        // The fast id resolves while the slow id is still gated.
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &fast, &mut out).unwrap();
+        assert_eq!(out.0.len(), 1, "fast id resolved despite the gated slow id");
+
+        // The slow id is still unavailable (its fetch is blocked).
+        let (ack, _rx) = AckRef::test_pair();
+        let mut out = Collected(Vec::new());
+        assert!(matches!(
+            deser
+                .deserialize(&raw(&slow_probe), &ack, &mut out)
+                .unwrap_err(),
+            DeserError::NotReady { .. }
+        ));
+        deser
+    })
+    .await
+    .unwrap();
+
+    // Release the gate: the slow id now resolves too.
+    released.store(false, Ordering::Relaxed);
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &slow, &mut out).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rows.len(), 1, "slow id resolves after the gate is released");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

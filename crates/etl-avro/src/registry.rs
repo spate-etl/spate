@@ -8,20 +8,44 @@
 //!
 //! `schema_registry_converter` is used strictly as the registry HTTP
 //! client — its decoders never appear on the hot path.
+//!
+//! # Transient vs permanent failures
+//!
+//! Only a *permanent* verdict about an id — the registry answering `404`
+//! (unknown id/subject/version), a schema that uses unsupported references,
+//! or an unparseable schema — is negatively cached. A *transient* outage
+//! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
+//! leaves the id **absent** so the deserializer's next replay refetches it:
+//! poisoning a transient blip would drop (and ack) perfectly decodable
+//! records for the whole negative-cache TTL. Per-id backoff, held here in
+//! the fetcher, keeps those replays from hot-looping the registry.
+//!
+//! # Concurrency
+//!
+//! Fetches run concurrently (up to [`MAX_CONCURRENT_FETCHES`]) so one slow
+//! or black-holed id cannot head-of-line-block every other id. Per-id
+//! dedup (a fetch already in flight is never started twice) and per-id
+//! backoff are preserved across the concurrency.
 
-use crate::cache::{CompiledSchema, SchemaCache};
+use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use apache_avro::Schema;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
+use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
-/// How many times a retriable registry error is retried before an id gets
-/// a (TTL-bounded) negative cache entry.
-const FETCH_ATTEMPTS: u32 = 5;
+/// Per-id backoff bounds applied after a transient registry failure, so
+/// repeated NotReady replays cannot hot-loop the registry.
 const FETCH_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// Maximum number of schema ids fetched concurrently. Bounds head-of-line
+/// blocking (a slow id no longer stalls the rest) while keeping registry
+/// load and open-socket count modest.
+const MAX_CONCURRENT_FETCHES: usize = 4;
 
 /// Cloneable handle held by deserializers: request a fetch, read the cache.
 #[derive(Clone, Debug)]
@@ -55,6 +79,22 @@ fn sr_settings(cfg: &RegistryConfig) -> SrSettings {
     builder.build().expect("registry settings")
 }
 
+/// What a single fetch resolved to, used to drive per-id backoff.
+enum FetchOutcome {
+    /// A definitive verdict was written to the cache: a compiled schema, or
+    /// a negative entry for a permanently unusable id. Backoff cleared.
+    Resolved,
+    /// A transient registry failure. The id was left absent so a later
+    /// replay refetches it; the fetcher grows this id's backoff.
+    Transient,
+}
+
+/// Per-id backoff state kept in the fetcher.
+struct Backoff {
+    delay: Duration,
+    next_allowed: Instant,
+}
+
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
     cfg: RegistryConfig,
@@ -63,59 +103,141 @@ pub(crate) fn spawn_fetcher(
     let cache = Arc::new(SchemaCache::new(cfg.negative_cache_ttl));
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
-    let settings = sr_settings(&cfg);
+    let settings = Arc::new(sr_settings(&cfg));
     runtime.spawn(async move {
-        while let Some(id) = rx.recv().await {
-            // Dedup: the id may have been requested by several pipeline
-            // threads before the first fetch landed.
-            if !matches!(task_cache.get(id), crate::cache::Lookup::Missing) {
-                continue;
+        // Ids with a fetch currently running: dedup across the concurrency.
+        let mut in_flight: HashSet<u32> = HashSet::new();
+        // Per-id backoff after transient failures.
+        let mut backoff: HashMap<u32, Backoff> = HashMap::new();
+        let mut tasks: JoinSet<(u32, FetchOutcome)> = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                // Drain finished fetches first so slots free promptly.
+                Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                    let Ok((id, outcome)) = joined else {
+                        // A fetch task panicked (should not happen: fetch_one
+                        // returns errors, never panics). The id stays in
+                        // `in_flight` and won't refetch, which is no worse
+                        // than the pre-existing fetcher-death behavior.
+                        tracing::error!("registry fetch task panicked");
+                        continue;
+                    };
+                    in_flight.remove(&id);
+                    match outcome {
+                        FetchOutcome::Resolved => {
+                            backoff.remove(&id);
+                        }
+                        FetchOutcome::Transient => match backoff.get_mut(&id) {
+                            Some(b) => {
+                                b.delay = (b.delay * 2).min(FETCH_BACKOFF_MAX);
+                                b.next_allowed = Instant::now() + b.delay;
+                            }
+                            None => {
+                                backoff.insert(
+                                    id,
+                                    Backoff {
+                                        delay: FETCH_BACKOFF_INITIAL,
+                                        next_allowed: Instant::now() + FETCH_BACKOFF_INITIAL,
+                                    },
+                                );
+                            }
+                        },
+                    }
+                }
+                maybe_id = rx.recv(), if tasks.len() < MAX_CONCURRENT_FETCHES => {
+                    let Some(id) = maybe_id else {
+                        // All deserializers dropped: the pipeline is draining.
+                        break;
+                    };
+                    // Dedup: the id may be requested by several pipeline
+                    // threads before the first fetch lands, or already
+                    // resolved / negatively cached.
+                    if in_flight.contains(&id) {
+                        continue;
+                    }
+                    if !matches!(task_cache.get(id), Lookup::Missing) {
+                        continue;
+                    }
+                    // Honor per-id backoff so replays after a transient
+                    // failure don't hammer the registry.
+                    if backoff.get(&id).is_some_and(|b| Instant::now() < b.next_allowed) {
+                        continue;
+                    }
+                    in_flight.insert(id);
+                    let cache = Arc::clone(&task_cache);
+                    let settings = Arc::clone(&settings);
+                    tasks.spawn(async move {
+                        let outcome = fetch_one(id, &settings, &cache).await;
+                        (id, outcome)
+                    });
+                }
             }
-            fetch_one(id, &settings, &task_cache).await;
         }
     });
     RegistryHandle { tx, cache }
 }
 
-async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) {
-    let mut backoff = FETCH_BACKOFF_INITIAL;
-    for attempt in 1..=FETCH_ATTEMPTS {
-        match schema_registry::get_schema_by_id_and_type(id, settings, SchemaType::Avro).await {
-            Ok(registered) => {
-                if !registered.references.is_empty() {
-                    cache.insert_failed(
-                        id,
-                        format!(
-                            "schema {id} uses {} registry reference(s), which etl-avro \
-                             does not support yet",
-                            registered.references.len()
-                        ),
-                    );
-                    return;
+/// Fetch, parse, and publish schema `id`, or classify the failure. A single
+/// HTTP attempt: transient failures are retried by the deserializer replaying
+/// the payload (bounded by this id's backoff), not by blocking here — which
+/// also stops one slow id from monopolizing a fetch slot for minutes.
+async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> FetchOutcome {
+    match schema_registry::get_schema_by_id_and_type(id, settings, SchemaType::Avro).await {
+        Ok(registered) => {
+            if !registered.references.is_empty() {
+                cache.insert_failed(
+                    id,
+                    format!(
+                        "schema {id} uses {} registry reference(s), which etl-avro \
+                         does not support yet",
+                        registered.references.len()
+                    ),
+                );
+                return FetchOutcome::Resolved;
+            }
+            match Schema::parse_str(&registered.schema) {
+                Ok(schema) => {
+                    tracing::info!(schema_id = id, "schema fetched and compiled");
+                    cache.insert_ready(CompiledSchema { id, schema });
                 }
-                match Schema::parse_str(&registered.schema) {
-                    Ok(schema) => {
-                        tracing::info!(schema_id = id, "schema fetched and compiled");
-                        cache.insert_ready(CompiledSchema { id, schema });
-                    }
-                    Err(e) => {
-                        cache.insert_failed(id, format!("schema {id} failed to parse: {e}"));
-                    }
+                Err(e) => {
+                    cache.insert_failed(id, format!("schema {id} failed to parse: {e}"));
                 }
-                return;
             }
-            Err(e) if e.retriable && attempt < FETCH_ATTEMPTS => {
-                tracing::warn!(schema_id = id, attempt, error = %e, "registry fetch retry");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(FETCH_BACKOFF_MAX);
-            }
-            Err(e) => {
-                tracing::warn!(schema_id = id, error = %e, "registry fetch failed");
-                cache.insert_failed(id, format!("registry fetch for schema {id} failed: {e}"));
-                return;
-            }
+            FetchOutcome::Resolved
+        }
+        Err(e) if is_permanent(&e) => {
+            // A genuinely unknown id (registry 404). Negative-cache it so we
+            // don't hammer the registry for an id that will never resolve;
+            // the deserializer applies its ErrorPolicy to the poison payload.
+            tracing::warn!(schema_id = id, error = %e, "registry reports schema id unknown");
+            cache.insert_failed(id, format!("registry fetch for schema {id} failed: {e}"));
+            FetchOutcome::Resolved
+        }
+        Err(e) => {
+            // Transient outage (5xx other than 404, 429, timeout, refused or
+            // black-holed connection, retriable error). Leave the id absent:
+            // poisoning it here would drop (and ack) decodable records for the
+            // whole negative TTL. The next replay refetches, subject to
+            // per-id backoff.
+            tracing::warn!(schema_id = id, error = %e, "registry fetch failed transiently; will retry");
+            FetchOutcome::Transient
         }
     }
+}
+
+/// Whether a registry error is a *permanent* verdict about the id (a `404`
+/// not-found) rather than a transient outage.
+///
+/// `schema_registry_converter` (a 0.x dependency) does not expose the HTTP
+/// status as a field — it only formats it into the error message
+/// (`"...failed with status 404 Not Found"`) — so we match on that. This is
+/// deliberately narrow: anything we cannot positively identify as a `404` is
+/// treated as transient, because the safe failure mode is to refetch (a
+/// bounded stall), never to negatively cache and silently drop valid records.
+fn is_permanent(e: &SRCError) -> bool {
+    e.error.contains("status 404")
 }
 
 /// Fetch the latest version of every configured subject into the cache

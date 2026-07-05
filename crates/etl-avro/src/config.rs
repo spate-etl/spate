@@ -219,7 +219,10 @@ impl AvroDeserializerBuilder {
                         crate::registry::prewarm(&registry_cfg, &subjects, &cache).await;
                     });
                 }
-                SchemaSourceMode::Confluent { registry: handle }
+                SchemaSourceMode::Confluent {
+                    registry: handle,
+                    memo: crate::cache::SchemaCache::empty_snapshot(),
+                }
             }
             AvroMode::Raw => {
                 let schema = Self::fixed_schema(settings, "raw")?;

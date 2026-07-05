@@ -9,7 +9,6 @@
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink |
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format) |
-//! | `avro-fast` | Opt-in zero-copy Avro backend |
 //! | `full` | All of the above |
 
 pub use etl_core::*;

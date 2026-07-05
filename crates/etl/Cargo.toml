@@ -18,7 +18,6 @@ etl-clickhouse = { workspace = true, optional = true }
 [features]
 default = []
 avro = ["dep:etl-avro"]
-avro-fast = ["avro", "etl-avro/fast"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
 full = ["avro", "kafka", "clickhouse"]

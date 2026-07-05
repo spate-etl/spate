@@ -1,6 +1,6 @@
 [package]
 name = "etl-avro"
-description = "Avro deserialization for the etl-rs framework: Confluent wire format, schema registry integration, and pluggable codec backends. Applications should depend on the `etl` facade crate with the `avro` feature."
+description = "Avro deserialization for the etl-rs framework: Confluent wire format, schema registry integration, and schema-evolution support. Applications should depend on the `etl` facade crate with the `avro` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,13 +10,29 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+apache-avro = { workspace = true }
+bytes = { workspace = true }
 etl-core = { workspace = true }
+schema_registry_converter = { workspace = true, features = ["futures", "rustls_tls"] }
+humantime-serde = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
 
-[features]
-default = []
-# Zero-copy backend built on `serde_avro_fast` (license verification pending;
-# see the crate documentation before enabling in distributed binaries).
-fast = []
+[dev-dependencies]
+criterion = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+
+[[bench]]
+name = "decode"
+harness = false
 
 [lints]
 workspace = true

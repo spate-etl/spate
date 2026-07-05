@@ -17,6 +17,8 @@ enum Outcome {
     Write(Duration),
     Fail(ErrorClass, Duration),
     Hang,
+    /// Panic the write task (simulates a writer bug / poisoned lock).
+    Panic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -105,6 +107,7 @@ impl ShardWriter for MockWriter {
                 std::future::pending::<()>().await;
                 unreachable!()
             }
+            Outcome::Panic => panic!("scripted sink write panic"),
         };
         self.concurrent.fetch_sub(1, Ordering::SeqCst);
         result
@@ -495,6 +498,131 @@ async fn drain_flushes_partials_and_abandons_hung_writes() {
         "aborted write fails its acks — never silently delivers"
     );
     assert_eq!(f.budget.usage(), 0, "budget released for both outcomes");
+}
+
+/// A panicking write task must abandon *its own* batch — not the oldest
+/// pending one. Two batches are in flight on one shard: the first (started
+/// first) hangs briefly then succeeds; the second panics immediately. The
+/// panicked batch's acks must resolve Failed and the healthy one Delivered.
+/// The old handler abandoned the minimum-`started` batch, so it failed the
+/// wrong (healthy) batch and stranded the panicked one.
+#[tokio::test(start_paused = true)]
+async fn write_task_panic_abandons_exactly_the_panicked_batch() {
+    let mut cfg = small_batches();
+    cfg.inflight.max_per_shard = 2;
+    let f = fixture(1, 1, cfg, 16);
+    // First write (seq 0) hangs 50ms then succeeds; second (seq 1) panics.
+    f.writer.script(
+        0,
+        0,
+        [Outcome::Write(Duration::from_millis(50)), Outcome::Panic],
+    );
+
+    let (ok_ack, ok_rx) = AckRef::test_pair();
+    let (panic_ack, panic_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ok_ack)).unwrap();
+    f.queues.try_send(0, chunk(1, 8, &panic_ack)).unwrap();
+    drop(ok_ack);
+    drop(panic_ack);
+    drop(f.queues);
+
+    let report = f.pool.drain(Duration::from_secs(5)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 1,
+            abandoned: 1
+        }
+    );
+    assert_eq!(
+        ok_rx.try_recv().unwrap().status,
+        AckStatus::Delivered,
+        "the healthy batch must not be failed for another task's panic"
+    );
+    assert_eq!(
+        panic_rx.try_recv().unwrap().status,
+        AckStatus::Failed,
+        "the panicked batch's acks must resolve Failed, not leak"
+    );
+}
+
+/// The drain deadline may be published *after* a worker has already parked
+/// on a hung write in its drain phase (queues close when drivers drop their
+/// chains, strictly before `SinkPool::drain` runs). The worker must still
+/// observe the late deadline and abort — the old once-per-join deadline read
+/// deadlocked here.
+#[tokio::test(start_paused = true)]
+async fn drain_deadline_published_after_worker_parks_is_observed() {
+    let f = fixture(1, 1, small_batches(), 16);
+    f.writer.script(0, 0, [Outcome::Hang]);
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    drop(ack);
+    // Close intake and let the worker reach its drain phase and park on the
+    // hung write with no deadline published yet.
+    drop(f.queues);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Only now is the deadline published — the exact ordering that wedged
+    // graceful shutdown before the fix.
+    let report = f.pool.drain(Duration::from_millis(200)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0, "budget released for the aborted write");
+}
+
+/// With every in-flight permit held by a hung write, the drain-phase
+/// force-seal of a partial batch must not block on the semaphore: it parks
+/// the sealed batch and lets the deadline loop abort everything. The old
+/// force-seal awaited `acquire_owned()` here forever and never reached the
+/// deadline. Both the hung in-flight batch and the partial are abandoned.
+#[tokio::test(start_paused = true)]
+async fn drain_force_seal_does_not_block_on_a_held_permit() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer.script(0, 0, [Outcome::Hang]);
+
+    let (a_ack, a_rx) = AckRef::test_pair();
+    let (b_ack, b_rx) = AckRef::test_pair();
+    // Chunk A hits max_bytes → seals, grabs the only permit, and hangs.
+    f.queues.try_send(0, chunk(4, 8, &a_ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Chunk B stays partial in the accumulator (below max_bytes).
+    f.queues.try_send(0, chunk(1, 8, &b_ack)).unwrap();
+    f.budget.add(8);
+    drop(a_ack);
+    drop(b_ack);
+    drop(f.queues);
+
+    let report = f.pool.drain(Duration::from_millis(200)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 2
+        },
+        "the hung batch and the force-sealed partial both abandon"
+    );
+    assert_eq!(a_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(b_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
 }
 
 #[test]

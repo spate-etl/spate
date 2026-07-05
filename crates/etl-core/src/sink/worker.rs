@@ -119,6 +119,11 @@ pub(crate) struct ShardWorker<W: ShardWriter> {
 /// Worker-loop state that outcome handling needs together.
 struct Ledger {
     pending: HashMap<u64, Pending>,
+    /// Tokio task id → batch seq. A panicked write task's `JoinError`
+    /// carries no seq, only the task id, so this map lets us abandon exactly
+    /// the batch that died instead of guessing by age (which strands the
+    /// real victim's acks and budget forever).
+    ids: HashMap<tokio::task::Id, u64>,
     report: WorkerReport,
 }
 
@@ -127,6 +132,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         let mut acc = Accumulator::new();
         let mut ledger = Ledger {
             pending: HashMap::new(),
+            ids: HashMap::new(),
             report: WorkerReport::default(),
         };
         let mut tasks: JoinSet<WriteDone> = JoinSet::new();
@@ -136,6 +142,11 @@ impl<W: ShardWriter> ShardWorker<W> {
             self.cfg.breaker,
             Arc::clone(&self.metrics),
         )));
+        // A private clone of the deadline watch. The drain loop selects on
+        // its `changed()`, so a deadline published by `SinkPool::drain`
+        // *after* this worker entered the drain phase is still observed —
+        // even while a write task is hung and never joins.
+        let mut drain_deadline = self.drain_deadline.clone();
         let mut seq: u64 = 0;
         let mut recv_buf: Vec<EncodedChunk> = Vec::with_capacity(64);
 
@@ -144,7 +155,7 @@ impl<W: ShardWriter> ShardWorker<W> {
             tokio::select! {
                 biased;
 
-                Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                Some(joined) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                     self.handle_join(joined, &mut ledger);
                 }
 
@@ -176,67 +187,114 @@ impl<W: ShardWriter> ShardWorker<W> {
             }
         }
 
-        // Drain: force-seal the partial batch, then resolve in-flight
-        // writes under the drain deadline.
+        // ---- Drain (DESIGN.md § Shutdown) ----
+        // Force-seal the partial batch, then resolve in-flight writes under
+        // the drain deadline. The force-seal must NOT block on the in-flight
+        // semaphore: with every permit held by a hung write it would park
+        // here — before the deadline loop is reached — and deadlock
+        // shutdown. Instead the sealed batch waits in `waiting` (its
+        // `Pending` already registered in the ledger) and is launched as
+        // soon as a permit frees; the deadline sweep abandons it like any
+        // other pending batch, dropping the sealed frames unspawned.
+        let mut waiting: Option<(u64, SealedBatch)> = None;
         if !acc.is_empty() {
-            self.dispatch(
-                &mut acc,
-                FlushReason::Drain,
-                &mut seq,
-                &mut ledger,
-                &mut tasks,
-                &semaphore,
-                &breakers,
-            )
-            .await;
+            let (this_seq, batch) = self.seal(&mut acc, FlushReason::Drain, &mut seq, &mut ledger);
+            match Arc::clone(&semaphore).try_acquire_owned() {
+                Ok(permit) => {
+                    self.spawn_write(
+                        batch,
+                        this_seq,
+                        permit,
+                        &mut tasks,
+                        &breakers,
+                        &mut ledger.ids,
+                    );
+                }
+                Err(_) => waiting = Some((this_seq, batch)),
+            }
         }
 
-        while !tasks.is_empty() {
-            let deadline = *self.drain_deadline.borrow();
-            let joined = match deadline {
-                None => tasks.join_next().await,
-                Some(at) => match tokio::time::timeout_at(at, tasks.join_next()).await {
-                    Ok(joined) => joined,
-                    Err(_elapsed) => {
-                        // Deadline exceeded: abort every write still in
-                        // flight and fail those batches loudly. Their data
-                        // replays after restart — at-least-once holds.
-                        tasks.shutdown().await;
-                        let stranded: Vec<u64> = ledger.pending.keys().copied().collect();
-                        for s in stranded {
-                            self.abandon(s, &mut ledger);
-                        }
-                        break;
+        // Once the deadline-watch sender drops, `changed()` errors forever;
+        // disable that branch after the first error so the select cannot
+        // busy-spin on it.
+        let mut deadline_watch_live = true;
+        loop {
+            // Launch the waiting batch the moment a permit is available.
+            if waiting.is_some()
+                && let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned()
+            {
+                let (this_seq, batch) = waiting.take().expect("just checked is_some");
+                self.spawn_write(
+                    batch,
+                    this_seq,
+                    permit,
+                    &mut tasks,
+                    &breakers,
+                    &mut ledger.ids,
+                );
+            }
+            if tasks.is_empty() && waiting.is_none() {
+                break;
+            }
+
+            let deadline = *drain_deadline.borrow();
+            tokio::select! {
+                biased;
+
+                Some(joined) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    self.handle_join(joined, &mut ledger);
+                }
+
+                changed = drain_deadline.changed(), if deadline_watch_live => {
+                    if changed.is_err() {
+                        // Sender gone: no drain will ever publish a deadline.
+                        deadline_watch_live = false;
                     }
-                },
-            };
-            match joined {
-                Some(joined) => self.handle_join(joined, &mut ledger),
-                None => break,
+                }
+
+                () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                    // Deadline exceeded: abort every write still in flight and
+                    // fail those batches loudly. Their data replays after
+                    // restart — at-least-once holds.
+                    tasks.shutdown().await;
+                    drop(waiting.take()); // unspawned sealed batch; its Pending is swept below
+                    let stranded: Vec<u64> = ledger.pending.keys().copied().collect();
+                    for s in stranded {
+                        self.abandon(s, &mut ledger);
+                    }
+                    ledger.ids.clear();
+                    break;
+                }
             }
         }
         ledger.report
     }
 
-    fn handle_join(&self, joined: Result<WriteDone, JoinError>, ledger: &mut Ledger) {
+    fn handle_join(
+        &self,
+        joined: Result<(tokio::task::Id, WriteDone), JoinError>,
+        ledger: &mut Ledger,
+    ) {
         match joined {
-            Ok(WriteDone { seq, written: true }) => self.settle(seq, ledger),
-            Ok(WriteDone {
-                seq,
-                written: false,
-            }) => self.abandon(seq, ledger),
+            Ok((id, WriteDone { seq, written })) => {
+                ledger.ids.remove(&id);
+                if written {
+                    self.settle(seq, ledger);
+                } else {
+                    self.abandon(seq, ledger);
+                }
+            }
             Err(join_err) => {
                 // A panicked write task (writer bug). Its seq is lost with
-                // it; conservatively fail the oldest pending batch —
-                // over-failing is always safe under at-least-once.
+                // it, but its task id is not: abandon exactly the batch that
+                // died so the healthy in-flight batch keeps its acks.
+                let id = join_err.id();
                 tracing::error!(error = %join_err, "sink write task panicked");
-                if let Some(seq) = ledger
-                    .pending
-                    .iter()
-                    .min_by_key(|(_, p)| p.started)
-                    .map(|(s, _)| *s)
-                {
-                    self.abandon(seq, ledger);
+                match ledger.ids.remove(&id) {
+                    Some(seq) => self.abandon(seq, ledger),
+                    None => tracing::error!(
+                        "panicked sink task had no ledger entry; batch already resolved"
+                    ),
                 }
             }
         }
@@ -274,20 +332,17 @@ impl<W: ShardWriter> ShardWorker<W> {
         ledger.report.abandoned += 1;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn dispatch(
+    /// Assign a seq to the accumulated batch, seal it, and register its
+    /// `Pending` in the ledger. Shared by the normal dispatch path and the
+    /// drain force-seal; the caller then obtains a permit (blocking on the
+    /// normal path, non-blocking during drain) and calls [`spawn_write`].
+    fn seal(
         &self,
         acc: &mut Accumulator,
         reason: FlushReason,
         seq: &mut u64,
         ledger: &mut Ledger,
-        tasks: &mut JoinSet<WriteDone>,
-        semaphore: &Arc<Semaphore>,
-        breakers: &Arc<Mutex<BreakerSet>>,
-    ) {
-        if acc.is_empty() {
-            return;
-        }
+    ) -> (u64, SealedBatch) {
         let this_seq = *seq;
         *seq += 1;
         let full = std::mem::replace(acc, Accumulator::new());
@@ -310,21 +365,29 @@ impl<W: ShardWriter> ShardWorker<W> {
             },
         );
         self.metrics.set_inflight(ledger.pending.len());
+        (this_seq, batch)
+    }
 
-        // Waiting for a permit intentionally stops intake: the shard queue
-        // fills and backpressure propagates. Permits release on task end,
-        // including aborts.
-        let permit = Arc::clone(semaphore)
-            .acquire_owned()
-            .await
-            .expect("sink semaphore closed");
-
+    /// Spawn the write task for a sealed batch and record its task id, so a
+    /// panic (whose `JoinError` carries only the id) abandons exactly this
+    /// batch. The `permit` is held for the task's lifetime and releases on
+    /// completion or abort.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_write(
+        &self,
+        batch: SealedBatch,
+        this_seq: u64,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        tasks: &mut JoinSet<WriteDone>,
+        breakers: &Arc<Mutex<BreakerSet>>,
+        ids: &mut HashMap<tokio::task::Id, u64>,
+    ) {
         let writer = Arc::clone(&self.writer);
         let endpoints = Arc::clone(&self.endpoints);
         let breakers = Arc::clone(breakers);
         let metrics = Arc::clone(&self.metrics);
         let retry = self.cfg.retry;
-        tasks.spawn(async move {
+        let handle = tasks.spawn(async move {
             let _permit = permit;
             let mut backoff = Backoff::new(retry, this_seq);
             let mut attempts: u32 = 0;
@@ -377,6 +440,34 @@ impl<W: ShardWriter> ShardWorker<W> {
                 }
             }
         });
+        ids.insert(handle.id(), this_seq);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch(
+        &self,
+        acc: &mut Accumulator,
+        reason: FlushReason,
+        seq: &mut u64,
+        ledger: &mut Ledger,
+        tasks: &mut JoinSet<WriteDone>,
+        semaphore: &Arc<Semaphore>,
+        breakers: &Arc<Mutex<BreakerSet>>,
+    ) {
+        if acc.is_empty() {
+            return;
+        }
+        let (this_seq, batch) = self.seal(acc, reason, seq, ledger);
+
+        // Waiting for a permit intentionally stops intake: the shard queue
+        // fills and backpressure propagates. Permits release on task end,
+        // including aborts. (This is backpressure by design — the drain
+        // phase, which cannot afford to block, uses `try_acquire_owned`.)
+        let permit = Arc::clone(semaphore)
+            .acquire_owned()
+            .await
+            .expect("sink semaphore closed");
+        self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
     }
 }
 

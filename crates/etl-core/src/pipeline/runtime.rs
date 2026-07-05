@@ -324,6 +324,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             driver_handles.push(handle);
         }
 
+        // The chain factory has served its purpose. Factories naturally
+        // capture ShardQueues clones (their terminals need them), and the
+        // sink only drains once every queue clone is gone — holding the
+        // factory through the drain would deadlock shutdown.
+        drop(self.chains);
+
         let controller_ctx = ControllerContext {
             source: self.source,
             checkpointer,

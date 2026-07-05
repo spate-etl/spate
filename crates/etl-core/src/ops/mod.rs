@@ -8,7 +8,18 @@
 //! inside a single `push_batch` call, so borrowed payloads never cross or
 //! outlive the boundary. See `docs/DESIGN.md` (§ Frozen v1 contracts).
 
+mod builder;
 mod chain;
+mod handoff;
+#[cfg(test)]
+mod tests;
+
+pub use builder::{
+    Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapPart, Root,
+    SinkedChain, TryMapPart, chain, chain_owned,
+};
+pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, TypedChain};
+pub use handoff::{ChunkConfig, SinkHandoff};
 
 use crate::deser::RecFamily;
 use crate::error::FatalError;

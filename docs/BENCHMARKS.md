@@ -125,6 +125,16 @@ saturate the fixed egress side (2 shard workers) near 59M records/s, so
 with real per-record work the pipeline threads dominate and the sink side
 stops being the limiter.
 
+Accounting note (2026-07 correction): an earlier revision of this table
+reported window-scoped `records` against lifetime `sink_rows_total`
+(warmup + window + drain), which read as rows exceeding records by ~10%.
+The harness now reports `produced_total` alongside and asserts
+conservation; a quiet-machine re-run shows `sink_rows_total ==
+produced_total` exactly (e.g. 475,555,328 == 475,555,328 @ 1 thread) and
+healthy 1→2 thread scaling (36.6M → 54.4M records/s). The metric itself is
+proven exact by `sink_records_metric_matches_rows_written_exactly` in
+`etl-core`.
+
 ⚠ Finding for tuning documentation: with the *default* sink batch config
 (500k rows) and an unthrottled source, the 256 MiB in-flight budget fills
 in tens of milliseconds while a batch needs hundreds of thousands of rows

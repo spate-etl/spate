@@ -170,7 +170,11 @@ pub struct SealedBatch {
 }
 ```
 
-Deltas applied over the spike code at freeze time: `push_batch` returns a
+Deltas applied over the spike code at freeze time: `PushOutcome::Blocked`
+carries a `BlockReason` — `Capacity` (sink pressure: engages the
+backpressure controller) vs `NotReady` (an upstream dependency such as a
+schema fetch: retried without pausing the source, counted on
+`etl_deser_not_ready_total`); `push_batch` returns a
 `PushOutcome` carrying a resume cursor (partial-batch backpressure: never
 re-run operators for already-pushed records) instead of the spike's
 `Result<usize, _>`; the boundary trait gains flush/drain hooks;
@@ -203,6 +207,14 @@ batch stalls its partition's watermark (alert on
 
 Two contracts guard the drop-resolves-Delivered convention:
 
+- **Collections fail by default.** Individual records keep drop=Delivered,
+  but every *collection* of acknowledgements on the sink path (encoded
+  chunks, worker ledgers, batch accumulators) is an `AckSet`, which fails
+  its handles on drop and delivers only explicitly after a durable write.
+  Teardown anywhere — a dropped queue, an aborted worker task, a
+  runtime shutdown without drain — therefore stalls watermarks instead of
+  committing unwritten data.
+
 - **Teardown fails unsent output.** Any component holding acknowledgement
   handles for data not yet durably written must `fail()` them in its `Drop`
   (the chain's terminal stage does this for parked chunks and partial
@@ -213,6 +225,22 @@ Two contracts guard the drop-resolves-Delivered convention:
   revocation. Incremental/cooperative assignment requires an additive
   checkpointer extension (future work); the controller defensively drains
   and commits live lanes if a source violates this.
+
+### Considered alternative: fail-by-default record acknowledgements
+
+Inverting the record-level default (drop = Failed, explicit `deliver()`)
+was evaluated as structural hardening: forgetting to deliver would cost
+replay, while today forgetting to *fail* at a teardown seam costs silent
+loss. Verdict: **keep drop=Delivered for records, fail-by-default for
+collections** (the `AckSet` contract above). Rationale: every legitimate
+record drop — `filter`, Skip policies, post-write release — is
+framework-mediated and zero-ceremony today, and matches the
+Vector-finalizer semantics the design borrows; inverting would turn each
+of those sites into explicit bookkeeping whose failure mode (forgotten
+`deliver`) is a watermark stall that halts pipelines on correct data.
+Teardown loss, by contrast, only ever materializes where acknowledgements
+travel in bulk — precisely the seams `AckSet` now guards, with regression
+tests on each (handoff drop, queue drop, worker/runtime teardown).
 
 ## Operator chain
 
@@ -239,6 +267,26 @@ and `flat_map` are unaffected.
 ## Backpressure
 
 Two layers, one invariant.
+
+**Sizing rule** (motivated by a measured 24× throughput collapse under an
+unthrottled source with default settings — see `docs/BENCHMARKS.md`): the
+in-flight budget must comfortably hold everything the sink legitimately
+keeps in flight, or steady-state operation lives above the high watermark
+and the pause controller duty-cycles at `min_pause`:
+
+```text
+max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
+    shards × inflight.max_per_shard × batch.max_bytes   // pending writes
+  + shards × queue_capacity × chunk.target_bytes )      // queued chunks
+```
+
+Worked example: the defaults (2 shards × 2 in-flight × 128 MiB batches ≈
+512 MiB pending alone) exceed the default 256 MiB budget — fine for
+throttled sources that never fill batches, wrong for saturated ones. For a
+saturated pipeline either raise `backpressure.max_inflight_bytes` to ≥ 2 GiB
+or cap `batch.max_bytes` near `budget × low_ratio / (2 × shards ×
+max_inflight)` (32 MiB with the defaults). The flagship example's YAML
+carries this rule next to the knobs.
 
 1. **Passive**: bounded per-shard queues plus a global in-flight byte budget.
 2. **Active**: when a queue rejects or the budget crosses the high watermark,
@@ -332,7 +380,14 @@ for properties that would break the framework's guarantees
 
 ## Metrics
 
-See `docs/METRICS.md` for the full taxonomy. Implementation rules: the
+See `docs/METRICS.md` for the full taxonomy. **Assembly order matters**:
+`metrics::install` must run before any metric handle is constructed —
+handles bind to the recorder present at construction, and one built
+earlier records into the void. `install` is idempotent (a second call
+returns the first exporter; `exporter: none` never claims the process
+slot), so assemblies call
+`metrics::install(&pipeline::metrics_settings(&config))` right after
+loading config and the runtime's own install reuses it. Implementation rules: the
 `metrics` facade is the registry abstraction (implementors use it directly
 for custom metrics); the Prometheus exporter mounts on the admin server; all
 framework handles are pre-registered at build time; hot-path counting happens

@@ -42,6 +42,7 @@ alongside the framework's metrics.
 |---|---|---|---|
 | `etl_deser_records_total` | counter | `outcome` (`ok`\|`error`) | Deserialization attempts by outcome. One input payload may yield 0..N records; this counts outputs, plus one `error` per failed payload. |
 | `etl_deser_records_dropped_total` | counter | `reason` (`skip_policy`) | Payloads dropped by the Skip error policy. |
+| `etl_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
 | `etl_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch. |
 
 ## Operators (`etl_operator_*`)
@@ -104,7 +105,7 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|
-| `etl_e2e_latency_seconds` | histogram | | Source-to-durable-write latency, observed per acknowledged batch. Time basis is `metrics.e2e_basis`: `ingest` (default, skew-free) or `event` (uses the record's event time; clock-skew sensitive). |
+| `etl_e2e_latency_seconds` | histogram | | Source-to-durable-write latency, observed by the sink worker at each durable flush from the batch's **oldest** record. Time basis is `metrics.e2e_basis`: `ingest` (default, skew-free: time since the record entered the terminal stage) or `event` (against the record's event time; clock-skew sensitive, falls back to ingest when no event time exists). |
 
 ## Pipeline / process
 

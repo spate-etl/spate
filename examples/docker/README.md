@@ -67,6 +67,21 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
   the framework) plus librdkafka's prefetch caps; size `resources.limits`
   above their sum with headroom for batches held during retries.
 
+## Backpressure and batch sizing
+
+The in-flight byte budget (`backpressure.max_inflight_bytes`) must
+comfortably exceed what the sink legitimately keeps in flight, or a
+saturated pipeline duty-cycles against the pause controller (a measured
+24x collapse — `docs/BENCHMARKS.md`):
+
+```text
+max_inflight_bytes x low_ratio >= 2 x ( shards x inflight.max_per_shard x batch.max_bytes
+                                      + shards x queue_capacity x chunk.target_bytes )
+```
+
+Raise the budget or cap `batch.max_bytes` accordingly; the full rule and a
+worked example live in `docs/DESIGN.md` § Backpressure.
+
 ## Scaling and rebalances
 
 One pod = one consumer-group member. Scaling a Deployment up or down

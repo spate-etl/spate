@@ -11,6 +11,15 @@ categories.workspace = true
 
 [dependencies]
 etl-core = { workspace = true }
+humantime-serde = { workspace = true }
+rdkafka = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+testcontainers = { workspace = true, features = ["blocking"] }
+testcontainers-modules = { workspace = true, features = ["kafka"] }
 
 [lints]
 workspace = true

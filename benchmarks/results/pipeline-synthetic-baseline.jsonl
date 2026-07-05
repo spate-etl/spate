@@ -1,0 +1,1 @@
+{"bench":"pipeline_synthetic","commits":96,"e2e_p50_s":null,"e2e_p99_s":null,"exit":"Completed","payload_bytes":256,"records":461911552,"records_per_s":15394558.392169742,"records_per_s_per_thread":15394558.392169742,"shards":2,"sink_batches_total":962,"sink_rows_total":480231424,"threads":1,"window_s":30.004858875,"work_us":0}

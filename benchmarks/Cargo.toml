@@ -8,6 +8,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+apache-avro = { workspace = true }
+bytes = { workspace = true }
+crossbeam-channel = { workspace = true }
+etl-clickhouse = { workspace = true }
+etl-core = { workspace = true }
+etl-kafka = { workspace = true }
+rdkafka = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

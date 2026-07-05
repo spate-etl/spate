@@ -213,6 +213,19 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "benchmarks"
 version = "0.1.0"
+dependencies = [
+ "apache-avro",
+ "bytes",
+ "crossbeam-channel",
+ "etl-clickhouse",
+ "etl-core",
+ "etl-kafka",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "tokio",
+ "yaml_serde",
+]
 
 [[package]]
 name = "bigdecimal"

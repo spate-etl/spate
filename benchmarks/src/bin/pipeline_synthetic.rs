@@ -1,0 +1,186 @@
+//! Framework-overhead ceiling: generator source → real chain → real sink
+//! pool → null writer, driven by the real `PipelineRuntime`. No broker, no
+//! network — what's left is the framework itself.
+//!
+//! Usage:
+//!   pipeline_synthetic          # matrix over THREADS_LIST, one child per config
+//!   RUN_ONE=1 pipeline_synthetic  # single measurement, JSON line on stdout
+//!
+//! Env: THREADS_LIST (1,2,4,8) | THREADS (1) DURATION_S (30) PAYLOAD (256)
+//! WORK_US (0) SHARDS (2) QUEUE_CAP (8) CHECKPOINT_INTERVAL_MS (200)
+//! METRICS_PORT (19095) RESULTS (append JSONL path)
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
+use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, SyntheticSource};
+use benchmarks::{busy_work, env_str, env_u64, http_get, prom, report};
+use etl_core::backpressure::InflightBudget;
+use etl_core::config::PipelineConfig;
+use etl_core::metrics::{ComponentLabels, SinkShardMetrics};
+use etl_core::ops::{ChunkConfig, chain};
+use etl_core::pipeline::{DrainReport, PipelineRuntime, RuntimeOptions, SinkRuntime};
+use etl_core::sink::{KeyHashRouter, SinkPool, SinkPoolConfig, shard_queues};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// Per-record simulated work, read by the `spin` map stage (fn items
+/// cannot capture, so the knob is a global).
+static WORK_US: AtomicU64 = AtomicU64::new(0);
+
+fn spin(r: RawView<'_>) -> RawView<'_> {
+    busy_work(WORK_US.load(Ordering::Relaxed));
+    r
+}
+
+fn run_one() {
+    let threads = env_u64("THREADS", 1) as usize;
+    let duration = Duration::from_secs(env_u64("DURATION_S", 30));
+    let payload = env_u64("PAYLOAD", 256) as usize;
+    let work_us = env_u64("WORK_US", 0);
+    let shards = env_u64("SHARDS", 2) as usize;
+    let queue_cap = env_u64("QUEUE_CAP", 8) as usize;
+    let checkpoint_ms = env_u64("CHECKPOINT_INTERVAL_MS", 200);
+    let port = env_u64("METRICS_PORT", 19095) as u16;
+    WORK_US.store(work_us, Ordering::Relaxed);
+
+    let config = PipelineConfig::from_str(&format!(
+        r"
+pipeline: {{ name: synthetic, threads: {threads} }}
+checkpoint: {{ interval: {checkpoint_ms}ms }}
+metrics: {{ exporter: prometheus, listen: 127.0.0.1:{port} }}
+source: {{ synthetic: {{}} }}
+sink: {{ nullsink: {{}} }}
+"
+    ))
+    .expect("config");
+
+    let produced = Arc::new(AtomicU64::new(0));
+    let source = SyntheticSource::new(threads, payload, Arc::clone(&produced));
+    let commits = source.commits();
+
+    let writer = Arc::new(NullWriter::default());
+    let endpoints: Vec<Vec<()>> = (0..shards).map(|_| vec![()]).collect();
+    let (queues, receivers) = shard_queues(shards, queue_cap);
+    let budget = Arc::new(InflightBudget::new());
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("io runtime");
+    let labels = ComponentLabels::new("synthetic", "sink", "null");
+    let metrics = (0..shards)
+        .map(|s| {
+            SinkShardMetrics::new(
+                &labels,
+                u32::try_from(s).expect("shard"),
+                &[format!("null-{s}")],
+            )
+        })
+        .collect();
+    let pool = SinkPool::spawn(
+        Arc::clone(&writer),
+        endpoints,
+        receivers,
+        SinkPoolConfig::default(),
+        Arc::clone(&budget),
+        metrics,
+        "synthetic",
+        io.handle(),
+    );
+    let sink = SinkRuntime {
+        queues: queues.clone(),
+        drain: Box::new(move |deadline| {
+            Box::pin(async move {
+                let r = pool.drain(deadline).await;
+                DrainReport {
+                    flushed_batches: r.flushed,
+                    abandoned_batches: r.abandoned,
+                }
+            })
+        }),
+        probe: None,
+    };
+
+    let chain_queues = queues;
+    let chain_budget = Arc::clone(&budget);
+    let chains = move |_thread: usize| {
+        let b = chain::<RawFam, _>(RawDeser).filter(|_r: &RawView<'_>| true);
+        if WORK_US.load(Ordering::Relaxed) > 0 {
+            b.map_rec::<RawFam, _>(spin)
+                .sink(
+                    RawEncoder,
+                    KeyHashRouter,
+                    ChunkConfig::default(),
+                    chain_queues.clone(),
+                    Arc::clone(&chain_budget),
+                )
+                .build()
+        } else {
+            b.sink(
+                RawEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                chain_queues.clone(),
+                Arc::clone(&chain_budget),
+            )
+            .build()
+        }
+    };
+
+    let runtime =
+        PipelineRuntime::new(config, source, chains, sink, budget).with_options(RuntimeOptions {
+            handle_signals: false,
+            ..RuntimeOptions::default()
+        });
+    let shutdown = runtime.shutdown_handle();
+    let pipeline = std::thread::spawn(move || runtime.run());
+
+    // Warm up, then measure a steady-state window.
+    std::thread::sleep(Duration::from_secs(3));
+    let c0 = produced.load(Ordering::Relaxed);
+    let t0 = Instant::now();
+    std::thread::sleep(duration);
+    let c1 = produced.load(Ordering::Relaxed);
+    let window = t0.elapsed().as_secs_f64();
+
+    let metrics_text = http_get("127.0.0.1", port, "/metrics").unwrap_or_default();
+    shutdown.trigger();
+    let exit = pipeline.join().expect("pipeline thread").expect("run");
+
+    let records = c1 - c0;
+    let rate = records as f64 / window;
+    report(&serde_json::json!({
+        "bench": "pipeline_synthetic",
+        "threads": threads,
+        "shards": shards,
+        "payload_bytes": payload,
+        "work_us": work_us,
+        "window_s": window,
+        "records": records,
+        "records_per_s": rate,
+        "records_per_s_per_thread": rate / threads as f64,
+        "e2e_p50_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.5),
+        "e2e_p99_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.99),
+        "sink_rows_total": writer.rows(),
+        "sink_batches_total": writer.batches(),
+        "commits": commits.load(Ordering::Relaxed),
+        "exit": format!("{:?}", exit.state),
+    }));
+}
+
+fn main() {
+    if std::env::var("RUN_ONE").is_ok() {
+        run_one();
+        return;
+    }
+    let list = env_str("THREADS_LIST", "1,2,4,8");
+    for threads in list.split(',').filter_map(|t| t.trim().parse::<u64>().ok()) {
+        eprintln!("── pipeline_synthetic THREADS={threads} ──");
+        let status = std::process::Command::new(std::env::current_exe().expect("exe"))
+            .env("RUN_ONE", "1")
+            .env("THREADS", threads.to_string())
+            .status()
+            .expect("child run");
+        assert!(status.success(), "child run failed for THREADS={threads}");
+    }
+}

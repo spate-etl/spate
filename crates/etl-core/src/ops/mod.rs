@@ -26,6 +26,24 @@ use crate::error::FatalError;
 use crate::record::{Flow, Record};
 use crate::source::PayloadBatch;
 
+/// Why a batch could not complete yet. Both cases are retried with the
+/// resume cursor, but only [`BlockReason::Capacity`] engages the driver's
+/// backpressure controller — a not-ready wait is an upstream dependency
+/// (e.g. a schema fetch), not sink pressure, and pausing the source for it
+/// would misreport the pipeline's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlockReason {
+    /// The terminal stage could not accept more output (a shard queue is
+    /// full): genuine backpressure.
+    Capacity,
+    /// A deserializer reported
+    /// [`DeserError::NotReady`](crate::error::DeserError::NotReady): the
+    /// payload replays once its dependency arrives. Counted on
+    /// `etl_deser_not_ready_total`.
+    NotReady,
+}
+
 /// Result of pushing one batch (or a resumed suffix of one) through a
 /// chain.
 #[derive(Debug)]
@@ -34,15 +52,16 @@ pub enum PushOutcome {
     /// Every payload was fully processed (records may have been filtered
     /// or skipped by policy along the way).
     Done,
-    /// The terminal stage could not accept more output (a shard queue is
-    /// full). Payloads with index `< resume_at` are fully processed; the
-    /// driver applies backpressure and later re-pushes the same batch with
+    /// The batch could not complete yet. Payloads with index `< resume_at`
+    /// are fully processed; the driver later re-pushes the same batch with
     /// `from = resume_at`. Any partially-emitted payload's already-emitted
     /// records are parked inside the terminal stage and drain first on
     /// resume — operators never re-run for them.
     Blocked {
         /// Index of the first payload not yet fully processed.
         resume_at: usize,
+        /// What the batch is waiting for.
+        reason: BlockReason,
     },
     /// A `Fail`-policy stage tripped or an invariant broke. The batch's
     /// [`AckRef`](crate::checkpoint::AckRef) must be failed by the driver;

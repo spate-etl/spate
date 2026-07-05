@@ -13,7 +13,7 @@
 //! payloads. Operators therefore never re-run for an already-pushed record,
 //! and no lifetime-bearing state is ever stored across the boundary.
 
-use super::{Collector, CollectorFor, PushOutcome, RunnableChain};
+use super::{BlockReason, Collector, CollectorFor, PushOutcome, RunnableChain};
 use crate::checkpoint::AckRef;
 use crate::deser::{Deserializer, EmitRecord, RecFamily};
 use crate::error::{DeserError, ErrorClass, ErrorPolicy, FatalError};
@@ -651,12 +651,14 @@ where
         if self.ops.relieve() == Flow::Blocked {
             return PushOutcome::Blocked {
                 resume_at: self.cursor,
+                reason: BlockReason::Capacity,
             };
         }
 
         let started = Instant::now();
         let mut ok: u64 = 0;
         let mut errors: u64 = 0;
+        let mut not_ready: u64 = 0;
         let mut outcome: Option<PushOutcome> = None;
 
         // Replay a stashed not-ready payload before pulling new ones. Its
@@ -669,12 +671,15 @@ where
                     self.cursor += 1;
                     outcome = Some(PushOutcome::Blocked {
                         resume_at: self.cursor,
+                        reason: BlockReason::Capacity,
                     });
                 }
                 Step::NotReady => {
+                    not_ready += 1;
                     self.pending = Some(p);
                     outcome = Some(PushOutcome::Blocked {
                         resume_at: self.cursor,
+                        reason: BlockReason::NotReady,
                     });
                 }
                 Step::Fatal(f) => outcome = Some(PushOutcome::Fatal(f)),
@@ -691,12 +696,15 @@ where
                     self.cursor += 1;
                     outcome = Some(PushOutcome::Blocked {
                         resume_at: self.cursor,
+                        reason: BlockReason::Capacity,
                     });
                 }
                 Step::NotReady => {
+                    not_ready += 1;
                     self.pending = Some(PendingPayload::from_raw(&raw));
                     outcome = Some(PushOutcome::Blocked {
                         resume_at: self.cursor,
+                        reason: BlockReason::NotReady,
                     });
                 }
                 Step::Fatal(f) => outcome = Some(PushOutcome::Fatal(f)),
@@ -708,6 +716,9 @@ where
             m.batch(ok, errors, elapsed);
             if errors > 0 && matches!(self.deser_policy, ErrorPolicy::Skip) {
                 m.dropped(errors);
+            }
+            if not_ready > 0 {
+                m.not_ready(not_ready);
             }
         }
         self.ops.on_batch_end(elapsed);
@@ -735,6 +746,7 @@ where
             Flow::Continue => PushOutcome::Done,
             Flow::Blocked => PushOutcome::Blocked {
                 resume_at: self.cursor,
+                reason: BlockReason::Capacity,
             },
         }
     }

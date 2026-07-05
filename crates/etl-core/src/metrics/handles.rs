@@ -5,6 +5,7 @@
 //! lookups. Methods take **per-batch aggregates**, enforcing the hot-path
 //! counting discipline by API shape (see `docs/METRICS.md`).
 
+use super::E2eBasis;
 use super::names;
 use crate::error::ErrorClass;
 use crate::record::PartitionId;
@@ -266,6 +267,7 @@ pub struct DeserMetrics {
     ok: Counter,
     errors: Counter,
     dropped_skip: Counter,
+    not_ready: Counter,
     batch_duration: Histogram,
 }
 
@@ -280,6 +282,7 @@ impl DeserMetrics {
                 names::L_REASON,
                 "skip_policy",
             ),
+            not_ready: labels.counter(names::DESER_NOT_READY_TOTAL),
             batch_duration: labels.histogram(names::DESER_BATCH_DURATION_SECONDS),
         }
     }
@@ -299,6 +302,13 @@ impl DeserMetrics {
     #[inline]
     pub fn dropped(&self, n: u64) {
         self.dropped_skip.increment(n);
+    }
+
+    /// Count not-ready replays (payloads waiting on an upstream
+    /// dependency such as a schema fetch).
+    #[inline]
+    pub fn not_ready(&self, n: u64) {
+        self.not_ready.increment(n);
     }
 }
 
@@ -505,13 +515,26 @@ pub struct SinkShardMetrics {
     err_fatal: Counter,
     inflight: Gauge,
     abandoned: Counter,
+    e2e: Histogram,
+    e2e_basis: E2eBasis,
     replicas: Vec<ReplicaMetrics>,
 }
 
 impl SinkShardMetrics {
     /// Resolve all handles for one shard. `replicas` are display names used
-    /// as the `replica` label (bounded by cluster topology).
-    pub fn new(labels: &ComponentLabels, shard: u32, replicas: &[String]) -> Self {
+    /// as the `replica` label (bounded by cluster topology). `e2e_basis`
+    /// selects the time base for `etl_e2e_latency_seconds` (see
+    /// `docs/METRICS.md`).
+    ///
+    /// Call **after** [`install`](crate::metrics::install): handles bind to
+    /// the recorder present at construction, and a handle built before the
+    /// exporter exists silently records into the void.
+    pub fn new(
+        labels: &ComponentLabels,
+        shard: u32,
+        replicas: &[String],
+        e2e_basis: E2eBasis,
+    ) -> Self {
         let shard: SharedString = shard.to_string().into();
         let replicas = replicas
             .iter()
@@ -598,8 +621,30 @@ impl SinkShardMetrics {
             ),
             inflight: labels.gauge1(names::SINK_INFLIGHT_BATCHES, names::L_SHARD, shard.clone()),
             abandoned: labels.counter1(names::SINK_ABANDONED_BATCHES_TOTAL, names::L_SHARD, shard),
+            e2e: labels.histogram(names::E2E_LATENCY_SECONDS),
+            e2e_basis,
             replicas,
         }
+    }
+
+    /// Observe end-to-end latency for one durably written batch, from its
+    /// oldest record. `ingest_age` is time since that record entered the
+    /// terminal stage; `oldest_event_ms` is its source event time. The
+    /// configured basis picks which one lands in the histogram (event
+    /// basis falls back to ingest when no event time was available).
+    #[inline]
+    pub fn e2e_observed(&self, ingest_age: Duration, oldest_event_ms: i64) {
+        let latency = match self.e2e_basis {
+            E2eBasis::Event if oldest_event_ms != i64::MAX => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+                    .unwrap_or(0);
+                Duration::from_millis(u64::try_from(now_ms - oldest_event_ms).unwrap_or(0))
+            }
+            _ => ingest_age,
+        };
+        self.e2e.record(latency.as_secs_f64());
     }
 
     /// Record one durably acknowledged flush.
@@ -668,7 +713,6 @@ pub struct CheckpointMetrics {
     commits_err: Counter,
     commit_duration: Histogram,
     watermark_age: Gauge,
-    e2e_latency: Histogram,
     partition_pending: Option<PartitionGauges>,
 }
 
@@ -685,7 +729,6 @@ impl CheckpointMetrics {
             ),
             commit_duration: labels.histogram(names::CHECKPOINT_COMMIT_DURATION_SECONDS),
             watermark_age: labels.gauge(names::CHECKPOINT_WATERMARK_AGE_SECONDS),
-            e2e_latency: labels.histogram(names::E2E_LATENCY_SECONDS),
             partition_pending: per_partition_detail.then(|| PartitionGauges {
                 name: names::CHECKPOINT_PENDING_BATCHES,
                 labels: labels.clone(),
@@ -727,12 +770,6 @@ impl CheckpointMetrics {
     /// Set the age of the oldest unacknowledged batch.
     pub fn set_watermark_age(&self, age: Duration) {
         self.watermark_age.set(age.as_secs_f64());
-    }
-
-    /// Observe source-to-durable-write latency for an acknowledged batch.
-    #[inline]
-    pub fn e2e_latency(&self, latency: Duration) {
-        self.e2e_latency.record(latency.as_secs_f64());
     }
 }
 

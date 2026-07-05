@@ -76,9 +76,11 @@ mod tests {
 
     fn chunk() -> EncodedChunk {
         EncodedChunk {
+            oldest_ingest: std::time::Instant::now(),
+            oldest_event_ms: 0,
             frame: Bytes::from_static(b"x"),
             rows: 1,
-            acks: Vec::new(),
+            acks: crate::checkpoint::AckSet::new(),
         }
     }
 
@@ -92,6 +94,23 @@ mod tests {
         assert!(rx[0].try_recv().is_ok());
         assert!(q.try_send(0, chunk()).is_ok(), "capacity freed");
         let _ = rx;
+    }
+
+    #[test]
+    fn dropping_a_receiver_with_queued_chunks_fails_their_acks() {
+        use crate::checkpoint::{AckRef, AckStatus};
+        let (q, rx) = shard_queues(1, 4);
+        let (ack, ack_rx) = AckRef::test_pair();
+        let mut c = chunk();
+        c.acks = vec![ack.clone()].into();
+        drop(ack);
+        q.try_send(0, c).expect("queued");
+        drop(rx); // sink torn down with the chunk still queued
+        assert_eq!(
+            ack_rx.try_recv().expect("resolved").status,
+            AckStatus::Failed,
+            "chunks lost in a dropped queue must fail their batches"
+        );
     }
 
     #[test]

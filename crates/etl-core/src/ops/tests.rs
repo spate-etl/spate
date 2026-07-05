@@ -204,6 +204,10 @@ fn drain_rows(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<Vec<u8>
     let mut rows = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
         rows.extend(decode_rows(&chunk.frame));
+        // These tests play the sink: consuming a chunk here stands in for
+        // a durable write, so resolve its acknowledgements as delivered
+        // (an AckSet fails them on plain drop — teardown safety).
+        chunk.acks.deliver();
     }
     rows
 }
@@ -468,7 +472,8 @@ fn blocked_resumes_without_rerunning_operators() {
         assert!(pushes < 32, "must converge");
         match c.push_batch(&mut batch, from) {
             PushOutcome::Done => break,
-            PushOutcome::Blocked { resume_at } => {
+            PushOutcome::Blocked { resume_at, reason } => {
+                assert_eq!(reason, BlockReason::Capacity, "full queues are capacity");
                 assert!(resume_at >= from);
                 from = resume_at;
                 rows.extend(drain_rows(&mut rxs[0]));
@@ -814,13 +819,18 @@ fn not_ready_blocks_then_replays_without_loss_or_duplication() {
 
     // First push: payload 0 flows, payload 1 reports NotReady → Blocked at
     // index 1, and the payload is stashed for replay.
-    let PushOutcome::Blocked { resume_at } = c.push_batch(&mut batch, 0) else {
+    let PushOutcome::Blocked { resume_at, reason } = c.push_batch(&mut batch, 0) else {
         panic!("expected Blocked while the schema is not ready");
     };
     assert_eq!(resume_at, 1);
+    assert_eq!(
+        reason,
+        BlockReason::NotReady,
+        "a dependency wait must not read as sink backpressure"
+    );
 
     // Still not ready: Blocked again at the same index.
-    let PushOutcome::Blocked { resume_at } = c.push_batch(&mut batch, 1) else {
+    let PushOutcome::Blocked { resume_at, .. } = c.push_batch(&mut batch, 1) else {
         panic!("expected Blocked on second attempt");
     };
     assert_eq!(resume_at, 1);

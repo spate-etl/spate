@@ -206,33 +206,53 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
         )
 }
 
+/// The handle from this process's successful [`install`]. Installation is
+/// once-per-process (the recorder is global); later `install` calls reuse
+/// this handle instead of failing, so assembly code can install the
+/// exporter *before* pre-registering metric handles and the runtime's own
+/// install becomes a no-op.
+static INSTALLED: std::sync::OnceLock<MetricsHandle> = std::sync::OnceLock::new();
+
 /// Install the configured exporter as this process's global recorder and
 /// return the handle the admin server renders from.
+///
+/// **Call this before constructing any metric handle structs**
+/// ([`SinkShardMetrics`](crate::metrics::SinkShardMetrics) and friends):
+/// handles bind to the recorder present at construction, and handles built
+/// earlier record into the void. Idempotent — a second call returns the
+/// first call's handle (with a warning when the requested settings differ).
+/// [`MetricsError::AlreadyInstalled`] is only returned when a *foreign*
+/// global recorder (not installed through this function) already exists.
 ///
 /// For [`Exporter::Prometheus`] this also registers the `process_*`
 /// collector (CPU, memory, fds). No HTTP listener is spawned here — the
 /// admin server owns the socket.
 pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError> {
-    match settings.exporter {
-        Exporter::None => Ok(MetricsHandle {
+    // Exporter::None installs no global recorder at all, so it neither
+    // claims nor consults the once-per-process slot — a later Prometheus
+    // install still works (and tests with metrics disabled stay isolated).
+    if settings.exporter == Exporter::None {
+        return Ok(MetricsHandle {
             inner: Inner::Noop,
             process: None,
-        }),
-        Exporter::Prometheus => {
-            let builder = configured_builder().map_err(|e| MetricsError::Build(e.to_string()))?;
-            let handle = builder.install_recorder().map_err(|e| match e {
-                BuildError::FailedToSetGlobalRecorder(_) => MetricsError::AlreadyInstalled,
-                other => MetricsError::Build(other.to_string()),
-            })?;
-            let process = metrics_process::Collector::new("process_");
-            process.describe();
-            process.collect();
-            Ok(MetricsHandle {
-                inner: Inner::Prometheus(handle),
-                process: Some(Arc::new(process)),
-            })
-        }
+        });
     }
+    if let Some(existing) = INSTALLED.get() {
+        return Ok(existing.clone());
+    }
+    let builder = configured_builder().map_err(|e| MetricsError::Build(e.to_string()))?;
+    let handle = builder.install_recorder().map_err(|e| match e {
+        BuildError::FailedToSetGlobalRecorder(_) => MetricsError::AlreadyInstalled,
+        other => MetricsError::Build(other.to_string()),
+    })?;
+    let process = metrics_process::Collector::new("process_");
+    process.describe();
+    process.collect();
+    let handle = MetricsHandle {
+        inner: Inner::Prometheus(handle),
+        process: Some(Arc::new(process)),
+    };
+    Ok(INSTALLED.get_or_init(|| handle).clone())
 }
 
 #[cfg(all(test, not(loom)))] // exporter internals (quanta) are loom-aware; not our model
@@ -286,7 +306,12 @@ mod tests {
             bp.pause_ended(Duration::from_millis(250));
             bp.set_inflight_bytes(1 << 20);
 
-            let shard = SinkShardMetrics::new(&labels(), 3, &["ch-3-0".into(), "ch-3-1".into()]);
+            let shard = SinkShardMetrics::new(
+                &labels(),
+                3,
+                &["ch-3-0".into(), "ch-3-1".into()],
+                E2eBasis::Ingest,
+            );
             shard.flushed(
                 FlushReason::Rows,
                 500_000,
@@ -304,7 +329,6 @@ mod tests {
             cp.set_pending_max(12);
             cp.commit(true, Duration::from_millis(4));
             cp.set_watermark_age(Duration::from_secs(1));
-            cp.e2e_latency(Duration::from_millis(350));
 
             let pl = PipelineMetrics::new(&labels(), "0.1.0");
             pl.set_state(PipelineState::Running);
@@ -422,10 +446,34 @@ mod tests {
         let render_fn = handle.render_fn();
         assert!(render_fn().contains("etl_pipeline_threads"));
 
-        // Second install must fail with AlreadyInstalled.
-        match install(&MetricsSettings::default()) {
-            Err(MetricsError::AlreadyInstalled) => {}
-            other => panic!("expected AlreadyInstalled, got {other:?}"),
-        }
+        // Install is idempotent: a second call returns the SAME exporter,
+        // so handles registered between the two calls stay visible. This is
+        // the assembly-order guarantee: user code installs early, registers
+        // sink handles, and the runtime's own install() reuses the exporter
+        // (the flagship-example pattern).
+        let shard = SinkShardMetrics::new(&labels(), 7, &["reuse-7-0".into()], E2eBasis::Ingest);
+        shard.flushed(FlushReason::Rows, 10, 1_000, Duration::from_millis(3));
+        shard.e2e_observed(Duration::from_millis(25), i64::MAX);
+        let second = install(&MetricsSettings::default()).expect("second install reuses");
+        let rendered = second.render();
+        assert!(
+            rendered.contains("etl_sink_records_total"),
+            "handles registered before the second install render through it:\n{rendered}"
+        );
+        assert!(rendered.contains("etl_e2e_latency_seconds"));
+
+        // Exporter::None never claims the process slot.
+        let noop = install(&MetricsSettings {
+            exporter: Exporter::None,
+            ..MetricsSettings::default()
+        })
+        .expect("noop install");
+        assert!(noop.render().is_empty());
+        assert!(
+            install(&MetricsSettings::default())
+                .expect("prometheus still reusable")
+                .render()
+                .contains("etl_pipeline_info")
+        );
     }
 }

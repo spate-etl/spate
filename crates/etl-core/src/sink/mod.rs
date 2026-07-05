@@ -30,16 +30,22 @@ pub use config::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPo
 pub use pool::{DrainReport, SinkPool};
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
 
-use crate::checkpoint::AckRef;
+use crate::checkpoint::AckSet;
 use crate::deser::RecFamily;
 use crate::error::SinkError;
 use crate::record::{Record, RecordMeta};
 use bytes::{Bytes, BytesMut};
+use std::time::Instant;
 
 /// A small frame of encoded rows produced on a pipeline thread, the unit
 /// shipped over the per-shard queues. Wire frames are concatenable (row
 /// formats like RowBinary carry no per-frame header), so workers accumulate
 /// chunks without re-encoding.
+///
+/// Teardown safety: `acks` is an [`AckSet`] — dropping a chunk anywhere
+/// (a closed queue, an aborted worker, a parked chunk at teardown) fails
+/// its batches so their offsets never commit; only a completed durable
+/// write delivers them.
 #[derive(Debug)]
 pub struct EncodedChunk {
     /// Encoded rows in the sink's wire format.
@@ -49,7 +55,13 @@ pub struct EncodedChunk {
     /// Acknowledgement handles of the source batches represented in
     /// `frame`. Consecutive records usually share a batch, so this stays
     /// short (the encoder dedupes consecutive identical handles).
-    pub acks: Vec<AckRef>,
+    pub acks: AckSet,
+    /// When the oldest record in `frame` entered the terminal stage
+    /// (ingest-basis end-to-end latency).
+    pub oldest_ingest: Instant,
+    /// Smallest record event time in `frame`, milliseconds since the epoch
+    /// (event-basis end-to-end latency).
+    pub oldest_event_ms: i64,
 }
 
 /// The CPU half of a sink connector: encodes one record into the sink's

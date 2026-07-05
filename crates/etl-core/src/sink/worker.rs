@@ -14,7 +14,7 @@ use super::config::SinkPoolConfig;
 use super::retry::Backoff;
 use super::{EncodedChunk, SealedBatch, ShardWriter};
 use crate::backpressure::InflightBudget;
-use crate::checkpoint::AckRef;
+use crate::checkpoint::AckSet;
 use crate::error::{ErrorClass, SinkError};
 use crate::metrics::{FlushReason, SinkShardMetrics};
 use std::collections::HashMap;
@@ -43,11 +43,17 @@ impl WorkerReport {
 /// A batch awaiting resolution: everything the worker needs to resolve
 /// acknowledgements and bookkeeping once its write task reports.
 struct Pending {
-    acks: Vec<AckRef>,
+    acks: AckSet,
     rows: u64,
     bytes: u64,
     reason: FlushReason,
     started: Instant,
+    /// Ingest time of the oldest record in the batch (e2e latency, ingest
+    /// basis).
+    oldest_ingest: std::time::Instant,
+    /// Smallest record event time in the batch, ms since epoch (e2e
+    /// latency, event basis).
+    oldest_event_ms: i64,
 }
 
 /// Outcome reported by a write task. Tasks never touch acks.
@@ -60,8 +66,10 @@ struct Accumulator {
     frames: Vec<bytes::Bytes>,
     rows: u64,
     bytes: u64,
-    acks: Vec<AckRef>,
+    acks: AckSet,
     first_at: Option<Instant>,
+    oldest_ingest: Option<std::time::Instant>,
+    oldest_event_ms: i64,
 }
 
 impl Accumulator {
@@ -70,8 +78,10 @@ impl Accumulator {
             frames: Vec::new(),
             rows: 0,
             bytes: 0,
-            acks: Vec::new(),
+            acks: AckSet::new(),
             first_at: None,
+            oldest_ingest: None,
+            oldest_event_ms: i64::MAX,
         }
     }
 
@@ -80,7 +90,12 @@ impl Accumulator {
         self.rows += u64::from(chunk.rows);
         self.bytes += chunk.frame.len() as u64;
         self.frames.push(chunk.frame);
-        self.acks.extend(chunk.acks);
+        self.oldest_ingest = Some(match self.oldest_ingest {
+            Some(cur) => cur.min(chunk.oldest_ingest),
+            None => chunk.oldest_ingest,
+        });
+        self.oldest_event_ms = self.oldest_event_ms.min(chunk.oldest_event_ms);
+        self.acks.absorb(chunk.acks);
     }
 
     fn is_empty(&self) -> bool {
@@ -233,11 +248,13 @@ impl<W: ShardWriter> ShardWorker<W> {
         };
         self.metrics
             .flushed(p.reason, p.rows, p.bytes, p.started.elapsed());
+        self.metrics
+            .e2e_observed(p.oldest_ingest.elapsed(), p.oldest_event_ms);
         self.budget
             .sub(usize::try_from(p.bytes).unwrap_or(usize::MAX));
         self.metrics.set_inflight(ledger.pending.len());
         ledger.report.flushed += 1;
-        drop(p.acks); // resolution: Delivered
+        p.acks.deliver();
     }
 
     fn abandon(&self, seq: u64, ledger: &mut Ledger) {
@@ -249,10 +266,7 @@ impl<W: ShardWriter> ShardWorker<W> {
             bytes = p.bytes,
             "abandoning sink batch; data will replay after restart"
         );
-        for ack in &p.acks {
-            ack.fail();
-        }
-        drop(p.acks);
+        drop(p.acks); // AckSet drop resolution: Failed
         self.metrics.abandoned(1);
         self.budget
             .sub(usize::try_from(p.bytes).unwrap_or(usize::MAX));
@@ -291,6 +305,8 @@ impl<W: ShardWriter> ShardWorker<W> {
                 bytes: full.bytes,
                 reason,
                 started: Instant::now(),
+                oldest_ingest: full.oldest_ingest.unwrap_or_else(std::time::Instant::now),
+                oldest_event_ms: full.oldest_event_ms,
             },
         );
         self.metrics.set_inflight(ledger.pending.len());

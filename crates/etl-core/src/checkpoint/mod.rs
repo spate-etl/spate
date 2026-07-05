@@ -31,7 +31,7 @@ mod loom_tests;
 mod sync;
 mod tracker;
 
-pub use ack::{AckMsg, AckRef, AckStatus, BatchId};
+pub use ack::{AckMsg, AckRef, AckSet, AckStatus, BatchId};
 #[cfg(not(loom))]
 pub use checkpointer::{AckIssuer, Checkpointer, DrainStats};
 pub use tracker::{PartitionTracker, ResolveOutcome};

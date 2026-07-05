@@ -207,3 +207,108 @@ mod tests {
         drop(ack); // send fails silently — shutdown teardown ordering
     }
 }
+
+/// A fail-safe collection of acknowledgement handles for data that has not
+/// been durably written yet (encoded chunks, sink batches).
+///
+/// A bare [`AckRef`] resolves *Delivered* on drop — the right default for
+/// records, where drop means "consumed" (filtered out, skipped by policy,
+/// or written). Collections travelling the sink path are different: there,
+/// drop without an explicit outcome means the data was torn down (task
+/// aborted, queue dropped, worker cancelled), and resolving Delivered would
+/// commit offsets for rows that never reached the sink. `AckSet` therefore
+/// **fails** every handle it still holds when dropped; the happy path calls
+/// [`AckSet::deliver`] after the durable write. Over-failing is always safe
+/// under at-least-once — it costs replay, never loss.
+#[derive(Debug, Default)]
+pub struct AckSet(Vec<AckRef>);
+
+impl AckSet {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        AckSet(Vec::new())
+    }
+
+    /// Add a handle to the set.
+    pub fn push(&mut self, ack: AckRef) {
+        self.0.push(ack);
+    }
+
+    /// Move every handle out of `other` into `self`.
+    pub fn absorb(&mut self, mut other: AckSet) {
+        self.0.append(&mut other.0);
+    }
+
+    /// Whether the set holds no handles.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of handles held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Resolve the set as delivered: the data it covers is durably
+    /// written. Consumes the set; the handles drop with their default
+    /// (Delivered) resolution.
+    pub fn deliver(mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for AckSet {
+    fn drop(&mut self) {
+        for ack in &self.0 {
+            ack.fail();
+        }
+    }
+}
+
+impl From<Vec<AckRef>> for AckSet {
+    fn from(acks: Vec<AckRef>) -> Self {
+        AckSet(acks)
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod ack_set_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_a_set_fails_its_batches() {
+        let (ack, rx) = AckRef::test_pair();
+        let mut set = AckSet::new();
+        set.push(ack.clone());
+        drop(ack);
+        drop(set);
+        assert_eq!(rx.try_recv().unwrap().status, AckStatus::Failed);
+    }
+
+    #[test]
+    fn delivering_a_set_resolves_delivered() {
+        let (ack, rx) = AckRef::test_pair();
+        let mut set = AckSet::new();
+        set.push(ack.clone());
+        drop(ack);
+        set.deliver();
+        assert_eq!(rx.try_recv().unwrap().status, AckStatus::Delivered);
+    }
+
+    #[test]
+    fn absorb_moves_handles_without_resolving() {
+        let (ack, rx) = AckRef::test_pair();
+        let mut a = AckSet::new();
+        a.push(ack.clone());
+        drop(ack);
+        let mut b = AckSet::new();
+        b.absorb(a);
+        assert!(rx.try_recv().is_err(), "absorb must not resolve");
+        assert_eq!(b.len(), 1);
+        b.deliver();
+        assert_eq!(rx.try_recv().unwrap().status, AckStatus::Delivered);
+    }
+}

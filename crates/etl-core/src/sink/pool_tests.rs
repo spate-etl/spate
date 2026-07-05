@@ -5,7 +5,7 @@ use super::*;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::error::ErrorClass;
-use crate::metrics::{ComponentLabels, SinkShardMetrics};
+use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -135,7 +135,14 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
         .collect();
     let replica_names: Vec<String> = (0..replicas).map(|r| format!("r{r}")).collect();
     let metrics: Vec<SinkShardMetrics> = (0..shards)
-        .map(|s| SinkShardMetrics::new(&labels, u32::try_from(s).unwrap(), &replica_names))
+        .map(|s| {
+            SinkShardMetrics::new(
+                &labels,
+                u32::try_from(s).unwrap(),
+                &replica_names,
+                E2eBasis::Ingest,
+            )
+        })
         .collect();
     let pool = SinkPool::spawn(
         Arc::clone(&writer),
@@ -158,9 +165,11 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
 /// A chunk of `rows` rows, `bytes_per_row * rows` bytes, carrying `ack`.
 fn chunk(rows: u32, bytes_per_row: usize, ack: &AckRef) -> EncodedChunk {
     EncodedChunk {
+        oldest_ingest: std::time::Instant::now(),
+        oldest_event_ms: 0,
         frame: Bytes::from(vec![0u8; bytes_per_row * rows as usize]),
         rows,
-        acks: vec![ack.clone()],
+        acks: vec![ack.clone()].into(),
     }
 }
 
@@ -543,4 +552,111 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
             },
         )
         .unwrap();
+}
+
+/// Teardown without drain (a Failed exit dropping the I/O runtime) must
+/// never resolve un-written data as delivered: pending batches and queued
+/// chunks hold their acknowledgements in fail-on-drop sets.
+#[test]
+fn runtime_teardown_without_drain_fails_unwritten_acks() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let (in_flight_ack, in_flight_rx) = AckRef::test_pair();
+    let (queued_ack, queued_rx) = AckRef::test_pair();
+
+    let fx = rt.block_on(async {
+        let fx = fixture(1, 1, small_batches(), 8);
+        // First chunk seals immediately (max_rows = 1) and its write hangs
+        // forever: the batch stays pending in the worker's ledger.
+        fx.writer.set_default(Outcome::Hang);
+        fx.queues
+            .try_send(0, chunk(1, 8, &in_flight_ack))
+            .expect("send in-flight");
+        // Give the worker a moment to seal and dispatch.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Second chunk sits in the shard queue, never picked up (the
+        // worker is awaiting the semaphore/inflight join).
+        fx.queues
+            .try_send(0, chunk(1, 8, &queued_ack))
+            .expect("send queued");
+        fx
+    });
+    drop(in_flight_ack);
+    drop(queued_ack);
+
+    // Tear the runtime down without draining the pool: worker futures and
+    // the queued chunk are dropped wherever they stand.
+    rt.shutdown_background();
+    drop(fx);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut statuses = Vec::new();
+    for rx in [in_flight_rx, queued_rx] {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let msg: AckMsg = rx
+            .recv_timeout(remaining)
+            .expect("ack resolves at teardown");
+        statuses.push(msg.status);
+    }
+    assert_eq!(
+        statuses,
+        vec![AckStatus::Failed, AckStatus::Failed],
+        "unwritten data must fail, never deliver, at teardown"
+    );
+}
+
+/// Metric-level row conservation: `etl_sink_records_total` counts exactly
+/// the rows of durably written batches — no double-counting across chunk
+/// merging, sealing, or retries. Uses a current-thread runtime so the
+/// thread-local recorder sees the worker's increments.
+#[test]
+fn sink_records_metric_matches_rows_written_exactly() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let cfg = SinkPoolConfig {
+                batch: BatchConfig {
+                    max_rows: 5,
+                    max_bytes: u64::MAX,
+                    linger: Duration::from_secs(3600),
+                },
+                ..SinkPoolConfig::default()
+            };
+            let fx = fixture(1, 1, cfg, 64);
+            let (ack, _rx) = AckRef::test_pair();
+            // 12 rows across chunks of 3. Sealing is chunk-granular: the
+            // accumulator crosses max_rows=5 at the second and fourth
+            // chunk, so two 6-row batches flush and nothing remains for
+            // the drain.
+            for _ in 0..4 {
+                fx.queues.try_send(0, chunk(3, 4, &ack)).expect("send");
+            }
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(5)).await;
+            assert_eq!(report.flushed, 2);
+            assert_eq!(report.abandoned, 0);
+            let written: u64 = fx.writer.calls().iter().map(|c| c.rows).sum();
+            assert_eq!(written, 12, "writer saw every row exactly once");
+        });
+    });
+    let rendered = handle.render();
+    let line = rendered
+        .lines()
+        .find(|l| l.starts_with("etl_sink_records_total") && l.contains("shard=\"0\""))
+        .unwrap_or_else(|| panic!("records counter rendered:\n{rendered}"));
+    let value: f64 = line.rsplit(' ').next().unwrap().parse().expect("value");
+    assert!(
+        (value - 12.0).abs() < f64::EPSILON,
+        "metric must equal rows written exactly, got {value}"
+    );
 }

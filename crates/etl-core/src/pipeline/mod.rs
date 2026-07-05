@@ -31,7 +31,7 @@ mod controller;
 mod driver;
 mod runtime;
 
-pub use runtime::{PipelineRuntime, RuntimeOptions, ShutdownHandle, StartError};
+pub use runtime::{PipelineRuntime, RuntimeOptions, ShutdownHandle, StartError, metrics_settings};
 
 use crate::error::FatalError;
 use crate::record::PartitionId;
@@ -71,16 +71,10 @@ pub(crate) enum DriverEvent {
     Fatal { thread: usize, error: FatalError },
 }
 
-/// What the sink reported when draining at shutdown.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DrainReport {
-    /// Batches flushed durably during the drain.
-    pub flushed_batches: u64,
-    /// Batches abandoned at the deadline (their offsets stay uncommitted
-    /// and replay after restart; their acknowledgements must have been
-    /// failed by the sink).
-    pub abandoned_batches: u64,
-}
+/// What the sink reported when draining at shutdown — the sink layer's
+/// [`DrainReport`](crate::sink::DrainReport), re-exported so assemblies
+/// hand `SinkPool::drain`'s result straight through.
+pub use crate::sink::DrainReport;
 
 /// The sink half the runtime drives: the shared shard-queue handle plus a
 /// drain hook invoked once at shutdown with the remaining drain budget.

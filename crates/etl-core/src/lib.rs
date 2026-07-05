@@ -15,6 +15,12 @@
 // anything touching tokio::net is compiled out of loom model builds.
 #[cfg(not(loom))]
 pub mod admin;
+/// Re-export of the [`bytes`] crate: [`RowEncoder`](sink::RowEncoder)
+/// signatures take [`bytes::BytesMut`], so connector authors can use this
+/// re-export instead of declaring their own `bytes` dependency (declaring
+/// one is also fine — versions are compatible per the workspace pin).
+pub use bytes;
+
 pub mod backpressure;
 pub mod checkpoint;
 pub mod config;

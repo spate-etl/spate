@@ -10,7 +10,7 @@ use crate::config::{
     PinningMode, PipelineConfig, PipelineSection,
 };
 use crate::error::{ErrorClass, FatalError, SourceError};
-use crate::ops::{PushOutcome, RunnableChain};
+use crate::ops::{BlockReason, PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{PipelineRuntime, RuntimeOptions};
 use crate::record::{PartitionId, RawPayload};
 use crate::sink::shard_queues;
@@ -218,6 +218,7 @@ struct ChainShared {
 enum ChainMode {
     Ok,
     BlockOnce(AtomicBool),
+    BlockForever,
     FatalAtBatch(usize),
     PanicAtBatch(usize),
 }
@@ -236,7 +237,16 @@ impl RunnableChain for FakeChain {
         }
         match &self.mode {
             ChainMode::BlockOnce(done) if !done.swap(true, Ordering::Relaxed) => {
-                return PushOutcome::Blocked { resume_at: from };
+                return PushOutcome::Blocked {
+                    resume_at: from,
+                    reason: BlockReason::Capacity,
+                };
+            }
+            ChainMode::BlockForever => {
+                return PushOutcome::Blocked {
+                    resume_at: from,
+                    reason: BlockReason::Capacity,
+                };
             }
             ChainMode::FatalAtBatch(n) if self.batches_seen == *n => {
                 return PushOutcome::Fatal(FatalError {
@@ -270,10 +280,7 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
         Box::pin(async move {
             let _receivers = receivers;
             flag.store(true, Ordering::Relaxed);
-            DrainReport {
-                flushed_batches: 0,
-                abandoned_batches: 0,
-            }
+            DrainReport::default()
         })
     });
     (
@@ -500,6 +507,40 @@ fn blocked_chain_pauses_then_resumes() {
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
+}
+
+/// A batch that can never unblock must not hold shutdown hostage until the
+/// barrier deadline: the driver's retry loop observes the shutdown flag,
+/// abandons the batch (failing its acknowledgement so the data replays),
+/// and exits promptly.
+#[test]
+fn shutdown_during_permanently_blocked_batch_exits_promptly_and_fails_the_batch() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::BlockForever,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    // Let the driver enter the blocked-retry loop.
+    std::thread::sleep(Duration::from_millis(100));
+    let begun = std::time::Instant::now();
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "shutdown must not wait for the barrier deadline"
+    );
+    // The abandoned batch's offsets never became committable: nothing was
+    // consumed, so no watermark advanced and no commit happened.
+    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
+    let log = h.shared.lock().unwrap();
+    assert!(
+        log.committed.is_empty(),
+        "a blocked, abandoned batch must not commit: {:?}",
+        log.committed
+    );
 }
 
 #[test]

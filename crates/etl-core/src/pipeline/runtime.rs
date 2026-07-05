@@ -162,7 +162,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let pipeline_name = self.config.pipeline.name.clone();
 
         // Observability first: everything after this records metrics.
-        let handle = match metrics::install(&map_settings(&self.config)) {
+        let handle = match metrics::install(&metrics_settings(&self.config)) {
             Ok(h) => h,
             Err(metrics::MetricsError::AlreadyInstalled) => {
                 tracing::warn!(
@@ -171,7 +171,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 );
                 metrics::install(&MetricsSettings {
                     exporter: Exporter::None,
-                    ..map_settings(&self.config)
+                    ..metrics_settings(&self.config)
                 })
                 .map_err(|e| StartError::Metrics(e.to_string()))?
             }
@@ -309,6 +309,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     &ComponentLabels::new(pipeline_name.clone(), "source", "source"),
                     self.config.metrics.per_partition_detail,
                 ),
+                shutdown: Arc::clone(&self.shutdown),
             };
             let core = core_ids.get(i).copied().flatten();
             let handle = std::thread::Builder::new()
@@ -418,7 +419,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     }
 }
 
-fn map_settings(config: &PipelineConfig) -> MetricsSettings {
+/// The [`MetricsSettings`] a pipeline configuration maps to.
+///
+/// Assemblies that pre-register metric handles (sink shard metrics, custom
+/// metrics) should call
+/// [`metrics::install`](crate::metrics::install)`(&metrics_settings(&config))`
+/// **before** constructing them; the runtime's own install then reuses the
+/// exporter. Handles built before any install bind to the no-op recorder
+/// and render nothing.
+#[must_use]
+pub fn metrics_settings(config: &PipelineConfig) -> MetricsSettings {
     MetricsSettings {
         exporter: match config.metrics.exporter {
             MetricsExporter::Prometheus => Exporter::Prometheus,

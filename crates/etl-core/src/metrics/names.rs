@@ -62,6 +62,10 @@ pub const DESER_RECORDS_TOTAL: &str = "etl_deser_records_total";
 pub const DESER_RECORDS_DROPPED_TOTAL: &str = "etl_deser_records_dropped_total";
 /// Deserialization time per source batch.
 pub const DESER_BATCH_DURATION_SECONDS: &str = "etl_deser_batch_duration_seconds";
+/// Counter: payload replays awaiting an upstream dependency (e.g. a schema
+/// fetch) — `DeserError::NotReady` occurrences. Not an error and not
+/// backpressure.
+pub const DESER_NOT_READY_TOTAL: &str = "etl_deser_not_ready_total";
 
 // Operators.
 
@@ -158,6 +162,7 @@ pub const COUNTERS: &[&str] = &[
     SOURCE_REBALANCES_TOTAL,
     DESER_RECORDS_TOTAL,
     DESER_RECORDS_DROPPED_TOTAL,
+    DESER_NOT_READY_TOTAL,
     OPERATOR_RECORDS_IN_TOTAL,
     OPERATOR_RECORDS_OUT_TOTAL,
     OPERATOR_RECORDS_DROPPED_TOTAL,

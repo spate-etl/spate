@@ -12,12 +12,14 @@ use crate::backpressure::{InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::AckRef;
 use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
-use crate::ops::{PushOutcome, RunnableChain};
+use crate::ops::{BlockReason, PushOutcome, RunnableChain};
+use crate::record::RawPayload;
 use crate::sink::ShardQueues;
 use crate::source::{LaneId, PayloadBatch, SourceLane};
 use crate::telemetry::RateLimit;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 static POLL_ERROR_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
@@ -63,6 +65,10 @@ pub(crate) struct DriverContext<L> {
     pub health: Arc<HealthState>,
     pub bp_metrics: BackpressureMetrics,
     pub source_metrics: SourceMetrics,
+    /// The process-wide shutdown flag: checked inside long-running inner
+    /// loops (blocked-batch retries) so a wedged batch cannot defer
+    /// shutdown to the barrier timeout.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 /// Run one driver thread to completion.
@@ -78,6 +84,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         health,
         bp_metrics,
         source_metrics,
+        shutdown,
     } = ctx;
 
     let mut lanes: Vec<L> = Vec::new();
@@ -181,9 +188,10 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             Ok(Some(mut batch)) => {
                 last_data = Instant::now();
                 flushed_since_data = false;
+                let mut counting = CountingBatch::new(&mut batch);
                 let outcome = drive_batch(
                     chain.as_mut(),
-                    &mut batch,
+                    &mut counting,
                     &mut bp,
                     &budget,
                     &queues,
@@ -193,7 +201,9 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     &health,
                     &bp_metrics,
                     &mut pause_started,
+                    &shutdown,
                 );
+                source_metrics.batch(counting.records, counting.bytes);
                 if let Err(error) = outcome {
                     let _ = events.send(DriverEvent::Fatal {
                         thread: params.thread,
@@ -265,6 +275,7 @@ fn drive_batch(
     health: &HealthState,
     bp_metrics: &BackpressureMetrics,
     pause_started: &mut Option<Instant>,
+    shutdown: &AtomicBool,
 ) -> Result<(), FatalError> {
     // Cloned before the first push: if the chain panics the batch may be
     // in an arbitrary state, but this handle can still fail it.
@@ -275,12 +286,29 @@ fn drive_batch(
         let pushed = std::panic::catch_unwind(AssertUnwindSafe(|| chain.push_batch(batch, from)));
         match pushed {
             Ok(PushOutcome::Done) => return Ok(()),
-            Ok(PushOutcome::Blocked { resume_at }) => {
+            Ok(PushOutcome::Blocked { resume_at, reason }) => {
                 debug_assert!(resume_at >= from, "resume cursor must not go backwards");
                 from = resume_at;
-                bp.on_send_rejected();
-                if let Some(t) = bp.tick(budget, queues.all_below(params.queue_low_ratio)) {
-                    apply_transition(t, owned, events, bp_metrics, pause_started);
+                // A batch that can never unblock must not hold shutdown
+                // hostage until the barrier deadline: abandon it (fail its
+                // acknowledgement — the data replays after restart) and
+                // hand control back so the Shutdown message is processed.
+                if shutdown.load(Ordering::Relaxed) {
+                    tracing::warn!(
+                        thread = params.thread,
+                        "shutdown during a blocked batch; abandoning it for replay"
+                    );
+                    ack.fail();
+                    return Ok(());
+                }
+                // Only genuine sink pressure engages the backpressure
+                // controller; a not-ready wait (schema fetch in flight) is
+                // counted by the chain and simply retried.
+                if reason == BlockReason::Capacity {
+                    bp.on_send_rejected();
+                    if let Some(t) = bp.tick(budget, queues.all_below(params.queue_low_ratio)) {
+                        apply_transition(t, owned, events, bp_metrics, pause_started);
+                    }
                 }
                 std::thread::sleep(params.blocked_retry);
             }
@@ -296,6 +324,41 @@ fn drive_batch(
                 });
             }
         }
+    }
+}
+
+/// Wraps a lane batch to count payloads and payload bytes as the chain
+/// consumes them — the `etl_source_records_total` / `etl_source_bytes_total`
+/// feed. Counting happens per payload (not per derived record), and each
+/// payload is yielded exactly once even across blocked-batch retries, so
+/// the totals are exact.
+struct CountingBatch<'a, 'buf> {
+    inner: &'a mut dyn PayloadBatch<'buf>,
+    records: u64,
+    bytes: u64,
+}
+
+impl<'a, 'buf> CountingBatch<'a, 'buf> {
+    fn new(inner: &'a mut dyn PayloadBatch<'buf>) -> Self {
+        CountingBatch {
+            inner,
+            records: 0,
+            bytes: 0,
+        }
+    }
+}
+
+impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
+    fn next_payload(&mut self) -> Option<RawPayload<'buf>> {
+        let payload = self.inner.next_payload()?;
+        self.records += 1;
+        self.bytes +=
+            payload.bytes.len() as u64 + payload.key.map(<[u8]>::len).unwrap_or_default() as u64;
+        Some(payload)
+    }
+
+    fn ack(&self) -> &AckRef {
+        self.inner.ack()
     }
 }
 

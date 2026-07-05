@@ -10,7 +10,7 @@
 use super::Collector;
 use super::chain::{FatalSlot, OpMeterSlot, StageLifecycle};
 use crate::backpressure::InflightBudget;
-use crate::checkpoint::{AckRef, BatchId};
+use crate::checkpoint::{AckSet, BatchId};
 use crate::deser::RecFamily;
 use crate::error::{ErrorPolicy, FatalError};
 use crate::record::{Flow, Record};
@@ -19,7 +19,7 @@ use crate::telemetry::RateLimit;
 use bytes::BytesMut;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Tuning for the terminal stage's per-shard chunking.
 #[derive(Clone, Copy, Debug)]
@@ -44,12 +44,29 @@ impl Default for ChunkConfig {
 }
 
 /// Per-shard accumulation state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ShardBuf {
     buf: BytesMut,
     rows: u32,
-    acks: Vec<AckRef>,
+    acks: AckSet,
     last_batch: Option<BatchId>,
+    /// When the first record of the open chunk arrived.
+    first_ingest: Option<Instant>,
+    /// Smallest event time seen in the open chunk (ms since epoch).
+    oldest_event_ms: i64,
+}
+
+impl Default for ShardBuf {
+    fn default() -> Self {
+        ShardBuf {
+            buf: BytesMut::new(),
+            rows: 0,
+            acks: AckSet::new(),
+            last_batch: None,
+            first_ingest: None,
+            oldest_event_ms: i64::MAX,
+        }
+    }
 }
 
 static ENCODE_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
@@ -118,9 +135,12 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
             frame,
             rows: shard.rows,
             acks: std::mem::take(&mut shard.acks),
+            oldest_ingest: shard.first_ingest.take().unwrap_or_else(Instant::now),
+            oldest_event_ms: shard.oldest_event_ms,
         };
         shard.rows = 0;
         shard.last_batch = None;
+        shard.oldest_event_ms = i64::MAX;
         match self.queues.try_send(idx, chunk) {
             Ok(()) => {}
             Err(ChunkSendError(chunk)) => self.parked.push_back((idx, chunk)),
@@ -142,26 +162,16 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
     }
 }
 
-/// Teardown safety: an `AckRef` dropped without intervention resolves
-/// *Delivered*, so a handoff dropped while still holding un-sent output
-/// (parked chunks after a drain deadline, partial shard buffers) would
-/// commit offsets for data that never reached the sink. Fail every ack we
-/// still hold so those watermarks stall and the records replay after
-/// restart — at-least-once over completeness, always.
+/// Teardown safety: un-sent output (parked chunks after a drain deadline,
+/// partial shard buffers) holds its acknowledgements in fail-on-drop
+/// [`AckSet`]s, so tearing the handoff down stalls those watermarks and the
+/// records replay after restart — at-least-once over completeness, always.
+/// This `Drop` only reconciles the in-flight byte budget for parked chunks
+/// (their bytes were added at seal time).
 impl<F: RecFamily, E, R> Drop for SinkHandoff<F, E, R> {
     fn drop(&mut self) {
         for (_, chunk) in self.parked.drain(..) {
             self.budget.sub(chunk.frame.len());
-            for ack in &chunk.acks {
-                ack.fail();
-            }
-        }
-        for shard in &mut self.shards {
-            if shard.rows > 0 {
-                for ack in &shard.acks {
-                    ack.fail();
-                }
-            }
         }
     }
 }
@@ -184,6 +194,8 @@ where
             Ok(()) => {
                 shard.rows += 1;
                 self.meter.0.out();
+                shard.first_ingest.get_or_insert_with(Instant::now);
+                shard.oldest_event_ms = shard.oldest_event_ms.min(rec.meta.event_time_ms);
                 let bid = rec.ack.batch_id();
                 if shard.last_batch != Some(bid) {
                     shard.acks.push(rec.ack.clone());

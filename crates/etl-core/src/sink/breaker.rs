@@ -160,7 +160,12 @@ mod tests {
                 open_for: Duration::from_secs(5),
                 half_open_probes: 1,
             },
-            Arc::new(SinkShardMetrics::new(&labels, 0, &names)),
+            Arc::new(SinkShardMetrics::new(
+                &labels,
+                0,
+                &names,
+                crate::metrics::E2eBasis::Ingest,
+            )),
         )
     }
 

@@ -17,8 +17,17 @@
 //! A connector implements [`RowEncoder`] (CPU half) and [`ShardWriter`]
 //! (I/O half); the framework owns everything between them.
 
+mod breaker;
+mod config;
+mod pool;
+#[cfg(test)]
+mod pool_tests;
 mod queue;
+mod retry;
+mod worker;
 
+pub use config::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
+pub use pool::{DrainReport, SinkPool};
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
 
 use crate::checkpoint::AckRef;

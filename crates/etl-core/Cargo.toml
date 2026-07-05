@@ -24,7 +24,7 @@ serde = { workspace = true }
 serde_path_to_error = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "net", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 

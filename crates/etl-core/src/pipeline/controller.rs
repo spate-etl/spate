@@ -160,6 +160,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     }
 
     // ---- Drain sequence (shutdown or failure; DESIGN.md § Shutdown) ----
+    // Failure-initiated drains must set the process shutdown flag too:
+    // drivers wedged in the blocked-batch retry loop only observe that flag,
+    // and main joins them without a timeout — without this store, a chain
+    // failure elsewhere leaves a blocked driver spinning forever.
+    shutdown.store(true, Ordering::Relaxed);
     pipeline_metrics.set_state(if state.failure.is_some() {
         PipelineState::Failed
     } else {

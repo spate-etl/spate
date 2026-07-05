@@ -81,6 +81,7 @@ impl<W: ShardWriter> SinkPool<W> {
         let endpoints: Vec<Arc<Vec<W::Endpoint>>> =
             shard_endpoints.into_iter().map(Arc::new).collect();
 
+        let nonce = run_nonce();
         let workers = receivers
             .into_iter()
             .zip(metrics)
@@ -94,7 +95,7 @@ impl<W: ShardWriter> SinkPool<W> {
                     budget: Arc::clone(&budget),
                     metrics: Arc::new(shard_metrics),
                     drain_deadline: drain_rx.clone(),
-                    token_prefix: format!("{pipeline_name}-{shard}-"),
+                    token_prefix: format!("{pipeline_name}-{nonce}-{shard}-"),
                 };
                 runtime.spawn(worker.run())
             })
@@ -140,5 +141,41 @@ impl<W: ShardWriter> SinkPool<W> {
             flushed: report.flushed,
             abandoned: report.abandoned,
         }
+    }
+}
+
+/// A short id unique across process runs (boot time, pid, and an in-process
+/// counter), embedded in every deduplication token.
+///
+/// Without it, tokens are `{pipeline}-{shard}-{seq}` with `seq` restarting
+/// at 0 on every start: a restarted (or same-named concurrent) pipeline
+/// reuses tokens still inside the server's deduplication window, and the
+/// sink silently discards **new** rows while acknowledging them — data
+/// loss precisely when server-side dedup is enabled. With the nonce,
+/// in-session retries still share their batch's token (idempotent), while
+/// cross-run collisions are impossible; crash replay lands duplicate rows
+/// instead of losing them, which is the documented at-least-once contract.
+fn run_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = u64::from(std::process::id());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}", nanos ^ (pid << 48) ^ (n << 40))
+}
+
+#[cfg(all(test, not(loom)))]
+mod nonce_tests {
+    use super::run_nonce;
+
+    #[test]
+    fn nonces_differ_within_and_across_calls() {
+        let a = run_nonce();
+        let b = run_nonce();
+        assert_ne!(a, b, "two pools in one process must not share tokens");
+        assert!(!a.is_empty() && a.len() <= 16);
     }
 }

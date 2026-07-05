@@ -18,10 +18,11 @@ allow = [
     "Zlib",
     "MPL-2.0",
 ]
-# NOTE: serde_avro_fast (optional, behind etl-avro's `fast` feature) has
-# conflicting license metadata (crates.io: LGPL-3.0-only, upstream repo:
-# MPL-2.0). It must not be added as a dependency until verified; cargo-deny
-# will fail the build if it arrives with LGPL metadata.
+# NOTE: serde_avro_fast (the evaluated zero-copy Avro backend) was cut over
+# conflicting license metadata: every published release through 2.1.0
+# declares LGPL-3.0-only on crates.io while the upstream repo is MPL-2.0.
+# It must not be re-added until a release ships corrected metadata;
+# cargo-deny will fail the build if it arrives declaring LGPL.
 
 [bans]
 multiple-versions = "warn"

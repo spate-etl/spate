@@ -49,8 +49,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2.4"
 
-# Concurrency.
+# Concurrency and buffers.
 crossbeam-channel = "0.5.15"
+bytes = "1"
 
 # Connector dependencies. 0.x crates with breaking minors are held to a
 # single minor; Cargo.lock pins exact patches.
@@ -61,6 +62,7 @@ serde_avro_fast = "2.1"
 schema_registry_converter = { version = "4.9", default-features = false }
 
 # Test and bench tooling.
+tempfile = "3"
 testcontainers = "0.27"
 testcontainers-modules = "0.15"
 proptest = "1.11"

@@ -10,6 +10,34 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+bytesize = { workspace = true }
+crossbeam-channel = { workspace = true }
+http-body-util = { workspace = true }
+humantime-serde = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+metrics-process = { workspace = true }
+serde = { workspace = true }
+serde_path_to_error = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "net", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+divan = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "test-util"] }
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { workspace = true }
 
 [lints]
 workspace = true

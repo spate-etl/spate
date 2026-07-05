@@ -7,3 +7,18 @@
 //!
 //! Applications should depend on the [`etl`](https://crates.io/crates/etl)
 //! facade crate rather than on `etl-core` directly.
+//!
+//! The architecture and its invariants are documented in `docs/DESIGN.md`;
+//! the metric taxonomy in `docs/METRICS.md`.
+
+pub mod admin;
+pub mod backpressure;
+pub mod checkpoint;
+pub mod config;
+pub mod error;
+pub mod metrics;
+pub mod record;
+pub mod telemetry;
+
+pub use error::{DeserError, ErrorClass, ErrorPolicy, SinkError, SourceError};
+pub use record::{Flow, PartitionId, RawPayload, Record, RecordMeta};

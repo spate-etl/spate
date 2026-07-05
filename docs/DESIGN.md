@@ -80,8 +80,80 @@ scale and unified drain choreography. A per-thread-consumer fallback remains
 possible behind the same traits if split-queue semantics ever bite
 (benchmarked and validated in `docs/BENCHMARKS.md`).
 
-*Exact trait signatures are frozen after the zero-copy seam spike; see
-`crates/etl-core/src/source/`.*
+## Frozen v1 contracts
+
+Validated by the zero-copy seam spike (borrowed static chain: ~40 ns/record,
+25M records/s, **0 allocations/record** hard-asserted by a counting
+allocator; owned records measured 3.7× slower) and the ClickHouse RowBinary
+spike. The load-bearing shapes:
+
+```rust
+/// Data plane: a pollable unit pinned to one pipeline thread.
+pub trait SourceLane: Send {
+    type Batch<'a>: PayloadBatch<'a> where Self: 'a;
+    fn poll(&mut self, max_records: usize) -> Option<Self::Batch<'_>>;
+}
+
+/// One poll's payloads, streamed out, all borrowing the batch lifetime.
+pub trait PayloadBatch<'buf> {
+    fn next_payload(&mut self) -> Option<RawPayload<'buf>>;
+    fn ack(&self) -> &AckRef;              // one AckRef per poll batch
+}
+
+/// Lifetime→type family: lets a lifetime-parameterized record type cross
+/// generic and dyn boundaries. `Owned<T>` is provided for non-borrowing
+/// records.
+pub trait RecFamily: 'static { type Rec<'buf>: Send; }
+
+/// One payload in, 0..N records out, push-style. Dyn-compatible.
+pub trait Deserializer<F: RecFamily>: Send {
+    fn deserialize<'buf>(&mut self, raw: &RawPayload<'buf>, ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>) -> Result<usize, DeserError>;
+}
+
+/// Statically composed push stage (map/filter/flat_map monomorphize into
+/// one loop). `CollectorFor<F>` is the family-erased, dyn-compatible form
+/// used by flat_map's stack-borrowed `Emitter`.
+pub trait Collector<T> { fn push(&mut self, rec: Record<T>) -> Flow; }
+
+/// THE SEAM — the one erasure boundary, one virtual call per batch.
+/// Records are born (deserialized) and die (serialized into shard frames)
+/// inside a single call; no lifetime-parameterized type is ever stored
+/// across it, so `Box<dyn RunnableChain>` is legal.
+pub trait RunnableChain: Send {
+    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>) -> PushOutcome;
+    // + flush/drain lifecycle hooks
+}
+
+pub struct Record<T> { pub payload: T, meta: RecordMeta /* Copy */, ack: AckRef }
+
+/// Sink I/O half: framework owns batching/routing/retry/rotation; a
+/// connector writes one sealed batch to one replica endpoint.
+pub trait ShardWriter: Send + Sync + 'static {
+    type Endpoint: Send + Sync + 'static;
+    fn write_batch(&self, ep: &Self::Endpoint, batch: &SealedBatch)
+        -> impl Future<Output = Result<(), SinkError>> + Send;
+}
+
+/// Encoded on pipeline threads by the sink's pipeline-thread half
+/// (a `RowEncoder`), shipped to workers as sealed byte frames.
+pub struct SealedBatch {
+    frames: Vec<Bytes>,          // pre-encoded wire frames (~1 MiB each)
+    rows: u64, bytes: u64,
+    dedup_token: String,         // deterministic per batch
+    acks: Vec<AckRef>,
+}
+```
+
+Deltas applied over the spike code at freeze time: `push_batch` returns a
+`PushOutcome` carrying a resume cursor (partial-batch backpressure: never
+re-run operators for already-pushed records) instead of the spike's
+`Result<usize, _>`; the boundary trait gains flush/drain hooks;
+`RawPayload` carries the message key (for shard routing hashes); mapping to
+a *different* borrowed family uses an explicit `.map_to::<Family>()`
+builder method (closure inference limitation, measured acceptable).
+Reference implementation: branch `worktree-agent-a162b0ef2e0a29f4e`
+(`crates/etl-core/src/spike/`).
 
 ## Records and checkpointing
 
@@ -154,9 +226,22 @@ than per-replica) keeps batches full-sized — ClickHouse wants few big inserts
 ClickHouse specifics: direct-to-shard writes against local tables
 (`internal_replication=true`) rather than Distributed-table inserts (bigger
 blocks, less merge pressure, and a synchronous server ack that checkpointing
-requires); one `INSERT` per sealed batch (`Insert`, not `Inserter`, whose
-soft thresholds hide insert boundaries) carrying a deterministic
-`insert_deduplication_token` so in-session retries are idempotent.
+requires); one `INSERT` per sealed batch carrying a deterministic
+`insert_deduplication_token` so in-session retries are idempotent. Rows are
+encoded to RowBinary **on the pipeline threads** by etl-clickhouse's own
+serializer (the crate's is private — a semver win, verified round-tripping
+against a live server) and shipped as pre-formatted frames through
+`Client::insert_formatted_with` + `InsertFormatted::send(Bytes)` — the same
+transport the crate's typed path uses internally. Per-insert settings via
+`with_setting(..)` (`with_option` is deprecated), always including
+`insert_deduplicate=1` and `wait_end_of_query=1`; success of `end()` is the
+durable-ack point.
+
+⚠ Dedup sharp edge (verified live): on plain `MergeTree`, deduplication
+**silently no-ops** unless the table sets
+`non_replicated_deduplication_window > 0` (server default 0).
+`Replicated*MergeTree` defaults to a window of 100. etl-clickhouse
+documentation must state this prominently.
 
 ## Delivery semantics — honest version
 
@@ -241,7 +326,8 @@ MPL-2.0 — it stays out of the dependency tree until verified (enforced by
 | Operator dispatch | static in-chain, dyn per batch at boundary | preserves inlining; ~amortized-zero dispatch cost |
 | Ack design | refcounted per-batch Arc + contiguity ring | supports filter/flat_map/multi-sink for free; ~2 atomics/record |
 | Sink workers | per shard, replica rotation, max_inflight | full-size batches (ClickHouse merge pressure) + parallelism |
-| ClickHouse insert | `Insert` per sealed batch + dedup token | deterministic batch boundaries for acks and idempotent retries |
+| ClickHouse insert | pre-encoded RowBinary frames via `InsertFormatted` + dedup token | encode on pipeline threads; deterministic batch boundaries for acks and idempotent retries (spike-verified) |
+| Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; 40 ns/rec, 0 allocs/rec vs 3.7× slower owned (spike-measured) |
 | Metrics | `metrics` facade + prometheus exporter | facade *is* the MeterRegistry pattern; backend-pluggable |
 | Config | YAML (`yaml_serde`), opaque passthrough | serde_yaml archived; serde-yml has RUSTSEC advisory |
 | Error policy | Skip / Fail only, metrics-surfaced | no owned DLQ topic in target environments |

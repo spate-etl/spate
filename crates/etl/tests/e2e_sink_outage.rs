@@ -28,7 +28,13 @@ fn sink_outage_backpressures_and_loses_nothing() {
 
     h.create_topic(&params.topic, partitions);
     h.create_table(&params.table);
-    h.produce(&params.topic, &events(partitions, total));
+    // Two waves: the second is produced only after the sink is frozen, so
+    // the outage is guaranteed unwritable inflow. Producing everything
+    // upfront raced the pipeline — a fast run drained all rows before the
+    // pause landed and an idle sink feels no outage.
+    let all = events(partitions, total);
+    let (first_wave, second_wave) = all.split_at(15_000);
+    h.produce(&params.topic, first_wave);
 
     let pipeline = h.spawn_pipeline(&params);
 
@@ -38,6 +44,7 @@ fn sink_outage_backpressures_and_loses_nothing() {
 
     // ── Outage ─────────────────────────────────────────────────────────
     h.pause_clickhouse();
+    h.produce(&params.topic, second_wave);
     let outage = Duration::from_secs(15);
     let start = Instant::now();
     let mut saw_paused = false;

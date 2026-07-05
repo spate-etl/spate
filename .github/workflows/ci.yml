@@ -21,6 +21,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo check -p etl --examples --all-features
+      - run: cargo bench --no-run --workspace
 
   test:
     name: Test (stable)
@@ -42,3 +43,16 @@ jobs:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
+
+  integration:
+    name: End-to-end (Docker)
+    # The full Kafka → Avro → ClickHouse suite against real containers;
+    # runs on pushes to main (PRs get the docker-free jobs above).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p etl --all-features -- --ignored --test-threads=1
+        timeout-minutes: 30

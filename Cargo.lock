@@ -929,14 +929,23 @@ dependencies = [
 name = "etl"
 version = "0.1.0"
 dependencies = [
+ "apache-avro",
  "bytes",
+ "clickhouse",
  "etl-avro",
  "etl-clickhouse",
  "etl-core",
  "etl-kafka",
  "etl-test",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "metrics",
+ "rdkafka",
  "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tracing",
 ]

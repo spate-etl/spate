@@ -16,12 +16,44 @@ etl-kafka = { workspace = true, optional = true }
 etl-clickhouse = { workspace = true, optional = true }
 
 [dev-dependencies]
+apache-avro = { workspace = true }
 bytes = { workspace = true }
+clickhouse = { workspace = true }
 etl-test = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true }
 metrics = { workspace = true }
+rdkafka = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+testcontainers = { workspace = true, features = ["blocking"] }
+testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing = { workspace = true }
+
+# Docker-backed end-to-end scenarios; one binary each because the metrics
+# recorder is process-global. All #[ignore]d — run with:
+# `cargo test -p etl --all-features -- --ignored --test-threads=1`
+[[test]]
+name = "e2e_happy"
+required-features = ["full"]
+
+[[test]]
+name = "e2e_sink_outage"
+required-features = ["full"]
+
+[[test]]
+name = "e2e_rebalance"
+required-features = ["full"]
+
+[[test]]
+name = "e2e_drain_restart"
+required-features = ["full"]
+
+[[test]]
+name = "e2e_poison"
+required-features = ["full"]
 
 [[example]]
 name = "memory_pipeline"

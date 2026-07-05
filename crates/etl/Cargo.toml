@@ -15,6 +15,30 @@ etl-avro = { workspace = true, optional = true }
 etl-kafka = { workspace = true, optional = true }
 etl-clickhouse = { workspace = true, optional = true }
 
+[dev-dependencies]
+bytes = { workspace = true }
+etl-test = { workspace = true }
+metrics = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = { workspace = true }
+
+[[example]]
+name = "memory_pipeline"
+
+[[example]]
+name = "custom_operator"
+
+[[example]]
+name = "custom_source_sink"
+
+[[example]]
+name = "custom_metrics"
+
+[[example]]
+name = "kafka_avro_to_clickhouse"
+required-features = ["full"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]

@@ -1,0 +1,56 @@
+# The flagship pipeline: Kafka → Avro → chain → sharded ClickHouse.
+# Every ${VAR:-default} interpolates from the environment (Kubernetes:
+# ConfigMap/Secret env). Framework sections are typed and validated;
+# `source`/`deserializer`/`sink` bodies belong to their connectors.
+
+pipeline:
+  name: orders
+  # threads: 4          # default: available cores minus the I/O reserve
+  io_threads: 2
+
+checkpoint:
+  interval: 5s
+  max_pending_batches: 1024
+  drain_timeout: 25s    # keep below terminationGracePeriodSeconds
+
+backpressure:
+  max_inflight_bytes: 256MiB
+
+metrics:
+  exporter: prometheus
+  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
+
+source:
+  kafka:
+    brokers: ${KAFKA_BROKERS:-localhost:9092}
+    topic: ${KAFKA_TOPIC:-orders}
+    group_id: ${KAFKA_GROUP:-orders-etl}
+    commit_interval: 5s
+    rdkafka:
+      # Raw librdkafka passthrough. Properties the framework owns for
+      # correctness (offset storage, auto-commit) are rejected here.
+      auto.offset.reset: earliest
+
+deserializer:
+  avro:
+    mode: confluent
+    registry:
+      url: ${SCHEMA_REGISTRY_URL:-http://localhost:8081}
+    prewarm_subjects: ["${KAFKA_TOPIC:-orders}-value"]
+
+sink:
+  clickhouse:
+    table: ${CLICKHOUSE_TABLE:-orders}
+    # Column order is the RowBinary wire contract: it must match the row
+    # struct's field declaration order in the example.
+    columns: [id, customer, amount_cents, ts_ms]
+    shards:
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+    user: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+    batch:
+      max_rows: 500000
+      max_bytes: 128MiB
+      linger: 1s
+    inflight:
+      max_per_shard: 2

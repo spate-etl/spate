@@ -929,10 +929,16 @@ dependencies = [
 name = "etl"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "etl-avro",
  "etl-clickhouse",
  "etl-core",
  "etl-kafka",
+ "etl-test",
+ "metrics",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

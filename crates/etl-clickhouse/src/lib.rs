@@ -51,6 +51,9 @@
 //!     shards:
 //!       - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
 //!       - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
+//!     # Only when inserting into JSON columns (as String fields of JSON
+//!     # text — see the rowbinary type table):
+//!     settings: { input_format_binary_read_json_as_string: "1" }
 //! ```
 //!
 //! [`config::from_component_config`] turns that section into a
@@ -62,9 +65,14 @@
 pub mod config;
 mod encoder;
 pub mod rowbinary;
+mod schema;
+pub mod serde;
+mod types;
 mod writer;
 
-pub use config::{ClickHouseSink, ClickHouseSinkConfig, from_component_config};
+pub use config::{ClickHouseSink, ClickHouseSinkConfig, SchemaValidation, from_component_config};
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};
-pub use rowbinary::{DateTime64Millis, DateTimeSeconds, RowBinaryError, serialize_row};
+pub use rowbinary::{RowBinaryError, serialize_row};
+pub use schema::{RowSchema, SchemaError};
+pub use types::*;
 pub use writer::{ClickHouseEndpoint, ClickHouseWriter};

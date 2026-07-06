@@ -106,6 +106,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pipeline threads; workers merge chunks into big batches and write
     // one deduplication-tokened INSERT per batch, rotating replicas.
     let sink = etl::clickhouse::config::from_component_config(&config.sink)?;
+
+    // Opt-in fail-fast schema validation (`validate_schema: names|full` in
+    // the YAML): checks the configured columns against every replica's
+    // live table NOW — before any thread spawns — and hands the encoder
+    // the expected schema so the row struct is checked against it on the
+    // first record. `off` (the default) returns None and issues no
+    // queries.
+    let row_schema = io.block_on(sink.validate_schema())?;
+
     let num_shards = sink.endpoints.len();
     let (queues, receivers) = shard_queues(num_shards, 8);
     let budget = Arc::new(InflightBudget::new());
@@ -171,6 +180,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let queues = queues;
         let budget = Arc::clone(&budget);
         let name = pipeline_name.clone();
+        // With validation on, each pipeline thread's encoder clone checks
+        // the Order struct against the live schema on its first record.
+        let encoder = match row_schema {
+            Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
+            None => ClickHouseEncoder::<Order>::new(),
+        };
         move |_thread: usize| {
             chain_owned::<Order, _>(deserializer.clone())
                 .with_metrics(name.clone(), "main")
@@ -185,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ErrorPolicy::Skip,
                 )
                 .sink(
-                    ClickHouseEncoder::<Order>::new(),
+                    encoder.clone(),
                     KeyHashRouter,
                     ChunkConfig::default(),
                     queues.clone(),

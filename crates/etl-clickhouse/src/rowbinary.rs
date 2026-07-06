@@ -21,14 +21,33 @@
 //! | newtype enum variants | 1 discriminant byte (serde `variant_index`) + value (`Variant`) |
 //! | `char`, `()`, unit structs/variants, struct/tuple variants, `Option<Option<T>>` | **unsupported** — record-level error |
 //!
+//! ## Column-type coverage beyond the primitives
+//!
+//! | ClickHouse type | Rust field |
+//! |---|---|
+//! | `Date` / `Date32` | [`DateDays`](crate::DateDays) / [`Date32Days`](crate::Date32Days), or `chrono::NaiveDate` / `time::Date` via [`crate::serde`] (feature-gated) |
+//! | `DateTime` | [`DateTimeSeconds`], or `chrono::DateTime<Utc>` / `time::OffsetDateTime` via [`crate::serde`] |
+//! | `DateTime64(0/3/6/9)` | [`DateTime64Secs`](crate::DateTime64Secs) / [`DateTime64Millis`] / [`DateTime64Micros`](crate::DateTime64Micros) / [`DateTime64Nanos`](crate::DateTime64Nanos), or the `datetime64::*` serde modules |
+//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or the `time`/`time64::*` serde modules (server ≥ 25.6, `enable_time_time64_type=1`) |
+//! | `UUID` | `uuid::Uuid` with `#[serde(with = "etl_clickhouse::serde::uuid")]` (feature `uuid`). ⚠ `Uuid`'s default impl writes a LEB128-prefixed 16-byte string — silently wrong |
+//! | `IPv4` | `std::net::Ipv4Addr` with `#[serde(with = "etl_clickhouse::serde::ipv4")]`. ⚠ the default impl writes big-endian octets — silently wrong |
+//! | `IPv6` | `std::net::Ipv6Addr` bare (its default impl — 16 network-order bytes — is correct) |
+//! | `Enum8` / `Enum16` | `serde_repr` enums: `#[derive(Serialize_repr)] #[repr(i8)]` (or `i16`) |
+//! | `Decimal(P, S)` | [`Decimal32<S>`](crate::Decimal32) / [`Decimal64<S>`](crate::Decimal64) / [`Decimal128<S>`](crate::Decimal128) pre-scaled wrappers (or raw ints); `rust_decimal` conversions behind the `rust_decimal` feature |
+//! | `Int256` / `UInt256` | [`Int256`](crate::Int256) / [`UInt256`](crate::UInt256) (32 raw LE bytes) |
+//! | `JSON` | a `String` of JSON text **plus** the per-insert setting `input_format_binary_read_json_as_string: "1"` (see the crate docs' wiring example) |
+//! | `LowCardinality(T)` | the plain `T` — transparent on insert; the server builds the dictionary |
+//! | Geo (`Point`, `Ring`, `LineString`, `Polygon`, ...) | the [`Point`](crate::Point)/[`Ring`](crate::Ring)/... aliases (tuples and `Vec`s of `Float64`) |
+//! | `Dynamic`, `AggregateFunction(...)`, `Decimal256` | **unsupported** — no serde shape maps to them (`Decimal256`: scale manually into an [`Int256`](crate::Int256)) |
+//!
 //! ## The wire contract is field order
 //!
 //! RowBinary carries no column names: the `INSERT INTO t (a, b, c)` column
 //! list must match the struct's field declaration order exactly. Reordering
 //! struct fields is a breaking change to the pipeline's wire format.
 //! Column-type niceties (e.g. `DateTime64(3)` is an `Int64` of milliseconds
-//! on the wire) are handled with plain integer fields or newtype wrappers
-//! such as [`DateTime64Millis`].
+//! on the wire) are handled with plain integer fields, the newtype wrappers
+//! above, or the [`crate::serde`] field attributes.
 //!
 //! ## Unsupported serde attributes (they misalign columns)
 //!
@@ -158,28 +177,7 @@ pub fn serialize_row<T: Serialize + ?Sized>(
     })
 }
 
-/// Milliseconds since the Unix epoch, matching a `DateTime64(3)` column's
-/// wire representation (`Int64`). A documentation-carrying newtype: the
-/// encoding is transparently the inner `i64`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DateTime64Millis(pub i64);
-
-impl Serialize for DateTime64Millis {
-    fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_i64(self.0)
-    }
-}
-
-/// Seconds since the Unix epoch, matching a `DateTime` column's wire
-/// representation (`UInt32`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DateTimeSeconds(pub u32);
-
-impl Serialize for DateTimeSeconds {
-    fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u32(self.0)
-    }
-}
+pub use crate::types::{DateTime64Millis, DateTimeSeconds};
 
 fn put_leb128(buf: &mut BytesMut, mut value: u64) {
     loop {
@@ -801,6 +799,40 @@ mod tests {
             ),
             "declared/serialized field-count mismatch must error"
         );
+    }
+
+    #[test]
+    fn serde_repr_enums_encode_as_enum8_and_enum16() {
+        // The documented mechanism for Enum8/Enum16 columns: serde_repr
+        // serializes the discriminant as its #[repr] integer, which the
+        // serializer writes fixed-width like any other i8/i16.
+        #[derive(serde_repr::Serialize_repr)]
+        #[repr(i8)]
+        enum Level8 {
+            #[allow(dead_code)]
+            Low = -1,
+            High = 2,
+        }
+        #[derive(serde_repr::Serialize_repr)]
+        #[repr(i16)]
+        enum Level16 {
+            Big = 300,
+        }
+        assert_eq!(enc(&Level8::High), [2]);
+        assert_eq!(enc(&Level8::Low), [0xff]);
+        assert_eq!(enc(&Level16::Big), 300i16.to_le_bytes());
+    }
+
+    #[test]
+    fn ipv6_default_impl_matches_the_16_byte_wire_format() {
+        // Unlike Ipv4Addr (see crate::serde::ipv4), Ipv6Addr's default
+        // serde impl — 16 network-order octets — is exactly the IPv6
+        // column's FixedString(16)-style layout.
+        use std::net::Ipv6Addr;
+        let localhost = Ipv6Addr::LOCALHOST;
+        assert_eq!(enc(&localhost), localhost.octets());
+        let addr: Ipv6Addr = "2001:db8::8a2e:370:7334".parse().unwrap();
+        assert_eq!(enc(&addr), addr.octets());
     }
 
     #[test]

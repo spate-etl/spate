@@ -76,6 +76,11 @@ default = []
 avro = ["dep:etl-avro"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
+# ClickHouse ecosystem column types (each implies `clickhouse`).
+clickhouse-uuid = ["clickhouse", "etl-clickhouse/uuid"]
+clickhouse-chrono = ["clickhouse", "etl-clickhouse/chrono"]
+clickhouse-time = ["clickhouse", "etl-clickhouse/time"]
+clickhouse-rust-decimal = ["clickhouse", "etl-clickhouse/rust_decimal"]
 full = ["avro", "kafka", "clickhouse"]
 
 [package.metadata.docs.rs]

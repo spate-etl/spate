@@ -18,10 +18,29 @@ humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+rust_decimal = { workspace = true, optional = true }
+
+[features]
+## `uuid::Uuid` fields for `UUID` columns via `serde::uuid`.
+uuid = ["dep:uuid"]
+## `chrono` fields (NaiveDate, DateTime<Utc>, Duration) for date/time
+## columns via `serde::chrono`.
+chrono = ["dep:chrono"]
+## `time` crate fields (Date, OffsetDateTime, Duration) for date/time
+## columns via `serde::time`.
+time = ["dep:time"]
+## Checked conversions between `rust_decimal::Decimal` and the pre-scaled
+## `Decimal32/64/128` wrappers.
+rust_decimal = ["dep:rust_decimal"]
 
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["lz4", "rustls-tls", "test-util"] }
 crossbeam-channel = { workspace = true }
+proptest = { workspace = true }
+serde_repr = { workspace = true }
 hyper = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }

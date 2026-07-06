@@ -12,7 +12,7 @@ use super::chain::{FatalSlot, OpMeterSlot, StageLifecycle};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckSet, BatchId};
 use crate::deser::RecFamily;
-use crate::error::{ErrorPolicy, FatalError};
+use crate::error::{ErrorClass, ErrorPolicy, FatalError, SinkError};
 use crate::record::{Flow, Record};
 use crate::sink::{ChunkSendError, EncodedChunk, RowEncoder, ShardQueues, ShardRouter};
 use crate::telemetry::RateLimit;
@@ -30,7 +30,9 @@ pub struct ChunkConfig {
     /// **not** bound insert sizes.
     pub target_bytes: usize,
     /// Policy for record-level encoder failures. `Skip` drops the record
-    /// (metrics-counted); `Fail` stops the pipeline.
+    /// (metrics-counted); `Fail` stops the pipeline. An encoder error of
+    /// [`ErrorClass::Fatal`] stops the pipeline regardless of this policy
+    /// — fatal means the component is broken, not the record.
     pub encode_policy: ErrorPolicy,
 }
 
@@ -221,8 +223,19 @@ where
                 // The encoder may have written a partial row; roll it back
                 // so the frame stays well-formed.
                 shard.buf.truncate(before);
+                // A Fatal-class error means the component is broken, not
+                // the record ("processing must stop"): it overrides the
+                // record-level policy — skipping it once per record would
+                // silently drop everything.
+                let fatal_class = matches!(
+                    e,
+                    SinkError::Client {
+                        class: ErrorClass::Fatal,
+                        ..
+                    }
+                );
                 match self.cfg.encode_policy {
-                    ErrorPolicy::Skip => {
+                    ErrorPolicy::Skip if !fatal_class => {
                         self.meter.0.skipped();
                         self.meter.0.record_error();
                         crate::rate_limited_warn!(

@@ -79,7 +79,8 @@ impl Deserializer<LogF> for LogDeser {
     }
 }
 
-/// Length-prefixed encoder for `SubEvent`; fails on `BADROW` chunks.
+/// Length-prefixed encoder for `SubEvent`; fails record-level on `BADROW`
+/// chunks and fatally on `FATALROW` chunks.
 #[derive(Clone, Default)]
 struct SubEncoder;
 
@@ -95,6 +96,12 @@ impl RowEncoder<SubF> for SubEncoder {
             return Err(SinkError::Client {
                 class: crate::error::ErrorClass::RecordLevel,
                 reason: "unencodable row".into(),
+            });
+        }
+        if rec.payload.chunk == b"FATALROW" {
+            return Err(SinkError::Client {
+                class: crate::error::ErrorClass::Fatal,
+                reason: "encoder broken".into(),
             });
         }
         buf.extend_from_slice(rec.payload.chunk);
@@ -431,6 +438,48 @@ fn encoder_fail_policy_is_fatal() {
     assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
     drop(batch);
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+}
+
+#[test]
+fn fatal_class_encoder_errors_override_the_skip_policy() {
+    // A Fatal-class error says the encoder itself is broken ("processing
+    // must stop"); under the default Skip policy it must still stop the
+    // pipeline instead of silently dropping every record.
+    let (queues, _rxs) = shard_queues(1, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(), // encode_policy: Skip
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["a:FATALROW"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
+    drop(batch);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+
+    // Record-level errors still skip under the same policy.
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+    let bufs = payloads(&["a:ok|BADROW"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    let _ = c.flush();
+    assert_eq!(drain_rows(&mut rxs[0]), vec![b"ok".to_vec()]);
 }
 
 // ---- backpressure / resume semantics ----------------------------------------

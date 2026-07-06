@@ -5,12 +5,14 @@
 //! produces the writer, per-shard replica endpoints, and the framework's
 //! [`SinkPoolConfig`].
 
+use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
 use etl_core::sink::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The `clickhouse` sink section.
@@ -72,6 +74,36 @@ pub struct ClickHouseSinkConfig {
     /// Client-side send/end timeouts.
     #[serde(default)]
     pub timeouts: TimeoutSection,
+    /// Opt-in startup schema validation (see [`SchemaValidation`]).
+    /// `off` by default: today's behavior, no queries issued.
+    #[serde(default)]
+    pub validate_schema: SchemaValidation,
+}
+
+/// When to check the configured columns and row struct against the live
+/// table (via [`ClickHouseSink::validate_schema`]).
+///
+/// ```yaml
+/// sink:
+///   clickhouse:
+///     validate_schema: full   # off | names | full
+/// ```
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemaValidation {
+    /// No validation (default).
+    #[default]
+    Off,
+    /// At startup: every configured column exists and is insertable on
+    /// every replica. At the first record: struct field names and order
+    /// match the configured columns.
+    Names,
+    /// [`SchemaValidation::Names`] plus a class-based type-compatibility
+    /// check per position (permissive: a `u32` may feed `UInt32`,
+    /// `DateTime`, or `IPv4`; unknown server types always pass; the
+    /// `Nullable`-vs-`Option` mismatch always fails — that one is wire
+    /// corruption).
+    Full,
 }
 
 /// One shard's replica endpoints.
@@ -208,6 +240,24 @@ pub struct ClickHouseSink {
     pub endpoints: Vec<Vec<ClickHouseEndpoint>>,
     /// Pool knobs mapped onto the framework's configuration.
     pub pool: SinkPoolConfig,
+    /// What `validate_schema()` will check, captured from the config.
+    schema_check: schema::SchemaCheck,
+}
+
+impl ClickHouseSink {
+    /// Opt-in startup schema validation. Call **after** [`build`] and
+    /// **before** `SinkPool::spawn` consumes `endpoints` — a failure here
+    /// exits before any pipeline thread or sink worker exists.
+    ///
+    /// Instant `Ok(None)` when `validate_schema: off`. Otherwise fetches
+    /// `system.columns` from every replica of every shard, fails fast
+    /// with a readable diff (missing / non-insertable columns, replica
+    /// drift, missing table), and returns the parsed schema to pass to
+    /// [`crate::ClickHouseEncoder::with_schema`] for the first-record
+    /// struct check.
+    pub async fn validate_schema(&self) -> Result<Option<Arc<RowSchema>>, SchemaError> {
+        schema::validate(&self.schema_check, &self.endpoints).await
+    }
 }
 
 /// Build a [`ClickHouseSink`] from the opaque `sink: { clickhouse: ... }`
@@ -280,6 +330,12 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
         writer,
         endpoints,
         pool,
+        schema_check: schema::SchemaCheck {
+            mode: cfg.validate_schema,
+            database: cfg.database.clone(),
+            table: cfg.table.clone(),
+            columns: cfg.columns.clone(),
+        },
     })
 }
 
@@ -549,6 +605,25 @@ settings: { insert_quorum: "auto" }
              breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
         ));
         assert!(sink.is_ok(), "boundary-valid config must build: {sink:?}");
+    }
+
+    #[test]
+    fn validate_schema_modes_parse() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        for (yaml, expected) in [
+            ("", SchemaValidation::Off),
+            ("validate_schema: off\n", SchemaValidation::Off),
+            ("validate_schema: names\n", SchemaValidation::Names),
+            ("validate_schema: full\n", SchemaValidation::Full),
+        ] {
+            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
+            assert_eq!(cfg.validate_schema, expected, "for `{yaml}`");
+        }
+        let err = serde_yaml::from_str::<ClickHouseSinkConfig>(&format!(
+            "{base}validate_schema: everything\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("everything"), "{err}");
     }
 
     #[test]

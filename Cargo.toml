@@ -39,6 +39,10 @@ serde_json = "1.0"
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 serde_path_to_error = "0.1"
 humantime-serde = "1.1"
+uuid = { version = "1", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+time = { version = "0.3", default-features = false, features = ["std", "macros"] }
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
 bytesize = { version = "2.4", features = ["serde"] }
 
 # Errors, logging, metrics.
@@ -63,6 +67,7 @@ serde_avro_fast = "2.1"
 schema_registry_converter = { version = "4.9", default-features = false }
 
 # Test and bench tooling.
+serde_repr = "0.1"
 tempfile = "3"
 testcontainers = "0.27"
 testcontainers-modules = "0.15"

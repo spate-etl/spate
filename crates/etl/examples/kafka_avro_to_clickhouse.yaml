@@ -54,6 +54,9 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
+    # Fail startup (and the first record) when the columns, row struct,
+    # and live table disagree: off | names | full.
+    validate_schema: full
     batch:
       max_rows: 500000
       max_bytes: 128MiB

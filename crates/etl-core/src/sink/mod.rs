@@ -70,7 +70,11 @@ pub struct EncodedChunk {
 /// like [`Deserializer`](crate::deser::Deserializer).
 pub trait RowEncoder<F: RecFamily>: Send {
     /// Append `rec`'s encoding to `buf`. Errors are record-level and
-    /// subject to the sink stage's `ErrorPolicy`.
+    /// subject to the sink stage's `ErrorPolicy` — except errors of
+    /// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal), which stop
+    /// the pipeline regardless of policy (fatal means the encoder itself
+    /// is broken, e.g. the row type cannot match the target schema; every
+    /// subsequent record would fail identically).
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,

@@ -8,8 +8,12 @@
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
+//! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
+//! | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns |
+//! | `clickhouse-time` | `time` crate fields for the same date/time columns |
+//! | `clickhouse-rust-decimal` | `rust_decimal::Decimal` conversions for `Decimal` columns |
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
-//! | `full` | All of the above |
+//! | `full` | All connectors (`avro`, `kafka`, `clickhouse`) |
 //!
 //! # Anatomy of a pipeline
 //!

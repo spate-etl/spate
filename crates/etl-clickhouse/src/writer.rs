@@ -23,6 +23,12 @@ impl ClickHouseEndpoint {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    /// Crate-internal access for schema validation queries; the client
+    /// type stays out of the public API.
+    pub(crate) fn client(&self) -> &clickhouse::Client {
+        &self.client
+    }
 }
 
 impl fmt::Debug for ClickHouseEndpoint {

@@ -2,6 +2,7 @@
 //! threads.
 
 use crate::rowbinary;
+use crate::schema::{self, RowSchema};
 use bytes::BytesMut;
 use etl_core::deser::Owned;
 use etl_core::error::{ErrorClass, SinkError};
@@ -9,6 +10,7 @@ use etl_core::record::Record;
 use etl_core::sink::RowEncoder;
 use serde::Serialize;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// Encodes `T: Serialize` records into RowBinary via this crate's
 /// [serializer](crate::rowbinary). Runs inside the chain's terminal stage
@@ -16,16 +18,46 @@ use std::marker::PhantomData;
 ///
 /// The struct's **field declaration order is the wire contract** — it must
 /// match the column list configured for the sink (see the crate docs).
+/// [`ClickHouseEncoder::with_schema`] checks that contract against the
+/// live table's schema on each pipeline thread's first record.
 #[derive(Debug)]
 pub struct ClickHouseEncoder<T> {
+    check: Option<CheckState>,
     _row: PhantomData<fn(T)>,
+}
+
+#[derive(Debug)]
+struct CheckState {
+    expected: Arc<RowSchema>,
+    done: bool,
 }
 
 impl<T> ClickHouseEncoder<T> {
     /// An encoder for rows of type `T`.
     #[must_use]
     pub fn new() -> Self {
-        ClickHouseEncoder { _row: PhantomData }
+        ClickHouseEncoder {
+            check: None,
+            _row: PhantomData,
+        }
+    }
+
+    /// An encoder that validates the row struct against `expected` (the
+    /// schema returned by [`crate::ClickHouseSink::validate_schema`]) on
+    /// the first record it encodes: field names and order always, type
+    /// classes in `full` mode. A mismatch is an
+    /// [`ErrorClass::Fatal`] error — it stops the pipeline before any
+    /// misaligned batch is sent. Steady-state cost after the first record
+    /// is one predictable branch.
+    #[must_use]
+    pub fn with_schema(expected: Arc<RowSchema>) -> Self {
+        ClickHouseEncoder {
+            check: Some(CheckState {
+                expected,
+                done: false,
+            }),
+            _row: PhantomData,
+        }
     }
 }
 
@@ -37,7 +69,15 @@ impl<T> Default for ClickHouseEncoder<T> {
 
 impl<T> Clone for ClickHouseEncoder<T> {
     fn clone(&self) -> Self {
-        Self::new()
+        // Each pipeline thread's clone re-validates its own first record:
+        // the check is cheap, and threads must not race a shared flag.
+        ClickHouseEncoder {
+            check: self.check.as_ref().map(|c| CheckState {
+                expected: Arc::clone(&c.expected),
+                done: false,
+            }),
+            _row: PhantomData,
+        }
     }
 }
 
@@ -46,6 +86,21 @@ where
     T: Serialize + Send + 'static,
 {
     fn encode<'buf>(&mut self, rec: &Record<T>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        if let Some(check) = &mut self.check
+            && !check.done
+        {
+            let fields = schema::probe::probe_row(&rec.payload).map_err(|e| SinkError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!("schema validation could not probe the row struct: {e}"),
+            })?;
+            schema::check_first_record(&check.expected, &fields).map_err(|diff| {
+                SinkError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: diff,
+                }
+            })?;
+            check.done = true;
+        }
         rowbinary::serialize_row(&rec.payload, buf).map_err(|e| SinkError::Client {
             class: ErrorClass::RecordLevel,
             reason: format!("rowbinary encoding failed: {e}"),

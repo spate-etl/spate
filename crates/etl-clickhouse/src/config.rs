@@ -10,8 +10,9 @@ use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
 use etl_core::sink::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +33,7 @@ use std::time::Duration;
 ///     retry: { initial: 100ms, max: 10s, multiplier: 2.0, jitter: 0.2, max_attempts: 0 }
 ///     breaker: { failure_threshold: 3, open_for: 5s, half_open_probes: 1 }
 ///     timeouts: { send: 30s, end: 180s }
+///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -74,6 +76,10 @@ pub struct ClickHouseSinkConfig {
     /// Client-side send/end timeouts.
     #[serde(default)]
     pub timeouts: TimeoutSection,
+    /// Transport (HTTP-body) compression for insert requests. `lz4` by
+    /// default (see [`Compression`]).
+    #[serde(default)]
+    pub compression: Compression,
     /// Opt-in startup schema validation (see [`SchemaValidation`]).
     /// `off` by default: today's behavior, no queries issued.
     #[serde(default)]
@@ -104,6 +110,81 @@ pub enum SchemaValidation {
     /// `Nullable`-vs-`Option` mismatch always fails — that one is wire
     /// corruption).
     Full,
+}
+
+/// Transport (HTTP-body) compression the client applies to insert requests.
+///
+/// This is wire-level compression negotiated per connection — it is unrelated
+/// to on-disk column `CODEC`s declared in table DDL, which stay the caller's
+/// responsibility. Deserialized from a scalar string:
+///
+/// ```yaml
+/// compression: lz4         # off | none | lz4 | zstd | zstd:<1-22>
+/// ```
+///
+/// `lz4` is fast and low-CPU (the default, matching prior behavior); `zstd`
+/// trades CPU for a better ratio and accepts an explicit level (`zstd` alone
+/// uses level 3). `off` disables compression.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compression {
+    /// No transport compression.
+    None,
+    /// LZ4 (default): fast, low CPU, moderate ratio.
+    #[default]
+    Lz4,
+    /// ZSTD at the given level (`1..=22`): higher ratio, more CPU.
+    Zstd(i32),
+}
+
+/// Default ZSTD level, matching the `clickhouse`/`zstd` crate default.
+const ZSTD_DEFAULT_LEVEL: i32 = 3;
+
+impl FromStr for Compression {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" | "none" => Ok(Compression::None),
+            "lz4" => Ok(Compression::Lz4),
+            "zstd" => Ok(Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
+            other => {
+                let raw = other.strip_prefix("zstd:").ok_or_else(|| {
+                    format!(
+                        "unknown compression `{other}`: expected off, lz4, zstd, or zstd:<1-22>"
+                    )
+                })?;
+                let level: i32 = raw.parse().map_err(|_| {
+                    format!("invalid zstd level `{raw}`: expected an integer in [1, 22]")
+                })?;
+                if !(1..=22).contains(&level) {
+                    return Err(format!("zstd level must be in [1, 22] (got {level})"));
+                }
+                Ok(Compression::Zstd(level))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Compression {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // A scalar with an embedded level (`zstd:9`), so parse from the string
+        // rather than deriving a tagged enum; serde attaches the field path.
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(de::Error::custom)
+    }
+}
+
+/// Map our stable [`Compression`] onto the `clickhouse` crate's enum. Private:
+/// the 0.x library type must never surface in this crate's public API.
+fn to_client_compression(c: Compression) -> clickhouse::Compression {
+    match c {
+        Compression::None => clickhouse::Compression::None,
+        Compression::Lz4 => clickhouse::Compression::Lz4,
+        Compression::Zstd(level) => clickhouse::Compression::Zstd(level),
+    }
 }
 
 /// One shard's replica endpoints.
@@ -297,6 +378,7 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
                     if let Some(password) = &cfg.password {
                         client = client.with_password(password);
                     }
+                    client = client.with_compression(to_client_compression(cfg.compression));
                     ClickHouseEndpoint::new(client, url.clone())
                 })
                 .collect()
@@ -416,6 +498,18 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         return fail(format!(
             "retry.initial ({:?}) must not exceed retry.max ({:?})",
             retry.initial, retry.max
+        ));
+    }
+
+    // Compression: the string parser already bounds the level, but a
+    // programmatic `build()` caller can construct `Zstd(level)` directly, and
+    // an out-of-range level is rejected by the server mid-stream (a retryable
+    // code — an infinite loop). Reject at load, mirroring the retry checks.
+    if let Compression::Zstd(level) = cfg.compression
+        && !(1..=22).contains(&level)
+    {
+        return fail(format!(
+            "compression zstd level must be in [1, 22] (got {level})"
         ));
     }
 
@@ -642,5 +736,53 @@ settings: { insert_quorum: "auto" }
         ))
         .unwrap_err();
         assert!(err.to_string().contains("max_rowz"), "{err}");
+    }
+
+    #[test]
+    fn compression_parses_and_defaults_to_lz4() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        for (yaml, expected) in [
+            ("", Compression::Lz4),
+            ("compression: off\n", Compression::None),
+            ("compression: none\n", Compression::None),
+            ("compression: lz4\n", Compression::Lz4),
+            ("compression: zstd\n", Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
+            ("compression: \"zstd:9\"\n", Compression::Zstd(9)),
+            ("compression: \"zstd:1\"\n", Compression::Zstd(1)),
+            ("compression: \"zstd:22\"\n", Compression::Zstd(22)),
+        ] {
+            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
+            assert_eq!(cfg.compression, expected, "for `{yaml}`");
+        }
+    }
+
+    #[test]
+    fn compression_rejects_invalid_strings_with_a_path() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        for (value, needle) in [
+            ("gzip", "unknown compression"),
+            ("\"zstd:0\"", "[1, 22]"),
+            ("\"zstd:99\"", "[1, 22]"),
+            ("\"zstd:x\"", "invalid zstd level"),
+        ] {
+            let err = serde_yaml::from_str::<ClickHouseSinkConfig>(&format!(
+                "{base}compression: {value}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "expected `{needle}` for `{value}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_rejects_out_of_range_programmatic_zstd_level() {
+        let mut cfg: ClickHouseSinkConfig =
+            serde_yaml::from_str("table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n")
+                .unwrap();
+        cfg.compression = Compression::Zstd(99);
+        let err = build(cfg).unwrap_err();
+        assert!(err.to_string().contains("[1, 22]"), "{err}");
     }
 }

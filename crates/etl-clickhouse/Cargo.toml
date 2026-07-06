@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }
-clickhouse = { workspace = true, features = ["lz4", "rustls-tls"] }
+clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls"] }
 etl-core = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
@@ -37,7 +37,7 @@ time = ["dep:time"]
 rust_decimal = ["dep:rust_decimal"]
 
 [dev-dependencies]
-clickhouse = { workspace = true, features = ["lz4", "rustls-tls", "test-util"] }
+clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls", "test-util"] }
 crossbeam-channel = { workspace = true }
 proptest = { workspace = true }
 serde_repr = { workspace = true }

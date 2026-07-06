@@ -20,9 +20,12 @@ struct TestRow {
 
 fn sink_for(url: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        // `off`: the crate's `record` handler decodes the request body with no
+        // decompression, so a decodable round-trip requires an uncompressed body.
         r#"
 table: orders
 columns: [id, name, score]
+compression: off
 shards:
   - replicas: ["{url}"]
 "#
@@ -171,9 +174,12 @@ fn matching_columns() -> Vec<SysColumn> {
 
 fn sink_with(url: &str, mode: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        // `off`: the mock's `provide` handler returns uncompressed responses,
+        // so the schema-validation SELECTs must not request compression.
         r#"
 table: orders
 columns: [id, name, score]
+compression: off
 shards:
   - replicas: ["{url}"]
 validate_schema: {mode}
@@ -401,6 +407,7 @@ async fn replica_disagreement_fails_startup() {
         r#"
 table: orders
 columns: [id, name, score]
+compression: off
 shards:
   - replicas: ["{}", "{}"]
 validate_schema: names

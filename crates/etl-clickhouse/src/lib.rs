@@ -70,7 +70,9 @@ pub mod serde;
 mod types;
 mod writer;
 
-pub use config::{ClickHouseSink, ClickHouseSinkConfig, SchemaValidation, from_component_config};
+pub use config::{
+    ClickHouseSink, ClickHouseSinkConfig, Compression, SchemaValidation, from_component_config,
+};
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};
 pub use rowbinary::{RowBinaryError, serialize_row};
 pub use schema::{RowSchema, SchemaError};

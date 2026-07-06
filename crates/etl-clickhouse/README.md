@@ -27,6 +27,24 @@ Crash replay re-batches with new tokens and lands rows twice regardless —
 at-least-once by contract. `ReplacingMergeTree` with a version column is
 the sanctioned pattern for replay tolerance.
 
+## Transport compression
+
+Insert (and schema-probe) request/response bodies are compressed on the wire.
+This is **transport compression only** — negotiated per connection with the
+server — and is independent of the on-disk column `CODEC`s you declare in table
+DDL, which remain your responsibility.
+
+```yaml
+sink:
+  clickhouse:
+    compression: lz4      # off | none | lz4 (default) | zstd | zstd:<1-22>
+```
+
+`lz4` (the default) is fast and low-CPU — the right choice for high-throughput
+ingest. `zstd` trades CPU for a better ratio, worth it when network egress is
+the bottleneck (e.g. cross-region); `zstd` alone uses level 3, or pin a level
+with `zstd:9`. `off` disables compression entirely.
+
 ## Column order is the wire contract
 
 RowBinary carries no column names: the configured `columns` list and the

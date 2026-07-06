@@ -4,6 +4,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste` is unmaintained (author archived it) but has no safe replacement
+    # in this position: it reaches us only through the `clickhouse` dev-dependency
+    # (clickhouse -> polonius-the-crab -> higher-kinded-types -> paste). It is a
+    # proc-macro with no runtime or network surface. Re-check when clickhouse
+    # ships a release that drops it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained transitive dev-dep of clickhouse; no upgrade path" },
+]
 
 [licenses]
 version = 2
@@ -17,6 +25,7 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
+    "CDLA-Permissive-2.0", # webpki-roots (Mozilla CCADB root store data)
 ]
 # NOTE: serde_avro_fast (the evaluated zero-copy Avro backend) was cut over
 # conflicting license metadata: every published release through 2.1.0

@@ -9,7 +9,10 @@ use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
-use etl_core::sink::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
+use etl_core::sink::{
+    BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
+    SinkProbeFn, endpoint_probe,
+};
 use serde::{Deserialize, Deserializer, de};
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -323,6 +326,10 @@ pub struct ClickHouseSink {
     pub pool: SinkPoolConfig,
     /// What `validate_schema()` will check, captured from the config.
     schema_check: schema::SchemaCheck,
+    /// An independent client set for readiness probing: sharing the insert
+    /// clients would report the write path healthy merely because probing
+    /// keeps its connections warm.
+    probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
 }
 
 impl ClickHouseSink {
@@ -338,6 +345,32 @@ impl ClickHouseSink {
     /// struct check.
     pub async fn validate_schema(&self) -> Result<Option<Arc<RowSchema>>, SchemaError> {
         schema::validate(&self.schema_check, &self.endpoints).await
+    }
+
+    /// A readiness probe over every replica of every shard, using the
+    /// sink's independent probe client set (never the insert clients).
+    /// This is the probe [`SinkBundle::into_parts`] attaches; manual
+    /// assemblies hand it to `SinkRuntime.probe` directly.
+    #[must_use]
+    pub fn probe_fn(&self) -> SinkProbeFn {
+        endpoint_probe(self.writer.clone(), Arc::clone(&self.probe_endpoints))
+    }
+}
+
+impl SinkBundle for ClickHouseSink {
+    type Writer = ClickHouseWriter;
+
+    fn into_parts(self) -> SinkParts<ClickHouseWriter> {
+        let probe = self.probe_fn();
+        let replica_labels = self
+            .endpoints
+            .iter()
+            .map(|shard| shard.iter().map(|e| e.url().to_string()).collect())
+            .collect();
+        SinkParts::new(self.writer, self.endpoints, self.pool)
+            .with_component_type("clickhouse")
+            .with_replica_labels(replica_labels)
+            .with_probe(probe)
     }
 }
 
@@ -360,30 +393,10 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
         cfg.timeouts.end,
     );
 
-    let endpoints = cfg
-        .shards
-        .iter()
-        .map(|shard| {
-            shard
-                .replicas
-                .iter()
-                .map(|url| {
-                    let mut client = clickhouse::Client::default().with_url(url);
-                    if let Some(db) = &cfg.database {
-                        client = client.with_database(db);
-                    }
-                    if let Some(user) = &cfg.user {
-                        client = client.with_user(user);
-                    }
-                    if let Some(password) = &cfg.password {
-                        client = client.with_password(password);
-                    }
-                    client = client.with_compression(to_client_compression(cfg.compression));
-                    ClickHouseEndpoint::new(client, url.clone())
-                })
-                .collect()
-        })
-        .collect();
+    // Two independent client sets: inserts and readiness probes must not
+    // share connection pools (see `ClickHouseSink::probe_endpoints`).
+    let endpoints = make_endpoints(&cfg);
+    let probe_endpoints = Arc::new(make_endpoints(&cfg));
 
     let pool = SinkPoolConfig {
         batch: BatchConfig {
@@ -418,7 +431,35 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
             table: cfg.table.clone(),
             columns: cfg.columns.clone(),
         },
+        probe_endpoints,
     })
+}
+
+/// One connected client per replica, `[shard][replica]`.
+fn make_endpoints(cfg: &ClickHouseSinkConfig) -> Vec<Vec<ClickHouseEndpoint>> {
+    cfg.shards
+        .iter()
+        .map(|shard| {
+            shard
+                .replicas
+                .iter()
+                .map(|url| {
+                    let mut client = clickhouse::Client::default().with_url(url);
+                    if let Some(db) = &cfg.database {
+                        client = client.with_database(db);
+                    }
+                    if let Some(user) = &cfg.user {
+                        client = client.with_user(user);
+                    }
+                    if let Some(password) = &cfg.password {
+                        client = client.with_password(password);
+                    }
+                    client = client.with_compression(to_client_compression(cfg.compression));
+                    ClickHouseEndpoint::new(client, url.clone())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {

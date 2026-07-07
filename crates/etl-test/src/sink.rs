@@ -5,7 +5,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use etl_core::deser::Owned;
 use etl_core::error::{ErrorClass, SinkError};
 use etl_core::record::Record;
-use etl_core::sink::{RowEncoder, SealedBatch, ShardWriter};
+use etl_core::sink::{
+    RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig, endpoint_probe,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -34,6 +36,7 @@ pub enum ScriptedResult {
 
 /// One scripted write outcome: an optional delay, then a result.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriteOutcome {
     /// Sleep this long (tokio time — controllable with `test-util`) before
     /// resolving.
@@ -246,6 +249,70 @@ impl ShardWriter for CaptureWriter {
                 }),
             }
         }
+    }
+}
+
+/// Build a ready-to-run capturing sink: a `shards × replicas` in-memory
+/// topology over a [`CaptureWriter`], with its scripting handle.
+///
+/// The returned [`CaptureSink`] implements
+/// [`SinkBundle`](etl_core::sink::SinkBundle), so it drops straight into
+/// `Pipeline::sink` — the first-class mock path for testing whole
+/// assemblies. Unscripted writes succeed; drive failures and probe health
+/// through the [`SinkScript`].
+#[must_use]
+pub fn capture_sink(shards: usize, replicas: usize) -> (CaptureSink, SinkScript) {
+    assert!(shards > 0, "capture_sink needs at least one shard");
+    assert!(replicas > 0, "capture_sink needs at least one replica");
+    let (writer, script) = capture_writer();
+    (
+        CaptureSink {
+            writer,
+            shards,
+            replicas,
+            pool: SinkPoolConfig::default(),
+        },
+        script,
+    )
+}
+
+/// A capturing sink bundle for whole-pipeline tests — see [`capture_sink`].
+#[derive(Clone, Debug)]
+pub struct CaptureSink {
+    writer: CaptureWriter,
+    shards: usize,
+    replicas: usize,
+    pool: SinkPoolConfig,
+}
+
+impl CaptureSink {
+    /// Override the pool tuning (tests usually shrink `linger`).
+    #[must_use]
+    pub fn with_pool_config(mut self, pool: SinkPoolConfig) -> Self {
+        self.pool = pool;
+        self
+    }
+}
+
+impl SinkBundle for CaptureSink {
+    type Writer = CaptureWriter;
+
+    fn into_parts(self) -> SinkParts<CaptureWriter> {
+        let endpoints: Vec<Vec<ReplicaTag>> = (0..self.shards)
+            .map(|shard| {
+                (0..self.replicas)
+                    .map(|replica| ReplicaTag { shard, replica })
+                    .collect()
+            })
+            .collect();
+        // A mock scripts probe health directly (via `SinkScript`), so this
+        // reuses the capture writer rather than an independent client set —
+        // the separate-probe-clients rule matters for real connectors with a
+        // live pool, not an in-memory fake.
+        let probe = endpoint_probe(self.writer.clone(), Arc::new(endpoints.clone()));
+        SinkParts::new(self.writer, endpoints, self.pool)
+            .with_component_type("capture")
+            .with_probe(probe)
     }
 }
 

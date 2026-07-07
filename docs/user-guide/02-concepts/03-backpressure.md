@@ -1,0 +1,112 @@
+# Backpressure
+
+When the sink slows down, something upstream has to give. etl-rs's answer
+is built around one invariant, with two cooperating layers on top of it.
+
+## The invariant: a source thread never blocks on a channel send
+
+The chain's terminal stage hands encoded chunks to the per-shard queues
+with `try_send` — never a blocking `send`. When a queue rejects (or the
+byte budget crosses its high watermark), the source loop **pauses the
+offending lanes and keeps polling**.
+
+Why this is non-negotiable for Kafka: a poll loop parked in `send()` stops
+calling `poll()`. After `max.poll.interval.ms` without a poll, the broker
+evicts the consumer from its group and triggers a rebalance — which pauses
+*other* consumers, reassigns partitions, and generally converts "the sink
+is slow" into a rebalance storm across the whole group. Pausing lanes while
+continuing to poll keeps the consumer alive, keeps rebalance callbacks
+serviced, and confines the slowdown to exactly where it belongs.
+
+The same reasoning protects the ack path: acknowledgements travel over an
+unbounded channel and atomic counters, so a full data path can never block
+a completion signal (see
+[Delivery guarantees](02-delivery-guarantees.md)).
+
+## Layer 1 — passive: bounded queues and the byte budget
+
+- **Per-shard bounded queues** between pipeline threads and sink workers.
+  Their depth and rejections are visible as `etl_queue_depth` and
+  `etl_queue_full_events_total` (every full event is a backpressure signal,
+  never a block).
+- **A global in-flight byte budget** (`backpressure.max_inflight_bytes`)
+  counts every byte that has left the source but has not yet been durably
+  written — queued chunks plus batches in flight at the sink.
+
+## Layer 2 — active: pause with hysteresis
+
+When a queue rejects or the budget crosses its **high watermark**, the
+source pauses the offending lanes (for Kafka: `pause()` on those
+partitions) and keeps polling. It resumes under hysteresis — the budget
+must fall below the **low watermark** and a minimum pause must elapse — so
+the controller doesn't flap at the boundary. Observe it via
+`etl_backpressure_paused`, `etl_backpressure_pause_events_total`
+(a flapping indicator when high), and `etl_backpressure_inflight_bytes`
+(see [docs/METRICS.md](../../METRICS.md)).
+
+Backpressure is resumable mid-batch: if `try_send` fails partway through a
+batch, the chain records the exact resume point — already-processed records
+are never re-run through the operators.
+
+Independently of all pipeline state, the Kafka source sets librdkafka's own
+prefetch caps (`queued.min.messages`, `queued.max.messages.kbytes`) as a
+hard memory backstop.
+
+## Sizing the budget
+
+This is the one backpressure knob that regularly needs thought. The rule,
+from [docs/DESIGN.md](../../DESIGN.md) § Backpressure — motivated by a
+measured **24× throughput collapse** under an unthrottled source with
+default settings:
+
+```text
+max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
+    shards × inflight.max_per_shard × batch.max_bytes   // pending writes
+  + shards × queue_capacity × chunk.target_bytes )      // queued chunks
+```
+
+In words: the budget's low watermark must comfortably hold everything the
+sink *legitimately* keeps in flight during steady-state operation. If it
+can't, a saturated pipeline lives permanently above the high watermark and
+the pause controller duty-cycles at its minimum pause — throughput collapses
+even though nothing is wrong.
+
+Worked example (the defaults): 2 shards × 2 in-flight × 128 MiB batches is
+about 512 MiB of pending writes alone — already exceeding the default
+256 MiB budget. That's fine for throttled sources that never fill batches;
+wrong for saturated ones. For a saturated pipeline, either:
+
+- raise `backpressure.max_inflight_bytes` to 2 GiB or more, or
+- cap `batch.max_bytes` near `budget × low_ratio / (2 × shards ×
+  max_inflight)` — about 16 MiB with the defaults.
+
+The flagship example's YAML
+(`crates/etl/examples/kafka_avro_to_clickhouse.yaml`) carries this rule as
+a comment next to the knobs; keep it there in your configs too. See
+[Tuning](../05-deployment/tuning.md) for the wider performance picture and
+[Configuring pipelines](../03-guides/configuring-pipelines.md) for the
+config section itself.
+
+> [!NOTE]
+> Symptoms of an undersized budget: `etl_backpressure_paused` pinned at 1
+> or `etl_backpressure_pause_events_total` climbing fast, low sink batch
+> sizes, and throughput far below what the sink can absorb — while
+> `etl_sink_errors_total` stays quiet. The sink isn't failing; the source
+> is being duty-cycled.
+
+## What you'll see when backpressure engages
+
+Sustained `etl_backpressure_paused == 1` means the sink genuinely can't
+keep up (a capacity problem: add replicas or shards, or tune batching) —
+or the budget is undersized as above. For Kafka, paused lanes translate to
+growing consumer lag (`etl_source_lag_records`), which is the correct,
+bounded failure mode: data waits in the broker, not in process memory.
+
+## Further reading
+
+- [docs/DESIGN.md](../../DESIGN.md) § Backpressure — the canonical rule and
+  the benchmark behind it.
+- [Architecture](01-architecture.md) — where the queues and budget sit in
+  the process.
+- [Monitoring](../05-deployment/monitoring.md) — alerting on pressure
+  signals.

@@ -1,0 +1,145 @@
+# Tuning
+
+Every knob below has a safe default; most pipelines change two or three of
+them. This page covers what each one moves and how to size them together —
+the defaults quoted are the exact values from
+`crates/etl-core/src/config/mod.rs` and the sink config structs (also
+tabulated in the [configuration reference](../07-reference/configuration.md)).
+
+## Threads: `pipeline.threads` vs `pipeline.io_threads`
+
+The process splits work between two pools
+([Architecture](../02-concepts/01-architecture.md)):
+
+- **Pipeline threads** (plain `std::thread`) run the hot path: lane polling,
+  deserialization, the operator chain, row encoding, shard routing.
+- **The I/O runtime** (`io_threads` tokio workers, default **2**) runs sink
+  shard workers, flush timers, the checkpointer, and the admin server.
+
+When `pipeline.threads` is unset, the count derives at startup as
+`available_parallelism` minus the I/O reserve (the `io_threads` workers plus
+one controller thread), floored at 1. `available_parallelism` respects
+cgroup CPU quotas, so a Kubernetes CPU **limit** sizes this correctly on its
+own.
+
+> [!WARNING]
+> A pod without a CPU limit sees the **node's** cores and spawns that many
+> pipeline threads. If you don't set limits, set `pipeline.threads`
+> explicitly.
+
+Raise `io_threads` only if you have many shards with slow, concurrent
+writes; the hot path never runs there, so extra I/O workers buy nothing for
+CPU-bound pipelines and eat into the derived pipeline-thread count.
+
+## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`
+
+Each sink shard worker accumulates encoded chunks and seals a batch as soon
+as **any** threshold trips (defaults: `max_rows: 500000`,
+`max_bytes: 128MiB`, `linger: 1s`; a sealed batch may overshoot by at most
+one chunk, since chunks arrive whole):
+
+- **Bigger batches** amortize per-insert cost — ClickHouse in particular
+  wants few, large inserts (less merge pressure). `max_rows`/`max_bytes`
+  bound the ceiling.
+- **`linger`** bounds latency at low throughput: a non-empty batch seals
+  this long after its first chunk even if the size thresholds never trip.
+  Lower it for latency-sensitive pipelines; raise it if a trickle of tiny
+  inserts is fragmenting the sink.
+- Every sealed batch is a retry unit and an ack unit: larger batches mean
+  coarser replays after a failure.
+
+Watch `etl_sink_batch_rows`/`etl_sink_batch_bytes` and
+`etl_sink_flushes_total{reason=...}`: a sink flushing mostly on `linger`
+never fills its batches — the size thresholds are irrelevant there, and you
+can safely lower `max_bytes` to relax the backpressure budget (next
+section).
+
+## Concurrency: `inflight.max_per_shard`
+
+Concurrent sealed batches in flight per shard (default **2**), rotating
+across healthy replicas. While all permits are taken the worker stops
+consuming its queue, which fills and surfaces upstream as backpressure —
+this is the intended signal, not a stall. Raising it buys replica
+parallelism at the cost of more memory pinned in flight (it multiplies
+directly into the budget rule below).
+
+## The backpressure budget: `backpressure.max_inflight_bytes`
+
+A global cap on bytes admitted into the pipeline but not yet durably
+written (default **256MiB**), with pause/resume hysteresis: sources pause
+above `high_ratio` (default **0.8**) and may resume below `low_ratio`
+(default **0.5**) after at least `min_pause` (default **500ms** — pausing a
+Kafka partition purges its prefetch, so resuming isn't free). See
+[Backpressure](../02-concepts/03-backpressure.md) for the model.
+
+**The sizing rule** (from [docs/DESIGN.md](../../DESIGN.md) § Backpressure,
+motivated by a measured 24x throughput collapse): the budget's low
+watermark must comfortably hold everything the sink legitimately keeps in
+flight, or a saturated pipeline lives above the high watermark and
+duty-cycles against `min_pause`:
+
+```text
+max_inflight_bytes × low_ratio  ≥  2 × ( shards × inflight.max_per_shard × batch.max_bytes
+                                       + shards × queue_capacity × chunk.target_bytes )
+```
+
+The pending-writes term dominates. Worked example from the flagship YAML
+(`crates/etl/examples/kafka_avro_to_clickhouse.yaml`): one shard, 2
+in-flight, 128 MiB batches gives `2 × (1 × 2 × 128MiB) = 512MiB`, so the
+example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). Note
+the framework **defaults are intentionally not self-consistent** under
+saturation: 2 shards at the default batch settings exceed the default
+256 MiB budget. That's fine for throttled sources that never fill batches;
+for a saturated source, either raise the budget or cap `batch.max_bytes`
+near `budget × low_ratio / (2 × shards × max_per_shard)`.
+
+Memory sizing follows: set the container memory limit above
+`max_inflight_bytes` plus librdkafka's prefetch caps
+(`queued.max.messages.kbytes`, set via the Kafka section's `rdkafka` map —
+see [Kafka](../04-connectors/kafka.md)), with headroom for batches held
+during retries.
+
+## Queues: `SinkOptions::queue_capacity`
+
+The bounded chunk queue between pipeline threads and each shard worker,
+default **8** chunks (chunks target 64 KiB — `ChunkConfig::target_bytes`).
+This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
+[Assembling a pipeline](../03-guides/assembling-a-pipeline.md)), not YAML.
+It exists to signal, not to buffer: a full queue is the per-shard
+backpressure trigger (`etl_queue_full_events_total`). Keep it small; the
+global byte budget, not the queue, is the intended smoothing buffer.
+
+## Checkpointing: `checkpoint.*`
+
+- `interval` (default **5s**): how often committable watermarks flush to
+  the source. This is *not* a durability boundary — the sink write is —
+  so shortening it only narrows the replay window after a crash, at the
+  cost of more commit traffic. Validation floors it at 100ms.
+- `max_pending_batches` (default **1024**): unacknowledged batches per
+  partition before that partition pauses — a per-partition backpressure
+  backstop alongside the byte budget.
+- `drain_timeout` (default **25s**): the shutdown/rebalance drain budget.
+  Keep it below `terminationGracePeriodSeconds` — see [Docker](docker.md)
+  and [Graceful shutdown](../03-guides/graceful-shutdown.md).
+- `stalled_fail_after` (default **120s**): a partition watermark stalled
+  behind a *failed* batch this long fails the pipeline, converting a
+  permanent sink failure into a restart-and-replay instead of a process
+  that consumes but commits nothing.
+
+## Pinning: `pipeline.pinning`
+
+- `off` (default): no core pinning.
+- `compact`: pin pipeline thread *i* to core *i*.
+
+`compact` only yields exclusive cores under the kubelet **static CPU
+manager** with Guaranteed QoS and integer CPU requests; anywhere else it
+merely sets affinity inside a shared cpuset and can hurt by fighting the
+scheduler. Leave it `off` unless you run that setup.
+
+## Where parallelism actually comes from
+
+Kafka consumption parallelism is bounded by partition count, not thread
+count — lanes map m:n onto pipeline threads. If the pipeline is
+CPU-saturated, more threads help; if it's partition-starved, only more
+partitions (or fewer replicas per consumer group) do. Scale horizontally by
+replicas: one pod is one consumer-group member.

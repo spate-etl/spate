@@ -18,6 +18,7 @@
 //! (I/O half); the framework owns everything between them.
 
 mod breaker;
+mod bundle;
 mod config;
 mod pool;
 #[cfg(test)]
@@ -26,9 +27,52 @@ mod queue;
 mod retry;
 mod worker;
 
+pub use bundle::{SinkBundle, SinkParts};
 pub use config::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
 pub use pool::{DrainReport, SinkPool};
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
+
+/// Boxed sink drain hook: budget in, report out. Produced by sink
+/// assemblies (wrapping [`SinkPool::drain`]), consumed once at shutdown by
+/// the pipeline runtime.
+pub type SinkDrainFn = Box<
+    dyn FnOnce(std::time::Duration) -> std::pin::Pin<Box<dyn Future<Output = DrainReport> + Send>>
+        + Send,
+>;
+
+/// Boxed, repeatable sink connectivity probe (readiness). The runtime
+/// probes at startup and then periodically, driving the sinks-connected
+/// half of `/readyz`.
+pub type SinkProbeFn = Box<
+    dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<(), SinkError>> + Send>> + Send + Sync,
+>;
+
+/// Build a [`SinkProbeFn`] that probes every replica of every shard in
+/// `shard_endpoints` (indexed `[shard][replica]`) via
+/// [`ShardWriter::probe`] — the readiness loop
+/// [`SinkParts::with_probe`](crate::sink::SinkParts::with_probe) expects.
+/// Back `writer` with an independent probe client set, never the insert
+/// clients (see [`SinkParts::probe`](crate::sink::SinkParts)).
+pub fn endpoint_probe<W>(
+    writer: W,
+    shard_endpoints: std::sync::Arc<Vec<Vec<W::Endpoint>>>,
+) -> SinkProbeFn
+where
+    W: ShardWriter + Clone,
+{
+    Box::new(move || {
+        let writer = writer.clone();
+        let shard_endpoints = std::sync::Arc::clone(&shard_endpoints);
+        Box::pin(async move {
+            for shard in shard_endpoints.iter() {
+                for endpoint in shard {
+                    writer.probe(endpoint).await?;
+                }
+            }
+            Ok(())
+        })
+    })
+}
 
 use crate::checkpoint::AckSet;
 use crate::deser::RecFamily;

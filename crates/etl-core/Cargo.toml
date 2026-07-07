@@ -43,5 +43,11 @@ tokio = { workspace = true, features = ["macros", "test-util"] }
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
+# divan provides its own main; without this the default libtest harness
+# wraps the file and `cargo bench` silently runs zero benchmarks.
+[[bench]]
+name = "chain"
+harness = false
+
 [lints]
 workspace = true

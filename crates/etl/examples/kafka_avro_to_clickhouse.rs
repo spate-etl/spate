@@ -1,9 +1,29 @@
 //! The flagship pipeline: Kafka → Avro → chain → sharded ClickHouse.
 //!
-//! This example is the assembly reference — every wiring step a production
-//! binary performs, commented. The YAML next to it
+//! This example is the assembly reference — a production binary in full.
+//! [`Pipeline`] owns the process plumbing (telemetry, metrics exporter,
+//! the shared I/O runtime, shard queues, sink workers, probes); the code
+//! here is only what is genuinely this pipeline's: connector construction,
+//! schema validation, and the operator chain. The YAML next to it
 //! (`kafka_avro_to_clickhouse.yaml`) carries all tuning; point `ETL_CONFIG`
 //! elsewhere to reconfigure without recompiling.
+//!
+//! # What the builder desugars to
+//!
+//! Every step is a thin composition of public primitives — assemblies can
+//! drop down to them at any point (see the `etl::pipeline::Pipeline`
+//! module docs for the full mapping):
+//!
+//! - `Pipeline::from_path` — `telemetry::init` → `metrics::install`
+//!   (exporter before any handle, so nothing records into the void) →
+//!   the `etl-io` tokio runtime → `InflightBudget::new`.
+//! - `.sink(sink)` — `SinkBundle::into_parts` → `shard_queues` →
+//!   per-shard `SinkShardMetrics` → `SinkPool::spawn` → drain + probe
+//!   wiring (the probe uses its own client set).
+//! - `.chains(..)` — the per-thread chain factory, with queues/budget/name
+//!   delivered through [`ChainCtx`].
+//! - `.run(source)` — `PipelineRuntime::new(...).run()`, reusing the
+//!   builder's I/O runtime.
 //!
 //! # Run it
 //!
@@ -34,18 +54,11 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use etl::avro::AvroDeserializerBuilder;
-use etl::backpressure::InflightBudget;
 use etl::clickhouse::ClickHouseEncoder;
-use etl::config::PipelineConfig;
-use etl::error::ErrorPolicy;
 use etl::kafka::KafkaSource;
-use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
-use etl::ops::{ChunkConfig, chain_owned};
-use etl::pipeline::{ExitState, PipelineRuntime, SinkProbeFn, SinkRuntime};
-use etl::sink::{KeyHashRouter, ShardWriter, SinkPool, shard_queues};
+use etl::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
 
 /// One record, end to end: `Deserialize` reads it from Avro (field names
 /// match the writer schema), `Serialize` writes it as RowBinary — where
@@ -60,135 +73,58 @@ struct Order {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // JSON logs for Kubernetes; RUST_LOG overrides the default filter.
-    etl::telemetry::init(etl::telemetry::LogFormat::Json, "info");
-
-    // ── Configuration ───────────────────────────────────────────────────
+    // Constructor owns init: JSON logs (RUST_LOG overrides the filter; call
+    // `etl::telemetry::init` first to customize), the metrics exporter —
+    // installed before any handle can exist — and the shared I/O runtime.
     let config_path = std::env::var("ETL_CONFIG")
         .unwrap_or_else(|_| "crates/etl/examples/kafka_avro_to_clickhouse.yaml".to_string());
-    let config = PipelineConfig::from_path(Path::new(&config_path))?;
-
-    // Install the metrics exporter BEFORE building any metric handles
-    // (sink shard metrics below): handles bind to the recorder present at
-    // construction. The runtime's own install reuses this exporter.
-    let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))?;
-    let pipeline_name = config.pipeline.name.clone();
-
-    // ── Connector runtime ───────────────────────────────────────────────
-    // Sink workers and the schema-registry fetcher live on this tokio
-    // runtime; pipeline threads stay pure CPU.
-    let io = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.pipeline.io_threads)
-        .thread_name("etl-connectors")
-        .enable_all()
-        .build()?;
+    let pipeline = Pipeline::from_path(Path::new(&config_path))?;
 
     // ── Source: Kafka ───────────────────────────────────────────────────
     // One consumer per process; partitions become lanes fanned across
     // pipeline threads. The `source: { kafka: ... }` section is the
     // connector's own schema.
-    let source = KafkaSource::from_component_config(&config.source)?;
+    let source = KafkaSource::from_component_config(&pipeline.config().source)?;
 
     // ── Deserializer: Confluent-framed Avro ─────────────────────────────
-    // Schemas come from the registry via an async fetcher on the connector
+    // Schemas come from the registry via an async fetcher on the I/O
     // runtime; a cache miss never blocks a pipeline thread — the batch
     // retries once the schema lands.
-    let deser_section = config
+    let deser_section = pipeline
+        .config()
         .deserializer
         .as_ref()
         .ok_or("this pipeline requires a `deserializer` section")?;
-    let avro = AvroDeserializerBuilder::from_component(deser_section, io.handle())?;
-    let deserializer = avro.build_serde::<Order>();
+    let deserializer =
+        AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
+            .build_serde::<Order>();
 
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
-    // The connector turns its section into a ShardWriter, per-shard replica
-    // endpoints, and pool tuning. Rows are encoded to RowBinary on the
-    // pipeline threads; workers merge chunks into big batches and write
-    // one deduplication-tokened INSERT per batch, rotating replicas.
-    let sink = etl::clickhouse::config::from_component_config(&config.sink)?;
+    // The connector turns its section into everything the builder needs:
+    // writer, per-shard replica endpoints, pool tuning, readiness probe.
+    let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 
     // Opt-in fail-fast schema validation (`validate_schema: names|full` in
     // the YAML): checks the configured columns against every replica's
     // live table NOW — before any thread spawns — and hands the encoder
     // the expected schema so the row struct is checked against it on the
-    // first record. `off` (the default) returns None and issues no
-    // queries.
-    let row_schema = io.block_on(sink.validate_schema())?;
-
-    let num_shards = sink.endpoints.len();
-    let (queues, receivers) = shard_queues(num_shards, 8);
-    let budget = Arc::new(InflightBudget::new());
-
-    let sink_labels = ComponentLabels::new(pipeline_name.clone(), "sink", "clickhouse");
-    let shard_metrics = sink
-        .endpoints
-        .iter()
-        .enumerate()
-        .map(|(shard, replicas)| {
-            let urls: Vec<String> = replicas.iter().map(|e| e.url().to_string()).collect();
-            SinkShardMetrics::new(
-                &sink_labels,
-                u32::try_from(shard).unwrap_or(0),
-                &urls,
-                E2eBasis::Ingest,
-            )
-        })
-        .collect();
-
-    let pool = SinkPool::spawn(
-        Arc::new(sink.writer),
-        sink.endpoints,
-        receivers,
-        sink.pool,
-        Arc::clone(&budget),
-        shard_metrics,
-        &pipeline_name,
-        io.handle(),
-    );
-
-    // Readiness: a second, independent client set probes every replica;
-    // the runtime flips /readyz sinks-connected accordingly.
-    let probe: SinkProbeFn = {
-        let probe_sink = etl::clickhouse::config::from_component_config(&config.sink)?;
-        let writer = Arc::new(probe_sink.writer);
-        let endpoints = Arc::new(probe_sink.endpoints);
-        Box::new(move || {
-            let writer = Arc::clone(&writer);
-            let endpoints = Arc::clone(&endpoints);
-            Box::pin(async move {
-                for shard in endpoints.iter() {
-                    for endpoint in shard {
-                        writer.probe(endpoint).await?;
-                    }
-                }
-                Ok(())
-            })
-        })
+    // first record. `off` (the default) returns None and issues no queries.
+    let encoder = match pipeline.block_on(sink.validate_schema())? {
+        Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
+        None => ClickHouseEncoder::<Order>::new(),
     };
 
-    let sink_runtime = SinkRuntime {
-        queues: queues.clone(),
-        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
-        probe: Some(probe),
-    };
-
-    // ── The chain ───────────────────────────────────────────────────────
-    // One identical chain per pipeline thread. Record-level failures here
-    // follow the per-stage policy: Skip counts and continues; Fail stops
-    // the pipeline.
-    let chains = {
-        let queues = queues;
-        let budget = Arc::clone(&budget);
-        let name = pipeline_name.clone();
-        // With validation on, each pipeline thread's encoder clone checks
-        // the Order struct against the live schema on its first record.
-        let encoder = match row_schema {
-            Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
-            None => ClickHouseEncoder::<Order>::new(),
-        };
-        move |_thread: usize| {
+    // ── The chain, and run ──────────────────────────────────────────────
+    // One identical chain per pipeline thread, fully monomorphized; the
+    // ChainCtx delivers this thread's queue/budget plumbing. Record-level
+    // failures follow the per-stage policy: Skip counts and continues;
+    // Fail stops the pipeline. Blocks until SIGTERM/SIGINT (drain) or a
+    // fatal error.
+    let report = pipeline
+        .sink(sink)?
+        .chains(move |ctx| {
             chain_owned::<Order, _>(deserializer.clone())
-                .with_metrics(name.clone(), "main")
+                .with_metrics(ctx.pipeline, "main")
                 .try_map(
                     |order: Order| {
                         if order.amount_cents >= 0 {
@@ -203,32 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     encoder.clone(),
                     KeyHashRouter,
                     ChunkConfig::default(),
-                    queues.clone(),
-                    Arc::clone(&budget),
+                    ctx.queues,
+                    ctx.budget,
                 )
                 .build()
-        }
-    };
+        })
+        .run(source)?;
 
-    // ── Run ─────────────────────────────────────────────────────────────
-    // Blocks until SIGTERM/SIGINT (drain) or a fatal error. The runtime
-    // owns pipeline threads, the controller, metrics, and the admin server.
-    let report = PipelineRuntime::new(config, source, chains, sink_runtime, budget).run()?;
-
-    tracing::info!(
-        state = ?report.state,
-        drain = ?report.sink_drain,
-        watermarks = ?report.final_watermarks,
-        "pipeline finished"
-    );
-    match report.state {
-        ExitState::Completed => Ok(()),
-        ExitState::Failed(failure) => {
-            eprintln!(
-                "pipeline failed in {}: {}",
-                failure.component, failure.reason
-            );
-            std::process::exit(1);
-        }
-    }
+    report.log();
+    std::process::exit(report.exit_code());
 }

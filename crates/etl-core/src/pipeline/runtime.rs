@@ -9,7 +9,7 @@ use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
-    MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
@@ -92,6 +92,7 @@ pub struct PipelineRuntime<S: Source> {
     budget: Arc<InflightBudget>,
     shutdown: Arc<AtomicBool>,
     options: RuntimeOptions,
+    io: Option<tokio::runtime::Runtime>,
 }
 
 impl<S: Source> std::fmt::Debug for PipelineRuntime<S> {
@@ -121,6 +122,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             budget,
             shutdown: Arc::new(AtomicBool::new(false)),
             options: RuntimeOptions::default(),
+            io: None,
         }
     }
 
@@ -128,6 +130,20 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     #[must_use]
     pub fn with_options(mut self, options: RuntimeOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Use a caller-owned tokio runtime as the I/O runtime instead of
+    /// building one inside [`run`](Self::run) — for assemblies whose
+    /// connectors needed a handle before the runtime existed (sink workers
+    /// spawned at construction, schema-registry fetchers, async pre-flight
+    /// validation). `run` shuts it down on exit exactly as it does the
+    /// internally built one; connector tasks spawned on it earlier keep
+    /// running until then. Without this, assemblies end up running a
+    /// second runtime, doubling `pipeline.io_threads`.
+    #[must_use]
+    pub fn with_io_runtime(mut self, io: tokio::runtime::Runtime) -> Self {
+        self.io = Some(io);
         self
     }
 
@@ -162,21 +178,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let pipeline_name = self.config.pipeline.name.clone();
 
         // Observability first: everything after this records metrics.
-        let handle = match metrics::install(&metrics_settings(&self.config)) {
-            Ok(h) => h,
-            Err(metrics::MetricsError::AlreadyInstalled) => {
-                tracing::warn!(
-                    "a metrics recorder is already installed; continuing \
-                     with the existing one and a detached render handle"
-                );
-                metrics::install(&MetricsSettings {
-                    exporter: Exporter::None,
-                    ..metrics_settings(&self.config)
-                })
-                .map_err(|e| StartError::Metrics(e.to_string()))?
-            }
-            Err(e) => return Err(StartError::Metrics(e.to_string())),
-        };
+        let handle = install_or_reuse(&metrics_settings(&self.config))?;
 
         let runtime_labels = ComponentLabels::new(pipeline_name.clone(), "runtime", "pipeline");
         let pipeline_metrics = PipelineMetrics::new(&runtime_labels, &self.options.version);
@@ -187,12 +189,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // I/O runtime: sink workers (spawned by the caller-built SinkPool
         // onto this runtime via its own handle), admin server, upkeep,
-        // signals.
-        let io = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.config.pipeline.io_threads)
-            .thread_name("etl-io")
-            .enable_all()
-            .build()?;
+        // signals. A caller-owned runtime (`with_io_runtime`) is adopted
+        // instead of built; either way this function owns its shutdown.
+        let io = match self.io.take() {
+            Some(io) => io,
+            None => tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(self.config.pipeline.io_threads)
+                .thread_name("etl-io")
+                .enable_all()
+                .build()?,
+        };
 
         // Admin bind, upkeep, and the controller thread are started *after*
         // the driver threads (below) so a failure in any of them can stop
@@ -511,6 +517,28 @@ fn stop_drivers<L>(
     }
     for handle in driver_handles {
         let _ = handle.join();
+    }
+}
+
+/// Install the exporter, degrading gracefully when a foreign recorder
+/// already owns the process: the pipeline keeps running against the
+/// existing recorder with a detached (empty-rendering) handle for the
+/// admin server. Shared by the runtime and the pipeline builder.
+pub(crate) fn install_or_reuse(settings: &MetricsSettings) -> Result<MetricsHandle, StartError> {
+    match metrics::install(settings) {
+        Ok(h) => Ok(h),
+        Err(metrics::MetricsError::AlreadyInstalled) => {
+            tracing::warn!(
+                "a metrics recorder is already installed; continuing \
+                 with the existing one and a detached render handle"
+            );
+            metrics::install(&MetricsSettings {
+                exporter: Exporter::None,
+                ..settings.clone()
+            })
+            .map_err(|e| StartError::Metrics(e.to_string()))
+        }
+        Err(e) => Err(StartError::Metrics(e.to_string())),
     }
 }
 

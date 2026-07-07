@@ -8,7 +8,9 @@
 //! but closures are the intended API.)
 //!
 //! This example drives a chain by hand — poll a batch, push it through,
-//! flush — which is exactly what a pipeline thread does in production:
+//! flush — which is exactly what a pipeline thread does in production. It
+//! deliberately bypasses the runtime; for a full assembly around a chain
+//! like this one, see `memory_pipeline.rs` and `etl::pipeline::Pipeline`:
 //!
 //! ```sh
 //! cargo run -p etl --example custom_operator

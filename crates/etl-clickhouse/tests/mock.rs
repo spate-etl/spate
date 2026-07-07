@@ -427,6 +427,34 @@ validate_schema: names
 }
 
 #[tokio::test]
+async fn probe_fn_covers_every_replica_with_its_own_clients() {
+    use etl_core::sink::SinkBundle;
+
+    // Healthy server: the probe closure succeeds and hits the mock once
+    // per replica per call.
+    let mock = Mock::new();
+    mock.add(handlers::provide::<u8>([1u8]));
+    let sink = sink_for(mock.url());
+    let probe = sink.probe_fn();
+    probe().await.expect("probe healthy replica");
+
+    // The bundle decomposition carries the probe, the clickhouse
+    // component type, and URL replica labels.
+    let parts = sink.into_parts();
+    assert_eq!(parts.component_type, "clickhouse");
+    assert_eq!(parts.replica_labels, vec![vec![mock.url().to_string()]]);
+    let bundled_probe = parts.probe.expect("bundle carries a probe");
+    mock.add(handlers::provide::<u8>([1u8]));
+    bundled_probe().await.expect("bundled probe works");
+
+    // Unreachable server: the probe fails.
+    let dead = Mock::new();
+    dead.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+    let sink = sink_for(dead.url());
+    assert!(sink.probe_fn()().await.is_err());
+}
+
+#[tokio::test]
 async fn probe_maps_select_one() {
     let mock = Mock::new();
     mock.add(handlers::provide::<u8>([1u8]));

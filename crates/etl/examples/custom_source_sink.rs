@@ -20,18 +20,12 @@
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use etl::backpressure::InflightBudget;
 use etl::checkpoint::{AckIssuer, AckRef};
-use etl::config::PipelineConfig;
 use etl::deser::Owned;
 use etl::error::{SinkError, SourceError};
-use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
-use etl::ops::{ChunkConfig, chain_owned};
-use etl::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl::record::{PartitionId, RawPayload, Record};
-use etl::sink::{
-    KeyHashRouter, RowEncoder, SealedBatch, ShardWriter, SinkPool, SinkPoolConfig, shard_queues,
-};
+use etl::prelude::*;
+use etl::record::{RawPayload, Record};
+use etl::sink::{RowEncoder, SealedBatch, ShardWriter};
 use etl::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -232,11 +226,11 @@ sink: { stdout: {} }
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Pretty logs for a demo: first init wins, the builder's JSON default
+    // becomes a no-op. The builder then owns the metrics exporter (before
+    // any handle can exist) and the shared I/O runtime.
     etl::telemetry::init(etl::telemetry::LogFormat::Pretty, "info");
-    let config = PipelineConfig::from_str(CONFIG)?;
-    // Exporter first, handles second — handles built before the exporter
-    // exists would record into the void (see `metrics::install`).
-    let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))?;
+    let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
 
     let per_partition = 100;
     let commits = Arc::new(Mutex::new(BTreeMap::new()));
@@ -248,60 +242,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         commits: Arc::clone(&commits),
     };
 
-    // Two shards, one "replica" each. Keyless records route by partition.
-    let (queues, receivers) = shard_queues(2, 8);
-    let budget = Arc::new(InflightBudget::new());
-    let io = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()?;
-    let labels = ComponentLabels::new("counter-demo", "sink", "stdout");
-    let metrics = (0..2u32)
-        .map(|s| SinkShardMetrics::new(&labels, s, &[format!("stdout-{s}")], E2eBasis::Ingest))
-        .collect();
+    // A hand-rolled sink needs no SinkBundle impl of its own: SinkParts is
+    // the bundle. Two shards, one "replica" each — keyless records route
+    // by partition. The builder derives labels, per-shard metrics, queues,
+    // and workers from it.
     let pool_cfg = {
         let mut cfg = SinkPoolConfig::default();
         cfg.batch.linger = Duration::from_millis(50);
         cfg
     };
-    let pool = SinkPool::spawn(
-        Arc::new(StdoutWriter),
-        vec![vec!["shard-0".into()], vec!["shard-1".into()]],
-        receivers,
+    let sink = SinkParts::new(
+        StdoutWriter,
+        vec![vec!["shard-0".to_string()], vec!["shard-1".to_string()]],
         pool_cfg,
-        Arc::clone(&budget),
-        metrics,
-        "counter-demo",
-        io.handle(),
-    );
-    let sink = SinkRuntime {
-        queues: queues.clone(),
-        drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
-        probe: None,
-    };
+    )
+    .with_component_type("stdout");
 
-    let chain_queues = queues;
-    let chain_budget = Arc::clone(&budget);
-    let chains = move |_thread: usize| {
-        chain_owned::<Vec<u8>, _>(etl::deser::BytesPassthrough)
-            .with_metrics("counter-demo", "main")
-            .sink(
-                JsonLinesEncoder,
-                KeyHashRouter,
-                ChunkConfig::default(),
-                chain_queues.clone(),
-                Arc::clone(&chain_budget),
-            )
-            .build()
-    };
-
-    let runtime =
-        PipelineRuntime::new(config, source, chains, sink, budget).with_options(RuntimeOptions {
+    let runtime = pipeline
+        .sink(sink)?
+        .chains(|ctx| {
+            chain_owned::<Vec<u8>, _>(etl::deser::BytesPassthrough)
+                .with_metrics(ctx.pipeline, "main")
+                .sink(
+                    JsonLinesEncoder,
+                    KeyHashRouter,
+                    ChunkConfig::default(),
+                    ctx.queues,
+                    ctx.budget,
+                )
+                .build()
+        })
+        .runtime_options(RuntimeOptions {
             handle_signals: false,
             ..RuntimeOptions::default()
-        });
+        })
+        .into_runtime(source)?;
     let shutdown = runtime.shutdown_handle();
-    let pipeline = std::thread::spawn(move || runtime.run());
+    let join = std::thread::spawn(move || runtime.run());
 
     // Wait for the checkpointer to commit both partitions to the end.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -316,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(20));
     }
     shutdown.trigger();
-    let report = pipeline.join().expect("pipeline thread")?;
+    let report = join.join().expect("pipeline thread")?;
     println!("\npipeline exit: {:?}", report.state);
     println!("committed: {:?}", commits.lock().expect("commits lock"));
     Ok(())

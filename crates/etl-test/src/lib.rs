@@ -74,8 +74,8 @@ pub mod strategies;
 
 pub use deser::{EmitCollector, TestDeserializer};
 pub use sink::{
-    CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,
-    WriteOutcome, capture_writer, decode_rows,
+    CaptureSink, CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,
+    WriteOutcome, capture_sink, capture_writer, decode_rows,
 };
 pub use source::{
     DrainBarrierProbe, MemoryBatch, MemoryLane, MemorySource, SourceHandle, memory_source,

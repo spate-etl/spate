@@ -42,28 +42,54 @@
 //! # A minimal pipeline
 //!
 //! Operators are stateful closures chained Flink/Streams-style; the YAML
-//! carries tuning and connector configuration. Sketch (see
-//! `examples/memory_pipeline.rs` for the complete runnable version and
-//! `examples/kafka_avro_to_clickhouse.rs` for the production assembly):
+//! carries tuning and connector configuration; [`pipeline::Pipeline`]
+//! assembles and runs the process. This compiles and runs against the
+//! `etl-test` mocks — swap in `KafkaSource::from_component_config` and a
+//! ClickHouse sink for the production version (see
+//! `examples/kafka_avro_to_clickhouse.rs`):
 //!
-//! ```ignore
-//! let config = PipelineConfig::from_path("pipeline.yaml".as_ref())?;
-//! let source = KafkaSource::from_component_config(&config.source)?;
-//! let (queues, receivers) = shard_queues(num_shards, 8);
-//! let budget = Arc::new(InflightBudget::new());
-//! let pool = SinkPool::spawn(writer, endpoints, receivers, /* … */);
+//! ```
+//! use etl::prelude::*;
+//! use etl_test::{BytesPassthrough, TestEncoder, capture_sink, memory_source};
 //!
-//! let chains = move |_thread| {
-//!     chain_owned::<Order, _>(deserializer.clone())
-//!         .with_metrics("orders", "main")
-//!         .filter(|o: &Order| o.amount_cents >= 0)
-//!         .map(enrich)
-//!         .sink(encoder, KeyHashRouter, ChunkConfig::default(),
-//!               queues.clone(), budget.clone())
-//!         .build()
-//! };
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = PipelineConfig::from_str(
+//!     "pipeline: { name: demo, threads: 1, io_threads: 1 }\n\
+//!      checkpoint: { interval: 100ms }\n\
+//!      metrics: { exporter: none }\n\
+//!      source: { memory: {} }\n\
+//!      sink: { capture: {} }",
+//! )?;
+//! let (source, handle) = memory_source();
+//! let (sink, script) = capture_sink(1, 1);
 //!
-//! PipelineRuntime::new(config, source, chains, sink_runtime, budget).run()?;
+//! let runtime = Pipeline::from_config(config)?
+//!     .sink(sink)?
+//!     .chains(|ctx| {
+//!         chain_owned::<Vec<u8>, _>(BytesPassthrough)
+//!             .with_metrics(ctx.pipeline, "main")
+//!             .filter(|payload: &Vec<u8>| !payload.is_empty())
+//!             .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(),
+//!                   ctx.queues, ctx.budget)
+//!             .build()
+//!     })
+//!     .runtime_options(RuntimeOptions { handle_signals: false, ..Default::default() })
+//!     .into_runtime(source)?;
+//!
+//! // Drive it: assign a lane, produce, wait for the durable commit.
+//! let shutdown = runtime.shutdown_handle();
+//! let join = std::thread::spawn(move || runtime.run());
+//! handle.assign_lanes(&[(etl::source::LaneId(0), PartitionId(0))]);
+//! let last = handle.push(PartitionId(0), None, b"hello");
+//! while handle.last_committed(PartitionId(0)) != Some(last + 1) {
+//!     std::thread::sleep(std::time::Duration::from_millis(5));
+//! }
+//! shutdown.trigger();
+//! let report = join.join().expect("join")?;
+//! assert_eq!(report.exit_code(), 0);
+//! assert!(!script.writes().is_empty());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Where things live
@@ -83,6 +109,26 @@
 //!   sinks with scripting handles).
 
 pub use etl_core::*;
+
+/// Curated imports for pipeline assemblies: one `use etl::prelude::*;`
+/// brings in the builder, chain entry points, and the types every
+/// assembly touches.
+///
+/// Connector constructors are deliberately excluded — import those from
+/// their feature-gated modules ([`kafka`], [`clickhouse`], [`avro`]).
+/// Additions to this module are semver-additive; nothing is ever removed.
+pub mod prelude {
+    pub use etl_core::config::PipelineConfig;
+    pub use etl_core::error::ErrorPolicy;
+    pub use etl_core::ops::{ChunkConfig, chain, chain_owned};
+    pub use etl_core::pipeline::{
+        BuildError, ChainCtx, ExitReport, ExitState, Pipeline, PipelineError, PipelineRuntime,
+        RuntimeOptions, ShutdownHandle, SinkOptions,
+    };
+    pub use etl_core::record::PartitionId;
+    pub use etl_core::sink::{KeyHashRouter, SinkBundle, SinkParts, SinkPoolConfig};
+    pub use etl_core::telemetry::LogFormat;
+}
 
 /// Avro deserialization support (Confluent wire format, schema registry).
 #[cfg(feature = "avro")]

@@ -19,18 +19,15 @@
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use etl::avro::AvroDeserializerBuilder;
-use etl::backpressure::InflightBudget;
 use etl::clickhouse::ClickHouseEncoder;
 use etl::config::PipelineConfig;
 use etl::error::ErrorPolicy;
 use etl::kafka::KafkaSource;
-use etl::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use etl::ops::{ChunkConfig, chain_owned};
 use etl::pipeline::{
-    ExitReport, PipelineRuntime, RuntimeOptions, ShutdownHandle, SinkProbeFn, SinkRuntime,
-    StartError,
+    ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
-use etl::sink::{KeyHashRouter, ShardWriter, SinkPool, shard_queues};
+use etl::sink::KeyHashRouter;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::service::service_fn;
@@ -292,91 +289,35 @@ impl Harness {
 
     pub fn spawn_pipeline(&self, params: &PipelineParams) -> RunningPipeline {
         let config = PipelineConfig::from_str(&params.yaml(self)).expect("pipeline config parses");
-        // Exporter before handles: the sink metrics below must bind to the
-        // real recorder (install is idempotent across scenarios).
-        let _metrics = etl::metrics::install(&etl::pipeline::metrics_settings(&config))
-            .expect("metrics install");
         let admin: SocketAddr = config.metrics.listen;
-        let pipeline_name = config.pipeline.name.clone();
 
-        let io = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("e2e-connectors")
-            .enable_all()
-            .build()
-            .expect("io runtime");
-
-        let source = KafkaSource::from_component_config(&config.source).expect("kafka source");
-        let deser_section = config.deserializer.as_ref().expect("deserializer section");
-        let avro =
-            AvroDeserializerBuilder::from_component(deser_section, io.handle()).expect("avro");
-        let deserializer = avro.build_serde::<Event>();
-
-        let sink = etl::clickhouse::config::from_component_config(&config.sink).expect("sink");
-        let num_shards = sink.endpoints.len();
-        let (queues, receivers) = shard_queues(num_shards, params.queue_capacity);
-        let budget = std::sync::Arc::new(InflightBudget::new());
-
-        let sink_labels = ComponentLabels::new(pipeline_name.clone(), "sink", "clickhouse");
-        let shard_metrics = sink
-            .endpoints
-            .iter()
-            .enumerate()
-            .map(|(shard, replicas)| {
-                let urls: Vec<String> = replicas.iter().map(|e| e.url().to_string()).collect();
-                SinkShardMetrics::new(
-                    &sink_labels,
-                    u32::try_from(shard).unwrap_or(0),
-                    &urls,
-                    E2eBasis::Ingest,
-                )
-            })
-            .collect();
-
-        let pool = SinkPool::spawn(
-            std::sync::Arc::new(sink.writer),
-            sink.endpoints,
-            receivers,
-            sink.pool,
-            std::sync::Arc::clone(&budget),
-            shard_metrics,
-            &pipeline_name,
-            io.handle(),
-        );
-
-        let probe: SinkProbeFn = {
-            let probe_sink =
-                etl::clickhouse::config::from_component_config(&config.sink).expect("probe sink");
-            let writer = std::sync::Arc::new(probe_sink.writer);
-            let endpoints = std::sync::Arc::new(probe_sink.endpoints);
-            Box::new(move || {
-                let writer = std::sync::Arc::clone(&writer);
-                let endpoints = std::sync::Arc::clone(&endpoints);
-                Box::pin(async move {
-                    for shard in endpoints.iter() {
-                        for endpoint in shard {
-                            writer.probe(endpoint).await?;
-                        }
-                    }
-                    Ok(())
-                })
-            })
-        };
-
-        let sink_runtime = SinkRuntime {
-            queues: queues.clone(),
-            drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
-            probe: Some(probe),
-        };
+        // The builder owns init: exporter before any handle (idempotent
+        // across scenarios), the shared I/O runtime, queues, pool, probe.
+        let pipeline = Pipeline::from_config(config).expect("pipeline builder");
+        let source =
+            KafkaSource::from_component_config(&pipeline.config().source).expect("kafka source");
+        let deser_section = pipeline
+            .config()
+            .deserializer
+            .as_ref()
+            .expect("deserializer section");
+        let deserializer =
+            AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())
+                .expect("avro")
+                .build_serde::<Event>();
+        let sink =
+            etl::clickhouse::config::from_component_config(&pipeline.config().sink).expect("sink");
 
         let chunk_bytes = params.chunk_bytes;
-        let chains = {
-            let queues = queues;
-            let budget = std::sync::Arc::clone(&budget);
-            let name = pipeline_name.clone();
-            move |_thread: usize| {
+        let runtime = pipeline
+            .sink_with(
+                sink,
+                SinkOptions::default().with_queue_capacity(params.queue_capacity),
+            )
+            .expect("sink assembly")
+            .chains(move |ctx| {
                 chain_owned::<Event, _>(deserializer.clone())
-                    .with_metrics(name.clone(), "main")
+                    .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
                         ClickHouseEncoder::<Event>::new(),
@@ -385,18 +326,17 @@ impl Harness {
                             target_bytes: chunk_bytes,
                             ..ChunkConfig::default()
                         },
-                        queues.clone(),
-                        std::sync::Arc::clone(&budget),
+                        ctx.queues,
+                        ctx.budget,
                     )
                     .build()
-            }
-        };
-
-        let runtime = PipelineRuntime::new(config, source, chains, sink_runtime, budget)
-            .with_options(RuntimeOptions {
+            })
+            .runtime_options(RuntimeOptions {
                 handle_signals: false,
                 ..RuntimeOptions::default()
-            });
+            })
+            .into_runtime(source)
+            .expect("into_runtime");
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::Builder::new()
             .name("e2e-pipeline".into())
@@ -407,7 +347,6 @@ impl Harness {
             shutdown,
             join,
             admin,
-            _io: io,
         }
     }
 }
@@ -516,7 +455,6 @@ pub struct RunningPipeline {
     pub shutdown: ShutdownHandle,
     pub join: std::thread::JoinHandle<Result<ExitReport, StartError>>,
     pub admin: SocketAddr,
-    _io: tokio::runtime::Runtime,
 }
 
 impl RunningPipeline {

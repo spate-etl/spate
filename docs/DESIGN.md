@@ -285,7 +285,7 @@ Worked example: the defaults (2 shards × 2 in-flight × 128 MiB batches ≈
 throttled sources that never fill batches, wrong for saturated ones. For a
 saturated pipeline either raise `backpressure.max_inflight_bytes` to ≥ 2 GiB
 or cap `batch.max_bytes` near `budget × low_ratio / (2 × shards ×
-max_inflight)` (32 MiB with the defaults). The flagship example's YAML
+max_inflight)` (16 MiB with the defaults). The flagship example's YAML
 carries this rule next to the knobs.
 
 1. **Passive**: bounded per-shard queues plus a global in-flight byte budget.
@@ -398,6 +398,52 @@ for custom metrics); the Prometheus exporter mounts on the admin server; all
 framework handles are pre-registered at build time; hot-path counting happens
 at batch boundaries.
 
+## Assembly: the builder and its desugaring
+
+`pipeline::Pipeline` is the primary assembly path; the manual primitives
+stay public, semver-committed, and documented (the hyper/axum layering
+contract: the convenience layer is a thin composition of public
+lower-level APIs, and its rustdoc shows the exact desugaring). Nothing in
+the builder touches the data path — it assembles the cold path and hands
+the user's chain factory through unchanged, so the operator chain stays
+fully monomorphized behind the same one-dyn-call-per-batch boundary.
+
+Design points, each earned by a footgun in the manual assembly:
+
+- **Constructor owns init.** `Pipeline::from_config` installs telemetry
+  and the metrics exporter and builds the I/O runtime before returning —
+  you cannot hold a builder without a live recorder, so the
+  silent-dead-handles ordering bug (§ Metrics) is unconstructible, and
+  connectors get `io_handle()`/`block_on()` for pre-`run` edge work
+  (schema fetchers, `validate_schema`). Coarse typestate in the
+  DataFusion `SessionState` style; no state-parameter generics, the
+  builder stays nameable and storable. It refuses to be constructed
+  inside an async runtime (it owns a blocking one).
+- **One I/O runtime.** The builder's runtime moves into
+  `PipelineRuntime` (`with_io_runtime`) instead of `run()` building a
+  second one — assemblies no longer double `io_threads` behind the
+  thread-reservation math.
+- **Connector-agnostic sink slot.** `sink::SinkBundle` (`into_parts` →
+  `SinkParts { writer, shard_endpoints, pool, component_type,
+  replica_labels, probe }`, `#[non_exhaustive]`) is the seam between
+  connector factories and the builder; its only bound is `ShardWriter`,
+  preserving the dependency policy below. `SinkParts` implements the
+  trait itself — hand-rolled sinks need no impl. Connector-typed flows
+  that the framework cannot name (ClickHouse `validate_schema` →
+  `RowSchema` → encoder) stay concrete pre-steps outside the trait.
+- **Drop ordering is structural.** The sink drains only when every
+  `ShardQueues` clone is gone; the builder lends queues per
+  chain-factory call via `ChainCtx` (by value, not `Clone`) and never
+  exposes them otherwise. Defense in depth: since the leaked-sender fix,
+  a clone that outlives the drivers degrades shutdown to a
+  deadline-bounded loud abandon instead of an unbounded hang.
+- **Source stays a terminal generic.** `PipelineRuntime<S: Source>` is
+  minted at `into_runtime(source)`/`run(source)`; connector construction
+  remains one explicit line — no config-tag→constructor registry
+  (topology is code-defined; a registry would reintroduce it as data).
+- `.sink()` errors on a second call so multi-output sink routing can
+  arrive later as an additive `add_sink`.
+
 ## Dependency policy
 
 No rdkafka / clickhouse / apache-avro types appear in public trait bounds or
@@ -440,4 +486,8 @@ MPL-2.0 — it stays out of the dependency tree until verified (enforced by
 | Kafka teardown | rebalance completes inline once closing | consumer close triggers a final revoke inside `BaseConsumer::drop`'s close-poll; a deferred intent there deadlocks teardown forever |
 | Kafka startup deadline | checked before transport errors in `poll_events` | unreachable brokers surface endless Retryable errors; checked last, the fatal fail-fast would never fire |
 | Sink readiness | `SinkRuntime.probe` hook polled by the runtime | `/readyz` needs live sink connectivity; nothing else could ever set it |
+| Assembly API | non-generic `Pipeline` builder, source at the terminal call | nameable/storable without typestate generics; cold-path only, zero hot-path cost |
+| Assembly init | constructor owns telemetry/metrics/IO runtime | makes the exporter-before-handles ordering unconstructible instead of documented |
+| IO runtime ownership | builder-owned, adopted by `PipelineRuntime::run` | one runtime as designed; `io_threads` no longer silently doubled |
+| Sink integration | `SinkBundle` → `#[non_exhaustive]` `SinkParts` | connector-agnostic with only a `ShardWriter` bound; fields can grow additively |
 | MSRV | 1.94 (rolling N-2), edition 2024 | library-consumer reach; absorbs dep MSRV ratchets |

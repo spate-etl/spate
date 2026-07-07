@@ -3,295 +3,19 @@
 //! bundle. The Checkpointer, DrainBarrier, and WatermarkController in the
 //! loop are the real implementations.
 
+use super::fakes::*;
 use super::*;
-use crate::checkpoint::AckIssuer;
-use crate::config::{
-    BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter, MetricsSection,
-    PinningMode, PipelineConfig, PipelineSection,
-};
-use crate::error::{ErrorClass, FatalError, SourceError};
-use crate::ops::{BlockReason, PushOutcome, RunnableChain};
-use crate::pipeline::runtime::{PipelineRuntime, RuntimeOptions};
-use crate::record::{PartitionId, RawPayload};
+use crate::config::PipelineConfig;
+use crate::error::{ErrorClass, SourceError};
+use crate::ops::RunnableChain;
+use crate::pipeline::runtime::PipelineRuntime;
+use crate::record::PartitionId;
 use crate::sink::shard_queues;
-use crate::source::{
-    DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
-};
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::source::LaneId;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-// ---------------------------------------------------------------- fakes --
-
-#[derive(Default)]
-struct SourceLog {
-    committed: BTreeMap<PartitionId, i64>,
-    pauses: Vec<Vec<LaneId>>,
-    resumes: Vec<Vec<LaneId>>,
-    flush_commits: usize,
-    opened: bool,
-    /// Interleaved ordering log shared with the chain fake.
-    log: Vec<String>,
-}
-
-enum Script {
-    Assign(Vec<LaneSpec>),
-    Revoke(Vec<LaneId>),
-    /// Panic inside `poll_events` — models a source bug that kills the
-    /// controller thread outside its drain choreography.
-    PanicPoll,
-}
-
-struct LaneSpec {
-    id: LaneId,
-    partition: PartitionId,
-    batches: Vec<Vec<(i64, Vec<u8>)>>,
-}
-
-type SharedLog = Arc<Mutex<SourceLog>>;
-type SharedScript = Arc<Mutex<VecDeque<Script>>>;
-
-struct FakeSource {
-    shared: SharedLog,
-    script: SharedScript,
-    issuer: Option<AckIssuer>,
-}
-
-impl FakeSource {
-    fn new() -> (Self, SharedLog, SharedScript) {
-        let shared = Arc::new(Mutex::new(SourceLog::default()));
-        let script = Arc::new(Mutex::new(VecDeque::new()));
-        (
-            FakeSource {
-                shared: Arc::clone(&shared),
-                script: Arc::clone(&script),
-                issuer: None,
-            },
-            shared,
-            script,
-        )
-    }
-}
-
-impl Source for FakeSource {
-    type Lane = FakeLane;
-
-    fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().opened = true;
-        self.issuer = Some(ctx.issuer);
-        Ok(())
-    }
-
-    fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<FakeLane>, SourceError> {
-        let next = self.script.lock().unwrap().pop_front();
-        match next {
-            Some(Script::Assign(specs)) => {
-                let issuer = self.issuer.as_ref().expect("open before assign");
-                let lanes = specs
-                    .into_iter()
-                    .map(|s| FakeLane {
-                        id: s.id,
-                        partition: s.partition,
-                        batches: s.batches.into(),
-                        current: Vec::new(),
-                        issuer: issuer.clone(),
-                    })
-                    .collect();
-                Ok(SourceEvent::LanesAssigned(lanes))
-            }
-            Some(Script::Revoke(ids)) => {
-                let mut log = self.shared.lock().unwrap();
-                log.log.push("revoke-delivered".into());
-                Ok(SourceEvent::LanesRevoked {
-                    barrier: DrainBarrier::new(ids.len()),
-                    lanes: ids,
-                })
-            }
-            Some(Script::PanicPoll) => panic!("scripted poll_events panic"),
-            None => {
-                std::thread::sleep(timeout.min(Duration::from_millis(5)));
-                Ok(SourceEvent::Idle)
-            }
-        }
-    }
-
-    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        let mut log = self.shared.lock().unwrap();
-        for &(p, o) in watermarks {
-            let slot = log.committed.entry(p).or_insert(o);
-            *slot = (*slot).max(o);
-        }
-        log.log.push("commit".into());
-        Ok(())
-    }
-
-    fn flush_commits(&mut self) -> Result<(), SourceError> {
-        let mut log = self.shared.lock().unwrap();
-        log.flush_commits += 1;
-        log.log.push("flush_commits".into());
-        Ok(())
-    }
-
-    fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().pauses.push(lanes.to_vec());
-        Ok(())
-    }
-
-    fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().resumes.push(lanes.to_vec());
-        Ok(())
-    }
-}
-
-struct FakeLane {
-    id: LaneId,
-    partition: PartitionId,
-    batches: VecDeque<Vec<(i64, Vec<u8>)>>,
-    current: Vec<(i64, Vec<u8>)>,
-    issuer: AckIssuer,
-}
-
-impl SourceLane for FakeLane {
-    type Batch<'a> = FakeBatch<'a>;
-
-    fn id(&self) -> LaneId {
-        self.id
-    }
-
-    fn partition(&self) -> PartitionId {
-        self.partition
-    }
-
-    fn poll(
-        &mut self,
-        _max_records: usize,
-        timeout: Duration,
-    ) -> Result<Option<FakeBatch<'_>>, SourceError> {
-        match self.batches.pop_front() {
-            Some(batch) => {
-                self.current = batch;
-                let last = self.current.last().expect("non-empty batch").0;
-                let ack = self.issuer.issue(self.partition, last);
-                Ok(Some(FakeBatch {
-                    payloads: &self.current,
-                    idx: 0,
-                    partition: self.partition,
-                    ack,
-                }))
-            }
-            None => {
-                std::thread::sleep(timeout.min(Duration::from_millis(2)));
-                Ok(None)
-            }
-        }
-    }
-}
-
-struct FakeBatch<'a> {
-    payloads: &'a [(i64, Vec<u8>)],
-    idx: usize,
-    partition: PartitionId,
-    ack: crate::checkpoint::AckRef,
-}
-
-impl<'a> PayloadBatch<'a> for FakeBatch<'a> {
-    fn next_payload(&mut self) -> Option<RawPayload<'a>> {
-        let (offset, bytes) = self.payloads.get(self.idx)?;
-        self.idx += 1;
-        Some(RawPayload {
-            bytes,
-            key: None,
-            partition: self.partition,
-            offset: *offset,
-            timestamp_ms: *offset,
-        })
-    }
-
-    fn ack(&self) -> &crate::checkpoint::AckRef {
-        &self.ack
-    }
-}
-
-#[derive(Default)]
-struct ChainShared {
-    consumed: AtomicUsize,
-    flushes: AtomicUsize,
-}
-
-enum ChainMode {
-    Ok,
-    BlockOnce(AtomicBool),
-    BlockForever,
-    FatalAtBatch(usize),
-    PanicAtBatch(usize),
-    /// Fail the ack of the n-th batch (1-based) after consuming it, stalling
-    /// that partition's watermark permanently — as a fatal sink write does.
-    FailAckAtBatch(usize),
-    /// Clone-and-stash every batch's ack so watermarks never advance and the
-    /// checkpointer's pending count climbs. Setting `release` stops stashing;
-    /// the test then drops the stash to resolve the batches Delivered.
-    HoldAcks {
-        held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
-        release: Arc<AtomicBool>,
-    },
-}
-
-struct FakeChain {
-    shared: Arc<ChainShared>,
-    log: Arc<Mutex<SourceLog>>,
-    mode: ChainMode,
-    batches_seen: usize,
-}
-
-impl RunnableChain for FakeChain {
-    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>, from: usize) -> PushOutcome {
-        if from == 0 {
-            self.batches_seen += 1;
-        }
-        match &self.mode {
-            ChainMode::BlockOnce(done) if !done.swap(true, Ordering::Relaxed) => {
-                return PushOutcome::Blocked {
-                    resume_at: from,
-                    reason: BlockReason::Capacity,
-                };
-            }
-            ChainMode::BlockForever => {
-                return PushOutcome::Blocked {
-                    resume_at: from,
-                    reason: BlockReason::Capacity,
-                };
-            }
-            ChainMode::FatalAtBatch(n) if self.batches_seen == *n => {
-                return PushOutcome::Fatal(FatalError {
-                    component: "fake-chain".into(),
-                    reason: "scripted fatal".into(),
-                });
-            }
-            ChainMode::PanicAtBatch(n) if self.batches_seen == *n => {
-                panic!("scripted panic in operator chain");
-            }
-            _ => {}
-        }
-        while let Some(_p) = batch.next_payload() {
-            self.shared.consumed.fetch_add(1, Ordering::Relaxed);
-        }
-        match &self.mode {
-            ChainMode::FailAckAtBatch(n) if self.batches_seen == *n => batch.ack().fail(),
-            ChainMode::HoldAcks { held, release } if !release.load(Ordering::Relaxed) => {
-                held.lock().unwrap().push(batch.ack().clone());
-            }
-            _ => {}
-        }
-        PushOutcome::Done
-    }
-
-    fn flush(&mut self) -> PushOutcome {
-        self.shared.flushes.fetch_add(1, Ordering::Relaxed);
-        self.log.lock().unwrap().log.push("flush".into());
-        PushOutcome::Done
-    }
-}
 
 fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
     let (queues, receivers) = shard_queues(1, 8);
@@ -312,63 +36,6 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
         },
         drained,
     )
-}
-
-fn test_config(threads: usize) -> PipelineConfig {
-    PipelineConfig {
-        pipeline: PipelineSection {
-            name: "test".into(),
-            threads: Some(threads),
-            io_threads: 1,
-            pinning: PinningMode::Off,
-        },
-        checkpoint: CheckpointSection {
-            interval: Duration::from_millis(20),
-            max_pending_batches: 1024,
-            drain_timeout: Duration::from_secs(3),
-            stalled_fail_after: Duration::from_secs(120),
-        },
-        backpressure: BackpressureSection {
-            min_pause: Duration::from_millis(10),
-            ..Default::default()
-        },
-        metrics: MetricsSection {
-            exporter: MetricsExporter::None,
-            listen: "127.0.0.1:0".parse().expect("addr"),
-            ..Default::default()
-        },
-        source: ComponentConfig::new("fake", serde_yaml::Value::Null),
-        deserializer: None,
-        sink: ComponentConfig::new("fake", serde_yaml::Value::Null),
-    }
-}
-
-fn test_options() -> RuntimeOptions {
-    RuntimeOptions {
-        handle_signals: false,
-        max_records: 512,
-        poll_timeout: Duration::from_millis(2),
-        idle_flush: Duration::from_millis(20),
-        blocked_retry: Duration::from_millis(1),
-        event_poll_timeout: Duration::from_millis(5),
-        version: "test".into(),
-    }
-}
-
-fn batches(ranges: &[std::ops::Range<i64>]) -> Vec<Vec<(i64, Vec<u8>)>> {
-    ranges
-        .iter()
-        .map(|r| r.clone().map(|o| (o, vec![0u8; 8])).collect())
-        .collect()
-}
-
-/// Spin until `cond` holds or the timeout elapses; panic on timeout.
-fn wait_for(what: &str, timeout: Duration, cond: impl Fn() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
 }
 
 struct Harness {
@@ -789,6 +456,90 @@ fn controller_panic_stops_drivers_and_fails_instead_of_hanging() {
         panic!("a controller panic must fail the run");
     };
     assert_eq!(failure.component, "controller");
+}
+
+/// A caller-owned I/O runtime (`with_io_runtime`) must be the runtime
+/// `run()` actually uses — tasks land on its worker threads — and must be
+/// shut down by `run()` on exit exactly like an internally built one.
+#[test]
+fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("custom-io")
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    // A parked task holding a drop guard: only a runtime shutdown drops it.
+    struct SetOnDrop(Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let runtime_shut_down = Arc::new(AtomicBool::new(false));
+    let guard = SetOnDrop(Arc::clone(&runtime_shut_down));
+    io.spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+
+    // A sink drain that records which runtime executes spawned work.
+    let (queues, receivers) = shard_queues(1, 8);
+    let drain_worker: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&drain_worker);
+    let drain: super::SinkDrainFn = Box::new(move |_budget| {
+        Box::pin(async move {
+            let _receivers = receivers;
+            let name = tokio::spawn(async { std::thread::current().name().map(String::from) })
+                .await
+                .expect("probe task");
+            *seen.lock().unwrap() = name;
+            DrainReport::default()
+        })
+    });
+    let sink = SinkRuntime {
+        queues,
+        drain,
+        probe: None,
+    };
+
+    let (source, _shared, _script) = FakeSource::new();
+    let chain_shared = Arc::new(ChainShared::default());
+    let log = Arc::new(Mutex::new(SourceLog::default()));
+    let cs = Arc::clone(&chain_shared);
+    let runtime = PipelineRuntime::new(
+        test_config(1),
+        source,
+        move |_thread| {
+            Box::new(FakeChain {
+                shared: Arc::clone(&cs),
+                log: Arc::clone(&log),
+                mode: ChainMode::Ok,
+                batches_seen: 0,
+            }) as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options())
+    .with_io_runtime(io);
+    let shutdown = runtime.shutdown_handle();
+    let join = std::thread::spawn(move || runtime.run());
+    std::thread::sleep(Duration::from_millis(50));
+    shutdown.trigger();
+    let report = join.join().unwrap().unwrap();
+
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        drain_worker.lock().unwrap().as_deref(),
+        Some("custom-io"),
+        "drain-spawned work must run on the caller's runtime"
+    );
+    assert!(
+        runtime_shut_down.load(Ordering::Relaxed),
+        "run() must shut the caller-owned runtime down on exit"
+    );
 }
 
 /// A fallible startup step after the driver threads are spawned (here, the

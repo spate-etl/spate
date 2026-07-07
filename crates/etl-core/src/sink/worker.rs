@@ -142,11 +142,18 @@ impl<W: ShardWriter> ShardWorker<W> {
             self.cfg.breaker,
             Arc::clone(&self.metrics),
         )));
-        // A private clone of the deadline watch. The drain loop selects on
-        // its `changed()`, so a deadline published by `SinkPool::drain`
-        // *after* this worker entered the drain phase is still observed —
-        // even while a write task is hung and never joins.
+        // A private clone of the deadline watch. Both loops select on its
+        // `changed()`: the intake loop breaks into drain the moment a
+        // deadline is published even though the queue is still open (a
+        // chunk sender leaked past shutdown would otherwise keep
+        // `recv_many` from ever closing and wedge shutdown unboundedly),
+        // and the drain loop observes a deadline published *after* it
+        // parked on a hung write.
         let mut drain_deadline = self.drain_deadline.clone();
+        // Once the deadline-watch sender drops, `changed()` errors forever;
+        // disable that branch after the first error so neither select can
+        // busy-spin on it.
+        let mut deadline_watch_live = true;
         let mut seq: u64 = 0;
         let mut recv_buf: Vec<EncodedChunk> = Vec::with_capacity(64);
 
@@ -177,6 +184,24 @@ impl<W: ShardWriter> ShardWorker<W> {
                             self.dispatch(&mut acc, reason, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers)
                                 .await;
                         }
+                    }
+                }
+
+                // Below `recv_many` on purpose: chunks already queued at
+                // shutdown are consumed before the deadline is considered
+                // (biased select polls in order), so a graceful drain still
+                // flushes everything the drivers handed over.
+                changed = drain_deadline.changed(), if deadline_watch_live => {
+                    match changed {
+                        // A deadline published while intake is still open:
+                        // a chunk sender leaked past shutdown. Enter the
+                        // bounded drain instead of waiting for a close that
+                        // may never come; the deadline sweep below abandons
+                        // whatever cannot finish in time.
+                        Ok(()) if drain_deadline.borrow().is_some() => break,
+                        Ok(()) => {}
+                        // Sender gone: no drain will ever publish a deadline.
+                        Err(_) => deadline_watch_live = false,
                     }
                 }
 
@@ -214,10 +239,6 @@ impl<W: ShardWriter> ShardWorker<W> {
             }
         }
 
-        // Once the deadline-watch sender drops, `changed()` errors forever;
-        // disable that branch after the first error so the select cannot
-        // busy-spin on it.
-        let mut deadline_watch_live = true;
         loop {
             // Launch the waiting batch the moment a permit is available.
             if waiting.is_some()

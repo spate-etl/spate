@@ -1,0 +1,105 @@
+# Error handling
+
+etl-rs sorts every failure into one of three classes, gives you exactly two
+policies for the record-level class, and surfaces all of it through
+metrics. There are no dead-letter queues and no silent drops.
+
+## The taxonomy
+
+| Class | Examples | What happens |
+|---|---|---|
+| **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `etl_sink_retries_total` and `etl_sink_replica_healthy`. |
+| **Record-level** | A payload that won't deserialize, a `try_map` closure returning `Err` | Subject to the per-stage policy: **Skip** or **Fail** (below). |
+| **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. |
+
+## Record-level policy: Skip or Fail — nothing else
+
+- **Skip**: count the record on a metric, resolve its acknowledgement as
+  delivered (so the watermark advances past it — an intentional drop must
+  never stall commits), and continue.
+- **Fail**: stop the pipeline. The batch resolves as failed, the watermark
+  stalls, the process exits non-zero, and the data replays after restart.
+
+Defaults follow the likely blast radius: **deserializers default to Skip**
+(one poison message on a topic shouldn't take the pipeline down),
+**operators default to Fail** (an error in your own transform is a bug you
+want to see immediately). Both are overridable per stage:
+
+```rust
+.try_map(
+    |order: Order| {
+        if order.amount_cents >= 0 {
+            Ok(order)
+        } else {
+            Err("negative amount")
+        }
+    },
+    ErrorPolicy::Skip, // count, drop, continue
+)
+```
+
+(From `crates/etl/examples/kafka_avro_to_clickhouse.rs`; see
+[Your first pipeline](../01-getting-started/03-first-pipeline.md).)
+
+There is deliberately no dead-letter queue in v1: the target environments
+have no owned DLQ topic, and a half-owned one is worse than none. If you
+need one, an `inspect`/`flat_map` stage that writes failures to your own
+side channel is the extension point — see
+[Custom operators](../06-extending/custom-operators.md).
+
+## Everything is surfaced through metrics
+
+Every drop has a `reason`; every error has an `error_type`. The pattern is
+`*_dropped_total{reason}` for intentional removals and
+`*_errors_total{error_type}` for failures:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `etl_deser_records_dropped_total` | `reason` (`skip_policy`) | Payloads dropped by the deserializer's Skip policy. |
+| `etl_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |
+| `etl_operator_errors_total` | `error_type` | User-code errors by taxonomy class. |
+| `etl_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
+
+A useful alert from [docs/METRICS.md](../../METRICS.md): a non-zero
+`rate(etl_deser_records_dropped_total[5m])` means schema drift or poison
+messages are being skipped — Skip keeps you up, not uninformed. See
+[Monitoring](../05-deployment/monitoring.md) for the full alerting story.
+
+## Fatal errors, panics, and stalled watermarks
+
+- **Panic policy**: panics in user code (operators, encoders) are caught
+  per batch. The batch resolves as Failed — its partition's watermark
+  stalls — the pipeline transitions to Failed, and the process exits
+  non-zero. There is no thread resurrection; the orchestrator restarts the
+  process and the data replays. This is at-least-once doing its job: a
+  crash never commits past unwritten data (see
+  [Delivery guarantees](02-delivery-guarantees.md)).
+- **Stalled watermarks are bounded**: a fatal sink write abandons its batch
+  and permanently stalls that partition's watermark. If any partition stays
+  stalled behind a failed batch longer than
+  `checkpoint.stalled_fail_after` (default 120s), the controller fails the
+  whole pipeline — restarting and replaying beats running indefinitely
+  while committing nothing for that partition. Alert on
+  `etl_checkpoint_watermark_age_seconds` well before that deadline.
+- **Exit codes are the contract with the orchestrator**: `run` returns an
+  exit report; `report.exit_code()` is non-zero for any failed state. Wire
+  it through `std::process::exit` as the examples do.
+
+## Choosing policies
+
+- Data you don't control (external topics): Skip at the deserializer, plus
+  an alert on the drop rate.
+- Your own transforms: Fail. If a `try_map` starts erroring, you shipped a
+  bug or the upstream contract changed — either way you want a loud stop,
+  not a quiet trickle of dropped records.
+- Skip is only safe where dropping is *semantically acceptable*. If every
+  record is money, Fail everywhere and treat the replay as the recovery
+  path.
+
+## Further reading
+
+- [docs/DESIGN.md](../../DESIGN.md) § Errors, panics, shutdown, health —
+  the canonical policy statement.
+- [docs/METRICS.md](../../METRICS.md) — the full metric taxonomy.
+- [Graceful shutdown](../03-guides/graceful-shutdown.md) — what a
+  Fail-triggered stop does to in-flight data.

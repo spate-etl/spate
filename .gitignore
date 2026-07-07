@@ -2,4 +2,5 @@
 **/target
 *.profraw
 .DS_Store
-/.claude/
+/.claude/*
+!/.claude/commands/

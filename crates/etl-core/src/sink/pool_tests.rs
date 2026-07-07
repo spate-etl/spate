@@ -579,6 +579,53 @@ async fn drain_deadline_published_after_worker_parks_is_observed() {
     assert_eq!(f.budget.usage(), 0, "budget released for the aborted write");
 }
 
+/// A `ShardQueues` clone leaked past shutdown (stashed outside the chain
+/// factory) must not wedge `drain` forever: the published deadline itself
+/// breaks the worker out of intake into the bounded drain, force-sealing
+/// and flushing the partial batch on the way. The old intake loop only
+/// exited when the queue closed, so this drain never returned.
+#[tokio::test(start_paused = true)]
+async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
+    let cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: u64::MAX,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    let f = fixture(1, 1, cfg, 16);
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    // Below every seal threshold: sits in the accumulator until drain.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    drop(ack);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // The clone is deliberately KEPT alive across the drain call.
+    let leaked = f.queues.clone();
+    drop(f.queues);
+    let report = tokio::time::timeout(
+        Duration::from_secs(30),
+        f.pool.drain(Duration::from_millis(200)),
+    )
+    .await
+    .expect("drain must complete despite the leaked sender");
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 1,
+            abandoned: 0
+        },
+        "the partial batch force-seals and flushes on the way out"
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+    assert_eq!(f.budget.usage(), 0);
+    drop(leaked);
+}
+
 /// With every in-flight permit held by a hung write, the drain-phase
 /// force-seal of a partial batch must not block on the semaphore: it parks
 /// the sealed batch and lets the deadline loop abort everything. The old

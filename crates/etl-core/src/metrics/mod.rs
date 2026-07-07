@@ -85,7 +85,7 @@ pub enum E2eBasis {
 /// Exporter settings, mapped from the `metrics` config section by the
 /// pipeline runtime. Defined here (not in `config`) so this module has no
 /// config dependency.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetricsSettings {
     /// Which exporter to install.
     pub exporter: Exporter,
@@ -213,6 +213,10 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
 /// install becomes a no-op.
 static INSTALLED: std::sync::OnceLock<MetricsHandle> = std::sync::OnceLock::new();
 
+/// The settings of the first successful [`install`], kept so later calls
+/// with different settings can warn that theirs are ignored.
+static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::OnceLock::new();
+
 /// Install the configured exporter as this process's global recorder and
 /// return the handle the admin server renders from.
 ///
@@ -238,6 +242,17 @@ pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError
         });
     }
     if let Some(existing) = INSTALLED.get() {
+        if INSTALLED_SETTINGS
+            .get()
+            .is_some_and(|first| first != settings)
+        {
+            tracing::warn!(
+                requested = ?settings,
+                active = ?INSTALLED_SETTINGS.get(),
+                "metrics exporter already installed with different settings; \
+                 the first install's exporter stays in effect"
+            );
+        }
         return Ok(existing.clone());
     }
     let builder = configured_builder().map_err(|e| MetricsError::Build(e.to_string()))?;
@@ -252,6 +267,7 @@ pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError
         inner: Inner::Prometheus(handle),
         process: Some(Arc::new(process)),
     };
+    let _ = INSTALLED_SETTINGS.set(settings.clone());
     Ok(INSTALLED.get_or_init(|| handle).clone())
 }
 

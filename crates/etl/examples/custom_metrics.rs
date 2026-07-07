@@ -3,8 +3,10 @@
 //! The framework's instrumentation API **is** the [`metrics`] facade: any
 //! counter/gauge/histogram you record is exported by the same Prometheus
 //! endpoint as `etl_*` metrics — no extra registry to learn. This example
-//! installs the exporter (in a real pipeline [`PipelineRuntime::run`] does
-//! that from your YAML), records custom metrics the recommended way
+//! installs the exporter by hand (in a real pipeline
+//! [`Pipeline::from_config`] does that from your YAML *before* you can
+//! build any handle — that ordering guarantee is the point of the
+//! constructor), records custom metrics the recommended way
 //! (pre-registered handles, per-batch counting), and prints the rendered
 //! exposition:
 //!
@@ -12,7 +14,7 @@
 //! cargo run -p etl --example custom_metrics
 //! ```
 //!
-//! [`PipelineRuntime::run`]: etl::pipeline::PipelineRuntime::run
+//! [`Pipeline::from_config`]: etl::pipeline::Pipeline::from_config
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -21,8 +23,8 @@ use etl::metrics::{ComponentLabels, DeserMetrics, MetricsSettings, install};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // In a real pipeline the runtime installs this from the YAML `metrics`
-    // section and mounts /metrics on the admin server.
+    // In a real pipeline Pipeline::from_config installs this from the YAML
+    // `metrics` section and the runtime mounts /metrics on the admin server.
     let handle = install(&MetricsSettings::default())?;
 
     // ── Your metrics ────────────────────────────────────────────────────

@@ -27,19 +27,19 @@
 //! abandoned loudly; unacknowledged offsets are never committed, so the
 //! data replays after restart (at-least-once).
 
+mod builder;
 mod controller;
 mod driver;
 mod runtime;
 
+pub use builder::{BuildError, ChainCtx, Pipeline, PipelineError, SinkOptions};
 pub use runtime::{PipelineRuntime, RuntimeOptions, ShutdownHandle, StartError, metrics_settings};
 
 use crate::error::FatalError;
 use crate::record::PartitionId;
 use crate::sink::ShardQueues;
 use crate::source::{DrainBarrier, LaneId};
-use std::future::Future;
-use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Control messages the controller sends to a driver thread.
 pub(crate) enum ThreadControl<L> {
@@ -103,19 +103,13 @@ impl std::fmt::Debug for SinkRuntime {
     }
 }
 
-/// Boxed sink drain hook: budget in, report out.
-pub type SinkDrainFn =
-    Box<dyn FnOnce(Duration) -> Pin<Box<dyn Future<Output = DrainReport> + Send>> + Send>;
-
-/// Boxed, repeatable sink connectivity probe (readiness).
-pub type SinkProbeFn = Box<
-    dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), crate::error::SinkError>> + Send>>
-        + Send
-        + Sync,
->;
+/// Boxed sink drain hook — defined next to the sink layer that produces
+/// it, re-exported here where the runtime consumes it.
+pub use crate::sink::{SinkDrainFn, SinkProbeFn};
 
 /// Terminal state of a pipeline run.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExitState {
     /// Drained and committed cleanly (SIGTERM or programmatic shutdown).
     Completed,
@@ -126,6 +120,7 @@ pub enum ExitState {
 
 /// Owned copy of the fatal error carried in the exit report.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FatalErrorReport {
     /// Component that failed.
     pub component: String,
@@ -133,8 +128,17 @@ pub struct FatalErrorReport {
     pub reason: String,
 }
 
+impl std::fmt::Display for FatalErrorReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pipeline failed in {}: {}", self.component, self.reason)
+    }
+}
+
+impl std::error::Error for FatalErrorReport {}
+
 /// Outcome of [`PipelineRuntime::run`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ExitReport {
     /// How the run ended.
     pub state: ExitState,
@@ -146,5 +150,49 @@ pub struct ExitReport {
     pub final_watermarks: Vec<(PartitionId, i64)>,
 }
 
+impl ExitReport {
+    /// Log the outcome — state, sink drain, final watermarks — at the level
+    /// matching it (`info` for a clean exit, `error` for a failure).
+    pub fn log(&self) {
+        match &self.state {
+            ExitState::Completed => tracing::info!(
+                state = ?self.state,
+                drain = ?self.sink_drain,
+                watermarks = ?self.final_watermarks,
+                "pipeline finished"
+            ),
+            ExitState::Failed(failure) => tracing::error!(
+                component = %failure.component,
+                reason = %failure.reason,
+                drain = ?self.sink_drain,
+                watermarks = ?self.final_watermarks,
+                "pipeline failed"
+            ),
+        }
+    }
+
+    /// The process exit code this outcome maps to: `0` for a clean exit,
+    /// `1` for a failure.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        match self.state {
+            ExitState::Completed => 0,
+            ExitState::Failed(_) => 1,
+        }
+    }
+
+    /// The report as a `Result`, so a `main` can `?` a failed run: a clean
+    /// exit passes the report through, a failure returns the
+    /// [`FatalErrorReport`] as the error.
+    pub fn ok(self) -> Result<ExitReport, FatalErrorReport> {
+        match &self.state {
+            ExitState::Completed => Ok(self),
+            ExitState::Failed(failure) => Err(failure.clone()),
+        }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+pub(crate) mod fakes;
 #[cfg(all(test, not(loom)))]
 mod tests;

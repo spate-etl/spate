@@ -1,0 +1,114 @@
+.hero {
+  padding: 5rem 0 4rem;
+  text-align: center;
+  background: radial-gradient(
+      ellipse at top,
+      rgba(209, 80, 11, 0.12),
+      transparent 60%
+    ),
+    var(--ifm-background-color);
+  overflow: hidden;
+}
+
+.heroTitle {
+  font-size: 3.75rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.5rem;
+}
+
+.heroTagline {
+  font-size: 1.5rem;
+  font-weight: 500;
+  max-width: 48rem;
+  margin: 0 auto 1rem;
+  color: var(--ifm-color-emphasis-800);
+}
+
+.heroPitch {
+  max-width: 42rem;
+  margin: 0 auto 2rem;
+  color: var(--ifm-color-emphasis-700);
+  line-height: 1.6;
+}
+
+.perfPill {
+  display: inline-block;
+  padding: 0.35rem 0.9rem;
+  margin-bottom: 1.75rem;
+  border: 1px solid var(--ifm-color-primary);
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ifm-color-primary);
+  background: rgba(209, 80, 11, 0.08);
+}
+
+.buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.features {
+  padding: 4rem 0;
+}
+
+.featureCard {
+  height: 100%;
+  padding: 1.75rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 12px;
+  background: var(--ifm-background-surface-color);
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.featureCard:hover {
+  border-color: var(--ifm-color-primary);
+  transform: translateY(-3px);
+}
+
+.featureTitle {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.featureBody {
+  color: var(--ifm-color-emphasis-700);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin-bottom: 0;
+}
+
+.taste {
+  padding: 1rem 0 5rem;
+}
+
+.tasteInner {
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+.sectionHeading {
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.sectionSub {
+  text-align: center;
+  color: var(--ifm-color-emphasis-700);
+  margin-bottom: 2.5rem;
+}
+
+@media (max-width: 768px) {
+  .heroTitle {
+    font-size: 2.75rem;
+  }
+  .heroTagline {
+    font-size: 1.25rem;
+  }
+}

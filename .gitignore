@@ -4,3 +4,13 @@
 .DS_Store
 /.claude/*
 !/.claude/commands/
+
+# Docusaurus docs site (website/)
+website/node_modules
+website/build
+website/.docusaurus
+website/.cache-loader
+# Generated rustdoc, staged into the site by CI (see .github/workflows/docs.yml)
+website/static/api
+npm-debug.log*
+yarn-error.log

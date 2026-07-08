@@ -1,0 +1,106 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'website/**'
+      - 'crates/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'website/**'
+      - 'crates/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# GITHUB_TOKEN permissions for deploying to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so Docusaurus can derive per-page "last updated" times.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build API reference (rustdoc)
+        run: cargo doc --workspace --exclude benchmarks --no-deps --all-features
+
+      # Stage rustdoc under the site's static/ dir so Docusaurus copies it into
+      # the build at <baseUrl>/api/ (and it's served during local `npm start`).
+      - name: Stage API reference into static/api
+        run: |
+          rm -rf website/static/api
+          mkdir -p website/static/api
+          cp -r target/doc/. website/static/api/
+          # rustdoc emits no workspace-root index; redirect /api/ to the facade crate.
+          cat > website/static/api/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta http-equiv="refresh" content="0; url=etl/index.html" />
+              <link rel="canonical" href="etl/index.html" />
+              <title>etl-rs API reference</title>
+            </head>
+            <body>
+              <a href="etl/index.html">Redirecting to the etl crate API reference…</a>
+            </body>
+          </html>
+          EOF
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build Docusaurus site
+        working-directory: website
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/build
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Only publish from main; pull requests build the site to catch breakage.
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

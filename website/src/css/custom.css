@@ -1,0 +1,43 @@
+/**
+ * etl-rs theme. Dark-mode-first, with a warm "rust" amber accent.
+ * Infima CSS variables drive the whole site.
+ */
+
+:root {
+  --ifm-color-primary: #d1500b;
+  --ifm-color-primary-dark: #bc4809;
+  --ifm-color-primary-darker: #b14409;
+  --ifm-color-primary-darkest: #923807;
+  --ifm-color-primary-light: #e65a0f;
+  --ifm-color-primary-lighter: #f05f10;
+  --ifm-color-primary-lightest: #f37831;
+
+  --ifm-code-font-size: 90%;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'SFMono-Regular', ui-monospace,
+    'Menlo', 'Consolas', monospace;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.08);
+}
+
+/* Dark mode: brighten the accent for contrast on the dark surface. */
+[data-theme='dark'] {
+  --ifm-color-primary: #ff8c4a;
+  --ifm-color-primary-dark: #ff7629;
+  --ifm-color-primary-darker: #ff6b18;
+  --ifm-color-primary-darkest: #e15200;
+  --ifm-color-primary-light: #ffa26b;
+  --ifm-color-primary-lighter: #ffad7c;
+  --ifm-color-primary-lightest: #ffc9a8;
+
+  --ifm-background-color: #16181d;
+  --ifm-background-surface-color: #1c1f26;
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 255, 0.1);
+}
+
+.navbar {
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+/* Tighten inline code so metric names / type names read cleanly. */
+code {
+  border-radius: 4px;
+}

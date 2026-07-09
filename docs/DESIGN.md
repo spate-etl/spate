@@ -322,11 +322,21 @@ ClickHouse specifics: direct-to-shard writes against local tables
 blocks, less merge pressure, and a synchronous server ack that checkpointing
 requires); one `INSERT` per sealed batch carrying a deterministic
 `insert_deduplication_token` so in-session retries are idempotent. Rows are
-encoded to RowBinary **on the pipeline threads** by etl-clickhouse's own
-serializer (the crate's is private — a semver win, verified round-tripping
-against a live server) and shipped as pre-formatted frames through
+encoded **on the pipeline threads** by etl-clickhouse's own serializer (the
+crate's is private — a semver win, verified round-tripping against a live
+server) and shipped as pre-formatted frames through
 `Client::insert_formatted_with` + `InsertFormatted::send(Bytes)` — the same
-transport the crate's typed path uses internally. Per-insert settings via
+transport the crate's typed path uses internally. The default format is
+row-wise **RowBinary**; an opt-in columnar **Native** encoder
+(`format: native`) transposes each chunk into one self-describing block —
+proven to cut server parse CPU ~90% and wire ~50–75% at ~2–3× the client
+encode cost (see `BENCHMARKS.md`), so it ships opt-in with RowBinary the
+default. Both use the same frame transport: a Native insert body is a stream
+of concatenated blocks, so batching/acks are format-agnostic. The terminal
+stage's `RowEncoder` gained defaulted `buffered_bytes()`/`finish_chunk()`
+hooks so a columnar encoder can buffer a block and flush it at each chunk
+seal; the stage clones one encoder per shard so shards never share block
+state. Per-insert settings via
 `with_setting(..)` (`with_option` is deprecated), always including
 `insert_deduplicate=1` and `wait_end_of_query=1`; success of `end()` is the
 durable-ack point.

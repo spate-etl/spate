@@ -269,6 +269,6 @@ before the SIGKILL. Details in
 - [Delivery guarantees](../02-concepts/02-delivery-guarantees.md) — what
   at-least-once buys you and what it doesn't.
 - [Kafka](../04-connectors/kafka.md), [Avro](../04-connectors/avro.md), and
-  [ClickHouse](../04-connectors/clickhouse.md) connector references.
+  [ClickHouse](../04-connectors/clickhouse/README.md) connector references.
 - [Docker](../05-deployment/docker.md) and
   [Monitoring](../05-deployment/monitoring.md) to take this to production.

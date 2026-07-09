@@ -42,7 +42,7 @@ partition's watermark rather than being skipped — watch
 when the insert completes with `wait_end_of_query=1` — a synchronous server
 acknowledgement, which is exactly why the sink writes directly to shard-local
 tables rather than through a Distributed table. See the
-[ClickHouse connector](../04-connectors/clickhouse.md).
+[ClickHouse connector](../04-connectors/clickhouse/README.md).
 
 ## Teardown can't lose data
 

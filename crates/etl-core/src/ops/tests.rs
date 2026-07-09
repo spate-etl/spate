@@ -121,6 +121,55 @@ impl RowEncoder<Owned<Vec<u8>>> for VecEncoder {
     }
 }
 
+/// A mock **columnar** encoder: buffers rows inside `self` during `encode`
+/// (writing nothing to the per-chunk buffer), then emits one self-describing
+/// block — `[u32 row_count]` followed by length-prefixed rows — in
+/// `finish_chunk`. Stands in for the ClickHouse Native encoder to prove the
+/// terminal stage drives the columnar contract: per-shard buffering, the
+/// `buffered_bytes` seal threshold, and `finish_chunk` at every seal.
+#[derive(Clone, Default)]
+struct ColumnarEncoder {
+    buffered: Vec<Vec<u8>>,
+}
+
+impl RowEncoder<Owned<Vec<u8>>> for ColumnarEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        // A columnar encoder writes NOTHING here; it transposes on finalize.
+        assert!(
+            buf.is_empty(),
+            "columnar encode must not touch the chunk buffer"
+        );
+        self.buffered.push(rec.payload.clone());
+        Ok(())
+    }
+    fn buffered_bytes(&self) -> usize {
+        4 + self.buffered.iter().map(|r| 4 + r.len()).sum::<usize>()
+    }
+    fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
+        buf.extend_from_slice(&(u32::try_from(self.buffered.len()).unwrap()).to_le_bytes());
+        for r in &self.buffered {
+            buf.extend_from_slice(&(u32::try_from(r.len()).unwrap()).to_le_bytes());
+            buf.extend_from_slice(r);
+        }
+        self.buffered.clear();
+        Ok(())
+    }
+}
+
+/// Decode a [`ColumnarEncoder`] block: leading `u32` row count, then rows.
+fn decode_block(frame: &[u8]) -> Vec<Vec<u8>> {
+    let count = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
+    let mut rows = Vec::with_capacity(count);
+    let mut at = 4;
+    for _ in 0..count {
+        let len = u32::from_le_bytes(frame[at..at + 4].try_into().unwrap()) as usize;
+        at += 4;
+        rows.push(frame[at..at + len].to_vec());
+        at += len;
+    }
+    rows
+}
+
 /// Cloneable owned passthrough for factory tests (the framework's
 /// `BytesPassthrough` does not derive `Clone`).
 #[derive(Clone, Default)]
@@ -664,6 +713,151 @@ fn multi_shard_routing_by_key_hash() {
     assert_eq!(
         drain_rows(&mut rxs[1]),
         vec![b"odd".to_vec(), b"odd2".to_vec()]
+    );
+}
+
+// ---- columnar (block-format) handoff -----------------------------------------
+
+#[test]
+fn columnar_encoder_seals_one_block_per_chunk_at_flush() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            ColumnarEncoder::default(),
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::clone(&budget),
+        )
+        .build();
+
+    let bufs = payloads(&["aa", "bbb", "c"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    // Nothing sealed yet: a columnar encoder buffers until the block closes.
+    assert!(rxs[0].try_recv().is_err(), "no block before flush");
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let chunk = rxs[0].try_recv().expect("one columnar block at flush");
+    assert_eq!(chunk.rows, 3, "block carries every buffered row");
+    assert_eq!(
+        decode_block(&chunk.frame),
+        vec![b"aa".to_vec(), b"bbb".to_vec(), b"c".to_vec()]
+    );
+    assert!(rxs[0].try_recv().is_err(), "exactly one block");
+
+    // Delivering the block resolves the buffered rows' acks — never before.
+    chunk.acks.deliver();
+    drop(batch);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}
+
+#[test]
+fn columnar_buffered_bytes_seals_before_flush() {
+    // A small target: the encoder's `buffered_bytes` crosses it mid-batch and
+    // seals a block without waiting for flush (proves the threshold reads the
+    // columnar encoder's internal size, not the empty chunk buffer).
+    let cfg = ChunkConfig {
+        target_bytes: 16,
+        ..ChunkConfig::default()
+    };
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            ColumnarEncoder::default(),
+            ToZero,
+            cfg,
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    // buffered_bytes = 4 header + per row (4 len + 4 bytes). After 2 rows =
+    // 4 + 8 + 8 = 20 >= 16 -> seal; the 3rd row seals at flush.
+    let bufs = payloads(&["aaaa", "bbbb", "cccc"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+    let _ = c.flush();
+
+    let b1 = rxs[0].try_recv().expect("mid-batch block");
+    let b2 = rxs[0].try_recv().expect("flush block");
+    assert_eq!(b1.rows, 2, "sealed once the target was reached");
+    assert_eq!(b2.rows, 1, "remainder sealed at flush");
+    let all: Vec<_> = decode_block(&b1.frame)
+        .into_iter()
+        .chain(decode_block(&b2.frame))
+        .collect();
+    assert_eq!(
+        all,
+        vec![b"aaaa".to_vec(), b"bbbb".to_vec(), b"cccc".to_vec()]
+    );
+}
+
+#[test]
+fn columnar_blocks_are_per_shard_pure_under_interleaving() {
+    #[derive(Clone, Copy)]
+    struct ByOffset;
+    impl ShardRouter for ByOffset {
+        fn route(&self, meta: &crate::record::RecordMeta, n: usize) -> usize {
+            usize::try_from(meta.offset).unwrap() % n
+        }
+    }
+    let (queues, mut rxs) = shard_queues(2, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            ColumnarEncoder::default(),
+            ByOffset,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    // Offsets 0..6 route 0,1,0,1,0,1 — interleaved across two per-shard
+    // encoders. A single shared encoder would mix these into one block.
+    let bufs = payloads(&["s0a", "s1a", "s0b", "s1b", "s0c", "s1c"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+    let _ = c.flush();
+
+    let block0 = rxs[0].try_recv().expect("shard 0 block");
+    let block1 = rxs[1].try_recv().expect("shard 1 block");
+    assert_eq!(
+        decode_block(&block0.frame),
+        vec![b"s0a".to_vec(), b"s0b".to_vec(), b"s0c".to_vec()],
+        "shard 0's block holds only shard 0's rows, in order"
+    );
+    assert_eq!(
+        decode_block(&block1.frame),
+        vec![b"s1a".to_vec(), b"s1b".to_vec(), b"s1c".to_vec()],
+    );
+    assert_eq!((block0.rows, block1.rows), (3, 3));
+}
+
+#[test]
+fn columnar_buffered_rows_at_teardown_fail_for_replay() {
+    let (queues, _rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            ColumnarEncoder::default(),
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["buffered-but-never-sealed"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+    // No flush: the row is buffered in the encoder and never becomes a block.
+    drop(c); // teardown drops the shard (encoder + its captured acks)
+    drop(batch);
+    assert_eq!(
+        ack_rx.try_recv().unwrap().status,
+        AckStatus::Failed,
+        "buffered-but-unwritten rows must fail so they replay after restart"
     );
 }
 

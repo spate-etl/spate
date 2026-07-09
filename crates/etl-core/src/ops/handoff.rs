@@ -45,9 +45,15 @@ impl Default for ChunkConfig {
     }
 }
 
-/// Per-shard accumulation state.
+/// Per-shard accumulation state, including this shard's own encoder
+/// instance. A columnar encoder (ClickHouse Native) buffers its rows
+/// internally until the chunk is finalized, so each shard must own its
+/// encoder — a single shared encoder would interleave rows from different
+/// shards into one block. Row formats clone a trivial unit and are
+/// unaffected.
 #[derive(Debug)]
-struct ShardBuf {
+struct ShardBuf<E> {
+    encoder: E,
     buf: BytesMut,
     rows: u32,
     acks: AckSet,
@@ -58,19 +64,6 @@ struct ShardBuf {
     oldest_event_ms: i64,
 }
 
-impl Default for ShardBuf {
-    fn default() -> Self {
-        ShardBuf {
-            buf: BytesMut::new(),
-            rows: 0,
-            acks: AckSet::new(),
-            last_batch: None,
-            first_ingest: None,
-            oldest_event_ms: i64::MAX,
-        }
-    }
-}
-
 static ENCODE_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
 
 /// The chain's terminal stage. Owns one accumulation buffer per shard,
@@ -79,12 +72,11 @@ static ENCODE_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
 /// `try_send` that never blocks the pipeline thread.
 #[derive(Debug)]
 pub struct SinkHandoff<F: RecFamily, E, R> {
-    encoder: E,
     router: R,
     queues: ShardQueues,
     budget: Arc<InflightBudget>,
     cfg: ChunkConfig,
-    shards: Vec<ShardBuf>,
+    shards: Vec<ShardBuf<E>>,
     /// Sealed chunks that could not be sent, in seal order.
     parked: VecDeque<(usize, EncodedChunk)>,
     pub(crate) meter: OpMeterSlot,
@@ -93,7 +85,10 @@ pub struct SinkHandoff<F: RecFamily, E, R> {
     _family: std::marker::PhantomData<fn() -> F>,
 }
 
-impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
+impl<F: RecFamily, E, R> SinkHandoff<F, E, R>
+where
+    E: RowEncoder<F> + Clone,
+{
     pub(crate) fn new(
         encoder: E,
         router: R,
@@ -106,14 +101,21 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
         assert!(cfg.target_bytes > 0, "chunk target must be non-zero");
         let shards = (0..queues.num_shards())
             .map(|_| ShardBuf {
+                // Each shard clones the template encoder: a columnar encoder
+                // carries per-block state that must not be shared across
+                // shards, and a row encoder clones a trivial unit.
+                encoder: encoder.clone(),
                 // Pre-size so the first chunk fills a target-sized buffer
                 // instead of regrowing (realloc + memcpy) from zero.
                 buf: BytesMut::with_capacity(cfg.target_bytes),
-                ..ShardBuf::default()
+                rows: 0,
+                acks: AckSet::new(),
+                last_batch: None,
+                first_ingest: None,
+                oldest_event_ms: i64::MAX,
             })
             .collect();
         SinkHandoff {
-            encoder,
             router,
             queues,
             budget,
@@ -134,6 +136,19 @@ impl<F: RecFamily, E, R> SinkHandoff<F, E, R> {
     fn seal_and_send(&mut self, idx: usize) {
         let shard = &mut self.shards[idx];
         if shard.rows == 0 {
+            return;
+        }
+        // Columnar encoders buffer their rows internally; flush the pending
+        // block into `buf` as one complete frame before sealing (a no-op for
+        // row formats, which already wrote every row in `encode`). A finalize
+        // failure means a broken encoder, not a bad record: record it fatal
+        // and ship nothing — the shard's captured acks fail on teardown, so
+        // the rows replay.
+        if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
+            self.fatal.0 = Some(FatalError {
+                component: self.component.to_string(),
+                reason: e.to_string(),
+            });
             return;
         }
         let frame = shard.buf.split().freeze();
@@ -192,7 +207,7 @@ impl<F: RecFamily, E, R> Drop for SinkHandoff<F, E, R> {
 impl<'buf, F, E, R> Collector<<F as RecFamily>::Rec<'buf>> for SinkHandoff<F, E, R>
 where
     F: RecFamily,
-    E: RowEncoder<F>,
+    E: RowEncoder<F> + Clone,
     R: ShardRouter,
 {
     fn push(&mut self, rec: Record<F::Rec<'buf>>) -> Flow {
@@ -203,7 +218,7 @@ where
         let idx = self.router.route(&rec.meta, self.shards.len());
         let shard = &mut self.shards[idx];
         let before = shard.buf.len();
-        match self.encoder.encode(&rec, &mut shard.buf) {
+        match shard.encoder.encode(&rec, &mut shard.buf) {
             Ok(()) => {
                 shard.rows += 1;
                 self.meter.0.out();
@@ -214,7 +229,11 @@ where
                     shard.acks.push(rec.ack.clone());
                     shard.last_batch = Some(bid);
                 }
-                if shard.buf.len() >= self.cfg.target_bytes {
+                // Columnar encoders hold the block in `encoder`, not `buf`;
+                // count what they've buffered so a block still seals at the
+                // target size. `buffered_bytes()` is 0 for row formats, so
+                // this reduces to the plain `buf.len()` check for them.
+                if shard.buf.len() + shard.encoder.buffered_bytes() >= self.cfg.target_bytes {
                     self.seal_and_send(idx);
                 }
                 Flow::Continue
@@ -258,7 +277,10 @@ where
     }
 }
 
-impl<F: RecFamily, E, R> StageLifecycle for SinkHandoff<F, E, R> {
+impl<F: RecFamily, E, R> StageLifecycle for SinkHandoff<F, E, R>
+where
+    E: RowEncoder<F> + Clone,
+{
     fn on_batch_end(&mut self, elapsed: Duration) {
         self.meter.0.flush(elapsed);
     }

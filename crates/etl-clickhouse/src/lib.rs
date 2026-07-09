@@ -61,9 +61,18 @@
 //! [`ClickHouseEndpoint`]s, and the sink-pool configuration;
 //! [`ClickHouseEncoder`] is the matching `RowEncoder` for any
 //! `T: serde::Serialize`.
+//!
+//! # Wire format
+//!
+//! The default is row-wise **RowBinary** ([`rowbinary`]). An opt-in columnar
+//! **Native** encoder ([`native`], `format: native`) transposes each chunk
+//! into one self-describing block: it costs more client CPU but cuts server
+//! parse CPU and compressed wire size substantially — build it from a fetched
+//! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
 
 pub mod config;
 mod encoder;
+pub mod native;
 pub mod rowbinary;
 mod schema;
 pub mod serde;
@@ -71,9 +80,11 @@ mod types;
 mod writer;
 
 pub use config::{
-    ClickHouseSink, ClickHouseSinkConfig, Compression, SchemaValidation, from_component_config,
+    ClickHouseSink, ClickHouseSinkConfig, Compression, Format, SchemaValidation,
+    from_component_config,
 };
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};
+pub use native::{NativeEncoder, NativeError, NativeSchema};
 pub use rowbinary::{RowBinaryError, serialize_row};
 pub use schema::{RowSchema, SchemaError};
 pub use types::*;

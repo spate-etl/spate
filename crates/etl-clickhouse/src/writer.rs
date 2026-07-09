@@ -39,12 +39,14 @@ impl fmt::Debug for ClickHouseEndpoint {
     }
 }
 
-/// Writes sealed RowBinary batches: one `INSERT ... FORMAT RowBinary` per
-/// batch, carrying the batch's deduplication token so retries — including
-/// on other replicas — are idempotent within the server's dedup window.
-/// `write_batch` returning `Ok` is the durable-ack point (the server
-/// confirmed the insert, materialized views included, thanks to
-/// `wait_end_of_query=1`).
+/// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
+/// format — RowBinary or Native — is baked into `insert_sql`), carrying the
+/// batch's deduplication token so retries — including on other replicas —
+/// are idempotent within the server's dedup window. The transport is
+/// format-agnostic: frames concatenate to the request body (RowBinary rows
+/// or a stream of Native blocks). `write_batch` returning `Ok` is the
+/// durable-ack point (the server confirmed the insert, materialized views
+/// included, thanks to `wait_end_of_query=1`).
 #[derive(Clone, Debug)]
 pub struct ClickHouseWriter {
     insert_sql: String,

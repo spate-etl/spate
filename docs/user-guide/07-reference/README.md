@@ -41,6 +41,6 @@ authors — see [Extending](../06-extending/README.md).
 ## Related pages elsewhere in the guide
 
 - Connector configuration bodies: [Kafka](../04-connectors/kafka.md),
-  [ClickHouse](../04-connectors/clickhouse.md),
+  [ClickHouse](../04-connectors/clickhouse/README.md),
   [Avro](../04-connectors/avro.md), [Memory](../04-connectors/memory.md).
 - Operational defaults in context: [Tuning](../05-deployment/tuning.md).

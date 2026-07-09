@@ -129,7 +129,7 @@ single-key shape is what lets every typed struct keep `deny_unknown_fields`.
 
 Each connector's body schema is documented on its page:
 [Kafka](../04-connectors/kafka.md) ·
-[ClickHouse](../04-connectors/clickhouse.md) ·
+[ClickHouse](../04-connectors/clickhouse/README.md) ·
 [Avro](../04-connectors/avro.md) ·
 [Memory](../04-connectors/memory.md).
 

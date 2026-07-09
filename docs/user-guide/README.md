@@ -69,7 +69,7 @@ disagree.
 
 ### [4. Connectors](04-connectors/README.md)
 
-- [Kafka](04-connectors/kafka.md) · [ClickHouse](04-connectors/clickhouse.md)
+- [Kafka](04-connectors/kafka.md) · [ClickHouse](04-connectors/clickhouse/README.md)
   · [Avro](04-connectors/avro.md) · [Memory (testing)](04-connectors/memory.md)
 
 ### [5. Deployment](05-deployment/README.md)

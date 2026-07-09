@@ -28,7 +28,7 @@ builder) with no connectors. Enable what you need:
 | Feature | Enables |
 |---|---|
 | `kafka` | `etl::kafka` — Kafka source built on `rdkafka` (single consumer, partition-queue lanes). See [Kafka connector](../04-connectors/kafka.md). |
-| `clickhouse` | `etl::clickhouse` — ClickHouse sink (RowBinary encoding, dedup tokens, replica rotation). See [ClickHouse connector](../04-connectors/clickhouse.md). |
+| `clickhouse` | `etl::clickhouse` — ClickHouse sink (RowBinary encoding, dedup tokens, replica rotation). See [ClickHouse connector](../04-connectors/clickhouse/README.md). |
 | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (implies `clickhouse`). |
 | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns (implies `clickhouse`). |
 | `clickhouse-time` | `time` crate fields for the same date/time columns (implies `clickhouse`). |

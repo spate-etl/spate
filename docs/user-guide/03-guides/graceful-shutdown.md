@@ -84,7 +84,7 @@ Note the replay caveat: batch dedup tokens do not survive a restart
 (re-batching changes boundaries), so replayed rows land again — design
 target tables to tolerate duplicates. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.md) and the
-[ClickHouse connector](../04-connectors/clickhouse.md) deduplication notes.
+[ClickHouse connector](../04-connectors/clickhouse/README.md) deduplication notes.
 
 ## Leaked queues: bounded, loud, contained
 

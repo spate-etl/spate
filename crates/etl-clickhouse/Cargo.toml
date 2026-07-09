@@ -14,6 +14,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls"] }
 etl-core = { workspace = true }
+foldhash = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

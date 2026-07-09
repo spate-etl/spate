@@ -64,7 +64,7 @@ A single shared multi-thread tokio runtime (default 2 workers,
   into batches (bounded by `max_rows` / `max_bytes` / `linger`), seals
   them, and dispatches up to `max_per_shard` concurrent flushes rotating
   across healthy replicas, retrying the same sealed batch on failure. See
-  the [ClickHouse connector](../04-connectors/clickhouse.md) for the
+  the [ClickHouse connector](../04-connectors/clickhouse/README.md) for the
   concrete sink.
 - **The admin HTTP server** — `/metrics`, `/healthz`, `/readyz`. See
   [Monitoring](../05-deployment/monitoring.md).

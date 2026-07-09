@@ -101,6 +101,98 @@ Transport parity (~20M rows/s locally); typed-path validation costs
 non-zero `non_replicated_deduplication_window` (server default 0 silently
 disables dedup; replicated tables default to a window of 100).
 
+### ClickHouse Native vs RowBinary format (go/no-go, 2026-07)
+
+Environment: M5 Max / 128 GB (dev laptop), Rust 1.96.1 release, ClickHouse
+25.6 in Docker, single-threaded server (`max_threads=1`,
+`max_insert_threads=1`), 200k rows/insert, medians over 15 interleaved reps.
+Harness: `benchmarks/src/bin/ch_native_format.rs`
+(`ROWS=200000 ITERS=41 REPS=15 SERVER=1`); raw JSON in
+`benchmarks/results/`. Four schemas: `events` (mixed realistic),
+`metrics` (fixed-width; regression guard), `dims` (LowCardinality-heavy),
+and `dims_hc` (a client-only stress variant — `dims` with one LowCardinality
+column at ~50k distinct values — guarding dictionary hash-collision
+pathology).
+
+Methodology note: the rig is now **symmetric** — both formats are timed
+through their real `RowEncoder` impls (per-row `buffered_bytes` +
+`finish_chunk`), reported as median-of-total-ns → f64 ns/row, with a bare
+free-function RowBinary line kept as a wrapper-overhead reference. An earlier
+revision of this table timed RowBinary at that bare function while Native
+paid the full `RowEncoder` pipeline shape, and truncated ns/row to integers,
+so the old and new numbers are **not** directly comparable.
+
+**Client encode (ns/row, lower is better; symmetric rig — both formats via
+their `RowEncoder` impls, bare-fn RowBinary shown as a wrapper reference):**
+
+| Schema | RowBinary | RowBinary bare-fn | Native | Native vs RB |
+|---|---|---|---|---|
+| events | 32.9 (30.4M/s) | 32.1 | 64.3 (15.6M/s) | ~1.95× slower |
+| metrics (fixed-width) | 10.4 (95.8M/s) | 9.9 | 32.7 (30.6M/s) | ~3.1× slower |
+| dims (LC-heavy) | 26.3 (38.0M/s) | 25.8 | 43.7 (22.9M/s) | ~1.66× slower |
+| dims_hc (LC stress) | 26.0 (38.4M/s) | 25.8 | 50.6 (19.8M/s) | ~1.95× slower |
+
+**Compressed wire size (events, 200k rows):**
+
+| Codec | RowBinary | Native | Native smaller |
+|---|---|---|---|
+| lz4 | 9.59 MB | 4.92 MB | **48.7%** |
+| zstd:3 | 4.47 MB | 1.32 MB | **70.6%** |
+
+(dims: lz4 75.3%, zstd 56.9% smaller; dims_hc: lz4 58.1%, zstd 46.2%;
+metrics: lz4 35.1%, zstd 62.0% smaller. Wire encoding is byte-identical to
+the previous pass — raw events 126→108 B/row.)
+
+**Server CPU (events, `OSCPUVirtualTimeMicroseconds`, median over 15 reps):**
+
+| Engine | RowBinary | Native | Native lower |
+|---|---|---|---|
+| `Null` (parse + block-form only) | 92.5 ms | 7.8 ms | **91.6%** |
+| `MergeTree` (end-to-end) | 122.3 ms | 36.5 ms | **70.2%** |
+| `MergeTree − Null` (format-independent) | 29.7 ms | 28.7 ms | ~equal (validates isolation) |
+
+(Server CPU varies ±~10% run to run; the parse-isolated Native win is
+consistently ~90%.)
+
+Interpretation: Native moves the row→column pivot off the server onto the
+client. It costs **~1.7–3.1× more client encode CPU** (schema-dependent) but
+cuts **server parse CPU ~92%** (and ~70% end-to-end on MergeTree) and
+**compressed wire ~50–75%**. The relative gap is largest on the fixed-width
+`metrics` schema (~3.1×), where RowBinary is essentially a memcpy; in absolute
+ns/row the Native cost is highest on `events` and the `LowCardinality`-heavy
+`dims`/`dims_hc` schemas (dictionary + columnar building the server would
+otherwise do row-by-row). The `MergeTree − Null` delta is format-independent
+(29.7 ms ≈ 28.7 ms), confirming the parse-isolation method.
+
+Encoder efficiency pass (measured, not guessed): making the per-row
+`buffered_bytes` seal-check O(1) (a cached size refreshed every 16 rows) and
+`#[inline]`-ing the column dispatch were kept. A hand-rolled FxHash for the
+LowCardinality dictionary was **tried and reverted** — it collided badly on
+high-cardinality keys (`city`, 5k distinct) and ran ~3× slower than the
+default SipHash. The dictionary hasher was then switched to **foldhash**
+(SMHasher-clean avalanche, per-instance seeding): the wire bytes stay
+identical — dictionary order is first-seen, not hash-order — and dims Native
+encode improved ~45%. (`dims_hc`, one LowCardinality column at ~50k distinct
+values, was added to guard the new hasher against collision pathology.) The
+first-record field-name check was also moved **off** the per-row path
+(probe-based, run once), fixing a ~1.6–1.8 ns/field/row regression, alongside
+micro-optimizations: a single up-front reserve in finalize-block, `Array`/`Map`
+offsets stored as LE bytes at push time, and the `LowCardinality` key-width
+match hoisted out of the write loop. The residual — Native ≈ **1.7–3.1×
+RowBinary encode** depending on schema — is the irreducible serde
+value-at-a-time dispatch + columnar transpose cost (scattered per-column
+buffers + a finalize concatenation copy), deliberately traded for the
+server/wire wins.
+
+**Verdict: NO-GO on the strict gate** (which required *no* client-encode
+regression — the fixed-width `metrics` schema still regresses well past 5%),
+so **RowBinary stays the default and Native ships opt-in** (`format: native`).
+Native is the better choice when the ClickHouse cluster is CPU-bound or
+egress/wire is the constraint — the offload is exactly the point. RowBinary is
+better when client CPU is the constraint. Not yet run: the sustained
+end-to-end pass (Rig D) — point `e2e_kafka_clickhouse` at a `format: native`
+sink and sample `system.metric_log`/`part_log`.
+
 ### Framework baselines (permanent harness, 2026-07)
 
 Environment: M5 Max 18-core / 128 GB (dev laptop), quiet machine, Rust

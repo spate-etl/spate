@@ -64,7 +64,8 @@ sink:
 | `timeouts.send` | duration | `30s` | Per-send timeout (one frame reaching the socket). |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
 | `compression` | string | `lz4` | Transport (HTTP-body) compression: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in 1..22. Unrelated to on-disk column codecs. |
-| `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](../03-guides/schema-validation.md). |
+| `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](../../03-guides/schema-validation.md). |
+| `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.md). |
 
 ## RowBinary on pipeline threads
 
@@ -80,7 +81,7 @@ inserts; they never touch a record.
 > order** must match; reordering either is a breaking change to the
 > pipeline. `validate_schema: names` (or `full`) plus
 > `ClickHouseEncoder::with_schema` turns this contract into a fail-fast
-> check — see [Schema validation](../03-guides/schema-validation.md). The
+> check — see [Schema validation](../../03-guides/schema-validation.md). The
 > full type mapping is in the crate's `rowbinary` module docs.
 
 ## Deduplication tokens — and the window warning
@@ -105,7 +106,7 @@ And the honest limit: tokens cover *same-batch retries* only. Crash replay
 re-batches with different boundaries and different tokens, so replayed rows
 land again. Design target tables to tolerate duplicates —
 `ReplacingMergeTree` with a version column is the sanctioned pattern. See
-[Delivery guarantees](../02-concepts/02-delivery-guarantees.md).
+[Delivery guarantees](../../02-concepts/02-delivery-guarantees.md).
 
 ## Replica rotation and the circuit breaker
 
@@ -141,13 +142,16 @@ replica of every shard** that drives the sinks-connected half of
 insert clients would report the write path healthy merely because probing
 keeps its connections warm. Manual assemblies hand `probe_fn()` to
 `SinkRuntime.probe` directly (see
-[Manual assembly](../03-guides/manual-assembly.md)).
+[Manual assembly](../../03-guides/manual-assembly.md)).
 
 ## Related
 
-- [Schema validation](../03-guides/schema-validation.md) — the
+- [Native format](./native-format.md) — the opt-in columnar
+  `format: native`: when to use it, the supported type matrix, and the
+  measured trade-off (server CPU/wire vs client CPU).
+- [Schema validation](../../03-guides/schema-validation.md) — the
   `validate_schema` modes end to end.
-- [Tuning](../05-deployment/tuning.md) — batch sizing and its coupling to
+- [Tuning](../../05-deployment/tuning.md) — batch sizing and its coupling to
   `backpressure.max_inflight_bytes` (the sizing rule).
-- [Graceful shutdown](../03-guides/graceful-shutdown.md) — what happens to
+- [Graceful shutdown](../../03-guides/graceful-shutdown.md) — what happens to
   in-flight batches at the drain deadline.

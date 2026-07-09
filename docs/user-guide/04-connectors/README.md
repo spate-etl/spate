@@ -14,7 +14,7 @@ the connector's factory (see
 | Connector | Role | Crate | Feature on `etl` | Config tag |
 |---|---|---|---|---|
 | [Kafka](kafka.md) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
-| [ClickHouse](clickhouse.md) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` |
+| [ClickHouse](clickhouse/README.md) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` |
 | [Avro](avro.md) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
 | [Memory / Capture](memory.md) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
@@ -34,7 +34,7 @@ connectors.
   included). Deterministic dedup tokens make same-batch retries idempotent
   — **only if the table keeps a deduplication window**; crash replay is not
   covered, so target tables must tolerate duplicates. See the
-  [warning](clickhouse.md) — it is the sharpest edge in the framework.
+  [warning](clickhouse/README.md) — it is the sharpest edge in the framework.
 - **Avro (format)** — schema fetches never block a pipeline thread: a
   cache miss holds the batch and replays it when the schema lands — records
   are never dropped or duplicated by the mechanism. Undecodable payloads

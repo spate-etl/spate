@@ -599,11 +599,13 @@ where
     D: Deserializer<DF> + 'static,
     P: Assemble<SinkHandoff<CurF, E, R>>,
     P::Out: for<'buf> Collector<<DF as RecFamily>::Rec<'buf>> + StageLifecycle + Send + 'static,
-    E: RowEncoder<CurF> + 'static,
+    E: RowEncoder<CurF> + Clone + 'static,
     R: ShardRouter + Send + 'static,
 {
-    /// Build one chain instance. Consumes the specification; no `Clone`
-    /// bounds.
+    /// Build one chain instance. Consumes the specification; the deserializer
+    /// and router need no `Clone`, but the encoder does — the terminal stage
+    /// mints one encoder per shard (columnar encoders hold per-block state
+    /// that cannot be shared), and every in-tree encoder is `Clone`.
     #[must_use]
     pub fn build(self) -> Box<dyn RunnableChain> {
         let SinkedChain {

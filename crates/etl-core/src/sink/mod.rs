@@ -82,9 +82,11 @@ use bytes::{Bytes, BytesMut};
 use std::time::Instant;
 
 /// A small frame of encoded rows produced on a pipeline thread, the unit
-/// shipped over the per-shard queues. Wire frames are concatenable (row
-/// formats like RowBinary carry no per-frame header), so workers accumulate
-/// chunks without re-encoding.
+/// shipped over the per-shard queues. Wire frames are concatenable — either
+/// the format is headerless (RowBinary rows appended back-to-back) or each
+/// frame is one complete, self-describing block (ClickHouse Native), and a
+/// concatenation of complete blocks is itself a legal insert stream — so
+/// workers accumulate chunks without re-encoding.
 ///
 /// Teardown safety: `acks` is an [`AckSet`] — dropping a chunk anywhere
 /// (a closed queue, an aborted worker, a parked chunk at teardown) fails
@@ -124,10 +126,41 @@ pub trait RowEncoder<F: RecFamily>: Send {
         rec: &Record<F::Rec<'buf>>,
         buf: &mut BytesMut,
     ) -> Result<(), SinkError>;
+
+    /// Bytes the encoder is holding internally that have **not** yet been
+    /// flushed to a frame. Row formats append directly in
+    /// [`encode`](Self::encode) and buffer nothing, so the default is `0`.
+    /// Columnar formats (which must transpose a whole block before any bytes
+    /// exist) return the approximate size of the block under assembly; the
+    /// terminal stage adds this to the shard buffer length when deciding
+    /// whether to seal a chunk, so a columnar block still respects
+    /// [`ChunkConfig::target_bytes`](crate::ops::ChunkConfig).
+    fn buffered_bytes(&self) -> usize {
+        0
+    }
+
+    /// Finalize the pending chunk: flush any internally-buffered rows into
+    /// `buf` as exactly **one** complete, self-describing wire frame, leaving
+    /// the encoder empty and ready for the next chunk. Row formats already
+    /// wrote every row in [`encode`](Self::encode), so the default is a
+    /// no-op. The terminal stage calls this immediately before it seals each
+    /// [`EncodedChunk`] — in steady state, on data lulls, and at drain — so a
+    /// columnar encoder's buffered rows are never silently dropped.
+    ///
+    /// An `Err` is fatal (a broken encoder, not a bad record): the stage
+    /// ships no partial frame and the buffered rows' acknowledgements fail on
+    /// teardown, so the data replays. Because a Native block concatenates
+    /// with the blocks around it, each `finish_chunk` frame is independently
+    /// valid — workers still accumulate frames without re-encoding.
+    fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
+        let _ = buf;
+        Ok(())
+    }
 }
 
 /// A batch sealed by a shard worker, ready to write. Frames concatenate to
-/// the full wire payload.
+/// the full wire payload (a stream of one or more self-describing blocks for
+/// block formats like ClickHouse Native).
 #[derive(Debug)]
 pub struct SealedBatch {
     /// Encoded frames, in order.

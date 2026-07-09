@@ -94,7 +94,7 @@ belongs to it:
 |---|---|---|
 | `source` | yes | [Kafka](../04-connectors/kafka.md), [Memory](../04-connectors/memory.md), or your own ([Custom sources](../06-extending/custom-source.md)) |
 | `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/avro.md) |
-| `sink` | yes | [ClickHouse](../04-connectors/clickhouse.md), [Memory](../04-connectors/memory.md), or your own ([Custom sinks](../06-extending/custom-sink.md)) |
+| `sink` | yes | [ClickHouse](../04-connectors/clickhouse/README.md), [Memory](../04-connectors/memory.md), or your own ([Custom sinks](../06-extending/custom-sink.md)) |
 
 The sink connectors map their `batch`, `inflight`, and `retry` sub-sections
 onto the framework's `SinkPoolConfig` (defaults: `batch.max_rows: 500000`,

@@ -87,6 +87,46 @@ pub struct ClickHouseSinkConfig {
     /// `off` by default: today's behavior, no queries issued.
     #[serde(default)]
     pub validate_schema: SchemaValidation,
+    /// Insert wire format (see [`Format`]). `rowbinary` by default;
+    /// `native` selects the columnar block format (which always fetches the
+    /// column schema).
+    #[serde(default)]
+    pub format: Format,
+}
+
+/// The `INSERT` wire format.
+///
+/// ```yaml
+/// sink:
+///   clickhouse:
+///     format: native   # rowbinary | native
+/// ```
+///
+/// `rowbinary` (default) streams rows; `native` transposes each chunk into a
+/// columnar block. Native is type-driven, so selecting it always fetches
+/// `system.columns` — [`build`] upgrades `validate_schema: off` to
+/// [`SchemaValidation::Names`] so the encoder can learn each column's type.
+/// Pair it with [`crate::NativeEncoder`] on the chain (via
+/// [`ClickHouseSink::native_schema`]); RowBinary pairs with
+/// [`crate::ClickHouseEncoder`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// Row-wise RowBinary (default).
+    #[default]
+    RowBinary,
+    /// Columnar Native (self-describing blocks).
+    Native,
+}
+
+impl Format {
+    /// The `FORMAT` keyword for the `INSERT` statement.
+    fn keyword(self) -> &'static str {
+        match self {
+            Format::RowBinary => "RowBinary",
+            Format::Native => "Native",
+        }
+    }
 }
 
 /// When to check the configured columns and row struct against the live
@@ -324,6 +364,8 @@ pub struct ClickHouseSink {
     pub endpoints: Vec<Vec<ClickHouseEndpoint>>,
     /// Pool knobs mapped onto the framework's configuration.
     pub pool: SinkPoolConfig,
+    /// The configured insert wire format.
+    format: Format,
     /// What `validate_schema()` will check, captured from the config.
     schema_check: schema::SchemaCheck,
     /// An independent client set for readiness probing: sharing the insert
@@ -345,6 +387,29 @@ impl ClickHouseSink {
     /// struct check.
     pub async fn validate_schema(&self) -> Result<Option<Arc<RowSchema>>, SchemaError> {
         schema::validate(&self.schema_check, &self.endpoints).await
+    }
+
+    /// The configured insert wire format.
+    #[must_use]
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    /// Fetch the column schema and build a [`NativeSchema`] for a
+    /// [`crate::NativeEncoder`]. `format: native` always fetches
+    /// `system.columns` (see [`Format`]), so this returns a schema whenever
+    /// Native is configured. Call after [`build`], before the endpoints are
+    /// consumed — like [`validate_schema`](Self::validate_schema).
+    pub async fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, SchemaError> {
+        let schema = self.validate_schema().await?.ok_or_else(|| {
+            SchemaError::Mismatch(
+                "sink.clickhouse: `format: native` requires a fetched schema (build upgrades \
+                 validate_schema to at least `names`)"
+                    .into(),
+            )
+        })?;
+        crate::native::NativeSchema::from_row_schema(&schema)
+            .map_err(|e| SchemaError::Mismatch(format!("sink.clickhouse: {e}")))
     }
 
     /// A readiness probe over every replica of every shard, using the
@@ -385,7 +450,15 @@ pub fn from_component_config(section: &ComponentConfig) -> Result<ClickHouseSink
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
     validate(&cfg)?;
 
-    let insert_sql = insert_statement(&cfg.table, &cfg.columns);
+    // Native is type-driven: it must fetch each column's type, so it always
+    // queries `system.columns`. Upgrade `off` to `names` (this still does no
+    // strict per-type check unless the user asked for `full`).
+    let schema_mode = match (cfg.format, cfg.validate_schema) {
+        (Format::Native, SchemaValidation::Off) => SchemaValidation::Names,
+        (_, mode) => mode,
+    };
+
+    let insert_sql = insert_statement(&cfg.table, &cfg.columns, cfg.format);
     let writer = ClickHouseWriter::new(
         insert_sql,
         cfg.settings.clone().into_iter().collect(),
@@ -425,8 +498,9 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
         writer,
         endpoints,
         pool,
+        format: cfg.format,
         schema_check: schema::SchemaCheck {
-            mode: cfg.validate_schema,
+            mode: schema_mode,
             database: cfg.database.clone(),
             table: cfg.table.clone(),
             columns: cfg.columns.clone(),
@@ -585,7 +659,7 @@ fn is_identifier(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn insert_statement(table: &str, columns: &[String]) -> String {
+fn insert_statement(table: &str, columns: &[String], format: Format) -> String {
     let table = table
         .split('.')
         .map(|p| format!("`{p}`"))
@@ -596,7 +670,7 @@ fn insert_statement(table: &str, columns: &[String]) -> String {
         .map(|c| format!("`{c}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("INSERT INTO {table} ({cols}) FORMAT RowBinary")
+    format!("INSERT INTO {table} ({cols}) FORMAT {}", format.keyword())
 }
 
 #[cfg(test)]
@@ -815,6 +889,45 @@ settings: { insert_quorum: "auto" }
                 "expected `{needle}` for `{value}`: {err}"
             );
         }
+    }
+
+    #[test]
+    fn format_parses_and_defaults_to_rowbinary() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        for (yaml, expected) in [
+            ("", Format::RowBinary),
+            ("format: rowbinary\n", Format::RowBinary),
+            ("format: native\n", Format::Native),
+        ] {
+            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
+            assert_eq!(cfg.format, expected, "for `{yaml}`");
+        }
+    }
+
+    #[test]
+    fn native_format_emits_native_sql_and_forces_a_schema_fetch() {
+        let sink = from_component_config(&component(
+            "table: t\ncolumns: [id, name]\nshards: [{replicas: [\"http://a\"]}]\nformat: native",
+        ))
+        .unwrap();
+        assert_eq!(
+            sink.writer.insert_sql(),
+            "INSERT INTO `t` (`id`, `name`) FORMAT Native"
+        );
+        assert_eq!(sink.format(), Format::Native);
+        // Native upgrades `validate_schema: off` to `names` so the encoder
+        // can learn each column's type from `system.columns`.
+        assert_eq!(sink.schema_check.mode, SchemaValidation::Names);
+    }
+
+    #[test]
+    fn native_format_keeps_an_explicit_full_validation_mode() {
+        let sink = from_component_config(&component(
+            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n\
+             format: native\nvalidate_schema: full",
+        ))
+        .unwrap();
+        assert_eq!(sink.schema_check.mode, SchemaValidation::Full);
     }
 
     #[test]

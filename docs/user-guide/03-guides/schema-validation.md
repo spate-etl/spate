@@ -105,7 +105,7 @@ Together the two halves pin all three descriptions to each other:
 
 ## Related
 
-- [ClickHouse connector](../04-connectors/clickhouse.md) — the full sink
+- [ClickHouse connector](../04-connectors/clickhouse/README.md) — the full sink
   configuration, including the deduplication window warning.
 - [Assembling a pipeline](assembling-a-pipeline.md) — where `block_on`
   pre-steps fit in the builder flow.

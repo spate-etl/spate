@@ -197,6 +197,24 @@ pub fn http_post(host: &str, port: u16, path: &str, body: &str) -> std::io::Resu
     Ok(decode_http(&raw))
 }
 
+/// Plain HTTP/1.1 POST with a **binary** body (localhost ClickHouse only):
+/// used for `INSERT ... FORMAT <binary>` where the body is a text query
+/// prefix followed by the raw block/row bytes. Returns the decoded response.
+pub fn http_post_bytes(host: &str, port: u16, path: &str, body: &[u8]) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect((host, port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    Ok(decode_http(&raw))
+}
+
 /// Plain HTTP/1.1 GET over a `TcpStream` (localhost admin/ClickHouse
 /// endpoints only). Returns the response body.
 pub fn http_get(host: &str, port: u16, path: &str) -> std::io::Result<String> {

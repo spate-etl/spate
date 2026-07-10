@@ -60,11 +60,11 @@ exact data table (its `<details>` fallback); the committed JSONL under
 
 ## The two rigs, and the honest framing
 
-The `avro-fast` backend (borrowed, zero-copy) decodes roughly **7.4× faster** than
+The `avro-fast` backend (borrowed, zero-copy) decodes roughly **7.2× faster** than
 `apache-avro` on the CPU rig. But a full end-to-end pass sustains hundreds of
 thousands of rows per second, and the ClickHouse sink — not the decoder — sets
 that rate, so the decode win shrinks to a fraction of a percent end to end
-(within ±0.3% across n=3): real, but not the headline. Two rigs exist precisely to
+(within ±0.5% across n=3): real, but not the headline. Two rigs exist precisely to
 say this out loud rather than cherry-pick:
 
 - **CPU rig** (no broker, no server): decode → `flat_map` → Native encode. Shows

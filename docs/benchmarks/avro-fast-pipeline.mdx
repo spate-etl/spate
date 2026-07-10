@@ -80,8 +80,8 @@ seam, not just the decoder.
   />
 </StatRow>
 
-The two multiples are the point of the CPU rig: the borrowed decoder is ~7.4×
-faster to decode and ~4.3× faster through the whole in-process pipeline (decode →
+The two multiples are the point of the CPU rig: the borrowed decoder is ~7.2×
+faster to decode and ~4.2× faster through the whole in-process pipeline (decode →
 `flat_map` → filter → encode → handoff) than the `apache-avro` owned path, the
 pipeline pair both on RowBinary. Native costs more CPU to encode than RowBinary,
 so it trails on this rig; that trade only pays off server-side, and end to end
@@ -125,11 +125,11 @@ just prose.
 />
 
 Across the four Avro arms the decoder choice barely moves the rate: on Native,
-borrowed `serde_avro_fast` lands **+0.12%** and owned `serde_avro_fast`
-**+0.08%** from owned `apache-avro` — every arm sits within **±0.3%** across n=3
-reps (medians ~213.5k rows/s). No measurable difference, because the ClickHouse
+borrowed `serde_avro_fast` lands **−0.26%** and owned `serde_avro_fast`
+**−0.42%** from owned `apache-avro` — every arm sits within **±0.5%** across n=3
+reps (medians ~213k rows/s). No measurable difference, because the ClickHouse
 sink, not the decoder, is the limiter. The insert format does not move the rate
-either: `fast_borrowed + RowBinary` lands within **−0.26%** of the same decoder on
+either: `fast_borrowed + RowBinary` lands within **−0.13%** of the same decoder on
 Native (both ~213k rows/s) — the earlier revision's ~−2.8% RowBinary throughput
 penalty did not survive n=3. What the format *does* change is the flush tail:
 RowBinary's sink-flush p99 falls in the 50–100 ms histogram bucket (interpolated

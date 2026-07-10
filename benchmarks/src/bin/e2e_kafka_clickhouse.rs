@@ -629,7 +629,9 @@ fn run_avro(
             );
         }
         ("apache_owned", "native") => {
-            let d = builder.build_serde::<SensorBatchOwned>();
+            let d = builder
+                .build_serde::<SensorBatchOwned>()
+                .expect("apache builder");
             run_owned_native(
                 config,
                 source,
@@ -645,7 +647,9 @@ fn run_avro(
             );
         }
         ("apache_owned", _) => {
-            let d = builder.build_serde::<SensorBatchOwned>();
+            let d = builder
+                .build_serde::<SensorBatchOwned>()
+                .expect("apache builder");
             run_owned_rowbinary(
                 config,
                 source,

@@ -87,17 +87,26 @@ tolerate every live writer version** of the subject. Configuring a
 a clear error; use `build_serde` when you need reader pinning.
 
 Where the schema is fixed at build time — the `raw` and `single_object`
-framings — a fast-incompatible schema now fails the **builder** immediately,
-not at runtime. Only `confluent` registry schemas, discovered per writer id as
-messages arrive, can surface a fast-compile failure **per record**.
+framings — a schema a backend cannot compile fails **that backend's
+builder** immediately, not at runtime: the fast builders reject a
+fast-incompatible schema, and the apache builders (`build_value`,
+`build_serde`) reject an apache-incompatible one. Only `confluent` registry
+schemas, discovered per writer id as messages arrive, can surface a compile
+failure **per record**.
 
-A schema the fast backend cannot compile (while apache accepts it) never
-poisons the apache path: fast pipelines surface it per record as a
-schema-unavailable error, subject to the usual Skip/Fail policy. That
-guarantee is **one-directional**, though: the apache parse is a hard
-prerequisite for *both* backends, so a schema `apache-avro` itself rejects (or
-panics on) is negative-cached *before* any fast compile is attempted. A
-fast-rejection never breaks the apache path; an apache-rejection breaks both.
+Each backend compiles every schema **independently**, so a schema only one
+backend accepts never poisons the other — in either direction. A
+fast-rejected schema stays fully usable on the apache path, and a schema
+`apache-avro` rejects (or panics on — some malformed names, like a record
+called `my-record`, trip a parser panic) still decodes on the fast backend,
+which accepts several real-world shapes apache does not (dashed namespaces,
+wrong-typed field defaults, enum defaults outside the symbol list). The
+backend whose compile failed surfaces its stored reason per record as a
+schema-unavailable error, subject to the usual Skip/Fail policy. Only a
+schema **no** enabled backend accepts is negative-cached as a poison
+payload. One exception: `single_object` framing computes its header
+fingerprint with the apache parser, so that mode needs an apache-parseable
+schema even for a fast-only pipeline (`raw` does not).
 
 ## Borrowed (zero-copy) records
 

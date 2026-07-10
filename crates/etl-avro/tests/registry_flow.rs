@@ -207,7 +207,7 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
 
     let payload = confluent_payload(42, 7);
     let (ack, _rx) = AckRef::test_pair();
@@ -247,7 +247,7 @@ async fn retriable_registry_errors_are_retried() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(9, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -271,7 +271,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(5, 1);
 
     // Drive to the negative-cache verdict.
@@ -328,7 +328,7 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(42, 7);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -358,7 +358,7 @@ async fn non_retriable_5xx_is_transient_not_poison() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(7, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -390,7 +390,7 @@ async fn slow_fetch_does_not_block_other_ids() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let slow = confluent_payload(100, 1);
     let fast = confluent_payload(200, 2);
 
@@ -456,7 +456,7 @@ async fn prewarm_loads_subjects_at_startup() {
     cfg.prewarm_subjects = vec!["events-value".into()];
     let builder =
         AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
 
     // The pre-warm must request the subject's latest version at startup.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -477,17 +477,17 @@ async fn prewarm_loads_subjects_at_startup() {
 }
 
 /// apache-avro 0.21 `Schema::parse_str` *panics* (not `Err`) on some
-/// malformed names — `"my-record"` trips an internal unwrap. The fetcher runs
-/// the parse in a spawned task; a panic there used to leave the id in-flight
-/// forever, so every payload for it returned NotReady with no drop signal (a
-/// permanent head-of-line stall). The fetcher now catches the panic and
-/// negative-caches the id, so it surfaces as a poison (SchemaUnavailable) the
-/// ErrorPolicy can act on. (The caught panic prints a backtrace to stderr;
-/// that is expected and harmless.)
+/// malformed names — `"my-record"` trips an internal unwrap — while
+/// serde_avro_fast accepts the very same schema. The compile catches the
+/// panic and stores it as the apache side's failure, so the apache path
+/// surfaces a per-record poison (SchemaUnavailable) the ErrorPolicy can act
+/// on — never a permanent NotReady stall — while the fast path decodes the
+/// id normally. (The caught panic prints a backtrace to stderr; that is
+/// expected and harmless.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn panicking_schema_parse_negative_caches_not_stalls() {
+async fn panicking_schema_parse_fails_only_the_apache_side_not_stalls() {
     let stub = StubRegistry::default();
-    let bad = r#"{"type":"record","name":"my-record","fields":[]}"#;
+    let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
     stub.script("/schemas/ids/77", 200, &schema_body(bad), 0);
     let addr = stub.clone().serve().await;
 
@@ -496,7 +496,7 @@ async fn panicking_schema_parse_negative_caches_not_stalls() {
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value();
+    let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(77, 1);
 
     let err = tokio::task::spawn_blocking(move || {
@@ -508,8 +508,47 @@ async fn panicking_schema_parse_negative_caches_not_stalls() {
     .unwrap_err();
     assert!(
         matches!(err, DeserError::SchemaUnavailable { .. }),
-        "a panicking schema parse must negative-cache, not stall at NotReady: {err}"
+        "a panicking schema parse must poison only the apache side, not stall at NotReady: {err}"
     );
+
+    // The same id decodes single-pass on the fast backend: apache's
+    // rejection no longer poisons the schema for the backend that accepts
+    // it.
+    #[cfg(feature = "fast")]
+    {
+        #[derive(Debug, serde::Deserialize)]
+        struct EventRow {
+            id: i64,
+        }
+        struct CollectedRows(Vec<EventRow>);
+        impl EmitRecord<'_, EventRow> for CollectedRows {
+            fn emit(&mut self, rec: Record<EventRow>) -> Flow {
+                self.0.push(rec.payload);
+                Flow::Continue
+            }
+        }
+
+        let mut fast = builder.build_serde_fast::<EventRow>().unwrap();
+        let payload = confluent_payload(77, 9);
+        let rows = tokio::task::spawn_blocking(move || {
+            let (ack, _rx) = AckRef::test_pair();
+            let mut out = CollectedRows(Vec::new());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match fast.deserialize(&raw(&payload), &ack, &mut out) {
+                    Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    other => return other.map(|()| out.0),
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .expect("the fast backend must decode a schema only apache rejects");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 9);
+    }
 }
 
 /// The fast backend rides the same NotReady/fetch/replay contract: the

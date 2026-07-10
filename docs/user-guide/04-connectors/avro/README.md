@@ -12,7 +12,7 @@ I/O runtime handle (the registry fetcher lives there):
 ```rust
 let deserializer =
     AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-        .build_serde::<Order>();
+        .build_serde::<Order>()?;
 ```
 
 ## Configuration

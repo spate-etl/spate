@@ -144,14 +144,14 @@ fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("avro_decode");
     group.throughput(Throughput::Elements(1));
     group.bench_function("value", |b| {
-        let mut deser = builder.build_value();
+        let mut deser = builder.build_value().expect("apache builder");
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
         });
     });
     group.bench_function("serde_typed", |b| {
-        let mut deser = builder.build_serde::<Order>();
+        let mut deser = builder.build_serde::<Order>().expect("apache builder");
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
@@ -276,7 +276,9 @@ fn bench_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("avro_decode_batch50");
     group.throughput(Throughput::Elements(EVENTS));
     group.bench_function("serde_typed", |b| {
-        let mut deser = builder.build_serde::<SensorBatch>();
+        let mut deser = builder
+            .build_serde::<SensorBatch>()
+            .expect("apache builder");
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();

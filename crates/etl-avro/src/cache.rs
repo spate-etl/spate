@@ -7,29 +7,46 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 /// A registry schema parsed once, shared by every pipeline thread.
+///
+/// Each backend's compiled form is an independent `Result`: one backend
+/// rejecting a schema never poisons the other. An entry is cacheable as
+/// `Ready` whenever **at least one** enabled backend compiled; a backend
+/// whose side failed surfaces its stored reason per record as
+/// `SchemaUnavailable`. Each reason string is fully rendered here, once,
+/// so the per-record path only clones it (never re-formats).
 #[derive(Debug)]
 pub(crate) struct CompiledSchema {
     /// Registry id this schema was fetched under (0 for fixed schemas).
     pub(crate) id: u32,
-    /// The parsed writer schema.
-    pub(crate) schema: Schema,
-    /// The fast backend's compiled form of the same schema. `Err` means
-    /// `serde_avro_fast` rejected a schema `apache-avro` accepts: the apache
-    /// path is unaffected (this entry stays `Ready`), and the fast path
-    /// surfaces the stored reason per record as `SchemaUnavailable`. The
-    /// string is the fully-rendered `SchemaUnavailable` reason, built once
-    /// here so the per-record path only clones it (never re-formats).
+    /// The apache backend's parsed writer schema, or why it rejected it.
+    pub(crate) schema: Result<Schema, String>,
+    /// The fast backend's compiled form of the same schema, or why
+    /// `serde_avro_fast` rejected it.
     #[cfg(feature = "fast")]
     pub(crate) fast: Result<serde_avro_fast::Schema, String>,
 }
 
 impl CompiledSchema {
-    /// Compile every enabled backend's form of a schema. `json` must be the
-    /// schema's *original* JSON source — never a canonical form, which strips
-    /// logical types and defaults that the fast backend needs.
-    pub(crate) fn compile(id: u32, schema: Schema, json: &str) -> Self {
-        #[cfg(not(feature = "fast"))]
-        let _ = json;
+    /// Compile every enabled backend's form of a schema, each independently.
+    /// `json` must be the schema's *original* JSON source — never a canonical
+    /// form, which strips logical types and defaults that the fast backend
+    /// needs.
+    ///
+    /// apache-avro 0.21 *panics* rather than erroring on some malformed
+    /// names (e.g. a record named `"my-record"`); the panic is caught here
+    /// and becomes that backend's stored failure, because `serde_avro_fast`
+    /// accepts some of those schemas and must still be able to decode them.
+    /// (The caught panic prints a backtrace to stderr; that is harmless.)
+    pub(crate) fn compile(id: u32, json: &str) -> Self {
+        let schema = match std::panic::catch_unwind(|| Schema::parse_str(json)) {
+            Ok(Ok(schema)) => Ok(schema),
+            Ok(Err(e)) => Err(format!(
+                "schema {id} is not usable by the apache backend: {e}"
+            )),
+            Err(_panic) => Err(format!(
+                "schema {id} is not usable by the apache backend: the parser panicked"
+            )),
+        };
         CompiledSchema {
             id,
             schema,
@@ -38,6 +55,25 @@ impl CompiledSchema {
                 .parse::<serde_avro_fast::Schema>()
                 .map_err(|e| format!("schema {id} is not usable by the fast backend: {e}")),
         }
+    }
+
+    /// `None` when at least one enabled backend compiled (the entry is
+    /// `Ready` material); otherwise the combined per-backend reasons — the
+    /// negative-cache payload for a schema nothing can use.
+    pub(crate) fn unusable_reason(&self) -> Option<String> {
+        let apache = match &self.schema {
+            Ok(_) => return None,
+            Err(reason) => reason,
+        };
+        #[cfg(feature = "fast")]
+        {
+            match &self.fast {
+                Ok(_) => None,
+                Err(fast) => Some(format!("{apache}; {fast}")),
+            }
+        }
+        #[cfg(not(feature = "fast"))]
+        Some(apache.clone())
     }
 }
 
@@ -183,28 +219,74 @@ mod tests {
     const SCHEMA_JSON: &str =
         r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#;
 
-    fn schema() -> Schema {
-        Schema::parse_str(SCHEMA_JSON).unwrap()
-    }
+    /// apache-avro parses this; serde_avro_fast 2.1 rejects it (a `bytes`
+    /// decimal logical type missing `precision`).
+    #[cfg(feature = "fast")]
+    const FAST_REJECTED_JSON: &str = r#"{"type":"record","name":"D","fields":[{"name":"amt","type":{"type":"bytes","logicalType":"decimal","scale":2}}]}"#;
+
+    /// serde_avro_fast accepts this; apache-avro 0.21 *panics* on the
+    /// dashed record name.
+    #[cfg(feature = "fast")]
+    const APACHE_REJECTED_JSON: &str =
+        r#"{"type":"record","name":"my-record","fields":[{"name":"a","type":"long"}]}"#;
 
     fn compiled(id: u32) -> CompiledSchema {
-        CompiledSchema::compile(id, schema(), SCHEMA_JSON)
+        CompiledSchema::compile(id, SCHEMA_JSON)
+    }
+
+    #[test]
+    fn well_formed_schema_compiles_for_every_backend() {
+        let entry = compiled(4);
+        assert!(entry.schema.is_ok());
+        #[cfg(feature = "fast")]
+        assert!(entry.fast.is_ok());
+        assert!(entry.unusable_reason().is_none());
     }
 
     #[cfg(feature = "fast")]
     #[test]
-    fn fast_parse_failure_never_poisons_the_apache_side() {
+    fn fast_rejection_never_poisons_the_apache_side() {
         // The two backends compile independently: a schema the fast backend
         // rejects still produces a fully usable `Ready` entry for the apache
         // path, with the failure stored per-backend inside the entry.
-        let entry = CompiledSchema::compile(3, schema(), "not a schema");
+        let entry = CompiledSchema::compile(3, FAST_REJECTED_JSON);
+        assert!(entry.schema.is_ok());
         assert!(entry.fast.is_err());
+        assert!(entry.unusable_reason().is_none());
         let cache = SchemaCache::new(Duration::from_secs(600));
         cache.insert_ready(entry);
         assert!(matches!(cache.get(3), Lookup::Ready(s) if s.id == 3));
+    }
 
-        // And a well-formed schema compiles for both backends.
-        assert!(compiled(4).fast.is_ok());
+    #[cfg(feature = "fast")]
+    #[test]
+    fn apache_rejection_never_poisons_the_fast_side() {
+        // The reverse direction: apache-avro panics on the dashed record
+        // name, but serde_avro_fast compiles it — the entry stays `Ready`
+        // and the fast path decodes while the apache side carries its
+        // stored per-record reason.
+        let entry = CompiledSchema::compile(6, APACHE_REJECTED_JSON);
+        assert!(
+            matches!(&entry.schema, Err(reason) if reason.contains("apache backend")),
+            "{:?}",
+            entry.schema.as_ref().err()
+        );
+        assert!(entry.fast.is_ok());
+        assert!(entry.unusable_reason().is_none());
+        let cache = SchemaCache::new(Duration::from_secs(600));
+        cache.insert_ready(entry);
+        assert!(matches!(cache.get(6), Lookup::Ready(s) if s.id == 6));
+    }
+
+    #[test]
+    fn a_schema_no_backend_accepts_is_unusable() {
+        let entry = CompiledSchema::compile(8, "not a schema");
+        let reason = entry
+            .unusable_reason()
+            .expect("no backend can use junk JSON");
+        assert!(reason.contains("apache backend"), "{reason}");
+        #[cfg(feature = "fast")]
+        assert!(reason.contains("fast backend"), "{reason}");
     }
 
     #[test]

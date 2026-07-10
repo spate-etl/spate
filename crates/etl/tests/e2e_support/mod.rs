@@ -304,7 +304,8 @@ impl Harness {
         let deserializer =
             AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())
                 .expect("avro")
-                .build_serde::<Event>();
+                .build_serde::<Event>()
+                .expect("apache builder");
         let sink =
             etl::clickhouse::config::from_component_config(&pipeline.config().sink).expect("sink");
 

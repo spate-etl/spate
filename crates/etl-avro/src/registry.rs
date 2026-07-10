@@ -13,7 +13,10 @@
 //!
 //! Only a *permanent* verdict about an id — the registry answering `404`
 //! (unknown id/subject/version), a schema that uses unsupported references,
-//! or an unparseable schema — is negatively cached. A *transient* outage
+//! or a schema **no enabled backend** can parse — is negatively cached. A
+//! schema only one backend accepts is not a negative verdict: it is
+//! published `Ready` with the rejecting backend's reason stored per-backend
+//! inside the entry (see `CompiledSchema`). A *transient* outage
 //! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
 //! leaves the id **absent** so the deserializer's next replay refetches it:
 //! poisoning a transient blip would drop (and ack) perfectly decodable
@@ -28,7 +31,6 @@
 //! backoff are preserved across the concurrency.
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
-use apache_avro::Schema;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
 use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
@@ -200,28 +202,23 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
                 );
                 return FetchOutcome::Resolved;
             }
-            // apache-avro's parse is a hard prerequisite for both backends: a
-            // schema it rejects is negative-cached here before the fast form is
-            // ever compiled, so a fast-only pipeline cannot decode it even when
-            // serde_avro_fast would have accepted it. The non-poisoning
-            // guarantee is one-directional — a fast-only rejection never
-            // poisons the apache path (see `CompiledSchema::compile`).
-            //
-            // `Schema::parse_str` can *panic* rather than return `Err` on some
-            // malformed names in apache-avro 0.21 (e.g. `"my-record"` trips an
-            // internal unwrap); catch it so a poison schema negative-caches
-            // like any other parse failure instead of killing this task and
-            // stalling the id at NotReady forever.
-            match std::panic::catch_unwind(|| Schema::parse_str(&registered.schema)) {
-                Ok(Ok(schema)) => {
+            // Each backend compiles independently (`CompiledSchema::compile`,
+            // which also catches apache-avro 0.21's parse *panics* on
+            // malformed names like `"my-record"`): a schema only one backend
+            // accepts is published `Ready` and stays fully usable there,
+            // while the rejecting backend surfaces its stored reason per
+            // record. Only a schema **no** enabled backend accepts is
+            // negative-cached — a poison payload for every pipeline. Either
+            // way the id resolves; a bad schema can never stall it at
+            // NotReady forever.
+            let compiled = CompiledSchema::compile(id, &registered.schema);
+            match compiled.unusable_reason() {
+                None => {
                     tracing::info!(schema_id = id, "schema fetched and compiled");
-                    cache.insert_ready(CompiledSchema::compile(id, schema, &registered.schema));
+                    cache.insert_ready(compiled);
                 }
-                Ok(Err(e)) => {
-                    cache.insert_failed(id, format!("schema {id} failed to parse: {e}"));
-                }
-                Err(_panic) => {
-                    cache.insert_failed(id, format!("schema {id} fetch/parse panicked"));
+                Some(reason) => {
+                    cache.insert_failed(id, reason);
                 }
             }
             FetchOutcome::Resolved
@@ -268,21 +265,18 @@ pub(crate) async fn prewarm(cfg: &RegistryConfig, subjects: &[String], cache: &S
         let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
         match schema_registry::get_schema_by_subject(&settings, &strategy).await {
             Ok(registered) if registered.references.is_empty() => {
-                // Catch a parse panic per subject (see `fetch_one`) so one
-                // poison schema cannot kill this detached task mid-list and
-                // silently skip every remaining subject's pre-warm.
-                match std::panic::catch_unwind(|| Schema::parse_str(&registered.schema)) {
-                    Ok(Ok(schema)) => {
+                // Per-backend compile with the parse-panic guard inside
+                // (see `fetch_one`), so one poison schema cannot kill this
+                // detached task mid-list and silently skip every remaining
+                // subject's pre-warm.
+                let compiled = CompiledSchema::compile(registered.id, &registered.schema);
+                match compiled.unusable_reason() {
+                    None => {
                         tracing::info!(subject, schema_id = registered.id, "pre-warmed schema");
-                        cache.insert_ready(CompiledSchema::compile(
-                            registered.id,
-                            schema,
-                            &registered.schema,
-                        ));
+                        cache.insert_ready(compiled);
                     }
-                    Ok(Err(e)) => tracing::warn!(subject, error = %e, "pre-warm parse failed"),
-                    Err(_panic) => {
-                        tracing::warn!(subject, "pre-warm parse panicked; skipping subject");
+                    Some(reason) => {
+                        tracing::warn!(subject, %reason, "pre-warm parse failed; skipping subject");
                     }
                 }
             }

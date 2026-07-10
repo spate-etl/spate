@@ -73,27 +73,29 @@ impl SchemaSource {
         }
     }
 
-    /// Load and parse the schema, returning its original JSON alongside
-    /// (compiling other backends' forms needs the source text, not a
-    /// re-rendered canonical form).
-    fn load(&self) -> Result<(Schema, String), AvroConfigError> {
-        let text = match (&self.inline, &self.path) {
-            (Some(s), None) => s.clone(),
+    /// Load the schema's original JSON source (backend compiles need the
+    /// source text, not a re-rendered canonical form).
+    fn load_text(&self) -> Result<String, AvroConfigError> {
+        match (&self.inline, &self.path) {
+            (Some(s), None) => Ok(s.clone()),
             (None, Some(p)) => {
                 std::fs::read_to_string(p).map_err(|e| AvroConfigError::SchemaLoad {
                     detail: format!("{}: {e}", p.display()),
-                })?
+                })
             }
-            _ => {
-                return Err(AvroConfigError::Invalid {
-                    detail: "a schema source needs exactly one of `inline` or `path`".into(),
-                });
-            }
-        };
-        let schema = Schema::parse_str(&text).map_err(|e| AvroConfigError::SchemaLoad {
+            _ => Err(AvroConfigError::Invalid {
+                detail: "a schema source needs exactly one of `inline` or `path`".into(),
+            }),
+        }
+    }
+
+    /// Load and parse the schema with `apache-avro` (the reader-schema
+    /// path, which only exists on the apache backend).
+    fn load(&self) -> Result<Schema, AvroConfigError> {
+        let text = self.load_text()?;
+        Schema::parse_str(&text).map_err(|e| AvroConfigError::SchemaLoad {
             detail: format!("schema failed to parse: {e}"),
-        })?;
-        Ok((schema, text))
+        })
     }
 }
 
@@ -194,7 +196,7 @@ impl AvroDeserializerBuilder {
         let reader_schema = settings
             .reader_schema
             .as_ref()
-            .map(|s| s.load().map(|(schema, _)| Arc::new(schema)))
+            .map(|s| s.load().map(Arc::new))
             .transpose()?;
         let mode = match settings.mode {
             AvroMode::Confluent => {
@@ -253,7 +255,20 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
-                let fp = schema.schema.fingerprint::<Rabin>();
+                // The single-object header fingerprint is computed by
+                // apache-avro, so this mode needs the apache parse to
+                // succeed even for a fast-only pipeline (unlike `raw`).
+                let apache =
+                    schema
+                        .schema
+                        .as_ref()
+                        .map_err(|reason| AvroConfigError::SchemaLoad {
+                            detail: format!(
+                                "mode `single_object` computes the header fingerprint \
+                                 with the apache parser, which rejected the schema: {reason}"
+                            ),
+                        })?;
+                let fp = apache.fingerprint::<Rabin>();
                 let bytes: [u8; 8] =
                     fp.bytes
                         .as_slice()
@@ -287,23 +302,64 @@ impl AvroDeserializerBuilder {
                 detail: format!("mode `{mode}` does not use a `registry` section"),
             });
         }
-        let (schema, json) = source.load()?;
-        Ok(Arc::new(CompiledSchema::compile(0, schema, &json)))
+        let json = source.load_text()?;
+        // Per-backend compile (with apache-avro's parse-panic caught): a
+        // fixed schema only one backend accepts still builds, and each
+        // backend's builder gates on its own side below. Only a schema no
+        // enabled backend accepts is a load error.
+        let compiled = CompiledSchema::compile(0, &json);
+        if let Some(reason) = compiled.unusable_reason() {
+            return Err(AvroConfigError::SchemaLoad { detail: reason });
+        }
+        Ok(Arc::new(compiled))
+    }
+
+    /// The fixed schema's apache-side failure, if any. Fixed-schema modes
+    /// compile every backend eagerly at build time, so a schema this
+    /// backend cannot use fails the apache builders *here* rather than
+    /// surfacing per record as `SchemaUnavailable` — which under the
+    /// default Skip policy would drop and ack 100% of the input while
+    /// watermarks advance (the same gate `build_fast` applies to the fast
+    /// side). Confluent writer schemas arrive per id at runtime and cannot
+    /// be checked until then.
+    fn fixed_apache_error(&self) -> Option<String> {
+        match &self.core.mode {
+            SchemaSourceMode::Raw { schema } | SchemaSourceMode::SingleObject { schema, .. } => {
+                schema.schema.as_ref().err().cloned()
+            }
+            SchemaSourceMode::Confluent { .. } => None,
+        }
     }
 
     /// The dynamically-typed deserializer (emits [`crate::AvroValue`]).
-    #[must_use]
-    pub fn build_value(&self) -> AvroValueDeserializer {
-        AvroValueDeserializer::new(self.core.clone())
+    ///
+    /// # Errors
+    ///
+    /// Rejects a fixed schema (`raw`/`single_object`) that the apache
+    /// backend cannot parse — deferring it would surface every record as
+    /// `SchemaUnavailable` and drop it under the default Skip policy. The
+    /// fast builders gate on their own backend the same way.
+    pub fn build_value(&self) -> Result<AvroValueDeserializer, AvroConfigError> {
+        if let Some(reason) = self.fixed_apache_error() {
+            return Err(AvroConfigError::Invalid { detail: reason });
+        }
+        Ok(AvroValueDeserializer::new(self.core.clone()))
     }
 
     /// The serde-typed deserializer (emits `T`).
-    #[must_use]
-    pub fn build_serde<T>(&self) -> AvroSerdeDeserializer<T>
+    ///
+    /// # Errors
+    ///
+    /// Rejects a fixed schema the apache backend cannot parse — see
+    /// [`Self::build_value`].
+    pub fn build_serde<T>(&self) -> Result<AvroSerdeDeserializer<T>, AvroConfigError>
     where
         T: serde::de::DeserializeOwned + Send + 'static,
     {
-        AvroSerdeDeserializer::new(self.core.clone())
+        if let Some(reason) = self.fixed_apache_error() {
+            return Err(AvroConfigError::Invalid { detail: reason });
+        }
+        Ok(AvroSerdeDeserializer::new(self.core.clone()))
     }
 
     /// The fast single-pass deserializer for **owned** records (emits `T`).
@@ -315,9 +371,9 @@ impl AvroDeserializerBuilder {
     /// Rejects a configured `reader_schema`: the fast backend resolves each
     /// writer schema directly into `T` and has no reader-schema resolution —
     /// evolution is expressed with serde attributes instead (see the
-    /// [`AvroFastDeserializer`] docs). Unlike `build_value`/`build_serde`,
-    /// this returns `Result` because the backend choice happens after the
-    /// settings were validated.
+    /// [`AvroFastDeserializer`] docs). Also rejects a fixed schema this
+    /// backend cannot compile, mirroring [`Self::build_value`]'s gate on
+    /// the apache side.
     #[cfg(feature = "fast")]
     pub fn build_serde_fast<T>(
         &self,
@@ -490,8 +546,8 @@ mod tests {
             "{err}"
         );
         // The apache builders accept the same settings.
-        let _ = builder.build_serde::<E>();
-        let _ = builder.build_value();
+        builder.build_serde::<E>().unwrap();
+        builder.build_value().unwrap();
     }
 
     #[cfg(feature = "fast")]
@@ -521,8 +577,58 @@ mod tests {
             "{err}"
         );
         // The apache builders accept the same settings.
-        let _ = builder.build_serde::<D>();
-        let _ = builder.build_value();
+        builder.build_serde::<D>().unwrap();
+        builder.build_value().unwrap();
+    }
+
+    #[cfg(feature = "fast")]
+    #[test]
+    fn apache_incompatible_fixed_schema_builds_only_the_fast_backend() {
+        // The mirror image: a raw-mode schema apache-avro rejects (it panics
+        // on the dashed record name) but serde_avro_fast accepts. The fast
+        // builders work — this used to be impossible, the load poisoned the
+        // whole builder — while the apache builders reject at build time
+        // with the stored reason instead of draining records at runtime.
+        let rt = runtime();
+        let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
+        let yaml = format!("mode: raw\nschema: {{inline: '{bad}'}}");
+        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
+        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+
+        #[derive(Debug, serde::Deserialize)]
+        struct E {
+            #[expect(dead_code, reason = "shape only")]
+            id: i64,
+        }
+        builder.build_serde_fast::<E>().unwrap();
+
+        let err = builder.build_value().unwrap_err();
+        assert!(
+            matches!(&err, AvroConfigError::Invalid { detail } if detail.contains("apache backend")),
+            "{err}"
+        );
+        let err = builder.build_serde::<E>().unwrap_err();
+        assert!(
+            matches!(&err, AvroConfigError::Invalid { detail } if detail.contains("apache backend")),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "fast")]
+    #[test]
+    fn single_object_requires_the_apache_parse_for_its_fingerprint() {
+        // single_object frames with the Rabin fingerprint, which apache-avro
+        // computes — so unlike `raw`, an apache-rejected schema fails the
+        // settings even though the fast backend could decode the datum.
+        let rt = runtime();
+        let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
+        let yaml = format!("mode: single_object\nschema: {{inline: '{bad}'}}");
+        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
+        let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err();
+        assert!(
+            matches!(&err, AvroConfigError::SchemaLoad { detail } if detail.contains("fingerprint")),
+            "{err}"
+        );
     }
 
     #[test]

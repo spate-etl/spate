@@ -119,9 +119,20 @@ impl DecoderCore {
         let Some((writer, mut datum)) = self.resolve(raw)? else {
             return Ok(None);
         };
-        let value = from_avro_datum(&writer.schema, &mut datum, self.reader_schema.as_deref())
-            .map_err(|e| DeserError::Malformed {
-                reason: format!("avro datum decode failed: {e}"),
+        let schema = writer
+            .schema
+            .as_ref()
+            .map_err(|reason| DeserError::SchemaUnavailable {
+                // Pre-rendered in `CompiledSchema::compile`: clone, never
+                // format. A registry schema only the fast backend accepts
+                // reaches here on the apache path.
+                reason: reason.clone(),
+            })?;
+        let value =
+            from_avro_datum(schema, &mut datum, self.reader_schema.as_deref()).map_err(|e| {
+                DeserError::Malformed {
+                    reason: format!("avro datum decode failed: {e}"),
+                }
             })?;
         Ok(Some(value))
     }
@@ -390,11 +401,7 @@ mod tests {
     fn raw_core(reader: Option<&str>) -> DecoderCore {
         DecoderCore {
             mode: SchemaSourceMode::Raw {
-                schema: Arc::new(crate::cache::CompiledSchema::compile(
-                    0,
-                    writer_schema(),
-                    WRITER_V1,
-                )),
+                schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
             },
             reader_schema: reader.map(|r| Arc::new(Schema::parse_str(r).unwrap())),
         }
@@ -488,11 +495,7 @@ mod tests {
         let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
         let core = |expected: u64| DecoderCore {
             mode: SchemaSourceMode::SingleObject {
-                schema: Arc::new(crate::cache::CompiledSchema::compile(
-                    0,
-                    writer_schema(),
-                    WRITER_V1,
-                )),
+                schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
                 fingerprint: expected,
             },
             reader_schema: None,
@@ -619,11 +622,7 @@ mod tests {
             let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
             let core = |expected: u64| DecoderCore {
                 mode: SchemaSourceMode::SingleObject {
-                    schema: Arc::new(crate::cache::CompiledSchema::compile(
-                        0,
-                        writer_schema(),
-                        WRITER_V1,
-                    )),
+                    schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
                     fingerprint: expected,
                 },
                 reader_schema: None,
@@ -645,6 +644,18 @@ mod tests {
             assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
         }
 
+        /// A `CompiledSchema` with the given backend's side replaced by a
+        /// stored failure — the state a real one-backend rejection leaves.
+        fn half_compiled(fail_apache: bool) -> crate::cache::CompiledSchema {
+            let mut compiled = crate::cache::CompiledSchema::compile(0, WRITER_V1);
+            if fail_apache {
+                compiled.schema = Err("schema 0 is not usable by the apache backend: nope".into());
+            } else {
+                compiled.fast = Err("schema 0 is not usable by the fast backend: nope".into());
+            }
+            compiled
+        }
+
         #[test]
         fn fast_unusable_schema_is_unavailable_for_fast_and_fine_for_apache() {
             // A schema whose fast form failed to compile: the fast pipeline
@@ -652,11 +663,7 @@ mod tests {
             // no panic), while the apache path on the very same core decodes.
             let core = DecoderCore {
                 mode: SchemaSourceMode::Raw {
-                    schema: Arc::new(crate::cache::CompiledSchema::compile(
-                        0,
-                        writer_schema(),
-                        "not an avro schema",
-                    )),
+                    schema: Arc::new(half_compiled(false)),
                 },
                 reader_schema: None,
             };
@@ -674,6 +681,33 @@ mod tests {
                 .deserialize(&raw_payload(&payload), &test_ack(), &mut value_out)
                 .unwrap();
             assert_eq!(value_out.0.len(), 1);
+        }
+
+        #[test]
+        fn apache_unusable_schema_is_unavailable_for_apache_and_fine_for_fast() {
+            // The mirror image: a schema only the fast backend compiled. The
+            // apache paths surface SchemaUnavailable per record with the
+            // stored reason; the fast path on the very same core decodes.
+            let core = DecoderCore {
+                mode: SchemaSourceMode::Raw {
+                    schema: Arc::new(half_compiled(true)),
+                },
+                reader_schema: None,
+            };
+            let payload = datum(4, "mirror");
+
+            let mut value_out = Collected::<AvroValue>(Vec::new());
+            let err = AvroValueDeserializer::new(core.clone())
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut value_out)
+                .unwrap_err();
+            assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+            assert!(value_out.0.is_empty());
+
+            let mut out = Collected::<EventOwned>(Vec::new());
+            AvroFastDeserializer::<Owned<EventOwned>>::new(core)
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+                .unwrap();
+            assert_eq!(out.0.len(), 1);
         }
     }
 }

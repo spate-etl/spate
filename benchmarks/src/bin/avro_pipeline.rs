@@ -327,7 +327,9 @@ fn run_arm(
     match stage {
         "decode" => match deser_kind {
             "apache_owned" => run_decode::<Owned<SensorBatchOwned>, _>(
-                &builder.build_serde::<SensorBatchOwned>(),
+                &builder
+                    .build_serde::<SensorBatchOwned>()
+                    .expect("apache builder"),
                 datum,
                 events,
                 threads,
@@ -360,7 +362,9 @@ fn run_arm(
             let datum = datum.to_vec();
             match deser_kind {
                 "apache_owned" => pipeline_owned(
-                    builder.build_serde::<SensorBatchOwned>(),
+                    builder
+                        .build_serde::<SensorBatchOwned>()
+                        .expect("apache builder"),
                     format,
                     datum,
                     events,

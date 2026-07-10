@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<Order>();
+            .build_serde::<Order>()?;
 
     // Sink: the connector turns its YAML section into everything the
     // builder needs — writer, per-shard replica endpoints, pool tuning,

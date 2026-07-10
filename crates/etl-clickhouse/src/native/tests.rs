@@ -345,9 +345,13 @@ fn zero_rows_produce_no_bytes() {
     assert!(got.is_empty(), "a zero-row chunk emits nothing");
 }
 
-// The `encode` path (not `block_of`) runs the first-record field-name check.
-mod field_name_check {
+// The `encode` path (not `block_of`) runs the first-record struct check:
+// field names/order always, type classes when the schema carries `full`.
+mod first_record_check {
     use super::*;
+    use crate::config::SchemaValidation;
+    use crate::schema::RowSchema;
+    use crate::types::DateTime64Millis;
     use bytes::BytesMut;
     use etl_core::checkpoint::AckRef;
     use etl_core::error::{ErrorClass, SinkError};
@@ -367,6 +371,137 @@ mod field_name_check {
             },
             ack,
         }
+    }
+
+    /// A schema as `native_schema()` would build it from a live table
+    /// fetched under `validate_schema: full`.
+    fn full_schema(cols: &[(&str, &str)]) -> Arc<NativeSchema> {
+        let expected = RowSchema {
+            mode: SchemaValidation::Full,
+            table: "`t`".into(),
+            columns: cols
+                .iter()
+                .map(|(n, t)| {
+                    (
+                        (*n).to_string(),
+                        crate::schema::typeparse::parse(t),
+                        (*t).to_string(),
+                    )
+                })
+                .collect(),
+        };
+        NativeSchema::from_row_schema(&expected).expect("schema builds")
+    }
+
+    fn fatal_reason(err: SinkError) -> String {
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                reason
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_mode_rejects_a_wrapper_scale_mismatch() {
+        // The struct declares milli scale via the wire wrapper; the table
+        // column is micro precision. Without this check every timestamp
+        // would land ~1000x too small (1970-era) — the raw Int64 layout
+        // cannot notice.
+        #[derive(Serialize)]
+        struct R {
+            ts: DateTime64Millis,
+        }
+        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
+        let err = enc
+            .encode(
+                &record(R {
+                    ts: DateTime64Millis(1_700_000_000_000),
+                }),
+                &mut BytesMut::new(),
+            )
+            .expect_err("scale mismatch must be rejected at the first record");
+        let reason = fatal_reason(err);
+        assert!(
+            reason.contains("DateTime64Millis") && reason.contains("DateTime64(6)"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn full_mode_accepts_a_matching_wrapper_scale_and_encodes_raw_int64() {
+        #[derive(Serialize)]
+        struct R {
+            ts: DateTime64Millis,
+        }
+        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(3)")]));
+        let mut buf = BytesMut::new();
+        enc.encode(
+            &record(R {
+                ts: DateTime64Millis(1_700_000_000_000),
+            }),
+            &mut buf,
+        )
+        .expect("matching scale encodes");
+        enc.finish_chunk(&mut buf).expect("finish");
+        // The wrapper is wire-transparent: the column data is the raw LE i64.
+        assert!(
+            buf.ends_with(&1_700_000_000_000i64.to_le_bytes()),
+            "wrapper must encode as the raw little-endian Int64"
+        );
+    }
+
+    #[test]
+    fn full_mode_rejects_a_class_incompatible_plain_field() {
+        // Not just wrappers: `full` brings the whole class matrix to the
+        // Native path (a u64 field cannot feed an Int64 column).
+        #[derive(Serialize)]
+        struct R {
+            n: u64,
+        }
+        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("n", "Int64")]));
+        let err = enc
+            .encode(&record(R { n: 1 }), &mut BytesMut::new())
+            .expect_err("class mismatch must be rejected");
+        let reason = fatal_reason(err);
+        assert!(reason.contains("not compatible"), "{reason}");
+    }
+
+    #[test]
+    fn full_mode_cannot_check_an_undeclared_scale() {
+        // A plain i64 declares no scale, so `full` has nothing to compare:
+        // the docs tell users to declare intent through the wrappers.
+        #[derive(Serialize)]
+        struct R {
+            ts: i64,
+        }
+        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
+        enc.encode(
+            &record(R {
+                ts: 1_700_000_000_000,
+            }),
+            &mut BytesMut::new(),
+        )
+        .expect("an undeclared scale is not checkable and must pass");
+    }
+
+    #[test]
+    fn static_schemas_check_names_only() {
+        // `from_columns` has no fetched truth: the wrapper mismatch that
+        // `full` rejects passes here (names-level check only).
+        #[derive(Serialize)]
+        struct R {
+            ts: DateTime64Millis,
+        }
+        let mut enc = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(6)")]));
+        enc.encode(
+            &record(R {
+                ts: DateTime64Millis(1),
+            }),
+            &mut BytesMut::new(),
+        )
+        .expect("static schemas stay at the name-level check");
     }
 
     #[test]

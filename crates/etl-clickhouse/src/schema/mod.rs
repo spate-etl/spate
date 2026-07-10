@@ -11,10 +11,14 @@
 //!   Config order differing from *table* order is deliberately not an
 //!   error: the `INSERT` column list maps by name, so only the struct
 //!   must agree with the config.
-//! - **First record** (`check_first_record`, driven by the encoder): the
-//!   row struct's probed field names, order, and — in `full` mode —
-//!   type classes against the configured columns. This is where the
-//!   positional wire contract is actually enforced.
+//! - **First record** (`check_first_record`, driven by both encoders —
+//!   RowBinary's [`crate::ClickHouseEncoder::with_schema`] and the Native
+//!   encoder whenever its schema was fetched): the row struct's probed
+//!   field names, order, and — in `full` mode — type classes against the
+//!   configured columns, including wire-wrapper scale vs the column's
+//!   declared precision (`DateTime64Millis` into `DateTime64(6)` fails
+//!   here). This is where the positional wire contract is actually
+//!   enforced.
 
 pub(crate) mod probe;
 pub(crate) mod typeparse;

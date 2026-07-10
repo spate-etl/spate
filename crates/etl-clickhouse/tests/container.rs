@@ -713,6 +713,100 @@ mod native_e2e {
         assert_eq!(got, sent, "Native round-trip must match what we encoded");
     }
 
+    /// The scale-declaration gate against a real table: under
+    /// `validate_schema: full` a wire wrapper whose scale disagrees with the
+    /// column's declared precision fails fatally at the first record (before
+    /// any block is built), and the matching wrapper lands the exact instant
+    /// — verified by the server's own `toUnixTimestamp64Micro`, not our
+    /// decoder.
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn native_full_mode_gates_datetime64_scale_against_a_real_table() {
+        use etl_clickhouse::DateTime64Micros;
+        use etl_core::error::{ErrorClass, SinkError};
+        use std::sync::Arc;
+
+        let srv = bare_server("25.3-alpine", "native-secret3").await;
+        srv.admin
+            .query(
+                "CREATE TABLE dt_micro (id UInt64, ts DateTime64(6, 'UTC')) \
+                 ENGINE = MergeTree ORDER BY id",
+            )
+            .execute()
+            .await
+            .expect("create dt_micro");
+
+        let sink = sink_with(
+            &srv.url,
+            "dt_micro",
+            &["id", "ts"],
+            "full",
+            "format: native\nuser: default\npassword: native-secret3\n",
+        );
+        let schema = sink.native_schema().await.expect("fetch native schema");
+
+        // Milli-scaled wrapper into the micro column: without the gate every
+        // timestamp would land ~1000x too small (January 1970).
+        #[derive(Clone, Serialize)]
+        struct MilliRow {
+            id: u64,
+            ts: DateTime64Millis,
+        }
+        let mut enc = NativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
+        let err = encode_native_batch(
+            &mut enc,
+            vec![MilliRow {
+                id: 1,
+                ts: DateTime64Millis(1_700_000_000_123),
+            }],
+            "dt-1",
+        )
+        .expect_err("scale mismatch must fail at the first record");
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                assert!(
+                    reason.contains("DateTime64Millis") && reason.contains("DateTime64(6"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+
+        // The matching wrapper passes the gate and the server sees the
+        // exact micro-scaled instant.
+        #[derive(Clone, Serialize)]
+        struct MicroRow {
+            id: u64,
+            ts: DateTime64Micros,
+        }
+        const TS_MICROS: i64 = 1_700_000_000_123_456;
+        let mut enc = NativeEncoder::<Owned<MicroRow>>::new(schema);
+        let batch = encode_native_batch(
+            &mut enc,
+            vec![MicroRow {
+                id: 1,
+                ts: DateTime64Micros(TS_MICROS),
+            }],
+            "dt-2",
+        )
+        .expect("matching scale encodes");
+        sink.writer
+            .write_batch(&sink.endpoints[0][0], &batch)
+            .await
+            .expect("write native block");
+        let got: i64 = srv
+            .admin
+            .query("SELECT toUnixTimestamp64Micro(ts) FROM dt_micro WHERE id = 1")
+            .fetch_one()
+            .await
+            .expect("read back the landed instant");
+        assert_eq!(
+            got, TS_MICROS,
+            "the landed instant matches the declared scale"
+        );
+    }
+
     /// Spot-check the trickiest columns against the server's own rendering
     /// (independent of the crate's decoder): the Array(LowCardinality) and
     /// Map columns whose on-wire layout has no RowBinary analogue.

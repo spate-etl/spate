@@ -57,10 +57,13 @@ sink:
     # it must match the SensorEvent struct's field order in the example.
     columns: [sensor, batch_ts_ms, name, value, unit]
     format: native
-    # `format: native` upgrades validate_schema off→names automatically (the
-    # encoder is type-driven and fetches system.columns), so the DateTime64(3)
-    # column type reaches the encoder and the first-record field-name check
-    # runs against the live table.
+    # `full` checks type classes on the first record against the live table —
+    # including the SensorEvent struct's DateTime64Millis wrapper against the
+    # column's declared DateTime64(3) precision, so a milli/micro scale
+    # mismatch fails fatally instead of landing 1970-era timestamps.
+    # (`format: native` would upgrade `off` to `names` anyway: the encoder is
+    # type-driven and always fetches system.columns.)
+    validate_schema: full
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}

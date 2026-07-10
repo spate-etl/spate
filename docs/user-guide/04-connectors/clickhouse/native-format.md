@@ -75,10 +75,14 @@ Bool; `Int`/`UInt` 8–256; `Float32/64`; `Date`, `Date32`; `DateTime`,
 and `#[serde(with = "…")]` modules (`uuid`, `ipv4`).
 
 > [!WARNING]
-> The Native writer emits the raw little-endian `Int64` and ignores the
-> column's declared precision — a `DateTime64(6)` column fed milli-scaled
-> values silently lands wrong timestamps; nothing validates the scale. Match
-> the wrapper (`DateTime64Millis`, …) to the column's declared precision.
+> The Native writer emits the raw little-endian `Int64` and does not rescale
+> to the column's declared precision — a `DateTime64(6)` column fed
+> milli-scaled values silently lands wrong timestamps. Declare the scale
+> through the wrapper (`DateTime64Millis`, …) and set `validate_schema:
+> full`: a wrapper whose scale disagrees with the table's declared precision
+> then fails fatally on the first record, before anything is inserted. A
+> plain `i64` field declares no scale, so nothing can validate it — the
+> mismatch stays silent.
 
 ## Not supported (yet)
 

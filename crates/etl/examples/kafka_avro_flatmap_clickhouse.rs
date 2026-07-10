@@ -45,15 +45,17 @@
 //! Needs Kafka and ClickHouse (`KAFKA_BROKERS`, `CLICKHOUSE_URL`), a topic of
 //! bare-datum Avro `SensorBatch` messages (`mode: raw`, no registry), and the
 //! target table. `batch_ts_ms` is epoch milliseconds and lands in a real
-//! `DateTime64(3)` column: an `i64` serializes cleanly into it (the Native
-//! leaf writer lays a `DateTime64(3)` out as a little-endian `Int64`, which is
-//! exactly the epoch-millis wire value), and the column name matches the
-//! struct field so the positional check passes.
+//! `DateTime64(3)` column: the row declares that scale with the
+//! [`DateTime64Millis`] wrapper, which encodes as the raw little-endian
+//! `Int64` (exactly the epoch-millis wire value, zero cost), and the column
+//! name matches the struct field so the positional check passes.
 //!
-//! Caveat: the Native leaf writer emits that raw `Int64` and ignores the
-//! column's declared precision — feeding these milli-scaled values into a
-//! `DateTime64(6)` column would silently land wrong timestamps; nothing
-//! validates the scale.
+//! Caveat: the Native leaf writer does not rescale to the column's declared
+//! precision — pointed at a `DateTime64(6)` column, these milli-scaled values
+//! would land as 1970-era timestamps. The wrapper is what makes that
+//! checkable: under the YAML's `validate_schema: full` a wrapper/precision
+//! mismatch fails fatally on the first record, before anything is inserted
+//! (a plain `i64` field declares no scale, so nothing could validate it).
 //!
 //! ```sql
 //! CREATE TABLE sensor_events (
@@ -78,7 +80,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use etl::avro::AvroDeserializerBuilder;
-use etl::clickhouse::NativeEncoder;
+use etl::clickhouse::{DateTime64Millis, NativeEncoder};
 use etl::kafka::KafkaSource;
 use etl::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -107,11 +109,13 @@ struct Event<'a> {
 /// The `flat_map` output = one ClickHouse row. **Field order must match the
 /// `columns` list in the YAML** — Native maps fields to columns positionally.
 /// The `&str` fields still borrow the payload; the copy happens in the Native
-/// encoder's column buffers.
+/// encoder's column buffers. [`DateTime64Millis`] declares the timestamp's
+/// scale so `validate_schema: full` can check it against the column's
+/// declared precision (it still encodes as the raw `Int64`).
 #[derive(Debug, Serialize)]
 struct SensorEvent<'a> {
     sensor: &'a str,
-    batch_ts_ms: i64,
+    batch_ts_ms: DateTime64Millis,
     name: &'a str,
     value: i64,
     unit: &'a str,
@@ -179,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for event in batch.events {
                         out.emit(SensorEvent {
                             sensor,
-                            batch_ts_ms,
+                            batch_ts_ms: DateTime64Millis(batch_ts_ms),
                             name: event.name,
                             value: event.value,
                             unit: event.unit,

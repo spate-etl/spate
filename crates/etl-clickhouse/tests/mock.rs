@@ -342,6 +342,79 @@ async fn type_mismatch_fails_full_but_passes_names() {
 }
 
 #[tokio::test]
+async fn native_full_mode_checks_wrapper_scale_against_fetched_precision() {
+    use etl_clickhouse::{DateTime64Millis, NativeEncoder};
+    use etl_core::sink::RowEncoder;
+
+    #[derive(Clone, Serialize)]
+    struct EventRow {
+        id: u64,
+        ts: DateTime64Millis,
+    }
+    let row = EventRow {
+        id: 1,
+        ts: DateTime64Millis(1_700_000_000_000),
+    };
+
+    fn native_sink(url: &str, mode: &str) -> config::ClickHouseSink {
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+            r#"
+table: events
+columns: [id, ts]
+format: native
+compression: off
+shards:
+  - replicas: ["{url}"]
+validate_schema: {mode}
+"#
+        ))
+        .expect("config yaml");
+        config::build(cfg).expect("valid sink config")
+    }
+
+    // The live table is micro precision; the struct declares milli via the
+    // wrapper. `full` rejects the first record before any block is built.
+    let mock = Mock::new();
+    mock.add(handlers::provide::<SysColumn>(vec![
+        sys_col("id", "UInt64", ""),
+        sys_col("ts", "DateTime64(6)", ""),
+    ]));
+    let schema = native_sink(mock.url(), "full")
+        .native_schema()
+        .await
+        .expect("fetch native schema");
+    let err = NativeEncoder::<Owned<EventRow>>::new(schema)
+        .encode(&record(row.clone()), &mut BytesMut::new())
+        .expect_err("full mode rejects the scale mismatch");
+    match err {
+        SinkError::Client { class, reason } => {
+            assert_eq!(class, ErrorClass::Fatal, "{reason}");
+            assert!(
+                reason.contains("DateTime64Millis") && reason.contains("DateTime64(6)"),
+                "{reason}"
+            );
+        }
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+
+    // Matching precision encodes; `names` mode stays permissive by design.
+    for (mode, col_type) in [("full", "DateTime64(3)"), ("names", "DateTime64(6)")] {
+        let mock = Mock::new();
+        mock.add(handlers::provide::<SysColumn>(vec![
+            sys_col("id", "UInt64", ""),
+            sys_col("ts", col_type, ""),
+        ]));
+        let schema = native_sink(mock.url(), mode)
+            .native_schema()
+            .await
+            .expect("fetch native schema");
+        NativeEncoder::<Owned<EventRow>>::new(schema)
+            .encode(&record(row.clone()), &mut BytesMut::new())
+            .unwrap_or_else(|e| panic!("{mode} against {col_type} must encode: {e:?}"));
+    }
+}
+
+#[tokio::test]
 async fn missing_and_materialized_columns_fail_startup() {
     let mock = Mock::new();
     mock.add(handlers::provide::<SysColumn>(vec![

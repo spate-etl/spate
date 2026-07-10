@@ -86,21 +86,14 @@ pub enum NativeError {
         /// Fields the row serialized.
         got: usize,
     },
-    /// The row struct's field name at a position does not match the
-    /// configured column — the field order is wrong (checked on the first
-    /// record, since the encoder maps fields to columns positionally).
-    #[error(
-        "position {position}: row field `{field}` does not match column `{column}` \
-         (row field order must match the configured columns)"
-    )]
-    FieldName {
-        /// The 0-based column position.
-        position: usize,
-        /// The row struct's field name at that position.
-        field: String,
-        /// The configured column name at that position.
-        column: String,
-    },
+    /// The first record's probed struct does not match the configured
+    /// columns (pre-formatted multi-line diff). Field names and order are
+    /// checked whenever the schema was fetched; under `validate_schema:
+    /// full` this also rejects class-incompatible types per position —
+    /// including a wire-wrapper scale that disagrees with the column
+    /// (`DateTime64Millis` into `DateTime64(6)`).
+    #[error("{0}")]
+    FirstRecord(String),
     /// A tuple/geo value serialized more elements than its column has.
     #[error("tuple value has more elements than the column type")]
     TupleArity,
@@ -137,54 +130,41 @@ impl NativeError {
 }
 
 /// The immutable, `clickhouse`-free column template a [`NativeEncoder`] is
-/// built from: ordered `(name, raw type string, parsed type)`.
+/// built from: the validated, config-ordered `(name, parsed type, raw type
+/// string)` columns plus the validation mode they were fetched under, which
+/// the encoder's first-record struct check applies.
 #[derive(Debug)]
 pub struct NativeSchema {
-    columns: Vec<NativeColumn>,
-    /// Column names in order — the first-record field-name check compares the
-    /// row struct's field names against these.
-    names: Vec<String>,
-}
-
-#[derive(Debug)]
-struct NativeColumn {
-    name: String,
-    /// Raw `system.columns.type` text, emitted verbatim on the wire.
-    type_name: String,
-    ty: ChType,
+    expected: RowSchema,
 }
 
 impl NativeSchema {
     /// Build from a validated [`RowSchema`] (fetched from `system.columns`),
     /// failing fatally for any column whose type the encoder cannot lay out.
+    ///
+    /// The schema's validation mode carries over to the encoder's
+    /// first-record check: under `validate_schema: full` each field's type
+    /// class is checked against the live column type, so a wire-wrapper
+    /// scale that disagrees with the table's declared precision
+    /// (`DateTime64Millis` into `DateTime64(6)`) fails on the first record
+    /// instead of silently landing wrong timestamps.
     pub fn from_row_schema(schema: &RowSchema) -> Result<Arc<NativeSchema>, NativeError> {
-        Self::from_specs(
-            schema
-                .columns
-                .iter()
-                .map(|(name, ty, raw)| (name.clone(), raw.clone(), ty.clone())),
-        )
+        Self::from_expected(RowSchema {
+            mode: schema.mode,
+            table: schema.table.clone(),
+            columns: schema.columns.clone(),
+        })
     }
 
-    fn from_specs<I>(specs: I) -> Result<Arc<NativeSchema>, NativeError>
-    where
-        I: IntoIterator<Item = (String, String, ChType)>,
-    {
-        let mut columns = Vec::new();
-        for (name, type_name, ty) in specs {
+    fn from_expected(expected: RowSchema) -> Result<Arc<NativeSchema>, NativeError> {
+        for (name, ty, _) in &expected.columns {
             // Validate the writer can be built (fail fast, before any row).
-            ColumnWriter::build(&ty).map_err(|ch_type| NativeError::UnsupportedColumn {
+            ColumnWriter::build(ty).map_err(|ch_type| NativeError::UnsupportedColumn {
                 column: name.clone(),
                 ch_type,
             })?;
-            columns.push(NativeColumn {
-                name,
-                type_name,
-                ty,
-            });
         }
-        let names = columns.iter().map(|c| c.name.clone()).collect();
-        Ok(Arc::new(NativeSchema { columns, names }))
+        Ok(Arc::new(NativeSchema { expected }))
     }
 
     /// Build a schema from `(column name, ClickHouse type string)` pairs,
@@ -194,21 +174,36 @@ impl NativeSchema {
     /// which fetches the real types from `system.columns`. Use this only when
     /// the schema is known statically — the type strings must match the
     /// server's column types exactly, or the server will reject the block.
+    /// The first-record check runs at name level only (there is no fetched
+    /// truth to compare type classes against).
     pub fn from_columns(specs: &[(&str, &str)]) -> Result<Arc<NativeSchema>, NativeError> {
-        Self::from_specs(specs.iter().map(|(n, t)| {
-            (
-                (*n).to_string(),
-                (*t).to_string(),
-                crate::schema::typeparse::parse(t),
-            )
-        }))
+        Self::from_expected(RowSchema {
+            mode: crate::config::SchemaValidation::Names,
+            table: "<static schema>".into(),
+            columns: specs
+                .iter()
+                .map(|(n, t)| {
+                    (
+                        (*n).to_string(),
+                        crate::schema::typeparse::parse(t),
+                        (*t).to_string(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    fn columns(&self) -> &[(String, ChType, String)] {
+        &self.expected.columns
     }
 
     fn fresh_columns(&self) -> Vec<ColumnWriter> {
-        self.columns
+        self.columns()
             .iter()
             // build() succeeded at construction, so it cannot fail here.
-            .map(|c| ColumnWriter::build(&c.ty).expect("column type validated at construction"))
+            .map(|(_, ty, _)| {
+                ColumnWriter::build(ty).expect("column type validated at construction")
+            })
             .collect()
     }
 }
@@ -285,17 +280,17 @@ impl<F> NativeEncoder<F> {
         let reserve = self.compute_buffered()
             + self
                 .schema
-                .columns
+                .columns()
                 .iter()
-                .map(|c| c.name.len() + c.type_name.len())
+                .map(|(name, _, type_name)| name.len() + type_name.len())
                 .sum::<usize>()
             + 20;
         buf.reserve(reserve);
         put_leb128(buf, self.columns.len() as u64);
         put_leb128(buf, u64::from(self.rows));
-        for (col, meta) in self.columns.iter().zip(&self.schema.columns) {
-            put_string(buf, meta.name.as_bytes());
-            put_string(buf, meta.type_name.as_bytes());
+        for (col, (name, _, type_name)) in self.columns.iter().zip(self.schema.columns()) {
+            put_string(buf, name.as_bytes());
+            put_string(buf, type_name.as_bytes());
             // Per column: state prefix (inner-first), then data streams.
             col.write_prefix(buf);
             col.write_data(buf);
@@ -319,7 +314,7 @@ impl<F> Clone for NativeEncoder<F> {
 impl<F> fmt::Debug for NativeEncoder<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeEncoder")
-            .field("columns", &self.schema.columns.len())
+            .field("columns", &self.schema.columns().len())
             .field("rows", &self.rows)
             .finish()
     }
@@ -335,29 +330,22 @@ where
         rec: &Record<F::Rec<'buf>>,
         _buf: &mut BytesMut,
     ) -> Result<(), SinkError> {
-        // First record only: validate the row's field names against the
+        // First record only: validate the row's probed struct against the
         // configured columns off the per-row path — positional dispatch would
-        // otherwise silently mis-column a same-wire-class field/column swap.
+        // otherwise silently mis-column a same-wire-class field/column swap,
+        // and (in `full` mode) a wire wrapper whose scale disagrees with the
+        // column's declared precision would silently land wrong values.
         // Best-effort safety, not a gate: `probe_row` errors for tuple/seq rows
         // (no field names) and other exotic-but-encodable shapes; skip the
         // check there rather than reject a row the encoder would accept. Only a
-        // positive name mismatch is fatal. Same first-record pattern as the
+        // positive mismatch is fatal. Same first-record pattern as the
         // RowBinary encoder, except a probe failure is fatal there (RowBinary's
         // check requires a named struct) and skipped here (Native also accepts
         // tuple rows).
         if !self.checked {
             if let Ok(fields) = crate::schema::probe::probe_row(&rec.payload) {
-                for (position, (field, column)) in fields.iter().zip(&self.schema.names).enumerate()
-                {
-                    if field.name != column.as_str() {
-                        return Err(NativeError::FieldName {
-                            position,
-                            field: field.name.to_string(),
-                            column: column.clone(),
-                        }
-                        .into_sink_error());
-                    }
-                }
+                crate::schema::check_first_record(&self.schema.expected, &fields)
+                    .map_err(|diff| NativeError::FirstRecord(diff).into_sink_error())?;
             }
             self.checked = true;
         }

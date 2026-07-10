@@ -1,6 +1,6 @@
 # etl-rs
 
-[![Documentation](https://img.shields.io/badge/docs-marcuskainth.github.io%2Fetl--rs-e8590c)](https://marcuskainth.github.io/etl-rs/)
+[![Documentation](https://img.shields.io/badge/docs-etl--rs.pages.kainth.net-e8590c)](https://etl-rs.pages.kainth.net/)
 
 A high-performance, at-least-once ETL pipeline framework for Rust.
 
@@ -68,7 +68,7 @@ ClickHouse pattern).
 ## Documentation
 
 The full documentation site — the user guide plus the generated API reference —
-is published at **<https://marcuskainth.github.io/etl-rs/>** (source in
+is published at **<https://etl-rs.pages.kainth.net/>** (source in
 [`website/`](website), content in [`docs/`](docs)).
 
 - [docs/DESIGN.md](docs/DESIGN.md) — architecture and the decision log.

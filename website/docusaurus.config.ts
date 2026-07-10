@@ -2,8 +2,10 @@ import type { Config, PluginConfig } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import { themes as prismThemes } from 'prism-react-renderer';
 
-// The repo is a personal-account project, so this publishes to a *project*
-// GitHub Pages site: https://marcuskainth.github.io/etl-rs/.
+// The site is deployed to Cloudflare Pages on a dedicated subdomain:
+// https://etl-rs.pages.kainth.net/ (Direct Upload from CI — see docs.yml).
+// organizationName/projectName below still drive the GitHub source links
+// (githubUrl, editUrl, footer), not the deployed URL.
 const organizationName = 'MarcusKainth';
 const projectName = 'etl-rs';
 const githubUrl = `https://github.com/${organizationName}/${projectName}`;
@@ -28,8 +30,8 @@ const config: Config = {
   tagline: 'High-performance, at-least-once ETL pipelines in Rust',
   favicon: 'img/favicon.svg',
 
-  url: `https://${organizationName.toLowerCase()}.github.io`,
-  baseUrl: `/${projectName}/`,
+  url: 'https://etl-rs.pages.kainth.net',
+  baseUrl: '/',
   organizationName,
   projectName,
   trailingSlash: false,

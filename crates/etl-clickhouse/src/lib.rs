@@ -59,8 +59,9 @@
 //! [`config::from_component_config`] turns that section into a
 //! [`ClickHouseWriter`] (the framework's `ShardWriter`), per-shard
 //! [`ClickHouseEndpoint`]s, and the sink-pool configuration;
-//! [`ClickHouseEncoder`] is the matching `RowEncoder` for any
-//! `T: serde::Serialize`.
+//! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a
+//! record family: owned rows use `Owned<Row>`, and the encode path itself
+//! needs only `Row: serde::Serialize`.
 //!
 //! # Wire format
 //!

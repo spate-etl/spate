@@ -10,7 +10,7 @@ Streams: CPU-pinned processing threads over zero-copy borrowed records,
 checkpoint-driven source commits, sharded and replicated asynchronous
 sinks, built-in backpressure, and first-class Prometheus metrics —
 measured at **~9 ns/record with zero per-record allocations** through a
-realistic operator chain (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
+realistic operator chain (see [docs/benchmarks/](docs/benchmarks/)).
 
 ```toml
 [dependencies]
@@ -74,7 +74,7 @@ is published at **<https://marcuskainth.github.io/etl-rs/>** (source in
 - [docs/DESIGN.md](docs/DESIGN.md) — architecture and the decision log.
 - [docs/METRICS.md](docs/METRICS.md) — every metric, its labels, and
   alerting starting points.
-- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — methodology and measured
+- [docs/benchmarks/](docs/benchmarks/) — methodology and measured
   results, including the consumer-topology A/B that shaped the Kafka
   connector.
 - [examples/docker](examples/docker) — containers and Kubernetes.

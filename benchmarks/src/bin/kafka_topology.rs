@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use benchmarks::{busy_work, docker, ensure_topic, env_u64, percentile, produce, report};
+use benchmarks::report::{Metric, Report};
+use benchmarks::{busy_work, docker, ensure_topic, env_u64, percentile, produce};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::{Offset, TopicPartitionList};
@@ -246,19 +247,27 @@ fn main() {
             let elapsed_s = elapsed_ns as f64 / 1e9;
             let consumed = shared.consumed.load(Ordering::Relaxed);
             let records_per_s = consumed as f64 / elapsed_s;
-            let out = serde_json::json!({
-                "mode": cfg.mode,
-                "partitions": cfg.partitions,
-                "threads": cfg.threads,
-                "payload_bytes": cfg.payload,
-                "work_us": cfg.work_us,
-                "consumed": consumed,
-                "elapsed_s": elapsed_s,
-                "records_per_s": records_per_s,
-                "mb_per_s": records_per_s * cfg.payload as f64 / 1e6,
-                "p99_gap_us": percentile(&mut gaps, 0.99),
-            });
-            report(&out);
+            Report::measurement("kafka_topology")
+                .variant("mode", cfg.mode.clone())
+                .variant("partitions", cfg.partitions)
+                .variant("threads", cfg.threads as u64)
+                .variant("payload_bytes", cfg.payload as u64)
+                .variant("work_us", cfg.work_us)
+                .metric("consumed", Metric::maximize(consumed as f64, "records"))
+                .metric("elapsed_s", Metric::minimize(elapsed_s, "s"))
+                .metric(
+                    "records_per_s",
+                    Metric::maximize(records_per_s, "records/s"),
+                )
+                .metric(
+                    "mb_per_s",
+                    Metric::maximize(records_per_s * cfg.payload as f64 / 1e6, "MB/s"),
+                )
+                .metric(
+                    "p99_gap_us",
+                    Metric::minimize(percentile(&mut gaps, 0.99) as f64, "us"),
+                )
+                .emit();
         }
         _ => {
             eprintln!("usage: kafka_topology <produce|consume>");

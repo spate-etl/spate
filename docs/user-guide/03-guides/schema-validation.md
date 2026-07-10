@@ -58,8 +58,8 @@ let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sin
 
 // `off` returns Ok(None) instantly and issues no queries.
 let encoder = match pipeline.block_on(sink.validate_schema())? {
-    Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
-    None => ClickHouseEncoder::<Order>::new(),
+    Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
+    None => ClickHouseEncoder::<Owned<Order>>::new(),
 };
 
 let report = pipeline.sink(sink)?/* .chains(...).run(...) */;

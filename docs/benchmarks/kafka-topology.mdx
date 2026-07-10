@@ -1,0 +1,77 @@
+---
+title: Kafka topology
+sidebar_position: 5
+description: Per-thread consumers vs one consumer with split partition queues.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+
+export const modeLabels = { perthread: 'Per-thread', split: 'Single + split queues' };
+
+# Kafka consumer topology A/B (decision gate, 2026-07)
+
+Environment: M5 Max 18-core / 128 GB, single local Kafka 4.1 broker (Docker),
+rdkafka 0.39 (vendored librdkafka), 10M × 256 B messages pre-produced, medians
+over 3–9 repetitions. Modes: **A** = one `BaseConsumer` per thread; **B** = one
+consumer + `split_partition_queue` fanned across threads. Harness:
+`benchmarks/src/bin/kafka_topology.rs`.
+
+Hand-recorded during the original spike — no machine-readable backing; the
+confirmation run below is the machine-backed follow-up.
+
+| Config | A: per-thread | B: split queues | B vs A |
+|---|---|---|---|
+| 16 partitions, 4 threads, no work | 7.74M rec/s | 2.90M rec/s | −62% |
+| 16 partitions, 4 threads, 10 µs/record | 385.0k rec/s | 372.8k rec/s | **−3.2%** |
+| 64 partitions, 4 threads, no work | 7.84M rec/s | 2.86M rec/s | −64% |
+| Controls (16p, no work) | A 1 thread: 3.32M | B 1 thread: 3.69M; B 8 threads: 2.12M | |
+
+Interpretation: the zero-work gap is a **single-librdkafka-instance fetch
+ceiling** (~3.3–3.7M rec/s here regardless of polling arrangement; split queues
+on one thread *beat* main-queue polling by 11%; extra threads on one instance
+reduce throughput). Mode A's headline is 4 independent instances, not a better
+polling model. With ≥ ~1.1 µs/record of real work at 4 threads, per-record cost
+dominates and both modes run at 93–96% of theoretical.
+
+**Decision: single consumer + split partition queues confirmed** for etl-kafka.
+Caveats recorded: re-measure the per-instance ceiling against multi-broker
+clusters (fetchers parallelize per broker); very-high-throughput trivial
+pipelines with many threads remain the one shape favouring per-thread consumers
+— it stays a documented escape hatch behind the Source abstraction.
+
+Semantics probes (same environment; hand-recorded during the original spike,
+no machine-readable backing): split-queue polls **do** reset
+`max.poll.interval.ms` (30 s of split-only polling at a 10 s interval: zero
+evictions); messages fetched before the first split land on the main queue
+(choreography: pause on assign → split → distribute → resume); revoked
+partitions' queues go permanently silent and queues must be re-split after every
+rebalance; `pause()` purges split-queue prefetch and resume redelivers gap-free
+(1010/1010); rebalance/stats callbacks fire only on the main-queue polling
+thread.
+
+## Consumer topology confirmation (permanent harness)
+
+`kafka_topology`, 16 partitions × 4 threads × 10 µs/record × 10M × 256 B, single
+local broker, 2 reps/mode. Reproduces the spike's small (~3%) gap at realistic work.
+
+<BenchBars
+  bench="kafka_topology"
+  metric="records_per_s"
+  category="mode"
+  emphasize="split"
+  labels={modeLabels}
+  order={['Per-thread', 'Single + split queues']}
+  title="Consumer topology at realistic work (10 µs/record)"
+  caption="At realistic per-record work the two topologies are within a few percent; split queues is the confirmed choice."
+/>
+
+| Mode | Records/s (reps) | vs per-thread |
+|---|---|---|
+| Per-thread consumers | 390.0k / 390.0k | — |
+| Single + split queues | 382.8k / 380.4k | **−2.2%** |
+
+The gap reproduces **exactly**: this quiet-machine re-run lands at **−2.2%**, the
+same figure the confirmation reported before — a stable, real result at realistic
+per-record work. (A contaminated earlier run under concurrent compile load showed
+−24% — single-instance fetch is more sensitive to CPU starvation; benchmark on a
+quiet machine.)

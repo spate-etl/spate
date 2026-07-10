@@ -71,11 +71,20 @@ name = "custom_metrics"
 name = "kafka_avro_to_clickhouse"
 required-features = ["full"]
 
+[[example]]
+name = "kafka_avro_flatmap_clickhouse"
+required-features = ["full", "avro-fast"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
+# Fast Avro decode backend (implies `avro`). Deliberately excluded from
+# `full`: it pulls in `serde_avro_fast`, whose crates.io license metadata
+# (LGPL-3.0-only) conflicts with its repository license (MPL-2.0) — enabling
+# it is a per-project compliance call. See the etl-avro crate docs.
+avro-fast = ["avro", "etl-avro/fast"]
 # ClickHouse ecosystem column types (each implies `clickhouse`).
 clickhouse-uuid = ["clickhouse", "etl-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "etl-clickhouse/chrono"]

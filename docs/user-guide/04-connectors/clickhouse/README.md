@@ -70,10 +70,12 @@ sink:
 ## RowBinary on pipeline threads
 
 Encoding is CPU work, so it happens on the pinned pipeline threads —
-`ClickHouseEncoder` (the sink's `RowEncoder`) serializes any
-`T: serde::Serialize` row to RowBinary using the crate's own serializer.
-Sink workers on the I/O runtime only merge frames, seal batches, and drive
-inserts; they never touch a record.
+`ClickHouseEncoder` (the sink's `RowEncoder`) serializes each row to RowBinary
+using the crate's own serializer. Its type parameter is the record *family*,
+not the row type: owned rows are wrapped as `Owned<Row>` (e.g.
+`ClickHouseEncoder::<Owned<Order>>::new()`), while the encode path itself needs
+only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
+frames, seal batches, and drive inserts; they never touch a record.
 
 > [!IMPORTANT]
 > RowBinary carries no column names — position is everything. The

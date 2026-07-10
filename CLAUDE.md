@@ -13,8 +13,9 @@ cargo test --workspace --all-features          # unit + integration (no docker)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
 cargo bench -p etl-core                        # criterion + divan micro benches
+cargo bench -p etl-avro --features fast        # fast-backend decode variants need the feature
 RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
-cargo check -p etl --examples --all-features   # all five examples compile
+cargo check -p etl --examples --all-features   # all six examples compile
 cargo run -p etl --example memory_pipeline     # runnable without infrastructure
 docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
 ```

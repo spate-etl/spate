@@ -1,0 +1,73 @@
+# Zero-copy pipeline: Kafka → Avro (borrowed) → flat_map → ClickHouse Native.
+# The high-performance sibling of kafka_avro_to_clickhouse.yaml. Every
+# ${VAR:-default} interpolates from the environment (Kubernetes:
+# ConfigMap/Secret env). Framework sections are typed and validated;
+# `source`/`deserializer`/`sink` bodies belong to their connectors.
+
+pipeline:
+  name: sensor-events
+  # threads: 4          # default: available cores minus the I/O reserve
+  io_threads: 2
+
+checkpoint:
+  interval: 5s
+  max_pending_batches: 1024
+  drain_timeout: 25s    # keep below terminationGracePeriodSeconds
+
+backpressure:
+  # Sizing rule (docs/DESIGN.md § Backpressure): the budget's low watermark
+  # must hold ~2x (shards x inflight x batch.max_bytes + queued chunks).
+  max_inflight_bytes: 1GiB
+
+metrics:
+  exporter: prometheus
+  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
+
+source:
+  kafka:
+    brokers: ${KAFKA_BROKERS:-localhost:9092}
+    topic: ${KAFKA_TOPIC:-sensor-batches}
+    group_id: ${KAFKA_GROUP:-sensor-events-etl}
+    commit_interval: 5s
+    rdkafka:
+      auto.offset.reset: earliest
+
+deserializer:
+  avro:
+    # Bare datums with a fixed writer schema — no registry. The fast backend
+    # (`build_fast`) has no reader-schema resolution, so evolution is
+    # expressed with serde attributes on the row structs, not `reader_schema`.
+    mode: raw
+    schema:
+      inline: |
+        {"type":"record","name":"SensorBatch","fields":[
+          {"name":"sensor","type":"string"},
+          {"name":"batch_ts_ms","type":"long"},
+          {"name":"events","type":{"type":"array","items":
+            {"type":"record","name":"Event","fields":[
+              {"name":"name","type":"string"},
+              {"name":"value","type":"long"},
+              {"name":"unit","type":"string"}]}}}]}
+
+sink:
+  clickhouse:
+    table: ${CLICKHOUSE_TABLE:-sensor_events}
+    # Columnar Native blocks: offloads parse CPU to the client and shrinks the
+    # wire on LowCardinality columns. Column order is the positional contract —
+    # it must match the SensorEvent struct's field order in the example.
+    columns: [sensor, batch_ts_ms, name, value, unit]
+    format: native
+    # `format: native` upgrades validate_schema off→names automatically (the
+    # encoder is type-driven and fetches system.columns), so the DateTime64(3)
+    # column type reaches the encoder and the first-record field-name check
+    # runs against the live table.
+    shards:
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+    user: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+    batch:
+      max_rows: 500000
+      max_bytes: 128MiB
+      linger: 1s
+    inflight:
+      max_per_shard: 2

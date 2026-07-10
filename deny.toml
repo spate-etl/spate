@@ -27,11 +27,25 @@ allow = [
     "MPL-2.0",
     "CDLA-Permissive-2.0", # webpki-roots (Mozilla CCADB root store data)
 ]
-# NOTE: serde_avro_fast (the evaluated zero-copy Avro backend) was cut over
-# conflicting license metadata: every published release through 2.1.0
-# declares LGPL-3.0-only on crates.io while the upstream repo is MPL-2.0.
-# It must not be re-added until a release ships corrected metadata;
-# cargo-deny will fail the build if it arrives declaring LGPL.
+# NOTE: these two crates power the opt-in `fast` feature of etl-avro. The
+# feature is off by default — the default build contains no trace of either —
+# and users who enable it make their own compliance call, so the exceptions
+# admit exactly these crates at the exact evaluated versions. Two distinct
+# situations:
+#   - serde_avro_fast: metadata error. The repository is MPL-2.0 (fix merged
+#     upstream, awaiting a release); crates.io metadata still says
+#     LGPL-3.0-only. Narrow this exception when a corrected release ships
+#     (MPL-2.0 is already on the allow list).
+#   - serde_serializer_quick_unsupported: genuinely LGPL-3.0-only (LICENSE
+#     file matches the metadata) — a ~300-line no_std macro-only helper by
+#     the same author, and still a dependency of serde_avro_fast master, so
+#     it remains in the feature's tree even after the metadata fix ships.
+exceptions = [
+    { name = "serde_avro_fast", version = "=2.1.0", allow = ["LGPL-3.0-only"] },
+    { name = "serde_serializer_quick_unsupported", version = "=1.0.0", allow = [
+        "LGPL-3.0-only",
+    ] },
+]
 
 [bans]
 multiple-versions = "warn"

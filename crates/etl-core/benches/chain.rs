@@ -5,7 +5,7 @@
 //! handoff, against the owned-payload equivalent. The static-vs-dyn
 //! boundary delta was measured by the seam prototype (~+9% on a trivial
 //! chain, amortizing to 1–2% with realistic work; see
-//! `docs/BENCHMARKS.md`) — the boundary is one virtual call per batch by
+//! `docs/benchmarks/zero-copy-seam.mdx`) — the boundary is one virtual call per batch by
 //! construction.
 //!
 //! Run: `cargo bench -p etl-core --bench chain`

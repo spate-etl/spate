@@ -6,6 +6,7 @@
 use bytes::BytesMut;
 use etl_clickhouse::config::{self, ClickHouseSinkConfig};
 use etl_clickhouse::serialize_row;
+use etl_core::deser::Owned;
 use etl_core::sink::{SealedBatch, ShardWriter};
 use serde::{Deserialize, Serialize};
 use testcontainers_modules::clickhouse::ClickHouse;
@@ -223,7 +224,7 @@ where
 /// into one sealed batch: `encode` per row (buffering columnar), then one
 /// `finish_chunk` producing exactly one Native block frame.
 fn encode_native_batch<T>(
-    encoder: &mut etl_clickhouse::NativeEncoder<T>,
+    encoder: &mut etl_clickhouse::NativeEncoder<Owned<T>>,
     rows: Vec<T>,
     token: &str,
 ) -> Result<SealedBatch, etl_core::error::SinkError>
@@ -480,7 +481,7 @@ mod wide {
             .await
             .expect("startup validation against the real table")
             .expect("full mode returns a schema");
-        let mut encoder = ClickHouseEncoder::<WideRow>::with_schema(schema);
+        let mut encoder = ClickHouseEncoder::<Owned<WideRow>>::with_schema(schema);
         let batch =
             encode_batch(&mut encoder, vec![encoded_row()], "wide-1").expect("first-record check");
         sink.writer
@@ -694,7 +695,7 @@ mod native_e2e {
             .native_schema()
             .await
             .expect("fetch native schema from system.columns");
-        let mut encoder = NativeEncoder::<NativeRow>::new(native_schema);
+        let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
         let sent = rows();
         let batch = encode_native_batch(&mut encoder, sent.clone(), "native-1").expect("encode");
         sink.writer
@@ -733,7 +734,7 @@ mod native_e2e {
             "format: native\nuser: default\npassword: native-secret2\n",
         );
         let native_schema = sink.native_schema().await.expect("native schema");
-        let mut encoder = NativeEncoder::<NativeRow>::new(native_schema);
+        let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
         let batch = encode_native_batch(&mut encoder, rows(), "native-2").expect("encode");
         sink.writer
             .write_batch(&sink.endpoints[0][0], &batch)
@@ -838,7 +839,7 @@ mod native_edges {
             "format: native\nuser: default\npassword: edges-secret\n",
         );
         let schema = sink.native_schema().await.expect("native schema");
-        let mut encoder = NativeEncoder::<EdgeRow>::new(schema);
+        let mut encoder = NativeEncoder::<Owned<EdgeRow>>::new(schema);
         let batch = encode_native_batch(&mut encoder, vec![edge_row()], "edges-1").expect("encode");
         sink.writer
             .write_batch(&sink.endpoints[0][0], &batch)
@@ -924,7 +925,7 @@ async fn schema_validation_startup_scenarios() {
         .await
         .expect("warns, passes")
         .unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<IdOnly>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<IdOnly>>::with_schema(schema);
     let batch = encode_batch(&mut encoder, vec![IdOnly { id: 1 }], "extras-1").expect("encode");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
@@ -977,7 +978,7 @@ async fn schema_validation_first_record_scenarios() {
         .await
         .expect("order-by-name is fine")
         .unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Reordered>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<Reordered>>::with_schema(schema);
     let batch = encode_batch(
         &mut encoder,
         vec![Reordered {
@@ -1004,7 +1005,7 @@ async fn schema_validation_first_record_scenarios() {
     // positional wire contract breaks, and the first record says so.
     let sink = sink_with(&srv.url, "orders", &["id", "name", "amount"], "names", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Reordered>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<Reordered>>::with_schema(schema);
     let err = encode_batch(
         &mut encoder,
         vec![Reordered {
@@ -1030,7 +1031,7 @@ async fn schema_validation_first_record_scenarios() {
     }
     let sink = sink_with(&srv.url, "dt_col", &["id", "x"], "full", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<I32X>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<I32X>>::with_schema(schema);
     let err = encode_batch(&mut encoder, vec![I32X { id: 1, x: 100 }], "dt-1")
         .expect_err("i32 vs DateTime in full mode");
     let reason = fatal(err);
@@ -1041,7 +1042,7 @@ async fn schema_validation_first_record_scenarios() {
 
     let sink = sink_with(&srv.url, "dt_col", &["id", "x"], "names", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<I32X>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<I32X>>::with_schema(schema);
     let batch = encode_batch(&mut encoder, vec![I32X { id: 1, x: 100 }], "dt-2")
         .expect("names mode skips type classes");
     sink.writer
@@ -1059,7 +1060,7 @@ async fn schema_validation_first_record_scenarios() {
     }
     let sink = sink_with(&srv.url, "orders", &["id", "name", "amount"], "full", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<PlainAmount>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<PlainAmount>>::with_schema(schema);
     let err = encode_batch(
         &mut encoder,
         vec![PlainAmount {
@@ -1079,7 +1080,7 @@ async fn schema_validation_first_record_scenarios() {
     }
     let sink = sink_with(&srv.url, "plain_s", &["id", "s"], "full", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<OptS>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<OptS>>::with_schema(schema);
     let err = encode_batch(
         &mut encoder,
         vec![OptS {
@@ -1100,7 +1101,7 @@ async fn schema_validation_first_record_scenarios() {
     }
     let sink = sink_with(&srv.url, "lowcard", &["id", "lc"], "full", "");
     let schema = sink.validate_schema().await.unwrap().unwrap();
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<LcRow>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<LcRow>>::with_schema(schema);
     let batch = encode_batch(
         &mut encoder,
         vec![LcRow {

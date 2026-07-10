@@ -116,10 +116,14 @@ pub(crate) fn spawn_fetcher(
                 // Drain finished fetches first so slots free promptly.
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     let Ok((id, outcome)) = joined else {
-                        // A fetch task panicked (should not happen: fetch_one
-                        // returns errors, never panics). The id stays in
-                        // `in_flight` and won't refetch, which is no worse
-                        // than the pre-existing fetcher-death behavior.
+                        // A fetch task panicked. The known panic source —
+                        // apache-avro's `Schema::parse_str` — is caught inside
+                        // `fetch_one` and negative-cached, so reaching here
+                        // means an unexpected panic elsewhere in the task. The
+                        // `JoinError` does not carry our schema id, so that id
+                        // stays in `in_flight` and won't refetch; this
+                        // last-resort path is no worse than the pre-existing
+                        // fetcher-death behavior.
                         tracing::error!("registry fetch task panicked");
                         continue;
                     };
@@ -196,13 +200,28 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
                 );
                 return FetchOutcome::Resolved;
             }
-            match Schema::parse_str(&registered.schema) {
-                Ok(schema) => {
+            // apache-avro's parse is a hard prerequisite for both backends: a
+            // schema it rejects is negative-cached here before the fast form is
+            // ever compiled, so a fast-only pipeline cannot decode it even when
+            // serde_avro_fast would have accepted it. The non-poisoning
+            // guarantee is one-directional — a fast-only rejection never
+            // poisons the apache path (see `CompiledSchema::compile`).
+            //
+            // `Schema::parse_str` can *panic* rather than return `Err` on some
+            // malformed names in apache-avro 0.21 (e.g. `"my-record"` trips an
+            // internal unwrap); catch it so a poison schema negative-caches
+            // like any other parse failure instead of killing this task and
+            // stalling the id at NotReady forever.
+            match std::panic::catch_unwind(|| Schema::parse_str(&registered.schema)) {
+                Ok(Ok(schema)) => {
                     tracing::info!(schema_id = id, "schema fetched and compiled");
-                    cache.insert_ready(CompiledSchema { id, schema });
+                    cache.insert_ready(CompiledSchema::compile(id, schema, &registered.schema));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     cache.insert_failed(id, format!("schema {id} failed to parse: {e}"));
+                }
+                Err(_panic) => {
+                    cache.insert_failed(id, format!("schema {id} fetch/parse panicked"));
                 }
             }
             FetchOutcome::Resolved
@@ -249,15 +268,22 @@ pub(crate) async fn prewarm(cfg: &RegistryConfig, subjects: &[String], cache: &S
         let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
         match schema_registry::get_schema_by_subject(&settings, &strategy).await {
             Ok(registered) if registered.references.is_empty() => {
-                match Schema::parse_str(&registered.schema) {
-                    Ok(schema) => {
+                // Catch a parse panic per subject (see `fetch_one`) so one
+                // poison schema cannot kill this detached task mid-list and
+                // silently skip every remaining subject's pre-warm.
+                match std::panic::catch_unwind(|| Schema::parse_str(&registered.schema)) {
+                    Ok(Ok(schema)) => {
                         tracing::info!(subject, schema_id = registered.id, "pre-warmed schema");
-                        cache.insert_ready(CompiledSchema {
-                            id: registered.id,
+                        cache.insert_ready(CompiledSchema::compile(
+                            registered.id,
                             schema,
-                        });
+                            &registered.schema,
+                        ));
                     }
-                    Err(e) => tracing::warn!(subject, error = %e, "pre-warm parse failed"),
+                    Ok(Err(e)) => tracing::warn!(subject, error = %e, "pre-warm parse failed"),
+                    Err(_panic) => {
+                        tracing::warn!(subject, "pre-warm parse panicked; skipping subject");
+                    }
                 }
             }
             Ok(_) => {

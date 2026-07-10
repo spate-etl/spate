@@ -15,7 +15,8 @@
 
 use apache_avro::Schema;
 use apache_avro::types::{Record as AvroRecord, Value};
-use benchmarks::{docker, ensure_topic, env_str, env_u64, report};
+use benchmarks::report::{Metric, Report};
+use benchmarks::{docker, ensure_topic, env_str, env_u64};
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use std::time::{Duration, Instant};
@@ -94,13 +95,17 @@ fn main() {
     }
     producer.flush(Duration::from_secs(60)).expect("flush");
     let elapsed = start.elapsed().as_secs_f64();
-    report(&serde_json::json!({
-        "bench": "loadgen",
-        "mode": mode,
-        "topic": topic,
-        "records": sent,
-        "elapsed_s": elapsed,
-        "achieved_records_per_s": sent as f64 / elapsed,
-        "target_records_per_s": rate,
-    }));
+    Report::measurement("loadgen")
+        .variant("mode", mode)
+        .variant("topic", topic)
+        // Target rate is the RATE config echo (0 = unthrottled), not an
+        // achieved quantity — carried in the variant, no direction attached.
+        .variant("target_records_per_s", rate)
+        .metric("records", Metric::maximize(sent as f64, "records"))
+        .metric("elapsed_s", Metric::minimize(elapsed, "s"))
+        .metric(
+            "achieved_records_per_s",
+            Metric::maximize(sent as f64 / elapsed, "records/s"),
+        )
+        .emit();
 }

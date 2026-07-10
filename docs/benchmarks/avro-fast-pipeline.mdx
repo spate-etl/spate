@@ -1,0 +1,166 @@
+---
+title: Avro-fast pipeline
+sidebar_position: 2
+description: The zero-copy Avro decode A/B — CPU-bound (the true multiple) and at scale (the sink dominates).
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+import BenchStat, { StatRow } from '@site/src/components/Bench/BenchStat';
+
+export const deserLabels = {
+  apache_owned: 'apache-avro (owned)',
+  fast_owned: 'serde_avro_fast (owned)',
+  fast_borrowed: 'serde_avro_fast (borrowed)',
+  native: 'Native',
+  rowbinary: 'RowBinary',
+};
+
+# Avro-fast pipeline
+
+The `avro-fast` backend (`serde_avro_fast`, single-pass typed decode, borrowed
+records) is measured against the `apache-avro` owned path at two layers. The
+point of two rigs is honesty: the CPU rig shows the true decode multiple, and
+the end-to-end rig shows that at scale the bottleneck has already moved to the
+sink.
+
+## CPU rig — decode isolated
+
+In-process, no broker, no server: a synthetic source replays a pre-encoded Avro
+batch datum (one datum = 50 events) into the chosen decoder. `STAGE=decode`
+isolates the decoder, reproducing the `etl-avro` micro-bench inside the
+normalized harness.
+
+<BenchBars
+  bench="avro_pipeline"
+  where={{ stage: 'decode' }}
+  metric="ns_per_event"
+  category="deser"
+  emphasize="fast_borrowed"
+  labels={deserLabels}
+  title="Avro decode cost per event"
+  caption="Per-event decode time for one 50-event batch datum, by decoder backend."
+/>
+
+<StatRow>
+  <BenchStat
+    emphasis
+    label="Borrowed fast decode vs apache-avro (owned)"
+    bench="avro_pipeline"
+    metric="ns_per_event"
+    numer={{ deser: 'apache_owned', stage: 'decode' }}
+    denom={{ deser: 'fast_borrowed', stage: 'decode' }}
+    sub="STAGE=decode · lower ns/event is better"
+  />
+</StatRow>
+
+`STAGE=pipeline` adds the rest of the CPU work — `flat_map` fan-out, `filter`,
+columnar encode, and shard handoff — so throughput reflects the whole in-process
+seam, not just the decoder.
+
+<BenchBars
+  bench="avro_pipeline"
+  where={{ stage: 'pipeline' }}
+  metric="records_per_s"
+  category={['deser', 'format']}
+  emphasize="fast_borrowed"
+  labels={deserLabels}
+  title="CPU-rig pipeline throughput"
+  caption="Decode + flat_map + filter + encode + shard handoff, events per second."
+/>
+
+<StatRow>
+  <BenchStat
+    emphasis
+    label="Borrowed fast pipeline vs apache-avro (owned), RowBinary"
+    bench="avro_pipeline"
+    metric="ns_per_event"
+    numer={{ deser: 'apache_owned', format: 'rowbinary', stage: 'pipeline' }}
+    denom={{ deser: 'fast_borrowed', format: 'rowbinary', stage: 'pipeline' }}
+    sub="STAGE=pipeline · whole in-process seam · lower ns/event is better"
+  />
+</StatRow>
+
+The two multiples are the point of the CPU rig: the borrowed decoder is ~7.4×
+faster to decode and ~4.3× faster through the whole in-process pipeline (decode →
+`flat_map` → filter → encode → handoff) than the `apache-avro` owned path, the
+pipeline pair both on RowBinary. Native costs more CPU to encode than RowBinary,
+so it trails on this rig; that trade only pays off server-side, and end to end
+(below) it disappears entirely.
+
+## E2E rig — the bottleneck moves to the sink {#e2e-rig}
+
+The same work end to end: an Avro batch payload produced to Kafka, decoded,
+fanned out, and written to ClickHouse. Here the decode delta is a small share of
+per-row cost because the sink dominates.
+
+<BenchBars
+  bench="e2e_kafka_clickhouse"
+  metric={['rows_per_s', 'records_per_s']}
+  category={['deser', 'format']}
+  exclude={{ deser: 'none' }}
+  emphasize="native"
+  labels={deserLabels}
+  title="End-to-end rows/s (Kafka → ClickHouse)"
+  caption="Sustained rows landed in ClickHouse per second, by decoder + insert format."
+/>
+
+The raw `deser: none` arm is excluded from these charts: it is a byte passthrough
+that writes **one** ClickHouse row per Kafka message, while every Avro arm explodes
+each message into **20** event rows. Its ~55.5k rows/s is 20× fewer rows for the same
+messages, so it is not comparable on a rows/s axis and would falsely imply Avro
+decode outruns a raw copy. Each record now carries its explode factor in
+`variant.events` (=20 on the Avro arms; the raw arm records `variant.payload`
+instead), so the "not comparable to the raw arm" caveat is machine-visible, not
+just prose.
+
+<BenchBars
+  bench="e2e_kafka_clickhouse"
+  metric="sink_flush_p99"
+  category={['deser', 'format']}
+  exclude={{ deser: 'none' }}
+  emphasize="native"
+  labels={deserLabels}
+  title="Sink flush p99"
+  caption="Tail flush latency — a different unit, so its own panel (never a second axis)."
+/>
+
+Across the four Avro arms the decoder choice barely moves the rate: on Native,
+borrowed `serde_avro_fast` lands **+0.12%** and owned `serde_avro_fast`
+**+0.08%** from owned `apache-avro` — every arm sits within **±0.3%** across n=3
+reps (medians ~213.5k rows/s). No measurable difference, because the ClickHouse
+sink, not the decoder, is the limiter. The insert format does not move the rate
+either: `fast_borrowed + RowBinary` lands within **−0.26%** of the same decoder on
+Native (both ~213k rows/s) — the earlier revision's ~−2.8% RowBinary throughput
+penalty did not survive n=3. What the format *does* change is the flush tail:
+RowBinary's sink-flush p99 falls in the 50–100 ms histogram bucket (interpolated
+~99 ms) against Native's 10–25 ms bucket (~24.7 ms). Throughput is sink-bound and
+identical; only the flush-latency tail separates the two formats.
+
+### How the E2E rig is driven
+
+The current rig runs **saturated**: `RATE=0` means the producer deliberately
+outruns the pipeline, so the measured rate is the pipeline's ceiling rather than a
+throttled target. Each arm is run **three times**; the charts and quoted figures
+use per-arm medians (n=3). Every run is a 30 s consumption window, `EVENTS=20`
+(20 event rows exploded per Kafka message, recorded in each record's
+`variant.events`), 4 partitions, 2 pipeline threads, against local Kafka and
+ClickHouse containers. Each run uses a **fresh per-pid topic and consumer group**,
+so the un-drained saturation tail is abandoned when the window closes — it is
+**not** replayed on a later run. Under saturation the Native arms log only a
+handful of `backpressure_pauses` (0–3 across reps), so they are flush-bound, not
+backpressure-bound.
+
+`etl_e2e_latency_seconds` **is** wired: it is observed on the sink ack path
+(`crates/etl-core/src/sink/worker.rs`, via `SinkShardMetrics::e2e_observed`), and
+every arm now reports e2e p50/p99. Read those tail figures as **coarse**, though:
+the e2e latency histogram uses second-wide buckets, so the reported p50/p99 are
+linear-interpolation positions **inside** the (0.5, 1.0] bucket (edges 0.5 s and
+1.0 s) — 0.750 s / 0.995 s on the reps that stay inside it — the interpolation
+math, not a fine measurement of the true tail; they should not be read to three
+decimals. The sink-flush p99 above is bucket-interpolated the same way (its
+~24.7 ms and ~99 ms are the 10–25 ms and 50–100 ms bucket bands), so it is **not**
+a finer-grained signal than the e2e histogram — both are coarse. A
+related harness lesson, now encoded in the binaries: metric handles created before
+`metrics::install` bind to the no-op recorder and silently render nothing — the
+harnesses install the recorder first, and the examples should be audited for the
+same pattern.

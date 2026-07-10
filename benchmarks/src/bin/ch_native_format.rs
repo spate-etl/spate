@@ -19,15 +19,18 @@
 //!   merge) and read `system.query_log` ProfileEvents.
 //!
 //! Env: ROWS (200000) ITERS (25) REPS (15, server reps) SERVER (1 = run rig C)
-//! RESULTS (JSONL path). Methodology + recorded results in docs/BENCHMARKS.md.
+//! RESULTS (JSONL path). Methodology + recorded results in
+//! docs/benchmarks/clickhouse-format.mdx.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use benchmarks::{docker, env_u64, http_post_bytes, percentile, report};
+use benchmarks::report::{Metric, Report};
+use benchmarks::{docker, env_u64, http_post_bytes, percentile};
 use bytes::BytesMut;
 use etl_clickhouse::{
     ClickHouseEncoder, DateTime64Millis, Decimal64, NativeEncoder, NativeSchema, serialize_row,
 };
 use etl_core::checkpoint::AckRef;
+use etl_core::deser::Owned;
 use etl_core::record::{PartitionId, Record, RecordMeta};
 use etl_core::sink::RowEncoder;
 use serde::Serialize;
@@ -245,7 +248,7 @@ fn encode_rowbinary_bare<T: Serialize>(records: &[Record<T>], buf: &mut BytesMut
 }
 
 fn encode_rowbinary<T: Serialize + Send + 'static>(
-    enc: &mut ClickHouseEncoder<T>,
+    enc: &mut ClickHouseEncoder<Owned<T>>,
     records: &[Record<T>],
     buf: &mut BytesMut,
 ) {
@@ -260,7 +263,7 @@ fn encode_rowbinary<T: Serialize + Send + 'static>(
 }
 
 fn encode_native<T: Serialize + Send + 'static>(
-    enc: &mut NativeEncoder<T>,
+    enc: &mut NativeEncoder<Owned<T>>,
     records: &[Record<T>],
     buf: &mut BytesMut,
 ) {
@@ -305,7 +308,7 @@ fn measure<T: Serialize + Send + 'static + Clone>(
 
     // Rig A: encode timing, both formats through their real `RowEncoder` impl.
     let mut buf = BytesMut::new();
-    let mut rb_enc = ClickHouseEncoder::<T>::new();
+    let mut rb_enc = ClickHouseEncoder::<Owned<T>>::new();
     let (rb_total, rb_raw) = median_total_ns(
         || {
             encode_rowbinary(&mut rb_enc, &records, &mut buf);
@@ -323,7 +326,7 @@ fn measure<T: Serialize + Send + 'static + Clone>(
         iters,
     );
 
-    let mut enc = NativeEncoder::<T>::new(schema);
+    let mut enc = NativeEncoder::<Owned<T>>::new(schema);
     let (nat_total, nat_raw) = median_total_ns(
         || {
             encode_native(&mut enc, &records, &mut buf);
@@ -409,17 +412,55 @@ fn run_client_ab(name: &str, rows: usize, iters: u64) -> (FormatResult, FormatRe
         nat.zstd_bytes,
         pct_lower(rb.zstd_bytes as f64, nat.zstd_bytes as f64)
     );
-    report(&serde_json::json!({
-        "bench": "ch_native_format.client",
-        "schema": name,
-        "rows": rows,
-        "rowbinary": { "ns_per_row": rb.ns_per_row, "raw": rb.raw_bytes, "lz4": rb.lz4_bytes, "zstd": rb.zstd_bytes },
-        "rowbinary_bare": { "ns_per_row": bare_ns },
-        "native":    { "ns_per_row": nat.ns_per_row, "raw": nat.raw_bytes, "lz4": nat.lz4_bytes, "zstd": nat.zstd_bytes },
-        "encode_cpu_pct_lower": pct_lower(rb.ns_per_row, nat.ns_per_row),
-        "lz4_pct_smaller": pct_lower(rb.lz4_bytes as f64, nat.lz4_bytes as f64),
-        "zstd_pct_smaller": pct_lower(rb.zstd_bytes as f64, nat.zstd_bytes as f64),
-    }));
+    // One measurement per format on this schema (client-side encode). The
+    // cross-format improvement percentages ride on the `native` arm they
+    // describe, so no derived number is dropped.
+    Report::measurement("ch_native_format")
+        .variant("stage", "client")
+        .variant("format", "rowbinary")
+        .variant("schema", name)
+        .variant("rows", rows as u64)
+        .metric("ns_per_row", Metric::minimize(rb.ns_per_row, "ns"))
+        .metric("raw_bytes", Metric::minimize(rb.raw_bytes as f64, "bytes"))
+        .metric("lz4_bytes", Metric::minimize(rb.lz4_bytes as f64, "bytes"))
+        .metric(
+            "zstd_bytes",
+            Metric::minimize(rb.zstd_bytes as f64, "bytes"),
+        )
+        .emit();
+    Report::measurement("ch_native_format")
+        .variant("stage", "client")
+        .variant("format", "rowbinary_bare")
+        .variant("schema", name)
+        .variant("rows", rows as u64)
+        .metric("ns_per_row", Metric::minimize(bare_ns, "ns"))
+        .note("bare serialize_row reference (encoder-wrapper overhead baseline)")
+        .emit();
+    Report::measurement("ch_native_format")
+        .variant("stage", "client")
+        .variant("format", "native")
+        .variant("schema", name)
+        .variant("rows", rows as u64)
+        .metric("ns_per_row", Metric::minimize(nat.ns_per_row, "ns"))
+        .metric("raw_bytes", Metric::minimize(nat.raw_bytes as f64, "bytes"))
+        .metric("lz4_bytes", Metric::minimize(nat.lz4_bytes as f64, "bytes"))
+        .metric(
+            "zstd_bytes",
+            Metric::minimize(nat.zstd_bytes as f64, "bytes"),
+        )
+        .metric(
+            "encode_cpu_pct_lower",
+            Metric::maximize(pct_lower(rb.ns_per_row, nat.ns_per_row), "%"),
+        )
+        .metric(
+            "lz4_pct_smaller",
+            Metric::maximize(pct_lower(rb.lz4_bytes as f64, nat.lz4_bytes as f64), "%"),
+        )
+        .metric(
+            "zstd_pct_smaller",
+            Metric::maximize(pct_lower(rb.zstd_bytes as f64, nat.zstd_bytes as f64), "%"),
+        )
+        .emit();
     (rb, nat)
 }
 
@@ -456,7 +497,7 @@ fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64)> {
     let mut rb_buf = BytesMut::new();
     encode_rowbinary_bare(&records, &mut rb_buf);
     let rb_body = rb_buf.to_vec();
-    let mut enc = NativeEncoder::<EventRow>::new(schema);
+    let mut enc = NativeEncoder::<Owned<EventRow>>::new(schema);
     let mut nat_buf = BytesMut::new();
     encode_native(&mut enc, &records, &mut nat_buf);
     let nat_body = nat_buf.to_vec();
@@ -523,11 +564,32 @@ fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64)> {
         (mt_rb - null_rb).max(0.0),
         (mt_nat - null_nat).max(0.0),
     );
-    report(&serde_json::json!({
-        "bench": "ch_native_format.server", "schema": "events", "rows": rows, "reps": reps,
-        "null_engine": { "rowbinary_cpu_us": null_rb, "native_cpu_us": null_nat, "native_pct_lower": pct_lower(null_rb, null_nat) },
-        "mergetree": { "rowbinary_cpu_us": mt_rb, "native_cpu_us": mt_nat, "native_pct_lower": pct_lower(mt_rb, mt_nat) },
-    }));
+    // One measurement per (format, engine): server-side parse CPU. The
+    // native arm carries its own improvement over rowbinary.
+    let emit_engine = |engine: &str, rb: f64, nat: f64| {
+        Report::measurement("ch_native_format")
+            .variant("stage", "server")
+            .variant("format", "rowbinary")
+            .variant("schema", "events")
+            .variant("engine", engine)
+            .variant("rows", rows as u64)
+            .metric("cpu_us", Metric::minimize(rb, "us").with_n(reps))
+            .emit();
+        Report::measurement("ch_native_format")
+            .variant("stage", "server")
+            .variant("format", "native")
+            .variant("schema", "events")
+            .variant("engine", engine)
+            .variant("rows", rows as u64)
+            .metric("cpu_us", Metric::minimize(nat, "us").with_n(reps))
+            .metric(
+                "native_pct_lower",
+                Metric::maximize(pct_lower(rb, nat), "%"),
+            )
+            .emit();
+    };
+    emit_engine("null", null_rb, null_nat);
+    emit_engine("mergetree", mt_rb, mt_nat);
     // The gate uses the Null-engine parse-isolation number.
     Some((null_rb, null_nat))
 }
@@ -591,9 +653,10 @@ fn main() {
         "NO-GO — ship Native opt-in, keep RowBinary default"
     };
     println!("\n  VERDICT: {verdict}");
-    report(&serde_json::json!({
-        "bench": "ch_native_format.verdict",
-        "client_ok": client_ok, "wire_ok": wire_ok, "server_ok": server_ok,
-        "verdict": verdict,
-    }));
+    Report::verdict("ch_native_format")
+        .variant("client_ok", client_ok)
+        .variant("wire_ok", wire_ok)
+        .variant("server_ok", server_ok)
+        .note(verdict)
+        .emit();
 }

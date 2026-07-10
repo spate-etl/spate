@@ -1,0 +1,235 @@
+/*
+ * Benchmark chart styling.
+ *
+ * Colour is emphasis, not categorical: the arm that is the point wears the site
+ * accent (--ifm-color-primary: #d1500b light / #ff8c4a dark — swapped by Infima,
+ * so dark mode is *selected*, not an automatic media flip); everything else wears
+ * a single validated de-emphasis grey (#8a8781). That pair was checked with the
+ * dataviz validator on both surfaces: CVD ΔE 48.6 (light) / 44.8 (dark), both
+ * marks >= 3:1 contrast. Text wears Infima ink tokens, never the mark colour.
+ *
+ * Fills are set via CSS classes (not the SVG `fill` attribute) so the custom
+ * properties resolve and swap with the theme without re-rendering the SVG.
+ */
+
+.viz {
+  --bench-accent: var(--ifm-color-primary);
+  --bench-muted: #8a8781;
+  --bench-ink: var(--ifm-font-color-base);
+  --bench-ink-2: var(--ifm-color-emphasis-700);
+  --bench-surface: var(--ifm-background-color);
+  --bench-track: var(--ifm-color-emphasis-200);
+
+  margin: 1.5rem 0;
+}
+
+.figure {
+  margin: 0;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 10px;
+  padding: 1rem 1.1rem 0.85rem;
+  background: var(--ifm-background-surface-color);
+  max-width: 680px;
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.15rem;
+}
+
+.title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--bench-ink);
+  line-height: 1.3;
+}
+
+.direction {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--bench-ink-2);
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  white-space: nowrap;
+}
+
+.caption {
+  font-size: 0.85rem;
+  color: var(--bench-ink-2);
+  margin: 0.1rem 0 0.4rem;
+  line-height: 1.45;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin: 0.2rem 0 0.55rem;
+  font-size: 0.82rem;
+  color: var(--bench-ink-2);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.swatchAccent {
+  background: var(--bench-accent);
+}
+
+.swatchMuted {
+  background: var(--bench-muted);
+}
+
+/* Wide content scrolls inside its own container; the page body never does. */
+.chartScroll {
+  overflow-x: auto;
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  min-width: 360px;
+  height: auto;
+}
+
+.barAccent {
+  fill: var(--bench-accent);
+}
+
+.barMuted {
+  fill: var(--bench-muted);
+}
+
+.rowLabel {
+  fill: var(--bench-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.valueLabel {
+  fill: var(--bench-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.groupLabel {
+  fill: var(--bench-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.provenance {
+  font-size: 0.74rem;
+  color: var(--ifm-color-emphasis-600);
+  margin-top: 0.6rem;
+  line-height: 1.4;
+}
+
+.synthetic {
+  color: var(--ifm-color-warning-darker);
+  font-weight: 600;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  margin-top: 0.4rem;
+}
+
+.details {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.details summary {
+  cursor: pointer;
+  color: var(--bench-ink-2);
+  font-weight: 500;
+}
+
+.details table {
+  margin: 0.5rem 0 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.placeholder {
+  border: 1px dashed var(--ifm-toc-border-color);
+  border-radius: 8px;
+  padding: 1.1rem 1.1rem;
+  color: var(--bench-ink-2);
+  font-size: 0.9rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.placeholder strong {
+  color: var(--bench-ink);
+}
+
+/* ── stat tiles ──────────────────────────────────────────────────────────── */
+
+.statRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.stat {
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.statEmphasis {
+  border-color: var(--bench-accent);
+}
+
+.statLabel {
+  font-size: 0.8rem;
+  color: var(--bench-ink-2);
+  line-height: 1.35;
+}
+
+.statValue {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  margin: 0.25rem 0 0.1rem;
+  color: var(--bench-ink);
+  /* Proportional figures on a large standalone number (not tabular). */
+}
+
+.statValueEmphasis {
+  color: var(--bench-accent);
+}
+
+.statUnit {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--bench-ink-2);
+  margin-left: 0.15rem;
+}
+
+.statSub {
+  font-size: 0.78rem;
+  color: var(--ifm-color-emphasis-600);
+  line-height: 1.4;
+  margin-top: 0.1rem;
+}

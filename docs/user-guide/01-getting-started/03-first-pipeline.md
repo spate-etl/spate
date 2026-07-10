@@ -178,8 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // checks the configured columns against every replica's live table
     // NOW, before any thread spawns.
     let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
-        None => ClickHouseEncoder::<Order>::new(),
+        Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
+        None => ClickHouseEncoder::<Owned<Order>>::new(),
     };
 
     // One identical chain per pipeline thread, fully monomorphized.
@@ -268,7 +268,7 @@ before the SIGKILL. Details in
 
 - [Delivery guarantees](../02-concepts/02-delivery-guarantees.md) — what
   at-least-once buys you and what it doesn't.
-- [Kafka](../04-connectors/kafka.md), [Avro](../04-connectors/avro.md), and
+- [Kafka](../04-connectors/kafka.md), [Avro](../04-connectors/avro/README.md), and
   [ClickHouse](../04-connectors/clickhouse/README.md) connector references.
 - [Docker](../05-deployment/docker.md) and
   [Monitoring](../05-deployment/monitoring.md) to take this to production.

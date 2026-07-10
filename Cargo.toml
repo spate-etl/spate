@@ -64,7 +64,11 @@ foldhash = "0.2"
 rdkafka = "0.39"
 clickhouse = "0.15"
 apache-avro = "0.21"
-serde_avro_fast = "2.1"
+# Exact pin: =2.1.0 is the release the benchmarks and the license review
+# evaluated; a later 2.x could silently change its license metadata (see
+# deny.toml). Default features stay on: 2.1.0 fails to compile with them off
+# (its codec-dispatch enum becomes empty), and `deflate` only adds flate2.
+serde_avro_fast = "=2.1.0"
 schema_registry_converter = { version = "4.9", default-features = false }
 
 # Test and bench tooling.

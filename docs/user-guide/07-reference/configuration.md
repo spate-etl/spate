@@ -93,7 +93,7 @@ belongs to it:
 | Section | Required | Body documented in |
 |---|---|---|
 | `source` | yes | [Kafka](../04-connectors/kafka.md), [Memory](../04-connectors/memory.md), or your own ([Custom sources](../06-extending/custom-source.md)) |
-| `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/avro.md) |
+| `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/avro/README.md) |
 | `sink` | yes | [ClickHouse](../04-connectors/clickhouse/README.md), [Memory](../04-connectors/memory.md), or your own ([Custom sinks](../06-extending/custom-sink.md)) |
 
 The sink connectors map their `batch`, `inflight`, and `retry` sub-sections

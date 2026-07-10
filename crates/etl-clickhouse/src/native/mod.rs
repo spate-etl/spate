@@ -31,7 +31,7 @@ use crate::schema::typeparse::ChType;
 use bytes::BytesMut;
 use column::ColumnWriter;
 use dispatch::RowDispatchSer;
-use etl_core::deser::Owned;
+use etl_core::deser::RecFamily;
 use etl_core::error::{ErrorClass, SinkError};
 use etl_core::record::Record;
 use etl_core::sink::RowEncoder;
@@ -213,14 +213,19 @@ impl NativeSchema {
     }
 }
 
-/// Encodes `T: Serialize` rows into the ClickHouse Native format. Runs on
-/// pipeline threads inside the terminal stage; buffers rows columnar in
-/// [`encode`](RowEncoder::encode) and emits one block per chunk in
-/// [`finish_chunk`](RowEncoder::finish_chunk).
+/// Encodes a record family's `Serialize` rows into the ClickHouse Native
+/// format. Runs on pipeline threads inside the terminal stage; buffers rows
+/// columnar in [`encode`](RowEncoder::encode) and emits one block per chunk
+/// in [`finish_chunk`](RowEncoder::finish_chunk).
+///
+/// `F` is the **record family**: `Owned<T>` for plain owned row structs
+/// (`NativeEncoder::<Owned<MyRow>>::new(schema)`), or a borrowed family for
+/// zero-copy pipelines — any family whose records implement `Serialize` at
+/// every lifetime encodes.
 ///
 /// Cloning mints a fresh, empty encoder over the same schema — the terminal
 /// stage clones one per shard.
-pub struct NativeEncoder<T> {
+pub struct NativeEncoder<F> {
     schema: Arc<NativeSchema>,
     columns: Vec<ColumnWriter>,
     rows: u32,
@@ -238,10 +243,10 @@ pub struct NativeEncoder<T> {
     /// so `buffered_bytes` (called by the terminal stage on every record) is
     /// O(1) instead of an O(columns) walk per row.
     approx_bytes: usize,
-    _row: PhantomData<fn(T)>,
+    _row: PhantomData<fn(F)>,
 }
 
-impl<T> NativeEncoder<T> {
+impl<F> NativeEncoder<F> {
     /// A Native encoder for the columns described by `schema`.
     #[must_use]
     pub fn new(schema: Arc<NativeSchema>) -> Self {
@@ -303,7 +308,7 @@ impl<T> NativeEncoder<T> {
     }
 }
 
-impl<T> Clone for NativeEncoder<T> {
+impl<F> Clone for NativeEncoder<F> {
     fn clone(&self) -> Self {
         // A per-shard clone is a fresh, empty encoder over the same schema —
         // never a copy of another shard's buffered rows.
@@ -311,7 +316,7 @@ impl<T> Clone for NativeEncoder<T> {
     }
 }
 
-impl<T> fmt::Debug for NativeEncoder<T> {
+impl<F> fmt::Debug for NativeEncoder<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeEncoder")
             .field("columns", &self.schema.columns.len())
@@ -320,11 +325,16 @@ impl<T> fmt::Debug for NativeEncoder<T> {
     }
 }
 
-impl<T> RowEncoder<Owned<T>> for NativeEncoder<T>
+impl<F> RowEncoder<F> for NativeEncoder<F>
 where
-    T: Serialize + Send + 'static,
+    F: RecFamily,
+    for<'b> F::Rec<'b>: Serialize,
 {
-    fn encode(&mut self, rec: &Record<T>, _buf: &mut BytesMut) -> Result<(), SinkError> {
+    fn encode<'buf>(
+        &mut self,
+        rec: &Record<F::Rec<'buf>>,
+        _buf: &mut BytesMut,
+    ) -> Result<(), SinkError> {
         // First record only: validate the row's field names against the
         // configured columns off the per-row path — positional dispatch would
         // otherwise silently mis-column a same-wire-class field/column swap.

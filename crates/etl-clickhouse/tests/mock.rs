@@ -7,6 +7,7 @@ use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use etl_clickhouse::config::{self, ClickHouseSinkConfig};
 use etl_clickhouse::serialize_row;
+use etl_core::deser::Owned;
 use etl_core::error::{ErrorClass, SinkError};
 use etl_core::sink::{SealedBatch, ShardWriter};
 use serde::{Deserialize, Serialize};
@@ -230,7 +231,7 @@ async fn matching_schema_passes_and_first_record_encodes() {
 
     // The first-record struct check passes and the bytes are identical
     // to an unvalidated encoder's.
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<TestRow>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<TestRow>>::with_schema(schema);
     let row = TestRow {
         id: 7,
         name: "x".into(),
@@ -266,7 +267,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
     let sink = sink_with(mock.url(), "names");
     let schema = sink.validate_schema().await.unwrap().unwrap();
 
-    let mut encoder = etl_clickhouse::ClickHouseEncoder::<WrongOrder>::with_schema(schema);
+    let mut encoder = etl_clickhouse::ClickHouseEncoder::<Owned<WrongOrder>>::with_schema(schema);
     let err = encoder
         .encode(
             &record(WrongOrder {
@@ -313,7 +314,7 @@ async fn type_mismatch_fails_full_but_passes_names() {
         .await
         .unwrap()
         .unwrap();
-    let err = etl_clickhouse::ClickHouseEncoder::<WrongType>::with_schema(schema)
+    let err = etl_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
         .encode(&record(wrong.clone()), &mut BytesMut::new())
         .expect_err("full mode checks type classes");
     match err {
@@ -335,7 +336,7 @@ async fn type_mismatch_fails_full_but_passes_names() {
         .await
         .unwrap()
         .unwrap();
-    etl_clickhouse::ClickHouseEncoder::<WrongType>::with_schema(schema)
+    etl_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
         .encode(&record(wrong), &mut BytesMut::new())
         .expect("names mode skips type classes");
 }

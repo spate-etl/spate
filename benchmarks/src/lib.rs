@@ -8,18 +8,25 @@
 //! - `pipeline_synthetic` — the framework-overhead ceiling: an in-process
 //!   generator source through the real chain, sink pool, and runtime into
 //!   a null writer; no broker or network in the loop.
+//! - `avro_pipeline` — the Avro decode-backend A/B: one datum holding an
+//!   array of events, exploded with `flat_map` into the ClickHouse encoder.
+//!   CPU-bound by construction; no broker or server in the loop.
 //! - `loadgen` — Kafka producer at a target rate (raw payloads or
 //!   Confluent-framed Avro).
 //! - `e2e_kafka_clickhouse` — the full pipeline against local containers
 //!   or external clusters (pure env configuration; Kubernetes-runnable).
+//! - `ch_native_format` — ClickHouse Native vs RowBinary go/no-go.
 //!
-//! Methodology and recorded results live in `docs/BENCHMARKS.md`.
+//! Every binary emits the same versioned record — see [`report::Report`].
+//! Methodology and recorded results live in `docs/benchmarks/`.
 
 // Bench harnesses narrate progress on stderr by design.
 #![allow(clippy::print_stderr)]
 
+pub mod avro_batch;
 pub mod docker;
 pub mod prom;
+pub mod report;
 pub mod synthetic;
 
 use std::time::{Duration, Instant};
@@ -138,12 +145,15 @@ pub fn percentile(samples: &mut [u64], p: f64) -> u64 {
     samples[idx]
 }
 
-/// Prints a JSON report line to stdout and appends it to the file named by
-/// `RESULTS` (JSON lines) when that variable is set.
-pub fn report(value: &serde_json::Value) {
+/// Prints one [`report::Report`] as a JSON line on stdout and appends it to
+/// the file named by `RESULTS` when that variable is set.
+///
+/// Prefer [`report::Report::emit`] at call sites.
+pub fn report(rep: &report::Report) {
+    let line = serde_json::to_string(rep).expect("serialize report");
     #[allow(clippy::print_stdout)]
     {
-        println!("{value}");
+        println!("{line}");
     }
     if let Ok(path) = std::env::var("RESULTS") {
         use std::io::Write;
@@ -152,7 +162,7 @@ pub fn report(value: &serde_json::Value) {
             .append(true)
             .open(&path)
             .expect("open RESULTS file");
-        writeln!(f, "{value}").expect("append result");
+        writeln!(f, "{line}").expect("append result");
     }
 }
 

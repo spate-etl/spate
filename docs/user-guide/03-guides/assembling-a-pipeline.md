@@ -83,7 +83,7 @@ I/O runtime is already alive, so:
 
 - `pipeline.io_handle()` — a `tokio::runtime::Handle` for background tasks
   that must start before `run` (the Avro schema-registry fetcher takes one;
-  see [Avro](../04-connectors/avro.md)).
+  see [Avro](../04-connectors/avro/README.md)).
 - `pipeline.block_on(future)` — run an async pre-flight step to completion
   on the I/O runtime, blocking the current thread. The canonical use is
   ClickHouse schema validation
@@ -91,8 +91,8 @@ I/O runtime is already alive, so:
 
 ```rust
 let encoder = match pipeline.block_on(sink.validate_schema())? {
-    Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
-    None => ClickHouseEncoder::<Order>::new(),
+    Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
+    None => ClickHouseEncoder::<Owned<Order>>::new(),
 };
 ```
 

@@ -56,6 +56,9 @@ jobs:
       # the hot path fails this job.
       - run: cargo test -p etl-core --release --test chain_alloc
       - run: cargo bench -p etl-core -- --save-baseline nightly
+      # etl-avro's fast-backend decode variants are `#[cfg(feature = "fast")]`;
+      # bench with the feature so they are compiled and regression-tracked too.
+      - run: cargo bench -p etl-avro --features fast -- --save-baseline nightly
       - name: Fetch previous baseline
         uses: actions/download-artifact@v4
         continue-on-error: true

@@ -21,7 +21,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo check -p etl --examples --all-features
-      - run: cargo bench --no-run --workspace
+      - run: cargo bench --no-run --workspace --all-features
 
   features:
     name: Feature powerset

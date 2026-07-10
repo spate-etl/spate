@@ -7,12 +7,13 @@
 //!   RUN_ONE=1 pipeline_synthetic  # single measurement, JSON line on stdout
 //!
 //! Env: THREADS_LIST (1,2,4,8) | THREADS (1) DURATION_S (30) PAYLOAD (256)
-//! WORK_US (0) SHARDS (2) QUEUE_CAP (8) CHECKPOINT_INTERVAL_MS (200)
+//! WORK_US (0) SHARDS (2) QUEUE_CAP (64) CHECKPOINT_INTERVAL_MS (200)
 //! METRICS_PORT (19095) RESULTS (append JSONL path)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, SyntheticSource};
-use benchmarks::{busy_work, env_str, env_u64, prom, report};
+use benchmarks::{busy_work, env_str, env_u64, prom};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::PipelineConfig;
 use etl_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
@@ -89,7 +90,8 @@ sink: {{ nullsink: {{}} }}
         .collect();
     // Small, fast-cycling batches: the null writer completes instantly, so
     // sealing often keeps the in-flight byte budget low and measures the
-    // framework rather than backpressure duty cycles (see BENCHMARKS.md).
+    // framework rather than backpressure duty cycles (see
+    // docs/benchmarks/framework-overhead.mdx).
     let pool_cfg = {
         let mut cfg = SinkPoolConfig::default();
         cfg.batch.max_rows = 65_536;
@@ -172,24 +174,45 @@ sink: {{ nullsink: {{}} }}
         writer.rows(),
         produced_total,
     );
-    report(&serde_json::json!({
-        "bench": "pipeline_synthetic",
-        "threads": threads,
-        "shards": shards,
-        "payload_bytes": payload,
-        "work_us": work_us,
-        "window_s": window,
-        "records": records,
-        "records_per_s": rate,
-        "records_per_s_per_thread": rate / threads as f64,
-        "e2e_p50_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.5),
-        "e2e_p99_s": prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.99),
-        "produced_total": produced_total,
-        "sink_rows_total": writer.rows(),
-        "sink_batches_total": writer.batches(),
-        "commits": commits.load(Ordering::Relaxed),
-        "exit": format!("{:?}", exit.state),
-    }));
+    let mut rep = Report::measurement("pipeline_synthetic")
+        .variant("threads", threads as u64)
+        .variant("shards", shards as u64)
+        .variant("payload_bytes", payload as u64)
+        .variant("work_us", work_us)
+        // The measured window (~DURATION_S) is a measurement context, not a
+        // goal — carried in the variant so no "higher is better" is implied.
+        .variant("window_s", window)
+        .metric("records", Metric::maximize(records as f64, "records"))
+        .metric("records_per_s", Metric::maximize(rate, "records/s"))
+        .metric(
+            "records_per_s_per_thread",
+            Metric::maximize(rate / threads as f64, "records/s"),
+        )
+        .metric(
+            "produced_total",
+            Metric::maximize(produced_total as f64, "records"),
+        )
+        .metric(
+            "sink_rows_total",
+            Metric::maximize(writer.rows() as f64, "rows"),
+        )
+        .metric(
+            "sink_batches_total",
+            Metric::maximize(writer.batches() as f64, "batches"),
+        )
+        .metric(
+            "commits",
+            Metric::maximize(commits.load(Ordering::Relaxed) as f64, "commits"),
+        );
+    // e2e latency is only populated when the exporter has histogram samples;
+    // omit the metric entirely rather than emitting a null.
+    if let Some(p50) = prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.5) {
+        rep = rep.metric("e2e_p50_s", Metric::minimize(p50, "s"));
+    }
+    if let Some(p99) = prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.99) {
+        rep = rep.metric("e2e_p99_s", Metric::minimize(p99, "s"));
+    }
+    rep.note(format!("exit={:?}", exit.state)).emit();
 }
 
 fn main() {

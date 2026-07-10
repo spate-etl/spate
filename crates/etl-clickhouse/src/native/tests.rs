@@ -4,6 +4,7 @@
 //! server round-trip (`tests/container.rs`) is the ground-truth oracle.
 
 use super::{NativeEncoder, NativeSchema};
+use etl_core::deser::Owned;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -377,7 +378,8 @@ mod field_name_check {
             b: u32,
             a: u32,
         }
-        let mut enc = NativeEncoder::<Swapped>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
+        let mut enc =
+            NativeEncoder::<Owned<Swapped>>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
         let err = enc
             .encode(&record(Swapped { b: 1, a: 2 }), &mut BytesMut::new())
             .expect_err("field-name swap must be rejected");
@@ -397,11 +399,55 @@ mod field_name_check {
             a: u32,
             b: u32,
         }
-        let mut enc = NativeEncoder::<Ok2>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
+        let mut enc = NativeEncoder::<Owned<Ok2>>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
         let mut buf = BytesMut::new();
         enc.encode(&record(Ok2 { a: 1, b: 2 }), &mut buf)
             .expect("matching names encode");
         enc.finish_chunk(&mut buf).expect("finish");
         assert!(!buf.is_empty(), "a matching row produces a block");
+    }
+
+    #[test]
+    fn borrowed_rows_encode_identically_to_owned() {
+        // A borrowed family produces the same block bytes as its owned
+        // equivalent: the Native encoder only needs `Serialize` on the row.
+        #[derive(Serialize)]
+        struct RowOwned {
+            id: u32,
+            s: String,
+        }
+        #[derive(Serialize)]
+        struct RowRef<'a> {
+            id: u32,
+            s: &'a str,
+        }
+        struct RowRefFam;
+        impl etl_core::deser::RecFamily for RowRefFam {
+            type Rec<'buf> = RowRef<'buf>;
+        }
+        let cols = &[("id", "UInt32"), ("s", "String")];
+
+        let mut owned_enc = NativeEncoder::<Owned<RowOwned>>::new(schema(cols));
+        let mut owned_buf = BytesMut::new();
+        owned_enc
+            .encode(
+                &record(RowOwned {
+                    id: 9,
+                    s: "zero".into(),
+                }),
+                &mut owned_buf,
+            )
+            .expect("owned encodes");
+        owned_enc.finish_chunk(&mut owned_buf).expect("finish");
+
+        let text = String::from("zero");
+        let mut ref_enc = NativeEncoder::<RowRefFam>::new(schema(cols));
+        let mut ref_buf = BytesMut::new();
+        ref_enc
+            .encode(&record(RowRef { id: 9, s: &text }), &mut ref_buf)
+            .expect("borrowed encodes");
+        ref_enc.finish_chunk(&mut ref_buf).expect("finish");
+
+        assert_eq!(owned_buf, ref_buf);
     }
 }

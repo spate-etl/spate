@@ -1,8 +1,12 @@
 //! Local benchmark infrastructure via the `docker` CLI.
 //!
-//! Containers are reused if already running (name-based) so repeated bench
-//! runs are cheap; set `KEEP=0` semantics are left to the caller — these
-//! helpers never tear down.
+//! A reachable server (port/ping probe) is reused so repeated bench runs are
+//! cheap — which means a server left RUNNING from a previous run is reused with
+//! its OS page cache and ClickHouse query cache still warm. Only when nothing
+//! answers is a **fresh** container started (any container of the same name is
+//! force-removed first; see [`remove_container`]). Set `FRESH=1` to force that
+//! remove+recreate even when a server already answers, restoring cold caches
+//! for the server-CPU rig (`ch_native_format`).
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -15,8 +19,25 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-fn container_running(name: &str) -> bool {
-    !docker(&["ps", "-q", "--filter", &format!("name=^{name}$")]).is_empty()
+/// Force-remove any container of this name (running or exited), ignoring a
+/// "no such container" miss.
+///
+/// Called before every `docker run`. A stopped/exited container of the same
+/// name — the normal state after an interrupted or crashed run — would make
+/// `docker run --name` fail with a name conflict. Starting fresh here (rather
+/// than `docker start`-ing a stopped one) gives the new container cold OS and
+/// query caches, which the server-CPU measurements in `ch_native_format` rely
+/// on. This only applies on the fresh-start path, though: a server still
+/// RUNNING from a previous run is reused as-is (warm caches) unless `FRESH=1`
+/// forces a remove+recreate.
+fn remove_container(name: &str) {
+    let _ = docker(&["rm", "-f", name]);
+}
+
+/// `FRESH=1` forces a remove+recreate even when a server already answers,
+/// giving the new container cold OS/page and query caches.
+fn fresh_requested() -> bool {
+    std::env::var("FRESH").is_ok_and(|v| v == "1")
 }
 
 fn tcp_open(host: &str, port: u16) -> bool {
@@ -35,21 +56,21 @@ fn tcp_open(host: &str, port: u16) -> bool {
 /// Returns the bootstrap string.
 pub fn ensure_kafka() -> String {
     let bootstrap = "localhost:9092".to_owned();
-    if tcp_open("localhost", 9092) {
+    // FRESH=1 forces a cold container even when a broker already answers.
+    if !fresh_requested() && tcp_open("localhost", 9092) {
         return bootstrap;
     }
-    if !container_running("etl-bench-kafka") {
-        eprintln!("starting etl-bench-kafka (apache/kafka:4.1.0) ...");
-        docker(&[
-            "run",
-            "-d",
-            "--name",
-            "etl-bench-kafka",
-            "-p",
-            "9092:9092",
-            "apache/kafka:4.1.0",
-        ]);
-    }
+    remove_container("etl-bench-kafka");
+    eprintln!("starting etl-bench-kafka (apache/kafka:4.1.0) ...");
+    docker(&[
+        "run",
+        "-d",
+        "--name",
+        "etl-bench-kafka",
+        "-p",
+        "9092:9092",
+        "apache/kafka:4.1.0",
+    ]);
     let deadline = Instant::now() + Duration::from_secs(90);
     while !tcp_open("localhost", 9092) {
         assert!(Instant::now() < deadline, "kafka did not become reachable");
@@ -79,25 +100,27 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
             std::thread::sleep(Duration::from_millis(500));
         }
     };
-    if ping(Duration::from_millis(600)) {
+    // FRESH=1 forces a cold container even when a server already answers.
+    if !fresh_requested() && ping(Duration::from_millis(600)) {
         return (host, port, creds.0, creds.1);
     }
-    if !container_running("etl-bench-clickhouse") {
-        eprintln!("starting etl-bench-clickhouse (clickhouse-server:25.6) ...");
-        docker(&[
-            "run",
-            "-d",
-            "--name",
-            "etl-bench-clickhouse",
-            "-p",
-            "18123:8123",
-            "-e",
-            "CLICKHOUSE_PASSWORD=bench",
-            "--ulimit",
-            "nofile=262144:262144",
-            "clickhouse/clickhouse-server:25.6",
-        ]);
-    }
+    remove_container("etl-bench-clickhouse");
+    eprintln!("starting etl-bench-clickhouse (clickhouse-server:25.6) ...");
+    docker(&[
+        "run",
+        "-d",
+        "--name",
+        "etl-bench-clickhouse",
+        "-p",
+        "18123:8123", // HTTP
+        "-p",
+        "19000:9000", // native protocol
+        "-e",
+        "CLICKHOUSE_PASSWORD=bench",
+        "--ulimit",
+        "nofile=262144:262144",
+        "clickhouse/clickhouse-server:25.6",
+    ]);
     assert!(
         ping(Duration::from_secs(90)),
         "clickhouse did not become reachable"

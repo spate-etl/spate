@@ -105,6 +105,9 @@ impl ShardWriter for NullWriter {
 pub struct SyntheticSource {
     lanes: usize,
     payload_size: usize,
+    /// When set, every payload in every lane's arena is a copy of this exact
+    /// buffer (e.g. a pre-encoded Avro datum) rather than synthetic filler.
+    template: Option<Arc<Vec<u8>>>,
     issuer: Option<AckIssuer>,
     assigned: bool,
     produced: Arc<AtomicU64>,
@@ -118,6 +121,22 @@ impl SyntheticSource {
         SyntheticSource {
             lanes,
             payload_size,
+            template: None,
+            issuer: None,
+            assigned: false,
+            produced,
+            commits: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// A source that replays one fixed payload — every yielded record is a
+    /// byte-for-byte copy of `payload` (e.g. a pre-encoded Avro datum). Used
+    /// by the `avro_pipeline` rig so a real deserializer decodes it downstream.
+    pub fn replaying(lanes: usize, payload: Vec<u8>, produced: Arc<AtomicU64>) -> Self {
+        SyntheticSource {
+            lanes,
+            payload_size: payload.len(),
+            template: Some(Arc::new(payload)),
             issuer: None,
             assigned: false,
             produced,
@@ -153,12 +172,17 @@ impl Source for SyntheticSource {
                 .map(|i| {
                     let arena: Arc<Vec<Vec<u8>>> = Arc::new(
                         (0..4096)
-                            .map(|j| {
-                                let mut p = vec![0xa5u8; self.payload_size];
-                                let tag = (j as u64).to_le_bytes();
-                                let n = tag.len().min(p.len());
-                                p[..n].copy_from_slice(&tag[..n]);
-                                p
+                            .map(|j| match &self.template {
+                                // Replay mode: every payload is the exact datum,
+                                // so a real deserializer decodes identical input.
+                                Some(t) => t.as_ref().clone(),
+                                None => {
+                                    let mut p = vec![0xa5u8; self.payload_size];
+                                    let tag = (j as u64).to_le_bytes();
+                                    let n = tag.len().min(p.len());
+                                    p[..n].copy_from_slice(&tag[..n]);
+                                    p
+                                }
                             })
                             .collect(),
                     );

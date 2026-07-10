@@ -1,10 +1,11 @@
 //! The Avro deserializers.
 //!
-//! Both deserializers share [`DecoderCore`]: framing → schema resolution →
-//! datum decode. Schema resolution never blocks a pipeline thread: on a
-//! registry cache miss the core triggers an asynchronous fetch and returns
-//! [`DeserError::NotReady`], which the chain converts into a retriable
-//! `Blocked` (see `etl-core`'s deserializer contract).
+//! Every deserializer shares [`DecoderCore`]: framing → schema resolution →
+//! datum decode, with the backend-specific datum decode swapped on top of
+//! [`DecoderCore::resolve`]. Schema resolution never blocks a pipeline
+//! thread: on a registry cache miss the core triggers an asynchronous fetch
+//! and returns [`DeserError::NotReady`], which the chain converts into a
+//! retriable `Blocked` (see `etl-core`'s deserializer contract).
 //!
 //! Empty payloads (Kafka tombstones) decode to **zero records** in every
 //! mode.
@@ -15,6 +16,8 @@ use crate::wire;
 use apache_avro::Schema;
 use apache_avro::from_avro_datum;
 use etl_core::checkpoint::AckRef;
+#[cfg(feature = "fast")]
+use etl_core::deser::RecFamily;
 use etl_core::deser::{Deserializer, EmitRecord, Owned};
 use etl_core::error::DeserError;
 use etl_core::record::{RawPayload, Record};
@@ -61,13 +64,20 @@ pub(crate) struct DecoderCore {
     pub(crate) reader_schema: Option<Arc<Schema>>,
 }
 
+/// A resolved payload: the writer schema plus the datum slice, which borrows
+/// the payload buffer. `None` is a tombstone (empty payload, zero records).
+type Resolved<'buf> = Option<(Arc<CompiledSchema>, &'buf [u8])>;
+
 impl DecoderCore {
-    /// Decode one payload to an [`AvroValue`], or `None` for a tombstone.
-    fn decode(&mut self, raw: &RawPayload<'_>) -> Result<Option<AvroValue>, DeserError> {
+    /// The backend-agnostic prefix of every decode: the tombstone rule,
+    /// framing, and schema resolution. The returned datum slice borrows the
+    /// payload buffer (`'buf`), so a borrowed-record backend can decode
+    /// straight out of it.
+    fn resolve<'buf>(&mut self, raw: &RawPayload<'buf>) -> Result<Resolved<'buf>, DeserError> {
         if raw.bytes.is_empty() {
             return Ok(None);
         }
-        let (writer, mut datum): (Arc<CompiledSchema>, &[u8]) = match &mut self.mode {
+        let resolved: (Arc<CompiledSchema>, &'buf [u8]) = match &mut self.mode {
             SchemaSourceMode::Confluent { registry, memo } => {
                 let (id, datum) = wire::parse_confluent(raw.bytes)?;
                 match registry.cache.lookup(memo, id) {
@@ -100,6 +110,14 @@ impl DecoderCore {
                 }
                 (Arc::clone(schema), datum)
             }
+        };
+        Ok(Some(resolved))
+    }
+
+    /// Decode one payload to an [`AvroValue`], or `None` for a tombstone.
+    fn decode(&mut self, raw: &RawPayload<'_>) -> Result<Option<AvroValue>, DeserError> {
+        let Some((writer, mut datum)) = self.resolve(raw)? else {
+            return Ok(None);
         };
         let value = from_avro_datum(&writer.schema, &mut datum, self.reader_schema.as_deref())
             .map_err(|e| DeserError::Malformed {
@@ -155,8 +173,10 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 /// allocations and CPU of the dynamically-typed path. Choose it for the clean
 /// typed API (no `apache-avro` types in your pipeline), not for throughput.
 ///
-/// Future work: decode straight into `T` in one pass if/when the upstream
-/// crate offers a serde deserializer over the raw wire bytes.
+/// With the `fast` feature enabled, `AvroFastDeserializer` (built by
+/// [`crate::AvroDeserializerBuilder::build_serde_fast`]) decodes straight
+/// into `T` in a single pass — choose it when decode throughput matters and
+/// its schema-evolution model fits (see its docs).
 #[derive(Clone, Debug)]
 pub struct AvroSerdeDeserializer<T> {
     core: DecoderCore,
@@ -196,6 +216,128 @@ where
                 ack: ack.clone(),
             });
         }
+        Ok(())
+    }
+}
+
+/// Fast typed deserializer (feature `fast`): decodes each datum **directly**
+/// into the record type in a single pass via `serde_avro_fast` — no
+/// intermediate [`AvroValue`] — several times faster than either apache-avro
+/// path. It is also the only Avro deserializer that can emit **borrowed**
+/// records: `&'buf str` / `&'buf [u8]` fields point straight into the payload
+/// buffer (zero-copy).
+///
+/// Construct through [`crate::AvroDeserializerBuilder::build_serde_fast`]
+/// (owned records — the simple default) or
+/// [`crate::AvroDeserializerBuilder::build_fast`] (any record family,
+/// including borrowed ones). No `serde_avro_fast` types appear in this API.
+///
+/// # Schema evolution
+///
+/// This backend has **no reader-schema resolution by design**: the serde
+/// target type *is* the reader shape, and each datum is decoded against its
+/// writer schema alone. Evolution is expressed with serde attributes —
+/// `#[serde(default)]` for fields newer writers added, `#[serde(alias)]` for
+/// renames — instead of Avro resolution rules (reader pinning, type
+/// promotions). In `confluent` mode every registry writer schema decodes
+/// straight into the target type, so the type must tolerate **every live
+/// writer version** of the subject. Configuring a `reader_schema` together
+/// with this backend is rejected at build time; the apache-avro
+/// [`AvroSerdeDeserializer`] remains the right choice when you need real
+/// Avro schema resolution.
+///
+/// # Borrowed (zero-copy) records
+///
+/// A borrowed record family is two lines — the family names the lifetime so
+/// the record type can cross the chain's generic boundaries:
+///
+/// ```ignore
+/// #[derive(serde::Deserialize)]
+/// struct Order<'a> {
+///     #[serde(borrow)] sku: &'a str,
+///     quantity: i32,
+/// }
+/// struct OrderFam;
+/// impl RecFamily for OrderFam {
+///     type Rec<'buf> = Order<'buf>;
+/// }
+/// let deser = builder.build_fast::<OrderFam>()?;
+/// ```
+///
+/// The flagship shape is a batch payload — one datum holding an array of
+/// events — exploded with the chain's `flat_map`: each `Event<'buf>` moved
+/// out of the decoded batch keeps borrowing the payload buffer, which
+/// outlives the whole synchronous fan-out. Zero-copy covers string/bytes
+/// *contents*; the batch's `Vec` containers still allocate once per payload,
+/// amortized over its events.
+#[cfg(feature = "fast")]
+pub struct AvroFastDeserializer<F: RecFamily> {
+    core: DecoderCore,
+    _f: PhantomData<fn() -> F>,
+}
+
+#[cfg(feature = "fast")]
+impl<F: RecFamily> AvroFastDeserializer<F> {
+    pub(crate) fn new(core: DecoderCore) -> Self {
+        AvroFastDeserializer {
+            core,
+            _f: PhantomData,
+        }
+    }
+}
+
+// Manual impls: the derived ones would demand `F: Clone`/`F: Debug`, and
+// family tags are typically bound-free unit structs.
+#[cfg(feature = "fast")]
+impl<F: RecFamily> Clone for AvroFastDeserializer<F> {
+    fn clone(&self) -> Self {
+        AvroFastDeserializer {
+            core: self.core.clone(),
+            _f: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "fast")]
+impl<F: RecFamily> std::fmt::Debug for AvroFastDeserializer<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AvroFastDeserializer")
+            .field("core", &self.core)
+            .finish()
+    }
+}
+
+#[cfg(feature = "fast")]
+impl<F> Deserializer<F> for AvroFastDeserializer<F>
+where
+    F: RecFamily,
+    for<'buf> F::Rec<'buf>: serde::Deserialize<'buf>,
+{
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>,
+    ) -> Result<(), DeserError> {
+        let Some((writer, datum)) = self.core.resolve(raw)? else {
+            return Ok(());
+        };
+        let fast = writer
+            .fast
+            .as_ref()
+            .map_err(|reason| DeserError::SchemaUnavailable {
+                // Pre-rendered in `CompiledSchema::compile`: clone, never format.
+                reason: reason.clone(),
+            })?;
+        let payload: F::Rec<'buf> =
+            serde_avro_fast::from_datum_slice(datum, fast).map_err(|e| DeserError::Malformed {
+                reason: format!("avro datum decode failed: {e}"),
+            })?;
+        let _ = out.emit(Record {
+            payload,
+            meta: raw.meta(),
+            ack: ack.clone(),
+        });
         Ok(())
     }
 }
@@ -248,10 +390,11 @@ mod tests {
     fn raw_core(reader: Option<&str>) -> DecoderCore {
         DecoderCore {
             mode: SchemaSourceMode::Raw {
-                schema: Arc::new(crate::cache::CompiledSchema {
-                    id: 0,
-                    schema: writer_schema(),
-                }),
+                schema: Arc::new(crate::cache::CompiledSchema::compile(
+                    0,
+                    writer_schema(),
+                    WRITER_V1,
+                )),
             },
             reader_schema: reader.map(|r| Arc::new(Schema::parse_str(r).unwrap())),
         }
@@ -345,10 +488,11 @@ mod tests {
         let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
         let core = |expected: u64| DecoderCore {
             mode: SchemaSourceMode::SingleObject {
-                schema: Arc::new(crate::cache::CompiledSchema {
-                    id: 0,
-                    schema: writer_schema(),
-                }),
+                schema: Arc::new(crate::cache::CompiledSchema::compile(
+                    0,
+                    writer_schema(),
+                    WRITER_V1,
+                )),
                 fingerprint: expected,
             },
             reader_schema: None,
@@ -368,5 +512,168 @@ mod tests {
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
             .unwrap_err();
         assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    }
+
+    /// The fast backend's mirror of the table above: same framing, schema
+    /// resolution, tombstone, and error-mapping semantics, single-pass decode.
+    #[cfg(feature = "fast")]
+    mod fast {
+        use super::*;
+
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct EventOwned {
+            id: i32,
+            name: String,
+        }
+
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct EventRef<'a> {
+            id: i32,
+            name: &'a str,
+        }
+
+        struct EventRefFam;
+        impl RecFamily for EventRefFam {
+            type Rec<'buf> = EventRef<'buf>;
+        }
+
+        #[test]
+        fn owned_round_trip_and_meta() {
+            let payload = datum(7, "orders");
+            let mut out = Collected(Vec::new());
+            AvroFastDeserializer::<Owned<EventOwned>>::new(raw_core(None))
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+                .unwrap();
+            assert_eq!(out.0.len(), 1);
+            assert_eq!(out.0[0].meta.offset, 42);
+            assert_eq!(
+                out.0[0].payload,
+                EventOwned {
+                    id: 7,
+                    name: "orders".into()
+                }
+            );
+        }
+
+        #[test]
+        fn borrowed_round_trip_is_zero_copy_by_pointer_provenance() {
+            let payload = datum(7, "orders");
+            let mut out = Collected(Vec::new());
+            AvroFastDeserializer::<EventRefFam>::new(raw_core(None))
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+                .unwrap();
+            assert_eq!(out.0.len(), 1);
+            let rec = &out.0[0].payload;
+            assert_eq!(
+                *rec,
+                EventRef {
+                    id: 7,
+                    name: "orders"
+                }
+            );
+            // The borrowed string points into the payload buffer itself.
+            assert!(
+                payload.as_ptr_range().contains(&rec.name.as_ptr()),
+                "borrowed field must point into the payload buffer"
+            );
+        }
+
+        #[test]
+        fn tombstones_emit_nothing() {
+            let mut out = Collected::<EventOwned>(Vec::new());
+            AvroFastDeserializer::<Owned<EventOwned>>::new(raw_core(None))
+                .deserialize(&raw_payload(b""), &test_ack(), &mut out)
+                .unwrap();
+            assert!(out.0.is_empty());
+        }
+
+        #[test]
+        fn garbage_is_malformed_not_panic() {
+            let mut out = Collected::<EventOwned>(Vec::new());
+            let err = AvroFastDeserializer::<Owned<EventOwned>>::new(raw_core(None))
+                .deserialize(&raw_payload(&[0xFF, 0xFF, 0xFF]), &test_ack(), &mut out)
+                .unwrap_err();
+            assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        }
+
+        #[test]
+        fn type_mismatch_is_malformed_not_panic() {
+            #[derive(Debug, serde::Deserialize)]
+            struct Wrong {
+                #[expect(dead_code, reason = "shape only")]
+                id: String,
+            }
+            let payload = datum(1, "x");
+            let mut out = Collected::<Wrong>(Vec::new());
+            let err = AvroFastDeserializer::<Owned<Wrong>>::new(raw_core(None))
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+                .unwrap_err();
+            assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        }
+
+        #[test]
+        fn single_object_checks_fingerprint() {
+            use apache_avro::rabin::Rabin;
+            let schema = writer_schema();
+            let fp = schema.fingerprint::<Rabin>();
+            let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
+            let core = |expected: u64| DecoderCore {
+                mode: SchemaSourceMode::SingleObject {
+                    schema: Arc::new(crate::cache::CompiledSchema::compile(
+                        0,
+                        writer_schema(),
+                        WRITER_V1,
+                    )),
+                    fingerprint: expected,
+                },
+                reader_schema: None,
+            };
+
+            let mut framed = vec![0xC3, 0x01];
+            framed.extend_from_slice(&fingerprint.to_le_bytes());
+            framed.extend_from_slice(&datum(9, "so"));
+
+            let mut out = Collected::<EventOwned>(Vec::new());
+            AvroFastDeserializer::<Owned<EventOwned>>::new(core(fingerprint))
+                .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
+                .unwrap();
+            assert_eq!(out.0.len(), 1);
+
+            let err = AvroFastDeserializer::<Owned<EventOwned>>::new(core(fingerprint ^ 1))
+                .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
+                .unwrap_err();
+            assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+        }
+
+        #[test]
+        fn fast_unusable_schema_is_unavailable_for_fast_and_fine_for_apache() {
+            // A schema whose fast form failed to compile: the fast pipeline
+            // surfaces SchemaUnavailable per record (Skip/Fail policy fodder,
+            // no panic), while the apache path on the very same core decodes.
+            let core = DecoderCore {
+                mode: SchemaSourceMode::Raw {
+                    schema: Arc::new(crate::cache::CompiledSchema::compile(
+                        0,
+                        writer_schema(),
+                        "not an avro schema",
+                    )),
+                },
+                reader_schema: None,
+            };
+            let payload = datum(3, "iso");
+
+            let mut out = Collected::<EventOwned>(Vec::new());
+            let err = AvroFastDeserializer::<Owned<EventOwned>>::new(core.clone())
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+                .unwrap_err();
+            assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+            assert!(out.0.is_empty());
+
+            let mut value_out = Collected::<AvroValue>(Vec::new());
+            AvroValueDeserializer::new(core)
+                .deserialize(&raw_payload(&payload), &test_ack(), &mut value_out)
+                .unwrap();
+            assert_eq!(value_out.0.len(), 1);
+        }
     }
 }

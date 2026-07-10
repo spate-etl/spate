@@ -17,9 +17,18 @@ Schema evolution follows Avro resolution rules via an optional
 
 Key types: `AvroDeserializerBuilder` (from the
 `deserializer: { avro: ... }` section), `AvroSerdeDeserializer<T>`,
-`AvroValueDeserializer`.
+`AvroValueDeserializer`, and — behind the `fast` feature —
+`AvroFastDeserializer<F>`.
 
-A zero-copy backend (`serde_avro_fast`, 10–20× faster datum decoding) was
-evaluated and is not shipped: its crates.io release metadata still declares
-`LGPL-3.0-only` while the repository shows MPL-2.0. Revisit when a release
-ships with corrected metadata.
+The opt-in `fast` feature adds a `serde_avro_fast` backend: single-pass
+datum→`T` decoding several times faster than the apache-avro paths, and the
+only backend able to emit borrowed (zero-copy) records. Its evolution model
+is serde attributes against each writer schema (no reader-schema
+resolution); backends are chosen per pipeline and coexist in one build.
+License note: `serde_avro_fast`'s crates.io metadata declares
+`LGPL-3.0-only` while its repository is MPL-2.0 (fix merged upstream,
+unreleased as of 2026-07), and its dependency
+`serde_serializer_quick_unsupported` (a ~300-line macro-only helper) is
+genuinely LGPL-3.0-only. The feature is off by default, the default build
+contains no trace of either crate, and enabling it is your project's own
+compliance call.

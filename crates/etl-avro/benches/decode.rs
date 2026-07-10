@@ -1,10 +1,15 @@
 //! Datum-decoding throughput: the dynamically-typed Value path vs the
-//! serde-typed path, on a realistic 15-field record.
+//! serde-typed path, on a realistic 15-field record — plus (feature `fast`)
+//! the fast backend's owned and borrowed variants, and a batch shape (one
+//! datum = an array of 50 events, per-event throughput) tracking the
+//! flagship `flat_map` use case.
 
 use apache_avro::{Schema, to_avro_datum};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use etl_core::checkpoint::AckRef;
+#[cfg(feature = "fast")]
+use etl_core::deser::RecFamily;
 use etl_core::deser::{Deserializer, EmitRecord};
 use etl_core::record::{Flow, PartitionId, RawPayload, Record};
 use std::hint::black_box;
@@ -44,6 +49,35 @@ struct Order {
     tags: Vec<String>,
     priority: i32,
     note: String,
+}
+
+/// Borrowed twin of [`Order`]: string-ish fields point into the payload.
+#[cfg(feature = "fast")]
+#[derive(Debug, serde::Deserialize)]
+#[expect(dead_code, reason = "deserialization target only")]
+struct OrderRef<'a> {
+    id: i64,
+    user_id: i64,
+    sku: &'a str,
+    quantity: i32,
+    unit_price: f64,
+    currency: &'a str,
+    region: &'a str,
+    channel: &'a str,
+    created_ms: i64,
+    updated_ms: i64,
+    discount: Option<f64>,
+    coupon: Option<&'a str>,
+    tags: Vec<&'a str>,
+    priority: i32,
+    note: &'a str,
+}
+
+#[cfg(feature = "fast")]
+struct OrderRefFam;
+#[cfg(feature = "fast")]
+impl RecFamily for OrderRefFam {
+    type Rec<'buf> = OrderRef<'buf>;
 }
 
 struct Sink(u64);
@@ -118,6 +152,147 @@ fn bench(c: &mut Criterion) {
     });
     group.bench_function("serde_typed", |b| {
         let mut deser = builder.build_serde::<Order>();
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    #[cfg(feature = "fast")]
+    group.bench_function("serde_fast", |b| {
+        let mut deser = builder.build_serde_fast::<Order>().unwrap();
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    #[cfg(feature = "fast")]
+    group.bench_function("serde_fast_borrowed", |b| {
+        let mut deser = builder.build_fast::<OrderRefFam>().unwrap();
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    group.finish();
+
+    bench_batch(c);
+}
+
+/// The flagship batch shape: one datum = one sensor batch holding an array
+/// of 50 events, throughput measured **per event** — the fast backend's
+/// headline `flat_map` use case, regression-tracked inside the workspace.
+fn bench_batch(c: &mut Criterion) {
+    const BATCH_SCHEMA: &str = r#"{"type":"record","name":"SensorBatch","fields":[
+      {"name":"sensor","type":"string"},
+      {"name":"events","type":{"type":"array","items":
+        {"type":"record","name":"Event","fields":[
+          {"name":"name","type":"string"},
+          {"name":"value","type":"long"},
+          {"name":"unit","type":"string"}]}}}]}"#;
+    const EVENTS: u64 = 50;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "deserialization target only")]
+    struct SensorBatch {
+        sensor: String,
+        events: Vec<Event>,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "deserialization target only")]
+    struct Event {
+        name: String,
+        value: i64,
+        unit: String,
+    }
+
+    #[cfg(feature = "fast")]
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "deserialization target only")]
+    struct SensorBatchRef<'a> {
+        sensor: &'a str,
+        events: Vec<EventRef<'a>>,
+    }
+    #[cfg(feature = "fast")]
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "deserialization target only")]
+    struct EventRef<'a> {
+        name: &'a str,
+        value: i64,
+        unit: &'a str,
+    }
+    #[cfg(feature = "fast")]
+    struct BatchRefFam;
+    #[cfg(feature = "fast")]
+    impl RecFamily for BatchRefFam {
+        type Rec<'buf> = SensorBatchRef<'buf>;
+    }
+
+    let schema = Schema::parse_str(BATCH_SCHEMA).unwrap();
+    let mut rec = apache_avro::types::Record::new(&schema).unwrap();
+    rec.put("sensor", "sensor-7");
+    rec.put(
+        "events",
+        apache_avro::types::Value::Array(
+            (0..EVENTS)
+                .map(|i| {
+                    apache_avro::types::Value::Record(vec![
+                        (
+                            "name".into(),
+                            apache_avro::types::Value::String(format!("metric_{i}")),
+                        ),
+                        (
+                            "value".into(),
+                            apache_avro::types::Value::Long(i as i64 * 37),
+                        ),
+                        (
+                            "unit".into(),
+                            apache_avro::types::Value::String("count".into()),
+                        ),
+                    ])
+                })
+                .collect(),
+        ),
+    );
+    let payload = to_avro_datum(&schema, rec).unwrap();
+
+    let settings = AvroSettings {
+        mode: AvroMode::Raw,
+        schema: Some(SchemaSource::inline(BATCH_SCHEMA)),
+        ..AvroSettings::default()
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+    let raw = RawPayload {
+        bytes: &payload,
+        key: None,
+        partition: PartitionId(0),
+        offset: 1,
+        timestamp_ms: 0,
+    };
+    let (ack, _rx) = AckRef::test_pair();
+
+    let mut group = c.benchmark_group("avro_decode_batch50");
+    group.throughput(Throughput::Elements(EVENTS));
+    group.bench_function("serde_typed", |b| {
+        let mut deser = builder.build_serde::<SensorBatch>();
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    #[cfg(feature = "fast")]
+    group.bench_function("serde_fast", |b| {
+        let mut deser = builder.build_serde_fast::<SensorBatch>().unwrap();
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    #[cfg(feature = "fast")]
+    group.bench_function("serde_fast_borrowed", |b| {
+        let mut deser = builder.build_fast::<BatchRefFam>().unwrap();
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();

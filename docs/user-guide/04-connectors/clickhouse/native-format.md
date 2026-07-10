@@ -20,14 +20,15 @@ at-least-once semantics are **unchanged** — only the encoding differs.
 Native **moves the row→column pivot off the ClickHouse server onto the (more
 easily scaled) ETL workers**. That is a deliberate trade, measured on a dev
 laptop (ClickHouse 25.6, 200k-row inserts, a realistic mixed schema; full
-methodology and numbers in the repo's `docs/BENCHMARKS.md`):
+methodology and numbers in the repo's
+`docs/benchmarks/clickhouse-format.mdx`):
 
 | Axis | RowBinary | Native | Delta |
 |---|---|---|---|
-| Client encode CPU | 32.9 ns/row | 64.3 ns/row | ~2× **more** (still 15.6M rows/s) |
+| Client encode CPU | 34.3 ns/row | 66.7 ns/row | ~2× **more** (still 15.0M rows/s) |
 | Compressed wire (lz4 / zstd) | baseline | — | **49% / 71% smaller** |
-| Server parse CPU (`ENGINE=Null`) | 92.5 ms | 7.8 ms | **92% less** |
-| Server CPU end-to-end (`MergeTree`) | 122 ms | 36 ms | **70% less** |
+| Server parse CPU (`ENGINE=Null`) | 94.8 ms | 7.7 ms | **92% less** |
+| Server CPU end-to-end (`MergeTree`) | 123.6 ms | 37.1 ms | **70% less** |
 
 The server win is largest when the destination has `LowCardinality`,
 `Array`, or `Map` columns — RowBinary makes the *server* build those
@@ -49,12 +50,15 @@ encoder from the fetched schema:
 ```rust
 let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 let native_schema = pipeline.block_on(sink.native_schema())?; // Arc<NativeSchema>
-let encoder = etl::clickhouse::NativeEncoder::<MyRow>::new(native_schema);
+let encoder = etl::clickhouse::NativeEncoder::<Owned<MyRow>>::new(native_schema);
 // hand `encoder` to the chain's terminal `.sink(...)` stage
 ```
 
-`MyRow` is the same `serde::Serialize` row struct RowBinary uses — its field
-order must match the configured `columns`. Because Native blocks are larger
+The type parameter is the record *family*, not the row type: an owned row
+struct is wrapped as `Owned<MyRow>` (a zero-copy borrowed row uses its own
+family type). `MyRow` is otherwise the same `serde::Serialize` struct
+RowBinary uses — its field order must match the configured `columns`. Because
+Native blocks are larger
 per unit of work, set a larger terminal-stage chunk target
 (`ChunkConfig::target_bytes`, e.g. 512 KiB) so each block is substantial; the
 sink still merges blocks up to `batch.max_bytes` per insert.
@@ -69,6 +73,12 @@ Bool; `Int`/`UInt` 8–256; `Float32/64`; `Date`, `Date32`; `DateTime`,
 `Polygon`, …). Field encodings match the [RowBinary type table](./README.md)
 — use the same wire-wrapper newtypes (`DateTime64Millis`, `Decimal64<S>`, …)
 and `#[serde(with = "…")]` modules (`uuid`, `ipv4`).
+
+> [!WARNING]
+> The Native writer emits the raw little-endian `Int64` and ignores the
+> column's declared precision — a `DateTime64(6)` column fed milli-scaled
+> values silently lands wrong timestamps; nothing validates the scale. Match
+> the wrapper (`DateTime64Millis`, …) to the column's declared precision.
 
 ## Not supported (yet)
 

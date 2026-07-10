@@ -64,7 +64,8 @@ outside `confluent`, and so on, all fail fast at startup.
 
 ## Typed or dynamic records
 
-The builder hands out two deserializer flavors:
+The builder hands out two deserializer flavors (plus two more behind the
+opt-in [fast backend](fast-backend.md)):
 
 - `build_serde::<T>()` — decodes each datum into your own
   `T: serde::de::DeserializeOwned` struct (field names match the writer
@@ -73,6 +74,10 @@ The builder hands out two deserializer flavors:
   derives `Deserialize` for Avro in and `Serialize` for RowBinary out.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
+- `build_serde_fast::<T>()` / `build_fast::<F>()` (feature `avro-fast`) —
+  single-pass typed decode, several times faster, including **borrowed**
+  (zero-copy) records; different evolution semantics. See
+  [the fast backend](fast-backend.md).
 
 ## Schema fetching never blocks a pipeline thread
 
@@ -100,21 +105,23 @@ defaults for missing fields, type promotions, aliases. Pin a reader schema
 when your struct must stay stable while producers evolve. Registry schemas
 using schema references are not supported yet and surface as unavailable.
 
-## Backend note
+## Backends
 
-Decoding uses the `apache-avro` crate. A `serde_avro_fast` zero-copy
-backend (10–20x faster datum decoding) was evaluated and is deliberately
-**not shipped**: the upstream repository is MPL-2.0, but every published
-crates.io release still declares `LGPL-3.0-only` in its metadata — the
-artifact a compliance review sees — so it stays out of the dependency tree
-(enforced by `deny.toml`) until a release ships with corrected metadata.
-Details in the `etl-avro` crate docs and
-[docs/DESIGN.md](../../DESIGN.md) § Dependency policy.
+Decoding uses the `apache-avro` crate by default. An opt-in
+`serde_avro_fast` backend — single-pass typed decoding, several times
+faster, and the only one able to emit borrowed (zero-copy) records — ships
+behind the `avro-fast` feature; the default build contains no trace of it.
+Backends are chosen **per pipeline** by builder method, so both coexist in
+one binary: keep the apache backend where you need real Avro reader-schema
+resolution, use the fast one where decode throughput matters. Details,
+trade-offs, and the license note: [the fast backend](fast-backend.md).
 
 ## Related
 
-- [Kafka source](kafka.md) — the payloads this format decodes.
-- [Error handling](../02-concepts/04-error-handling.md) — Skip vs Fail for
+- [The fast backend](fast-backend.md) — opt-in single-pass decoding and
+  zero-copy records.
+- [Kafka source](../kafka.md) — the payloads this format decodes.
+- [Error handling](../../02-concepts/04-error-handling.md) — Skip vs Fail for
   undecodable payloads.
-- [Backpressure](../02-concepts/03-backpressure.md) — how a held batch
+- [Backpressure](../../02-concepts/03-backpressure.md) — how a held batch
   interacts with flow control.

@@ -13,6 +13,32 @@ pub(crate) struct CompiledSchema {
     pub(crate) id: u32,
     /// The parsed writer schema.
     pub(crate) schema: Schema,
+    /// The fast backend's compiled form of the same schema. `Err` means
+    /// `serde_avro_fast` rejected a schema `apache-avro` accepts: the apache
+    /// path is unaffected (this entry stays `Ready`), and the fast path
+    /// surfaces the stored reason per record as `SchemaUnavailable`. The
+    /// string is the fully-rendered `SchemaUnavailable` reason, built once
+    /// here so the per-record path only clones it (never re-formats).
+    #[cfg(feature = "fast")]
+    pub(crate) fast: Result<serde_avro_fast::Schema, String>,
+}
+
+impl CompiledSchema {
+    /// Compile every enabled backend's form of a schema. `json` must be the
+    /// schema's *original* JSON source — never a canonical form, which strips
+    /// logical types and defaults that the fast backend needs.
+    pub(crate) fn compile(id: u32, schema: Schema, json: &str) -> Self {
+        #[cfg(not(feature = "fast"))]
+        let _ = json;
+        CompiledSchema {
+            id,
+            schema,
+            #[cfg(feature = "fast")]
+            fast: json
+                .parse::<serde_avro_fast::Schema>()
+                .map_err(|e| format!("schema {id} is not usable by the fast backend: {e}")),
+        }
+    }
 }
 
 /// Cache lookup result.
@@ -154,19 +180,38 @@ impl SchemaCache {
 mod tests {
     use super::*;
 
+    const SCHEMA_JSON: &str =
+        r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#;
+
     fn schema() -> Schema {
-        Schema::parse_str(r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#)
-            .unwrap()
+        Schema::parse_str(SCHEMA_JSON).unwrap()
+    }
+
+    fn compiled(id: u32) -> CompiledSchema {
+        CompiledSchema::compile(id, schema(), SCHEMA_JSON)
+    }
+
+    #[cfg(feature = "fast")]
+    #[test]
+    fn fast_parse_failure_never_poisons_the_apache_side() {
+        // The two backends compile independently: a schema the fast backend
+        // rejects still produces a fully usable `Ready` entry for the apache
+        // path, with the failure stored per-backend inside the entry.
+        let entry = CompiledSchema::compile(3, schema(), "not a schema");
+        assert!(entry.fast.is_err());
+        let cache = SchemaCache::new(Duration::from_secs(600));
+        cache.insert_ready(entry);
+        assert!(matches!(cache.get(3), Lookup::Ready(s) if s.id == 3));
+
+        // And a well-formed schema compiles for both backends.
+        assert!(compiled(4).fast.is_ok());
     }
 
     #[test]
     fn ready_and_missing() {
         let cache = SchemaCache::new(Duration::from_secs(30));
         assert!(matches!(cache.get(1), Lookup::Missing));
-        cache.insert_ready(CompiledSchema {
-            id: 1,
-            schema: schema(),
-        });
+        cache.insert_ready(compiled(1));
         assert!(matches!(cache.get(1), Lookup::Ready(s) if s.id == 1));
     }
 
@@ -188,10 +233,7 @@ mod tests {
         // Prewarm/fetcher race: a compiled schema must survive a concurrent
         // by-id fetch failing for the same id.
         let cache = SchemaCache::new(Duration::from_secs(600));
-        cache.insert_ready(CompiledSchema {
-            id: 5,
-            schema: schema(),
-        });
+        cache.insert_ready(compiled(5));
         cache.insert_failed(5, "registry returned 500".into());
         assert!(
             matches!(cache.get(5), Lookup::Ready(s) if s.id == 5),
@@ -208,10 +250,7 @@ mod tests {
         assert!(matches!(cache.lookup(&mut memo, 1), Lookup::Missing));
 
         // Published after the first lookup: the stale memo must refresh.
-        cache.insert_ready(CompiledSchema {
-            id: 1,
-            schema: schema(),
-        });
+        cache.insert_ready(compiled(1));
         assert!(matches!(cache.lookup(&mut memo, 1), Lookup::Ready(s) if s.id == 1));
         // Repeated Ready lookups keep working (served from the memo).
         assert!(matches!(cache.lookup(&mut memo, 1), Lookup::Ready(_)));
@@ -220,10 +259,7 @@ mod tests {
         // lookup refreshes on any non-Ready memo state.
         cache.insert_failed(2, "unknown".into());
         assert!(matches!(cache.lookup(&mut memo, 2), Lookup::Failed(_)));
-        cache.insert_ready(CompiledSchema {
-            id: 2,
-            schema: schema(),
-        });
+        cache.insert_ready(compiled(2));
         assert!(matches!(cache.lookup(&mut memo, 2), Lookup::Ready(_)));
     }
 }

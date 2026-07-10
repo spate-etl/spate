@@ -15,7 +15,7 @@ the connector's factory (see
 |---|---|---|---|---|
 | [Kafka](kafka.md) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
 | [ClickHouse](clickhouse/README.md) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` |
-| [Avro](avro.md) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
+| [Avro](avro/README.md) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
 | [Memory / Capture](memory.md) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 `features = ["full"]` on the `etl` facade enables all production

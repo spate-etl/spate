@@ -77,7 +77,8 @@ fast rebalances), partitions mapped m:n onto pipeline threads under local
 control, borrows kept thread-local. Consumption parallelism is still bounded
 by partition count — identical to per-thread consumers — the win is group
 scale and unified drain choreography. Validated empirically (see
-`docs/BENCHMARKS.md`): split-queue polls reset `max.poll.interval.ms`, so
+`docs/benchmarks/kafka-topology.mdx`): split-queue polls reset
+`max.poll.interval.ms`, so
 group liveness never depends on the controller; at realistic per-record work
 the throughput delta vs per-thread consumers is ~3%; a per-thread-consumer
 fallback remains a documented escape hatch behind the same traits.
@@ -133,7 +134,7 @@ pub trait RecFamily: 'static { type Rec<'buf>: Send; }
 /// One payload in, 0..N records out, push-style. Dyn-compatible.
 pub trait Deserializer<F: RecFamily>: Send {
     fn deserialize<'buf>(&mut self, raw: &RawPayload<'buf>, ack: &AckRef,
-        out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>) -> Result<usize, DeserError>;
+        out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>) -> Result<(), DeserError>;
 }
 
 /// Statically composed push stage (map/filter/flat_map monomorphize into
@@ -179,10 +180,10 @@ schema fetch: retried without pausing the source, counted on
 re-run operators for already-pushed records) instead of the spike's
 `Result<usize, _>`; the boundary trait gains flush/drain hooks;
 `RawPayload` carries the message key (for shard routing hashes); mapping to
-a *different* borrowed family uses an explicit `.map_to::<Family>()`
-builder method (closure inference limitation, measured acceptable).
-Reference implementation: branch `worktree-agent-a162b0ef2e0a29f4e`
-(`crates/etl-core/src/spike/`).
+a *different* borrowed family uses the explicit `map_rec::<Family, _>()` /
+`flat_map::<Family, _>()` builder methods with `fn`-item arguments (closure
+inference limitation, measured acceptable — see the E0582 note on the
+chain-builder module).
 
 ## Records and checkpointing
 
@@ -268,8 +269,10 @@ and `flat_map` are unaffected.
 
 Two layers, one invariant.
 
-**Sizing rule** (motivated by a measured 24× throughput collapse under an
-unthrottled source with default settings — see `docs/BENCHMARKS.md`): the
+**Sizing rule** (motivated by a ~24× throughput collapse observed under an
+unthrottled source with default settings — hand-recorded during the tuning
+investigation, no committed record; see
+`docs/benchmarks/framework-overhead.mdx`): the
 in-flight budget must comfortably hold everything the sink legitimately
 keeps in flight, or steady-state operation lives above the high watermark
 and the pause controller duty-cycles at `min_pause`:
@@ -329,8 +332,10 @@ server) and shipped as pre-formatted frames through
 transport the crate's typed path uses internally. The default format is
 row-wise **RowBinary**; an opt-in columnar **Native** encoder
 (`format: native`) transposes each chunk into one self-describing block —
-proven to cut server parse CPU ~90% and wire ~50–75% at ~2–3× the client
-encode cost (see `BENCHMARKS.md`), so it ships opt-in with RowBinary the
+proven to cut server parse CPU ~90% and wire ~35–75% (schema- and
+codec-dependent) at ~2–3× the client
+encode cost (see `docs/benchmarks/clickhouse-format.mdx`), so it ships opt-in
+with RowBinary the
 default. Both use the same frame transport: a Native insert body is a stream
 of concatenated blocks, so batching/acks are format-agnostic. The terminal
 stage's `RowEncoder` gained defaulted `buffered_bytes()`/`finish_chunk()`
@@ -461,19 +466,23 @@ public structs of `etl-core` — all are 0.x crates whose breaking releases
 must not become our breaking releases. Connector crates may re-export their
 underlying crate for advanced use, clearly documented as exempt from our
 stability promises. Avro's optional `fast` backend (`serde_avro_fast`) is
-license-gated: crates.io metadata says LGPL-3.0-only while upstream shows
-MPL-2.0 — it stays out of the dependency tree until verified (enforced by
-`deny.toml`).
+license-disclosed: crates.io metadata says LGPL-3.0-only while upstream is
+MPL-2.0 (fix merged, unreleased), and its microdependency
+`serde_serializer_quick_unsupported` is genuinely LGPL-3.0-only. It ships
+behind the off-by-default `fast` feature — the default build contains no
+trace of either crate, `deny.toml` carries scoped exceptions for exactly
+the pinned versions, and enabling the feature is the user's own compliance
+call. No `serde_avro_fast` types appear in the public API.
 
 ## Crate map
 
 | Crate | Role |
 |---|---|
-| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `full`). The only crate applications depend on. |
+| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `avro-fast`, `full`). The only crate applications depend on. |
 | `etl-core` | Engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline runtime, config, metrics, admin server, telemetry. |
 | `etl-kafka` | Kafka source (single consumer + partition queues). |
 | `etl-clickhouse` | ClickHouse `ShardWriter`. |
-| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. (A zero-copy `serde_avro_fast` backend was evaluated but is **not shipped** — license-metadata gated; see the crate docs and the dependency-policy note above.) |
+| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache; opt-in `fast` feature adds the `serde_avro_fast` backend (single-pass typed decode, borrowed/zero-copy records — see the dependency-policy note above). |
 | `etl-test` | Public in-memory source/sink mocks with scripting handles. |
 | `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |
 

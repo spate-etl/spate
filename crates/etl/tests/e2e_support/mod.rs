@@ -320,7 +320,7 @@ impl Harness {
                     .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
-                        ClickHouseEncoder::<Event>::new(),
+                        ClickHouseEncoder::<etl::deser::Owned<Event>>::new(),
                         KeyHashRouter,
                         ChunkConfig {
                             target_bytes: chunk_bytes,

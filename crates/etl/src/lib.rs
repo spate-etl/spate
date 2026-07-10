@@ -13,6 +13,7 @@
 //! | `clickhouse-time` | `time` crate fields for the same date/time columns |
 //! | `clickhouse-rust-decimal` | `rust_decimal::Decimal` conversions for `Decimal` columns |
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
+//! | `avro-fast` | Opt-in `serde_avro_fast` decode backend for [`avro`]: single-pass typed decode, borrowed (zero-copy) records. Not part of `full` — see the `etl-avro` docs for the license note |
 //! | `full` | All connectors (`avro`, `kafka`, `clickhouse`) |
 //!
 //! # Anatomy of a pipeline
@@ -119,6 +120,7 @@ pub use etl_core::*;
 /// Additions to this module are semver-additive; nothing is ever removed.
 pub mod prelude {
     pub use etl_core::config::PipelineConfig;
+    pub use etl_core::deser::{Owned, RecFamily};
     pub use etl_core::error::ErrorPolicy;
     pub use etl_core::ops::{ChunkConfig, chain, chain_owned};
     pub use etl_core::pipeline::{

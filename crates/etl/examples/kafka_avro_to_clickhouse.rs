@@ -110,8 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the expected schema so the row struct is checked against it on the
     // first record. `off` (the default) returns None and issues no queries.
     let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Order>::with_schema(schema),
-        None => ClickHouseEncoder::<Order>::new(),
+        Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
+        None => ClickHouseEncoder::<Owned<Order>>::new(),
     };
 
     // ── The chain, and run ──────────────────────────────────────────────

@@ -4,7 +4,7 @@
 use crate::rowbinary;
 use crate::schema::{self, RowSchema};
 use bytes::BytesMut;
-use etl_core::deser::Owned;
+use etl_core::deser::{Owned, RecFamily};
 use etl_core::error::{ErrorClass, SinkError};
 use etl_core::record::Record;
 use etl_core::sink::RowEncoder;
@@ -12,18 +12,24 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// Encodes `T: Serialize` records into RowBinary via this crate's
-/// [serializer](crate::rowbinary). Runs inside the chain's terminal stage
-/// on pinned pipeline threads; sink workers ship the resulting frames as-is.
+/// Encodes a record family's `Serialize` rows into RowBinary via this
+/// crate's [serializer](crate::rowbinary). Runs inside the chain's terminal
+/// stage on pinned pipeline threads; sink workers ship the resulting frames
+/// as-is.
 ///
-/// The struct's **field declaration order is the wire contract** — it must
-/// match the column list configured for the sink (see the crate docs).
+/// `F` is the **record family**: use `Owned<T>` for plain owned row structs
+/// (`ClickHouseEncoder::<Owned<MyRow>>::new()`), or a borrowed family whose
+/// `Rec<'buf>` points into the payload buffer for zero-copy pipelines — any
+/// family whose records implement `Serialize` at every lifetime encodes.
+///
+/// The row struct's **field declaration order is the wire contract** — it
+/// must match the column list configured for the sink (see the crate docs).
 /// [`ClickHouseEncoder::with_schema`] checks that contract against the
 /// live table's schema on each pipeline thread's first record.
 #[derive(Debug)]
-pub struct ClickHouseEncoder<T> {
+pub struct ClickHouseEncoder<F> {
     check: Option<CheckState>,
-    _row: PhantomData<fn(T)>,
+    _row: PhantomData<fn(F)>,
 }
 
 #[derive(Debug)]
@@ -32,8 +38,8 @@ struct CheckState {
     done: bool,
 }
 
-impl<T> ClickHouseEncoder<T> {
-    /// An encoder for rows of type `T`.
+impl<F> ClickHouseEncoder<F> {
+    /// An encoder for the family's rows.
     #[must_use]
     pub fn new() -> Self {
         ClickHouseEncoder {
@@ -61,13 +67,13 @@ impl<T> ClickHouseEncoder<T> {
     }
 }
 
-impl<T> Default for ClickHouseEncoder<T> {
+impl<F> Default for ClickHouseEncoder<F> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Clone for ClickHouseEncoder<T> {
+impl<F> Clone for ClickHouseEncoder<F> {
     fn clone(&self) -> Self {
         // Each pipeline thread's clone re-validates its own first record:
         // the check is cheap, and threads must not race a shared flag.
@@ -81,11 +87,16 @@ impl<T> Clone for ClickHouseEncoder<T> {
     }
 }
 
-impl<T> RowEncoder<Owned<T>> for ClickHouseEncoder<T>
+impl<F> RowEncoder<F> for ClickHouseEncoder<F>
 where
-    T: Serialize + Send + 'static,
+    F: RecFamily,
+    for<'b> F::Rec<'b>: Serialize,
 {
-    fn encode<'buf>(&mut self, rec: &Record<T>, buf: &mut BytesMut) -> Result<(), SinkError> {
+    fn encode<'buf>(
+        &mut self,
+        rec: &Record<F::Rec<'buf>>,
+        buf: &mut BytesMut,
+    ) -> Result<(), SinkError> {
         if let Some(check) = &mut self.check
             && !check.done
         {
@@ -164,7 +175,32 @@ mod tests {
             name: "x".into(),
         });
         let mut buf = BytesMut::new();
-        ClickHouseEncoder::new().encode(&rec, &mut buf).unwrap();
+        ClickHouseEncoder::<Owned<Row>>::new()
+            .encode(&rec, &mut buf)
+            .unwrap();
+        assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
+    }
+
+    #[test]
+    fn encodes_borrowed_rows_identically_to_owned() {
+        // A borrowed family encodes byte-for-byte like its owned equivalent:
+        // RowBinary only needs `Serialize`, never an owned or 'static row.
+        #[derive(Serialize)]
+        struct RowRef<'a> {
+            id: u64,
+            name: &'a str,
+        }
+        struct RowRefFam;
+        impl RecFamily for RowRefFam {
+            type Rec<'buf> = RowRef<'buf>;
+        }
+
+        let name = String::from("x");
+        let (rec, _rx) = record(RowRef { id: 7, name: &name });
+        let mut buf = BytesMut::new();
+        ClickHouseEncoder::<RowRefFam>::new()
+            .encode(&rec, &mut buf)
+            .unwrap();
         assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
     }
 
@@ -175,7 +211,7 @@ mod tests {
             c: char,
         }
         let (rec, _rx) = record(Bad { c: 'x' });
-        let err = ClickHouseEncoder::new()
+        let err = ClickHouseEncoder::<Owned<Bad>>::new()
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
         match err {

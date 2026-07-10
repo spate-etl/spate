@@ -1,0 +1,68 @@
+---
+title: Framework overhead
+sidebar_position: 4
+description: The framework ceiling harness, and a tuning finding on batch vs budget.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+
+export const threadLabels = { '1': '1 thread', '2': '2 threads', '4': '4 threads', '8': '8 threads' };
+
+# Framework baselines (permanent harness, 2026-07)
+
+Environment: M5 Max 18-core / 128 GB (dev laptop), quiet machine, Rust 1.96.1,
+release build. Harness: `benchmarks/` binaries; raw JSON in
+`benchmarks/results/`. Reproduce per the usage headers in each binary.
+
+## Framework ceiling
+
+`pipeline_synthetic`: generator source → real chain (filter, zero-work) → real
+sink pool → null writer; 256 B payloads, 2 shards, 2 I/O threads, 64 KiB chunks,
+65,536-row batches, 5 ms linger.
+
+<BenchBars
+  bench="pipeline_synthetic"
+  metric="records_per_s"
+  category="threads"
+  emphasize={2}
+  labels={threadLabels}
+  order={['1 thread', '2 threads', '4 threads', '8 threads']}
+  title="Framework ceiling: records/s by pipeline threads"
+  caption="Zero-work records saturate the fixed egress side (2 shard workers), so the throughput peak is at 2 threads — this is a ceiling harness, not a scaling proof."
+/>
+
+<BenchBars
+  bench="pipeline_synthetic"
+  metric="records_per_s_per_thread"
+  category="threads"
+  emphasize={1}
+  labels={threadLabels}
+  order={['1 thread', '2 threads', '4 threads', '8 threads']}
+  title="Per-thread throughput"
+  caption="Per-thread records/s falls as threads contend for the fixed egress side."
+/>
+
+Interpretation: ~25.4 ns/record full-framework cost at one thread (lane poll, ack
+issue/resolve, chain, encode, chunk, queue handoff, batching, checkpoint commits
+— the pure chain alone is ~9 ns). Zero-work records saturate the fixed egress
+side (2 shard workers), so throughput peaks at 2 threads and 4 and 8 threads both
+regress — this is a ceiling harness, not a scaling proof; with real per-record
+work the pipeline threads dominate and the sink side stops being the limiter. The
+exact per-arm figures are in each chart's data table — these ceiling arms are a
+single run each, so they carry no 95% CI (CIs appear only where a benchmark
+records repeated reps).
+
+The [accounting correction](./methodology.md#accounting-note) records how an
+earlier revision of these figures read as rows exceeding records by ~10%, and the
+conservation assertion that now guards it.
+
+## ⚠ Finding for tuning documentation
+
+With the *default* sink batch config (500k rows) and an unthrottled source, the
+256 MiB in-flight budget fills in tens of milliseconds while a batch needs
+hundreds of thousands of rows to seal — per-thread pause controllers then sit in
+500 ms `min_pause` cycles and throughput collapses ~24× (measured 2.5M rec/s in
+that state, hand-recorded during the tuning investigation — no committed record).
+Real sources rarely outrun the budget this way, but the interaction
+(batch-seal thresholds vs budget watermarks vs `min_pause`) deserves a
+documented sizing rule; recorded for the hardening pass.

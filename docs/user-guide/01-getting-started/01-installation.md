@@ -33,7 +33,8 @@ builder) with no connectors. Enable what you need:
 | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns (implies `clickhouse`). |
 | `clickhouse-time` | `time` crate fields for the same date/time columns (implies `clickhouse`). |
 | `clickhouse-rust-decimal` | `rust_decimal::Decimal` conversions for `Decimal` columns (implies `clickhouse`). |
-| `avro` | `etl::avro` — Avro deserialization (Confluent wire format, schema-registry client). See [Avro connector](../04-connectors/avro.md). |
+| `avro` | `etl::avro` — Avro deserialization (Confluent wire format, schema-registry client). See [Avro connector](../04-connectors/avro/README.md). |
+| `avro-fast` | Opt-in single-pass Avro decode backend with zero-copy records (implies `avro`). Deliberately **not** part of `full` — it carries a license consideration; see [the fast backend](../04-connectors/avro/fast-backend.md). |
 | `full` | All connectors: `avro` + `kafka` + `clickhouse`. |
 
 The quickstart needs no features at all; the flagship Kafka → Avro →

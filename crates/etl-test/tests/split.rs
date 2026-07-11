@@ -11,8 +11,10 @@ use etl_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use etl_core::record::PartitionId;
 use etl_core::sink::KeyHashRouter;
 use etl_core::source::LaneId;
-use etl_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
-use std::time::{Duration, Instant};
+use etl_test::{
+    BytesPassthrough, PipelineRun, TestEncoder, capture_sink, decode_rows, memory_source,
+};
+use std::time::Duration;
 
 const CONFIG: &str = r#"
 pipeline: { name: split-test, threads: 1, io_threads: 1 }
@@ -70,15 +72,11 @@ fn split_routes_to_named_sinks_and_commits_at_least_once() {
 
     // At-least-once: the watermark reaches one-past-last only after every
     // record — routed to either sink, or Skipped — is accounted for.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while handle.last_committed(p) != Some(last + 1) {
-        assert!(
-            Instant::now() < deadline,
-            "commit timeout (last committed: {:?})",
-            handle.last_committed(p)
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(
+        handle.wait_committed(p, last + 1, Duration::from_secs(10)),
+        "commit timeout (last committed: {:?})",
+        handle.last_committed(p)
+    );
     shutdown.trigger();
     let report = join.join().expect("join").expect("run");
     assert_eq!(report.exit_code(), 0, "clean drain");
@@ -145,7 +143,7 @@ sinks:
         .into_runtime(source)
         .expect("into_runtime");
 
-    let join = std::thread::spawn(move || runtime.run());
+    let run = PipelineRun::spawn(move || runtime.run());
 
     let p = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), p)]);
@@ -153,18 +151,13 @@ sinks:
     handle.push(p, None, b"zebra"); // unmatched → Fail records a fatal
 
     // The Fail-policy trip must stop the pipeline on its own — no external
-    // shutdown trigger. The deadline is far above the configured 2s
+    // shutdown trigger. The timeout is far above the configured 2s
     // drain_timeout so a regression to timeout-bound (or never) exits fails
     // here rather than being masked by a manual drain.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !join.is_finished() {
-        assert!(
-            Instant::now() < deadline,
-            "pipeline did not stop on its own after a Fail-policy fatal"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let report = join.join().expect("join").expect("run");
+    let report = run
+        .wait_exit(Duration::from_secs(10))
+        .expect("pipeline did not stop on its own after a Fail-policy fatal")
+        .expect("run");
     assert!(
         matches!(report.state, ExitState::Failed(_)),
         "unmatched record under Fail policy must fail the pipeline (got {:?})",

@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
@@ -570,17 +570,9 @@ pub fn metric_sum(body: &str, family: &str) -> f64 {
         .sum()
 }
 
-/// Poll `check` until it returns true or `timeout` elapses.
-pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if check() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    panic!("timed out after {timeout:?} waiting for: {what}");
-}
+/// Poll a condition until it holds or a timeout elapses; shared with the
+/// `etl-test` crate so scenarios and framework users use one helper.
+pub use etl_test::wait_until;
 
 /// Events for `total` records spread round-robin over `partitions`, with
 /// per-partition sequence numbers encoded into the id.

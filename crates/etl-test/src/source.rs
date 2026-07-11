@@ -59,6 +59,8 @@ struct SharedSync {
     data_cv: Condvar,
     /// Notified on assign/revoke — wakes a waiting `poll_events`.
     event_cv: Condvar,
+    /// Notified on commit — wakes a waiting `wait_committed`.
+    commit_cv: Condvar,
 }
 
 impl SharedSync {
@@ -206,6 +208,40 @@ impl SourceHandle {
             .map(|&(_, o)| o)
     }
 
+    /// Block until `partition`'s most recent committed offset reaches at least
+    /// `offset`, or `timeout` elapses; returns whether the target was met.
+    ///
+    /// The blocking counterpart to [`last_committed`](Self::last_committed):
+    /// waking on each [`Source::commit`] rather than polling. Pass the
+    /// one-past-last watermark (e.g. `last_offset + 1`) to wait for every
+    /// pushed record to be durably committed.
+    #[must_use]
+    pub fn wait_committed(&self, partition: PartitionId, offset: i64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut st = self.shared.lock();
+        loop {
+            let reached = st
+                .committed
+                .iter()
+                .rev()
+                .find(|&&(p, _)| p == partition)
+                .is_some_and(|&(_, o)| o >= offset);
+            if reached {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .shared
+                .commit_cv
+                .wait_timeout(st, deadline - now)
+                .expect("etl-test source state poisoned");
+            st = guard;
+        }
+    }
+
     /// Lanes currently paused via [`Source::pause`], ascending.
     #[must_use]
     pub fn paused_lanes(&self) -> Vec<LaneId> {
@@ -312,6 +348,7 @@ impl Source for MemorySource {
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
         self.shared.lock().committed.extend_from_slice(watermarks);
+        self.shared.commit_cv.notify_all();
         Ok(())
     }
 

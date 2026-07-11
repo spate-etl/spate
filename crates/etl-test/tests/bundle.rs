@@ -9,7 +9,7 @@ use etl_core::record::PartitionId;
 use etl_core::sink::KeyHashRouter;
 use etl_core::source::LaneId;
 use etl_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CONFIG: &str = r#"
 pipeline: { name: bundle-test, threads: 1, io_threads: 1 }
@@ -58,15 +58,11 @@ fn builder_pipeline_over_mocks_delivers_and_commits() {
 
     // At-least-once: the watermark (one-past-last) only reaches past
     // `last` once the capture writer durably acknowledged every record.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while handle.last_committed(p) != Some(last + 1) {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for the commit (last: {:?})",
-            handle.last_committed(p)
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(
+        handle.wait_committed(p, last + 1, Duration::from_secs(10)),
+        "timed out waiting for the commit (last: {:?})",
+        handle.last_committed(p)
+    );
     shutdown.trigger();
     let report = join.join().expect("join").expect("run");
     assert_eq!(report.exit_code(), 0, "clean drain");

@@ -66,6 +66,7 @@
 //! `proptest` feature and use [`strategies`].
 
 mod deser;
+mod run;
 mod sink;
 mod source;
 
@@ -73,6 +74,7 @@ mod source;
 pub mod strategies;
 
 pub use deser::{EmitCollector, TestDeserializer};
+pub use run::{PipelineRun, wait_until};
 pub use sink::{
     CaptureSink, CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,
     WriteOutcome, capture_sink, capture_writer, decode_rows,

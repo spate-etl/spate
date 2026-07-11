@@ -38,7 +38,15 @@
 //!    column mapping is **positional** — the `SensorEvent` field order must
 //!    equal the YAML `columns` order — with a first-record field-name check
 //!    off the hot path.
-//! 6. `.run(source)` — the runtime, reusing the builder's I/O runtime.
+//! 6. `sink.router::<EventFam>(sensor_key)` — a record-aware
+//!    [`DistributedRouter`](etl::clickhouse::DistributedRouter): each exploded
+//!    event routes by **its own** `sensor` field (flat_map children share
+//!    their parent's metadata, so the default meta-only `KeyHashRouter`
+//!    would colocate them), placing every sensor on the shard a ClickHouse
+//!    `Distributed` table with sharding key `xxHash64(sensor)` would pick.
+//!    With the YAML's single shard it routes identically to the default —
+//!    scaling out is a YAML change (see the `shards:` comment there).
+//! 7. `.run(source)` — the runtime, reusing the builder's I/O runtime.
 //!
 //! # Run it
 //!
@@ -65,6 +73,12 @@
 //!     value        Int64,
 //!     unit         LowCardinality(String)
 //! ) ENGINE = MergeTree ORDER BY (sensor, batch_ts_ms);
+//!
+//! -- Sharded deployments add a Distributed table for SELECTs whose sharding
+//! -- key matches the router (inserts stay direct-to-local); with
+//! -- optimize_skip_unused_shards=1, sensor-filtered queries touch one shard:
+//! -- CREATE TABLE sensor_events_dist AS sensor_events
+//! --     ENGINE = Distributed(<cluster>, <db>, sensor_events, xxHash64(sensor));
 //! ```
 //!
 //! ```sh
@@ -80,7 +94,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use etl::avro::AvroDeserializerBuilder;
-use etl::clickhouse::{DateTime64Millis, NativeEncoder};
+use etl::clickhouse::{DateTime64Millis, NativeEncoder, ShardKey};
 use etl::kafka::KafkaSource;
 use etl::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -136,6 +150,14 @@ impl RecFamily for EventFam {
     type Rec<'buf> = SensorEvent<'buf>;
 }
 
+/// Sharding key: the `sensor` column — one sensor always lands on one shard,
+/// matching a `Distributed` DDL of `xxHash64(sensor)`. A fn item, not a
+/// closure: the extractor is higher-ranked over the payload lifetime (the
+/// same rule as `map_rec` on a borrowing family).
+fn sensor_key<'a>(row: &'a SensorEvent<'_>) -> ShardKey<'a> {
+    ShardKey::Str(row.sensor)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Constructor owns init: logs, the metrics exporter (installed before any
     // handle can exist), and the shared I/O runtime.
@@ -159,11 +181,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
             .build_fast::<BatchFam>()?;
 
-    // ── Sink: ClickHouse Native ─────────────────────────────────────────
+    // ── Sink: ClickHouse Native, sharded by sensor ──────────────────────
     // `format: native` fetches `system.columns` and hands the encoder the
     // real column types (so `batch_ts_ms`'s `DateTime64(3)` is laid out as an
     // Int64). The encoder is `Clone`: the terminal stage mints one per shard.
     let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    // No-op unless the YAML opts into `distributed_check`; with it, startup
+    // fails fast if the sink topology drifts from the cluster + DDL.
+    pipeline.block_on(sink.validate_distributed())?;
+    // Weights come from the validated YAML — router and endpoints can't
+    // drift. With a single shard this routes identically to the default
+    // (everything to shard 0); with N it matches `xxHash64(sensor)`.
+    let router = sink.router::<EventFam>(sensor_key);
     let native = pipeline.block_on(sink.native_schema())?;
     let encoder = NativeEncoder::<EventFam>::new(native);
 
@@ -193,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|event: &SensorEvent<'_>| event.value >= 0)
                 .sink(
                     encoder.clone(),
-                    KeyHashRouter,
+                    router.clone(), // Clone, not Copy: one router per chain lane
                     ChunkConfig::default(),
                     ctx.queues,
                     ctx.budget,

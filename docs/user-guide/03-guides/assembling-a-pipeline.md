@@ -148,6 +148,11 @@ Move the fields into the chain you build:
 })
 ```
 
+`KeyHashRouter` is the default meta-only router; to route on a record's own
+payload instead — matching a sink cluster's sharding key, or splitting
+`flat_map` children across shards — pass a record-aware `RecordRouter` here
+instead (see [Sink sharding](../02-concepts/05-sink-sharding.md)).
+
 > [!IMPORTANT]
 > **The drain contract: do not stash `ctx.queues` outside the chain.** The
 > sink only begins draining once every `ShardQueues` clone is dropped —

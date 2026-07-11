@@ -3,10 +3,14 @@
 //!
 //! The division of labour (see `docs/DESIGN.md` § Sink):
 //!
-//! - **Pipeline threads** run the sink's [`RowEncoder`] inside the chain's
-//!   terminal stage, accumulating encoded rows into small [`EncodedChunk`]
-//!   frames per shard and `try_send`ing them into bounded per-shard queues
-//!   (never blocking — a full queue surfaces as backpressure).
+//! - **Pipeline threads** route each record to a shard — two tiers share
+//!   one seam: meta-only [`ShardRouter`] (the default [`KeyHashRouter`]:
+//!   key hash, else a stable partition hash) or record-aware
+//!   [`RecordRouter`] for payload-derived shard affinity — then run the
+//!   sink's [`RowEncoder`] inside the chain's terminal stage, accumulating
+//!   encoded rows into small [`EncodedChunk`] frames per shard and
+//!   `try_send`ing them into bounded per-shard queues (never blocking — a
+//!   full queue surfaces as backpressure).
 //! - **Shard workers** (tokio tasks) merge chunks from all pipeline
 //!   threads into full-size batches, seal on `max_rows` / `max_bytes` /
 //!   `linger`, and dispatch up to `max_inflight` concurrent
@@ -15,7 +19,8 @@
 //!   thread count.
 //!
 //! A connector implements [`RowEncoder`] (CPU half) and [`ShardWriter`]
-//! (I/O half); the framework owns everything between them.
+//! (I/O half), and may ship a [`RecordRouter`] when the target's sharding
+//! is payload-derived; the framework owns everything between them.
 
 mod breaker;
 mod bundle;
@@ -201,8 +206,13 @@ pub trait ShardWriter: Send + Sync + 'static {
     }
 }
 
-/// Routes records to shards. Pure and cheap — called per record on
-/// pipeline threads.
+/// Routes records to shards on metadata alone — the **meta-only tier** of
+/// sink routing. Pure and cheap — called per record on pipeline threads.
+///
+/// Every `ShardRouter` is also a [`RecordRouter`] for every record family
+/// through a blanket bridge, so meta-only routers plug into the same
+/// builder seam unchanged. Implement [`RecordRouter`] directly instead
+/// when routing needs the payload.
 pub trait ShardRouter: Send + Sync {
     /// The shard index in `0..num_shards` for a record.
     fn route(&self, meta: &RecordMeta, num_shards: usize) -> usize;
@@ -225,9 +235,95 @@ impl ShardRouter for KeyHashRouter {
     }
 }
 
+/// Routes records to shards with access to the full record — the
+/// **record-aware tier** of sink routing. Pure and cheap: called once per
+/// record on pinned pipeline threads, strictly before encoding; it must
+/// not perform I/O, block, or allocate per call. Family-generic and
+/// dyn-compatible, like [`RowEncoder`].
+///
+/// Two tiers, one seam:
+///
+/// - **Meta-only** ([`ShardRouter`]): routes on [`RecordMeta`] alone (key
+///   hash, source partition). The default [`KeyHashRouter`] lives here.
+///   Every `ShardRouter` is automatically a `RecordRouter` for every
+///   family through a blanket bridge, so meta-only routers plug into the
+///   same builder seam unchanged.
+/// - **Record-aware** (this trait): routes on the payload itself —
+///   required when shard affinity derives from a field of the terminal
+///   record type (e.g. matching a sink cluster's own sharding expression),
+///   and the only way to route `flat_map` children independently: children
+///   inherit their parent's [`RecordMeta`], so a meta-only router
+///   necessarily colocates them.
+///
+/// The router sees the record exactly as the [`RowEncoder`] will — after
+/// every transform — so a routing key must survive to the terminal record
+/// type. A router may hold state (a weights table, an atomic counter);
+/// `&self` plus interior mutability covers stateful strategies.
+///
+/// A router must also be **total**: return a shard index for every record
+/// and never panic. Routing deliberately has no per-record error policy —
+/// a record either has a well-defined shard or the router picks a
+/// deterministic fallback. Unlike an encoder error, which honors the sink
+/// stage's Skip/Fail policy, a router panic fails the in-flight batch and
+/// stops the pipeline; restart then replays the same record, so a
+/// payload-dependent panic is a deterministic crash loop until a code fix
+/// ships.
+///
+/// # Examples
+///
+/// A record-aware router over an owned family:
+///
+/// ```
+/// use etl_core::deser::Owned;
+/// use etl_core::record::Record;
+/// use etl_core::sink::RecordRouter;
+///
+/// struct ByLen;
+/// impl RecordRouter<Owned<Vec<u8>>> for ByLen {
+///     fn route_record<'buf>(&self, rec: &Record<Vec<u8>>, num_shards: usize) -> usize {
+///         rec.payload.len() % num_shards
+///     }
+/// }
+/// ```
+///
+/// Implement **either** this trait **or** [`ShardRouter`], never both —
+/// the bridge makes implementing both a coherence overlap:
+///
+/// ```compile_fail,E0119
+/// use etl_core::deser::Owned;
+/// use etl_core::record::{Record, RecordMeta};
+/// use etl_core::sink::{RecordRouter, ShardRouter};
+///
+/// struct Both;
+/// impl ShardRouter for Both {
+///     fn route(&self, _: &RecordMeta, _: usize) -> usize { 0 }
+/// }
+/// impl RecordRouter<Owned<Vec<u8>>> for Both {
+///     fn route_record<'buf>(&self, _: &Record<Vec<u8>>, _: usize) -> usize { 0 }
+/// }
+/// ```
+pub trait RecordRouter<F: RecFamily>: Send + Sync {
+    /// The shard index in `0..num_shards` for `rec`. Must be
+    /// `< num_shards` — the terminal stage indexes its shard buffers
+    /// directly with the result.
+    fn route_record<'buf>(&self, rec: &Record<F::Rec<'buf>>, num_shards: usize) -> usize;
+}
+
+/// Bridge: every meta-only [`ShardRouter`] routes any record family by
+/// ignoring the payload and delegating to [`ShardRouter::route`] on the
+/// record's metadata.
+impl<F: RecFamily, R: ShardRouter> RecordRouter<F> for R {
+    #[inline]
+    fn route_record<'buf>(&self, rec: &Record<F::Rec<'buf>>, num_shards: usize) -> usize {
+        self.route(&rec.meta, num_shards)
+    }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use crate::checkpoint::AckRef;
+    use crate::deser::Owned;
     use crate::record::PartitionId;
 
     fn meta(key_hash: Option<u64>, partition: u32) -> RecordMeta {
@@ -250,5 +346,29 @@ mod tests {
         let spread: std::collections::HashSet<_> =
             (0..16).map(|p| r.route(&meta(None, p), 4)).collect();
         assert!(spread.len() > 1, "keyless records must not all colocate");
+    }
+
+    #[test]
+    fn shard_router_bridges_to_record_router_ignoring_payload() {
+        let (ack, _rx) = AckRef::test_pair();
+        for key_hash in [Some(10), Some(u64::MAX), None] {
+            let rec = Record {
+                payload: vec![1u8, 2, 3],
+                meta: meta(key_hash, 3),
+                ack: ack.clone(),
+            };
+            for n in [1usize, 2, 4, 7] {
+                assert_eq!(
+                    RecordRouter::<Owned<Vec<u8>>>::route_record(&KeyHashRouter, &rec, n),
+                    ShardRouter::route(&KeyHashRouter, &rec.meta, n),
+                    "the bridge must delegate to the meta-only route"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn record_router_is_dyn_compatible_for_a_concrete_family() {
+        let _router: &dyn RecordRouter<Owned<Vec<u8>>> = &KeyHashRouter;
     }
 }

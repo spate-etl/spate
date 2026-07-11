@@ -644,3 +644,184 @@ mod prop_round_trip {
         }
     }
 }
+
+// ---- distributed_check (DDL-parity guard) -----------------------------------
+//
+// The guard's query order is fixed — cluster topology, then table engine —
+// and these FIFO-mock tests depend on it (a comment in
+// `distributed::DistributedCheck::verify` pins the contract from the other
+// side). Early-failure tests queue only the handlers that will be consumed:
+// the mock panics on drop if a queued handler goes unused.
+
+/// What the guard's `system.clusters` query returns.
+#[derive(Debug, Clone, clickhouse::Row, Serialize)]
+struct ClusterRow {
+    shard_num: u32,
+    shard_weight: u32,
+    host_name: String,
+}
+
+fn cluster_row(shard_num: u32, weight: u32, host: &str) -> ClusterRow {
+    ClusterRow {
+        shard_num,
+        shard_weight: weight,
+        host_name: host.into(),
+    }
+}
+
+/// What the guard's `system.tables` query returns.
+#[derive(Debug, Clone, clickhouse::Row, Serialize)]
+struct EngineRow {
+    engine: String,
+    engine_full: String,
+}
+
+fn engine_row(engine: &str, engine_full: &str) -> EngineRow {
+    EngineRow {
+        engine: engine.into(),
+        engine_full: engine_full.into(),
+    }
+}
+
+/// A sink with per-shard weights and a `distributed_check` block, all
+/// replicas pointing at the mock.
+fn checked_sink(url: &str, weights: &[u32], check: &str) -> config::ClickHouseSink {
+    let shards: String = weights
+        .iter()
+        .map(|w| format!("  - replicas: [\"{url}\"]\n    weight: {w}\n"))
+        .collect();
+    let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        "table: orders\ncolumns: [id, name, score]\ncompression: off\nshards:\n{shards}{check}\n"
+    ))
+    .expect("config yaml");
+    config::build(cfg).expect("valid sink config")
+}
+
+const CHECK_ON_ID: &str =
+    "distributed_check: { cluster: prod, table: orders_dist, sharding_key: id }";
+
+#[tokio::test]
+async fn distributed_check_passes_when_cluster_and_ddl_match() {
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(vec![
+        cluster_row(1, 1, "ch-0"),
+        cluster_row(2, 1, "ch-1"),
+    ]));
+    mock.add(handlers::provide::<EngineRow>(vec![engine_row(
+        "Distributed",
+        "Distributed('prod', 'db', 'orders', xxHash64(id))",
+    )]));
+    let sink = checked_sink(mock.url(), &[1, 1], CHECK_ON_ID);
+    sink.validate_distributed().await.expect("parity holds");
+}
+
+#[tokio::test]
+async fn distributed_check_off_issues_no_queries() {
+    // No handlers queued: a request would error, and the mock panics on
+    // drop if a queued handler goes unconsumed — a clean Ok proves the
+    // guard never talked to the server without a `distributed_check` block.
+    let dead = Mock::new();
+    let sink = sink_for(dead.url());
+    sink.validate_distributed()
+        .await
+        .expect("absent block must be a no-op");
+}
+
+#[tokio::test]
+async fn shard_count_mismatch_fails_the_distributed_check() {
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(vec![
+        cluster_row(1, 1, "ch-0"),
+        cluster_row(2, 1, "ch-1"),
+        cluster_row(3, 1, "ch-2"),
+    ]));
+    let sink = checked_sink(mock.url(), &[1, 1], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("2 shard(s)") && msg.contains("has 3"),
+        "names both sides: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn weight_mismatch_names_the_offending_shard() {
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(vec![
+        cluster_row(1, 9, "ch-0"),
+        cluster_row(2, 1, "ch-1"),
+    ]));
+    let sink = checked_sink(mock.url(), &[9, 10], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("config shard 1 has weight 10") && msg.contains("shard_num 2"),
+        "names the offending shard in both numberings: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn sharding_expression_mismatch_prints_both_sides() {
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
+        1, 1, "ch-0",
+    )]));
+    mock.add(handlers::provide::<EngineRow>(vec![engine_row(
+        "Distributed",
+        "Distributed('prod', 'db', 'orders', cityHash64(id))",
+    )]));
+    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cityHash64(id)") && msg.contains("xxHash64(id)"),
+        "prints the DDL and expected expressions: {msg}"
+    );
+    assert!(
+        msg.contains("Distributed('prod'"),
+        "prints the raw engine_full for diagnosis: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn non_distributed_engine_fails_with_the_engine_name() {
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
+        1, 1, "ch-0",
+    )]));
+    mock.add(handlers::provide::<EngineRow>(vec![engine_row(
+        "ReplacingMergeTree",
+        "ReplacingMergeTree(v) ORDER BY id",
+    )]));
+    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    assert!(
+        err.to_string().contains("ReplacingMergeTree"),
+        "names the actual engine: {err}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_cluster_fails_distinguishably() {
+    use etl_clickhouse::DistributedCheckError;
+
+    // An empty system.clusters result is a Mismatch (wrong cluster name)…
+    let mock = Mock::new();
+    mock.add(handlers::provide::<ClusterRow>(Vec::new()));
+    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    assert!(
+        matches!(&err, DistributedCheckError::Mismatch(m) if m.contains("not found")),
+        "empty topology is a Mismatch: {err}"
+    );
+
+    // …while a failing query is a Fetch — connectivity, not configuration.
+    let failing = Mock::new();
+    failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+    let sink = checked_sink(failing.url(), &[1], CHECK_ON_ID);
+    let err = sink.validate_distributed().await.unwrap_err();
+    assert!(
+        matches!(&err, DistributedCheckError::Fetch { what, .. } if *what == "cluster topology"),
+        "transport failure is a Fetch: {err}"
+    );
+}

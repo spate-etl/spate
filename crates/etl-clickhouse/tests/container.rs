@@ -230,6 +230,10 @@ async fn bare_server(tag: &str, password: &str) -> Server {
 // the tests/container/ subdirectory, part of this single binary.
 #[path = "container/basics.rs"]
 mod basics;
+#[path = "container/distributed_check.rs"]
+mod distributed_check;
+#[path = "container/distributed_parity.rs"]
+mod distributed_parity;
 #[cfg(feature = "uuid")]
 #[path = "container/native_e2e.rs"]
 mod native_e2e;

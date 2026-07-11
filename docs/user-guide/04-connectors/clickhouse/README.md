@@ -154,6 +154,9 @@ keeps its connections warm. Manual assemblies hand `probe_fn()` to
 - [Performance tuning](./performance-tuning.md) — batch/part size, writer
   parallelism, `async_insert`, and the reasoning behind each starting-point
   setting.
+- [Distributed parity](./distributed-parity.md) — match the router's shard
+  placement to a `Distributed` table's sharding key so cluster reads can
+  prune shards, plus the opt-in startup check that keeps the two aligned.
 - [Schema validation](../../03-guides/schema-validation.md) — the
   `validate_schema` modes end to end.
 - [Tuning](../../05-deployment/tuning.md) — batch sizing and its coupling to

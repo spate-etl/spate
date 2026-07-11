@@ -77,7 +77,7 @@ use crate::backpressure::InflightBudget;
 use crate::deser::{Deserializer, Owned, RecFamily};
 use crate::error::ErrorPolicy;
 use crate::metrics::{ComponentLabels, DeserMetrics, OperatorMetrics};
-use crate::sink::{RowEncoder, ShardQueues, ShardRouter};
+use crate::sink::{RecordRouter, RowEncoder, ShardQueues};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -482,9 +482,13 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
         }
     }
 
-    /// Terminate the chain into a sink: records are routed by `router`,
-    /// encoded by `encoder` on the pipeline thread, and handed to the sink
-    /// workers through `queues`.
+    /// Terminate the chain into a sink: records are routed by `router` —
+    /// any meta-only [`ShardRouter`](crate::sink::ShardRouter) (bridged
+    /// automatically, [`KeyHashRouter`](crate::sink::KeyHashRouter) being
+    /// the default choice) or a record-aware
+    /// [`RecordRouter`](crate::sink::RecordRouter) — encoded by `encoder`
+    /// on the pipeline thread, and handed to the sink workers through
+    /// `queues`.
     #[must_use]
     pub fn sink<E, R>(
         self,
@@ -600,7 +604,7 @@ where
     P: Assemble<SinkHandoff<CurF, E, R>>,
     P::Out: for<'buf> Collector<<DF as RecFamily>::Rec<'buf>> + StageLifecycle + Send + 'static,
     E: RowEncoder<CurF> + Clone + 'static,
-    R: ShardRouter + Send + 'static,
+    R: RecordRouter<CurF> + Send + 'static,
 {
     /// Build one chain instance. Consumes the specification; the deserializer
     /// and router need no `Clone`, but the encoder does — the terminal stage
@@ -663,7 +667,7 @@ where
     P: Assemble<SinkHandoff<CurF, E, R>>,
     P::Out: for<'buf> Collector<<DF as RecFamily>::Rec<'buf>> + StageLifecycle + Send + 'static,
     E: RowEncoder<CurF> + Clone + 'static,
-    R: ShardRouter + Clone + Send + 'static,
+    R: RecordRouter<CurF> + Clone + Send + 'static,
 {
     /// Build one more identical chain.
     #[must_use]

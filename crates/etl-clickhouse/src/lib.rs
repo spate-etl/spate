@@ -34,6 +34,33 @@
 //! rows will land again. Design target tables to tolerate duplicates —
 //! `ReplacingMergeTree` with a version column is the sanctioned pattern.
 //!
+//! Re-homing is a different hazard entirely: a key that moves to another
+//! shard — changed shard weights, a changed sharding key, a changed shard
+//! count — leaves its already-written rows behind on the old shard, and
+//! nothing collapses them there. Dedup tokens are shard-scoped, and
+//! `ReplacingMergeTree` merges within one shard's local table only, so
+//! the old copies persist indefinitely: unpruned reads through a
+//! `Distributed` table return both homes' rows, while pruned reads return
+//! only the new home's. Treat a re-homing change as a planned migration —
+//! backfill or delete the moved keys' old-shard rows — not as replay
+//! noise that settles. A plain restart with unchanged topology is the
+//! benign case: replayed rows land on the *same* shard, where the
+//! patterns above apply.
+//!
+//! # Shard-affinity routing (Distributed parity)
+//!
+//! [`DistributedRouter`] (built via [`ClickHouseSink::router`]) places each
+//! record on the same shard a ClickHouse `Distributed` table with sharding
+//! expression `xxHash64(<key column>)` would — so SELECTs through the
+//! Distributed table can prune shards (`optimize_skip_unused_shards=1`)
+//! while inserts keep going direct-to-local. The ordering contract is the
+//! operator's: `shards[i]` in the sink config must be the cluster's
+//! `shard_num = i + 1` (the `remote_servers` order), with matching
+//! `weight`s. The opt-in `distributed_check` config block verifies shard
+//! count, weights, and the DDL's sharding expression at startup
+//! ([`ClickHouseSink::validate_distributed`]); the ordering itself it can
+//! only warn about. See [`router`] for the algorithm.
+//!
 //! # Column order is the wire contract
 //!
 //! RowBinary carries no column names. The configured `columns` list and
@@ -72,8 +99,10 @@
 //! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
 
 pub mod config;
+mod distributed;
 mod encoder;
 pub mod native;
+pub mod router;
 pub mod rowbinary;
 mod schema;
 pub mod serde;
@@ -81,11 +110,13 @@ mod types;
 mod writer;
 
 pub use config::{
-    ClickHouseSink, ClickHouseSinkConfig, Compression, Format, SchemaValidation,
-    from_component_config,
+    ClickHouseSink, ClickHouseSinkConfig, Compression, DistributedCheckSection, Format,
+    SchemaValidation, from_component_config,
 };
+pub use distributed::DistributedCheckError;
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};
 pub use native::{NativeEncoder, NativeError, NativeSchema};
+pub use router::{DistributedRouter, KeyExtractor, ShardKey};
 pub use rowbinary::{RowBinaryError, serialize_row};
 pub use schema::{RowSchema, SchemaError};
 pub use types::*;

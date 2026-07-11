@@ -1,6 +1,6 @@
 # Concepts
 
-The mental model behind etl-rs. These four pages explain the contracts the
+The mental model behind etl-rs. These five pages explain the contracts the
 framework holds — and expects you to hold — with the reasoning behind each.
 The canonical, exhaustive version lives in [docs/DESIGN.md](../../DESIGN.md);
 these pages are the working subset a pipeline author needs.
@@ -31,6 +31,13 @@ keeps a saturated pipeline out of pause duty-cycling.
 The error taxonomy (retryable, record-level, fatal), the two record-level
 policies (Skip and Fail — there is no dead-letter queue), and the metrics
 that make every drop and every error visible.
+
+## [5. Sink sharding](05-sink-sharding.md)
+
+How the terminal stage fans writes across shards: what a shard is, the two
+router tiers (meta-only `KeyHashRouter` and record-aware `RecordRouter`), why
+one saturated shard pauses the whole pipeline, and the honest limit — hot
+shards are your data's shape, not the router's choice.
 
 ## Related
 

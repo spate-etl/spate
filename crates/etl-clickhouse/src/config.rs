@@ -5,10 +5,13 @@
 //! produces the writer, per-shard replica endpoints, and the framework's
 //! [`SinkPoolConfig`].
 
+use crate::distributed::{self, DistributedCheckError};
+use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
+use etl_core::deser::RecFamily;
 use etl_core::sink::{
     BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
     SinkProbeFn, endpoint_probe,
@@ -92,6 +95,11 @@ pub struct ClickHouseSinkConfig {
     /// column schema).
     #[serde(default)]
     pub format: Format,
+    /// Opt-in startup parity check against the cluster topology and a
+    /// `Distributed` table's DDL (see [`DistributedCheckSection`]).
+    /// Absent by default: no queries issued.
+    #[serde(default)]
+    pub distributed_check: Option<DistributedCheckSection>,
 }
 
 /// The `INSERT` wire format.
@@ -236,6 +244,53 @@ fn to_client_compression(c: Compression) -> clickhouse::Compression {
 pub struct ShardConfig {
     /// HTTP(S) URLs of this shard's replicas.
     pub replicas: Vec<String>,
+    /// Distributed-parity weight: must equal this shard's `<weight>` in
+    /// the cluster's `remote_servers` entry (ClickHouse's default is 1).
+    /// Consumed by [`ClickHouseSink::router`]; irrelevant otherwise.
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+/// The opt-in `distributed_check:` block — a startup guard verifying that
+/// the sink config, the cluster topology, and the `Distributed` table's
+/// DDL agree (see [`ClickHouseSink::validate_distributed`]).
+///
+/// ```yaml
+/// sink:
+///   clickhouse:
+///     distributed_check:
+///       cluster: prod
+///       table: analytics.events_dist   # db-qualified, or bare like `table`
+///       sharding_key: sensor           # expected DDL expr = xxHash64(sensor)
+///       # sharding_expr: "xxHash64(sensor)"  # escape hatch — exactly one
+///       # endpoint: "http://ch-front:8123"   # default: shard 0, replica 0
+/// ```
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DistributedCheckSection {
+    /// The cluster the `Distributed` table is defined over.
+    pub cluster: String,
+    /// The `Distributed` table to check, optionally `db.table`-qualified
+    /// (an unqualified name resolves like the sink `table`).
+    pub table: String,
+    /// The sharding key column; the expected DDL expression becomes
+    /// `xxHash64(<sharding_key>)`. Exactly one of this or `sharding_expr`.
+    #[serde(default)]
+    pub sharding_key: Option<String>,
+    /// Escape hatch: the full expected sharding expression, compared
+    /// textually after normalization (whitespace and identifier quoting
+    /// stripped) — inherently more brittle than `sharding_key`.
+    #[serde(default)]
+    pub sharding_expr: Option<String>,
+    /// Endpoint to query for `system.clusters` / `system.tables`. The
+    /// `Distributed` table may live on a front node outside the `shards:`
+    /// list; defaults to the first replica of shard 0.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// Batch sealing thresholds (defaults match the framework's).
@@ -372,6 +427,10 @@ pub struct ClickHouseSink {
     /// clients would report the write path healthy merely because probing
     /// keeps its connections warm.
     probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
+    /// Per-shard weights in config order, for [`router`](Self::router).
+    shard_weights: Arc<[u32]>,
+    /// The captured `distributed_check` block, if configured.
+    distributed: Option<distributed::DistributedCheck>,
 }
 
 impl ClickHouseSink {
@@ -419,6 +478,38 @@ impl ClickHouseSink {
     #[must_use]
     pub fn probe_fn(&self) -> SinkProbeFn {
         endpoint_probe(self.writer.clone(), Arc::clone(&self.probe_endpoints))
+    }
+
+    /// A [`DistributedRouter`] over this sink's shard topology and
+    /// configured weights — the record-aware router whose placement
+    /// matches a `Distributed` table with sharding expression
+    /// `xxHash64(<key column>)`. Infallible: the weights were validated at
+    /// [`build`].
+    ///
+    /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
+    /// projections are not injective) — name it:
+    /// `sink.router::<EventFam>(sensor_key)`.
+    #[must_use]
+    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
+        DistributedRouter::new(extract, &self.shard_weights)
+            .expect("config validation guarantees at least one shard and weights >= 1")
+    }
+
+    /// Opt-in startup DDL-parity guard. Instant `Ok(())` when no
+    /// `distributed_check` block is configured. Otherwise verifies shard
+    /// count, per-shard weights, and the `Distributed` table's sharding
+    /// expression against the live cluster, failing fast with a readable
+    /// diff — placement/DDL drift does not error at query time, it
+    /// silently returns wrong results under `optimize_skip_unused_shards`.
+    ///
+    /// Call **after** [`build`] and **before** the pipeline consumes the
+    /// sink — alongside [`validate_schema`](Self::validate_schema) /
+    /// [`native_schema`](Self::native_schema).
+    pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
+        match &self.distributed {
+            None => Ok(()),
+            Some(check) => check.verify().await,
+        }
     }
 }
 
@@ -471,6 +562,38 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
     let endpoints = make_endpoints(&cfg);
     let probe_endpoints = Arc::new(make_endpoints(&cfg));
 
+    let shard_weights: Arc<[u32]> = cfg.shards.iter().map(|s| s.weight).collect();
+    let distributed = cfg.distributed_check.as_ref().map(|section| {
+        let url = section
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| cfg.shards[0].replicas[0].clone());
+        let endpoint = ClickHouseEndpoint::new(client_for(&url, &cfg), url);
+        let expected_expr = match (&section.sharding_key, &section.sharding_expr) {
+            (Some(key), None) => format!("xxHash64({key})"),
+            (None, Some(expr)) => distributed::normalize(expr),
+            _ => unreachable!("validated: exactly one of sharding_key/sharding_expr"),
+        };
+        distributed::DistributedCheck {
+            endpoint,
+            cluster: section.cluster.clone(),
+            database: cfg.database.clone(),
+            table: section.table.clone(),
+            expected_expr,
+            weights: Arc::clone(&shard_weights),
+            replica_hosts: cfg
+                .shards
+                .iter()
+                .map(|s| {
+                    s.replicas
+                        .iter()
+                        .filter_map(|u| distributed::host_of(u))
+                        .collect()
+                })
+                .collect(),
+        }
+    });
+
     let pool = SinkPoolConfig {
         batch: BatchConfig {
             max_rows: cfg.batch.max_rows,
@@ -506,7 +629,25 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
             columns: cfg.columns.clone(),
         },
         probe_endpoints,
+        shard_weights,
+        distributed,
     })
+}
+
+/// One configured client for `url`. Private: the `clickhouse` crate's 0.x
+/// `Client` type must never surface in this crate's public API.
+fn client_for(url: &str, cfg: &ClickHouseSinkConfig) -> clickhouse::Client {
+    let mut client = clickhouse::Client::default().with_url(url);
+    if let Some(db) = &cfg.database {
+        client = client.with_database(db);
+    }
+    if let Some(user) = &cfg.user {
+        client = client.with_user(user);
+    }
+    if let Some(password) = &cfg.password {
+        client = client.with_password(password);
+    }
+    client.with_compression(to_client_compression(cfg.compression))
 }
 
 /// One connected client per replica, `[shard][replica]`.
@@ -517,20 +658,7 @@ fn make_endpoints(cfg: &ClickHouseSinkConfig) -> Vec<Vec<ClickHouseEndpoint>> {
             shard
                 .replicas
                 .iter()
-                .map(|url| {
-                    let mut client = clickhouse::Client::default().with_url(url);
-                    if let Some(db) = &cfg.database {
-                        client = client.with_database(db);
-                    }
-                    if let Some(user) = &cfg.user {
-                        client = client.with_user(user);
-                    }
-                    if let Some(password) = &cfg.password {
-                        client = client.with_password(password);
-                    }
-                    client = client.with_compression(to_client_compression(cfg.compression));
-                    ClickHouseEndpoint::new(client, url.clone())
-                })
+                .map(|url| ClickHouseEndpoint::new(client_for(url, cfg), url.clone()))
                 .collect()
         })
         .collect()
@@ -550,6 +678,12 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return fail(format!("replica `{url}` is not an http(s) URL"));
             }
+        }
+        // Weights are ClickHouse interval widths: a zero-weight shard
+        // receives nothing under Distributed parity and breaks the
+        // prefix-sum selection.
+        if shard.weight == 0 {
+            return fail(format!("shard {i} weight must be at least 1"));
         }
     }
     if cfg.columns.is_empty() {
@@ -645,6 +779,46 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         if cfg.settings.contains_key(reserved) {
             return fail(format!(
                 "setting `{reserved}` is managed by the sink and cannot be overridden"
+            ));
+        }
+    }
+
+    if let Some(check) = &cfg.distributed_check {
+        if !is_identifier(&check.cluster) {
+            return fail(format!(
+                "distributed_check: cluster `{}` is not a valid identifier",
+                check.cluster
+            ));
+        }
+        let parts: Vec<&str> = check.table.split('.').collect();
+        if check.table.is_empty() || parts.len() > 2 || !parts.iter().all(|p| is_identifier(p)) {
+            return fail(format!(
+                "distributed_check: table `{}` is not a valid (optionally \
+                 database-qualified) identifier",
+                check.table
+            ));
+        }
+        match (&check.sharding_key, &check.sharding_expr) {
+            (Some(_), Some(_)) | (None, None) => {
+                return fail(
+                    "distributed_check: set exactly one of sharding_key or sharding_expr".into(),
+                );
+            }
+            (Some(key), None) if !is_identifier(key) => {
+                return fail(format!(
+                    "distributed_check: sharding_key `{key}` is not a valid identifier"
+                ));
+            }
+            (None, Some(expr)) if expr.trim().is_empty() => {
+                return fail("distributed_check: sharding_expr must not be empty".into());
+            }
+            _ => {}
+        }
+        if let Some(url) = &check.endpoint
+            && !(url.starts_with("http://") || url.starts_with("https://"))
+        {
+            return fail(format!(
+                "distributed_check: endpoint `{url}` is not an http(s) URL"
             ));
         }
     }
@@ -938,5 +1112,116 @@ settings: { insert_quorum: "auto" }
         cfg.compression = Compression::Zstd(99);
         let err = build(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
+    }
+
+    #[test]
+    fn shard_weights_parse_and_default_to_one() {
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(
+            "table: t\ncolumns: [id]\nshards:\n\
+             \x20 - replicas: [\"http://a\"]\n\
+             \x20 - replicas: [\"http://b\"]\n\
+             \x20   weight: 9\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.shards[0].weight, 1, "weight defaults to 1");
+        assert_eq!(cfg.shards[1].weight, 9);
+    }
+
+    #[test]
+    fn zero_shard_weight_is_rejected() {
+        let err = from_component_config(&component(
+            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"], weight: 0}]",
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("weight"), "{err}");
+    }
+
+    #[test]
+    fn sink_router_captures_config_weights_in_order() {
+        use crate::router::ShardKey;
+        use etl_core::deser::Owned;
+
+        let sink = from_component_config(&component(
+            "table: t\ncolumns: [id]\nshards:\n\
+             \x20 - replicas: [\"http://a\"]\n\
+             \x20   weight: 9\n\
+             \x20 - replicas: [\"http://b\"]\n\
+             \x20   weight: 10\n",
+        ))
+        .unwrap();
+        // `&Vec<u8>` (not `&[u8]`) is forced by the KeyExtractor fn-pointer
+        // type: its argument is `&'a Rec<'buf>` = `&'a Vec<u8>`.
+        #[allow(clippy::ptr_arg)]
+        fn key(rec: &Vec<u8>) -> ShardKey<'_> {
+            ShardKey::Bytes(rec)
+        }
+        let router = sink.router::<Owned<Vec<u8>>>(key);
+        assert_eq!(router.shard_count(), 2);
+        // The docs' 9/10 example: remainder 8 → shard 0, remainder 9 → shard 1.
+        assert_eq!(router.shard_for_hash(8), 0);
+        assert_eq!(router.shard_for_hash(9), 1);
+    }
+
+    #[test]
+    fn distributed_check_parses_with_endpoint_defaulting_to_first_replica() {
+        let sink = from_component_config(&component(
+            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a:8123\"]}]\n\
+             distributed_check: { cluster: prod, table: db.t_dist, sharding_key: id }",
+        ))
+        .unwrap();
+        let check = sink.distributed.as_ref().expect("check captured");
+        assert_eq!(check.cluster, "prod");
+        assert_eq!(check.table, "db.t_dist");
+        assert_eq!(check.expected_expr, "xxHash64(id)");
+        assert_eq!(check.endpoint.url(), "http://a:8123");
+    }
+
+    #[test]
+    fn distributed_check_requires_exactly_one_of_key_or_expr() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        for check in [
+            "distributed_check: { cluster: c, table: t_dist }",
+            "distributed_check: { cluster: c, table: t_dist, sharding_key: id, sharding_expr: \"xxHash64(id)\" }",
+        ] {
+            let err = from_component_config(&component(&format!("{base}{check}"))).unwrap_err();
+            assert!(
+                err.to_string().contains("exactly one"),
+                "for `{check}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn distributed_check_rejects_bad_cluster_table_key_and_endpoint() {
+        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let cases = [
+            (
+                "distributed_check: { cluster: \"pr od\", table: t_dist, sharding_key: id }",
+                "cluster",
+            ),
+            (
+                "distributed_check: { cluster: c, table: a.b.c, sharding_key: id }",
+                "table",
+            ),
+            (
+                "distributed_check: { cluster: c, table: t_dist, sharding_key: \"id; DROP\" }",
+                "sharding_key",
+            ),
+            (
+                "distributed_check: { cluster: c, table: t_dist, sharding_expr: \"  \" }",
+                "sharding_expr",
+            ),
+            (
+                "distributed_check: { cluster: c, table: t_dist, sharding_key: id, endpoint: \"tcp://x\" }",
+                "endpoint",
+            ),
+        ];
+        for (check, needle) in cases {
+            let err = from_component_config(&component(&format!("{base}{check}"))).unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "expected `{needle}` for `{check}`: {err}"
+            );
+        }
     }
 }

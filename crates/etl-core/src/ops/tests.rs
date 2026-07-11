@@ -6,7 +6,9 @@ use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::deser::{BytesPassthrough, Deserializer, EmitRecord, Owned, RecFamily};
 use crate::error::{DeserError, ErrorPolicy, SinkError};
 use crate::record::{PartitionId, RawPayload, Record};
-use crate::sink::{EncodedChunk, KeyHashRouter, RowEncoder, ShardRouter, shard_queues};
+use crate::sink::{
+    EncodedChunk, KeyHashRouter, RecordRouter, RowEncoder, ShardRouter, shard_queues,
+};
 use crate::source::PayloadBatch;
 use bytes::BytesMut;
 use std::sync::Arc;
@@ -713,6 +715,82 @@ fn multi_shard_routing_by_key_hash() {
     assert_eq!(
         drain_rows(&mut rxs[1]),
         vec![b"odd".to_vec(), b"odd2".to_vec()]
+    );
+}
+
+#[test]
+fn record_router_routes_flat_map_children_independently_by_payload() {
+    /// Record-aware: routes on the child's own payload, which no meta-only
+    /// router can see (flat_map children share the parent's meta).
+    #[derive(Clone, Copy)]
+    struct ByChunkLen;
+    impl RecordRouter<SubF> for ByChunkLen {
+        fn route_record<'buf>(&self, rec: &Record<SubEvent<'buf>>, n: usize) -> usize {
+            rec.payload.chunk.len() % n
+        }
+    }
+    let (queues, mut rxs) = shard_queues(2, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ByChunkLen,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    // ONE parent record: all four children carry identical RecordMeta, yet
+    // route by their own chunk length — even to shard 0, odd to shard 1.
+    let bufs = payloads(&["k:aa|b|cc|d"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    assert_eq!(
+        drain_rows(&mut rxs[0]),
+        vec![b"aa".to_vec(), b"cc".to_vec()],
+        "even-length children route to shard 0 by payload"
+    );
+    assert_eq!(
+        drain_rows(&mut rxs[1]),
+        vec![b"b".to_vec(), b"d".to_vec()],
+        "odd-length children of the SAME parent route to shard 1"
+    );
+}
+
+#[test]
+fn meta_only_router_colocates_flat_map_children() {
+    // The tier boundary, and the bridge exercised through the full terminal
+    // stage: children inherit the parent's meta, so a meta-only router
+    // (keyless here → stable partition hash) sends every child to one shard.
+    let (queues, mut rxs) = shard_queues(2, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["k:aa|b|cc|d"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let (zero, one) = (drain_rows(&mut rxs[0]), drain_rows(&mut rxs[1]));
+    assert_eq!(
+        zero.len() + one.len(),
+        4,
+        "every child reaches exactly one shard"
+    );
+    assert!(
+        zero.is_empty() || one.is_empty(),
+        "a meta-only router colocates all children of one parent"
     );
 }
 

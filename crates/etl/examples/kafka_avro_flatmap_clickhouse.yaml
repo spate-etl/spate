@@ -66,6 +66,19 @@ sink:
     validate_schema: full
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+    # Scale-out: list shards in the cluster's remote_servers order (shard i
+    # here = shard_num i+1 there), weights matching the cluster config, and
+    # let startup verify parity against the Distributed table's DDL — the
+    # example's router already shards by xxHash64(sensor):
+    # shards:
+    #   - replicas: ["http://ch-0:8123"]
+    #     weight: 1
+    #   - replicas: ["http://ch-1:8123"]
+    #     weight: 1
+    # distributed_check:
+    #   cluster: sensors
+    #   table: sensor_events_dist
+    #   sharding_key: sensor
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
     batch:

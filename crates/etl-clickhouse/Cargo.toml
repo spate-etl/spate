@@ -19,6 +19,7 @@ humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+twox-hash = { workspace = true }
 uuid = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
@@ -40,6 +41,7 @@ rust_decimal = ["dep:rust_decimal"]
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls", "test-util"] }
 crossbeam-channel = { workspace = true }
+etl-test = { workspace = true }
 proptest = { workspace = true }
 serde_repr = { workspace = true }
 hyper = { workspace = true }

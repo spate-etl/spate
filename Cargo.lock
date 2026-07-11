@@ -1085,6 +1085,7 @@ dependencies = [
  "clickhouse",
  "crossbeam-channel",
  "etl-core",
+ "etl-test",
  "foldhash",
  "humantime-serde",
  "hyper",
@@ -1097,6 +1098,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "twox-hash",
  "uuid",
  "yaml_serde",
 ]

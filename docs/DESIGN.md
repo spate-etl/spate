@@ -312,6 +312,19 @@ of pipeline state.
 The framework owns everything generic; a connector implements only a small
 `ShardWriter` ("write this sealed batch to this replica endpoint").
 
+**Routing.** The terminal stage routes every record to a shard strictly
+before encoding. Two tiers share one seam: meta-only `ShardRouter` (default
+`KeyHashRouter` — key hash, falling back to a stable partition hash) and
+record-aware `RecordRouter<F>` (full `Record` access, mirroring
+`RowEncoder<F>`'s family-generic shape) for payload-derived shard affinity —
+the shape a ClickHouse cluster-parity router needs, and the only way to
+route `flat_map` children independently, since children inherit their
+parent's `RecordMeta`. A blanket bridge lifts every `ShardRouter` into
+`RecordRouter`, so the builder takes one bound, existing routers work
+unchanged, and a type implements exactly one of the two (the bridge makes
+both a coherence error). Routers are pure and cheap: per record, on pipeline
+threads, no I/O, no per-call allocation.
+
 Per **shard**: one worker task accumulates rows to `max_rows` / `max_bytes` /
 `linger`, seals the batch, then dispatches up to `max_inflight` (default 2)
 concurrent flushes rotating across healthy replicas (round-robin skipping

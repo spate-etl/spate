@@ -58,6 +58,7 @@ crossbeam-channel = "0.5.15"
 bytes = "1"
 core_affinity = "0.8"
 foldhash = "0.2"
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 
 # Connector dependencies. 0.x crates with breaking minors are held to a
 # single minor; Cargo.lock pins exact patches.

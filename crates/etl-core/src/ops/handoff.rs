@@ -14,7 +14,7 @@ use crate::checkpoint::{AckSet, BatchId};
 use crate::deser::RecFamily;
 use crate::error::{ErrorClass, ErrorPolicy, FatalError, SinkError};
 use crate::record::{Flow, Record};
-use crate::sink::{ChunkSendError, EncodedChunk, RowEncoder, ShardQueues, ShardRouter};
+use crate::sink::{ChunkSendError, EncodedChunk, RecordRouter, RowEncoder, ShardQueues};
 use crate::telemetry::RateLimit;
 use bytes::BytesMut;
 use std::collections::VecDeque;
@@ -208,14 +208,14 @@ impl<'buf, F, E, R> Collector<<F as RecFamily>::Rec<'buf>> for SinkHandoff<F, E,
 where
     F: RecFamily,
     E: RowEncoder<F> + Clone,
-    R: ShardRouter,
+    R: RecordRouter<F>,
 {
     fn push(&mut self, rec: Record<F::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
         if self.fatal.0.is_some() {
             return Flow::Continue;
         }
-        let idx = self.router.route(&rec.meta, self.shards.len());
+        let idx = self.router.route_record(&rec, self.shards.len());
         let shard = &mut self.shards[idx];
         let before = shard.buf.len();
         match shard.encoder.encode(&rec, &mut shard.buf) {

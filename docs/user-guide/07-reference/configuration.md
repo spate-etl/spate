@@ -94,7 +94,7 @@ belongs to it:
 |---|---|---|
 | `source` | yes | [Kafka](../04-connectors/kafka.md), [Memory](../04-connectors/memory.md), or your own ([Custom sources](../06-extending/custom-source.md)) |
 | `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/avro/README.md) |
-| `sink` | yes | [ClickHouse](../04-connectors/clickhouse/README.md), [Memory](../04-connectors/memory.md), or your own ([Custom sinks](../06-extending/custom-sink.md)) |
+| `sink` **or** `sinks` | yes (exactly one) | [ClickHouse](../04-connectors/clickhouse/README.md), [Memory](../04-connectors/memory.md), or your own ([Custom sinks](../06-extending/custom-sink.md)) |
 
 The sink connectors map their `batch`, `inflight`, and `retry` sub-sections
 onto the framework's `SinkPoolConfig` (defaults: `batch.max_rows: 500000`,
@@ -102,6 +102,31 @@ onto the framework's `SinkPoolConfig` (defaults: `batch.max_rows: 500000`,
 `retry.initial: 100ms`, `retry.max: 10s`, `retry.multiplier: 2.0`) — see
 each connector's page for its exact schema, and
 [Tuning](../05-deployment/tuning.md) for how to size them.
+
+### `sinks:` — multiple named sinks {#sinks}
+
+A pipeline that writes to more than one destination declares `sinks:` — a
+`name -> component` map — **instead of** `sink:` (setting both, or neither, is a
+load error). Each entry is an ordinary single-key component with its own full
+configuration:
+
+```yaml
+sinks:
+  type_a:
+    clickhouse: { table: events_a, columns: [...], batch: { linger: 1s }, ... }
+  type_b:
+    clickhouse: { table: events_b, columns: [...], batch: { linger: 5s }, ... }
+```
+
+The name is how the chain's [split terminal](../02-concepts/06-multi-sink.md)
+resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on
+that sink's `etl_sink_*` metrics. A single `sink:` is exactly equivalent to a
+one-entry `sinks:` map under the reserved name `"default"` — that entry keeps
+the historical label `component="sink"`, and the names `sink` and the empty
+string are rejected at load so no two sinks can share a label. See
+[multi-sink split](../02-concepts/06-multi-sink.md) for the routing DSL and
+[ClickHouse multi-table](../04-connectors/clickhouse/multi-table.md) for the
+connector end-to-end.
 
 ## Code-level knobs (not YAML)
 

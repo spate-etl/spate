@@ -469,8 +469,21 @@ Design points, each earned by a footgun in the manual assembly:
   minted at `into_runtime(source)`/`run(source)`; connector construction
   remains one explicit line — no config-tag→constructor registry
   (topology is code-defined; a registry would reintroduce it as data).
-- `.sink()` errors on a second call so multi-output sink routing can
-  arrive later as an additive `add_sink`.
+- **Multiple sinks via `add_sink`.** A pipeline installs one or more named
+  sinks (`add_sink(name, bundle)`; `sink(bundle)` is sugar for the reserved
+  name `"default"`). The chain terminates either in a single `.sink(...)` or
+  in a **split** — `split(cfg, unmatched).add::<F>(...)…​.route(closure)` —
+  that routes each record to exactly one typed branch, each branch a full sink
+  (own family/encoder/router/queues) resolved by name via `ctx.sink(name)`. The
+  ack layer needs nothing new: each branch clones the poll batch's `AckRef`, so
+  a source watermark holds until every destination it touched has durably
+  written, with worst-status merge. Unmatched records follow a configurable
+  `ErrorPolicy` (`Fail` default; `Skip` drops + counts `reason="unrouted"`).
+  Branches store their encoder/router type-erased so the branch type keys on
+  the destination family alone, letting a `Copy` typed handle recover it with
+  one downcast. Per record that costs the downcast plus a virtual route and
+  encode call (the single-sink terminal uses concrete types and pays neither);
+  the user's routing closure stays monomorphic.
 
 ## Dependency policy
 
@@ -509,6 +522,7 @@ call. No `serde_avro_fast` types appear in the public API.
 | Deser placement | pipeline thread | borrow lifetimes force it; keeps CPU pinned |
 | Operator dispatch | static in-chain, dyn per batch at boundary | preserves inlining; ~amortized-zero dispatch cost |
 | Ack design | refcounted per-batch Arc + contiguity ring | supports filter/flat_map/multi-sink for free; ~2 atomics/record |
+| Multi-sink | additive `add_sink` + a typed split terminal | per-type tables move fan-out off the DB onto the scalable ETL tier; +56%–212% throughput, 4–10× part size, 16–31% lower server CPU/row vs `Null`+MV (benchmark-verified) |
 | Sink workers | per shard, replica rotation, max_inflight | full-size batches (ClickHouse merge pressure) + parallelism |
 | ClickHouse insert | pre-encoded RowBinary frames via `InsertFormatted` + dedup token | encode on pipeline threads; deterministic batch boundaries for acks and idempotent retries (spike-verified) |
 | Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; 40 ns/rec, 0 allocs/rec vs 3.7× slower owned (spike-measured) |

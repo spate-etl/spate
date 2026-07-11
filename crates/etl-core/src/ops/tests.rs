@@ -111,6 +111,35 @@ impl RowEncoder<SubF> for SubEncoder {
     }
 }
 
+/// A second borrowed destination family for the split-terminal tests: stores
+/// the event key. Distinct row type from [`SubEvent`], so the two branches of
+/// a split are genuinely heterogeneous.
+#[derive(Debug)]
+struct KeyEvent<'buf> {
+    key: &'buf [u8],
+}
+
+struct KeyF;
+impl RecFamily for KeyF {
+    type Rec<'buf> = KeyEvent<'buf>;
+}
+
+/// Length-prefixed encoder for [`KeyEvent`].
+#[derive(Clone, Default)]
+struct KeyEncoder;
+
+impl RowEncoder<KeyF> for KeyEncoder {
+    fn encode<'buf>(
+        &mut self,
+        rec: &Record<KeyEvent<'buf>>,
+        buf: &mut BytesMut,
+    ) -> Result<(), SinkError> {
+        buf.extend_from_slice(&(u32::try_from(rec.payload.key.len()).unwrap()).to_le_bytes());
+        buf.extend_from_slice(rec.payload.key);
+        Ok(())
+    }
+}
+
 /// Length-prefixed encoder for owned byte records.
 #[derive(Clone, Default)]
 struct VecEncoder;
@@ -970,6 +999,216 @@ fn factory_stamps_independent_chains() {
     assert_eq!(rows.len(), 2);
     assert!(rows.contains(&b"one".to_vec()));
     assert!(rows.contains(&b"two".to_vec()));
+}
+
+// ---- split terminal ----------------------------------------------------------
+
+#[test]
+fn split_routes_records_to_their_typed_branch() {
+    // One borrowed source stream fans into two heterogeneously-typed branches:
+    // `a*` keys route their body to the SubEvent branch, `k*` keys route their
+    // key to the KeyEvent branch. `z*` matches neither (unmatched Skip).
+    let (sub_q, mut sub_rx) = shard_queues(1, 64);
+    let (key_q, mut key_rx) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+
+    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Skip);
+    let sub = split.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+    );
+    let key = split.add::<KeyF, _, _>(
+        KeyEncoder,
+        ToZero,
+        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+    );
+    let mut c = split
+        .route(move |e: LogEvent<'_>, out| {
+            if e.key.starts_with('a') {
+                out.emit(sub, SubEvent { chunk: e.body });
+            } else if e.key.starts_with('k') {
+                out.emit(
+                    key,
+                    KeyEvent {
+                        key: e.key.as_bytes(),
+                    },
+                );
+            }
+            // else: matches no branch -> `unmatched` (Skip here)
+        })
+        .build();
+
+    let bufs = payloads(&["a1:body-a", "k1:body-k", "z9:dropme"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    assert_eq!(
+        drain_rows(&mut sub_rx[0]),
+        vec![b"body-a".to_vec()],
+        "the a-keyed record's body reached the SubEvent branch"
+    );
+    assert_eq!(
+        drain_rows(&mut key_rx[0]),
+        vec![b"k1".to_vec()],
+        "the k-keyed record's key reached the KeyEvent branch"
+    );
+
+    // The unmatched `z9` record was dropped by the Skip policy; its ack share
+    // releases as success, so the batch resolves Delivered.
+    drop(batch);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}
+
+#[test]
+fn split_unmatched_fail_stops_the_pipeline() {
+    let (sub_q, _rx) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+
+    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let sub = split.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SinkCtx::new("sub".into(), sub_q, budget),
+    );
+    let mut c = split
+        .route(move |e: LogEvent<'_>, out| {
+            if e.key.starts_with('a') {
+                out.emit(sub, SubEvent { chunk: e.body });
+            }
+        })
+        .build();
+
+    let bufs = payloads(&["z9:nomatch"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+        panic!("unmatched record under Fail policy must stop the pipeline");
+    };
+    assert!(f.reason.contains("no split branch"));
+    drop(batch);
+    drop(c);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+}
+
+#[test]
+fn split_holds_watermark_until_every_branch_is_written() {
+    // A single source batch fans across two branches; the batch resolves
+    // Delivered only once BOTH branches' chunks are durably written — the
+    // multi-sink at-least-once contract, straight out of the shared AckRef.
+    let (sub_q, mut sub_rx) = shard_queues(1, 64);
+    let (key_q, mut key_rx) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+
+    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let sub = split.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+    );
+    let key = split.add::<KeyF, _, _>(
+        KeyEncoder,
+        ToZero,
+        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+    );
+    let mut c = split
+        .route(move |e: LogEvent<'_>, out| {
+            if e.key.starts_with('a') {
+                out.emit(sub, SubEvent { chunk: e.body });
+            } else {
+                out.emit(
+                    key,
+                    KeyEvent {
+                        key: e.key.as_bytes(),
+                    },
+                );
+            }
+        })
+        .build();
+
+    let bufs = payloads(&["a:xa", "k:xk"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    drop(batch);
+
+    // Deliver only the SubEvent branch: the KeyEvent branch still holds an ack
+    // clone of the same source batch, so the watermark must NOT advance.
+    while let Ok(chunk) = sub_rx[0].try_recv() {
+        chunk.acks.deliver();
+    }
+    assert!(
+        ack_rx.try_recv().is_err(),
+        "batch stays unresolved while a branch has not written"
+    );
+
+    // Deliver the KeyEvent branch too: the last clone drops and it resolves.
+    while let Ok(chunk) = key_rx[0].try_recv() {
+        chunk.acks.deliver();
+    }
+    assert_eq!(
+        ack_rx
+            .try_recv()
+            .expect("batch resolves once all branches wrote")
+            .status,
+        AckStatus::Delivered
+    );
+}
+
+#[test]
+fn split_one_branch_failure_fails_the_whole_batch() {
+    // Worst-status merge: if any branch's write is abandoned (its chunk's
+    // AckSet drops undelivered), the source batch resolves Failed so its
+    // offsets never commit — even though the other branch wrote successfully.
+    let (sub_q, mut sub_rx) = shard_queues(1, 64);
+    let (key_q, mut key_rx) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+
+    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let sub = split.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+    );
+    let key = split.add::<KeyF, _, _>(
+        KeyEncoder,
+        ToZero,
+        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+    );
+    let mut c = split
+        .route(move |e: LogEvent<'_>, out| {
+            if e.key.starts_with('a') {
+                out.emit(sub, SubEvent { chunk: e.body });
+            } else {
+                out.emit(
+                    key,
+                    KeyEvent {
+                        key: e.key.as_bytes(),
+                    },
+                );
+            }
+        })
+        .build();
+
+    let bufs = payloads(&["a:xa", "k:xk"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    drop(batch);
+
+    // The SubEvent branch writes durably...
+    while let Ok(chunk) = sub_rx[0].try_recv() {
+        chunk.acks.deliver();
+    }
+    // ...but the KeyEvent branch's write is abandoned (chunk dropped undelivered).
+    while let Ok(chunk) = key_rx[0].try_recv() {
+        drop(chunk);
+    }
+    assert_eq!(
+        ack_rx.try_recv().expect("batch resolves").status,
+        AckStatus::Failed,
+        "a single branch's abandoned write must fail the whole batch"
+    );
 }
 
 // ---- metrics ------------------------------------------------------------------

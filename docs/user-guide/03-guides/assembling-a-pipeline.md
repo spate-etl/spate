@@ -111,9 +111,11 @@ backpressure sizing rule — see
 [Backpressure](../02-concepts/03-backpressure.md) and
 [docs/DESIGN.md](../../DESIGN.md) § Backpressure before raising it.
 
-Calling `.sink` twice is an error (`BuildError::SinkAlreadySet`): the slot
-is single-occupancy so multi-output routing can arrive later as an additive
-API.
+`.sink(bundle)` is sugar for `.add_sink("default", bundle)`, so calling it
+twice is an error (`BuildError::DuplicateSinkName`). A pipeline that writes
+to several destinations installs each under its own name with
+`.add_sink(name, bundle)` and routes to them with the chain's split terminal —
+see [Multi-sink split](../02-concepts/06-multi-sink.md).
 
 ## Step 4: `.chains(|ctx| ...)` — one chain per pipeline thread
 

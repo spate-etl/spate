@@ -234,6 +234,8 @@ mod basics;
 mod distributed_check;
 #[path = "container/distributed_parity.rs"]
 mod distributed_parity;
+#[path = "container/multi_table.rs"]
+mod multi_table;
 #[cfg(feature = "uuid")]
 #[path = "container/native_e2e.rs"]
 mod native_e2e;

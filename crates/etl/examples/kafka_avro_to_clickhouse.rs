@@ -102,7 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
     // The connector turns its section into everything the builder needs:
     // writer, per-shard replica endpoints, pool tuning, readiness probe.
-    let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    let sink =
+        etl::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
 
     // Opt-in fail-fast schema validation (`validate_schema: names|full` in
     // the YAML): checks the configured columns against every replica's

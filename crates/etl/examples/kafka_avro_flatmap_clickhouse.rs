@@ -185,7 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `format: native` fetches `system.columns` and hands the encoder the
     // real column types (so `batch_ts_ms`'s `DateTime64(3)` is laid out as an
     // Int64). The encoder is `Clone`: the terminal stage mints one per shard.
-    let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    let sink =
+        etl::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.
     pipeline.block_on(sink.validate_distributed())?;

@@ -72,6 +72,7 @@ use super::chain::{
     TypedChain,
 };
 use super::handoff::{ChunkConfig, SinkHandoff};
+use super::split::{ErasedBranch, Sink, SinkCtx, SplitEmitter, SplitTerminal, new_branch};
 use super::{Collector, Emitter, RunnableChain};
 use crate::backpressure::InflightBudget;
 use crate::deser::{Deserializer, Owned, RecFamily};
@@ -509,6 +510,24 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
             handoff_meter,
         }
     }
+
+    /// Terminate the chain into a **split sink**: route each record to exactly
+    /// one of several typed sink branches (each its own table/schema/encoder),
+    /// declared with [`SplitBuilder::add`] and dispatched by the closure passed
+    /// to [`SplitBuilder::route`]. `cfg` is the per-branch chunking; `unmatched`
+    /// is the policy for a record that reaches no branch — [`ErrorPolicy::Fail`]
+    /// (the operator default) stops the pipeline, [`ErrorPolicy::Skip`] drops it
+    /// and counts `etl_operator_records_dropped_total{reason="unrouted"}`.
+    #[must_use]
+    pub fn split(self, cfg: ChunkConfig, unmatched: ErrorPolicy) -> SplitBuilder<DF, CurF, D, P> {
+        SplitBuilder {
+            builder: self,
+            cfg,
+            unmatched,
+            branches: Vec::new(),
+            next_idx: 0,
+        }
+    }
 }
 
 /// Closure-friendly transforms for chains whose current records are owned.
@@ -688,6 +707,143 @@ where
             ops,
             spec.builder.deser_policy,
             spec.builder.metrics.as_ref().map(|m| Arc::clone(&m.deser)),
+        ))
+    }
+}
+
+/// Accumulates split-sink branches before the routing closure is supplied.
+/// Built by [`ChainBuilder::split`]; each [`add`](Self::add) declares one
+/// destination and hands back a typed handle, then [`route`](Self::route)
+/// takes the closure that dispatches to them.
+pub struct SplitBuilder<DF: RecFamily, CurF: RecFamily, D, P> {
+    builder: ChainBuilder<DF, CurF, D, P>,
+    cfg: ChunkConfig,
+    unmatched: ErrorPolicy,
+    branches: Vec<Box<dyn ErasedBranch>>,
+    next_idx: usize,
+}
+
+impl<DF: RecFamily, CurF: RecFamily, D, P> std::fmt::Debug for SplitBuilder<DF, CurF, D, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitBuilder")
+            .field("branches", &self.branches.len())
+            .field("unmatched", &self.unmatched)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
+    /// Declare one destination branch of family `F` and return its typed,
+    /// `Copy` [`Sink<F>`] handle. `sink` comes from
+    /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink); `encoder`/`router`
+    /// are that table's, exactly as for [`ChainBuilder::sink`]. The declaration
+    /// order fixes the handle indices; call once per destination, then
+    /// [`route`](Self::route).
+    #[must_use = "a dropped Sink<F> handle leaves its branch permanently unreachable"]
+    pub fn add<F, E, R>(&mut self, encoder: E, router: R, sink: SinkCtx) -> Sink<F>
+    where
+        F: RecFamily + 'static,
+        E: RowEncoder<F> + Clone + Send + 'static,
+        R: RecordRouter<F> + 'static,
+    {
+        let idx = self.next_idx;
+        self.next_idx += 1;
+        // Per-branch operator meter, labelled by the sink name so each branch's
+        // `etl_operator_*` series is distinct.
+        let meter = OpMeterSlot(OpMeter::new(self.builder.metrics.as_ref().map(|m| {
+            let labels = ComponentLabels::new(
+                m.pipeline.clone(),
+                format!("{}.sink.{}", m.component, sink.name),
+                "sink_handoff",
+            );
+            Arc::new(OperatorMetrics::new(&labels))
+        })));
+        let component: Arc<str> = Arc::from(format!("sink.{}", sink.name));
+        let branch = new_branch::<F, E, R>(
+            encoder,
+            router,
+            sink.queues,
+            sink.budget,
+            self.cfg,
+            meter,
+            component,
+        );
+        self.branches.push(branch);
+        Sink::new(idx)
+    }
+
+    /// Supply the routing closure (classify + extract per record in one
+    /// `match`) and finish the split. The closure emits each record to exactly
+    /// one branch via [`SplitEmitter::emit`]; emitting to none invokes the
+    /// `unmatched` policy from [`ChainBuilder::split`].
+    #[must_use]
+    pub fn route<G>(self, route: G) -> RoutedSplit<DF, CurF, D, P, G>
+    where
+        G: for<'buf> FnMut(CurF::Rec<'buf>, &mut SplitEmitter<'_>) + Send + 'static,
+    {
+        let handoff_meter = meter_for(&self.builder.metrics, self.builder.stage_idx, "split");
+        RoutedSplit {
+            builder: self.builder,
+            unmatched: self.unmatched,
+            branches: self.branches,
+            route,
+            handoff_meter,
+        }
+    }
+}
+
+/// A split-terminated chain, ready to [`build`](Self::build). Not `Clone` —
+/// the branches are built once; stamp identical per-thread chains by
+/// re-running the `chains` factory closure (as the pipeline builder does).
+pub struct RoutedSplit<DF: RecFamily, CurF: RecFamily, D, P, G> {
+    builder: ChainBuilder<DF, CurF, D, P>,
+    unmatched: ErrorPolicy,
+    branches: Vec<Box<dyn ErasedBranch>>,
+    route: G,
+    handoff_meter: OpMeterSlot,
+}
+
+impl<DF: RecFamily, CurF: RecFamily, D, P, G> std::fmt::Debug for RoutedSplit<DF, CurF, D, P, G> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoutedSplit")
+            .field("branches", &self.branches.len())
+            .field("unmatched", &self.unmatched)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<DF, CurF, D, P, G> RoutedSplit<DF, CurF, D, P, G>
+where
+    DF: RecFamily,
+    CurF: RecFamily,
+    D: Deserializer<DF> + 'static,
+    G: for<'buf> FnMut(CurF::Rec<'buf>, &mut SplitEmitter<'_>) + Send + 'static,
+    P: Assemble<SplitTerminal<CurF, G>>,
+    P::Out: for<'buf> Collector<<DF as RecFamily>::Rec<'buf>> + StageLifecycle + Send + 'static,
+{
+    /// Build one chain instance whose terminal is the split sink.
+    #[must_use]
+    pub fn build(self) -> Box<dyn RunnableChain> {
+        let RoutedSplit {
+            builder,
+            unmatched,
+            branches,
+            route,
+            handoff_meter,
+        } = self;
+        let term = SplitTerminal::new(
+            route,
+            branches,
+            unmatched,
+            handoff_meter,
+            Arc::from("split"),
+        );
+        let ops = builder.parts.assemble(term);
+        Box::new(TypedChain::<DF, D, _>::new(
+            builder.deser,
+            ops,
+            builder.deser_policy,
+            builder.metrics.as_ref().map(|m| Arc::clone(&m.deser)),
         ))
     }
 }

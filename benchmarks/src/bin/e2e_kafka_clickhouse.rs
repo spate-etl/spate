@@ -285,7 +285,7 @@ fn spawn_and_measure<MK>(
         io.handle(),
     );
     let sink = SinkRuntime {
-        queues: queues.clone(),
+        queues: vec![queues.clone()],
         drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
         probe: None,
     };

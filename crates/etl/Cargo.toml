@@ -75,6 +75,10 @@ required-features = ["full"]
 name = "kafka_avro_flatmap_clickhouse"
 required-features = ["full", "avro-fast"]
 
+[[example]]
+name = "multi_table_split"
+required-features = ["full", "avro-fast"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]

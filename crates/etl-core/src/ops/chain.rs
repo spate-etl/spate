@@ -56,6 +56,7 @@ pub(crate) struct OpMeter {
     records_out: u64,
     filtered: u64,
     skipped: u64,
+    unrouted: u64,
     record_errors: u64,
 }
 
@@ -93,6 +94,11 @@ impl OpMeter {
     }
 
     #[inline(always)]
+    pub(crate) fn unrouted(&mut self) {
+        self.unrouted += 1;
+    }
+
+    #[inline(always)]
     pub(crate) fn record_error(&mut self) {
         self.record_errors += 1;
     }
@@ -106,6 +112,9 @@ impl OpMeter {
             if self.skipped > 0 {
                 h.skipped(self.skipped);
             }
+            if self.unrouted > 0 {
+                h.unrouted(self.unrouted);
+            }
             if self.record_errors > 0 {
                 h.errors(ErrorClass::RecordLevel, self.record_errors);
             }
@@ -114,6 +123,7 @@ impl OpMeter {
         self.records_out = 0;
         self.filtered = 0;
         self.skipped = 0;
+        self.unrouted = 0;
         self.record_errors = 0;
     }
 }

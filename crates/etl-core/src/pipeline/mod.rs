@@ -82,11 +82,14 @@ pub use crate::sink::DrainReport;
 /// Built by the sink layer (`SinkPool`) or by tests; the runtime is
 /// deliberately ignorant of worker internals.
 pub struct SinkRuntime {
-    /// Sending side of the per-shard chunk queues (the runtime only uses
-    /// capacity introspection; the chain's terminal stage holds clones).
-    pub queues: ShardQueues,
-    /// Drain the sink: flush what's pending within the budget, fail the
-    /// acknowledgements of anything abandoned, and report.
+    /// Sending side of the per-shard chunk queues, one entry per installed
+    /// sink (the runtime only uses capacity introspection for the
+    /// backpressure resume gate; the chain's terminal stage holds clones).
+    /// A single-sink pipeline has one entry.
+    pub queues: Vec<ShardQueues>,
+    /// Drain the sinks: flush what's pending within the budget, fail the
+    /// acknowledgements of anything abandoned, and report. For multi-sink
+    /// pipelines this is the composed hook that drains every sink.
     pub drain: SinkDrainFn,
     /// Optional connectivity probe (e.g. `SinkPool::probe_all`). The
     /// runtime probes at startup and then periodically, driving the

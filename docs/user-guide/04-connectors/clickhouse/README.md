@@ -10,11 +10,14 @@ Construct it from the pipeline's opaque section; the result is a
 `SinkBundle` that drops straight into the builder:
 
 ```rust
-let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+let sink = etl::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
 // optional pre-flight — see the schema validation guide
 let schema = pipeline.block_on(sink.validate_schema())?;
 let pipeline = pipeline.sink(sink)?;
 ```
+
+To write to **several tables** from one pipeline (one per record kind), see
+[multi-table split](./multi-table.md).
 
 ## Configuration
 
@@ -148,6 +151,8 @@ keeps its connections warm. Manual assemblies hand `probe_fn()` to
 
 ## Related
 
+- [Multi-table split](./multi-table.md) — write to one table per record kind
+  from a single pipeline (the `sinks:` map + the split terminal).
 - [Native format](./native-format.md) — the opt-in columnar
   `format: native`: when to use it, the supported type matrix, and the
   measured trade-off (server CPU/wire vs client CPU).

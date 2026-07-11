@@ -314,7 +314,8 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         },
         source: ComponentConfig::new("fake", serde_yaml::Value::Null),
         deserializer: None,
-        sink: ComponentConfig::new("fake", serde_yaml::Value::Null),
+        sink: Some(ComponentConfig::new("fake", serde_yaml::Value::Null)),
+        sinks: None,
     }
 }
 

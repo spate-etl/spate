@@ -14,7 +14,7 @@ the connector's factory (see
 | Connector | Role | Crate | Feature on `etl` | Config tag |
 |---|---|---|---|---|
 | [Kafka](kafka.md) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
-| [ClickHouse](clickhouse/README.md) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` |
+| [ClickHouse](clickhouse/README.md) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](clickhouse/multi-table.md)) |
 | [Avro](avro/README.md) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
 | [Memory / Capture](memory.md) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 

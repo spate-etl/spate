@@ -1,0 +1,85 @@
+# Multi-sink split: Kafka → Avro (borrowed) → flat_map → split into one
+# ClickHouse table per record kind. The `sinks:` map replaces `sink:` — each
+# entry is an ordinary single-key connector section, keyed by the name the
+# chain resolves via `ctx.sink("<name>")`.
+
+pipeline:
+  name: metric-split
+  io_threads: 2
+
+checkpoint:
+  interval: 5s
+  max_pending_batches: 1024
+  drain_timeout: 25s
+
+backpressure:
+  max_inflight_bytes: 1GiB
+
+metrics:
+  exporter: prometheus
+  listen: 0.0.0.0:9090
+
+source:
+  kafka:
+    brokers: ${KAFKA_BROKERS:-localhost:9092}
+    topic: ${KAFKA_TOPIC:-metric-batches}
+    group_id: ${KAFKA_GROUP:-metric-split-etl}
+    commit_interval: 5s
+    rdkafka:
+      auto.offset.reset: earliest
+
+deserializer:
+  avro:
+    mode: raw
+    schema:
+      inline: |
+        {"type":"record","name":"MetricBatch","fields":[
+          {"name":"host","type":"string"},
+          {"name":"ts_ms","type":"long"},
+          {"name":"readings","type":{"type":"array","items":
+            {"type":"record","name":"Reading","fields":[
+              {"name":"kind","type":"string"},
+              {"name":"name","type":"string"},
+              {"name":"value","type":"long"},
+              {"name":"text","type":"string"}]}}}]}
+
+# One sink per destination table. Each is a full ClickHouse sink section — its
+# own columns, format, shards, and batch/linger — so per-table part sizing is
+# tuned independently.
+sinks:
+  gauge:
+    clickhouse:
+      table: ${CLICKHOUSE_GAUGE_TABLE:-metrics_gauge}
+      columns: [host, ts_ms, name, value]
+      format: native
+      validate_schema: full
+      shards:
+        - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      user: ${CLICKHOUSE_USER:-default}
+      password: ${CLICKHOUSE_PASSWORD:-}
+      batch:
+        max_rows: 500000
+        max_bytes: 128MiB
+        linger: 1s
+      inflight:
+        max_per_shard: 2
+
+  text:
+    clickhouse:
+      table: ${CLICKHOUSE_TEXT_TABLE:-metrics_text}
+      columns: [host, ts_ms, name, text]
+      format: native
+      validate_schema: full
+      shards:
+        - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      user: ${CLICKHOUSE_USER:-default}
+      password: ${CLICKHOUSE_PASSWORD:-}
+      # A low-volume table: linger longer to build bigger parts. The cost is
+      # checkpoint lag — a Kafka batch with even one text reading holds its
+      # offsets until this fires (docs/user-guide/02-concepts/06-multi-sink.md).
+      batch:
+        max_rows: 500000
+        max_bytes: 128MiB
+        linger: 5s
+      inflight:
+        max_per_shard: 2

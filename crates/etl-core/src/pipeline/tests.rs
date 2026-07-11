@@ -30,7 +30,7 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
     });
     (
         SinkRuntime {
-            queues,
+            queues: vec![queues],
             drain,
             probe: None,
         },
@@ -499,7 +499,7 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
         })
     });
     let sink = SinkRuntime {
-        queues,
+        queues: vec![queues],
         drain,
         probe: None,
     };

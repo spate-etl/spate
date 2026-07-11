@@ -306,8 +306,13 @@ impl Harness {
                 .expect("avro")
                 .build_serde::<Event>()
                 .expect("apache builder");
-        let sink =
-            etl::clickhouse::config::from_component_config(&pipeline.config().sink).expect("sink");
+        let sink = etl::clickhouse::config::from_component_config(
+            pipeline
+                .config()
+                .sink_config("default")
+                .expect("sink config"),
+        )
+        .expect("sink");
 
         let chunk_bytes = params.chunk_bytes;
         let runtime = pipeline

@@ -61,7 +61,9 @@ pub(crate) struct DriverContext<L> {
     pub chain: Box<dyn RunnableChain>,
     pub bp: WatermarkController,
     pub budget: Arc<InflightBudget>,
-    pub queues: ShardQueues,
+    /// Introspection clones of every installed sink's shard queues; the
+    /// backpressure resume gate requires *all* of them below the low ratio.
+    pub queues: Vec<ShardQueues>,
     pub health: Arc<HealthState>,
     pub bp_metrics: BackpressureMetrics,
     pub source_metrics: SourceMetrics,
@@ -151,7 +153,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 
         // 2. Backpressure transitions. Pause/resume are *requests* — only
         // the controller thread touches the Source.
-        let queues_low = queues.all_below(params.queue_low_ratio);
+        let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
         if let Some(t) = bp.tick(&budget, queues_low) {
             let owned: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
             apply_transition(t, &owned, &events, &bp_metrics, &mut pause_started);
@@ -180,67 +182,82 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         next_lane += 1;
 
         let owned_ids: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
-        let poll_started = Instant::now();
-        let polled = lanes[lane_idx].poll(params.max_records, params.poll_timeout);
-        source_metrics.poll_duration(poll_started.elapsed());
+        // The poll result borrows the lane's buffers, so the lanes cannot
+        // move into the parking loop until this block ends; the fatal is
+        // latched here and acted on after.
+        let fatal_reported = {
+            let poll_started = Instant::now();
+            let polled = lanes[lane_idx].poll(params.max_records, params.poll_timeout);
+            source_metrics.poll_duration(poll_started.elapsed());
 
-        match polled {
-            Ok(Some(mut batch)) => {
-                last_data = Instant::now();
-                flushed_since_data = false;
-                let mut counting = CountingBatch::new(&mut batch);
-                let outcome = drive_batch(
-                    chain.as_mut(),
-                    &mut counting,
-                    &mut bp,
-                    &budget,
-                    &queues,
-                    &params,
-                    &events,
-                    &owned_ids,
-                    &health,
-                    &bp_metrics,
-                    &mut pause_started,
-                    &shutdown,
-                );
-                source_metrics.batch(counting.records, counting.bytes);
-                if let Err(error) = outcome {
+            let mut fatal_reported = false;
+            match polled {
+                Ok(Some(mut batch)) => {
+                    last_data = Instant::now();
+                    flushed_since_data = false;
+                    let mut counting = CountingBatch::new(&mut batch);
+                    let outcome = drive_batch(
+                        chain.as_mut(),
+                        &mut counting,
+                        &mut bp,
+                        &budget,
+                        &queues,
+                        &params,
+                        &events,
+                        &owned_ids,
+                        &health,
+                        &bp_metrics,
+                        &mut pause_started,
+                        &shutdown,
+                    );
+                    source_metrics.batch(counting.records, counting.bytes);
+                    if let Err(error) = outcome {
+                        let _ = events.send(DriverEvent::Fatal {
+                            thread: params.thread,
+                            error,
+                        });
+                        fatal_reported = true;
+                    }
+                }
+                Ok(None) => {
+                    idle_flush(
+                        chain.as_mut(),
+                        &mut last_data,
+                        &mut flushed_since_data,
+                        params.idle_flush,
+                        &mut bp,
+                        &events,
+                        params.thread,
+                    );
+                }
+                Err(e) if is_fatal(&e) => {
                     let _ = events.send(DriverEvent::Fatal {
                         thread: params.thread,
-                        error,
+                        error: FatalError {
+                            component: format!("driver-{}", params.thread),
+                            reason: format!("source poll failed: {e}"),
+                        },
                     });
-                    return DriverExit::Failed;
+                    fatal_reported = true;
+                }
+                Err(e) => {
+                    crate::rate_limited_warn!(
+                        POLL_ERROR_WARN,
+                        thread = params.thread,
+                        error = %e,
+                        "retryable source poll error"
+                    );
                 }
             }
-            Ok(None) => {
-                idle_flush(
-                    chain.as_mut(),
-                    &mut last_data,
-                    &mut flushed_since_data,
-                    params.idle_flush,
-                    &mut bp,
-                    &events,
-                    params.thread,
-                );
-            }
-            Err(e) if is_fatal(&e) => {
-                let _ = events.send(DriverEvent::Fatal {
-                    thread: params.thread,
-                    error: FatalError {
-                        component: format!("driver-{}", params.thread),
-                        reason: format!("source poll failed: {e}"),
-                    },
-                });
-                return DriverExit::Failed;
-            }
-            Err(e) => {
-                crate::rate_limited_warn!(
-                    POLL_ERROR_WARN,
-                    thread = params.thread,
-                    error = %e,
-                    "retryable source poll error"
-                );
-            }
+            fatal_reported
+        };
+        if fatal_reported {
+            // Dropping the chain closes this thread's shard-queue senders
+            // and fails any parked acks (the terminal's Drop contract), so
+            // nothing unwritten can commit while we wait out the
+            // controller's drain choreography.
+            drop(chain);
+            return park_until_shutdown(&control, lanes, &health, params.thread);
         }
     }
 }
@@ -248,6 +265,50 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 fn is_fatal(e: &SourceError) -> bool {
     let SourceError::Client { class, .. } = e;
     *class == ErrorClass::Fatal
+}
+
+/// A fatal thread must not vanish before the drain choreography: the
+/// controller sizes its shutdown [`DrainBarrier`](crate::source::DrainBarrier)
+/// by thread count, so a driver that returned early would force every
+/// fatal-initiated shutdown to burn the full drain timeout waiting on an
+/// arrival that can never come. Park here — chain already dropped, lanes
+/// released on request — until `Shutdown` arrives, then join the barrier.
+fn park_until_shutdown<L: SourceLane>(
+    control: &crossbeam_channel::Receiver<ThreadControl<L>>,
+    mut lanes: Vec<L>,
+    health: &HealthState,
+    thread: usize,
+) -> DriverExit {
+    loop {
+        health.heartbeat(thread);
+        match control.recv_timeout(Duration::from_millis(50)) {
+            // A lane assigned in the fatal→shutdown race: accept and drop
+            // it; the failure is already latched, nothing polls it again.
+            Ok(ThreadControl::AddLane(lane)) => drop(lane),
+            Ok(ThreadControl::StopLanes {
+                lanes: stop,
+                barrier,
+                ..
+            }) => {
+                let mut stopped = 0usize;
+                lanes.retain(|l| {
+                    let goes = stop.contains(&l.id());
+                    stopped += usize::from(goes);
+                    !goes
+                });
+                for _ in 0..stopped {
+                    barrier.arrive();
+                }
+            }
+            Ok(ThreadControl::Shutdown { barrier, .. }) => {
+                lanes.clear();
+                barrier.arrive();
+                return DriverExit::Failed;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return DriverExit::Failed,
+        }
+    }
 }
 
 /// Push one batch through the chain, retrying blocked pushes with the
@@ -268,7 +329,7 @@ fn drive_batch(
     batch: &mut dyn PayloadBatch<'_>,
     bp: &mut WatermarkController,
     budget: &InflightBudget,
-    queues: &ShardQueues,
+    queues: &[ShardQueues],
     params: &DriverParams,
     events: &crossbeam_channel::Sender<DriverEvent>,
     owned: &[LaneId],
@@ -311,7 +372,8 @@ fn drive_batch(
                 // counted by the chain and simply retried.
                 if reason == BlockReason::Capacity {
                     bp.on_send_rejected();
-                    if let Some(t) = bp.tick(budget, queues.all_below(params.queue_low_ratio)) {
+                    let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
+                    if let Some(t) = bp.tick(budget, queues_low) {
                         apply_transition(t, owned, events, bp_metrics, pause_started);
                     }
                 }

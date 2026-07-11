@@ -11,15 +11,17 @@
 mod builder;
 mod chain;
 mod handoff;
+mod split;
 #[cfg(test)]
 mod tests;
 
 pub use builder::{
     Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapPart, Root,
-    SinkedChain, TryMapPart, chain, chain_owned,
+    RoutedSplit, SinkedChain, SplitBuilder, TryMapPart, chain, chain_owned,
 };
 pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, TypedChain};
 pub use handoff::{ChunkConfig, SinkHandoff};
+pub use split::{Sink, SinkCtx, SplitEmitter, SplitTerminal};
 
 use crate::deser::RecFamily;
 use crate::error::FatalError;

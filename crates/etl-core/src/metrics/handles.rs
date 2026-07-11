@@ -319,6 +319,7 @@ pub struct OperatorMetrics {
     records_out: Counter,
     dropped_filtered: Counter,
     dropped_skip: Counter,
+    dropped_unrouted: Counter,
     err_retryable: Counter,
     err_record: Counter,
     err_fatal: Counter,
@@ -340,6 +341,11 @@ impl OperatorMetrics {
                 names::OPERATOR_RECORDS_DROPPED_TOTAL,
                 names::L_REASON,
                 "skip_policy",
+            ),
+            dropped_unrouted: labels.counter1(
+                names::OPERATOR_RECORDS_DROPPED_TOTAL,
+                names::L_REASON,
+                "unrouted",
             ),
             err_retryable: labels.counter1(
                 names::OPERATOR_ERRORS_TOTAL,
@@ -378,6 +384,13 @@ impl OperatorMetrics {
     #[inline]
     pub fn skipped(&self, n: u64) {
         self.dropped_skip.increment(n);
+    }
+
+    /// Count records dropped because they matched no split-sink branch and
+    /// the split's `unmatched` policy is `Skip`.
+    #[inline]
+    pub fn unrouted(&self, n: u64) {
+        self.dropped_unrouted.increment(n);
     }
 
     /// Count user-code errors of one taxonomy class.

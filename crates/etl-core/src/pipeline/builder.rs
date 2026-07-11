@@ -14,7 +14,7 @@
 //! ```ignore
 //! let pipeline = Pipeline::from_path(Path::new("pipeline.yaml"))?;
 //! let source = MySource::from_component_config(&pipeline.config().source)?;
-//! let sink = my_connector::from_component_config(&pipeline.config().sink)?;
+//! let sink = my_connector::from_component_config(pipeline.config().sink_config("default")?)?;
 //! let report = pipeline
 //!     .sink(sink)?
 //!     .chains(move |ctx| {
@@ -59,9 +59,11 @@ use super::runtime::{
 use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig};
 use crate::metrics::{ComponentLabels, MetricsHandle, SinkShardMetrics};
-use crate::ops::RunnableChain;
+use crate::ops::{RunnableChain, SinkCtx};
 use crate::pipeline::ExitReport;
-use crate::sink::{ShardQueues, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn, shard_queues};
+use crate::sink::{
+    DrainReport, ShardQueues, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn, shard_queues,
+};
 use crate::source::Source;
 use crate::telemetry::{self, LogFormat};
 use std::path::Path;
@@ -83,11 +85,12 @@ pub enum BuildError {
     /// The sink bundle's topology or labels are unusable.
     #[error("sink: {0}")]
     Sink(String),
-    /// [`Pipeline::sink`] was called twice.
-    #[error("a sink is already installed")]
-    SinkAlreadySet,
+    /// [`Pipeline::add_sink`] was called twice with the same name (a second
+    /// bare [`Pipeline::sink`] collides on the reserved `"default"` name).
+    #[error("a sink named {0:?} is already installed")]
+    DuplicateSinkName(String),
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a sink.
-    #[error("no sink installed (call Pipeline::sink first)")]
+    #[error("no sink installed (call Pipeline::sink or Pipeline::add_sink first)")]
     MissingSink,
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a chain factory.
     #[error("no chain factory installed (call Pipeline::chains first)")]
@@ -127,13 +130,48 @@ pub enum PipelineError {
 pub struct ChainCtx {
     /// Zero-based pipeline thread index.
     pub thread: usize,
-    /// This thread's clone of the shard-queue senders.
+    /// This thread's clone of the shard-queue senders for the **first**
+    /// installed sink — the back-compat handle for single-sink pipelines
+    /// (`.sink(...)`). Multi-sink pipelines resolve each branch's queues by
+    /// name via [`sink`](Self::sink) instead.
     pub queues: ShardQueues,
     /// The shared in-flight byte budget.
     pub budget: Arc<InflightBudget>,
     /// The pipeline name — [`ChainBuilder::with_metrics`](crate::ops::ChainBuilder::with_metrics)'s
     /// first argument.
     pub pipeline: String,
+    /// This thread's clone of every installed sink's queues, keyed by the
+    /// name passed to [`Pipeline::add_sink`]. Resolved through
+    /// [`sink`](Self::sink); private so the drop-ordering contract (the
+    /// clones die with the driver) stays enforced by construction.
+    named: Vec<(String, ShardQueues)>,
+}
+
+impl ChainCtx {
+    /// The named sink's handles (name, shard queues, shared in-flight budget)
+    /// for a split-terminal branch — pass the result straight to
+    /// [`SplitBuilder::add`](crate::ops::SplitBuilder::add). The single-sink
+    /// `.sink()` sugar installs its sink under the name `"default"`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sink was installed under `name` — a construction-time
+    /// wiring error (the chain factory runs once per thread, cold path,
+    /// before any data flows), surfaced the same way a bad sink topology is.
+    #[must_use]
+    pub fn sink(&self, name: &str) -> SinkCtx {
+        let queues = self
+            .named
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| {
+                let known: Vec<&str> = self.named.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("ChainCtx::sink: no sink named {name:?} (installed sinks: {known:?})")
+            })
+            .1
+            .clone();
+        SinkCtx::new(name.to_string(), queues, Arc::clone(&self.budget))
+    }
 }
 
 /// Sink wiring knobs that live outside connector config.
@@ -178,16 +216,17 @@ pub struct Pipeline {
     metrics: MetricsHandle,
     io: tokio::runtime::Runtime,
     budget: Arc<InflightBudget>,
-    sink: Option<SinkAssembly>,
+    sinks: Vec<(String, SinkAssembly)>,
     chains: Option<ChainFactoryFn>,
     options: RuntimeOptions,
 }
 
 impl std::fmt::Debug for Pipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sink_names: Vec<&str> = self.sinks.iter().map(|(n, _)| n.as_str()).collect();
         f.debug_struct("Pipeline")
             .field("pipeline", &self.config.pipeline.name)
-            .field("sink", &self.sink.is_some())
+            .field("sinks", &sink_names)
             .field("chains", &self.chains.is_some())
             .finish_non_exhaustive()
     }
@@ -243,7 +282,7 @@ impl Pipeline {
             metrics,
             io,
             budget: Arc::new(InflightBudget::new()),
-            sink: None,
+            sinks: Vec::new(),
             chains: None,
             options: RuntimeOptions::default(),
         })
@@ -283,29 +322,72 @@ impl Pipeline {
         self.io.block_on(future)
     }
 
-    /// Install the sink with default [`SinkOptions`]; see
-    /// [`sink_with`](Self::sink_with).
+    /// Install the single sink under the reserved name `"default"` with
+    /// default [`SinkOptions`] — the ergonomic path for single-sink
+    /// pipelines. Sugar for [`add_sink`](Self::add_sink)`("default", bundle)`.
     pub fn sink<B: SinkBundle>(self, bundle: B) -> Result<Self, BuildError> {
-        self.sink_with(bundle, SinkOptions::default())
+        self.add_sink_with("default", bundle, SinkOptions::default())
     }
 
-    /// Install the sink: builds the per-shard chunk queues, registers the
-    /// per-shard metrics (E2E basis from the config), spawns the
-    /// [`SinkPool`] workers on the I/O runtime, and wires the drain and
-    /// readiness probe.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError::SinkAlreadySet`] on a second call;
-    /// [`BuildError::Sink`] for an empty or ragged topology, label shapes
-    /// that do not match it, or a zero queue capacity.
+    /// [`sink`](Self::sink) with explicit [`SinkOptions`]. Sugar for
+    /// [`add_sink_with`](Self::add_sink_with)`("default", bundle, options)`.
     pub fn sink_with<B: SinkBundle>(
-        mut self,
+        self,
         bundle: B,
         options: SinkOptions,
     ) -> Result<Self, BuildError> {
-        if self.sink.is_some() {
-            return Err(BuildError::SinkAlreadySet);
+        self.add_sink_with("default", bundle, options)
+    }
+
+    /// Install a named sink with default [`SinkOptions`]; see
+    /// [`add_sink_with`](Self::add_sink_with). Call once per destination
+    /// table/stream; the chain's [`split`](crate::ops::ChainBuilder) terminal
+    /// resolves each branch's queues by this name via
+    /// [`ChainCtx::sink`](ChainCtx::sink).
+    pub fn add_sink<B: SinkBundle>(
+        self,
+        name: impl Into<String>,
+        bundle: B,
+    ) -> Result<Self, BuildError> {
+        self.add_sink_with(name, bundle, SinkOptions::default())
+    }
+
+    /// Install a named sink: builds the per-shard chunk queues, registers the
+    /// per-shard metrics (E2E basis from the config; the sink `name` becomes
+    /// the `component` label, so each sink's `etl_sink_*` series is distinct),
+    /// spawns the [`SinkPool`] workers on the I/O runtime, and wires the drain
+    /// and readiness probe. The named sinks share the one pipeline
+    /// [`InflightBudget`] and one backpressure controller (a stall on any sink
+    /// pauses the shared source).
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError::DuplicateSinkName`] when `name` is already installed;
+    /// [`BuildError::Sink`] for an empty or reserved name (`"sink"` is the
+    /// default sink's metric label), an empty or ragged topology, label
+    /// shapes that do not match it, or a zero queue capacity.
+    pub fn add_sink_with<B: SinkBundle>(
+        mut self,
+        name: impl Into<String>,
+        bundle: B,
+        options: SinkOptions,
+    ) -> Result<Self, BuildError> {
+        let sink_name = name.into();
+        if self.sinks.iter().any(|(n, _)| n == &sink_name) {
+            return Err(BuildError::DuplicateSinkName(sink_name));
+        }
+        if sink_name.is_empty() {
+            return Err(BuildError::Sink("sink name must be non-empty".into()));
+        }
+        // "default" maps to the historical component="sink" metric label, so
+        // a sink literally named "sink" would silently merge its etl_sink_*
+        // series with the default's. Reject it up front.
+        if sink_name == "sink" {
+            return Err(BuildError::Sink(
+                "the sink name \"sink\" is reserved (it is the default sink's \
+                 metric label); pick another name"
+                    .into(),
+            ));
         }
         if options.queue_capacity == 0 {
             return Err(BuildError::Sink("queue_capacity must be non-zero".into()));
@@ -328,9 +410,20 @@ impl Pipeline {
             )));
         }
 
-        let name = self.config.pipeline.name.clone();
+        let pipeline_name = self.config.pipeline.name.clone();
+        // The single-sink default keeps the historical `component="sink"`
+        // label; named sinks use their name so their series never collide.
+        let component = if sink_name == "default" {
+            "sink".to_string()
+        } else {
+            sink_name.clone()
+        };
         let (queues, receivers) = shard_queues(num_shards, options.queue_capacity);
-        let sink_labels = ComponentLabels::new(name.clone(), "sink", parts.component_type.clone());
+        let sink_labels = ComponentLabels::new(
+            pipeline_name.clone(),
+            component,
+            parts.component_type.clone(),
+        );
         let e2e_basis = metrics_settings(&self.config).e2e_basis;
         let shard_metrics: Vec<SinkShardMetrics> = replica_labels
             .iter()
@@ -351,14 +444,19 @@ impl Pipeline {
             parts.pool,
             Arc::clone(&self.budget),
             shard_metrics,
-            &name,
+            &pipeline_name,
             self.io.handle(),
         );
-        self.sink = Some(SinkAssembly {
-            queues,
-            drain: Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await })),
-            probe: parts.probe,
-        });
+        self.sinks.push((
+            sink_name,
+            SinkAssembly {
+                queues,
+                drain: Box::new(move |deadline| {
+                    Box::pin(async move { pool.drain(deadline).await })
+                }),
+                probe: parts.probe,
+            },
+        ));
         Ok(self)
     }
 
@@ -396,19 +494,39 @@ impl Pipeline {
         mut self,
         source: S,
     ) -> Result<PipelineRuntime<S>, BuildError> {
-        let assembly = self.sink.take().ok_or(BuildError::MissingSink)?;
+        if self.sinks.is_empty() {
+            return Err(BuildError::MissingSink);
+        }
         let mut factory = self.chains.take().ok_or(BuildError::MissingChains)?;
-        let queues = assembly.queues.clone();
+
+        // Decompose the installed sinks into: the per-thread named queue set
+        // (cloned into each ChainCtx), the introspection queues (the
+        // backpressure resume gate spans every sink), and the drain/probe
+        // hooks (composed into one of each for the runtime).
+        let mut intro_queues = Vec::with_capacity(self.sinks.len());
+        let mut drains = Vec::with_capacity(self.sinks.len());
+        let mut probes = Vec::new();
+        let mut named = Vec::with_capacity(self.sinks.len());
+        for (sink_name, assembly) in std::mem::take(&mut self.sinks) {
+            intro_queues.push(assembly.queues.clone());
+            named.push((sink_name, assembly.queues));
+            drains.push(assembly.drain);
+            if let Some(probe) = assembly.probe {
+                probes.push(probe);
+            }
+        }
+        let default_queues = named[0].1.clone();
         let budget = Arc::clone(&self.budget);
         let name = self.config.pipeline.name.clone();
         // This wrapper is the factory the runtime drops before the sink
-        // drain — the queue clone it captures dies exactly there.
+        // drain — the queue clones it captures die exactly there.
         let chains = move |thread: usize| {
             factory(ChainCtx {
                 thread,
-                queues: queues.clone(),
+                queues: default_queues.clone(),
                 budget: Arc::clone(&budget),
                 pipeline: name.clone(),
+                named: named.clone(),
             })
         };
         Ok(PipelineRuntime::new(
@@ -416,9 +534,9 @@ impl Pipeline {
             source,
             chains,
             SinkRuntime {
-                queues: assembly.queues,
-                drain: assembly.drain,
-                probe: assembly.probe,
+                queues: intro_queues,
+                drain: combine_drains(drains),
+                probe: combine_probes(probes),
             },
             self.budget,
         )
@@ -432,6 +550,57 @@ impl Pipeline {
     pub fn run<S: Source + 'static>(self, source: S) -> Result<ExitReport, PipelineError> {
         Ok(self.into_runtime(source)?.run()?)
     }
+}
+
+/// Compose per-sink drain hooks into one: drain every sink concurrently under
+/// the shared deadline and sum their reports, so a multi-sink drain respects
+/// one wall-clock budget instead of N sequential ones.
+fn combine_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
+    Box::new(move |deadline| {
+        Box::pin(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for drain in drains {
+                set.spawn(drain(deadline));
+            }
+            let mut total = DrainReport::default();
+            while let Some(res) = set.join_next().await {
+                match res {
+                    Ok(report) => {
+                        total.flushed += report.flushed;
+                        total.abandoned += report.abandoned;
+                    }
+                    // The panicked sink's counts are unknowable; its parked
+                    // acks still fail on drop, so at-least-once holds — but
+                    // the report is incomplete and must say so loudly.
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "a sink drain task panicked; its counts are missing \
+                         from the drain report"
+                    ),
+                }
+            }
+            total
+        })
+    })
+}
+
+/// Compose per-sink readiness probes into one: probe every sink and report
+/// connected only when all succeed (readiness is not a hot path, so the
+/// sequential short-circuit is fine).
+fn combine_probes(probes: Vec<SinkProbeFn>) -> Option<SinkProbeFn> {
+    if probes.is_empty() {
+        return None;
+    }
+    let probes = Arc::new(probes);
+    Some(Box::new(move || {
+        let probes = Arc::clone(&probes);
+        Box::pin(async move {
+            for probe in probes.iter() {
+                probe().await?;
+            }
+            Ok(())
+        })
+    }))
 }
 
 #[cfg(all(test, not(loom)))]
@@ -499,14 +668,52 @@ mod tests {
     }
 
     #[test]
-    fn second_sink_errors() {
+    fn duplicate_sink_name_errors() {
+        // A second bare `.sink()` collides on the reserved "default" name.
         let p = Pipeline::from_config(test_config(1))
             .expect("builder")
             .sink(null_sink(1))
             .expect("first sink");
         assert!(matches!(
             p.sink(null_sink(1)).err(),
-            Some(BuildError::SinkAlreadySet)
+            Some(BuildError::DuplicateSinkName(name)) if name == "default"
+        ));
+
+        // The same explicit name twice also collides.
+        let p = Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .add_sink("a", null_sink(1))
+            .expect("first");
+        assert!(matches!(
+            p.add_sink("a", null_sink(1)).err(),
+            Some(BuildError::DuplicateSinkName(name)) if name == "a"
+        ));
+    }
+
+    #[test]
+    fn distinct_named_sinks_install() {
+        Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .add_sink("a", null_sink(1))
+            .expect("first")
+            .add_sink("b", null_sink(2))
+            .expect("second install with a distinct name");
+    }
+
+    #[test]
+    fn reserved_and_empty_sink_names_error() {
+        // "sink" is the default sink's metric label — installing a sink under
+        // that name would silently merge the two series.
+        let p = Pipeline::from_config(test_config(1)).expect("builder");
+        assert!(matches!(
+            p.add_sink("sink", null_sink(1)).err(),
+            Some(BuildError::Sink(msg)) if msg.contains("reserved")
+        ));
+
+        let p = Pipeline::from_config(test_config(1)).expect("builder");
+        assert!(matches!(
+            p.add_sink("", null_sink(1)).err(),
+            Some(BuildError::Sink(msg)) if msg.contains("non-empty")
         ));
     }
 

@@ -169,6 +169,27 @@ For a **dedicated-server** ceiling (no client/server core contention), point the
 rig at an external cluster instead of the local container:
 `CLICKHOUSE_URL=http://host:8123 [CLICKHOUSE_USER=… CLICKHOUSE_PASSWORD=…]`.
 
+**Multi-table split vs. MV** ([study](./multi-table-split.mdx)) — three arms
+(`single_null` / `null_mv` / `split`) over a type-count sweep, ClickHouse pinned
+to 6 cores so the server is the binding constraint and the ETL has the host's
+remaining cores. `FRESH=1` recreates the container with the CPU cap; the CPU
+budget (CH 6 + ETL threads 6 + io 4 = 16 of 18) keeps both storage arms
+`sink`-bound — the validity precondition:
+
+```sh
+: > benchmarks/results/multi-table-split.jsonl
+# core sweep (recreates the 6-core container on the first invocation)
+FRESH=1 CLICKHOUSE_CPUS=6 DURATION_S=20 WARMUP_S=5 \
+  ARMS=single_null,null_mv,split TYPES_LIST=4,8,16 SKEWS=skewed LINGERS=1000 \
+  RESULTS=benchmarks/results/multi-table-split.jsonl \
+  cargo run -p benchmarks --release --bin multi_table_split
+# robustness: uniform mix (reuses the warm container)
+CLICKHOUSE_CPUS=6 DURATION_S=20 WARMUP_S=5 \
+  ARMS=single_null,null_mv,split TYPES_LIST=4,8,16 SKEWS=uniform LINGERS=1000 \
+  RESULTS=benchmarks/results/multi-table-split.jsonl \
+  cargo run -p benchmarks --release --bin multi_table_split
+```
+
 Superseded reference point: an earlier rate-limited E2E smoke (100k rec/s target,
 2026-07-05) recorded 89.4k rows/s against local containers. Its backing file
 (`e2e-local-smoke.jsonl`) no longer exists — it was replaced by the saturated rig

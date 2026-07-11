@@ -36,6 +36,24 @@ pub struct ChStats {
     pub async_flushes: f64,
     /// Mean rows per async flush — shows whether the server re-batched us.
     pub async_avg_rows: f64,
+
+    // ── Multi-table (MV-vs-split) fields; filled by `capture_multi` ──────
+    /// Whole-server INSERT-query CPU (µs) across the window — for the
+    /// `Null`+MV arm this *includes* the materialized views' fan-out CPU,
+    /// which the direct-split arm never pays. The headline offload signal.
+    pub server_insert_cpu_us: f64,
+    /// Rows actually stored across all target tables (`NewPart` rows) —
+    /// engine-agnostic to how they arrived (direct insert or via an MV).
+    pub target_rows: f64,
+    /// Materialized-view execution CPU (µs) — the work the MV arm does that
+    /// the split arm offloads to the ETL tier. Zero for the split arm.
+    pub mv_cpu_us: f64,
+    /// Materialized-view executions observed (`system.query_views_log`).
+    pub mv_executions: f64,
+    /// Rows merged in the window (`MergeParts`) — merge *cost*, not just count.
+    pub merged_rows: f64,
+    /// Total merge duration (ms) in the window.
+    pub merge_duration_ms: f64,
 }
 
 impl ChStats {
@@ -44,6 +62,17 @@ impl ChStats {
     pub fn cpu_us_per_row(&self) -> f64 {
         if self.written_rows > 0.0 {
             self.cpu_us / self.written_rows
+        } else {
+            0.0
+        }
+    }
+
+    /// Whole-server INSERT CPU (incl. MV fan-out) per stored target row — the
+    /// metric the MV-vs-split gate reads (0 when no rows landed).
+    #[must_use]
+    pub fn server_cpu_us_per_row(&self) -> f64 {
+        if self.target_rows > 0.0 {
+            self.server_insert_cpu_us / self.target_rows
         } else {
             0.0
         }
@@ -145,6 +174,103 @@ pub fn capture(
     ) {
         s.async_flushes = at(&r, 0);
         s.async_avg_rows = at(&r, 1);
+    }
+
+    s
+}
+
+/// Capture the MV-vs-split counters across a *set* of target tables: the
+/// whole-server INSERT CPU (which folds in materialized-view fan-out for the
+/// `Null`+MV arm), the rows/parts/merges actually stored across every target,
+/// and the materialized views' own execution cost. Same non-panicking,
+/// `since`-scoped contract as [`capture`].
+pub fn capture_multi(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    tables: &[String],
+    since: &str,
+) -> ChStats {
+    let _ = crate::docker::try_clickhouse_sql(host, port, user, password, "SYSTEM FLUSH LOGS");
+    let version = crate::docker::clickhouse_sql(host, port, user, password, "SELECT version()")
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_default();
+    let mut s = ChStats {
+        version,
+        ..ChStats::default()
+    };
+    let table_list = tables
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Whole-server INSERT CPU. No table filter: for the MV arm the fan-out
+    // runs *inside* the Null-table insert query, so its cost lands here.
+    if let Some(r) = scalar_row(
+        host,
+        port,
+        user,
+        password,
+        &format!(
+            "SELECT sum(ProfileEvents['OSCPUVirtualTimeMicroseconds']) \
+             FROM system.query_log \
+             WHERE type = 'QueryFinish' AND query_kind = 'Insert' \
+             AND event_time_microseconds >= toDateTime64('{since}', 3)"
+        ),
+    ) {
+        s.server_insert_cpu_us = at(&r, 0);
+    }
+
+    // Rows/parts/merges stored across every target table (engine-agnostic to
+    // how they arrived — direct split insert or MV fan-out).
+    if let Some(r) = scalar_row(
+        host,
+        port,
+        user,
+        password,
+        &format!(
+            "SELECT sumIf(rows, event_type = 'NewPart'), \
+             countIf(event_type = 'NewPart'), \
+             round(avgIf(rows, event_type = 'NewPart'), 1), \
+             round(avgIf(size_in_bytes, event_type = 'NewPart'), 1), \
+             countIf(event_type = 'MergeParts'), \
+             sumIf(rows, event_type = 'MergeParts'), \
+             sumIf(duration_ms, event_type = 'MergeParts') \
+             FROM system.part_log \
+             WHERE table IN ({table_list}) \
+             AND event_time_microseconds >= toDateTime64('{since}', 3)"
+        ),
+    ) {
+        s.target_rows = at(&r, 0);
+        s.parts_created = at(&r, 1);
+        s.avg_part_rows = at(&r, 2);
+        s.avg_part_bytes = at(&r, 3);
+        s.merges = at(&r, 4);
+        s.merged_rows = at(&r, 5);
+        s.merge_duration_ms = at(&r, 6);
+    }
+    // Keep the single-table fields consistent for shared report code.
+    s.written_rows = s.target_rows;
+    s.cpu_us = s.server_insert_cpu_us;
+
+    // Materialized-view execution cost — the work the split arm offloads.
+    // Absent (all zero) for the split arm, which runs no views.
+    if let Some(r) = scalar_row(
+        host,
+        port,
+        user,
+        password,
+        &format!(
+            "SELECT count(), \
+             sum(ProfileEvents['OSCPUVirtualTimeMicroseconds']) \
+             FROM system.query_views_log \
+             WHERE event_time_microseconds >= toDateTime64('{since}', 3)"
+        ),
+    ) {
+        s.mv_executions = at(&r, 0);
+        s.mv_cpu_us = at(&r, 1);
     }
 
     s

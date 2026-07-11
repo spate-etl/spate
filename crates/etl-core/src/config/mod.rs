@@ -73,6 +73,7 @@ pub use serde_yaml::Value as YamlValue;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -100,8 +101,16 @@ pub struct PipelineConfig {
     /// ready-made records need none.
     #[serde(default)]
     pub deserializer: Option<ComponentConfig>,
-    /// The sink component (opaque body).
-    pub sink: ComponentConfig,
+    /// Single sink component (opaque body) — sugar for the common one-sink
+    /// case, addressed as `"default"`. Mutually exclusive with `sinks`.
+    /// Resolve via [`sink_config`](Self::sink_config).
+    #[serde(default)]
+    pub sink: Option<ComponentConfig>,
+    /// Named sinks for a multi-sink split: a `name -> component` map, each an
+    /// ordinary single-key component (`clickhouse: {...}`). Mutually exclusive
+    /// with `sink`. Resolve via [`sink_config`](Self::sink_config).
+    #[serde(default)]
+    pub sinks: Option<BTreeMap<String, ComponentConfig>>,
 }
 
 /// `pipeline:` — identity and thread budget.
@@ -289,7 +298,14 @@ impl PipelineConfig {
                 source: e.into_inner(),
             })?;
         cfg.source.set_section("source");
-        cfg.sink.set_section("sink");
+        if let Some(sink) = cfg.sink.as_mut() {
+            sink.set_section("sink");
+        }
+        if let Some(sinks) = cfg.sinks.as_mut() {
+            for sink in sinks.values_mut() {
+                sink.set_section("sink");
+            }
+        }
         if let Some(deser) = cfg.deserializer.as_mut() {
             deser.set_section("deserializer");
         }
@@ -345,7 +361,71 @@ impl PipelineConfig {
                  (got low_ratio={low}, high_ratio={high})"
             ));
         }
+        match (&self.sink, &self.sinks) {
+            (Some(_), Some(_)) => {
+                return fail("set exactly one of `sink:` or `sinks:`, not both".into());
+            }
+            (None, None) => {
+                return fail("a `sink:` or `sinks:` section is required".into());
+            }
+            (None, Some(map)) if map.is_empty() => {
+                return fail("`sinks:` must declare at least one sink".into());
+            }
+            _ => {}
+        }
+        if let Some(sinks) = &self.sinks {
+            for name in sinks.keys() {
+                if name.is_empty() {
+                    return fail("`sinks:` names must be non-empty".into());
+                }
+                // "default" maps to the historical component="sink" metric
+                // label, so a sink literally named "sink" would merge its
+                // series with the default's.
+                if name == "sink" {
+                    return fail(
+                        "the sink name \"sink\" is reserved (it is the default \
+                         sink's metric label); rename the `sinks:` entry"
+                            .into(),
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// The component config for the sink named `name`. The single-sink `sink:`
+    /// form is addressed as `"default"`. A connector factory calls this once
+    /// per sink to build it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Validation`] if no sink is configured under `name`.
+    pub fn sink_config(&self, name: &str) -> Result<&ComponentConfig, ConfigError> {
+        if let Some(sinks) = &self.sinks {
+            sinks.get(name).ok_or_else(|| {
+                let known: Vec<&str> = sinks.keys().map(String::as_str).collect();
+                ConfigError::Validation(format!("no sink named {name:?} (configured: {known:?})"))
+            })
+        } else if name == "default" {
+            self.sink
+                .as_ref()
+                .ok_or_else(|| ConfigError::Validation("no sink configured".into()))
+        } else {
+            Err(ConfigError::Validation(format!(
+                "no sink named {name:?}: this pipeline configures a single `sink:` \
+                 (address it as \"default\")"
+            )))
+        }
+    }
+
+    /// The configured sink names, sorted. A single-sink config reports
+    /// `["default"]`.
+    #[must_use]
+    pub fn sink_names(&self) -> Vec<String> {
+        match &self.sinks {
+            Some(sinks) => sinks.keys().cloned().collect(),
+            None => vec!["default".to_string()],
+        }
     }
 }
 
@@ -422,7 +502,7 @@ metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
         assert_eq!(cfg.pipeline.threads, Some(4));
         assert_eq!(cfg.source.type_tag(), "kafka");
         assert_eq!(cfg.deserializer.as_ref().unwrap().type_tag(), "avro");
-        assert_eq!(cfg.sink.type_tag(), "clickhouse");
+        assert_eq!(cfg.sink_config("default").unwrap().type_tag(), "clickhouse");
 
         // Interpolated default landed inside the opaque body, and the kafka
         // body carries the required group_id.
@@ -459,8 +539,101 @@ metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
         struct ChProbe {
             columns: Vec<String>,
         }
-        let ch: ChProbe = cfg.sink.deserialize_into().unwrap();
+        let ch: ChProbe = cfg
+            .sink_config("default")
+            .unwrap()
+            .deserialize_into()
+            .unwrap();
         assert_eq!(ch.columns, ["id", "amount", "ts"]);
+    }
+
+    #[test]
+    fn single_sink_resolves_as_default() {
+        let cfg = PipelineConfig::from_str(MINIMAL).unwrap();
+        assert_eq!(cfg.sink_names(), vec!["default".to_string()]);
+        assert_eq!(cfg.sink_config("default").unwrap().type_tag(), "memory");
+        assert!(cfg.sink_config("other").is_err());
+    }
+
+    #[test]
+    fn sinks_map_parses_and_resolves_by_name() {
+        let yaml = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  type_a: { memory: {} }
+  type_b: { memory: {} }
+"#;
+        let cfg = PipelineConfig::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.sink_names(),
+            vec!["type_a".to_string(), "type_b".to_string()]
+        );
+        assert_eq!(cfg.sink_config("type_a").unwrap().type_tag(), "memory");
+        assert_eq!(cfg.sink_config("type_b").unwrap().type_tag(), "memory");
+        // The single-sink alias is not present in a `sinks:` config.
+        assert!(cfg.sink_config("default").is_err());
+    }
+
+    #[test]
+    fn sink_and_sinks_are_mutually_exclusive() {
+        let both = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sink: { memory: {} }
+sinks:
+  a: { memory: {} }
+"#;
+        assert!(matches!(
+            PipelineConfig::from_str(both),
+            Err(ConfigError::Validation(_))
+        ));
+
+        let neither = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+"#;
+        assert!(matches!(
+            PipelineConfig::from_str(neither),
+            Err(ConfigError::Validation(_))
+        ));
+
+        let empty = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks: {}
+"#;
+        assert!(matches!(
+            PipelineConfig::from_str(empty),
+            Err(ConfigError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn reserved_sink_names_are_rejected() {
+        // "sink" is the default sink's metric label; a `sinks:` entry under
+        // that name would merge its series with a default sink's.
+        let reserved = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  sink: { memory: {} }
+"#;
+        assert!(matches!(
+            PipelineConfig::from_str(reserved),
+            Err(ConfigError::Validation(msg)) if msg.contains("reserved")
+        ));
+
+        let empty_name = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  "": { memory: {} }
+"#;
+        assert!(matches!(
+            PipelineConfig::from_str(empty_name),
+            Err(ConfigError::Validation(msg)) if msg.contains("non-empty")
+        ));
     }
 
     #[test]

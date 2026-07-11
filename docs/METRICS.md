@@ -51,7 +51,7 @@ alongside the framework's metrics.
 |---|---|---|---|
 | `etl_operator_records_in_total` | counter | | Records entering the operator. |
 | `etl_operator_records_out_total` | counter | | Records emitted downstream (filter drops and flat_map fan-out make this differ from in). |
-| `etl_operator_records_dropped_total` | counter | `reason` (`filtered`\|`skip_policy`) | Records intentionally removed. |
+| `etl_operator_records_dropped_total` | counter | `reason` (`filtered`\|`skip_policy`\|`unrouted`) | Records intentionally removed (`unrouted`: matched no split-sink branch under an `unmatched: Skip` policy). |
 | `etl_operator_errors_total` | counter | `error_type` | User-code errors by taxonomy class. |
 | `etl_operator_batch_duration_seconds` | histogram | | Processing time per batch through this operator. |
 
@@ -76,6 +76,10 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | `etl_backpressure_inflight_bytes` | gauge | | Current global in-flight byte budget usage. |
 
 ## Sink (`etl_sink_*`)
+
+In a [multi-sink](user-guide/02-concepts/06-multi-sink.md) pipeline each sink's
+series carry its name as the `component` label (a single sink uses
+`component="sink"`), so per-table sink metrics never collide.
 
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|

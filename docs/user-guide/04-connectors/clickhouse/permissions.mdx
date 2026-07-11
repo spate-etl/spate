@@ -1,0 +1,125 @@
+---
+title: ClickHouse permissions
+description: The ClickHouse GRANTs the etl-clickhouse sink machinery needs — minimal, and by feature.
+---
+
+# ClickHouse permissions
+
+This page lists the ClickHouse privileges the **sink machinery itself**
+(`etl-clickhouse`, feature `clickhouse` on the `etl` facade) needs. The set is
+small and mostly conditional: the default configuration needs a single
+`INSERT`, and each extra grant is pulled in only by a specific feature.
+
+Everything runs over the **HTTP interface** with the account named by the
+`user:`/`password:` config fields. Grant these to that account (directly or via
+a role), on **every replica of every shard** in the `shards:` list — the sink
+writes direct-to-shard, so each node sees the traffic first-hand.
+
+:::note Your own table grants are assumed
+This page covers only the framework's privileges. You will of course also need
+`INSERT` on your destination table(s) and whatever `SELECT` your readers use —
+those are yours to grant and are not enumerated here.
+:::
+
+## The minimal grant
+
+With the default configuration — `validate_schema: off`, `format: rowbinary`,
+no `distributed_check` — the sink issues exactly one kind of statement: the
+per-batch `INSERT`. One grant covers it:
+
+```sql
+GRANT INSERT ON analytics.orders_local TO etl_writer;
+```
+
+:::note Grant the local table, on every node
+The sink writes to **shard-local** tables, never a `Distributed` table (see
+[Why direct-to-shard](./README.md#why-direct-to-shard-not-a-distributed-table)).
+Grant `INSERT` on the local table on **every replica of every shard** — not on
+a Distributed table, which the sink never inserts through.
+:::
+
+:::warning The writer profile must allow changing settings
+Every insert sets `insert_deduplicate`, `insert_deduplication_token`, and
+`wait_end_of_query` (these three are managed by the sink and cannot be
+overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
+or a settings **constraint** that pins any of these, fails the write. Keep the
+writer's profile at `readonly = 0` and leave those settings unconstrained. The
+tokens are what make retries idempotent — see the
+[dedup-window warning](./README.md#deduplication-tokens--and-the-window-warning).
+:::
+
+The `/readyz` liveness probe runs a bare `SELECT 1` (no table), which needs no
+additional privilege.
+
+## Grants by feature
+
+Two features each add read access to a system table. The sink only ever
+**reads** these — it issues no DDL against them.
+
+| Feature (config) | Extra grant | What the sink reads it for |
+|---|---|---|
+| `validate_schema: names` \| `full`, **or** `format: native` | `SELECT ON system.columns` | Fetch each column's name/type/default to validate the row contract (and, for Native, to lay out columnar bytes). `format: native` forces this on even when `validate_schema` is `off`. |
+| `distributed_check:` block present | `SELECT ON system.clusters`, `SELECT ON system.tables` | Read cluster topology (shard count/weights) and the Distributed table's engine DDL to confirm the sink's routing matches the cluster. |
+
+```sql
+-- Only if schema validation is on, or format: native (see Schema validation
+-- and Native format).
+GRANT SELECT ON system.columns TO etl_writer;
+
+-- Only if the distributed_check startup guard is enabled (see Distributed parity).
+GRANT SELECT ON system.clusters TO etl_writer;
+GRANT SELECT ON system.tables  TO etl_writer;
+```
+
+:::note System-table reads are already row-filtered
+ClickHouse only shows a user the `system.columns`/`system.tables` rows for
+objects it has some grant on. Because the writer already holds `INSERT` on the
+target table, it sees that table's rows — no extra object grant is needed for
+introspection to succeed.
+:::
+
+The `distributed_check` guard reads from its `endpoint` (defaults to the first
+replica of shard 0; override it when the Distributed table lives on a front
+node). Grant the two system-table `SELECT`s on whichever node serves that
+endpoint.
+
+## A complete role-based grant
+
+Putting it together for a fully-featured deployment (schema validation on,
+distributed check enabled). Run as an admin account that has
+`access_management` on each node:
+
+```sql
+CREATE ROLE IF NOT EXISTS etl_sink;
+
+GRANT INSERT ON analytics.orders_local TO etl_sink;   -- on every shard node
+GRANT SELECT ON system.columns         TO etl_sink;   -- schema validation / native
+GRANT SELECT ON system.clusters        TO etl_sink;   -- distributed_check
+GRANT SELECT ON system.tables          TO etl_sink;   -- distributed_check
+
+CREATE USER IF NOT EXISTS etl_writer
+    IDENTIFIED BY '...'
+    SETTINGS readonly = 0;                             -- allow the managed insert settings
+GRANT etl_sink TO etl_writer;
+```
+
+## What the sink never does
+
+To scope the account for a security review: the framework issues **no** DDL or
+maintenance statements at all — no `CREATE`, `ALTER`, `OPTIMIZE`, `TRUNCATE`,
+`DROP`, `RENAME`, `KILL`, `ON CLUSTER`, `SYSTEM …`, or temporary tables.
+Partitioning, the deduplication window, and table engines are properties of
+tables **you** create; the sink only inserts into them and reads the two system
+tables above. An account with just the grants on this page — and no
+`CREATE`/`DROP`/`ALTER` — is sufficient.
+
+## Related
+
+- [ClickHouse sink](./README.md) — the full config reference; `user`/`password`
+  name the account these grants apply to.
+- [Schema validation](../../03-guides/schema-validation.md) — the
+  `validate_schema` modes that pull in `SELECT ON system.columns`.
+- [Native format](./native-format.md) — `format: native`, which forces the
+  `system.columns` fetch on.
+- [Distributed parity](./distributed-parity.md) — the `distributed_check` guard
+  that reads `system.clusters` and `system.tables`.

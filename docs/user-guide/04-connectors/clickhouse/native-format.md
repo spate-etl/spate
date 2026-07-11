@@ -112,3 +112,5 @@ them.
 - [ClickHouse sink](./README.md) — the full sink configuration.
 - [Schema validation](../../03-guides/schema-validation.md) — the schema fetch
   Native relies on.
+- [Permissions](./permissions.mdx) — `format: native` forces the
+  `system.columns` fetch on, which needs `SELECT` on that table.

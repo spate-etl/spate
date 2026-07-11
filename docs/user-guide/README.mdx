@@ -1,0 +1,98 @@
+# etl-rs User Guide
+
+etl-rs is a high-performance, at-least-once ETL pipeline framework in Rust.
+Its flagship shape is Kafka in, Avro decoding, a chain of operators you write
+in Rust, and sharded ClickHouse out — but every piece behind that shape is a
+small, stable trait, so you can swap in your own sources, sinks, and
+deserializers. You define the operator graph in code (Flink / Java Streams
+style); YAML configures connectors and tuning, never the topology.
+
+One process runs one pipeline. CPU work (polling, deserialization, the
+operator chain) runs on pinned threads with zero per-record allocations on
+the hot path; I/O (sink writes, schema fetches, the admin server) runs on a
+small shared tokio runtime. The design is Kubernetes-native: scrape-based
+Prometheus metrics, `/healthz` and `/readyz` probes, and drain-on-SIGTERM.
+
+## Guarantees at a glance
+
+| Guarantee | What it means |
+|---|---|
+| At-least-once delivery | A source offset commits only after every record derived from it was durably written to the sink (or intentionally dropped). This holds across consumer rebalances, graceful shutdown, and crashes. See [Delivery guarantees](02-concepts/02-delivery-guarantees.mdx). |
+| Duplicates are possible | At-least-once means replays happen. Dedup tokens make same-batch retries idempotent, but crash replay re-batches with new boundaries — design target tables to tolerate duplicates. |
+| Sources never block | Backpressure pauses lanes and keeps polling; a source thread never parks in a channel send, so sink slowness never triggers a consumer-group eviction. See [Backpressure](02-concepts/03-backpressure.mdx). |
+| Errors are Skip or Fail | Record-level error policies are Skip (count and continue) or Fail (stop the pipeline) — never silent, always surfaced through metrics. See [Error handling](02-concepts/04-error-handling.mdx). |
+| No hidden costs on the hot path | Operator chains are fully monomorphized (one virtual call per batch, not per record); metric handles are pre-registered at build time. |
+
+Not in scope for v1: exactly-once sinks, general DAG topologies, windowing,
+dead-letter queues, and config hot-reload. The rationale lives in
+[docs/DESIGN.md](../DESIGN.md) — the source of truth when code and intuition
+disagree.
+
+## Where to start
+
+- Never used etl-rs? [Getting started](01-getting-started/README.mdx) has a
+  five-minute in-memory pipeline and a full Kafka-to-ClickHouse tutorial.
+- Want the mental model first? Read [Concepts](02-concepts/README.mdx).
+- Building or operating a real pipeline? Jump to the
+  [Guides](03-guides/README.mdx) and [Deployment](05-deployment/README.mdx).
+
+## Guide map
+
+### [1. Getting started](01-getting-started/README.mdx)
+
+- [Installation](01-getting-started/01-installation.mdx) — the `etl` facade
+  crate, feature flags, MSRV.
+- [Quickstart](01-getting-started/02-quickstart.mdx) — a zero-infrastructure
+  pipeline in five minutes.
+- [Your first pipeline](01-getting-started/03-first-pipeline.mdx) — Kafka →
+  Avro → operator chain → ClickHouse, end to end.
+
+### [2. Concepts](02-concepts/README.mdx)
+
+- [Architecture](02-concepts/01-architecture.mdx) — the anatomy of a running
+  pipeline process.
+- [Delivery guarantees](02-concepts/02-delivery-guarantees.mdx) — how
+  at-least-once actually works, and its honest limits.
+- [Backpressure](02-concepts/03-backpressure.mdx) — flow control without
+  blocking the source.
+- [Error handling](02-concepts/04-error-handling.mdx) — Skip, Fail, and the
+  metrics that surface both.
+
+### [3. Guides](03-guides/README.mdx)
+
+- [Assembling a pipeline](03-guides/assembling-a-pipeline.mdx)
+- [Configuring pipelines](03-guides/configuring-pipelines.mdx)
+- [Testing pipelines](03-guides/testing-pipelines.mdx)
+- [Schema validation](03-guides/schema-validation.mdx)
+- [Graceful shutdown](03-guides/graceful-shutdown.mdx)
+- [Manual assembly](03-guides/manual-assembly.mdx)
+
+### [4. Connectors](04-connectors/README.mdx)
+
+- [Kafka](04-connectors/kafka.mdx) · [ClickHouse](04-connectors/clickhouse/README.mdx)
+  · [Avro](04-connectors/avro/README.mdx) · [Memory (testing)](04-connectors/memory.mdx)
+
+### [5. Deployment](05-deployment/README.mdx)
+
+- [Docker](05-deployment/docker.mdx) · [Monitoring](05-deployment/monitoring.mdx)
+  · [Tuning](05-deployment/tuning.mdx)
+
+### [6. Extending](06-extending/README.mdx)
+
+- [Custom sources](06-extending/custom-source.mdx) ·
+  [Custom sinks](06-extending/custom-sink.mdx) ·
+  [Custom operators](06-extending/custom-operators.mdx)
+
+### [7. Reference](07-reference/README.mdx)
+
+- [Configuration](07-reference/configuration.mdx) ·
+  [Glossary](07-reference/glossary.mdx)
+
+## Related documentation
+
+- [docs/DESIGN.md](../DESIGN.md) — the architecture and every decision's
+  rationale (canonical; this guide links to it rather than restating it).
+- [docs/METRICS.md](../METRICS.md) — the full metric taxonomy and alerting
+  starting points.
+- API reference on docs.rs — this guide teaches concepts and contracts;
+  signatures and per-item docs live in the rustdoc for the `etl` crate.

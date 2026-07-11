@@ -77,7 +77,7 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 
 ## Sink (`etl_sink_*`)
 
-In a [multi-sink](user-guide/02-concepts/06-multi-sink.md) pipeline each sink's
+In a [multi-sink](user-guide/02-concepts/06-multi-sink.mdx) pipeline each sink's
 series carry its name as the `component` label (a single sink uses
 `component="sink"`), so per-table sink metrics never collide.
 

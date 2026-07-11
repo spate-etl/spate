@@ -1,0 +1,131 @@
+# Docker
+
+A pipeline is one static-ish binary plus one YAML file. The repository ships
+a flagship image at `examples/docker/Dockerfile` that packages the
+[first-pipeline tutorial's](../01-getting-started/03-first-pipeline.mdx)
+binary (`kafka_avro_to_clickhouse`) — treat it as the template for any
+pipeline you build on the framework.
+
+## The flagship image
+
+Build from the repository root:
+
+```sh
+docker build -f examples/docker/Dockerfile -t etl-pipeline .
+docker run -e KAFKA_BROKERS=broker:9092 -e CLICKHOUSE_URL=http://ch:8123 \
+           -p 9090:9090 etl-pipeline
+```
+
+The Dockerfile is two stages (lifted from `examples/docker/Dockerfile`):
+
+```dockerfile
+FROM rust:1.96-bookworm AS builder
+WORKDIR /build
+COPY . .
+RUN cargo build --release -p etl --example kafka_avro_to_clickhouse --features full \
+    && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
+
+# Distroless: glibc + libgcc only, no shell, runs as nonroot (65532).
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /build/pipeline /usr/local/bin/pipeline
+COPY --from=builder /build/crates/etl/examples/kafka_avro_to_clickhouse.yaml /etc/etl/pipeline.yaml
+
+ENV ETL_CONFIG=/etc/etl/pipeline.yaml
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/pipeline"]
+```
+
+Why this shape:
+
+- **Distroless runtime** (`gcr.io/distroless/cc-debian12:nonroot`): the
+  binary needs only glibc and libgcc. No shell, no package manager, runs as
+  UID 65532 — the attack surface is the pipeline itself.
+- **librdkafka is compiled from vendored sources** in the builder stage, so
+  no system packages are needed beyond the Rust image's toolchain. Expect
+  the first build to take several minutes; for CI, layer a
+  [cargo-chef](https://github.com/LukeMathWalker/cargo-chef) stage in front
+  to cache dependencies.
+- **One image, one pipeline.** The framework's operational unit is one
+  process running one pipeline; scale by replicas, not by packing pipelines
+  into a pod.
+
+## Configuration: `ETL_CONFIG` and mounted YAML
+
+The binary reads a single YAML file from the path in `ETL_CONFIG` (the image
+defaults it to `/etc/etl/pipeline.yaml` and bakes in the example config).
+Every `${VAR:-default}` in the file interpolates from the process
+environment at startup — see
+[Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the exact
+interpolation semantics. The Kubernetes pattern:
+
+- **ConfigMap** mounted over `/etc/etl/pipeline.yaml` (or anywhere, with
+  `ETL_CONFIG` pointing at it) owns the structure — connectors, tuning,
+  topology.
+- **Environment variables** (plain or Secret-backed) own credentials and
+  endpoints: `KAFKA_BROKERS`, `CLICKHOUSE_PASSWORD`, and friends land in the
+  YAML through interpolation, so secrets never live in the ConfigMap.
+
+:::note
+There is no config hot-reload, by design. Reconfigure with a rolling
+restart: annotate the pod template with a checksum of the ConfigMap so
+config edits trigger a rollout.
+:::
+
+## Probes and the admin server
+
+The admin server binds `metrics.listen` (default `0.0.0.0:9090`) and serves
+three endpoints:
+
+- `GET /readyz` — 200 once the source has received an assignment (lanes are
+  live) **and** the sink's replicas answer connectivity probes. Wire this to
+  `readinessProbe` so a pod takes traffic-shaped duties (its consumer-group
+  membership) only when it can actually write.
+- `GET /healthz` — 200 while every pipeline thread's poll loop heartbeat is
+  fresh and the checkpoint watermark is not stuck while data flows. Wire
+  this to `livenessProbe`: a wedged pipeline gets restarted instead of
+  idling forever.
+- `GET /metrics` — Prometheus exposition. See [Monitoring](monitoring.mdx)
+  and the canonical taxonomy in [docs/METRICS.md](../../METRICS.md).
+
+```yaml
+readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
+livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
+```
+
+## SIGTERM and the grace period
+
+On SIGTERM the pipeline runs the same drain choreography as a consumer
+rebalance: stop the lanes, flush the operator chains, give in-flight sink
+batches `checkpoint.drain_timeout` (default **25s**) to complete, commit
+offsets synchronously, exit. The details live in
+[Graceful shutdown](../03-guides/graceful-shutdown.mdx).
+
+:::info
+Set `terminationGracePeriodSeconds` comfortably **above**
+`checkpoint.drain_timeout` — e.g. 30s for the default 25s. If Kubernetes
+kills the pod mid-drain nothing is lost (at-least-once: uncommitted
+offsets replay on the next member), but every SIGKILL turns a clean
+commit into replayed duplicates. Give the drain the time it was
+configured to take.
+:::
+
+If a sink is down when the drain deadline hits, unflushed batches are
+abandoned loudly (`etl_sink_abandoned_batches_total` plus a log line) and
+replay after restart — delivery stays at-least-once either way.
+
+## Resources and scaling
+
+- `pipeline.threads` defaults to `available_parallelism` minus the I/O
+  reserve, and `available_parallelism` honours cgroup CPU limits. **Set a
+  CPU limit or set `pipeline.threads` explicitly** — a pod without limits
+  sees the node's cores and spawns a thread per core. See
+  [Tuning](tuning.mdx).
+- One pod = one consumer-group member. Scaling the Deployment triggers a
+  rebalance; revoked partitions drain and commit before handover, so a
+  scale event costs redelivery of only the uncommitted tail.
+- Memory is dominated by `backpressure.max_inflight_bytes` plus librdkafka's
+  prefetch caps; size `resources.limits.memory` above their sum with
+  headroom. The sizing rule is in [Tuning](tuning.mdx).
+
+The full Kubernetes walkthrough (including the scaling and rebalance notes)
+lives next to the Dockerfile in `examples/docker/README.md`.

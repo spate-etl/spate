@@ -1,0 +1,176 @@
+# Quickstart: a pipeline in five minutes
+
+This page builds the "hello world" pipeline — everything in memory, no
+external systems — yet it exercises the full assembly every real pipeline
+follows: source → deserializer → operator chain → sharded sink →
+checkpointed commits, with backpressure and graceful shutdown. If you have
+the repository checked out, it runs as-is:
+
+```sh
+cargo run -p etl --example memory_pipeline
+```
+
+The full version is `crates/etl/examples/memory_pipeline.rs`; everything
+below is lifted from it. To run it in your own project you need `etl` and
+`etl-test` (here as a regular dependency, since the example uses the mocks
+in `main`) — see [Installation](01-installation.mdx).
+
+## 1. Configuration
+
+Framework tuning comes from YAML. The `source` and `sink` sections are
+opaque bags that each connector's factory reads — here the in-memory pieces
+are built programmatically, so the tags are informational:
+
+```rust
+const CONFIG: &str = r#"
+pipeline: { name: memory-demo, threads: 1 }
+checkpoint: { interval: 200ms }
+source: { memory: {} }
+sink: { capture: {} }
+"#;
+```
+
+Real configs add backpressure budgets, metrics exporters, and connector
+sections — see [Configuring pipelines](../03-guides/configuring-pipelines.mdx)
+and the [configuration reference](../07-reference/configuration.mdx).
+
+## 2. Construct the builder
+
+```rust
+use etl::prelude::*;
+
+etl::telemetry::init(etl::telemetry::LogFormat::Pretty, "info");
+let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
+```
+
+`Pipeline::from_config` owns process initialization: it installs the
+metrics exporter *before any metric handle can exist* (so nothing records
+into the void) and builds the shared tokio I/O runtime the sink workers run
+on. Telemetry init is idempotent and first-call-wins — call
+`etl::telemetry::init` yourself first if you want pretty logs instead of
+the builder's JSON default. The why behind this ordering is in
+[Architecture](../02-concepts/01-architecture.mdx).
+
+## 3. Source and sink
+
+The `etl-test` mocks come paired with scripting handles — the source handle
+pushes records and reads back committed watermarks, the sink script reads
+back every durable write:
+
+```rust
+use etl_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
+use std::time::Duration;
+
+let (source, handle) = memory_source();
+
+let (sink, script) = capture_sink(1, 1); // one shard, one replica
+let pool_cfg = {
+    let mut cfg = SinkPoolConfig::default();
+    cfg.batch.linger = Duration::from_millis(50); // flush quickly for the demo
+    cfg
+};
+let sink = sink.with_pool_config(pool_cfg);
+```
+
+A Kafka source gets its lane assignments from the broker instead of a
+handle; a ClickHouse sink gets its shards and replicas from YAML. The seams
+are identical — see the [memory connector](../04-connectors/memory.mdx).
+
+## 4. The chain, assembled and spawned
+
+Payloads are comma-separated words. The deserializer splits them (one
+payload in, N records out), the chain filters and transforms, and the
+terminal `.sink(...)` stage encodes rows and routes them to the shard
+queues. The factory closure runs once per pipeline thread; `ChainCtx`
+carries that thread's plumbing (queues, byte budget, pipeline name):
+
+```rust
+let runtime = pipeline
+    .sink(sink)?
+    .chains(|ctx| {
+        chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
+            .with_metrics(ctx.pipeline, "main")
+            .filter(|word: &Vec<u8>| !word.is_empty())
+            .map(|word: Vec<u8>| word.to_ascii_uppercase())
+            .sink(
+                TestEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                ctx.queues,
+                ctx.budget,
+            )
+            .build()
+    })
+    .runtime_options(RuntimeOptions {
+        handle_signals: false, // the demo triggers shutdown itself
+        ..RuntimeOptions::default()
+    })
+    .into_runtime(source)?;
+let shutdown = runtime.shutdown_handle();
+let join = std::thread::spawn(move || runtime.run());
+```
+
+Two things to notice:
+
+- Everything inside the closure is statically composed — `filter` and `map`
+  monomorphize into one loop, with a single virtual call per *batch* at the
+  chain boundary. See [Architecture](../02-concepts/01-architecture.mdx).
+- `.into_runtime(source)` instead of `.run(source)` hands you the runtime
+  *before* it starts, so you can grab a `ShutdownHandle` and spawn the run —
+  exactly the pattern for [testing pipelines](../03-guides/testing-pipelines.mdx).
+  Production binaries usually call `.run(source)`, which blocks until
+  SIGTERM or a fatal error.
+
+## 5. Drive it and observe the guarantee
+
+Assign a lane, push three payloads (nine words, one empty), and wait for the
+committed watermark to cover the last offset:
+
+```rust
+use etl::source::LaneId;
+
+let p0 = PartitionId(0);
+handle.assign_lanes(&[(LaneId(0), p0)]);
+let mut last = 0;
+for payload in [
+    &b"alpha,beta,gamma"[..],
+    b"delta,,epsilon",
+    b"zeta,eta,theta",
+] {
+    last = handle.push(p0, Some(b"demo"), payload);
+}
+
+while handle.last_committed(p0) != Some(last + 1) {
+    std::thread::sleep(Duration::from_millis(20));
+}
+shutdown.trigger();
+let report = join.join().expect("pipeline thread")?;
+```
+
+That wait loop *is* the at-least-once contract in action: the watermark
+advances only after the sink acknowledged the data durably. The filtered
+empty word counts as delivered too — an intentional drop must not stall the
+commit. [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)
+explains the machinery.
+
+Finally, read back what the sink captured:
+
+```rust
+let rows: Vec<String> = script
+    .writes()
+    .iter()
+    .flat_map(|w| etl_test::decode_rows(&w.payload))
+    .map(|r| String::from_utf8_lossy(&r).into_owned())
+    .collect();
+assert_eq!(rows.len(), 8, "nine words minus one filtered empty");
+```
+
+## Where next
+
+- Swap the mocks for real connectors:
+  [Your first pipeline](03-first-pipeline.mdx).
+- Understand what each builder step desugars to:
+  [Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx) and
+  [Manual assembly](../03-guides/manual-assembly.mdx).
+- Turn this exact pattern into integration tests:
+  [Testing pipelines](../03-guides/testing-pipelines.mdx).

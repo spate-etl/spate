@@ -1,0 +1,154 @@
+# Glossary
+
+Precise definitions of the terms used throughout this guide, in
+alphabetical order. Where a term names a public type, the exact contract is
+in the rustdoc ([Reference](README.mdx)); where it names a mechanism, the
+rationale is in [docs/DESIGN.md](../../DESIGN.md).
+
+### Ack / `AckRef`
+
+The acknowledgement handle for one source poll batch: a clone of a
+refcounted `Arc` created **per batch**, not per record. Every record
+derived from the batch clones it — `flat_map` children share the parent's,
+multi-output routing clones per output with worst-status merge. Dropping a
+record resolves its share, and an intentional drop (a `filter`, a Skip
+policy) counts as **success**. When the last clone drops, the batch's
+`(partition, seq, status)` reaches the checkpointer over an unbounded
+channel — the ack path can never block behind data.
+
+### `AckSet`
+
+A collection of acknowledgement handles on the sink path (encoded chunks,
+worker ledgers, batch accumulators) with the **opposite** drop default:
+where a lone record's drop means delivered, an `AckSet` **fails** its
+handles on drop and delivers only explicitly, after a durable write. This
+is the fail-by-default contract that turns any teardown — a dropped queue,
+an aborted worker — into a watermark stall (replay) instead of a silent
+commit of unwritten data.
+
+### Backpressure watermarks (high / low)
+
+The hysteresis thresholds on the in-flight byte [budget](#budget--in-flight-bytes):
+sources pause when usage crosses `high_ratio` × budget and may resume once
+it falls below `low_ratio` × budget and at least `min_pause` has elapsed.
+Unrelated to the [checkpoint watermark](#watermark) — same word, different
+mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
+
+### Budget / in-flight bytes
+
+The global cap (`backpressure.max_inflight_bytes`) on bytes admitted into
+the pipeline but not yet durably written. Charged when records enter the
+terminal stage's chunks, released on durable write or failure; current
+usage is `etl_backpressure_inflight_bytes`.
+
+### Chain
+
+The operator pipeline one pipeline thread runs: deserializer →
+`map`/`filter`/`try_map`/`flat_map` stages → the terminal sink stage
+(encode, chunk, route). Statically composed and monomorphized into one
+loop; type erasure happens exactly once, at the chain boundary, with one
+virtual call per batch. Built by the chain factory you pass to
+`Pipeline::chains`, once per pipeline thread.
+
+### Chunk
+
+The handoff unit between a pipeline thread and a shard worker: rows encoded
+(by the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes`
+(default 64 KiB), carrying its rows' acks as an [`AckSet`](#ackset).
+Workers merge chunks into [sealed batches](#sealed-batch), so chunk size
+does not bound insert size.
+
+### Component / `component_type` labels
+
+Two of the three standard labels on every framework metric (with
+`pipeline`): `component` identifies the instance (e.g. `orders_kafka`,
+`main.deserializer`), `component_type` the implementation (e.g. `kafka`,
+`clickhouse`, `map`). See [Monitoring](../05-deployment/monitoring.mdx) and
+[docs/METRICS.md](../../METRICS.md).
+
+### Contiguity tracker
+
+The checkpointer's per-partition, per-[epoch](#epoch) bookkeeping: a ring
+of outstanding batch sequence numbers, from which it pops the contiguous
+acknowledged **prefix** and advances the committable
+[watermark](#watermark). Out-of-order acks park until the gap before them
+closes — this is what makes "never commit past unacknowledged data"
+structural. A synchronous, tokio-free, loom-tested module.
+
+### Dedup token
+
+A deterministic string minted per [sealed batch](#sealed-batch)
+(`SealedBatch::dedup_token`) and reused unchanged across retries of that
+batch. Sinks that support insert deduplication (ClickHouse) use it to make
+**same-boundary retries** idempotent. It does not cover crash replay —
+after restart, data re-batches with new boundaries and new tokens
+([Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)).
+
+### Drain
+
+The choreography that quiesces data without losing acknowledgements: stop
+the affected lanes, flush the chains, force-seal and write out in-flight
+sink batches under `checkpoint.drain_timeout`, then commit synchronously.
+Triggered identically by SIGTERM (all lanes) and by a rebalance revocation
+(the revoked lanes), via a `DrainBarrier` the owning pipeline threads
+arrive at. Batches still unwritten at the deadline are abandoned loudly and
+replay after restart.
+
+### Epoch
+
+The assignment generation in the checkpointer, bumped on every rebalance
+(`Checkpointer::begin_epoch`). Acks issued under a previous epoch are
+discarded, so a stale acknowledgement from a revoked assignment can never
+advance the new assignment's watermarks.
+
+### Lane
+
+The data-plane unit of a source (`SourceLane`): one pollable stream pinned
+to one pipeline thread, yielding borrowed payload batches. For Kafka, a
+lane is a partition queue; lanes map m:n onto pipeline threads.
+`etl_source_lanes_active` counts them.
+
+### Partition
+
+The source-side unit of ordering and checkpointing (`PartitionId`) — for
+Kafka, literally the topic partition. Watermarks, epochs, and the
+contiguity tracker are all per-partition.
+
+### Pipeline thread
+
+One of the N plain `std::thread`s (optionally core-pinned) running the hot
+path: poll lanes → deserialize → operator chain → route to shard queues.
+All CPU work happens here, with zero per-record allocations; I/O lives on
+the tokio [I/O runtime](../02-concepts/01-architecture.mdx) instead.
+
+### Replica
+
+One endpoint of a [shard](#shard) (`[shard][replica]` in a sink topology).
+Shard workers rotate writes round-robin across healthy replicas, skipping
+open circuit breakers; a failed write retries the same sealed batch on the
+next healthy replica.
+
+### Sealed batch
+
+The sink's write, retry, and acknowledgement unit (`SealedBatch`):
+concatenated pre-encoded frames plus row/byte counts, the
+[dedup token](#dedup-token), and the covered acks. A shard worker seals
+when `batch.max_rows`, `batch.max_bytes`, or `batch.linger` trips, then
+writes it via the `ShardWriter` — whose `Ok` is the durable-ack point.
+
+### Shard
+
+One partition of the sink's write topology, served by one worker task that
+batches, seals, and dispatches up to `inflight.max_per_shard` concurrent
+writes across its [replicas](#replica). Records route to shards by key
+hash (or by source partition when keyless).
+
+### Watermark
+
+The per-partition committable position: the offset **one past the last**
+contiguously acknowledged record. Stored on advance, committed to the
+source on `checkpoint.interval`, and committed synchronously on drain. The
+at-least-once invariant is that it never passes unacknowledged data; a
+failed batch stalls it (alert on `etl_checkpoint_watermark_age_seconds`)
+rather than being skipped. Distinct from the
+[backpressure watermarks](#backpressure-watermarks-high--low).

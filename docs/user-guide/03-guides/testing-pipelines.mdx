@@ -1,0 +1,176 @@
+# Testing pipelines
+
+The `etl-test` crate is the first-class way to test pipelines you build
+with this framework: deterministic in-memory mocks, no Docker, no external
+infrastructure. Every mock pairs with a scripting/observation handle (the
+`tower-test` philosophy) — you drive the source side, script the sink side,
+and assert on what actually got written and committed.
+
+The two canonical references this guide mirrors are
+`crates/etl-test/tests/bundle.rs` (a whole-assembly test) and
+`crates/etl/examples/memory_pipeline.rs` (the same pattern as a runnable
+demo).
+
+## The pieces
+
+| Mock | Handle | Role |
+|---|---|---|
+| `memory_source()` → `MemorySource` | `SourceHandle` | Scripts lane assignments/revocations, pushes payloads, observes commits and pauses. |
+| `capture_sink(shards, replicas)` → `CaptureSink` | `SinkScript` | A full `SinkBundle` over a `CaptureWriter`; records every write, scripts failures and probe health. |
+| `TestDeserializer` | — | Payload → records: `passthrough()`, `split_on(b',')`, `fail_on_prefix(...)` for poison payloads. |
+| `TestEncoder` / `decode_rows` | — | Length-prefixed row encoder whose frames tests can decode back into rows. |
+
+## The pattern: `into_runtime` + `shutdown_handle` + a spawned run
+
+Build with the ordinary `Pipeline` builder, but finish with
+`into_runtime` instead of `run` so you hold the shutdown handle, then spawn
+the blocking `run` on a thread. From `crates/etl-test/tests/bundle.rs`:
+
+```rust
+use etl_core::config::PipelineConfig;
+use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::pipeline::{Pipeline, RuntimeOptions};
+use etl_core::record::PartitionId;
+use etl_core::sink::KeyHashRouter;
+use etl_core::source::LaneId;
+use etl_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
+
+const CONFIG: &str = r#"
+pipeline: { name: bundle-test, threads: 1, io_threads: 1 }
+metrics: { exporter: none }
+source: { memory: {} }
+sink: { capture: {} }
+"#;
+
+let (source, handle) = memory_source();
+let (sink, script) = capture_sink(1, 1);
+
+let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?
+    .sink(sink)?
+    .chains(|ctx| {
+        chain_owned::<Vec<u8>, _>(BytesPassthrough)
+            .with_metrics(ctx.pipeline, "main")
+            .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(),
+                  ctx.queues, ctx.budget)
+            .build()
+    })
+    .runtime_options(RuntimeOptions {
+        handle_signals: false,          // the test triggers shutdown itself
+        ..RuntimeOptions::default()
+    })
+    .into_runtime(source)?;
+
+let shutdown = runtime.shutdown_handle();
+let join = std::thread::spawn(move || runtime.run());
+```
+
+Notes on the config: `metrics: { exporter: none }` installs no
+process-global recorder, so parallel tests stay isolated from each other's
+metrics; the `memory`/`capture` tags in `source:`/`sink:` are
+informational — the in-memory pieces are built programmatically, not from
+their sections.
+
+:::note
+`Pipeline::from_config` must run outside any async runtime, so write
+these as plain `#[test]` functions, not `#[tokio::test]`.
+:::
+
+## Driving the source: `SourceHandle`
+
+```rust
+let p = PartitionId(0);
+handle.assign_lanes(&[(LaneId(0), p)]);        // one lane on partition 0
+let mut last = 0;
+for payload in [&b"alpha"[..], b"beta", b"gamma"] {
+    last = handle.push(p, Some(b"key"), payload);   // returns the offset
+}
+```
+
+- `assign_lanes` queues an assignment event, exactly as a Kafka rebalance
+  would surface one. Pushing to a partition with no active lane yet is
+  allowed — payloads wait.
+- `push` / `push_many` queue payloads and return their offsets;
+  `push_at` sets an explicit event timestamp.
+- `revoke_lanes` returns a `DrainBarrierProbe` for testing rebalance drain
+  choreography; `paused_lanes()` observes backpressure.
+- The mock is deliberately strict: misuse that would indicate a runtime bug
+  (pausing an unassigned lane, duplicate lane ids) panics with a clear
+  message rather than passing silently.
+
+## Asserting the commit: one-past-last watermarks
+
+Watermarks advance only after the sink durably acknowledged every record —
+that is the at-least-once contract itself, so waiting on the commit is the
+strongest assertion a test can make. **Committed positions are one past the
+last offset** (Kafka convention: "next offset to read"):
+
+```rust
+let deadline = Instant::now() + Duration::from_secs(10);
+while handle.last_committed(p) != Some(last + 1) {
+    assert!(Instant::now() < deadline, "commit not observed in time");
+    std::thread::sleep(Duration::from_millis(10));
+}
+shutdown.trigger();
+let report = join.join().expect("join").expect("run");
+assert_eq!(report.exit_code(), 0, "clean drain");
+```
+
+`handle.committed()` returns every watermark ever committed, in call order,
+when you need more than the latest.
+
+## Asserting the writes: `SinkScript` and `decode_rows`
+
+Everything the sink wrote is captured, in order, with shard/replica
+targeting, row and byte counts, and the batch's dedup token:
+
+```rust
+let rows: Vec<Vec<u8>> = script
+    .writes()
+    .iter()
+    .flat_map(|w| decode_rows(&w.payload))
+    .collect();
+assert_eq!(rows, vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]);
+```
+
+`decode_rows` inverts `TestEncoder`'s length-prefixed framing back into the
+row payloads.
+
+### Scripting failures
+
+Unscripted writes succeed, so happy-path tests need no scripting. For
+failure paths:
+
+- `script.enqueue_for(shard, replica, WriteOutcome::retryable("boom"))` —
+  the next write to that endpoint fails retryably (the framework retries the
+  same sealed batch, rotating replicas); `WriteOutcome::fatal(...)` abandons
+  the batch and stalls the watermark; `.after(duration)` adds a delay.
+- `script.enqueue_global(...)` — same, for the next write to any endpoint.
+- `script.fail_probe(shard, replica, "down")` / `heal_probe` — drive the
+  readiness probe, and with it `/readyz`.
+
+Speed tip: the default batch `linger` is 1s; shrink it so tests flush fast,
+as the example does:
+
+```rust
+let mut cfg = SinkPoolConfig::default();
+cfg.batch.linger = Duration::from_millis(50);
+let sink = sink.with_pool_config(cfg);
+```
+
+## Testing stages in isolation
+
+You do not need a whole pipeline to test a deserializer or encoder:
+`TestDeserializer`, `TestEncoder`, and `EmitCollector` exercise single
+stages, and the `etl-test` crate docs walk the full life of one record —
+poll, deserialize, encode, acknowledge, commit — against a real
+`Checkpointer` with no runtime at all. For property tests, the `proptest`
+feature adds ready-made `strategies`.
+
+## Related
+
+- [Memory connectors](../04-connectors/memory.mdx) — the same mocks as
+  local-dev connectors.
+- [Assembling a pipeline](assembling-a-pipeline.mdx) — the builder steps
+  used above.
+- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — why
+  "wait for the watermark" is the right assertion.

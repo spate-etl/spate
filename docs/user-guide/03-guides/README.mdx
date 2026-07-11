@@ -1,0 +1,24 @@
+# Guides
+
+Task-oriented how-tos. Each guide gets you to one concrete outcome; none of
+them re-explains the architecture — for that, start with
+[Concepts](../02-concepts/README.mdx) or [docs/DESIGN.md](../../DESIGN.md).
+
+| Guide | Outcome |
+|---|---|
+| [Assembling a pipeline](assembling-a-pipeline.mdx) | Build and run a pipeline with the `Pipeline` builder — the primary assembly path. Read this one first. |
+| [Configuring pipelines](configuring-pipelines.mdx) | Write a pipeline YAML: typed framework sections, environment interpolation, opaque connector sections. |
+| [Testing pipelines](testing-pipelines.mdx) | Test a whole assembly deterministically with `etl-test`'s in-memory source and capturing sink. |
+| [Schema validation](schema-validation.mdx) | Fail fast when your row struct, `columns` list, and the live ClickHouse table disagree. |
+| [Graceful shutdown](graceful-shutdown.mdx) | Drain cleanly on SIGTERM, size `drain_timeout` against Kubernetes, and interpret exit codes. |
+| [Manual assembly](manual-assembly.mdx) | Desugar every builder step into the public primitives it composes — the escape hatch. |
+
+Where to go next:
+
+- Connector-specific configuration and guarantees:
+  [Connectors](../04-connectors/README.mdx).
+- Running in production: [Deployment](../05-deployment/README.mdx).
+- Writing your own source, sink, or operator:
+  [Extending](../06-extending/README.mdx).
+- Every configuration key in one table:
+  [Configuration reference](../07-reference/configuration.mdx).

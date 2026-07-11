@@ -33,7 +33,7 @@ GRANT INSERT ON analytics.orders_local TO etl_writer;
 
 :::note Grant the local table, on every node
 The sink writes to **shard-local** tables, never a `Distributed` table (see
-[Why direct-to-shard](./README.md#why-direct-to-shard-not-a-distributed-table)).
+[Why direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table)).
 Grant `INSERT` on the local table on **every replica of every shard** — not on
 a Distributed table, which the sink never inserts through.
 :::
@@ -45,7 +45,7 @@ overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
 or a settings **constraint** that pins any of these, fails the write. Keep the
 writer's profile at `readonly = 0` and leave those settings unconstrained. The
 tokens are what make retries idempotent — see the
-[dedup-window warning](./README.md#deduplication-tokens--and-the-window-warning).
+[dedup-window warning](./README.mdx#deduplication-tokens--and-the-window-warning).
 :::
 
 The `/readyz` liveness probe runs a bare `SELECT 1` (no table), which needs no
@@ -115,11 +115,11 @@ tables above. An account with just the grants on this page — and no
 
 ## Related
 
-- [ClickHouse sink](./README.md) — the full config reference; `user`/`password`
+- [ClickHouse sink](./README.mdx) — the full config reference; `user`/`password`
   name the account these grants apply to.
-- [Schema validation](../../03-guides/schema-validation.md) — the
+- [Schema validation](../../03-guides/schema-validation.mdx) — the
   `validate_schema` modes that pull in `SELECT ON system.columns`.
-- [Native format](./native-format.md) — `format: native`, which forces the
+- [Native format](./native-format.mdx) — `format: native`, which forces the
   `system.columns` fetch on.
-- [Distributed parity](./distributed-parity.md) — the `distributed_check` guard
+- [Distributed parity](./distributed-parity.mdx) — the `distributed_check` guard
   that reads `system.clusters` and `system.tables`.

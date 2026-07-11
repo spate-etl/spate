@@ -1,0 +1,108 @@
+# Memory connectors (etl-test)
+
+The `etl-test` crate ships in-memory connectors that run a **complete,
+real pipeline** — checkpointing, backpressure, graceful drain, the actual
+`SinkPool` — with no external infrastructure. They are not stubs of the
+engine; they are real `Source` and `SinkBundle` implementations whose I/O
+happens in process, each paired with a scripting/observation handle.
+
+Add it as a dev-dependency (or a regular one for demo binaries):
+
+```toml
+[dev-dependencies]
+etl-test = { version = "...", path = "..." }   # same workspace/registry as etl
+```
+
+## When to use them
+
+- **Demos and local development** — run the full assembly on a laptop with
+  zero setup: `cargo run -p etl --example memory_pipeline` is exactly this.
+- **CI** — deterministic whole-pipeline tests with no Docker; this is the
+  default test tier for the framework itself.
+- **Testing your pipelines** — the first-class path for framework users to
+  test their own chains, covered step by step in
+  [Testing pipelines](../03-guides/testing-pipelines.mdx).
+
+They are not production connectors: nothing is durable, and the source is
+driven entirely by your code.
+
+## The source: `memory_source()` + `SourceHandle`
+
+```rust
+use etl_test::memory_source;
+
+let (source, handle) = memory_source();      // source goes to the pipeline,
+                                             // handle stays with the test
+```
+
+`MemorySource` implements `Source`; the cloneable `SourceHandle` scripts
+its control plane and observes everything the runtime asks of it:
+
+| Handle method | What it does |
+|---|---|
+| `assign_lanes(&[(LaneId, PartitionId)])` | Queue an assignment event, like a rebalance would. |
+| `revoke_lanes(&[LaneId])` | Queue a revocation; returns a `DrainBarrierProbe` to observe the drain choreography. |
+| `push(partition, key, payload)` | Queue one payload; returns its assigned offset. `push_many` / `push_at` for batches and explicit timestamps. |
+| `last_committed(partition)` | The most recent committed watermark — **one past the last offset**, and only advanced after the sink durably acknowledged (the at-least-once assertion). `committed()` returns the full history. |
+| `paused_lanes()` | Which lanes backpressure has paused. |
+| `flush_commits_calls()`, `is_open()` | Lifecycle observation. |
+
+The mock is deliberately strict: misuse that would indicate a runtime bug —
+pausing an unassigned lane, duplicate lane ids, revoking an unknown lane —
+panics with a clear message instead of passing silently.
+
+## The sink: `capture_sink(shards, replicas)` + `SinkScript`
+
+```rust
+use etl_test::capture_sink;
+
+let (sink, script) = capture_sink(2, 2);     // 2 shards x 2 replicas
+let pipeline = pipeline.sink(sink)?;          // it's a real SinkBundle
+```
+
+`CaptureSink` builds a real shard topology over a `CaptureWriter` that
+records every write attempt. Unscripted writes succeed, so happy paths need
+no scripting; the `SinkScript` handle drives everything else:
+
+| Script method | What it does |
+|---|---|
+| `writes()` | Every write attempt so far, in order: shard, replica, rows, bytes, dedup token, payload, and how it resolved. |
+| `enqueue_for(shard, replica, outcome)` | Script the next write to one endpoint: `WriteOutcome::ok()`, `::retryable("...")`, `::fatal("...")`, each optionally `.after(delay)`. |
+| `enqueue_global(outcome)` | Same, for the next otherwise-unscripted write to any endpoint. |
+| `fail_probe(shard, replica, reason)` / `heal_probe(...)` | Drive the readiness probe (and with it `/readyz`) per replica. |
+
+Scripting a `retryable` outcome exercises the framework's real retry and
+replica-rotation machinery; a `fatal` outcome abandons the batch and stalls
+the watermark — letting you test the at-least-once failure modes
+themselves. `sink.with_pool_config(...)` overrides pool tuning; tests
+usually shrink `batch.linger` so flushes are fast.
+
+## Encoding helpers
+
+- `TestDeserializer` — payload to records: `passthrough()` (one payload,
+  one record), `split_on(b',')` (one payload, N records), and
+  `fail_on_prefix(...)` for poison-payload tests. `BytesPassthrough` (a
+  re-export of the framework's) skips deserialization entirely.
+- `TestEncoder` — a `RowEncoder` writing each row as a length-prefixed
+  frame; `decode_rows(&write.payload)` inverts it so assertions see the
+  original row bytes.
+
+## Configuration tags
+
+In pipeline YAML, the sections are informational — the in-memory pieces are
+constructed programmatically, and their factories read nothing:
+
+```yaml
+pipeline: { name: memory-demo, threads: 1 }
+metrics: { exporter: none }        # no global recorder; tests stay isolated
+source: { memory: {} }
+sink: { capture: {} }
+```
+
+## Related
+
+- [Testing pipelines](../03-guides/testing-pipelines.mdx) — the full
+  `into_runtime` + `shutdown_handle` pattern over these mocks.
+- [Quickstart](../01-getting-started/02-quickstart.mdx) — the memory
+  pipeline as your first run.
+- [Connector matrix](README.mdx) — the production counterparts.

@@ -1,0 +1,119 @@
+# Custom operators
+
+There is no `Operator` trait to implement. Operators in etl-rs are
+**stateful closures** over the chain builder's combinators — `map`,
+`filter`, `try_map`, `flat_map` — and a closure capturing its own state is
+a full-blown custom operator. The combinators compose **statically**: the
+whole chain monomorphizes into one loop, with a single virtual call per
+*batch* at the chain boundary (never per record), so adding a stage costs
+an inlined function call, not a dispatch. Rationale in
+[docs/DESIGN.md](../../DESIGN.md) (§ Operator chain).
+
+This page mirrors `crates/etl/examples/custom_operator.rs`, which drives a
+chain by hand exactly the way a pipeline thread does. Run it:
+
+```sh
+cargo run -p etl --example custom_operator
+```
+
+## A stateful operator: deduplication with `flat_map`
+
+`flat_map` is the general form — one record in, zero to N records out — and
+emitting zero is how an operator drops a record. A dedup set is just a
+closure capturing a `HashSet`:
+
+```rust
+let mut seen: HashSet<Vec<u8>> = HashSet::new();
+let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
+    // Stateful deduplication: emitting zero records drops the duplicate.
+    .flat_map::<Owned<Vec<u8>>, _>(move |word, out| {
+        if seen.insert(word.clone()) {
+            out.emit(word);
+        }
+    })
+    // Record-level validation with a per-stage error policy.
+    .try_map(
+        |word: Vec<u8>| {
+            if word.iter().all(u8::is_ascii_alphabetic) {
+                Ok(word)
+            } else {
+                Err("non-alphabetic word")
+            }
+        },
+        ErrorPolicy::Skip,
+    )
+    .map(|word: Vec<u8>| word.to_ascii_uppercase())
+    .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(), queues, budget)
+    .build();
+```
+
+Each chain factory runs once per pipeline thread, so `seen` is per-thread
+state — no locks on the hot path, but also no cross-thread visibility. A
+dedup set like this deduplicates within a thread's lanes only; that's the
+deal you're accepting by keeping the hot path share-nothing.
+
+## Dropping is not losing
+
+When the dedup closure emits nothing, the duplicate's ack share is released
+as **success**. Intentional drops — `filter` returning false, `flat_map`
+emitting zero, a `Skip` policy — count as delivered, so the source
+watermark still advances past them. The checkpointer only stalls on
+*failures*. See
+[Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
+
+## Zero-allocation fan-out: the `Emitter`
+
+`flat_map`'s second argument (`out` above) is a stack-borrowed `Emitter`.
+Each `out.emit(value)` pushes the child record straight into the downstream
+stage, inline — fan-out allocates nothing and buffers nothing. Children
+clone the parent's `AckRef`, so a parent record resolves only when all of
+its children do.
+
+## Errors: per-stage `Skip` or `Fail`
+
+`try_map` takes the fallible closure **and** an `ErrorPolicy` for that
+stage:
+
+- `ErrorPolicy::Skip` — drop the failing record, count it on
+  `etl_operator_records_dropped_total{reason="skip_policy"}`, continue.
+- `ErrorPolicy::Fail` — stop the pipeline. This is the right default for
+  bugs: operators default to Fail in the framework's taxonomy (the
+  deserializer stage defaults to Skip — malformed input is the outside
+  world's fault, a failing map is yours).
+
+There is deliberately no third option — no dead-letter queue, no silent
+drop. Every skipped record is visible in metrics
+([Error handling](../02-concepts/04-error-handling.mdx),
+[Monitoring](../05-deployment/monitoring.mdx)).
+
+:::note
+For chains over **borrowing** record families, bare closures on
+`map`/`try_map` hit a Rust inference limit (E0582); those two combinators
+offer `map_rec`/`try_map_rec` variants taking plain `fn` items instead.
+`filter`, `inspect`, and `flat_map` are unaffected, and owned-record
+chains (like the example above) infer everywhere.
+:::
+
+## When closures aren't enough: `Collector` and `StageLifecycle`
+
+The traits underneath the combinators are public in `etl::ops` for advanced
+stages — an operator that must observe batch flush/drain boundaries, park
+state across pushes, or integrate with the chain's lifecycle implements
+`Collector` (the push interface, `push(Record<T>) -> Flow`) and
+`StageLifecycle` directly. Reach for them only when a closure genuinely
+cannot express the behavior: the closures *are* the intended API, and the
+terminal stage's lifecycle contracts (fail-on-teardown for parked data) are
+easy to get wrong. Read the trait docs on
+[docs.rs](../07-reference/README.mdx) and the framework's own stages in
+`crates/etl-core/src/ops/` before going there.
+
+## Wiring it in
+
+In a real assembly the chain factory is the closure you hand to
+`Pipeline::chains`, and it gets a `ChainCtx` carrying the queues, budget,
+and pipeline name — see
+[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx). The example
+instead builds a `Checkpointer` and memory source by hand and pushes a
+batch through the chain directly — the same moves the runtime makes, and a
+convenient harness for unit-testing an operator in isolation
+([Testing pipelines](../03-guides/testing-pipelines.mdx)).

@@ -1,0 +1,123 @@
+# Architecture
+
+One process runs one pipeline. Inside that process, work splits along a
+hard line: CPU-bound record processing on pinned OS threads, I/O on a small
+shared tokio runtime, and a control plane coordinating both.
+
+```text
+                    ┌────────────────────────────────────────────────┐
+ pinned std thread  │ lane.poll → deserialize (borrowed) → operator  │──try_send──▶ per-shard
+ (× N, cgroup-aware)│ chain (map/filter/flat_map, monomorphized)     │              bounded queues
+                    └────────────────────────────────────────────────┘                   │
+                         ▲            full? pause lanes, keep polling                     ▼
+                         │                                              ┌──────────────────────────────┐
+                    ┌──────────┐   acks (unbounded, never block)        │ tokio runtime (small):       │
+                    │ source   │◀───────────────────────────────────────│ shard workers: batch, seal,  │
+                    │ control  │   watermarks → store/commit            │ rotate replicas, retry;      │
+                    │ plane    │                                        │ checkpointer; admin server   │
+                    └──────────┘                                        └──────────────────────────────┘
+```
+
+## Pipeline threads: where records live
+
+Pipeline threads are plain `std::thread`s, optionally core-pinned. Their
+count defaults to `available_parallelism` minus an I/O reserve and is always
+overridable in YAML (`pipeline.threads`). Each thread owns a set of source
+**lanes** — pollable data-plane units; for Kafka, a lane is a partition
+queue — and runs the whole hot path single-threaded:
+
+```text
+poll → deserialize → operator chain → route to shard queues
+```
+
+Two decisions define this stage:
+
+- **Deserialization happens here, not on an I/O task.** Payloads borrow
+  from the source's buffers, and those borrows cannot cross threads.
+  Keeping deserialization on the pipeline thread makes zero-copy legal and
+  keeps all CPU work on the pinned cores.
+- **The chain is monomorphized.** Operators (`map`, `filter`, `flat_map`,
+  `try_map`, ...) compose statically — the whole chain compiles to one
+  loop. Type erasure happens exactly once, at the chain boundary, with one
+  virtual call per **batch**. Per-record dynamic dispatch would defeat
+  cross-operator inlining; this design measured ~40 ns and zero allocations
+  per record in the validation spike (see
+  [docs/DESIGN.md](../../DESIGN.md) § Frozen v1 contracts).
+
+The chain's terminal stage encodes records into wire-format frames (for
+ClickHouse: RowBinary, encoded *on the pipeline thread*) and routes them to
+per-shard bounded queues with `try_send` — never a blocking send. When a
+queue is full, the source lanes pause and the thread keeps polling; see
+[Backpressure](03-backpressure.mdx).
+
+You build one chain per pipeline thread via the builder's `.chains(|ctx| ...)`
+factory — each call receives a `ChainCtx` carrying that thread's queue
+clones, the shared byte budget, and the pipeline name. See
+[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx).
+
+## The I/O runtime: where bytes leave
+
+A single shared multi-thread tokio runtime (default 2 workers,
+`pipeline.io_threads` in YAML) hosts everything asynchronous:
+
+- **Sink shard workers** — one per shard. Each accumulates encoded chunks
+  into batches (bounded by `max_rows` / `max_bytes` / `linger`), seals
+  them, and dispatches up to `max_per_shard` concurrent flushes rotating
+  across healthy replicas, retrying the same sealed batch on failure. See
+  the [ClickHouse connector](../04-connectors/clickhouse/README.mdx) for the
+  concrete sink.
+- **The admin HTTP server** — `/metrics`, `/healthz`, `/readyz`. See
+  [Monitoring](../05-deployment/monitoring.mdx).
+- **Async edge work** — e.g. the Avro schema-registry fetcher. Connectors
+  get a handle to this runtime before `run` via `pipeline.io_handle()` and
+  `pipeline.block_on(..)`.
+
+The builder constructs this runtime in `Pipeline::from_config` and the
+pipeline runtime adopts it — there is exactly one I/O runtime per process,
+so `io_threads` means what it says.
+
+:::note
+Because `Pipeline` owns a blocking tokio runtime, `Pipeline::from_config`
+refuses to be called from inside an async context (`BuildError::AsyncContext`).
+Build pipelines from a plain thread — usually `main`.
+:::
+
+## The control plane
+
+A controller thread services source events (rebalances, statistics), runs
+commit ticks, owns shutdown, and enforces liveness policies (e.g. failing
+the pipeline when a partition's watermark stays stalled behind a failed
+batch). The **checkpointer** it drives is a synchronous, tokio-free module:
+acknowledgements arrive over an unbounded channel — the ack path can never
+block behind data — and per-partition contiguity tracking turns them into
+committable watermarks. [Delivery guarantees](02-delivery-guarantees.mdx)
+covers that machinery.
+
+## Why one process = one pipeline
+
+This is a deliberate Kubernetes-native constraint, not a limitation to
+engineer around:
+
+- **Scaling** is `replicas: N` on a Deployment. Each pod is one
+  consumer-group member; Kafka assigns partitions across pods.
+- **Isolation**: a fatal error fails the process (non-zero exit), and the
+  orchestrator restarts it. There is no thread resurrection or in-process
+  supervision to reason about.
+- **Operations**: one config file, one metrics endpoint, one pair of
+  probes, one SIGTERM drain per pod. See
+  [Graceful shutdown](../03-guides/graceful-shutdown.mdx) and
+  [Deployment](../05-deployment/README.mdx).
+
+Pipelines are linear — source → chain → sharded sink — with routing across
+shards at the sink end. General DAGs, windowing, and stateful operators are
+explicit non-goals for v1 (see [docs/DESIGN.md](../../DESIGN.md) §
+Non-goals).
+
+## Further reading
+
+- [docs/DESIGN.md](../../DESIGN.md) § Process anatomy, § Source
+  abstraction, § Operator chain — the canonical version with all the
+  benchmarks and trade-offs.
+- [Custom sources](../06-extending/custom-source.mdx) /
+  [Custom sinks](../06-extending/custom-sink.mdx) — implementing the seams
+  this page describes.

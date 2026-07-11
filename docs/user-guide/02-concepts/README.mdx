@@ -1,0 +1,49 @@
+# Concepts
+
+The mental model behind etl-rs. These five pages explain the contracts the
+framework holds — and expects you to hold — with the reasoning behind each.
+The canonical, exhaustive version lives in [docs/DESIGN.md](../../DESIGN.md);
+these pages are the working subset a pipeline author needs.
+
+## [1. Architecture](01-architecture.mdx)
+
+The anatomy of a running pipeline process: pinned pipeline threads (poll →
+deserialize → operator chain → route), the single shared tokio I/O runtime
+(sink workers, admin server, async fetchers), and the control plane. Why one
+process runs exactly one pipeline.
+
+## [2. Delivery guarantees](02-delivery-guarantees.mdx)
+
+How at-least-once actually works: refcounted acknowledgements per source
+batch, the contiguity tracker, and watermarks that commit only after durable
+sink acks — across rebalances and shutdown. Also the honest limits: what
+ClickHouse dedup tokens do and do not cover, and how to design tables for
+replay.
+
+## [3. Backpressure](03-backpressure.mdx)
+
+Flow control without ever blocking the source: `try_send`, pause, keep
+polling. The in-flight byte budget, its watermarks, and the sizing rule that
+keeps a saturated pipeline out of pause duty-cycling.
+
+## [4. Error handling](04-error-handling.mdx)
+
+The error taxonomy (retryable, record-level, fatal), the two record-level
+policies (Skip and Fail — there is no dead-letter queue), and the metrics
+that make every drop and every error visible.
+
+## [5. Sink sharding](05-sink-sharding.mdx)
+
+How the terminal stage fans writes across shards: what a shard is, the two
+router tiers (meta-only `KeyHashRouter` and record-aware `RecordRouter`), why
+one saturated shard pauses the whole pipeline, and the honest limit — hot
+shards are your data's shape, not the router's choice.
+
+## Related
+
+- [Guides](../03-guides/README.mdx) — task-oriented how-tos built on these
+  concepts.
+- [Monitoring](../05-deployment/monitoring.mdx) and
+  [docs/METRICS.md](../../METRICS.md) — observing the contracts at runtime.
+- [Glossary](../07-reference/glossary.mdx) — the vocabulary (lane, shard,
+  watermark, epoch, sealed batch, ...).

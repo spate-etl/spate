@@ -13,7 +13,7 @@ export const armLabels = { single_null: 'single Null (ceiling)', null_mv: 'Null 
 When a stream carries many record types and you want one table per type, the
 fan-out has to happen *somewhere*. The classic ClickHouse answer is a `Null`
 landing table plus one `MATERIALIZED VIEW` per type — the **server** fans out.
-The [multi-sink split](../user-guide/02-concepts/06-multi-sink.md) does it in the
+The [multi-sink split](../user-guide/02-concepts/06-multi-sink.mdx) does it in the
 **ETL**: each record routes directly to its type's table. This rig asks whether
 moving that work off the (scarce, hard-to-scale) database earns its keep.
 
@@ -40,14 +40,15 @@ Environment: Apple M5 Max (18-core), macos/aarch64, Rust release, ClickHouse
 **26.3** in Docker **capped at 6 cores** (`--cpus=6`) so the server is the scarce
 resource and the ETL has the rest of the host — the shape the split exists for.
 Harness: `benchmarks/src/bin/multi_table_split.rs`; raw JSONL in
-`benchmarks/results/`, reproduction in [Methodology](./methodology.md).
+`benchmarks/results/`, reproduction in [Methodology](./methodology.mdx).
 
-> [!NOTE]
-> **Bottleneck discipline.** The comparison only means something if ClickHouse
-> is the binding constraint. Every arm records a `limiter` verdict; on the runs
-> below both storage arms are `sink`-bound, so the numbers are the server's
-> capacity, not the generator's. If an arm were generator- or budget-bound the
-> result would be invalid — see the concept page.
+:::note
+**Bottleneck discipline.** The comparison only means something if ClickHouse
+is the binding constraint. Every arm records a `limiter` verdict; on the runs
+below both storage arms are `sink`-bound, so the numbers are the server's
+capacity, not the generator's. If an arm were generator- or budget-bound the
+result would be invalid — see the concept page.
+:::
 
 ## Throughput: the split pulls away as types multiply
 
@@ -126,6 +127,6 @@ types is when per-table tables are most worth having). Both storage arms are
 touch the per-row CPU or the part-size results, which are the load-bearing wins.
 
 The cost the split carries is checkpoint lag from per-table `linger` on rare
-tables (see the [concept page](../user-guide/02-concepts/06-multi-sink.md#the-trade-youre-making-part-size-vs-checkpoint-lag)); on an interleaved source that is
+tables (see the [concept page](../user-guide/02-concepts/06-multi-sink.mdx#the-trade-youre-making-part-size-vs-checkpoint-lag)); on an interleaved source that is
 the price of big rare-type parts. For a stream where the database is the scarce
 resource, it is a price worth paying.

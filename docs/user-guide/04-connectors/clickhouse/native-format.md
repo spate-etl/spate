@@ -19,9 +19,11 @@ at-least-once semantics are **unchanged** — only the encoding differs.
 
 Native **moves the row→column pivot off the ClickHouse server onto the (more
 easily scaled) ETL workers**. That is a deliberate trade, measured on a dev
-laptop (ClickHouse 25.6, 200k-row inserts, a realistic mixed schema; full
-methodology and numbers in the repo's
-`docs/benchmarks/clickhouse-format.mdx`):
+laptop with an **idle, single-threaded ClickHouse 25.6** server (200k-row
+inserts, a realistic mixed schema; full methodology and numbers in the repo's
+`docs/benchmarks/clickhouse-format.mdx`). These are per-query, parse-isolated
+figures; a sustained-saturation rig on 26.3 measures whole-server CPU
+differently — see that page's note if you are sizing a busy cluster:
 
 | Axis | RowBinary | Native | Delta |
 |---|---|---|---|

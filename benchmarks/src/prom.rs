@@ -24,31 +24,41 @@ pub fn value(text: &str, name: &str, filter: &str) -> Option<f64> {
     matched.then_some(sum)
 }
 
-/// Approximate `q`-quantile (0.0..=1.0) of a classic Prometheus histogram
-/// from its cumulative `_bucket` series, with linear interpolation inside
-/// the winning bucket. Buckets across labeled series are merged.
-pub fn histogram_quantile(text: &str, name: &str, q: f64) -> Option<f64> {
+/// Parse the cumulative `_bucket` series of `name` into `(le, cumulative)`
+/// pairs, merging the same `le` boundary across labeled series. Malformed
+/// bucket lines are skipped rather than aborting the parse.
+fn buckets(text: &str, name: &str) -> Vec<(f64, f64)> {
     let bucket_prefix = format!("{name}_bucket");
-    let mut buckets: Vec<(f64, f64)> = Vec::new(); // (le, cumulative count)
+    let mut buckets: Vec<(f64, f64)> = Vec::new();
     for line in text.lines() {
         if !line.starts_with(&bucket_prefix) {
             continue;
         }
-        let le = line
-            .split("le=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())?;
+        let Some(le) = line.split("le=\"").nth(1).and_then(|s| s.split('"').next()) else {
+            continue;
+        };
         let le = if le == "+Inf" {
             f64::INFINITY
         } else {
-            le.parse::<f64>().ok()?
+            match le.parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
         };
-        let count = line.rsplit(' ').next()?.parse::<f64>().ok()?;
+        let Some(count) = line.rsplit(' ').next().and_then(|c| c.parse::<f64>().ok()) else {
+            continue;
+        };
         match buckets.iter_mut().find(|(b, _)| *b == le) {
             Some((_, c)) => *c += count,
             None => buckets.push((le, count)),
         }
     }
+    buckets
+}
+
+/// Interpolate the `q`-quantile (0.0..=1.0) from `(le, cumulative)` buckets,
+/// linearly inside the winning bucket. `None` when empty or with a zero total.
+fn quantile_from_buckets(mut buckets: Vec<(f64, f64)>, q: f64) -> Option<f64> {
     if buckets.is_empty() {
         return None;
     }
@@ -77,6 +87,27 @@ pub fn histogram_quantile(text: &str, name: &str, q: f64) -> Option<f64> {
         prev_count = *count;
     }
     Some(prev_le)
+}
+
+/// Approximate `q`-quantile (0.0..=1.0) of a classic Prometheus histogram
+/// from its cumulative `_bucket` series, with linear interpolation inside
+/// the winning bucket. Buckets across labeled series are merged.
+pub fn histogram_quantile(text: &str, name: &str, q: f64) -> Option<f64> {
+    quantile_from_buckets(buckets(text, name), q)
+}
+
+/// Like [`histogram_quantile`] but over the change in each cumulative `le`
+/// bucket between two renders (`after` − `before`), so the quantile reflects
+/// only the observations inside the window. An `le` missing from `before`
+/// counts as 0; a negative delta (counter reset) clamps to 0.
+pub fn histogram_quantile_delta(before: &str, after: &str, name: &str, q: f64) -> Option<f64> {
+    let base = buckets(before, name);
+    let mut delta = buckets(after, name);
+    for (le, count) in &mut delta {
+        let before_count = base.iter().find(|(b, _)| b == le).map_or(0.0, |(_, c)| *c);
+        *count = (*count - before_count).max(0.0);
+    }
+    quantile_from_buckets(delta, q)
 }
 
 #[cfg(test)]
@@ -112,5 +143,23 @@ lat_count 10\n";
         // The +Inf bucket clamps to the last finite boundary.
         let p999 = histogram_quantile(SAMPLE, "lat", 0.999).unwrap();
         assert!(p999 <= 1.0);
+    }
+
+    #[test]
+    fn histogram_quantile_delta_windows_observations() {
+        // `before` has all ten observations in the first bucket; `after` adds
+        // ten more, all in the second bucket. The windowed p50 must fall in the
+        // second bucket, unlike the cumulative p50.
+        let before =
+            "lat_bucket{le=\"0.1\"} 10\nlat_bucket{le=\"1\"} 10\nlat_bucket{le=\"+Inf\"} 10\n";
+        let after =
+            "lat_bucket{le=\"0.1\"} 10\nlat_bucket{le=\"1\"} 20\nlat_bucket{le=\"+Inf\"} 20\n";
+        let p50 = histogram_quantile_delta(before, after, "lat", 0.5).unwrap();
+        assert!(
+            (0.1..=1.0).contains(&p50),
+            "windowed p50 in second bucket: {p50}"
+        );
+        // No new observations → no quantile.
+        assert_eq!(histogram_quantile_delta(after, after, "lat", 0.5), None);
     }
 }

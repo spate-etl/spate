@@ -290,7 +290,7 @@ async fn bare_server(tag: &str, password: &str) -> Server {
 //
 // `Time`/`Time64` columns are exercised at the unit/mock layers only:
 // they need ClickHouse ≥ 25.6 plus `enable_time_time64_type=1`, and this
-// test pins 25.3 (LTS; first release with production-ready JSON).
+// test pins 26.3 (the current LTS line).
 #[cfg(all(feature = "uuid", feature = "chrono", feature = "time"))]
 mod wide {
     use super::*;
@@ -459,7 +459,7 @@ mod wide {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn wide_type_table_round_trips() {
-        let srv = bare_server("25.3-alpine", "wide-secret").await;
+        let srv = bare_server("26.3", "wide-secret").await;
         let ddl_client = srv
             .admin
             .clone()
@@ -670,7 +670,7 @@ mod native_e2e {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn native_format_round_trips_through_a_real_server() {
-        let srv = bare_server("25.3-alpine", "native-secret").await;
+        let srv = bare_server("26.3", "native-secret").await;
         srv.admin
             .query(DDL)
             .execute()
@@ -726,7 +726,7 @@ mod native_e2e {
         use etl_core::error::{ErrorClass, SinkError};
         use std::sync::Arc;
 
-        let srv = bare_server("25.3-alpine", "native-secret3").await;
+        let srv = bare_server("26.3", "native-secret3").await;
         srv.admin
             .query(
                 "CREATE TABLE dt_micro (id UInt64, ts DateTime64(6, 'UTC')) \
@@ -813,7 +813,7 @@ mod native_e2e {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn native_lowcardinality_composites_render_correctly() {
-        let srv = bare_server("25.3-alpine", "native-secret2").await;
+        let srv = bare_server("26.3", "native-secret2").await;
         srv.admin
             .query(DDL)
             .execute()
@@ -918,7 +918,7 @@ mod native_edges {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn int256_and_nested_geo_match_the_literal_row() {
-        let srv = bare_server("25.3-alpine", "edges-secret").await;
+        let srv = bare_server("26.3", "edges-secret").await;
         srv.admin
             .query(DDL)
             .execute()

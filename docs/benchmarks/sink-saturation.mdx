@@ -1,0 +1,311 @@
+---
+title: Sink saturation
+sidebar_position: 6
+description: Finding the ClickHouse sink ceiling — threads, format, part size, async_insert, compression, shards — with a per-record limiter verdict on every arm.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+
+export const engineLabels = { Null: 'Null', MergeTree: 'MergeTree' };
+export const fmtLabels = { rowbinary: 'RowBinary', native: 'Native' };
+export const asyncLabels = { '0': 'async_insert off', '1': 'async_insert on' };
+
+# ClickHouse sink saturation (2026-07)
+
+How fast can the pipeline push rows into ClickHouse, and **where is the
+bottleneck** — the framework, the client, or the server? This rig isolates the
+sink: an in-process generator source (no broker) drives the real chain, sink
+pool, and runtime into ClickHouse at full tilt. Backpressure clamps the
+generator to whatever the sink can absorb, so the steady-state rate is the
+sink's — *provided* the generator can actually keep up and the framework's own
+in-flight budget is not the thing holding it back. Both of those provisos turned
+out to matter, so every arm now carries a recorded **limiter verdict** saying
+which of the three is the constraint.
+
+Environment: Apple M5 Max (18-core), macos/aarch64, Rust release, ClickHouse
+**26.3.17.4** in Docker, **capped at 8 cores** (`--cpus=8`) so the client and
+server share this one host predictably. This is a **shared-host ceiling**: the
+ETL client and the ClickHouse server contend for the same 18 physical cores,
+which is the realistic shape for a co-located dev box and the honest framing for
+the numbers below. A dedicated server (point the rig at `CLICKHOUSE_URL`) removes
+that contention and raises the ceiling. Harness:
+`benchmarks/src/bin/ch_sink_saturation.rs`; the exact matrix (33 arms × 3 reps =
+99 records) is in [Methodology](./methodology.md), raw JSONL in
+`benchmarks/results/`.
+
+Throughput is read from `etl_sink_records_total` (durably-acked rows, summed
+across shards) over a steady-state 15 s window — it works for `ENGINE = Null`,
+where `SELECT count()` is 0 because the server discards rows after parsing.
+
+## The ceiling, and why the old "peak at 2 threads" was wrong
+
+The headline is a **measured sink ceiling of ~8.3M rows/s**, reached by the Null
+engine with the Native format at **4 pipeline threads**, and confirmed
+sink-limited by the recorded verdicts. The shape below is the whole story: the
+client is **generator-limited below 4 threads** (it cannot feed the sink fast
+enough), the sink **saturates at 4**, and the host is **oversubscribed above 4**
+(client and server fight for the same cores).
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="rows_per_s"
+  category="threads"
+  series="format"
+  where={{ engine: 'Null', async_insert: 0, io_threads: 4, shards: 4, batch_max_rows: 262144, batch_max_mb: 128, compression: 'lz4' }}
+  exclude={{ threads: 12 }}
+  order={['2', '3', '4', '5', '6', '8']}
+  seriesOrder={['Native', 'RowBinary']}
+  emphasize="native"
+  labels={fmtLabels}
+  title="Null-engine ceiling: throughput vs pipeline threads"
+  caption="Native peaks at 4 threads (~8.3M rows/s, sink-limited); the 2-thread arms are generator-limited, and past 4 threads the co-located 8-core server loses cores to the client. RowBinary tops out a step earlier and lower — see the wire-format section for what the server-CPU data does (and does not) say about why."
+/>
+
+There *is* a real peak at a thread count — the old page had that intuition right.
+But the peak sits **where the sink saturates, not at "2 threads"**. The earlier
+recording read 2 threads as the peak because at 2 threads the *generator* is the
+limiter (backpressure never engages), so the number it reported was the client's
+feed rate, not the sink's capacity. Extending the sweep to 3/4/5/6 threads and
+fixing the in-flight budget (below) moved the true peak to 4 threads and lifted
+it from a claimed "~4.6M ceiling" to a bracketed ~8.3M. Past the peak the curve
+falls monotonically — 4.76M (t5), 4.15M (t6), 3.12M (t8), all sink-limited —
+because each added pipeline thread steals a core from the server it is feeding.
+RowBinary peaks a step earlier (t3 ≈ t4, ~6.9M) and lower. Why it tops out below
+Native is *not* explained by the recorded per-row server CPU — that metric is
+actually lower for RowBinary — see the wire-format section for the honest
+reading of that discrepancy.
+
+## How we know the sink is the limiter
+
+Each arm records a per-record **limiter verdict** in its note (it is not a chart
+dimension — verdicts can differ across the three reps of one arm). The rule reads
+only signals the rig already has:
+
+- **`sink`** — the source was paused for backpressure at least once during the
+  window (`etl_backpressure_pause_events_total` delta > 0, or the
+  `etl_backpressure_paused` gauge caught mid-pause). The framework wanted to push
+  faster and the sink pushed back: the sink is the limiter.
+- **`generator`** — no pauses at all. The sink was never the constraint; the
+  in-process source simply could not produce rows fast enough. A `generator` arm
+  is a lower bound on sink capacity, not a measurement of it.
+- **`indeterminate-checkpoint`** — no backpressure pauses, but the
+  checkpoint-pending gauge ran high (acked-but-uncommitted batches piling toward
+  the limit). The checkpoint path has no pause counter, so this is flagged rather
+  than claimed as a clean sink measurement.
+- **`budget`** — the in-flight budget was set below the deployment sizing rule,
+  which invalidates the arm for any ceiling claim. None of the committed arms
+  carry this: the rig now **derives** its `MAX_INFLIGHT_MB` default from the
+  [backpressure sizing rule](../user-guide/04-connectors/clickhouse/performance-tuning.md#backpressure-budget)
+  (2 × in-flight bytes over the 0.5 low watermark) rather than a fixed 512 MB.
+
+That last point is the lesson of the first, invalidated recording: its budget
+(512 MB) was **below** the pipeline's own in-flight footprint, so the framework
+paused the source before the sink was full and reported a self-throttled rate as
+"the ceiling". The sizing rule the [tuning
+guide](../user-guide/04-connectors/clickhouse/performance-tuning.md#backpressure-budget)
+already prescribed predicts exactly that failure; deriving the budget from it
+removes the artifact, and the ceiling arm now runs with zero budget-limited reps.
+Across all 99 records, 77 reps are `sink`, 19 `generator` (the t2 arms and a few
+t3), and 3 `indeterminate-checkpoint`.
+
+The **ceiling arm** (Null / Native / t4) is sink-limited (2 of 3 reps `sink`, 1
+`indeterminate-checkpoint`) with a rep spread of 11.6%, and it is *bracketed* — a
+larger-thread arm (t5) sits below it at 4.76M, also sink-limited — which is what
+lets us call it a ceiling rather than a still-rising curve. Running the same arm
+with 8 io threads instead of 4 gives 8.58M (+3.6%, inside the noise band), so io
+threads are not the constraint at this rate.
+
+## Wire format at the ceiling
+
+On the `Null` engine (server parse isolated, no storage) Native sustains higher
+throughput than RowBinary — 8.28M vs 6.85M rows/s at 4 threads. But it does so at
+**higher whole-server CPU per row**, not lower:
+
+| Engine (t4, sync) | Format | rows/s | `ch_cpu_us_per_row` |
+|---|---|---|---|
+| `Null` | RowBinary | 6,851,471 | 0.1513 |
+| `Null` | **Native** | **8,281,878** | **0.1923** |
+| `MergeTree` | RowBinary | 3,802,047 | 0.2810 |
+| `MergeTree` | **Native** | **4,341,011** | **0.3693** |
+
+:::note This contradicts the isolated-parse study — read both
+The [ClickHouse format study](./clickhouse-format.mdx) measured Native cutting
+**server parse CPU ~92%** on a cold, single-query, single-threaded path. This rig
+measures the **opposite direction**: higher `ch_cpu_us_per_row` for Native under
+sustained saturation. The two are not comparable and neither is wrong. The format
+study isolates *parse* CPU for one query on an idle server; this rig samples
+*whole-server* CPU (`system.query_log` over the window — parse **plus** merges,
+part flushes, and scheduler overhead) while the server runs flat-out on 8 capped
+cores at millions of rows/s. Native's higher throughput means it drives more of
+that whole-server work per unit time, and it reaches a **higher absolute
+throughput**, which is the thing that matters here. Do not read this table as
+"Native costs more to parse" — read it as "at saturation, whole-server CPU/row is
+not the same quantity the format study isolated." The format choice guidance is
+unchanged; see that page for the encode-side trade.
+:::
+
+## The Null → MergeTree gap is a peak phenomenon
+
+`Null` discards rows after parse; `MergeTree` is the real sink (part write,
+merge, the works). The gap between them is the storage cost — but it is **not a
+fixed per-row tax**. It bites hard exactly at the saturation point and vanishes
+elsewhere:
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="rows_per_s"
+  category="threads"
+  series="engine"
+  where={{ format: 'native', async_insert: 0, io_threads: 4, shards: 4, batch_max_rows: 262144, batch_max_mb: 128, compression: 'lz4' }}
+  exclude={{ threads: [3, 5, 6, 12] }}
+  order={['2', '4', '8']}
+  seriesOrder={['Null', 'MergeTree']}
+  emphasize="Null"
+  labels={engineLabels}
+  title="Null vs MergeTree throughput (Native, sync)"
+  caption="MergeTree tracks Null at 2 and 8 threads (96% and 105%) but drops to 52% at 4 — the flush and part-write cost surfaces only where the sink is otherwise saturated."
+/>
+
+Native MergeTree holds **96%** of Null throughput at 2 threads and **105%** at 8
+(noise-level; MergeTree edges ahead where both are contention-bound), but only
+**52%** at 4 threads — right where Null peaks. Storage work (part write, merge
+scheduling) competes with parse only when the server is otherwise at its ceiling;
+below and above that point there are spare cycles to absorb it. The RowBinary gap
+tracks the same shape (100% / 55% / 84% at t2/t4/t8). So the honest statement is
+"~2× cost at the saturation point," not a constant flush tax.
+
+## async_insert: does the 26.3 default matter for us?
+
+ClickHouse **26.3 enables `async_insert` by default**. It batches many small
+client inserts server-side — but our sink already sends large blocks (256k rows)
+with synchronous durable acks. We swept it on and off explicitly for both formats
+rather than inherit the default.
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="rows_per_s"
+  category="threads"
+  series="async_insert"
+  where={{ engine: 'MergeTree', format: 'native', io_threads: 4, shards: 4, batch_max_rows: 262144, batch_max_mb: 128, compression: 'lz4' }}
+  order={['2', '4', '8']}
+  seriesOrder={['async_insert off', 'async_insert on']}
+  emphasize="0"
+  labels={asyncLabels}
+  title="MergeTree Native: async_insert off vs on"
+  caption="No consistent effect. For already-large batches the server writes them directly, so async_insert moves throughput neither way — the small deltas are host-contention noise, not the setting."
+/>
+
+The finding is **no consistent measured effect either way, for either format**,
+on already-large batches. The native deltas (async − sync) are +0.7% / −4.9% /
+−5.8% at t2/t4/t8; the rowbinary deltas are −5.6% / +7.0% / +9.9% — opposite
+signs, all within the run-to-run variance band, and the `system.asynchronous_insert_log`
+flush counter is empty for almost every `async_insert=1` arm, meaning the async
+buffer path was barely exercised. The recommendation to leave it **off**
+(`async_insert: "0"`) for batched ingestion still stands, but on grounds of
+write-path simplicity and unambiguous durable-ack semantics, **not** a throughput
+win — there is none to claim in either direction. `async_insert` earns its keep
+on the opposite workload: many small, direct inserts that would each become a
+tiny part.
+
+## Part size: bigger batches, bigger parts
+
+ClickHouse prefers large parts (fewer parts, less merge pressure). Our part size
+tracks the sink's `batch.max_rows` / `batch.max_bytes`, so raising the cap
+produces larger parts — up to where `linger` seals the batch first.
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="ch_avg_part_rows"
+  category="batch_max_rows"
+  where={{ engine: 'MergeTree', format: 'native', threads: 4, async_insert: 0, shards: 4, compression: 'lz4' }}
+  exclude={{ batch_max_mb: 128 }}
+  order={['262144', '1048576', '4194304']}
+  title="Rows per part grows with batch cap (MergeTree Native, THREADS=4)"
+  caption="A bigger batch writes a bigger part — rows/part roughly doubles from 256k to 1M rows and the part and merge counts roughly halve, then plateaus around 440k as the 500 ms linger seals each batch first."
+/>
+
+Raising the row cap from 256k to 4M lifts throughput **+28%** (3.59M → 4.59M
+rows/s) and grows the median part from **213k to 439k rows** while cutting the
+part count (257 → 165) and background merges (46 → 30) — the write-amplification
+win larger parts buy. It does **not** keep scaling: past ~440k rows/part the part
+size plateaus because the sink's `linger` (500 ms here) seals each batch before
+it reaches the larger row cap, so past ~1M rows the linger, not `max_rows`, is
+the effective sealer. The [sink tuning
+guide](../user-guide/04-connectors/clickhouse/performance-tuning.md) turns this
+into a starting recommendation with the reasoning behind it. (The 4M-row arm
+carries a ~13 GB worst-case in-flight memory bound — the rig prints it at
+startup.)
+
+## Compression codec
+
+New in this sweep: the sink's `compression` knob (lz4 / zstd / off), swept on the
+MergeTree Native sync t4 arm.
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="rows_per_s"
+  category="compression"
+  where={{ engine: 'MergeTree', format: 'native', threads: 4, async_insert: 0, shards: 4, batch_max_rows: 262144, batch_max_mb: 128 }}
+  order={['lz4', 'off', 'zstd']}
+  emphasize="lz4"
+  title="Compression codec throughput (MergeTree Native, THREADS=4)"
+  caption="lz4 and off are within noise (4.34M vs 4.25M); zstd is ~13% slower — but the median is soft (57% rep spread), so read it as 'zstd costs some throughput here', not a precise figure."
+/>
+
+lz4 (4.34M rows/s) and off (4.25M) are within noise of each other; **zstd is
+~13% slower** (3.79M) — but with a 57% rep spread that median is soft, so treat it
+as "zstd costs throughput at this rate," not a precise number. The recorded part
+bytes are nearly identical across all three codecs, which is the tell: **the
+synthetic body is low-entropy** (an arena of ~2048 distinct payloads), so it
+compresses far better than production data would. These are compressible-data
+numbers, and this caveat applies to **every byte-derived quantity on this page**
+(part bytes, part rows), not only the compression arms. `lz4` stays the default.
+
+## Shards (writer parallelism)
+
+Also new: the shard count (independent writer streams), swept on MergeTree Native
+sync t4. On a server capped at 8 cores, there is a sweet spot.
+
+<BenchBars
+  bench="ch_sink_saturation"
+  metric="rows_per_s"
+  category="shards"
+  where={{ engine: 'MergeTree', format: 'native', threads: 4, async_insert: 0, batch_max_rows: 262144, batch_max_mb: 128, compression: 'lz4' }}
+  order={['2', '4', '8']}
+  emphasize="4"
+  title="Writer shards throughput (MergeTree Native, THREADS=4)"
+  caption="4 writers saturate the capped 8-core server; 2 under-parallelize and 8 contend for the same cores. All three arms are sink-limited."
+/>
+
+**4 shards** is the peak (4.34M rows/s): 2 shards under-parallelize (2.43M) and 8
+shards contend for the same capped cores (3.41M, and the noisiest arm at 31.7%
+rep spread). All three are sink-limited. As with threads, the sweet spot is
+specific to this capped-8-core shared host; a wider server moves it right.
+
+## What this rig does and does not say
+
+- It **isolates the sink** *when the verdict says so*: only `sink`-limited arms
+  measure the sink. `generator` arms (the 2-thread points) are lower bounds on
+  sink capacity, and the 3 `indeterminate-checkpoint` reps are flagged rather
+  than trusted. Read the verdict, not just the bar.
+- Every **byte-derived** number (part bytes, rows/part, the compression arms)
+  reflects a **low-entropy synthetic body** (~2048 distinct payloads). Treat
+  compression wins as an upper bound and part sizes as best-case; production data
+  is higher-entropy.
+- It measures a **shared-host** ceiling — client and server on one 18-core box,
+  the server capped at 8. A dedicated ClickHouse cluster is a different, higher
+  ceiling; run the same rig against `CLICKHOUSE_URL` to find it. The thread,
+  shard, and format sweet spots are all specific to this capped, co-located host.
+- Windows are short (15 s) and the host is contended, so absolute numbers carry
+  **measured** run-to-run variance: across the 33 arms, rep spread
+  ((max − min)/median of `rows_per_s`) is ~±12% at the median arm, mean 14.4%,
+  and 30%+ on the most contended arms (p90 31.7%, max 57%). Quote the **shapes**
+  (where the sink saturates, the Null→MergeTree gap, part size vs cap), not any
+  single bar to three figures. Every bar's exact value and rep count (n=3) is in
+  its data table.
+- Minor anomalies, disclosed: 3 reps carry `indeterminate-checkpoint` (checkpoint
+  backlog high, no backpressure pauses); and the RowBinary Null curve is slightly
+  non-monotonic at the shoulder (t3 6.99M just above t4 6.85M, inside the noise).
+- Every arm records the ClickHouse **server version** (`26.3.17.4`), the derived
+  in-flight budget, and its own provenance in the JSONL, so a re-run on new
+  hardware or a new ClickHouse LTS is directly comparable.

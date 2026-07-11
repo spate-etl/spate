@@ -98,6 +98,8 @@ struct Meta {
     /// Raw-mode payload size in bytes, echoed for reconciliation; unused in
     /// avro mode, where the payload dimension is `events` (== records_per_input).
     payload_bytes: u64,
+    /// `SELECT version()` of the target server, recorded in the note.
+    ch_version: String,
 }
 
 fn producer(brokers: &str) -> BaseProducer {
@@ -385,12 +387,17 @@ fn spawn_and_measure<MK>(
     }
     let measure = "rows_per_s = rows landed / elapsed from first landed row to \
                    final count (saturated throughout under RATE=0)";
+    let ch_version = &meta.ch_version;
     let note = if rows >= expected {
-        format!("{measure}; complete; exit={:?}", exit.state)
+        format!(
+            "{measure}; complete; ch_version={ch_version}; exit={:?}",
+            exit.state
+        )
     } else {
         format!(
             "{measure}; produced {sent} messages, landed {rows}/{expected} \
-             rows, tail abandoned (fresh topic/group per run); exit={:?}",
+             rows, tail abandoned (fresh topic/group per run); \
+             ch_version={ch_version}; exit={:?}",
             exit.state
         )
     };
@@ -430,9 +437,12 @@ fn run_raw(conn: &Conn, topic: &str, partitions: i32, threads: usize, meta: Meta
         .expect("io runtime");
     let config = pipeline_config(threads);
     let source = kafka_source(&conn.brokers, topic);
+    // async_insert: "0" pins the synchronous insert path so the recorded server
+    // behaviour is stable across server versions (26.3 defaults it to 1).
     let sink_yaml = format!(
         "clickhouse:\n  table: bench_events\n  columns: [id, body]\n  \
-         user: {}\n  password: {:?}\n  shards:\n    - replicas: [{:?}]\n  \
+         user: {}\n  password: {:?}\n  settings: {{ async_insert: \"0\" }}\n  \
+         shards:\n    - replicas: [{:?}]\n  \
          batch: {{ linger: 500ms, max_rows: 262144 }}\n",
         conn.user, conn.password, conn.url
     );
@@ -524,9 +534,11 @@ fn run_avro(
     } else {
         "rowbinary"
     };
+    // async_insert: "0" pins the synchronous insert path (26.3 defaults it to 1).
     let sink_yaml = format!(
         "clickhouse:\n  table: sensor_events\n  columns: [{col_names}]\n  \
-         format: {ch_format}\n  user: {}\n  password: {:?}\n  shards:\n    \
+         format: {ch_format}\n  user: {}\n  password: {:?}\n  \
+         settings: {{ async_insert: \"0\" }}\n  shards:\n    \
          - replicas: [{:?}]\n  batch: {{ linger: 500ms, max_rows: 262144 }}\n",
         conn.user, conn.password, conn.url
     );
@@ -764,26 +776,10 @@ fn main() {
     let format = env_str("FORMAT", "rowbinary");
 
     // ── Infrastructure ──────────────────────────────────────────────────
+    // Kafka is resolved here; the ClickHouse half is shared with the other rigs.
     let external_kafka = std::env::var("KAFKA_BROKERS").ok();
-    let external_ch = std::env::var("CLICKHOUSE_URL").ok();
     let brokers = external_kafka.unwrap_or_else(docker::ensure_kafka);
-    let (url, host, port, user, password) = match external_ch {
-        Some(url) => {
-            let hp = url.trim_start_matches("http://").to_owned();
-            let (h, p) = hp.split_once(':').expect("CLICKHOUSE_URL host:port");
-            (
-                url.clone(),
-                h.to_owned(),
-                p.parse::<u16>().expect("port"),
-                env_str("CLICKHOUSE_USER", "default"),
-                env_str("CLICKHOUSE_PASSWORD", ""),
-            )
-        }
-        None => {
-            let (h, p, u, pw) = docker::ensure_clickhouse();
-            (format!("http://{h}:{p}"), h, p, u, pw)
-        }
-    };
+    let (url, host, port, user, password) = docker::resolve_clickhouse();
     let conn = Conn {
         brokers,
         url,
@@ -792,6 +788,15 @@ fn main() {
         user,
         password,
     };
+    let ch_version = docker::clickhouse_sql(
+        &conn.host,
+        conn.port,
+        &conn.user,
+        &conn.password,
+        "SELECT version()",
+    )
+    .map(|v| v.trim().to_owned())
+    .unwrap_or_default();
 
     if deser_kind == "none" {
         let meta = Meta {
@@ -803,6 +808,7 @@ fn main() {
             duration,
             records_per_input: 1,
             payload_bytes: payload as u64,
+            ch_version: ch_version.clone(),
         };
         run_raw(&conn, &topic, partitions, threads, meta, payload);
     } else {
@@ -815,6 +821,7 @@ fn main() {
             duration,
             records_per_input: events,
             payload_bytes: 0,
+            ch_version,
         };
         run_avro(
             &conn,

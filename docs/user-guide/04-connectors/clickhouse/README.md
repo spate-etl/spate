@@ -95,7 +95,7 @@ idempotent — the server drops the duplicate insert.
 > [!WARNING]
 > **Deduplication is silently off on plain `MergeTree`.** Token
 > deduplication only works if the server keeps a deduplication window.
-> `Replicated*MergeTree` defaults to a window of 100;
+> `Replicated*MergeTree` defaults to a window of 10000;
 > **plain `MergeTree` defaults to `0`, and the token does nothing** — no
 > error, no warning, duplicates on every retry. Set it explicitly:
 >
@@ -151,6 +151,9 @@ keeps its connections warm. Manual assemblies hand `probe_fn()` to
 - [Native format](./native-format.md) — the opt-in columnar
   `format: native`: when to use it, the supported type matrix, and the
   measured trade-off (server CPU/wire vs client CPU).
+- [Performance tuning](./performance-tuning.md) — batch/part size, writer
+  parallelism, `async_insert`, and the reasoning behind each starting-point
+  setting.
 - [Schema validation](../../03-guides/schema-validation.md) — the
   `validate_schema` modes end to end.
 - [Tuning](../../05-deployment/tuning.md) — batch sizing and its coupling to

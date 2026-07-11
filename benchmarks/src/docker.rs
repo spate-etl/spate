@@ -7,16 +7,37 @@
 //! force-removed first; see [`remove_container`]). Set `FRESH=1` to force that
 //! remove+recreate even when a server already answers, restoring cold caches
 //! for the server-CPU rig (`ch_native_format`).
+//!
+//! The server image is `CLICKHOUSE_IMAGE` (default the 26.3 LTS line), and the
+//! container is capped at `CLICKHOUSE_CPUS` cores (default 8) so a co-located
+//! client and server share a host predictably (see `ch_sink_saturation`).
+//! Because reuse keys only on the port, a running container of the *wrong*
+//! version is reused silently — pass `FRESH=1` (or remove the container) when
+//! you need a specific image; rigs that care record `SELECT version()`.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Run the `docker` CLI, returning trimmed stdout. Panics with the argv and
+/// stderr on a non-zero exit: a failed `docker run` (e.g. a rejected `--cpus`)
+/// must fail loudly here, not surface later as a misleading 90s ping timeout.
 fn docker(args: &[&str]) -> String {
+    docker_try(args).unwrap_or_else(|stderr| panic!("docker {args:?} failed: {stderr}"))
+}
+
+/// Like [`docker`] but returns the trimmed stderr as `Err` on a non-zero exit
+/// instead of panicking, for callers that tolerate failure (a `rm -f` of a
+/// container that isn't there).
+fn docker_try(args: &[&str]) -> Result<String, String> {
     let out = Command::new("docker")
         .args(args)
         .output()
         .expect("docker CLI");
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
 }
 
 /// Force-remove any container of this name (running or exited), ignoring a
@@ -31,7 +52,7 @@ fn docker(args: &[&str]) -> String {
 /// RUNNING from a previous run is reused as-is (warm caches) unless `FRESH=1`
 /// forces a remove+recreate.
 fn remove_container(name: &str) {
-    let _ = docker(&["rm", "-f", name]);
+    let _ = docker_try(&["rm", "-f", name]);
 }
 
 /// `FRESH=1` forces a remove+recreate even when a server already answers,
@@ -82,9 +103,9 @@ pub fn ensure_kafka() -> String {
 }
 
 /// Ensure a ClickHouse server on `localhost:18123` (HTTP), starting a
-/// `clickhouse/clickhouse-server:25.6` container (`etl-bench-clickhouse`,
-/// password `bench`) if nothing answers `/ping`. Returns (host, port,
-/// user, password).
+/// `$CLICKHOUSE_IMAGE` container (default the 26.3 LTS line, capped at
+/// `$CLICKHOUSE_CPUS` cores; `etl-bench-clickhouse`, password `bench`) if
+/// nothing answers `/ping`. Returns (host, port, user, password).
 pub fn ensure_clickhouse() -> (String, u16, String, String) {
     let (host, port) = ("localhost".to_owned(), 18123u16);
     let creds = ("default".to_owned(), "bench".to_owned());
@@ -102,10 +123,21 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
     };
     // FRESH=1 forces a cold container even when a server already answers.
     if !fresh_requested() && ping(Duration::from_millis(600)) {
+        let version = clickhouse_sql(&host, port, &creds.0, &creds.1, "SELECT version()")
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default();
+        eprintln!(
+            "reusing running etl-bench-clickhouse (server version {version}); \
+             CLICKHOUSE_IMAGE/CLICKHOUSE_CPUS are ignored for a reused container"
+        );
         return (host, port, creds.0, creds.1);
     }
     remove_container("etl-bench-clickhouse");
-    eprintln!("starting etl-bench-clickhouse (clickhouse-server:25.6) ...");
+    let image = std::env::var("CLICKHOUSE_IMAGE")
+        .unwrap_or_else(|_| "clickhouse/clickhouse-server:26.3".to_owned());
+    let cpus = std::env::var("CLICKHOUSE_CPUS").unwrap_or_else(|_| "8".to_owned());
+    let cpus_arg = format!("--cpus={cpus}");
+    eprintln!("starting etl-bench-clickhouse ({image}, --cpus={cpus}) ...");
     docker(&[
         "run",
         "-d",
@@ -119,7 +151,8 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
         "CLICKHOUSE_PASSWORD=bench",
         "--ulimit",
         "nofile=262144:262144",
-        "clickhouse/clickhouse-server:25.6",
+        &cpus_arg,
+        &image,
     ]);
     assert!(
         ping(Duration::from_secs(90)),
@@ -128,12 +161,49 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
     (host, port, creds.0, creds.1)
 }
 
-/// Run one SQL statement against ClickHouse over HTTP.
+/// Resolve a ClickHouse connection from `CLICKHOUSE_URL` (+ `CLICKHOUSE_USER` /
+/// `CLICKHOUSE_PASSWORD`) or the local bench container, as
+/// `(url, host, port, user, password)`. Only the `http://host:port` form is
+/// supported — https and bare `host:port` fail fast with a clear message.
+pub fn resolve_clickhouse() -> (String, String, u16, String, String) {
+    match std::env::var("CLICKHOUSE_URL").ok() {
+        Some(url) => {
+            let rest = url.strip_prefix("http://").unwrap_or_else(|| {
+                panic!(
+                    "CLICKHOUSE_URL must be http://host:port (got {url:?}); \
+                     https and bare host:port are unsupported"
+                )
+            });
+            let (h, p) = rest
+                .split_once(':')
+                .unwrap_or_else(|| panic!("CLICKHOUSE_URL must be http://host:port (got {url:?})"));
+            let port = p
+                .parse::<u16>()
+                .unwrap_or_else(|_| panic!("CLICKHOUSE_URL port not a u16 (got {p:?})"));
+            (
+                url.clone(),
+                h.to_owned(),
+                port,
+                crate::env_str("CLICKHOUSE_USER", "default"),
+                crate::env_str("CLICKHOUSE_PASSWORD", ""),
+            )
+        }
+        None => {
+            let (h, p, u, pw) = ensure_clickhouse();
+            (format!("http://{h}:{p}"), h, p, u, pw)
+        }
+    }
+}
+
+/// Run one SQL statement against ClickHouse over HTTP, returning the raw
+/// response body — which may itself carry a `DB::Exception`. Transport
+/// failures are `Err`; keeps the `BENCH_SQL_DEBUG` trace hook. Best-effort
+/// readers (chstats, log flushes) inspect the body themselves; callers that
+/// must fail on a server exception use [`clickhouse_sql`].
 ///
 /// Uses POST: ClickHouse treats HTTP GET as readonly and silently rejects
-/// DDL/inserts. Panics on a server exception so a misconfigured bench
-/// fails loudly instead of producing a zero-row "result".
-pub fn clickhouse_sql(
+/// DDL/inserts.
+pub fn try_clickhouse_sql(
     host: &str,
     port: u16,
     user: &str,
@@ -149,6 +219,19 @@ pub fn clickhouse_sql(
     if std::env::var("BENCH_SQL_DEBUG").is_ok() {
         eprintln!("SQL {sql:?} @ {host}:{port} -> {body:?}");
     }
+    Ok(body)
+}
+
+/// Run one SQL statement, panicking on a server exception so a misconfigured
+/// bench fails loudly instead of producing a zero-row "result".
+pub fn clickhouse_sql(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    sql: &str,
+) -> std::io::Result<String> {
+    let body = try_clickhouse_sql(host, port, user, password, sql)?;
     assert!(
         !body.contains("DB::Exception"),
         "clickhouse error for {sql:?}: {body}"

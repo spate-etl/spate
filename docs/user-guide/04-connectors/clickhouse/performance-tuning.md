@@ -1,0 +1,292 @@
+# ClickHouse sink performance tuning
+
+This is a **starting-point** guide to the settings that govern ClickHouse sink
+throughput, and the reasoning behind each one, so you can adapt them to your own
+workload. The recommendations were derived from a saturation benchmark of a
+deliberately sink-heavy workload — a fast in-memory source pushing narrow rows
+(a `UInt64` + a short `String`) into ClickHouse at full tilt, at-least-once — so
+the source is never the bottleneck and the sink's own limits show through. Your
+optimum depends on your rows, your network, and whether your ClickHouse is
+CPU-, IO-, or client-bound, so treat every value here as a place to start
+measuring, not a fixed answer. The full study is on the
+[Sink saturation](../../../benchmarks/sink-saturation.mdx) benchmark page.
+
+## The mental model
+
+For bulk ingestion the destination is usually the bottleneck, not the framework.
+So the goal of tuning is: **give ClickHouse large, infrequent inserts** (large
+parts, little merge pressure), **overlap enough of them** to keep the server
+busy, and **spend client CPU and network only where they are actually scarce**.
+Almost every setting below is a lever on one of those three.
+
+Three insert settings are fixed no matter how you tune, because they are the
+at-least-once contract: the sink always sends — and **reserves** — exactly
+`insert_deduplicate=1`, a per-batch `insert_deduplication_token`, and
+`wait_end_of_query=1`. These three cannot be overridden through the `settings:`
+map; the config rejects them at load. Together they mean a successful insert is
+durably committed and a retried batch is deduplicated rather than doubled (the
+token is honoured even on ClickHouse's async-insert path). Everything else under
+`settings:` is yours — **including `wait_for_async_insert`, which is *not*
+reserved**: with `async_insert` on, setting it to `"0"` makes an insert
+acknowledge before the rows are durable, which breaks at-least-once delivery
+(see the `async_insert` section below). Keep that boundary in mind when reading
+the ClickHouse settings.
+
+## Batch size — the most important knob
+
+```yaml
+sink:
+  clickhouse:
+    batch:
+      max_rows: 500000      # seal a batch at this many rows
+      max_bytes: 128MiB     # …or this many encoded bytes, whichever first
+      linger: 1s            # …or this long after the first row, at low volume
+```
+
+One sealed batch is one `INSERT`, and on a `MergeTree` table **one insert is
+one part** — up to the point where the server splits a large insert into several
+blocks (see [`max_insert_block_size`](#clickhouse-max_insert_block_size) below;
+a very large insert becomes a handful of parts, which is still healthy). So
+`batch.max_rows` / `max_bytes` directly set your part size, and
+ClickHouse strongly prefers large parts: fewer parts mean fewer background merges
+(less write amplification and CPU), faster queries, and no risk of the
+"too many parts" backpressure. **Raise these** until a batch holds a substantial
+part — hundreds of thousands to a few million rows, tens to a few hundred MB —
+bounded by two costs: the memory a sealed batch occupies in flight, and the
+latency `linger` adds at low volume (a partial batch waits up to `linger` before
+it ships). **Lower them** only if per-row latency matters more than part health,
+or if memory is tight. Avoid tiny batches: many small parts are the most common
+self-inflicted ClickHouse performance problem. `linger` only bites below the
+size thresholds — it bounds staleness on a quiet stream; set it to the freshness
+your consumers need.
+
+## Writer parallelism: shards and in-flight
+
+```yaml
+sink:
+  clickhouse:
+    shards:
+      - replicas: ["http://ch-1:8123"]
+      - replicas: ["http://ch-2:8123"]
+    inflight:
+      max_per_shard: 2
+```
+
+Each shard is one **writer** with its own insert stream; `inflight.max_per_shard`
+is how many sealed batches that writer keeps in flight at once. Together they set
+your insert concurrency (`shards × max_per_shard`). Concurrency matters because a
+synchronous insert spends real time waiting on the server's round-trip — while
+one batch is being written and confirmed, another can be building or in flight,
+so the writer is not idle. **Raise** `max_per_shard` (2 → 3–4) to overlap that
+round-trip; **add shards** to spread load across real ClickHouse shards, or to
+open more concurrent connections to a single powerful server. **Stop raising**
+once the server is the bottleneck: past the point where ClickHouse is CPU- or
+IO-bound, more concurrent inserts just add contention and context-switching and
+throughput flattens or dips. If your ClickHouse is a single modest node, a
+handful of writers is plenty; if it is a large cluster, scale shards toward its
+capacity.
+
+## I/O threads
+
+```yaml
+pipeline:
+  io_threads: 2     # tokio workers that run the sink's writer tasks
+```
+
+The sink's writer tasks all run on the pipeline's I/O runtime, and they are
+**tokio tasks, not threads**: each insert spends most of its life awaiting the
+server's round-trip, so a small pool multiplexes many concurrent inserts by
+interleaving them at their await points. Writers do **not** serialize when
+`io_threads` is below `shards × max_per_shard` — the default of **2** runs far
+more than two inserts at once. So leave it at the default until you have a
+concrete reason to raise it. That reason is **CPU work on the I/O runtime**, not
+insert count: request compression runs there, so at very high byte rates the
+compression threads can saturate two workers and become the limit. Raise
+`io_threads` then — but sparingly, because the derived pipeline-thread count is
+`available_parallelism` minus the I/O reserve, so every extra I/O worker is one
+fewer hot-path thread (see [Deployment tuning](../../05-deployment/tuning.md)).
+On a host where ClickHouse runs **locally**, remember the server needs cores too:
+client threads (pipeline `threads` + `io_threads`) and the server compete for the
+same machine, so oversubscribing the client starves the server it is feeding.
+
+## Backpressure budget
+
+```yaml
+backpressure:
+  max_inflight_bytes: 256MiB
+```
+
+This is the global ceiling on bytes admitted into the sink but not yet durably
+written. Size it with the established sizing rule in
+[Deployment tuning](../../05-deployment/tuning.md#the-backpressure-budget-backpressuremax_inflight_bytes),
+which sizes the budget's **low watermark** (default `low_ratio` 0.5) against
+everything the sink legitimately keeps in flight:
+
+```text
+max_inflight_bytes × low_ratio  ≥  2 × ( shards × inflight.max_per_shard × batch.max_bytes
+                                       + shards × queue_capacity × chunk.target_bytes )
+```
+
+The pending-writes term (`shards × max_per_shard × batch.max_bytes`) dominates.
+If the budget is smaller, the source is paused for backpressure **before** the
+sink's writers are even full — you would be throttling yourself below the sink's
+real capacity, and a saturated pipeline duty-cycles against `min_pause`. Size it
+to satisfy the rule with headroom; the cost is memory, since the budget is a RAM
+ceiling the host must actually have.
+
+## Checkpoint pending limit
+
+```yaml
+checkpoint:
+  max_pending_batches: 1024
+```
+
+Acked-but-not-yet-committed batches are tracked for the at-least-once watermark.
+Under very high insert rates — especially many small parts — this queue can fill
+and pause the source before the sink is saturated. If you see lanes pausing for
+the pending-batch limit while ClickHouse still has headroom, **raise it**; the
+cost is the memory those pending acknowledgements occupy. Prefer fixing it by
+writing **larger** batches first (fewer, bigger inserts drain the queue faster);
+raise the limit when large batches alone are not enough.
+
+## Wire format
+
+```yaml
+sink:
+  clickhouse:
+    format: rowbinary    # rowbinary (default) | native
+```
+
+`rowbinary` encodes row-wise and is near-memcpy cheap on the client; the server
+does the row→column pivot. `native` does that pivot on the **client** and hands
+ClickHouse finished columnar blocks — it moves the row→column work off the
+server and onto the client, and can compress smaller on the wire, at the cost of
+more client CPU. Whether that is a net win depends on your workload and where the
+bottleneck actually sits; the measured trade-offs live on the benchmark pages.
+**Reach for `native`** when ClickHouse is the CPU bottleneck or your network
+egress is the constraint (cross-region, metered), and **keep `rowbinary`** when
+client CPU is what's scarce — then measure. See the
+[Native format](./native-format.md) guide for the full trade and the type
+support matrix.
+
+## Compression
+
+```yaml
+sink:
+  clickhouse:
+    compression: lz4     # lz4 (default) | zstd | zstd:N | off
+```
+
+This compresses the HTTP insert body. `lz4` is cheap and a good default on most
+links. `zstd` (optionally `zstd:N`) compresses smaller for a bit more CPU — worth
+it on metered or cross-region links where bandwidth, not CPU, is the limit. `off`
+saves client CPU on a fast, trusted LAN where the wire is not the bottleneck.
+Match the choice to whichever of client CPU or bandwidth is scarce; it does not
+affect on-disk storage, only the request.
+
+## ClickHouse `async_insert`
+
+```yaml
+sink:
+  clickhouse:
+    settings:
+      async_insert: "0"           # 26.3 LTS defaults this to 1
+      wait_for_async_insert: "1"
+```
+
+`async_insert` tells ClickHouse to buffer inserts server-side and flush them in
+batches — it exists to protect the server from **many small, direct inserts**
+(one part per tiny insert would otherwise pile up). **ClickHouse 26.3 LTS turns
+it on by default.** If your client already batches into large blocks — as this
+sink does — the setting has little to offer: ClickHouse writes a large enough
+insert directly, so the async buffer is barely exercised, and you gain nothing
+for the extra moving part. For batched bulk ingestion, **set `async_insert:
+"0"`**: it keeps the write path simple and the durable-ack behaviour
+unambiguous. Leave it **on** only when you cannot batch on the client and are
+sending frequent small inserts — the workload it was built for. If you do use it,
+keep `wait_for_async_insert: "1"` so the server confirms the buffer was flushed
+before acknowledging — with `"0"` the acknowledgement returns before the data is
+durable, which is incompatible with at-least-once delivery.
+
+## ClickHouse `max_insert_block_size`
+
+```yaml
+sink:
+  clickhouse:
+    settings:
+      max_insert_block_size: "1048576"
+```
+
+The largest block (in rows) ClickHouse forms **when it parses an insert
+server-side** — so it applies to `format: rowbinary` but **not** to
+`format: native`, where the client already sends finished blocks and the server
+writes them as-is. For RowBinary it interacts with your `batch.max_rows`: an
+insert larger than `max_insert_block_size` (default ~1.05M rows) is split into
+multiple blocks, and each block becomes its own part. So the "one insert is one
+part" shorthand from the batch section holds only for inserts below this size;
+above it, a batch of a few million rows lands as a small handful of parts —
+still healthy, just not literally one. Leave it at the default unless you need
+to bound the server's per-insert memory or to shape that part granularity
+deliberately.
+
+## Deduplication and the part-pressure guards
+
+Deduplication is always on (the at-least-once contract). On a plain (non-
+replicated) `MergeTree` table, ClickHouse's dedup window defaults to **0**, which
+silently disables it — set `non_replicated_deduplication_window` on the table
+(replicated tables default to 10000) so a retried batch is actually deduplicated:
+
+```sql
+CREATE TABLE events (...) ENGINE = MergeTree ORDER BY ...
+  SETTINGS non_replicated_deduplication_window = 100;
+```
+
+If you deliberately run with small parts and hit **"too many parts"**, the guard
+rails are `parts_to_delay_insert` and `parts_to_throw_insert` (table settings):
+raising them buys headroom, but the real fix is almost always **larger batches**
+(above) so you create fewer parts in the first place.
+
+## A starting point
+
+For steady, batched, at-least-once ingestion into a co-located or single-node
+ClickHouse, this is a reasonable place to begin, then measure:
+
+```yaml
+pipeline:
+  io_threads: 2              # the default; raise only if compression saturates it
+backpressure:
+  max_inflight_bytes: 3GiB   # sized to the rule — see the note below
+sink:
+  clickhouse:
+    format: rowbinary          # native if the server is CPU-bound or egress is metered
+    compression: lz4
+    batch: { max_rows: 1000000, max_bytes: 256MiB, linger: 1s }
+    inflight: { max_per_shard: 2 }
+    shards:
+      - replicas: ["http://clickhouse:8123"]
+    settings:
+      async_insert: "0"        # already batching large blocks client-side
+```
+
+These numbers satisfy the [sizing rule](#backpressure-budget): one shard × 2
+in-flight × 256 MiB batches is a `2 × (1 × 2 × 256MiB) = 1024MiB` pending-writes
+term, and `3GiB × 0.5 = 1536MiB` clears it with headroom. **The budget is a
+memory ceiling the host must have:** at these settings the sink can pin up to
+~512 MiB of batch bytes in flight, and the rule sizes the ceiling to 3 GiB —
+the co-located node needs that RAM on top of ClickHouse itself. If that is too
+much, halve both `batch.max_bytes` to `128MiB` and `max_inflight_bytes` to
+`1.5GiB` (the rule still holds: `1.5GiB × 0.5 = 768MiB ≥ 2 × 2 × 128MiB =
+512MiB`) at the cost of smaller parts.
+
+Then watch ClickHouse's own accounting — `system.query_log` (written rows, insert
+duration, server CPU), `system.part_log` (rows and bytes per part, merge count),
+and `system.asynchronous_insert_log` — to confirm your parts are large and your
+merges are few, and adjust the batch size and writer concurrency from there.
+
+## Related
+
+- [ClickHouse sink](./README.md) — the full sink configuration reference.
+- [Native format](./native-format.md) — the RowBinary vs Native trade in depth.
+- [Sink saturation benchmark](../../../benchmarks/sink-saturation.mdx) — the
+  measurements these recommendations are drawn from.
+- [Deployment tuning](../../05-deployment/tuning.md) — pipeline-wide tuning.

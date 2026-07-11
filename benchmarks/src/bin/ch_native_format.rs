@@ -480,10 +480,11 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64)> {
+fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64, String)> {
     let (host, port, user, password) = docker::ensure_clickhouse();
     let sql =
         |q: &str| docker::clickhouse_sql(&host, port, &user, &password, q).expect("clickhouse sql");
+    let version = sql("SELECT version()").trim().to_owned();
     let cols = event_columns();
     let col_defs = cols
         .iter()
@@ -522,7 +523,7 @@ fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64)> {
             let query = format!("INSERT INTO {table} ({col_list}) FORMAT {fmt}");
             let path = format!(
                 "/?query={}&user={user}&password={password}&query_id={query_id}\
-                 &insert_deduplicate=0&max_insert_threads=1&max_threads=1",
+                 &async_insert=0&insert_deduplicate=0&max_insert_threads=1&max_threads=1",
                 percent_encode(&query)
             );
             let resp = http_post_bytes(&host, port, &path, body).expect("insert");
@@ -591,7 +592,7 @@ fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64)> {
     emit_engine("null", null_rb, null_nat);
     emit_engine("mergetree", mt_rb, mt_nat);
     // The gate uses the Null-engine parse-isolation number.
-    Some((null_rb, null_nat))
+    Some((null_rb, null_nat, version))
 }
 
 fn main() {
@@ -621,8 +622,8 @@ fn main() {
     let client_ok = metrics_regression >= -5.0; // Native not >5% slower on fixed-width
     let wire_ok = pct_lower(ev_rb.lz4_bytes as f64, ev_nat.lz4_bytes as f64) >= 8.0
         || pct_lower(ev_rb.zstd_bytes as f64, ev_nat.zstd_bytes as f64) >= 8.0;
-    let server_ok = match server {
-        Some((rb, nat)) => pct_lower(rb, nat) >= 20.0,
+    let server_ok = match &server {
+        Some((rb, nat, _)) => pct_lower(*rb, *nat) >= 20.0,
         None => false,
     };
     println!(
@@ -638,11 +639,11 @@ fn main() {
     );
     println!(
         "  server (events parse CPU >=20% lower): {}",
-        match server {
-            Some((rb, nat)) => format!(
+        match &server {
+            Some((rb, nat, _)) => format!(
                 "{}  [{:+.1}%]",
                 if server_ok { "PASS" } else { "FAIL" },
-                pct_lower(rb, nat)
+                pct_lower(*rb, *nat)
             ),
             None => "SKIPPED (set SERVER=1 with Docker)".to_string(),
         }
@@ -653,10 +654,16 @@ fn main() {
         "NO-GO — ship Native opt-in, keep RowBinary default"
     };
     println!("\n  VERDICT: {verdict}");
+    // Server inserts pin async_insert=0; record the server version so the
+    // recorded environment is explicit (server present only under SERVER=1).
+    let note = match &server {
+        Some((_, _, version)) => format!("{verdict}; async_insert=0; ch_version={version}"),
+        None => verdict.to_owned(),
+    };
     Report::verdict("ch_native_format")
         .variant("client_ok", client_ok)
         .variant("wire_ok", wire_ok)
         .variant("server_ok", server_ok)
-        .note(verdict)
+        .note(note)
         .emit();
 }

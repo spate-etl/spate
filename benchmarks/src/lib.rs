@@ -16,6 +16,10 @@
 //! - `e2e_kafka_clickhouse` — the full pipeline against local containers
 //!   or external clusters (pure env configuration; Kubernetes-runnable).
 //! - `ch_native_format` — ClickHouse Native vs RowBinary go/no-go.
+//! - `ch_sink_saturation` — pushes the ClickHouse sink to its ceiling from an
+//!   in-process generator (no broker), sweeping threads, shards, part size,
+//!   format, compression, and `async_insert` across `Null` and `MergeTree`
+//!   engines, with server-side part/CPU/async accounting (see [`chstats`]).
 //!
 //! Every binary emits the same versioned record — see [`report::Report`].
 //! Methodology and recorded results live in `docs/benchmarks/`.
@@ -24,6 +28,7 @@
 #![allow(clippy::print_stderr)]
 
 pub mod avro_batch;
+pub mod chstats;
 pub mod docker;
 pub mod prom;
 pub mod report;

@@ -95,6 +95,7 @@ failures.
 |---|---|---|
 | [Avro-fast pipeline](./avro-fast-pipeline.mdx) | The zero-copy decode A/B, CPU-bound and at scale | `avro_pipeline`, `e2e_kafka_clickhouse` |
 | [ClickHouse format](./clickhouse-format.mdx) | Native vs RowBinary go/no-go | `ch_native_format` |
+| [Sink saturation](./sink-saturation.mdx) | The ClickHouse sink ceiling and where the sink becomes the limiter: threads, format, part size, async_insert, compression, shards | `ch_sink_saturation` |
 | [Framework overhead](./framework-overhead.mdx) | The framework ceiling and a tuning finding | `pipeline_synthetic` |
 | [Kafka topology](./kafka-topology.mdx) | Per-thread vs split-queue consumers | `kafka_topology` |
 | [Zero-copy seam](./zero-copy-seam.mdx) | Borrowed vs owned operator chain | divan micro-bench (prose) |

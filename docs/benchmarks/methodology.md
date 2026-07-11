@@ -1,6 +1,6 @@
 ---
 title: Methodology
-sidebar_position: 7
+sidebar_position: 8
 description: How to reproduce the benchmarks, and the 2026-07 accounting correction.
 ---
 
@@ -64,6 +64,10 @@ done
 
 # ClickHouse Native vs RowBinary → clickhouse-native-format.jsonl (Docker ClickHouse 25.6)
 # 200k rows/insert, medians over 15 interleaved reps; SERVER=1 samples server CPU.
+# The committed data was recorded on 25.6 — pin CLICKHOUSE_IMAGE explicitly, because
+# the default image is now 26.3 (see the sink-saturation block below). The raw
+# inserts also pin async_insert=0 and record SELECT version() into the note.
+CLICKHOUSE_IMAGE=clickhouse/clickhouse-server:25.6 \
 ROWS=200000 ITERS=41 REPS=15 SERVER=1 \
   RESULTS=benchmarks/results/clickhouse-native-format.jsonl \
   cargo run -p benchmarks --release --bin ch_native_format
@@ -86,7 +90,10 @@ done; done
 # rate is the ceiling. 30 s window, 20 event rows exploded per message, 4 partitions,
 # 2 pipeline threads. One invocation = one arm (DESER/FORMAT); the committed matrix
 # is the DESER=none rowbinary baseline plus four avro arms, three runs each; charts
-# and quoted figures use per-arm medians.
+# and quoted figures use per-arm medians. Committed data is ClickHouse 25.6 — pin
+# CLICKHOUSE_IMAGE (the default is now 26.3); the sink YAML pins async_insert=0 and
+# the run records SELECT version() into its note.
+export CLICKHOUSE_IMAGE=clickhouse/clickhouse-server:25.6
 for rep in 1 2 3; do
   for arm in "none rowbinary" "apache_owned native" "fast_owned native" \
              "fast_borrowed native" "fast_borrowed rowbinary"; do
@@ -96,7 +103,71 @@ for rep in 1 2 3; do
       cargo run -p benchmarks --release --bin e2e_kafka_clickhouse
   done
 done
+
+# ClickHouse sink saturation → ch-sink-saturation.jsonl (Docker ClickHouse 26.3)
+# In-process generator (no broker) → real chain → sharded ClickHouse sink at full
+# tilt. Throughput = etl_sink_records_total delta / window (works for ENGINE=Null,
+# where SELECT count() is 0). The committed sweep is 33 arms × 3 reps = 99 records
+# on ClickHouse 26.3.17.4 (the current default image — no CLICKHOUSE_IMAGE pin
+# needed). Each record's `variant` is self-describing: it now carries the
+# identity-defining budget/shape keys (max_inflight_mb, max_pending_batches,
+# batch_max_mb, linger_ms, queue_cap, io_threads, shards, compression,
+# clickhouse_cpus), and each record's `note` carries a per-record `limiter` verdict
+# (sink / generator / indeterminate-checkpoint / budget) plus its evidence.
+#
+# Budget: MAX_INFLIGHT_MB is NOT pinned — the rig derives it per arm from the
+# deployment sizing rule (2 × in-flight bytes / 0.5 low watermark), so it is always
+# rule-compliant and never self-throttles the source below sink capacity. Override
+# only to reproduce the invalidated first recording. QUEUE_CAP default is 256,
+# MAX_PENDING_BATCHES default 8192.
+export RESULTS=benchmarks/results/ch-sink-saturation.jsonl
+export CLICKHOUSE_CPUS=8 SHARDS=4 IO_THREADS=4 DURATION_S=15 WARMUP_S=5 PAYLOAD=256
+: > "$RESULTS"                                    # fresh; reuse the warm 26.3 server
+for rep in 1 2 3; do                             # 3 reps/arm; charts median them
+  # Null ceiling search (both formats, sync, threads 2/3/4/5/6/8): find the peak.
+  # The binary self-matrixes THREADS_LIST into one arm per thread count.
+  ENGINE=Null FORMAT=rowbinary ASYNC_INSERT=0 THREADS_LIST=2,3,4,5,6,8 \
+    cargo run -p benchmarks --release --bin ch_sink_saturation
+  ENGINE=Null FORMAT=native    ASYNC_INSERT=0 THREADS_LIST=2,3,4,5,6,8 \
+    cargo run -p benchmarks --release --bin ch_sink_saturation
+  # io-thread sensitivity pair at the peak: Null Native t4, IO_THREADS=8 vs the 4
+  # already recorded above (Δ was +3.6%, within noise — not scaled across the matrix).
+  RUN_ONE=1 THREADS=4 IO_THREADS=8 ENGINE=Null FORMAT=native ASYNC_INSERT=0 \
+    cargo run -p benchmarks --release --bin ch_sink_saturation
+  # One t12 contention datapoint (excluded from the ceiling claim).
+  RUN_ONE=1 THREADS=12 ENGINE=Null FORMAT=native ASYNC_INSERT=0 \
+    cargo run -p benchmarks --release --bin ch_sink_saturation
+  # Real sink: MergeTree × {rowbinary, native} × {async 0, 1}, threads 2/4/8.
+  for FMT in rowbinary native; do for A in 0 1; do
+    ENGINE=MergeTree FORMAT=$FMT ASYNC_INSERT=$A THREADS_LIST=2,4,8 \
+      cargo run -p benchmarks --release --bin ch_sink_saturation
+  done; done
+  # Part-size sweep (MergeTree Native sync t4): bigger batches → bigger parts.
+  # The 4M-row arm carries a ~13 GB worst-case in-flight bound (printed at startup).
+  for R in 262144 1048576 4194304; do
+    RUN_ONE=1 THREADS=4 ENGINE=MergeTree FORMAT=native ASYNC_INSERT=0 \
+      BATCH_MAX_ROWS=$R BATCH_MAX_MB=$((R / 2048 + 8)) \
+      cargo run -p benchmarks --release --bin ch_sink_saturation
+  done
+  # Compression codec (MergeTree Native sync t4): zstd / off. The lz4 point IS
+  # the MergeTree Native sync t4 matrix arm above (same variant identity), so it
+  # is not re-run — the chart's lz4 bar reuses those reps.
+  for C in zstd off; do
+    RUN_ONE=1 THREADS=4 ENGINE=MergeTree FORMAT=native ASYNC_INSERT=0 COMPRESSION=$C \
+      cargo run -p benchmarks --release --bin ch_sink_saturation
+  done
+  # Writer shards (MergeTree Native sync t4): 2 / 8. The 4-shard point is the
+  # matrix arm above (SHARDS defaults to 4), so it too is reused, not re-run.
+  for S in 2 8; do
+    RUN_ONE=1 THREADS=4 SHARDS=$S ENGINE=MergeTree FORMAT=native ASYNC_INSERT=0 \
+      cargo run -p benchmarks --release --bin ch_sink_saturation
+  done
+done                                              # → 33 arms × 3 reps = 99 records
 ```
+
+For a **dedicated-server** ceiling (no client/server core contention), point the
+rig at an external cluster instead of the local container:
+`CLICKHOUSE_URL=http://host:8123 [CLICKHOUSE_USER=… CLICKHOUSE_PASSWORD=…]`.
 
 Superseded reference point: an earlier rate-limited E2E smoke (100k rec/s target,
 2026-07-05) recorded 89.4k rows/s against local containers. Its backing file

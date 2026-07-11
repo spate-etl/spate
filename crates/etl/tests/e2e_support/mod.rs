@@ -93,11 +93,11 @@ impl Harness {
 
         // Pinned modern ClickHouse with a password — the stock module image
         // (23.3-alpine, no auth) is unrepresentative of production.
-        let ch = GenericImage::new("clickhouse/clickhouse-server", "25.6")
+        let ch = GenericImage::new("clickhouse/clickhouse-server", "26.3")
             .with_env_var("CLICKHOUSE_PASSWORD", CH_PASSWORD)
             .start()
             .expect(
-                "start ClickHouse container (first run pulls clickhouse/clickhouse-server:25.6)",
+                "start ClickHouse container (first run pulls clickhouse/clickhouse-server:26.3)",
             );
         let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
         let ch_url = format!("http://127.0.0.1:{ch_port}");

@@ -53,4 +53,7 @@ The traits are public and small: a source is `Source` + `SourceLane`, a
 sink is `RowEncoder` + `ShardWriter`. Start with
 [Extending](../06-extending/README.mdx); the dependency policy that keeps
 third-party connector crates viable (no 0.x types in public trait bounds)
-is in [docs/DESIGN.md](../../DESIGN.md) § Dependency policy.
+is in [docs/DESIGN.md](../../DESIGN.md) § Dependency policy. For wiring your
+component into the metrics taxonomy — feeding a framework handle, labels, and
+naming rules — see
+[Instrumenting connectors](../06-extending/instrumenting-connectors.mdx).

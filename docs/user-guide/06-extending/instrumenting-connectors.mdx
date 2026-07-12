@@ -1,0 +1,151 @@
+# Instrumenting connectors
+
+The engine already measures the pipeline your connector plugs into — records,
+bytes, poll and flush durations, retries, errors, watermark age, end-to-end
+latency — without you writing a line of instrumentation. This page is about the
+seams where a connector *adds* to that picture: feeding a framework handle with
+signals only the connector can see (consumer lag, a rebalance), carrying the
+right labels so your series line up with everyone else's, and — when you need
+something the taxonomy doesn't cover — registering your own metric on the same
+facade the framework uses.
+
+The taxonomy every framework series belongs to is [docs/METRICS.md](../../METRICS.md);
+the operator's-eye view of the model is
+[Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
+second for the hot-path rules. This page mirrors
+`crates/etl/examples/custom_metrics.rs`
+(`cargo run -p etl --example custom_metrics`).
+
+## What you get for free
+
+Every stage is pre-instrumented by the engine, not by the connector. A source's
+records and bytes are counted as the driver polls it; a sink's flushes, batch
+sizes, retries, and errors are counted by the sink worker as it drains and
+writes; the checkpointer owns commit and watermark metrics. A hand-rolled
+`Source`/`RowEncoder`/`ShardWriter` inherits all of it the moment it is wired
+into a pipeline. So the question is never "how do I emit `etl_sink_records_total`" —
+the framework does — but "what does my connector know that the framework can't
+measure from the outside?"
+
+## Feeding a framework handle
+
+Some signals live inside the connector: a Kafka consumer's per-partition lag, a
+rebalance callback firing. The framework defines the handle
+([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
+drives it. That is exactly how `etl-kafka` reports lag — the source takes an
+optional pre-registered handle and, without it, simply logs instead:
+
+```rust
+// crates/etl-kafka/src/source.rs
+pub fn with_metrics(mut self, metrics: SourceMetrics) -> Self {
+    self.metrics = Some(metrics);
+    self
+}
+
+// ...later, inside the poll/statistics path:
+if let Some(m) = &self.metrics {
+    m.set_partition_lag(partition, lag);
+    m.set_lag_max(max_lag);
+}
+```
+
+The handle is resolved once at build time and injected; the connector never
+looks up a metric name on the hot path, it only calls methods on a handle it was
+handed. If your source can observe lag or rebalances, accept a `SourceMetrics`
+the same way and drive `set_lag_max` / `set_partition_lag` / `rebalance_assigned`
+/ `rebalance_revoked`.
+
+:::note
+`SourceMetrics` is the one framework handle a connector is expected to drive
+today. Sink-side signals (flush outcomes, retries, replica health) are derived
+by the sink worker and circuit breaker from the results your `ShardWriter`
+returns — you report them by returning the right outcome, not by touching a
+metrics handle. See [Custom sinks](custom-sink.mdx).
+:::
+
+## Labeling your component
+
+Every framework series carries three standard labels — `pipeline`, `component`,
+`component_type` — plus stage-specific ones (`shard`, `replica`, `partition`).
+`component` and `pipeline` come from `with_metrics(pipeline, component)` at
+assembly. The two you set as a connector author are on the sink builder:
+
+- `SinkParts::with_component_type("...")` sets `component_type`
+  (default `"custom"`) on every sink series, so ClickHouse series read
+  `component_type="clickhouse"` and yours read whatever names your
+  implementation.
+- `SinkParts::with_replica_labels(...)` supplies the display names bound to the
+  `replica` label, so per-replica health and error series identify the right
+  endpoint.
+
+[Custom sinks](custom-sink.mdx) is the reference for both — this page doesn't
+repeat the plumbing. The rule to internalize: pick a stable, low-cardinality
+`component_type` and give replicas human-meaningful names.
+
+## Registering your own metric
+
+When the taxonomy genuinely lacks something your connector needs, you don't
+register with the framework — the framework's instrumentation API *is* the
+[`metrics`](https://crates.io/crates/metrics) facade. Anything you record with
+its macros exports through the same `/metrics` endpoint as `etl_*`:
+
+```rust
+// Pre-register once, at build time.
+let schema_fetches = metrics::counter!("myconn_schema_fetches_total", "registry" => "prod");
+// Hot path: touch only the handle, count per batch.
+schema_fetches.increment(n);
+```
+
+[Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx) and the
+`custom_metrics.rs` example own this pattern in full. Two connector-specific
+notes: prefix your names with your connector, **not** `etl_` (that prefix is the
+framework taxonomy's), and reuse the `pipeline` / `component` values you were
+handed so your series join cleanly against the framework's in a query.
+
+## Contracts
+
+The framework's own stages follow these, and so must anything you add — the
+handle method shapes exist to make them the path of least resistance:
+
+- **Pre-register at build time.** Resolve every name and label once and keep the
+  handle; never resolve a metric name or build a label set on the per-record
+  path. `SourceMetrics::new(...)` and `metrics::counter!(...)` both belong in
+  construction, not the poll loop.
+- **Count at batch boundaries.** Increment counters once per batch with the
+  batch's totals; observe a batch's duration once (as a mean where per-record
+  granularity would matter), never per record.
+- **Follow the naming rules.** `_total` on counters, a unit suffix
+  (`_seconds` / `_bytes` / `_rows`) on anything measured in a unit. Framework
+  names are `etl_`-prefixed; connector-owned names are prefixed by the connector.
+- **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
+  topology and always on; `partition` is gated behind
+  `metrics.per_partition_detail` (default off) precisely because it is unbounded.
+  Don't attach an unbounded label (a key, an offset) to any series.
+
+:::warning
+The exporter installs a **process-global** recorder, and a handle binds to
+whatever recorder exists at construction. In a real pipeline
+`Pipeline::from_config` installs the exporter from your YAML *before* any handle
+is built; if you register metrics in a standalone tool, call `metrics::install`
+first or your handles record into the void. See
+[Monitoring](../05-deployment/monitoring.mdx).
+:::
+
+## Testing
+
+Assert your instrumentation the way the framework tests its own: build a
+**local** (non-global) recorder, exercise the code, and match against the
+rendered exposition — no global install, so tests stay isolated and parallel.
+`metrics::with_local_recorder(&recorder, || { /* drive the connector */ })` then
+`handle.render()` gives you the scrape text to `assert!(...contains(...))`
+against, exactly as `crates/etl/examples/custom_metrics.rs` and the `metrics`
+module's own tests do.
+
+:::note
+First-class, connector-owned metric *families* — pre-registered handle structs
+of your own, resolved through the framework's `ComponentLabels` builder so they
+inherit the standard labels automatically — are a planned extension built on the
+shared label seam inside `etl-core`'s `metrics` module. Until then, a connector
+either drives a framework handle (above) or registers directly on the `metrics`
+facade.
+:::

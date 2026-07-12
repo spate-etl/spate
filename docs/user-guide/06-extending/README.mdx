@@ -33,6 +33,15 @@ no trait to implement, and the whole chain still compiles to one
 monomorphized loop. Covers per-stage error policies, zero-allocation
 fan-out, and when to drop down to the `Collector`/`StageLifecycle` traits.
 
+## [Instrumenting connectors](instrumenting-connectors.mdx)
+
+Every stage is pre-instrumented by the engine; this page covers where a
+connector *adds* to that — feeding a framework handle with signals only it can
+see (a Kafka source driving `SourceMetrics` for consumer lag), carrying the
+standard labels via `with_component_type` / `with_replica_labels`, and
+registering your own metric on the same `metrics` facade when the taxonomy
+doesn't cover it.
+
 ## Prerequisites
 
 You'll want the [Concepts](../02-concepts/README.mdx) section first —

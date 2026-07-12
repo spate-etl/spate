@@ -22,13 +22,26 @@
 //! loop only ever touches resolved `Counter`/`Gauge`/`Histogram` handles,
 //! and methods take per-batch aggregates.
 
-mod handles;
+mod backpressure;
+mod checkpoint;
+mod deser;
+mod labels;
 pub mod names;
+mod operator;
+mod pipeline;
+mod queue;
+mod sink;
+mod source;
 
-pub use handles::{
-    BackpressureMetrics, CheckpointMetrics, ComponentLabels, DeserMetrics, FlushReason,
-    OperatorMetrics, PipelineMetrics, PipelineState, QueueMetrics, SinkShardMetrics, SourceMetrics,
-};
+pub use backpressure::BackpressureMetrics;
+pub use checkpoint::CheckpointMetrics;
+pub use deser::DeserMetrics;
+pub use labels::ComponentLabels;
+pub use operator::OperatorMetrics;
+pub use pipeline::{PipelineMetrics, PipelineState};
+pub use queue::QueueMetrics;
+pub use sink::{FlushReason, SinkShardMetrics};
+pub use source::SourceMetrics;
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 use std::net::{Ipv4Addr, SocketAddr};

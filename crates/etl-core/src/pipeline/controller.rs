@@ -10,7 +10,7 @@ use super::{DriverEvent, ExitState, FatalErrorReport, ThreadControl};
 use crate::admin::HealthState;
 use crate::checkpoint::Checkpointer;
 use crate::error::{ErrorClass, FatalError, SourceError};
-use crate::metrics::{CheckpointMetrics, PipelineMetrics, PipelineState, SourceMetrics};
+use crate::metrics::{CheckpointMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics};
 use crate::record::PartitionId;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -60,6 +60,10 @@ pub(crate) struct ControllerContext<S: Source> {
     pub stalled_fail_after: Duration,
     pub checkpoint_metrics: CheckpointMetrics,
     pub source_metrics: SourceMetrics,
+    /// The source's custom-metrics scope (`etl_<component_type>_source_*`),
+    /// handed to it at `open`. `None` unless the source declared a
+    /// non-reserved `component_type`.
+    pub source_meter: Option<Meter>,
     pub pipeline_metrics: PipelineMetrics,
 }
 
@@ -80,6 +84,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         stalled_fail_after,
         checkpoint_metrics,
         source_metrics,
+        source_meter,
         pipeline_metrics,
     } = ctx;
 
@@ -96,7 +101,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
 
     // Open the source with an issuer handle. A failure here is fatal
     // before any thread has data.
-    if let Err(e) = source.open(SourceCtx::new(checkpointer.handle())) {
+    if let Err(e) = source.open(SourceCtx::new(checkpointer.handle()).with_meter(source_meter)) {
         state.failure = Some(FatalError {
             component: "source".into(),
             reason: format!("source open failed: {e}"),

@@ -7,6 +7,15 @@
 //! configuration; the taxonomy contract lives in `docs/METRICS.md` and its
 //! names in [`names`].
 //!
+//! # Connector- and user-owned families
+//!
+//! Beyond the fixed handle structs, a [`Meter`] mints
+//! `Counter`/`Gauge`/`Histogram` handles that inherit the three standard
+//! labels (`pipeline`, `component`, `component_type`), so a connector's or
+//! pipeline author's own series join cleanly against the framework's. The
+//! handle types are re-exported here so a connector can store them without a
+//! direct `metrics` dependency.
+//!
 //! # One pipeline per process
 //!
 //! The exporter installs a **process-global** recorder (the `metrics`
@@ -26,6 +35,7 @@ mod backpressure;
 mod checkpoint;
 mod deser;
 mod labels;
+mod meter;
 pub mod names;
 mod operator;
 mod pipeline;
@@ -37,11 +47,22 @@ pub use backpressure::BackpressureMetrics;
 pub use checkpoint::CheckpointMetrics;
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
+pub use meter::Meter;
+// Role is derived by the runtime/builder from wiring position, never named by
+// connectors — crate-internal only (see `Meter::for_component`).
+pub(crate) use meter::MetricRole;
 pub use operator::OperatorMetrics;
 pub use pipeline::{PipelineMetrics, PipelineState};
 pub use queue::QueueMetrics;
 pub use sink::{FlushReason, SinkShardMetrics};
 pub use source::SourceMetrics;
+
+// The framework's instrumentation API *is* the `metrics` facade, so its
+// handle types are part of this crate's public surface — a connector storing
+// a [`Meter`]-minted handle in its own struct names them without taking a
+// direct `metrics` dependency, keeping one facade version across the tree.
+// This is the one sanctioned 0.x public-API exception (see `docs/DESIGN.md`).
+pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -387,6 +408,110 @@ mod tests {
                 "rendered output missing `{needle}`:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn custom_meter_inherits_standard_labels_and_namespace() {
+        let rendered = render_with_local_recorder(|| {
+            // A connector owns the `kafka` namespace: local names are
+            // auto-prefixed `etl_kafka_`.
+            let meter = Meter::with_namespace("kafka", "orders", "orders_kafka", "kafka");
+            meter
+                .counter("schema_fetches_total", &[("registry", "prod".into())])
+                .increment(3);
+            meter.gauge("cache_entries", &[]).set(17.0);
+            meter.histogram("fetch_duration_seconds", &[]).record(0.012);
+
+            // A pipeline author's default scope lands under `etl_custom_`.
+            Meter::new("orders", "enrich", "map")
+                .counter("orders_enriched_total", &[])
+                .increment(9);
+
+            // The same scope also builds a framework stage handle.
+            let deser = DeserMetrics::new(meter.labels());
+            deser.batch(510, 0, Duration::from_millis(1));
+        });
+
+        for needle in [
+            // Auto-prefixed name; standard labels first, then the extra label.
+            r#"etl_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"} 3"#,
+            r#"etl_kafka_cache_entries{pipeline="orders",component="orders_kafka",component_type="kafka"} 17"#,
+            r#"etl_kafka_fetch_duration_seconds_bucket{pipeline="orders",component="orders_kafka",component_type="kafka""#,
+            // The author's default scope uses the `etl_custom_` bucket.
+            r#"etl_custom_orders_enriched_total{pipeline="orders",component="enrich",component_type="map"} 9"#,
+            // The framework handle from the same Meter carries the same labels.
+            r#"etl_deser_records_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 510"#,
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "rendered output missing `{needle}`:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved framework root")]
+    fn custom_meter_rejects_reserved_namespace() {
+        Meter::with_namespace("sink", "p", "c", "t");
+    }
+
+    #[test]
+    #[should_panic(expected = "lowercase")]
+    fn custom_meter_rejects_invalid_namespace() {
+        Meter::with_namespace("Bad Name", "p", "c", "t");
+    }
+
+    #[test]
+    #[should_panic(expected = "without the `etl_` prefix")]
+    fn custom_meter_rejects_prefixed_local_name() {
+        let _ = Meter::new("p", "c", "t").counter("etl_custom_hits_total", &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "shadows a standard label")]
+    fn custom_meter_rejects_shadowed_standard_label() {
+        let _ = Meter::new("p", "c", "t").counter("hits_total", &[("component", "x".into())]);
+    }
+
+    #[test]
+    #[should_panic(expected = "role segment")]
+    fn custom_meter_rejects_role_prefixed_local_name() {
+        // `sink_`/`source_` are reserved to the runtime's role scoping, so a
+        // hand-written name starting with one can't alias a role-scoped family.
+        let _ = Meter::new("p", "c", "t").counter("sink_writes_total", &[]);
+    }
+
+    #[test]
+    fn for_component_scopes_by_role_and_gates_ineligible_types() {
+        // A reserved component_type (an undeclared source's default) yields no
+        // Meter rather than panicking.
+        assert!(Meter::for_component("source", MetricRole::Source, "p", "c").is_none());
+        assert!(Meter::for_component("sink", MetricRole::Sink, "p", "c").is_none());
+        // The `custom` author bucket is off-limits to component scoping (a
+        // sink's default `component_type`), so it too gets no Meter.
+        assert!(Meter::for_component("custom", MetricRole::Sink, "p", "c").is_none());
+        // A malformed component_type (a legal label, an illegal name segment)
+        // yields None (a warning is logged, not asserted here).
+        assert!(Meter::for_component("clickhouse-v2", MetricRole::Sink, "p", "c").is_none());
+        assert!(Meter::for_component("", MetricRole::Source, "p", "c").is_none());
+
+        let rendered = render_with_local_recorder(|| {
+            Meter::for_component("kafka", MetricRole::Source, "orders", "orders_in")
+                .expect("valid namespace")
+                .counter("bytes_total", &[])
+                .increment(10);
+            Meter::for_component("clickhouse", MetricRole::Sink, "orders", "orders_out")
+                .expect("valid namespace")
+                .counter("bytes_total", &[])
+                .increment(20);
+        });
+        // Role in the name; component_type is both namespace and label.
+        assert!(rendered.contains(
+            r#"etl_kafka_source_bytes_total{pipeline="orders",component="orders_in",component_type="kafka"} 10"#
+        ));
+        assert!(rendered.contains(
+            r#"etl_clickhouse_sink_bytes_total{pipeline="orders",component="orders_out",component_type="clickhouse"} 20"#
+        ));
     }
 
     #[test]

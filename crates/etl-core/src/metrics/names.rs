@@ -221,6 +221,48 @@ pub const HISTOGRAMS: &[&str] = &[
     E2E_LATENCY_SECONDS,
 ];
 
+// Namespace policy for connector- and user-owned families (see
+// `docs/METRICS.md` and the `Meter` docs). Every framework metric lives under
+// the `etl_` umbrella so an operator greps one root for the whole pipeline's
+// telemetry; a custom family registered through `Meter` must join that
+// umbrella but must not land under a reserved stage root, so it can never
+// collide with a current or future framework metric.
+
+/// The umbrella prefix on every framework metric, required of every
+/// `Meter`-registered custom family too.
+pub const PREFIX: &str = "etl_";
+
+/// The `etl_<root>_` segments the framework's own stage taxonomy owns. A
+/// `Meter` rejects any custom name whose first segment after `PREFIX` is one
+/// of these. Keep in sync with the stage sections above — the
+/// `every_framework_name_is_under_a_reserved_root` test enforces it.
+pub const RESERVED_ROOTS: &[&str] = &[
+    "source",
+    "deser",
+    "operator",
+    "queue",
+    "backpressure",
+    "sink",
+    "checkpoint",
+    "e2e",
+    "pipeline",
+];
+
+/// The default namespace for pipeline-author custom metrics (`Meter::new` /
+/// `ChainCtx::meter`) → `etl_custom_*`. Well-formed and not a reserved root, so
+/// a `Meter` may use it — but the runtime's `Meter::for_component` will *not*
+/// scope a built-in component here: a component must declare its own
+/// `component_type`, keeping author `etl_custom_*` families and component
+/// families in separate buckets.
+pub const CUSTOM_NAMESPACE: &str = "custom";
+
+/// The role segments the runtime injects between a component's namespace and
+/// its metric names (`etl_<ns>_source_*` / `_sink_*`) to separate a connector's
+/// source and sink families. Reserved as the leading segment of a `Meter` local
+/// name, so a hand-written `source_`/`sink_` name cannot alias a role-scoped
+/// family. Must stay in sync with `MetricRole::segment`.
+pub const ROLE_SEGMENTS: &[&str] = &["source", "sink"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +307,26 @@ mod tests {
         let unique: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(unique.len(), all.len(), "duplicate metric name");
         for name in &all {
-            assert!(name.starts_with("etl_"), "`{name}` must be etl_-prefixed");
+            assert!(name.starts_with(PREFIX), "`{name}` must be etl_-prefixed");
+        }
+    }
+
+    /// Every framework metric must fall under one of `RESERVED_ROOTS`, so the
+    /// `Meter` reserved-root guard actually protects the whole taxonomy. If a
+    /// new stage adds an `etl_<root>_*` family with a fresh root, add that root
+    /// to `RESERVED_ROOTS`.
+    #[test]
+    fn every_framework_name_is_under_a_reserved_root() {
+        for name in COUNTERS.iter().chain(GAUGES).chain(HISTOGRAMS) {
+            let rest = name
+                .strip_prefix(PREFIX)
+                .unwrap_or_else(|| panic!("`{name}` must be etl_-prefixed"));
+            let root = rest.split('_').next().unwrap_or("");
+            assert!(
+                RESERVED_ROOTS.contains(&root),
+                "`{name}` has root `{root}` not in RESERVED_ROOTS — add it so \
+                 the Meter collision guard covers this family"
+            );
         }
     }
 }

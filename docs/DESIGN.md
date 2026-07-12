@@ -504,7 +504,19 @@ No rdkafka / clickhouse / apache-avro types appear in public trait bounds or
 public structs of `etl-core` — all are 0.x crates whose breaking releases
 must not become our breaking releases. Connector crates may re-export their
 underlying crate for advanced use, clearly documented as exempt from our
-stability promises. Avro's optional `fast` backend (`serde_avro_fast`) is
+stability promises.
+
+The **one deliberate exception is the `metrics` facade** (also 0.x): its
+`Counter` / `Gauge` / `Histogram` / `SharedString` handle types are part of
+`etl-core`'s public surface, alongside the `Meter` scope and `ComponentLabels`
+that mint them. This is intentional — the framework's instrumentation API *is*
+the `metrics` facade, so a connector or pipeline author registering its own
+metric family speaks in those types. The mitigation is that `etl-core`
+re-exports the handle types (`etl_core::metrics::{Counter, ...}`); connectors
+never take a direct `metrics` dependency, so exactly one facade version lives
+in the tree and a breaking `metrics` release is upgraded in a single edit.
+
+Avro's optional `fast` backend (`serde_avro_fast`) is
 license-disclosed: crates.io metadata says LGPL-3.0-only while upstream is
 MPL-2.0 (fix merged, unreleased), and its microdependency
 `serde_serializer_quick_unsupported` is genuinely LGPL-3.0-only. It ships

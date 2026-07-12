@@ -58,11 +58,14 @@ use super::runtime::{
 };
 use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig};
-use crate::metrics::{ComponentLabels, MetricsHandle, SinkShardMetrics};
+use crate::metrics::{
+    ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
+};
 use crate::ops::{RunnableChain, SinkCtx};
 use crate::pipeline::ExitReport;
 use crate::sink::{
-    DrainReport, ShardQueues, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn, shard_queues,
+    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn,
+    shard_queues,
 };
 use crate::source::Source;
 use crate::telemetry::{self, LogFormat};
@@ -171,6 +174,35 @@ impl ChainCtx {
             .1
             .clone();
         SinkCtx::new(name.to_string(), queues, Arc::clone(&self.budget))
+    }
+
+    /// A [`Meter`] for a pipeline author's own metrics, pre-labelled with the
+    /// pipeline name plus the `component` / `component_type` you name and
+    /// scoped to the `etl_custom_` namespace. Resolve handles from it **once
+    /// here** (the factory runs once per thread, before data flows) and move
+    /// them into the operator closures that touch them:
+    ///
+    /// ```no_run
+    /// # use etl_core::pipeline::ChainCtx;
+    /// # fn wire(ctx: ChainCtx) {
+    /// // Pass the LOCAL name — this registers `etl_custom_enrich_hits_total`.
+    /// let hits = ctx.meter("enrich", "map").counter("enrich_hits_total", &[]);
+    /// // ... move `hits` into a `.inspect(move |r| { hits.increment(1); })`
+    /// # let _ = hits;
+    /// # }
+    /// ```
+    ///
+    /// The resulting series carry `pipeline`/`component`/`component_type` like
+    /// every framework series and live under the `etl_` umbrella, so they join
+    /// cleanly in a query. You pass local names; the `Meter` adds the
+    /// `etl_custom_` prefix. See `docs/METRICS.md`.
+    #[must_use]
+    pub fn meter(
+        &self,
+        component: impl Into<SharedString>,
+        component_type: impl Into<SharedString>,
+    ) -> Meter {
+        Meter::new(self.pipeline.clone(), component, component_type)
     }
 }
 
@@ -419,6 +451,14 @@ impl Pipeline {
             sink_name.clone()
         };
         let (mut queues, receivers) = shard_queues(num_shards, options.queue_capacity);
+        // The sink's custom-metrics scope (`etl_<component_type>_sink_*`),
+        // handed to the writer before it is shared across shard workers.
+        let sink_meter = Meter::for_component(
+            &parts.component_type,
+            MetricRole::Sink,
+            pipeline_name.clone(),
+            component.clone(),
+        );
         let sink_labels = ComponentLabels::new(
             pipeline_name.clone(),
             component,
@@ -440,8 +480,10 @@ impl Pipeline {
                 )
             })
             .collect();
+        let mut writer = parts.writer;
+        writer.attach_metrics(sink_meter);
         let pool = SinkPool::spawn(
-            Arc::new(parts.writer),
+            Arc::new(writer),
             parts.shard_endpoints,
             receivers,
             parts.pool,

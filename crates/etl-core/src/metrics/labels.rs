@@ -2,14 +2,20 @@
 //! label set, its typed `Counter`/`Gauge`/`Histogram` constructors, and the
 //! dynamic per-partition gauge family.
 //!
-//! The constructors are `pub(crate)` so each stage module (`source`, `sink`,
-//! `checkpoint`, ...) resolves its handles through one code path that always
-//! attaches the three standard labels.
+//! The stage constructors (`counter`, `counter1`, ...) are `pub(crate)` so
+//! each stage module (`source`, `sink`, `checkpoint`, ...) resolves its
+//! handles through one code path that always attaches the three standard
+//! labels. The dynamic-arity `register_*` path backing the public
+//! [`Meter`](super::Meter) lives here too (also `pub(crate)`), so
+//! connector- and user-owned metric families inherit the same labels.
 
 use super::names;
 use crate::error::ErrorClass;
 use crate::record::PartitionId;
-use metrics::{Counter, Gauge, Histogram, SharedString, counter, gauge, histogram};
+use metrics::{
+    Counter, Gauge, Histogram, Key, Label, Level, Metadata, SharedString, counter, gauge,
+    histogram, with_recorder,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -136,6 +142,164 @@ impl ComponentLabels {
             names::L_COMPONENT_TYPE => self.component_type.clone(),
             k => v.into(),
         )
+    }
+
+    /// Build the metric key for a dynamic-arity family: the three standard
+    /// labels first (so every family joins cleanly against the framework's
+    /// series), then the caller's `extra` labels in order.
+    ///
+    /// This mirrors what the `counter!`/`gauge!`/`histogram!` macros lower to
+    /// for runtime label values (`Key::from_parts` over a `Vec<Label>`); the
+    /// stage constructors above use the macro form because their labels are
+    /// fixed, while [`Meter`](super::Meter) needs a runtime-sized slice and a
+    /// name assembled from its namespace at build time.
+    fn family_key(&self, name: SharedString, extra: &[(&'static str, SharedString)]) -> Key {
+        validate_extra_labels(&name, extra);
+        let mut labels = Vec::with_capacity(3 + extra.len());
+        labels.push(Label::new(names::L_PIPELINE, self.pipeline.clone()));
+        labels.push(Label::new(names::L_COMPONENT, self.component.clone()));
+        labels.push(Label::new(
+            names::L_COMPONENT_TYPE,
+            self.component_type.clone(),
+        ));
+        for (k, v) in extra {
+            labels.push(Label::new(*k, v.clone()));
+        }
+        Key::from_parts(name, labels)
+    }
+
+    /// Resolve a counter carrying the three standard labels plus `extra`.
+    /// `name` is the fully-qualified `etl_<namespace>_...` name the
+    /// [`Meter`](super::Meter) assembled. Build-time (cold path) only.
+    pub(crate) fn register_counter(
+        &self,
+        name: SharedString,
+        extra: &[(&'static str, SharedString)],
+    ) -> Counter {
+        let key = self.family_key(name, extra);
+        with_recorder(|recorder| recorder.register_counter(&key, &FAMILY_METADATA))
+    }
+
+    /// Resolve a gauge carrying the three standard labels plus `extra`.
+    pub(crate) fn register_gauge(
+        &self,
+        name: SharedString,
+        extra: &[(&'static str, SharedString)],
+    ) -> Gauge {
+        let key = self.family_key(name, extra);
+        with_recorder(|recorder| recorder.register_gauge(&key, &FAMILY_METADATA))
+    }
+
+    /// Resolve a histogram carrying the three standard labels plus `extra`.
+    pub(crate) fn register_histogram(
+        &self,
+        name: SharedString,
+        extra: &[(&'static str, SharedString)],
+    ) -> Histogram {
+        let key = self.family_key(name, extra);
+        with_recorder(|recorder| recorder.register_histogram(&key, &FAMILY_METADATA))
+    }
+}
+
+/// Metadata attached to connector- and user-owned metric families. The
+/// framework's own stage metrics register through the `metrics` macros, which
+/// stamp `module_path!()` here; families registered through
+/// [`Meter`](super::Meter) inherit this module's path, which is adequate — the
+/// exporters this framework installs do not surface metadata.
+const FAMILY_METADATA: Metadata<'static> =
+    Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
+
+/// Guard the caller's `extra` labels at build time (cold path): none may
+/// shadow a standard label key (they are attached automatically) or repeat
+/// another `extra` key. Panics — a construction-time wiring mistake, caught
+/// at startup before any data flows, like a bad sink topology. The name's
+/// namespace is validated up front by [`Meter`](super::Meter), so it needs no
+/// check here.
+fn validate_extra_labels(name: &str, extra: &[(&'static str, SharedString)]) {
+    for (i, (k, _)) in extra.iter().enumerate() {
+        assert!(
+            *k != names::L_PIPELINE && *k != names::L_COMPONENT && *k != names::L_COMPONENT_TYPE,
+            "custom label `{k}` on `{name}` shadows a standard label \
+             (pipeline/component/component_type are attached automatically)"
+        );
+        assert!(
+            !extra[..i].iter().any(|(prev, _)| prev == k),
+            "custom label `{k}` is repeated on `{name}`"
+        );
+    }
+}
+
+/// Why a `Meter` namespace token was rejected. Lets the panicking constructor
+/// path ([`validate_namespace`]) and the non-panicking runtime path
+/// (`Meter::for_component`) share one rule set while phrasing the outcome
+/// differently — a hard error for an explicit author call, a silent opt-out or
+/// a warning for a component default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NamespaceRejection {
+    /// Empty string.
+    Empty,
+    /// Not a lowercase `[a-z][a-z0-9_]*` segment (so not a legal metric-name
+    /// segment) — e.g. it contains an uppercase letter or a hyphen, or leads
+    /// with a digit.
+    Malformed,
+    /// A framework stage root (`source`, `sink`, …); a custom family here would
+    /// collide with the taxonomy.
+    Reserved,
+}
+
+impl NamespaceRejection {
+    /// A short reason phrase for a diagnostic (`… because {reason}`).
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            NamespaceRejection::Empty => "it is empty",
+            NamespaceRejection::Malformed => "it is not a lowercase `[a-z][a-z0-9_]*` segment",
+            NamespaceRejection::Reserved => "it is a reserved framework stage root",
+        }
+    }
+}
+
+/// Classify a `Meter` namespace token (the `<ns>` in the `etl_<ns>_` prefix
+/// every one of its metrics gets): `Ok(())` if it is a usable, non-reserved
+/// segment, else why it was rejected. The single source of truth behind both
+/// the panicking [`validate_namespace`] and the non-panicking
+/// `Meter::for_component`; the reserved case is what makes custom names
+/// collision-proof against the framework taxonomy.
+pub(crate) fn classify_namespace(namespace: &str) -> Result<(), NamespaceRejection> {
+    if namespace.is_empty() {
+        return Err(NamespaceRejection::Empty);
+    }
+    let well_formed = namespace
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && namespace.as_bytes()[0].is_ascii_lowercase();
+    if !well_formed {
+        return Err(NamespaceRejection::Malformed);
+    }
+    if names::RESERVED_ROOTS.contains(&namespace) {
+        return Err(NamespaceRejection::Reserved);
+    }
+    Ok(())
+}
+
+/// Validate a `Meter` namespace token, panicking with a specific message on
+/// rejection. The construction-time wiring check behind
+/// [`Meter::with_namespace`](super::Meter::with_namespace).
+pub(crate) fn validate_namespace(namespace: &str) {
+    match classify_namespace(namespace) {
+        Ok(()) => {}
+        Err(NamespaceRejection::Empty) => panic!(
+            "Meter namespace must not be empty (it becomes the `etl_<namespace>_` \
+             segment on every metric); use `\"custom\"` or your connector's name"
+        ),
+        Err(NamespaceRejection::Malformed) => panic!(
+            "Meter namespace `{namespace}` must be a lowercase `[a-z][a-z0-9_]*` \
+             segment (it becomes part of the `etl_<namespace>_` metric prefix)"
+        ),
+        Err(NamespaceRejection::Reserved) => panic!(
+            "Meter namespace `{namespace}` is a reserved framework root; custom \
+             families would collide with `etl_{namespace}_*`. Use `\"custom\"` or \
+             a connector segment like `\"kafka\"`."
+        ),
     }
 }
 

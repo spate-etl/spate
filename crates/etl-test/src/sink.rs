@@ -4,6 +4,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use etl_core::deser::Owned;
 use etl_core::error::{ErrorClass, SinkError};
+use etl_core::metrics::Meter;
 use etl_core::record::Record;
 use etl_core::sink::{
     RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig, endpoint_probe,
@@ -178,6 +179,14 @@ pub struct CaptureWriter {
 
 impl ShardWriter for CaptureWriter {
     type Endpoint = ReplicaTag;
+
+    fn attach_metrics(&mut self, meter: Option<Meter>) {
+        // Exercise the connector-metrics seam: a family under the sink's
+        // `etl_<component_type>_sink_*` namespace (e.g. `etl_capture_sink_*`).
+        if let Some(meter) = meter {
+            meter.counter("attaches_total", &[]).increment(1);
+        }
+    }
 
     fn write_batch(
         &self,

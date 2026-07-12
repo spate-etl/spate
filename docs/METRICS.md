@@ -3,9 +3,22 @@
 `etl-rs` instruments every pipeline stage through the [`metrics`](https://crates.io/crates/metrics)
 facade. The framework installs an exporter selected by the `metrics` config
 section (`prometheus` exposes a scrape endpoint on the admin server; `none`
-disables export). Pipeline authors register their own metrics through the same
-facade — anything recorded with `metrics` macros or handles is exported
-alongside the framework's metrics.
+disables export). Pipeline authors and connectors register their own metrics through the same
+facade — anything recorded is exported alongside the framework's. The
+recommended path is a `Meter`: it attaches the three standard labels below and
+**auto-prefixes the name `etl_<namespace>_`**, so custom series live under the
+same `etl_` umbrella and an operator finds everything under one root. You pass a
+local name (`schema_fetches_total`); the `Meter` adds the prefix. The namespace
+is `custom` for pipeline-author metrics (`etl_custom_*`) or a segment a
+connector claims (`etl_kafka_*`), and it can never be one of the framework's
+reserved stage roots (`source`, `deser`, `operator`, `queue`, `backpressure`,
+`sink`, `checkpoint`, `e2e`, `pipeline`), so custom families cannot collide with
+a framework metric. A built-in source or sink receives its `Meter` from the
+runtime, scoped by its declared `component_type` and its role
+(`etl_<component_type>_source_*` / `_sink_*`), so a connector that is both a
+source and a sink keeps its families apart. Dropping to the raw `metrics` macros is the escape hatch for
+a metric you deliberately want *outside* the `etl_` namespace. See
+[Instrumenting connectors](user-guide/06-extending/instrumenting-connectors.mdx).
 
 ## Conventions
 

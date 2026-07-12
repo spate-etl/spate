@@ -8,8 +8,8 @@ use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkControlle
 use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::metrics::{
-    self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
-    MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter, Meter,
+    MetricRole, MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
@@ -177,6 +177,17 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         }
         let pipeline_name = self.config.pipeline.name.clone();
 
+        // The source's declared component_type feeds both its stage-metric
+        // labels and the namespace of the custom-metrics Meter it receives at
+        // `open`. Captured here, before `self.source` moves into the controller.
+        let source_ct = self.source.component_type().to_string();
+        let source_meter = Meter::for_component(
+            &source_ct,
+            MetricRole::Source,
+            pipeline_name.clone(),
+            "source",
+        );
+
         // Observability first: everything after this records metrics.
         let handle = install_or_reuse(&metrics_settings(&self.config))?;
 
@@ -307,7 +318,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     "driver",
                 )),
                 source_metrics: SourceMetrics::new(
-                    &ComponentLabels::new(pipeline_name.clone(), "source", "source"),
+                    &ComponentLabels::new(pipeline_name.clone(), "source", source_ct.clone()),
                     self.config.metrics.per_partition_detail,
                 ),
                 shutdown: Arc::clone(&self.shutdown),
@@ -389,9 +400,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 self.config.metrics.per_partition_detail,
             ),
             source_metrics: SourceMetrics::new(
-                &ComponentLabels::new(pipeline_name.clone(), "source", "source"),
+                &ComponentLabels::new(pipeline_name.clone(), "source", source_ct.clone()),
                 self.config.metrics.per_partition_detail,
             ),
+            source_meter,
             pipeline_metrics,
         };
         let controller_handle = match std::thread::Builder::new()

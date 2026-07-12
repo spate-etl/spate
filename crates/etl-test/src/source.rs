@@ -298,7 +298,17 @@ pub struct MemorySource {
 impl Source for MemorySource {
     type Lane = MemoryLane;
 
+    /// Scopes the source's own metric families under `etl_memory_source_*`.
+    fn component_type(&self) -> &str {
+        "memory"
+    }
+
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+        // Exercise the connector-metrics seam: a family under the source's
+        // `etl_memory_source_*` namespace, resolved once at open.
+        if let Some(meter) = &ctx.meter {
+            meter.counter("opens_total", &[]).increment(1);
+        }
         self.issuer = Some(ctx.issuer);
         self.shared.lock().open = true;
         Ok(())

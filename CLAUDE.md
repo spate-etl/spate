@@ -55,12 +55,23 @@ run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.
   `checkpoint` module) — it is loom-tested and must remain so.
 - **No connector-crate types in `etl-core` public APIs**, and no
   rdkafka/clickhouse/apache-avro types in any public trait bounds — those are
-  0.x dependencies and must not leak into our semver surface.
+  0.x dependencies and must not leak into our semver surface. The **one
+  sanctioned exception is the `metrics` facade**: `Meter`, `ComponentLabels`,
+  and the re-exported `Counter`/`Gauge`/`Histogram`/`SharedString` are public
+  because the framework's instrumentation API *is* that facade. It is
+  re-exported from `etl-core` (never depended on directly by connectors) so a
+  breaking `metrics` bump is one coordinated change, not per-crate drift.
 - **Acks can never block behind data.** The ack path is unbounded/atomic.
 - Record error policies are **Skip or Fail only**, always surfaced through
   metrics (`*_dropped_total{reason}` / `*_errors_total{error_type}`).
 - All metrics handles are **pre-registered at build time** — never resolve
   metric names/labels on the per-record path.
+- **All metrics live under the `etl_` umbrella.** The framework owns the
+  reserved stage roots (`etl_source_`, `etl_sink_`, …); connector/user families
+  register through a `Meter`, which auto-prefixes `etl_<namespace>_` (default
+  `custom`) and rejects a namespace that shadows a reserved root — so custom
+  series never collide with the taxonomy. Raw-facade metrics are the opt-out for
+  names deliberately outside `etl_`.
 - Delivery is at-least-once: never commit a source watermark past
   unacknowledged data, including across rebalances and shutdown.
 

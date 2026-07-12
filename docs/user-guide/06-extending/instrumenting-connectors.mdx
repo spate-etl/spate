@@ -82,25 +82,104 @@ assembly. The two you set as a connector author are on the sink builder:
 repeat the plumbing. The rule to internalize: pick a stable, low-cardinality
 `component_type` and give replicas human-meaningful names.
 
-## Registering your own metric
+## Owning a metric family
 
-When the taxonomy genuinely lacks something your connector needs, you don't
-register with the framework — the framework's instrumentation API *is* the
-[`metrics`](https://crates.io/crates/metrics) facade. Anything you record with
-its macros exports through the same `/metrics` endpoint as `etl_*`:
+When the taxonomy genuinely lacks something your connector or pipeline needs,
+register it through a [`Meter`](../07-reference/README.mdx). A `Meter` is a
+small, cloneable scope bound to one component's three standard labels: every
+handle it mints inherits them, and its name is **auto-prefixed under the `etl_`
+umbrella**, so your series sit right alongside the framework's and an operator
+finds the whole pipeline's telemetry under one greppable `etl_` root.
 
 ```rust
-// Pre-register once, at build time.
+use etl_core::metrics::Meter;
+
+// A connector claims its namespace; a pipeline author uses `Meter::new`.
+let meter = Meter::with_namespace("kafka", "orders", "orders_kafka", "kafka");
+// Pass the LOCAL name — the Meter prepends `etl_kafka_` for you.
+let schema_fetches = meter.counter("schema_fetches_total", &[("registry", "prod".into())]);
+let fetch_seconds = meter.histogram("fetch_duration_seconds", &[]);
+
+// Hot path: touch only the handles, per batch.
+schema_fetches.increment(n);
+fetch_seconds.record(elapsed);
+```
+
+This renders
+`etl_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}`.
+The rules the `Meter` enforces so you don't have to think about them:
+
+- **You never type the prefix.** `Meter::new(...)` uses the `custom` namespace
+  (`etl_custom_*`) — the bucket for pipeline-author metrics;
+  `Meter::with_namespace("kafka", ...)` claims a connector segment
+  (`etl_kafka_*`). The namespace is validated once at construction and **cannot
+  be a reserved framework stage root** (`source`, `sink`, `deser`, …), so a
+  custom family can never collide with a current or future framework metric.
+  This is the industry-standard shape — a single application prefix
+  (Prometheus's `namespace_subsystem_name`), exactly what Flink (`flink_…`) and
+  Envoy (reserved `envoy` root) do.
+- **Standard labels are automatic.** The `extra` slice is `&[]` for none;
+  values are `SharedString`, so `"prod".into()` and an owned `String` from
+  config both work. Push per-instance identity (a topic, a shard) into `extra`
+  labels, not the name, keeping the name low-cardinality.
+- **Store the handles** (`Counter` / `Gauge` / `Histogram`, re-exported from
+  `etl_core::metrics`) in your own struct — no direct `metrics` dependency.
+
+A connector that can appear as **both a source and a sink** in one pipeline (a
+Kafka source alongside a future Kafka sink) is separated by the runtime, not by
+you: when it injects a component's `Meter` it derives the end from the
+source-vs-sink position and scopes the family `etl_kafka_source_*` /
+`etl_kafka_sink_*`, so its source `bytes_total` and its sink `bytes_total` land
+under distinct names (`etl_kafka_source_bytes_total` vs
+`etl_kafka_sink_bytes_total`). Your connector code is identical at either end —
+you never name the role, and a `Meter` local name may not itself begin with a
+role segment (`source_` / `sink_`), which is reserved for exactly this scoping.
+(Instance identity — two Kafka sinks — stays in the `component` label, where
+same-meaning series belong.)
+
+### From a pipeline author's operators
+
+A `Meter` is also how you instrument an **operator** you write. Operator
+closures are pure (`.map` / `.inspect` take a bare function — there is no
+per-record context, by design), so the pattern is *mint at build time, close the
+handle over the closure*. The chain factory hands you a
+[`ChainCtx`](../07-reference/README.mdx); call `ctx.meter(component,
+component_type)` there (it uses the `custom` namespace):
+
+```rust
+.chains(move |ctx| {
+    // Registers `etl_custom_enrich_hits_total` — you pass the local name.
+    let hits = ctx.meter("enrich", "map").counter("enrich_hits_total", &[]);
+    chain(deser)
+        .with_metrics(ctx.pipeline, "enrich")
+        .inspect(move |r| if is_hit(r) { hits.increment(1); })
+        .sink(ctx.sink("default"))
+        .build()
+})
+```
+
+`ctx.meter(...)` fills in the pipeline name for you; you name the component and
+its type. `Counter` is `Arc`-backed, so closing it over a closure that the
+runtime clones once per pipeline thread is correct — every thread feeds one
+series.
+
+## Dropping to the raw facade
+
+If you need a metric **outside** the governed `etl_` namespace — mirroring a
+third-party library's own naming, say — record it straight onto the
+[`metrics`](https://crates.io/crates/metrics) facade. You get no standard labels
+and no namespace enforcement, so the collision-avoidance is yours: prefix with
+your own name, **not** `etl_` (that umbrella belongs to the `Meter`).
+
+```rust
+// Pre-register once, at build time; you own the whole name.
 let schema_fetches = metrics::counter!("myconn_schema_fetches_total", "registry" => "prod");
-// Hot path: touch only the handle, count per batch.
 schema_fetches.increment(n);
 ```
 
 [Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx) and the
-`custom_metrics.rs` example own this pattern in full. Two connector-specific
-notes: prefix your names with your connector, **not** `etl_` (that prefix is the
-framework taxonomy's), and reuse the `pipeline` / `component` values you were
-handed so your series join cleanly against the framework's in a query.
+`custom_metrics.rs` example own this pattern in full. Prefer the `Meter` above
+unless you specifically want to live outside the `etl_` taxonomy.
 
 ## Contracts
 
@@ -115,8 +194,13 @@ handle method shapes exist to make them the path of least resistance:
   batch's totals; observe a batch's duration once (as a mean where per-record
   granularity would matter), never per record.
 - **Follow the naming rules.** `_total` on counters, a unit suffix
-  (`_seconds` / `_bytes` / `_rows`) on anything measured in a unit. Framework
-  names are `etl_`-prefixed; connector-owned names are prefixed by the connector.
+  (`_seconds` / `_bytes` / `_rows`) on anything measured in a unit. Through a
+  `Meter` the `etl_<namespace>_` prefix is added for you (you pass the local
+  name); only a raw-facade metric needs a prefix you choose yourself, and that
+  one must **not** be `etl_`. Name a latency histogram `*_duration_seconds`
+  specifically: the exporter's default bucket layout is matched by that suffix,
+  so a bare `*_seconds` histogram renders as a summary instead (see
+  [Metrics § Histogram buckets](../../METRICS.md)).
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
   `metrics.per_partition_detail` (default off) precisely because it is unbounded.
@@ -141,11 +225,45 @@ rendered exposition — no global install, so tests stay isolated and parallel.
 against, exactly as `crates/etl/examples/custom_metrics.rs` and the `metrics`
 module's own tests do.
 
-:::note
-First-class, connector-owned metric *families* — pre-registered handle structs
-of your own, resolved through the framework's `ComponentLabels` builder so they
-inherit the standard labels automatically — are a planned extension built on the
-shared label seam inside `etl-core`'s `metrics` module. Until then, a connector
-either drives a framework handle (above) or registers directly on the `metrics`
-facade.
-:::
+## From a built-in source or sink
+
+A `Meter` you construct with `Meter::new(...)` — or take from `ChainCtx` —
+covers pipeline authors. A **built-in `Source` or sink `ShardWriter`** doesn't
+construct one: the runtime hands it a pre-scoped `Meter` at construction, so a
+connector never wires the pipeline name, the labels, or the prefix.
+
+- **Declare a `component_type`.** A source overrides
+  [`Source::component_type`](../07-reference/README.mdx) (default `"source"`); a
+  sink sets it via `SinkParts::with_component_type` (default `"custom"`). That
+  string is both the standard `component_type` label *and* the metric namespace,
+  so it must be a distinct, non-reserved segment: the defaults (`"source"`,
+  `"custom"`) opt out (see below), and `"custom"` in particular is reserved for
+  pipeline-author metrics.
+- **Receive the `Meter`.** A source reads `Option<Meter>` from
+  `SourceCtx` in `open`; a sink's writer overrides
+  `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before the
+  writer is shared). The runtime scopes it by **role** — `source`/`sink` derived
+  from the wiring position — so a Kafka source's families land under
+  `etl_kafka_source_*` and a Kafka sink's under `etl_kafka_sink_*`; its source
+  and sink families therefore land under distinct names. The connector's code is
+  identical at either end.
+
+```rust
+// A source, in open():
+fn component_type(&self) -> &str { "kafka" }
+fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+    if let Some(m) = &ctx.meter {
+        self.lag = Some(m.gauge("consumer_lag", &[]));   // etl_kafka_source_consumer_lag
+    }
+    // ...
+}
+```
+
+The `Meter` is `None` when the `component_type` can't scope a family: a reserved
+root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
+(a sink's default) opts out silently, and a value that is a legal label but an
+illegal metric-name segment (e.g. `"clickhouse-v2"`) is logged at `warn` and
+also yields `None` — so a component only gets a scope once it declares a
+distinct, well-formed `component_type`. See `crates/etl-test`'s `MemorySource` /
+`CaptureWriter` for a worked example, exercised end-to-end in
+`crates/etl-test/tests/component_metrics.rs`.

@@ -82,6 +82,7 @@ where
 use crate::checkpoint::AckSet;
 use crate::deser::RecFamily;
 use crate::error::SinkError;
+use crate::metrics::Meter;
 use crate::record::{Record, RecordMeta};
 use bytes::{Bytes, BytesMut};
 use std::time::Instant;
@@ -188,6 +189,21 @@ pub struct SealedBatch {
 pub trait ShardWriter: Send + Sync + 'static {
     /// A connected replica endpoint (e.g. one HTTP client per replica).
     type Endpoint: Send + Sync + 'static;
+
+    /// Receive a [`Meter`] scoped `etl_<component_type>_sink_*` for the sink's
+    /// own metric families, pre-labelled with the standard
+    /// `pipeline`/`component`/`component_type`. Called once by the builder
+    /// before the writer is shared across shard workers; resolve handles here
+    /// and store them (they are `Arc`-backed, so `write_batch`'s `&self` can
+    /// touch them). `None` when the sink's `component_type` cannot scope a
+    /// family: the default `"custom"` (reserved for pipeline-author metrics) or
+    /// a reserved root opts out silently, and a malformed value is logged and
+    /// also yields `None` — so declare a distinct `component_type` via
+    /// [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
+    /// to receive a scope. Defaults to ignoring it.
+    fn attach_metrics(&mut self, meter: Option<Meter>) {
+        let _ = meter;
+    }
 
     /// Write `batch` to `endpoint` durably.
     fn write_batch(

@@ -15,6 +15,7 @@ pub use barrier::DrainBarrier;
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
 use crate::error::SourceError;
+use crate::metrics::Meter;
 use crate::record::{PartitionId, RawPayload};
 use std::time::Duration;
 
@@ -93,13 +94,34 @@ pub struct SourceCtx {
     /// every lane they construct; each lane issues one [`AckRef`] per poll
     /// batch (`issue(partition, last_offset)`).
     pub issuer: AckIssuer,
+    /// A [`Meter`] scoped `etl_<component_type>_source_*` for the source's own
+    /// metric families (e.g. consumer lag, broker statistics), pre-labelled
+    /// with the standard `pipeline`/`component`/`component_type`. `None` unless
+    /// the source declared a [`Source::component_type`] that is a usable,
+    /// non-reserved namespace — a reserved default (`"source"`) opts out
+    /// silently, a malformed value is logged and also yields `None`. Resolve
+    /// handles from it once here in `open`; never on the poll path.
+    pub meter: Option<Meter>,
 }
 
 impl SourceCtx {
-    /// Context wrapping the checkpointer's issuer.
+    /// Context wrapping the checkpointer's issuer. The custom-metrics
+    /// [`meter`](Self::meter) is `None`; the runtime attaches one via
+    /// [`with_meter`](Self::with_meter).
     #[must_use]
     pub fn new(issuer: AckIssuer) -> Self {
-        SourceCtx { issuer }
+        SourceCtx {
+            issuer,
+            meter: None,
+        }
+    }
+
+    /// Attach the source's custom-metrics scope. Called by the runtime, which
+    /// builds it from the source's `component_type`.
+    #[must_use]
+    pub fn with_meter(mut self, meter: Option<Meter>) -> Self {
+        self.meter = meter;
+        self
     }
 }
 
@@ -108,6 +130,17 @@ impl SourceCtx {
 pub trait Source: Send {
     /// The lane type this source produces.
     type Lane: SourceLane;
+
+    /// The `component_type` metric label for this source (e.g. `"kafka"`),
+    /// mirroring [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
+    /// on the sink side. It is also the namespace of the source's custom-metrics
+    /// [`Meter`](SourceCtx::meter): declaring `"kafka"` scopes the source's own
+    /// families under `etl_kafka_source_*`. The default `"source"` is a reserved
+    /// root, so a source that does not override this gets no custom `Meter`
+    /// (its framework stage metrics are unaffected).
+    fn component_type(&self) -> &str {
+        "source"
+    }
 
     /// Connect and prepare. Called once before any other method.
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError>;

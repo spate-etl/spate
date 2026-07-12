@@ -508,6 +508,7 @@ impl FlushReason {
 struct ReplicaMetrics {
     healthy: Gauge,
     breaker_opens: Counter,
+    errors: Counter,
 }
 
 /// Sink-shard handles (`etl_sink_*`), one struct per shard worker.
@@ -528,6 +529,7 @@ pub struct SinkShardMetrics {
     err_fatal: Counter,
     inflight: Gauge,
     abandoned: Counter,
+    shard_healthy: Gauge,
     e2e: Histogram,
     e2e_basis: E2eBasis,
     replicas: Vec<ReplicaMetrics>,
@@ -567,11 +569,20 @@ impl SinkShardMetrics {
                         names::L_REPLICA,
                         replica.clone(),
                     ),
+                    errors: labels.counter2(
+                        names::SINK_REPLICA_ERRORS_TOTAL,
+                        names::L_SHARD,
+                        shard.clone(),
+                        names::L_REPLICA,
+                        replica.clone(),
+                    ),
                 };
                 m.healthy.set(1.0);
                 m
             })
             .collect();
+        let shard_healthy = labels.gauge1(names::SINK_SHARD_HEALTHY, names::L_SHARD, shard.clone());
+        shard_healthy.set(1.0);
         SinkShardMetrics {
             records: labels.counter1(names::SINK_RECORDS_TOTAL, names::L_SHARD, shard.clone()),
             bytes: labels.counter1(names::SINK_BYTES_TOTAL, names::L_SHARD, shard.clone()),
@@ -634,6 +645,7 @@ impl SinkShardMetrics {
             ),
             inflight: labels.gauge1(names::SINK_INFLIGHT_BATCHES, names::L_SHARD, shard.clone()),
             abandoned: labels.counter1(names::SINK_ABANDONED_BATCHES_TOTAL, names::L_SHARD, shard),
+            shard_healthy,
             e2e: labels.histogram(names::E2E_LATENCY_SECONDS),
             e2e_basis,
             replicas,
@@ -710,6 +722,20 @@ impl SinkShardMetrics {
         if let Some(r) = self.replicas.get(replica) {
             r.breaker_opens.increment(1);
         }
+    }
+
+    /// Count one failed write attempt attributed to a replica.
+    pub fn replica_error(&self, replica: usize) {
+        if let Some(r) = self.replicas.get(replica) {
+            r.errors.increment(1);
+        }
+    }
+
+    /// Record whether the shard has at least one circuit-closed replica.
+    /// Level-set and idempotent — safe to call redundantly; the shard's
+    /// breaker set drives it on transitions.
+    pub fn set_shard_healthy(&self, up: bool) {
+        self.shard_healthy.set(if up { 1.0 } else { 0.0 });
     }
 
     /// Count batches abandoned at the drain deadline.

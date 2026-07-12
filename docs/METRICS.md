@@ -94,6 +94,8 @@ series carry its name as the `component` label (a single sink uses
 | `etl_sink_inflight_batches` | gauge | `shard` | Sealed batches currently in flight. |
 | `etl_sink_replica_healthy` | gauge | `shard`, `replica` | 1 = circuit closed, 0 = open (replica quarantined). |
 | `etl_sink_breaker_opens_total` | counter | `shard`, `replica` | Circuit-breaker open transitions. |
+| `etl_sink_replica_errors_total` | counter | `shard`, `replica` | Failed write attempts attributed to a replica — which endpoint is erroring (`etl_sink_errors_total` gives the class breakdown per shard). |
+| `etl_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing each `open_for` window. |
 | `etl_sink_abandoned_batches_total` | counter | `shard` | Batches abandoned at drain deadline (will replay after restart). |
 
 ## Checkpointing (`etl_checkpoint_*`)
@@ -140,3 +142,9 @@ config section):
   messages being skipped.
 - `etl_sink_replica_healthy == 0` — replica down; sustained across all
   replicas of a shard means the shard channel will fill and pause the source.
+- `etl_sink_shard_healthy == 0` — no replica of the shard is circuit-closed;
+  intake stalls and the shard back-pressures the source (the whole-shard
+  escalation of the per-replica `replica_healthy` signal). Recovery probes
+  still fire each `open_for` window, so the gauge stays 0 through failed
+  probe cycles until one succeeds. Pair with a rising
+  `etl_sink_replica_errors_total{replica}` to identify the failing endpoints.

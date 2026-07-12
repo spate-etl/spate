@@ -825,13 +825,145 @@ fn sink_records_metric_matches_rows_written_exactly() {
         });
     });
     let rendered = handle.render();
-    let line = rendered
-        .lines()
-        .find(|l| l.starts_with("etl_sink_records_total") && l.contains("shard=\"0\""))
-        .unwrap_or_else(|| panic!("records counter rendered:\n{rendered}"));
-    let value: f64 = line.rsplit(' ').next().unwrap().parse().expect("value");
+    let value = metric_value(&rendered, "etl_sink_records_total", "shard=\"0\"");
     assert!(
         (value - 12.0).abs() < f64::EPSILON,
         "metric must equal rows written exactly, got {value}"
+    );
+}
+
+/// Pull one rendered Prometheus value by metric name plus a distinguishing
+/// label fragment. The value is the last space-separated token of the line
+/// (this exporter renders no trailing timestamp).
+fn metric_value(rendered: &str, name: &str, label: &str) -> f64 {
+    let line = rendered
+        .lines()
+        .find(|l| l.starts_with(name) && l.contains(label))
+        .unwrap_or_else(|| panic!("`{name}{{{label}}}` not rendered:\n{rendered}"));
+    line.rsplit(' ').next().unwrap().parse().expect("value")
+}
+
+/// End-to-end wiring of the whole-shard health signal: with every replica of
+/// a shard failing, `etl_sink_shard_healthy` drops to 0 once every breaker is
+/// open. Drives the real worker/breaker path (not the breaker unit tests)
+/// through the Prometheus recorder. Per-replica error *attribution* is pinned
+/// by `replica_errors_attribute_failures_asymmetrically`, whose counts differ
+/// per replica — this scenario is symmetric (one failure each) and could not
+/// tell swapped indices apart.
+#[test]
+fn shard_healthy_drops_to_zero_when_every_breaker_opens() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // One failure quarantines a replica; keep it open (no probe during
+            // the test) and cap attempts so the batch abandons after both
+            // replicas have failed exactly once.
+            cfg.breaker.failure_threshold = 1;
+            cfg.breaker.open_for = Duration::from_secs(3600);
+            cfg.retry.max_attempts = 2;
+            let fx = fixture(1, 2, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+
+            let (ack, ack_rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(30)).await;
+
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 0,
+                    abandoned: 1
+                }
+            );
+            // One attempt per replica before attempts are exhausted.
+            let calls = fx.writer.calls();
+            assert_eq!(calls.len(), 2, "one attempt on each replica");
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+        });
+    });
+
+    let rendered = handle.render();
+    // Both breakers open → no circuit-closed replica → shard unhealthy.
+    assert_eq!(
+        metric_value(&rendered, "etl_sink_shard_healthy", "shard=\"0\""),
+        0.0,
+        "every replica quarantined ⇒ shard_healthy == 0"
+    );
+}
+
+/// Per-replica error attribution, falsifiably: with `failure_threshold: 2`
+/// and three attempts, round-robin rotation lands two failures on replica 0
+/// and one on replica 1, so any index miswiring (swap, off-by-one) breaks
+/// the 2-vs-1 assertion below. Replica 1 stays circuit-closed, which also
+/// pins `etl_sink_shard_healthy` staying 1 while a healthy replica remains.
+#[test]
+fn replica_errors_attribute_failures_asymmetrically() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // Two failures quarantine a replica; keep it open (no probe
+            // during the test). Three attempts: r0, r1, r0 — the third
+            // opens replica 0's breaker and exhausts the attempt budget.
+            cfg.breaker.failure_threshold = 2;
+            cfg.breaker.open_for = Duration::from_secs(3600);
+            cfg.retry.max_attempts = 3;
+            let fx = fixture(1, 2, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+
+            let (ack, ack_rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(30)).await;
+
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 0,
+                    abandoned: 1
+                }
+            );
+            let calls = fx.writer.calls();
+            assert_eq!(
+                (calls[0].replica, calls[1].replica, calls[2].replica),
+                (0, 1, 0),
+                "round-robin rotation: two attempts on r0, one on r1"
+            );
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+        });
+    });
+
+    let rendered = handle.render();
+    assert_eq!(
+        metric_value(&rendered, "etl_sink_replica_errors_total", "replica=\"r0\""),
+        2.0,
+        "replica 0 took two failures"
+    );
+    assert_eq!(
+        metric_value(&rendered, "etl_sink_replica_errors_total", "replica=\"r1\""),
+        1.0,
+        "replica 1 took one failure"
+    );
+    // Replica 1 is below threshold and still circuit-closed.
+    assert_eq!(
+        metric_value(&rendered, "etl_sink_shard_healthy", "shard=\"0\""),
+        1.0,
+        "a circuit-closed replica remains ⇒ shard_healthy == 1"
     );
 }

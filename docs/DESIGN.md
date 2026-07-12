@@ -331,13 +331,26 @@ concurrent flushes rotating across healthy replicas (round-robin skipping
 open circuit breakers). Failures retry the **same sealed batch** on the next
 healthy replica with capped exponential backoff. Per-shard-worker (rather
 than per-replica) keeps batches full-sized — ClickHouse wants few big inserts
-— while `max_inflight` still provides replica parallelism.
+— while `max_inflight` still provides replica parallelism. When no replica of
+a shard is circuit-closed, new write attempts park until the next half-open
+probe window while their in-flight permits stay held, so intake stalls and
+the shard back-pressures the source (surfaced as `etl_sink_shard_healthy ==
+0`; with a bounded `retry.max_attempts` a batch instead fails and replays
+after restart — the watermark stalls either way). Records are never rerouted
+to another shard, which would break placement parity and the dedup tokens.
 
 ClickHouse specifics: direct-to-shard writes against local tables
 (`internal_replication=true`) rather than Distributed-table inserts (bigger
 blocks, less merge pressure, and a synchronous server ack that checkpointing
 requires); one `INSERT` per sealed batch carrying a deterministic
-`insert_deduplication_token` so in-session retries are idempotent. Rows are
+`insert_deduplication_token` so in-session retries are idempotent. Writing to
+one healthy replica and letting `ReplicatedMergeTree` replicate is the
+durability model, and its explicit boundary: replication is asynchronous
+(`insert_quorum=0`), so a batch acked by a replica destroyed before the part
+propagates is lost — the edge of the sink's at-least-once guarantee, closable
+per-sink via an operator-supplied `insert_quorum` at the cost of shard write
+availability (the connector guide documents the verified quorum-plus-dedup
+retry semantics). Rows are
 encoded **on the pipeline threads** by etl-clickhouse's own serializer (the
 crate's is private — a semver win, verified round-tripping against a live
 server) and shipped as pre-formatted frames through

@@ -125,6 +125,16 @@ pub const SINK_INFLIGHT_BATCHES: &str = "etl_sink_inflight_batches";
 pub const SINK_REPLICA_HEALTHY: &str = "etl_sink_replica_healthy";
 /// Circuit-breaker open transitions, by [`L_SHARD`] and [`L_REPLICA`].
 pub const SINK_BREAKER_OPENS_TOTAL: &str = "etl_sink_breaker_opens_total";
+/// Failed write attempts attributed to a replica, by [`L_SHARD`] and
+/// [`L_REPLICA`]. Pinpoints which endpoint of a shard is erroring (the
+/// shard-level [`SINK_ERRORS_TOTAL`] gives the class breakdown).
+pub const SINK_REPLICA_ERRORS_TOTAL: &str = "etl_sink_replica_errors_total";
+/// 1 = the shard has at least one circuit-closed replica, 0 = none is
+/// circuit-closed (every replica quarantined or half-open probing) — intake
+/// stalls and the shard back-pressures the source while recovery probes
+/// continue, by [`L_SHARD`]. The whole-shard escalation of
+/// [`SINK_REPLICA_HEALTHY`].
+pub const SINK_SHARD_HEALTHY: &str = "etl_sink_shard_healthy";
 /// Batches abandoned at the drain deadline (replayed after restart).
 pub const SINK_ABANDONED_BATCHES_TOTAL: &str = "etl_sink_abandoned_batches_total";
 
@@ -175,6 +185,7 @@ pub const COUNTERS: &[&str] = &[
     SINK_RETRIES_TOTAL,
     SINK_ERRORS_TOTAL,
     SINK_BREAKER_OPENS_TOTAL,
+    SINK_REPLICA_ERRORS_TOTAL,
     SINK_ABANDONED_BATCHES_TOTAL,
     CHECKPOINT_COMMITS_TOTAL,
 ];
@@ -190,6 +201,7 @@ pub const GAUGES: &[&str] = &[
     BACKPRESSURE_INFLIGHT_BYTES,
     SINK_INFLIGHT_BATCHES,
     SINK_REPLICA_HEALTHY,
+    SINK_SHARD_HEALTHY,
     CHECKPOINT_PENDING_BATCHES,
     CHECKPOINT_WATERMARK_AGE_SECONDS,
     PIPELINE_INFO,

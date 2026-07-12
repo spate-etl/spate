@@ -88,6 +88,7 @@ impl<W: ShardWriter> SinkPool<W> {
             .enumerate()
             .map(|(shard, (rx, shard_metrics))| {
                 let worker = ShardWorker {
+                    shard: u32::try_from(shard).unwrap_or(u32::MAX),
                     writer: Arc::clone(&writer),
                     endpoints: Arc::clone(&endpoints[shard]),
                     rx,

@@ -127,6 +127,54 @@ backoff. Per-replica circuit breakers quarantine a replica after
 (rather than per-replica) keep batches full-sized — ClickHouse wants few
 big inserts — while `max_per_shard` still provides replica parallelism.
 
+## Durability and replica loss
+
+The sink writes to **one** healthy replica per shard and relies on
+`ReplicatedMergeTree` (via ClickHouse Keeper) to replicate the part to the
+shard's other replicas and to heal a replica that was down when it returns.
+This is the client-side equivalent of `internal_replication=true`: the sink
+never *fans out* a block to several replicas as a delivery strategy (that is
+the `internal_replication=false` footgun — replicas drift). Cross-replica
+**retries** are the one deliberate exception — a failed write re-sends the
+same sealed batch to the next healthy replica, and the deduplication token
+makes an ambiguous double-landing a server-side no-op rather than a
+duplicate.
+
+Replication is **asynchronous** by default (`insert_quorum=0`), which is the
+right posture for high-throughput streams. The honest boundary this creates:
+a batch acknowledged by one replica that is destroyed before the part
+replicates is lost. That window — one confirming replica, no quorum — is the
+explicit edge of the sink's at-least-once guarantee. Pipelines that cannot
+tolerate it can require a write quorum by passing `insert_quorum` (and, if
+wanted, `insert_quorum_parallel` / `insert_quorum_timeout`) through the sink's
+**`settings` passthrough** — these are *not* among the three reserved settings
+(`insert_deduplicate`, `wait_end_of_query`, `insert_deduplication_token`), so
+they work today without framework changes. Quorum composes correctly with
+the deduplication the sink always enables: when a retried batch is
+recognised as a duplicate of an already-committed part, ClickHouse still
+waits for quorum on that *existing* part before acknowledging, and throws
+`UNKNOWN_STATUS_OF_INSERT` if it cannot verify — a deduplicated retry cannot
+silently bypass the quorum (verified against the `ReplicatedMergeTreeSink`
+implementation in ClickHouse 24.8 LTS and current master; treat older
+servers with suspicion). The cost is availability: a quorum insert fails
+with `TOO_FEW_LIVE_REPLICAS` when live replicas drop below the quorum, so a
+single replica outage can block writes to that shard. The framework itself
+stays async and takes no position on the tradeoff.
+
+When **no** replica of a shard is circuit-closed, write attempts park until
+the next half-open probe window (each probe is a real batch write, retried
+every `open_for`), in-flight slots stay held, and the shard's queue fills,
+so backpressure reaches the source and the source watermark stalls rather
+than losing or misrouting data — records are never rerouted to another shard
+(that would break the record→shard placement and the dedup-token scheme).
+With the default unbounded `retry.max_attempts` this holds indefinitely;
+with a bounded one, exhausted batches fail their acks and replay after
+restart instead — the watermark stalls either way. Recovery is automatic
+once any probe succeeds. This whole-shard condition is surfaced distinctly
+as `etl_sink_shard_healthy == 0` (with per-replica
+`etl_sink_replica_errors_total` to attribute the failures); see
+[docs/METRICS.md](../../../METRICS.md).
+
 ## Why direct-to-shard, not a Distributed table
 
 Writes go to shard-local tables (with `internal_replication=true` topology)

@@ -27,6 +27,10 @@ pub(crate) struct BreakerSet {
     states: Vec<State>,
     cursor: usize,
     metrics: Arc<SinkShardMetrics>,
+    /// Cached `etl_sink_shard_healthy` state (≥1 replica circuit-closed),
+    /// so the gauge and the caller's log fire edge-triggered on
+    /// transitions only.
+    shard_healthy: bool,
 }
 
 impl BreakerSet {
@@ -35,6 +39,8 @@ impl BreakerSet {
         for r in 0..replicas {
             metrics.set_replica_healthy(r, true);
         }
+        // Every replica starts circuit-closed, so the shard starts healthy.
+        metrics.set_shard_healthy(true);
         BreakerSet {
             cfg,
             states: vec![
@@ -45,6 +51,7 @@ impl BreakerSet {
             ],
             cursor: 0,
             metrics,
+            shard_healthy: true,
         }
     }
 
@@ -95,8 +102,9 @@ impl BreakerSet {
             .map(|t| t.max(now))
     }
 
-    /// Record a successful write on `replica`.
-    pub(crate) fn on_success(&mut self, replica: usize) {
+    /// Record a successful write on `replica`. Returns the shard-health
+    /// transition, if any, for the caller to log outside the lock.
+    pub(crate) fn on_success(&mut self, replica: usize) -> Option<ShardHealthTransition> {
         let was_unhealthy = !matches!(self.states[replica], State::Closed { .. });
         self.states[replica] = State::Closed {
             consecutive_failures: 0,
@@ -104,10 +112,16 @@ impl BreakerSet {
         if was_unhealthy {
             self.metrics.set_replica_healthy(replica, true);
         }
+        self.refresh_shard_health()
     }
 
-    /// Record a failed write on `replica`.
-    pub(crate) fn on_failure(&mut self, replica: usize, now: Instant) {
+    /// Record a failed write on `replica`. Returns the shard-health
+    /// transition, if any, for the caller to log outside the lock.
+    pub(crate) fn on_failure(
+        &mut self,
+        replica: usize,
+        now: Instant,
+    ) -> Option<ShardHealthTransition> {
         let next = match self.states[replica] {
             State::Closed {
                 consecutive_failures,
@@ -136,11 +150,64 @@ impl BreakerSet {
             self.metrics.set_replica_healthy(replica, false);
             self.metrics.breaker_opened(replica);
         }
+        self.refresh_shard_health()
+    }
+
+    /// Recompute shard health (≥1 replica circuit-closed) and, on a
+    /// transition, update the gauge and report the transition for the
+    /// caller to log. `next_replica`'s Open→HalfOpen promotion neither adds
+    /// nor removes a `Closed` state, so only the failure/success paths can
+    /// move this signal.
+    fn refresh_shard_health(&mut self) -> Option<ShardHealthTransition> {
+        let up = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::Closed { .. }));
+        if up == self.shard_healthy {
+            return None;
+        }
+        self.shard_healthy = up;
+        self.metrics.set_shard_healthy(up);
+        Some(if up {
+            ShardHealthTransition::Recovered
+        } else {
+            ShardHealthTransition::AllQuarantined
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn is_open(&self, replica: usize) -> bool {
         matches!(self.states[replica], State::Open { .. })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shard_healthy(&self) -> bool {
+        self.shard_healthy
+    }
+}
+
+/// A shard-health edge reported by [`BreakerSet`], logged by the write task
+/// after the breaker lock is released — tracing subscribers must never run
+/// under that mutex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShardHealthTransition {
+    Recovered,
+    AllQuarantined,
+}
+
+impl ShardHealthTransition {
+    pub(crate) fn log(self, shard: u32) {
+        match self {
+            ShardHealthTransition::Recovered => {
+                tracing::info!(shard, "shard recovered a healthy replica");
+            }
+            ShardHealthTransition::AllQuarantined => {
+                tracing::error!(
+                    shard,
+                    "all replicas quarantined; sink is back-pressuring the source"
+                );
+            }
+        }
     }
 }
 
@@ -225,5 +292,66 @@ mod tests {
         assert_eq!(b.next_replica(t2), Some(0));
         b.on_success(0);
         assert_eq!(b.next_replica(t2), Some(0), "closed again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shard_healthy_until_the_last_replica_opens() {
+        let mut b = set(2, 1);
+        let now = Instant::now();
+        assert!(b.shard_healthy(), "all replicas start closed");
+        // One replica quarantined: the shard still has a healthy replica.
+        assert_eq!(b.on_failure(0, now), None, "no shard-level transition");
+        assert!(b.is_open(0));
+        assert!(b.shard_healthy(), "replica 1 is still closed");
+        // Both replicas quarantined: the shard is fully unhealthy.
+        assert_eq!(
+            b.on_failure(1, now),
+            Some(ShardHealthTransition::AllQuarantined)
+        );
+        assert!(b.is_open(1));
+        assert!(!b.shard_healthy(), "every replica is open");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shard_health_recovers_only_on_probe_success() {
+        let mut b = set(1, 1);
+        let t0 = Instant::now();
+        assert_eq!(
+            b.on_failure(0, t0),
+            Some(ShardHealthTransition::AllQuarantined)
+        );
+        assert!(!b.shard_healthy(), "the only replica is open");
+
+        // A half-open probe does not restore shard health by itself — the
+        // probed replica is HalfOpen, not Closed.
+        let t1 = t0 + Duration::from_secs(6);
+        assert_eq!(b.next_replica(t1), Some(0));
+        assert!(!b.shard_healthy(), "probing, not yet confirmed healthy");
+        // Only a successful probe (→ Closed) flips it back.
+        assert_eq!(b.on_success(0), Some(ShardHealthTransition::Recovered));
+        assert!(b.shard_healthy(), "probe closed the breaker");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shard_health_does_not_flap_across_probe_failures() {
+        let mut b = set(1, 1);
+        let t0 = Instant::now();
+        assert_eq!(
+            b.on_failure(0, t0),
+            Some(ShardHealthTransition::AllQuarantined)
+        );
+        assert!(!b.shard_healthy());
+        // Probe, fail, probe, fail: the shard must stay unhealthy throughout
+        // — no spurious "recovered" transition on each half-open cycle.
+        let t1 = t0 + Duration::from_secs(6);
+        assert_eq!(b.next_replica(t1), Some(0));
+        assert!(!b.shard_healthy());
+        assert_eq!(b.on_failure(0, t1), None, "re-open is not a transition");
+        assert!(!b.shard_healthy());
+        let t2 = t1 + Duration::from_secs(6);
+        assert_eq!(b.next_replica(t2), Some(0));
+        assert!(!b.shard_healthy());
+        assert_eq!(b.on_failure(0, t2), None, "still quarantined, no edge");
+        assert!(!b.shard_healthy());
     }
 }

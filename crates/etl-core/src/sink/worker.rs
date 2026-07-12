@@ -104,6 +104,7 @@ impl Accumulator {
 }
 
 pub(crate) struct ShardWorker<W: ShardWriter> {
+    pub(crate) shard: u32,
     pub(crate) writer: Arc<W>,
     pub(crate) endpoints: Arc<Vec<W::Endpoint>>,
     pub(crate) rx: mpsc::Receiver<EncodedChunk>,
@@ -408,6 +409,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         let breakers = Arc::clone(breakers);
         let metrics = Arc::clone(&self.metrics);
         let retry = self.cfg.retry;
+        let shard = self.shard;
         let handle = tasks.spawn(async move {
             let _permit = permit;
             let mut backoff = Backoff::new(retry, this_seq);
@@ -433,19 +435,26 @@ impl<W: ShardWriter> ShardWorker<W> {
                 attempts += 1;
                 match writer.write_batch(&endpoints[replica], &batch).await {
                     Ok(()) => {
-                        breakers.lock().expect("breaker lock").on_success(replica);
+                        let transition = breakers.lock().expect("breaker lock").on_success(replica);
+                        if let Some(t) = transition {
+                            t.log(shard);
+                        }
                         return WriteDone {
                             seq: this_seq,
                             written: true,
                         };
                     }
                     Err(err) => {
-                        breakers
+                        let transition = breakers
                             .lock()
                             .expect("breaker lock")
                             .on_failure(replica, Instant::now());
+                        if let Some(t) = transition {
+                            t.log(shard);
+                        }
                         let class = class_of(&err);
                         metrics.errors(class, 1);
+                        metrics.replica_error(replica);
                         tracing::warn!(replica, attempts, error = %err, "sink write failed");
                         if class != ErrorClass::Retryable
                             || (retry.max_attempts > 0 && attempts >= retry.max_attempts)

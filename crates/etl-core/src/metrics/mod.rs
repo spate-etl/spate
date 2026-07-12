@@ -339,6 +339,8 @@ mod tests {
             shard.set_inflight(2);
             shard.set_replica_healthy(1, false);
             shard.breaker_opened(1);
+            shard.replica_error(1);
+            shard.set_shard_healthy(false);
             shard.abandoned(0);
 
             let cp = CheckpointMetrics::new(&labels(), false);
@@ -361,6 +363,8 @@ mod tests {
             r#"etl_backpressure_pause_events_total{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,
             r#"etl_sink_flushes_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",reason="rows"} 1"#,
             r#"etl_sink_replica_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 0"#,
+            r#"etl_sink_replica_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 1"#,
+            r#"etl_sink_shard_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3"} 0"#,
             r#"etl_checkpoint_commits_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 1"#,
             r#"etl_pipeline_state{pipeline="orders",component="orders_kafka",component_type="kafka",state="running"} 1"#,
             r#"etl_pipeline_info{pipeline="orders",component="orders_kafka",component_type="kafka",version="0.1.0"} 1"#,

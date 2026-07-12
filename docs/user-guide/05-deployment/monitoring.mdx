@@ -101,10 +101,13 @@ of [docs/METRICS.md](../../METRICS.md).
   cannot keep up, or the budget is undersized for the batch settings — see
   the sizing rule in [Tuning](tuning.mdx).
 
-For alerting on skipped records (schema drift, poison messages), replica
-health, and queue saturation, use the `*_dropped_total`,
-`etl_sink_replica_healthy`, and `etl_queue_full_events_total` series
-described in [docs/METRICS.md](../../METRICS.md).
+For alerting on skipped records (schema drift, poison messages), replica and
+shard health, and queue saturation, use the `*_dropped_total`,
+`etl_sink_replica_healthy`, `etl_sink_shard_healthy` (0 = no circuit-closed
+replica left in the shard — the whole-shard outage escalation, with
+`etl_sink_replica_errors_total` attributing the failures per endpoint), and
+`etl_queue_full_events_total` series described in
+[docs/METRICS.md](../../METRICS.md).
 
 ## Related
 

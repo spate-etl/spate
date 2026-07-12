@@ -418,12 +418,15 @@ impl Pipeline {
         } else {
             sink_name.clone()
         };
-        let (queues, receivers) = shard_queues(num_shards, options.queue_capacity);
+        let (mut queues, receivers) = shard_queues(num_shards, options.queue_capacity);
         let sink_labels = ComponentLabels::new(
             pipeline_name.clone(),
             component,
             parts.component_type.clone(),
         );
+        // Pre-register the queue-edge handles before `queues` is cloned into
+        // any terminal, so every producer shares the same `etl_queue_*` series.
+        queues.attach_metrics(&sink_labels);
         let e2e_basis = metrics_settings(&self.config).e2e_basis;
         let shard_metrics: Vec<SinkShardMetrics> = replica_labels
             .iter()

@@ -62,9 +62,9 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|
-| `etl_queue_depth` | gauge | `queue` | Items currently queued. |
+| `etl_queue_depth` | gauge | `queue` | Items currently queued, sampled on each send. It only advances *on a send*, so while the source is paused (or flow otherwise stalls) it freezes at its last sample — typically `capacity` — even as the workers drain the queue. The live resume decision uses the channel directly, not this gauge. |
 | `etl_queue_capacity` | gauge | `queue` | Configured bound. |
-| `etl_queue_full_events_total` | counter | `queue` | `try_send` rejections (each is a backpressure signal, never a block). |
+| `etl_queue_full_events_total` | counter | `queue` | `try_send` rejections (each is a backpressure signal, never a block). A rejected chunk is parked and retried once per poll cycle while blocked, and every retry that still finds the queue full counts again — so during a sustained stall this tracks retry cadence, not distinct fill episodes. |
 
 ## Backpressure (`etl_backpressure_*`)
 

@@ -1137,6 +1137,8 @@ dependencies = [
 name = "etl-kafka"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "bytesize",
  "etl-core",
  "etl-test",
  "humantime-serde",
@@ -1144,8 +1146,10 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rdkafka",
  "serde",
+ "serde_json",
  "testcontainers",
  "testcontainers-modules",
+ "tokio",
  "tracing",
  "yaml_serde",
 ]

@@ -1,0 +1,218 @@
+---
+title: Kafka sink
+sidebar_position: 7
+description: The Kafka producer-sink client-path ceiling — framing + delivery-report countdown overhead, the batch/queue sizing question, and shards — with the broker proven out as a confounder on every arm.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+
+export const cpuLabels = { '4': '4 cores', '6': '6 cores', '8': '8 cores' };
+export const modeLabels = { raw: 'raw rdkafka', framework: 'framework path' };
+export const rowsLabels = { '10000': '10k', '50000': '50k', '100000': '100k', '250000': '250k', '500000': '500k' };
+export const queueLabels = { '100000': '100k', '250000': '250k', '500000': '500k', '1000000': '1M' };
+
+# Kafka producer sink (2026-07)
+
+How fast can the pipeline produce to Kafka through the [producer
+sink](../user-guide/04-connectors/kafka-sink.mdx), and **what does the framework
+cost over librdkafka itself**? This rig isolates the client path: an in-process
+generator source (no source broker) drives the real chain, sink pool, and
+runtime into one `ThreadedProducer` at full tilt. Throughput is read from
+`etl_sink_records_total` (durable acks — the sink returns `Ok` only after every
+message's delivery report under `acks=all`) over a steady-state window, so the
+number is the durable client-path rate.
+
+Two questions make Kafka harder to measure than the [ClickHouse sink
+saturation](./sink-saturation.mdx) rig. First, there is no free `Null` engine:
+the broker always does real append work, so it is a live confounder that a
+sink-ceiling claim has to exclude. Second, the sink forces `acks=all +
+enable.idempotence`, and on a single-node `replication=1` broker `acks=all` ≈
+`acks=1` — so this rig measures the **client path, not a durability ceiling**.
+Both are handled explicitly below.
+
+Environment: Apple M5 Max (18-core), macos/aarch64, Rust release,
+`apache/kafka:4.1.0` in Docker **capped at 6 cores** (`--cpus=6`), rdkafka 0.39
+(vendored librdkafka), 256-byte payloads, single local broker. This is a
+**shared-host** measurement: the ETL client and the broker share the same
+18-core box, and the escape hatch for a dedicated broker is `BOOTSTRAP=host:9092`.
+Harness: `benchmarks/src/bin/kafka_sink_saturation.rs`; the matrix and env are in
+[Methodology](./methodology.mdx), raw JSONL in `benchmarks/results/`.
+
+## The client-path overhead ceiling
+
+The headline: through the full framework path the sink sustains **~1.21M
+records/s** (≈296 MB/s of payload) at the default settings — about **half** the
+**~2.49M records/s** a bare librdkafka produce loop reaches on the same broker
+with the same forced `acks=all + idempotence`, unframed. The gap is what the
+connector-internal framing (encode on the pipeline threads, parse on the writer),
+the per-batch delivery-report countdown, and the io-thread contention on the one
+shared producer cost over librdkafka itself.
+
+<BenchBars
+  bench="kafka_sink_saturation"
+  metric="records_per_s"
+  category="mode"
+  where={{ kafka_cpus: 6, batch_max_rows: 500000, queue_buffering_max_messages: 100000, shards: 1 }}
+  order={['raw rdkafka', 'framework path']}
+  emphasize="framework"
+  labels={modeLabels}
+  title="Framework path vs raw librdkafka (default settings)"
+  caption="The framework path (1.21M rec/s) sustains ~49% of the raw single-producer ceiling (2.49M rec/s) on the same broker and the same acks=all + idempotence. The raw arm is a single uncontended feeder — see the note on why more feeders is slower, not faster."
+/>
+
+The raw baseline is a **single** send thread on purpose. librdkafka's idempotent
+producer serialises on a per-partition sequence, so multiple send threads
+hammering one producer's queue contend on that sequence rather than adding
+throughput — more feeders are slower, not faster. One uncontended feeder is
+therefore the honest ceiling of a single producer, and it is the same contention
+that governs the (measured) shards result below.
+
+## How we know the broker is not the limiter
+
+Because the broker is always in the loop, every framework arm records a two-axis
+verdict in its note: `upstream` (is the framework being pushed as hard as it can
+produce?) and `downstream` (is the client or the broker the constraint?). The
+default arm reads `upstream=sink, downstream=client` — the source is paused for
+backpressure (the framework is saturated) and the broker has headroom.
+
+The broker headroom is measured directly. Sweeping the broker's core cap under
+the raw baseline, throughput is **flat** — the single-producer ceiling is
+client-bound, and even a 4-core broker absorbs ~2.45M rec/s, far above anything
+the framework pushes. So at the 6-core cap used for every other arm, the broker
+is provably not the confounder.
+
+<BenchBars
+  bench="kafka_sink_saturation"
+  metric="records_per_s"
+  category="kafka_cpus"
+  where={{ mode: 'raw' }}
+  order={['4 cores', '6 cores', '8 cores']}
+  emphasize="6"
+  labels={cpuLabels}
+  title="Broker-headroom calibration: raw throughput vs broker cores"
+  caption="Raw throughput is flat across 4/6/8 broker cores (~2.45–2.50M rec/s), so the single-producer ceiling is client-bound and the broker has ample headroom at the 6-core cap the rest of the matrix runs at."
+/>
+
+The mechanism is visible in the sink's own librdkafka statistics. At the default
+arm the broker round-trip (`broker_rtt_p99` ≈ 7 ms) and the on-wire transmit
+latency (`broker_outbuf_latency_p99` ≈ 0.4 ms) are tiny, while the *in-queue*
+latency (`broker_int_latency_p99` ≈ 67 ms) is large: messages wait in the local
+producer queue, not on a slow broker. That distinction is what settles the next
+question.
+
+## The default mismatch is benign — no cliff
+
+The framework's default `batch.max_rows` is **500,000**; librdkafka's default
+`queue.buffering.max.messages` is **100,000**. A full sealed batch cannot fit the
+producer queue, so every large batch rides the writer's bounded queue-full
+backoff. The worry was a throughput cliff — the backoff cadence starving the
+queue between refills, the way an undersized in-flight budget collapsed the
+[ClickHouse sink](./sink-saturation.mdx#how-we-know-the-sink-is-the-limiter). It
+does not happen. Sweeping `batch.max_rows` at the fixed 100k queue, throughput
+rises **monotonically** with batch size, and the 500k default — the one that most
+overflows the queue — is the **fastest**.
+
+<BenchBars
+  bench="kafka_sink_saturation"
+  metric="records_per_s"
+  category="batch_max_rows"
+  where={{ mode: 'framework', kafka_cpus: 6, queue_buffering_max_messages: 100000, shards: 1, batch_max_mb: 256 }}
+  order={['10k', '50k', '100k', '250k', '500k']}
+  emphasize="500000"
+  labels={rowsLabels}
+  title="Throughput vs batch.max_rows (queue fixed at 100k)"
+  caption="Monotonic: 174k (10k rows) → 1.21M (500k rows). No cliff. The per-batch delivery-report countdown is the dominant cost, and larger batches amortize it — even though the 250k and 500k batches exceed the 100k producer queue and ride the queue-full backoff."
+/>
+
+The reason is that the **per-batch delivery-report countdown**, not the queue, is
+the dominant cost. Each `write_batch` must await every message's report before it
+returns `Ok`; a small batch pays that round-trip synchronisation over few
+messages, a large batch amortizes it over many. librdkafka keeps the wire busy
+while the writer sleeps in backoff, so overflowing the queue is free. The
+converse sweep confirms it: **widening the queue to fit a 500k batch does not
+help** — throughput is flat from 100k to 1M.
+
+<BenchBars
+  bench="kafka_sink_saturation"
+  metric="records_per_s"
+  category="queue_buffering_max_messages"
+  where={{ mode: 'framework', kafka_cpus: 6, batch_max_rows: 500000, shards: 1, batch_max_mb: 256 }}
+  order={['100k', '250k', '500k', '1M']}
+  emphasize="100000"
+  labels={queueLabels}
+  title="Throughput vs queue.buffering.max.messages (batch fixed at 500k)"
+  caption="Flat within run-to-run noise (~1.2–1.3M rec/s). Enlarging the producer queue to hold a whole sealed batch buys nothing — the queue-full backoff is not on the critical path."
+/>
+
+:::note Sizing verdict — keep the defaults
+The default `batch.max_rows = 500,000` is the **right** value for producer-sink
+throughput: bigger batches amortize the countdown, and the mismatch with
+librdkafka's 100k queue is harmless because the backoff loop does not starve the
+wire. No defaults change is warranted. The practical guidance for tuning the
+Kafka sink is **raise `batch.max_rows` (and give it linger) to push throughput**,
+not to match the producer queue. (`batch.max_bytes` is held at 256 MiB in these
+arms so `max_rows` is the binding seal knob; at the shipped 128 MiB default a
+256-byte-payload batch seals on bytes near ~496k rows instead — a detail, not a
+different conclusion.)
+:::
+
+## Shards make it slower, not faster
+
+The connector page says `shards` is "framework worker parallelism … raise only if
+batch accumulation itself bottlenecks." The data says: **do not raise it.** Shards
+are worker clones of the **one** shared `ThreadedProducer`, so more shards mean
+more concurrent `write_batch` tasks contending on that single producer's queue and
+idempotent-sequence — the same per-sequence contention that makes more raw send
+threads slower, not faster. Going from 1 to 2 shards **cuts throughput to a third**.
+
+<BenchBars
+  bench="kafka_sink_saturation"
+  metric="records_per_s"
+  category="shards"
+  where={{ mode: 'framework', kafka_cpus: 6, batch_max_rows: 500000, queue_buffering_max_messages: 100000, batch_max_mb: 256 }}
+  order={['1', '2', '4']}
+  emphasize="1"
+  title="Throughput vs shards (one shared producer)"
+  caption="shards=1 is the peak (1.21M rec/s). shards=2 and shards=4 collapse to ~0.41M (34%) — concurrent workers contend on the single shared producer. Keep shards=1."
+/>
+
+This corrects the connector-page guidance: with one producer per sink, **keep
+`shards = 1`**. Raising it does not add producer parallelism (the shards share the
+client); it adds contention. The lever for more producer throughput is batch size,
+not shards.
+
+## Latency
+
+At saturation the end-to-end latency is queueing-dominated and should be read as
+such: with the source running full-tilt against a sink that backpressures, records
+sit in framework queues before egress. At the default arm `etl_e2e_latency_seconds`
+is **p50 ≈ 1.1 s, p99 ≈ 2.5 s** — a backlog-at-saturation figure, not a
+lightly-loaded serving latency. A rate-limited arm (not run here) would report the
+low-load latency; the [Kafka topology](./kafka-topology.mdx) page characterises the
+consume side.
+
+## What this rig does and does not say
+
+- It measures the **client path**, not durability. The single-node,
+  `replication=1` broker makes `acks=all` ≈ `acks=1`; the forced
+  `acks=all + enable.idempotence` are exercised, but the replication cost of a
+  real multi-broker cluster is not in these numbers.
+- Only arms whose verdict is `upstream=sink, downstream=client` back a client-path
+  claim; the raw baseline (broker-headroom oracle) and the sink's own broker
+  RTT/latency statistics are what exclude the broker on every arm.
+- It is a **shared-host** ceiling — client and broker on one 18-core box, broker
+  capped at 6. A dedicated broker (`BOOTSTRAP=host:9092`) is a different, higher
+  ceiling, though the raw calibration shows this broker is not the current limit.
+- Windows are short (20 s) and the host is contended, so absolute numbers carry
+  run-to-run variance (~±15% on the framework arms). Quote the **shapes** — the
+  ~2× framework/raw gap, the monotonic batch-size curve, the shards collapse — not
+  a single bar to three figures. Each bar's exact value and rep count is in its
+  data table.
+- The broker runs an aggressive retention (`retention.ms=10s`,
+  `retention.bytes=128 MiB`/partition) so the multi-arm matrix does not fill disk;
+  the light background segment purge is part of the shared-host cost.
+- Payload throughput (MB/s) counts the 256-byte payload only, not the framing,
+  headers, or per-message wire overhead.
+- Every arm records the broker version, the derived in-flight budget, the
+  producer-queue depth and broker latencies, and its own provenance in the JSONL,
+  so a re-run on new hardware is directly comparable.

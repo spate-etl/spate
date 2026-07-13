@@ -75,23 +75,43 @@ fn tcp_open(host: &str, port: u16) -> bool {
 /// Ensure a Kafka broker is reachable on `localhost:9092`, starting an
 /// `apache/kafka:4.1.0` container (`etl-bench-kafka`) if nothing answers.
 /// Returns the bootstrap string.
+///
+/// When `KAFKA_CPUS` is set, a freshly started container is capped at that
+/// many cores (`--cpus=$KAFKA_CPUS`), mirroring [`ensure_clickhouse`]'s
+/// `CLICKHOUSE_CPUS` so a co-located client and broker share the host
+/// predictably (the `kafka_sink_saturation` broker-headroom budget). Unset
+/// leaves the broker uncapped — the pre-existing behaviour the consumer rigs
+/// rely on. Like the ClickHouse path, reuse keys only on the port, so a broker
+/// already RUNNING is reused as-is and `KAFKA_CPUS` is ignored for it; pass
+/// `FRESH=1` to force a remove+recreate at the new cap.
 pub fn ensure_kafka() -> String {
     let bootstrap = "localhost:9092".to_owned();
     // FRESH=1 forces a cold container even when a broker already answers.
     if !fresh_requested() && tcp_open("localhost", 9092) {
+        if std::env::var("KAFKA_CPUS").is_ok() {
+            eprintln!(
+                "reusing running etl-bench-kafka; KAFKA_CPUS is ignored for a \
+                 reused container (pass FRESH=1 to recreate at the new cap)"
+            );
+        }
         return bootstrap;
     }
     remove_container("etl-bench-kafka");
-    eprintln!("starting etl-bench-kafka (apache/kafka:4.1.0) ...");
-    docker(&[
-        "run",
-        "-d",
-        "--name",
-        "etl-bench-kafka",
-        "-p",
-        "9092:9092",
-        "apache/kafka:4.1.0",
-    ]);
+    let cpus = std::env::var("KAFKA_CPUS").ok();
+    let cpus_arg = cpus.as_ref().map(|c| format!("--cpus={c}"));
+    eprintln!(
+        "starting etl-bench-kafka (apache/kafka:4.1.0{}) ...",
+        cpus_arg
+            .as_ref()
+            .map(|a| format!(", {a}"))
+            .unwrap_or_default()
+    );
+    let mut args: Vec<&str> = vec!["run", "-d", "--name", "etl-bench-kafka", "-p", "9092:9092"];
+    if let Some(arg) = &cpus_arg {
+        args.push(arg);
+    }
+    args.push("apache/kafka:4.1.0");
+    docker(&args);
     let deadline = Instant::now() + Duration::from_secs(90);
     while !tcp_open("localhost", 9092) {
         assert!(Instant::now() < deadline, "kafka did not become reachable");

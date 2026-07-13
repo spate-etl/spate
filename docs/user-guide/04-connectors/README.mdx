@@ -14,6 +14,7 @@ the connector's factory (see
 | Connector | Role | Crate | Feature on `etl` | Config tag |
 |---|---|---|---|---|
 | [Kafka](kafka.mdx) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
+| [Kafka](kafka-sink.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
 | [ClickHouse](clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](clickhouse/multi-table.mdx)) |
 | [Avro](avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
@@ -29,6 +30,13 @@ connectors.
   synchronously before partitions are released. Backpressure pauses
   partitions without ever blocking the poll loop, so sink slowness cannot
   cause a consumer-group eviction. One topic per pipeline.
+- **Kafka (sink)** — a batch acknowledges only after **every** message's
+  delivery report confirms, under forced `acks=all` + idempotence; a failed
+  or timed-out report stalls the watermark and the batch replays.
+  Idempotence covers only in-session producer retries — batch retries after
+  partial delivery and crash replay both duplicate (never lose), so
+  downstream consumers must tolerate duplicates. See the
+  [honesty section](kafka-sink.mdx).
 - **ClickHouse (sink)** — a batch acknowledges only after the server
   confirms the insert end-to-end (`wait_end_of_query=1`, materialized views
   included). Deterministic dedup tokens make same-batch retries idempotent

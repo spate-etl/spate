@@ -95,6 +95,48 @@ cross-series operator). Series backed by data librdkafka hasn't produced yet
 | `etl_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
 | `etl_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `etl_source_lag_records` is the committed-basis view. |
 
+## Kafka sink (`etl_kafka_sink_*`)
+
+Connector-owned families registered through the Kafka sink's `Meter`
+(namespace `kafka`, role `sink`). They translate the producer's librdkafka
+statistics snapshot, emitted every `statistics_interval` (default 5s; `0s`
+disables the whole family) and published from the producer's poll thread —
+never on the record path.
+
+The conventions match the Kafka source's families: counters are
+**absolute-mapped librdkafka totals** scoped to one producer lifetime
+(sound because a sink builds exactly one producer; restarts read as
+ordinary counter resets to PromQL), the `broker` label is bounded by
+cluster topology, and the latency gauges are per-broker rolling-window
+estimates over the last statistics interval that **cannot be aggregated**
+across brokers or processes (`max()` is the only defensible cross-series
+operator). Windows that sampled nothing are absent rather than `0`.
+Batch-level write latency is framework-side
+(`etl_sink_flush_duration_seconds`); these families add the producer's
+internal view. Per-partition transmit-queue detail is deferred (see the
+decision log) — the aggregate queue gauges below cover saturation.
+
+| Metric | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `etl_kafka_sink_tx_requests_total` | counter | | Requests sent to brokers. |
+| `etl_kafka_sink_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
+| `etl_kafka_sink_rx_responses_total` | counter | | Responses received from brokers. |
+| `etl_kafka_sink_rx_bytes_total` | counter | | Protocol bytes received. |
+| `etl_kafka_sink_tx_messages_total` | counter | | Messages produced (delivery-confirmed by librdkafka's accounting). |
+| `etl_kafka_sink_tx_message_bytes_total` | counter | | Message bytes produced (including framing). |
+| `etl_kafka_sink_produce_queue_messages` | gauge | | Messages waiting in the producer's client-side queue (queue-full pressure indicator). |
+| `etl_kafka_sink_produce_queue_bytes` | gauge | | Bytes waiting in the producer's client-side queue. |
+| `etl_kafka_sink_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
+| `etl_kafka_sink_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
+| `etl_kafka_sink_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `etl_kafka_sink_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
+| `etl_kafka_sink_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
+| `etl_kafka_sink_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
+| `etl_kafka_sink_broker_int_latency_avg_seconds` | gauge | `broker` | Mean time messages spent in the producer queue before transmission, last window. |
+| `etl_kafka_sink_broker_int_latency_p99_seconds` | gauge | `broker` | p99 producer-queue latency over the last window (non-aggregatable). |
+| `etl_kafka_sink_broker_outbuf_latency_avg_seconds` | gauge | `broker` | Mean time in the transmit buffer before the socket, last window. |
+| `etl_kafka_sink_broker_outbuf_latency_p99_seconds` | gauge | `broker` | p99 transmit-buffer latency over the last window (non-aggregatable). |
+
 ## Deserializer (`etl_deser_*`)
 
 | Metric | Type | Extra labels | Meaning |
@@ -214,3 +256,7 @@ config section):
 - `rate(etl_kafka_source_broker_tx_errors_total[5m]) > 0` or
   `etl_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
   by the `broker` label.
+- `etl_kafka_sink_produce_queue_messages` sustained near
+  `queue.buffering.max.messages` (default 100k) — the producer cannot drain
+  to the brokers; batch writes are absorbing queue-full backoff and
+  `etl_sink_flush_duration_seconds` will rise before the source pauses.

@@ -169,6 +169,49 @@ For a **dedicated-server** ceiling (no client/server core contention), point the
 rig at an external cluster instead of the local container:
 `CLICKHOUSE_URL=http://host:8123 [CLICKHOUSE_USER=… CLICKHOUSE_PASSWORD=…]`.
 
+**Kafka producer sink saturation** ([study](./kafka-sink.mdx)) — an in-process
+generator (no source broker) drives the real chain into the Kafka producer sink
+at full tilt against `apache/kafka:4.1.0` in Docker. Throughput =
+`etl_sink_records_total` delta / window (durable acks). The broker is capped at
+`KAFKA_CPUS` cores; each framework arm records a two-axis verdict in its note —
+`upstream` (`sink`/`budget`/`generator`/`checkpoint`) and `downstream`
+(`client`/`broker`, from the raw baseline and the sink's `etl_kafka_*` broker
+statistics). The rig sweeps one env dimension (`SWEEP` over `SWEEP_LIST`), `REPS`
+each; children re-exec with `RUN_ONE=1` and reuse the warm broker via `BOOTSTRAP`.
+
+```sh
+export RESULTS=benchmarks/results/kafka-sink-saturation.jsonl
+: > "$RESULTS"
+# Q0 broker-headroom calibration: the raw baseline vs broker cores. FRESH=1
+# recreates the capped broker per core count (reuse keys on the port, so --cpus
+# only applies on a fresh container). The raw ceiling is flat (~2.5M rec/s), so
+# the broker is not the limiter — 6 cores is the cap for every other arm.
+for C in 4 6 8; do
+  FRESH=1 KAFKA_CPUS=$C MODE=raw REPS=3 DURATION_S=20 WARMUP_S=5 \
+    cargo run -p benchmarks --release --bin kafka_sink_saturation
+done
+# Take the raw@6 median (~2.48M) as RAW_BASELINE_RPS so framework arms record
+# framework_over_raw. BATCH_MAX_MB is held at 256 (the rig default) so max_rows is
+# the binding seal knob; the raw baseline is a single uncontended feeder.
+export KAFKA_CPUS=6 RAW_BASELINE_RPS=2483946 REPS=3 DURATION_S=20 WARMUP_S=5
+# Q1 overhead ceiling: raw vs framework at the defaults (recreates the broker @ 6,
+# then Q2/Q3 reuse it warm — no FRESH).
+FRESH=1 SWEEP=MODE SWEEP_LIST=raw,framework \
+  cargo run -p benchmarks --release --bin kafka_sink_saturation
+# Q2a batch.max_rows sweep at the fixed 100k producer queue.
+SWEEP=BATCH_MAX_ROWS SWEEP_LIST=10000,50000,100000,250000,500000 BATCH_MAX_MB=256 \
+  cargo run -p benchmarks --release --bin kafka_sink_saturation
+# Q2b queue.buffering.max.messages sweep at the fixed 500k batch.
+SWEEP=QUEUE_BUFFERING_MAX_MESSAGES SWEEP_LIST=100000,250000,500000,1000000 \
+  cargo run -p benchmarks --release --bin kafka_sink_saturation
+# Q3 shards sweep at the default mismatch (batch 500k, queue 100k).
+SWEEP=SHARDS SWEEP_LIST=1,2,4 \
+  cargo run -p benchmarks --release --bin kafka_sink_saturation
+```                                                # → 51 records
+
+For a **dedicated broker** (its own cores), point the rig at an external cluster:
+`BOOTSTRAP=host:9092` skips docker entirely.
+
 **Multi-table split vs. MV** ([study](./multi-table-split.mdx)) — three arms
 (`single_null` / `null_mv` / `split`) over a type-count sweep, ClickHouse pinned
 to 6 cores so the server is the binding constraint and the ETL has the host's

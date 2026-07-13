@@ -1,0 +1,59 @@
+# Kafka → chain → Kafka fan-out: one region-prefixed input stream split to
+# a topic per region. The `sinks:` map holds one full `kafka:` sink section
+# per destination, keyed by the name the chain resolves via
+# `ctx.sink("<name>")`.
+
+pipeline:
+  name: kafka-to-kafka-split
+  io_threads: 2
+
+checkpoint:
+  interval: 5s
+  drain_timeout: 25s
+
+metrics:
+  exporter: prometheus
+  listen: 0.0.0.0:9090
+
+source:
+  kafka:
+    brokers: ${KAFKA_BROKERS:-localhost:9092}
+    topic: ${KAFKA_TOPIC:-orders}
+    group_id: ${KAFKA_GROUP:-orders-split-etl}
+    commit_interval: 5s
+    rdkafka:
+      auto.offset.reset: earliest
+
+# One sink per destination topic. Each is a full Kafka sink section with
+# its own producer, batching, and tuning. `acks=all` and idempotence are
+# forced by the sink (delivery reports are the durable-ack point); the
+# `rdkafka:` passthrough takes any other librdkafka producer property —
+# framework-owned ones are rejected at startup with an explanation.
+sinks:
+  eu:
+    kafka:
+      brokers: ${KAFKA_BROKERS:-localhost:9092}
+      topic: ${KAFKA_EU_TOPIC:-orders-eu}
+      delivery_timeout: 30s
+      max_message_bytes: 1MB
+      compression: lz4
+      batch:
+        max_rows: 100000
+        max_bytes: 16MiB
+        linger: 250ms
+      rdkafka:
+        linger.ms: "20"
+
+  us:
+    kafka:
+      brokers: ${KAFKA_BROKERS:-localhost:9092}
+      topic: ${KAFKA_US_TOPIC:-orders-us}
+      delivery_timeout: 30s
+      max_message_bytes: 1MB
+      compression: lz4
+      batch:
+        max_rows: 100000
+        max_bytes: 16MiB
+        linger: 250ms
+      rdkafka:
+        linger.ms: "20"

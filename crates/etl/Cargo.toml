@@ -79,6 +79,10 @@ required-features = ["full", "avro-fast"]
 name = "multi_table_split"
 required-features = ["full", "avro-fast"]
 
+[[example]]
+name = "kafka_to_kafka_split"
+required-features = ["kafka"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]

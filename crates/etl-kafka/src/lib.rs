@@ -1,4 +1,6 @@
-//! Kafka source for the `etl-rs` framework.
+//! Kafka source and producer sink for the `etl-rs` framework.
+//!
+//! # Source
 //!
 //! Built on `rdkafka` with a **single consumer per process**: partitions
 //! are split into per-partition queues (`split_partition_queue`) and fanned
@@ -37,6 +39,14 @@
 //! stability. See `docs/METRICS.md` § Kafka source for the full table;
 //! setting `statistics_interval: 0s` disables the families.
 //!
+//! # Sink
+//!
+//! The [`sink`] module is the producer half: pipelines terminate in a
+//! Kafka topic through the framework's sink seam, with a batch
+//! acknowledged only once **every** message's delivery report confirmed —
+//! see the module docs for topology, delivery semantics, and the
+//! `sink: { kafka: ... }` configuration schema.
+//!
 //! This crate deliberately re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
 //! changes here (see `docs/DESIGN.md` § Dependency policy).
@@ -46,8 +56,13 @@ mod context;
 mod error;
 mod lane;
 mod metrics;
+pub mod sink;
 mod source;
 
 pub use config::KafkaSourceConfig;
 pub use lane::{KafkaBatch, KafkaLane};
+pub use sink::{
+    KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig,
+    KafkaWriter, MessageEncoder,
+};
 pub use source::KafkaSource;

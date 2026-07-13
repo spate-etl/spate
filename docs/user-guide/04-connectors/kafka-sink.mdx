@@ -1,0 +1,170 @@
+# Kafka sink
+
+The Kafka sink (`etl-kafka`, feature `kafka` on the `etl` facade) is the
+producer half of the Kafka connector: pipelines terminate in a Kafka topic
+— Kafka → operator chain → Kafka for filter/reshape/fan-out. It is built
+on `rdkafka` with exactly **one producer per sink instance**, and a batch
+acknowledges only once **every** message's delivery report has confirmed —
+which is what lets the framework commit source offsets past it. Rationale
+and the ack wiring are in [docs/DESIGN.md](../../DESIGN.md) § Sink.
+
+Construct it from the pipeline's opaque section, and terminate the chain
+with one of the sink's encoder helpers (they bake the configured
+`max_message_bytes` guard into the encoder):
+
+```rust
+let sink = etl::kafka::sink::from_component_config(pipeline.config().sink_config("default")?)?;
+let encoder = sink.encoder_bytes();      // payload passthrough
+// or: sink.encoder_json::<Owned<MyRow>>()             — serde_json
+// or: sink.encoder_with(MyMessageEncoder)             — keys/headers/tombstones
+```
+
+One topic per sink instance: fan-out to multiple topics is the chain's
+[`split`](../02-concepts/06-multi-sink.mdx) terminal with one Kafka sink
+per topic — see the `kafka_to_kafka_split` example.
+
+## Configuration
+
+The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
+(`crates/etl-kafka/src/sink/config.rs`); unknown fields are rejected with
+the offending key.
+
+```yaml
+sink:
+  kafka:
+    brokers: ${KAFKA_BROKERS:-localhost:9092}
+    topic: orders-enriched
+    delivery_timeout: 30s
+    max_message_bytes: 1MB
+    compression: lz4
+    batch:
+      linger: 250ms
+    rdkafka:
+      linger.ms: "20"
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `brokers` | string | required | Comma-separated bootstrap servers. |
+| `topic` | string | required | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
+| `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever ([benchmark](../../benchmarks/kafka-sink.mdx)). |
+| `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing retryably. |
+| `max_message_bytes` | bytes | `1MB` (1,000,000) | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
+| `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `etl_kafka_sink_*` families; `0s` disables statistics and those families with it. |
+| `compression` | `none\|gzip\|snappy\|lz4\|zstd` | unset | Producer compression (`compression.codec`). `zstd` needs an rdkafka build with zstd support — an unavailable codec fails at startup, never mid-stream. |
+| `batch` / `inflight` / `retry` / `breaker` | sections | framework defaults | Sink pool tuning, identical shape to the ClickHouse sink's sections. |
+| `rdkafka` | string map | `{}` | Raw librdkafka producer properties, applied verbatim after validation — see below. |
+
+## The `rdkafka` passthrough and the denylist
+
+Tune anything librdkafka exposes (client-side batching via `linger.ms` /
+`batch.num.messages`, buffer sizing, security) without waiting for a typed
+field. Properties the sink owns for correctness are **rejected at load
+time with an explanation**; aliases are denied alongside canonical names
+(passthrough and framework values apply in unspecified order).
+
+| Denied property | Why |
+|---|---|
+| `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
+| `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
+| `delivery.timeout.ms`, `message.timeout.ms` (alias) | Owned by the typed `delivery_timeout` field, which also bounds the batch-write await. |
+| `message.max.bytes` | Owned by the typed `max_message_bytes` field, keeping the client limit aligned with the encode-time guard. |
+| `acks`, `request.required.acks` (alias) | **Forced to `all`.** The framework commits source offsets once a delivery report confirms; a report under weaker acks would turn at-least-once into at-most-once. |
+| `enable.idempotence` | **Forced on.** librdkafka's internal retries must not reorder or duplicate within a session. |
+| `transactional.id` | Transactions/exactly-once are not supported (documented non-goal); the ack model is per-batch delivery confirmation, not a two-phase commit. |
+| `delivery.report.only.error` | The sink counts every report to acknowledge a batch; suppressing success reports would hang every write. |
+| `enable.gapless.guarantee` | Raises librdkafka fatal errors on any gap, conflicting with the framework's retry-and-replay model. |
+
+The producer is created **at startup**, so a passthrough that conflicts
+with the forced durability settings (e.g. `max.in.flight` > 5 or
+`retries=0`, which idempotence rejects) fails as a config error before
+anything runs.
+
+## How a batch becomes durable
+
+The framework hands the writer a sealed batch of framed messages; the
+writer produces all of them and returns only after every delivery report
+confirmed — that return is the durable-ack point the checkpointer commits
+behind. Producer queue-full pushback is absorbed with a bounded async
+backoff inside the write (never blocking a worker unboundedly, never the
+poll loop). Report errors map onto the framework taxonomy:
+
+- **Retryable** (timed-out reports, broker transport failures, purges,
+  unknown codes): the framework retries the whole sealed batch with capped
+  exponential backoff. Messages already delivered in the failed attempt
+  are re-produced — duplicates, never loss.
+- **Fatal** (unknown topic, authorization failures, a message over the
+  broker limit, the idempotent producer's fenced states): the batch is
+  abandoned, its partition watermark stalls, and the pipeline fails fast
+  (`checkpoint.stalled_fail_after`) instead of spinning.
+
+Oversized records never reach the writer: the encoder's
+`max_message_bytes` guard fails them record-level, where the sink stage's
+Skip/Fail policy applies (default Skip: dropped and counted).
+
+## Delivery semantics, honestly
+
+At-least-once with three distinct duplicate windows — none of them loss:
+
+- **In-session producer retries** — covered by the forced
+  `enable.idempotence` (per-partition sequence numbers). No duplicates.
+- **Framework batch retries** — a batch that fails retryably after a
+  partial delivery re-produces the delivered prefix. Duplicates possible.
+  (`NotEnoughReplicasAfterAppend` is the sharpest case: the leader
+  appended, the ack failed, the retry writes again.)
+- **Crash replay** — after a restart the source replays from the committed
+  watermark and everything re-batches. Duplicates possible.
+
+The framework's `dedup_token` has no Kafka equivalent (there is no
+server-side dedup window to hand it to), so it is unused here. Design
+downstream consumers to tolerate duplicates — idempotent handling keyed on
+a payload identity, or compacted topics keyed on the message key.
+
+:::info
+Nothing in etl-rs is exactly-once, and no configuration makes it so. In
+particular, `enable.idempotence` does **not** mean exactly-once delivery
+of your stream — it only dedupes librdkafka's own in-session retries.
+:::
+
+## Keys, headers, tombstones
+
+A produce message is (key, headers, payload). Source message keys do
+**not** survive deserialization — a record carries only the key *hash* in
+its metadata — so a Kafka→Kafka pipeline that must preserve keys re-derives
+them from the payload (`KafkaBytesEncoder::with_key_fn`,
+`KafkaJsonEncoder::with_key_fn`) or carries them in its record type with a
+custom `MessageEncoder`, which can also set headers and mark tombstones
+(null payloads, distinct from empty). Kafka partition placement follows
+librdkafka's partitioner on the message key; the framework's `shards` are
+producer-side worker parallelism, not Kafka partitions.
+
+## Backpressure and shutdown
+
+A slow or unreachable broker slows `write_batch`, which holds the shard's
+in-flight permits, fills its queue, and pauses the source — the standard
+sink backpressure path, surfaced as `etl_sink_shard_healthy == 0` when the
+breaker quarantines the endpoint. At shutdown the drain force-seals and
+writes the partial batch under `checkpoint.drain_timeout`; if the broker
+is down at the deadline, remaining batches are abandoned loudly
+(`etl_sink_abandoned_batches_total` + log) and replay after restart.
+Producer teardown is bounded: rdkafka's own drop purges queued and
+in-flight messages and joins its poll thread (≲1s).
+
+## Dependency and security notes
+
+`etl-kafka` re-exports nothing from `rdkafka` (see
+[docs/DESIGN.md](../../DESIGN.md) § Dependency policy). The workspace's
+bundled librdkafka is built **without TLS/SASL** today — producing to a
+secured cluster needs the corresponding rdkafka features (a planned opt-in
+facade feature).
+
+## Related
+
+- [Multi-sink pipelines](../02-concepts/06-multi-sink.mdx) — the `split`
+  terminal this sink fans out with; `kafka_to_kafka_split` is the worked
+  example.
+- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — the
+  ack chain the delivery reports plug into.
+- [Monitoring](../05-deployment/monitoring.mdx) — the framework `etl_sink_*`
+  families; the connector's producer-statistics families
+  (`etl_kafka_sink_*`) are documented in [Metrics](../../METRICS.md).

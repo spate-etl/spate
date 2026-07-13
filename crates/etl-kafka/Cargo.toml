@@ -1,6 +1,6 @@
 [package]
 name = "etl-kafka"
-description = "Kafka source for the etl-rs framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads. Applications should depend on the `etl` facade crate with the `kafka` feature."
+description = "Kafka source and producer sink for the etl-rs framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads, and a delivery-report-acknowledged producer sink. Applications should depend on the `etl` facade crate with the `kafka` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,10 +10,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+bytesize = { workspace = true }
 etl-core = { workspace = true }
 humantime-serde = { workspace = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -23,6 +27,7 @@ metrics-exporter-prometheus = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

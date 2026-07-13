@@ -378,6 +378,30 @@ durable-ack point.
 `Replicated*MergeTree` defaults to a window of 100. etl-clickhouse
 documentation must state this prominently.
 
+Kafka specifics (the second consumer of the seam): the produce unit is
+(key, headers, payload), not a row frame, so etl-kafka's encoder writes a
+connector-internal length-delimited message framing into the opaque chunk
+frames and its writer parses them back — the frozen contracts carry it
+unchanged. One `ThreadedProducer` per sink instance (librdkafka owns broker
+routing/batching, and the absolute-mapped statistics counters are only
+sound with a single client); framework shards are worker parallelism over
+clones of it, one replica each — rotation degenerates to a no-op while the
+breaker still provides quarantine and the `etl_sink_shard_healthy`
+backpressure signal. `write_batch` produces every message of the sealed
+batch and awaits a per-batch delivery-report countdown (an `Arc` carried as
+each message's librdkafka opaque; the callback never blocks) before
+returning — returning `Ok` is the durable-ack point, so `acks=all` and
+`enable.idempotence` are forced and their properties denied in the
+passthrough. Producer queue-full is absorbed with bounded async backoff
+inside the write. Report errors map: authorization/unknown-topic/fenced
+idempotent-producer states are fatal (fail fast, not a retry spin);
+everything else retryable — a whole-batch retry re-produces any delivered
+prefix, which is the documented duplicate window alongside crash replay
+(`dedup_token` has no Kafka equivalent and is unused). Oversized records
+are caught at encode time (`max_message_bytes`, record-level → Skip/Fail
+policy); the same limit is applied client-side as `message.max.bytes`, so
+a writer-side size rejection means misaligned broker limits → fatal.
+
 ## Delivery semantics — honest version
 
 At-least-once means duplicates happen. Dedup tokens make **same-boundary
@@ -562,3 +586,11 @@ call. No `serde_avro_fast` types appear in the public API.
 | IO runtime ownership | builder-owned, adopted by `PipelineRuntime::run` | one runtime as designed; `io_threads` no longer silently doubled |
 | Sink integration | `SinkBundle` → `#[non_exhaustive]` `SinkParts` | connector-agnostic with only a `ShardWriter` bound; fields can grow additively |
 | MSRV | 1.94 (rolling N-2), edition 2024 | library-consumer reach; absorbs dep MSRV ratchets |
+| Kafka sink ack wiring | `ThreadedProducer` + per-batch delivery-report countdown awaited inside `write_batch` | acks resolve only from write outcomes (frozen contract); O(1) await state vs per-message futures at 500k msgs/batch; a custom context is needed for statistics anyway |
+| Kafka sink topology | one producer per sink; shards = workers over clones, 1 replica each | librdkafka owns broker routing/batching; absolute stats counters need a single client; breaker/backpressure still function |
+| Kafka sink durability | `acks=all` + `enable.idempotence` forced, denied in passthrough (incl. aliases) | a delivery report must mean a durable write before offsets commit; weaker settings silently become at-most-once |
+| Kafka sink framing | connector-internal length-delimited (key, headers, payload, tombstone bit) inside opaque frames | absorbs the message-unit mismatch without touching frozen contracts; format free to evolve |
+| Kafka sink oversized records | encode-time `max_message_bytes` guard (record-level), same value forced as `message.max.bytes` | the writer path has no per-record policy — a batch is all-or-nothing; catching size at encode keeps Skip/Fail semantics and makes writer-side size errors a misconfiguration (fatal) |
+| Kafka sink retry-duplicates stance | report failures classify retryable unless provably permanent; `NotEnoughReplicasAfterAppend` retries knowingly duplicate | at-least-once: replay over loss, idempotent-producer fatal states fail fast instead of spinning to `stalled_fail_after` |
+| Kafka producer teardown | rely on rdkafka's `Drop` (purge queue+inflight, 500ms flush, poll thread joined) | bounded ≤ ~600ms; purged messages' reports reclaim the countdown opaques — no custom Drop to maintain |
+| Kafka sink per-partition stats | deferred: aggregate produce-queue gauges only | `attach_metrics` has no `per_partition_detail` channel today (a `SourceCtx` concept); additive later |

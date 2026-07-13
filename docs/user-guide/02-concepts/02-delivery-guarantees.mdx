@@ -42,7 +42,11 @@ partition's watermark rather than being skipped — watch
 when the insert completes with `wait_end_of_query=1` — a synchronous server
 acknowledgement, which is exactly why the sink writes directly to shard-local
 tables rather than through a Distributed table. See the
-[ClickHouse connector](../04-connectors/clickhouse/README.mdx).
+[ClickHouse connector](../04-connectors/clickhouse/README.mdx). For the
+Kafka sink, a batch counts as durable when **every** message's delivery
+report has confirmed under `acks=all` — the write returns only then, so a
+single failed or timed-out report stalls the watermark and the batch
+replays. See the [Kafka sink](../04-connectors/kafka-sink.mdx).
 
 ## Teardown can't lose data
 

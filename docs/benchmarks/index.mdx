@@ -99,6 +99,7 @@ failures.
 | [Multi-table split vs. MV](./multi-table-split.mdx) | ETL per-type routing vs. `Null`+materialized-view fan-out: throughput, server CPU/row, part size | `multi_table_split` |
 | [Framework overhead](./framework-overhead.mdx) | The framework ceiling and a tuning finding | `pipeline_synthetic` |
 | [Kafka topology](./kafka-topology.mdx) | Per-thread vs split-queue consumers | `kafka_topology` |
+| [Kafka sink](./kafka-sink.mdx) | The Kafka producer-sink client-path ceiling: framing + countdown overhead, batch/queue sizing, shards | `kafka_sink_saturation` |
 | [Zero-copy seam](./zero-copy-seam.mdx) | Borrowed vs owned operator chain | divan micro-bench (prose) |
 
 A few figures are hand-recorded where no rig emits them — the

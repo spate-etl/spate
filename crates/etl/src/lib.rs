@@ -136,7 +136,7 @@ pub mod prelude {
 #[cfg(feature = "avro")]
 pub use etl_avro as avro;
 
-/// Kafka source connector.
+/// Kafka source and producer-sink connector.
 #[cfg(feature = "kafka")]
 pub use etl_kafka as kafka;
 

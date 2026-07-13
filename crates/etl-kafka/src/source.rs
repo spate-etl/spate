@@ -270,6 +270,14 @@ impl Source for KafkaSource {
                 reason: "open() called twice".into(),
             });
         }
+        // Enforce the passthrough guard (and the whole denylist) before any
+        // client is created — the sink's choke point is `build()`; `open()` is
+        // the source's, catching programmatic construction via
+        // `KafkaSource::new` that bypasses `from_component_config`'s validation.
+        self.config.validate().map_err(|e| SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason: e.to_string(),
+        })?;
         // Resolve the connector-owned metric handles once, before the poll
         // loop — but only when statistics are enabled. With
         // `statistics_interval: 0s` librdkafka never emits a snapshot, so
@@ -569,6 +577,31 @@ mod tests {
             startup_timeout: Duration::from_secs(30),
             statistics_interval: Duration::ZERO,
             rdkafka: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// `open()` runs the TLS/SASL guard before creating the consumer, so a
+    /// source built programmatically via `new()` — bypassing
+    /// `from_component_config`'s config-load validation — still fails fast with
+    /// the actionable message instead of a late librdkafka error. Without the
+    /// `tls` feature the guard rejects a security passthrough before any client
+    /// (or broker contact); with it the guard is a no-op and the lazily
+    /// connecting consumer is created without touching a broker.
+    #[test]
+    fn open_enforces_tls_guard_on_programmatic_source() {
+        use etl_core::checkpoint::Checkpointer;
+        let mut config = test_config();
+        config
+            .rdkafka
+            .insert("security.protocol".into(), "ssl".into());
+        let mut source = KafkaSource::new(config);
+        let cp = Checkpointer::new();
+        let result = source.open(SourceCtx::new(cp.handle()));
+        if cfg!(feature = "tls") {
+            result.expect("tls build: open succeeds");
+        } else {
+            let err = result.expect_err("non-tls build: open rejects the security config");
+            assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
         }
     }
 

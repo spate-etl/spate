@@ -402,6 +402,7 @@ impl KafkaSinkConfig {
                 return fail(format!("rdkafka.\"{key}\" cannot be overridden: {why}"));
             }
         }
+        crate::security::check_tls_feature(&self.rdkafka, "sink.kafka")?;
         if self.compression.is_some() {
             for key in ["compression.codec", "compression.type"] {
                 if self.rdkafka.contains_key(key) {
@@ -696,6 +697,39 @@ mod tests {
         assert_eq!(cc.get("message.timeout.ms"), Some("30000"));
         assert_eq!(cc.get("message.max.bytes"), Some("1000000"));
         assert_eq!(cc.get("statistics.interval.ms"), Some("5000"));
+    }
+
+    /// Sink counterpart to the source's TLS/SASL capability probe: a security
+    /// passthrough is accepted (and the producer creates — which validates the
+    /// build's SSL/SASL capability without connecting) only with the `tls`
+    /// feature; otherwise it is rejected at load with an actionable message.
+    #[test]
+    fn tls_config_matches_build_capability() {
+        for sec in [
+            "    security.protocol: ssl\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-256\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
+        ] {
+            let body = format!("{}  rdkafka:\n{sec}", minimal());
+            let parsed = parse(&body);
+            if cfg!(feature = "tls") {
+                let cfg = parsed.expect("tls build accepts a security config");
+                let cc = cfg.client_config();
+                assert!(
+                    cc.get("security.protocol").is_some(),
+                    "security passthrough survives into the client (not denylisted)"
+                );
+                let producer: rdkafka::producer::BaseProducer = cc
+                    .create()
+                    .expect("SSL/SASL compiled in: producer creation succeeds");
+                drop(producer);
+            } else {
+                let msg = parsed
+                    .expect_err("non-tls build rejects a security config")
+                    .to_string();
+                assert!(msg.contains("kafka-tls"), "actionable: {msg}");
+            }
+        }
     }
 
     #[test]

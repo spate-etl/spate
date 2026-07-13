@@ -9,6 +9,16 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) transport. Off by default: it
+# turns on rdkafka's `ssl-vendored`, which compiles OpenSSL from source into the
+# static build (longer builds; needs perl + a C compiler). SASL SCRAM/PLAIN ride
+# on OpenSSL's libcrypto, so no separate SASL feature is needed —
+# Kerberos/GSSAPI is intentionally not included. Security properties themselves
+# are set through the raw `rdkafka` passthrough (see the securing-connections
+# guide); this feature only compiles the transport in.
+tls = ["rdkafka/ssl-vendored"]
+
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }

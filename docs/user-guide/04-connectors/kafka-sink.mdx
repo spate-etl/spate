@@ -154,9 +154,27 @@ in-flight messages and joins its poll thread (≲1s).
 
 `etl-kafka` re-exports nothing from `rdkafka` (see
 [docs/DESIGN.md](../../DESIGN.md) § Dependency policy). The workspace's
-bundled librdkafka is built **without TLS/SASL** today — producing to a
-secured cluster needs the corresponding rdkafka features (a planned opt-in
-facade feature).
+bundled librdkafka is built **without TLS/SASL by default**; producing to a
+secured cluster needs the opt-in **`kafka-tls`** feature, after which the
+security properties are set through the `rdkafka:` passthrough exactly as on
+the source:
+
+```yaml
+sink:
+  kafka:
+    brokers: broker1:9093,broker2:9093
+    topic: orders-enriched
+    rdkafka:
+      security.protocol: sasl_ssl
+      sasl.mechanism: SCRAM-SHA-256
+      sasl.username: "${KAFKA_USER}"
+      sasl.password: "${KAFKA_PASSWORD}"
+      ssl.ca.location: /etc/kafka/ca.pem
+```
+
+Setting a security property without the feature is rejected at config load.
+The full matrix — TLS, mTLS client certificates, SASL SCRAM/PLAIN — is in
+[Securing connections](../03-guides/securing-connections.mdx).
 
 ## Related
 

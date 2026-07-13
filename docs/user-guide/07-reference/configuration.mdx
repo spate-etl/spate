@@ -103,6 +103,12 @@ onto the framework's `SinkPoolConfig` (defaults: `batch.max_rows: 500000`,
 each connector's page for its exact schema, and
 [Tuning](../05-deployment/tuning.mdx) for how to size them.
 
+**TLS & SASL.** Kafka security (TLS, mTLS, SASL SCRAM/PLAIN) is configured
+through the Kafka connector's `rdkafka:` passthrough, gated behind the opt-in
+`kafka-tls` **build feature** (not a YAML key); ClickHouse encrypts over
+`https://` replica URLs with no feature flag. See
+[Securing connections](../03-guides/securing-connections.mdx).
+
 ### `sinks:` — multiple named sinks {#sinks}
 
 A pipeline that writes to more than one destination declares `sinks:` — a

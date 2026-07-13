@@ -56,6 +56,7 @@ mod context;
 mod error;
 mod lane;
 mod metrics;
+mod security;
 pub mod sink;
 mod source;
 

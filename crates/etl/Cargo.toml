@@ -93,6 +93,11 @@ clickhouse = ["dep:etl-clickhouse"]
 # (LGPL-3.0-only) conflicts with its repository license (MPL-2.0) — enabling
 # it is a per-project compliance call. See the etl-avro crate docs.
 avro-fast = ["avro", "etl-avro/fast"]
+# Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) for the Kafka connector (implies
+# `kafka`). Deliberately excluded from `full`: it compiles OpenSSL from source
+# (rdkafka's `ssl-vendored`), so `full` stays buildable without the extra
+# toolchain and build time. See the securing-connections guide.
+kafka-tls = ["kafka", "etl-kafka/tls"]
 # ClickHouse ecosystem column types (each implies `clickhouse`).
 clickhouse-uuid = ["clickhouse", "etl-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "etl-clickhouse/chrono"]

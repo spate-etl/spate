@@ -149,6 +149,7 @@ impl KafkaSourceConfig {
                 )));
             }
         }
+        crate::security::check_tls_feature(&self.rdkafka, "source.kafka")?;
         if let Some(strategy) = self.rdkafka.get("partition.assignment.strategy")
             && strategy.contains("cooperative")
         {
@@ -294,6 +295,40 @@ mod tests {
         assert_eq!(cc.get("enable.auto.commit"), Some("true"));
         assert_eq!(cc.get("auto.commit.interval.ms"), Some("5000"));
         assert_eq!(cc.get("enable.partition.eof"), Some("false"));
+    }
+
+    /// A TLS/SASL passthrough is accepted only when the `tls` feature compiled
+    /// the transport into librdkafka. With the feature: the security keys
+    /// survive into the client and creation succeeds — client creation
+    /// validates the build's capability (SSL present, and the SCRAM SASL
+    /// provider present) without any network I/O. Without it: rejected at load
+    /// with an actionable message. Default `cargo test -p etl-kafka` exercises
+    /// the reject arm; `--features tls` / `--all-features` the accept arm.
+    #[test]
+    fn tls_config_matches_build_capability() {
+        for sec in [
+            "    security.protocol: ssl\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-256\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
+        ] {
+            let body = format!("{}  rdkafka:\n{sec}", minimal());
+            let parsed = KafkaSourceConfig::from_component_config(&section(&body));
+            if cfg!(feature = "tls") {
+                let cfg = parsed.expect("tls build accepts a security config");
+                let cc = cfg.client_config();
+                assert!(
+                    cc.get("security.protocol").is_some(),
+                    "security passthrough survives into the client (not denylisted)"
+                );
+                let consumer: rdkafka::consumer::BaseConsumer = cc
+                    .create()
+                    .expect("SSL/SASL compiled in: consumer creation succeeds");
+                drop(consumer);
+            } else {
+                let err = parsed.expect_err("non-tls build rejects a security config");
+                assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
+            }
+        }
     }
 
     #[test]

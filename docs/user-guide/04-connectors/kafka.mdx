@@ -69,6 +69,30 @@ framework values apply in unspecified order.
 `cooperative` strategy is rejected — the framework relies on eager (full)
 rebalances.
 
+## Security (TLS, mTLS, SASL)
+
+TLS/SASL is off by default (the bundled librdkafka is built without it).
+Enable the opt-in **`kafka-tls`** feature and set the security properties
+through the same `rdkafka:` passthrough — they are not denied:
+
+```yaml
+source:
+  kafka:
+    brokers: broker1:9093,broker2:9093
+    topic: orders
+    group_id: orders-etl
+    rdkafka:
+      security.protocol: ssl              # or sasl_ssl
+      ssl.ca.location: /etc/kafka/ca.pem
+      ssl.certificate.location: /etc/kafka/client.pem   # mTLS: client cert
+      ssl.key.location: /etc/kafka/client.key
+```
+
+Setting any security property without the feature is rejected at config load
+with an actionable message. The full property matrix (TLS, mTLS, SASL
+SCRAM/PLAIN, secrets via `${VAR}`) and the identical sink configuration are in
+[Securing connections](../03-guides/securing-connections.mdx).
+
 ## How offsets are committed
 
 The framework never uses librdkafka's position-based auto-commit. Instead:

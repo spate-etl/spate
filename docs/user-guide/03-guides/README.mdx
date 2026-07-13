@@ -11,6 +11,7 @@ them re-explains the architecture — for that, start with
 | [Testing pipelines](testing-pipelines.mdx) | Test a whole assembly deterministically with `etl-test`'s in-memory source and capturing sink. |
 | [Schema validation](schema-validation.mdx) | Fail fast when your row struct, `columns` list, and the live ClickHouse table disagree. |
 | [Graceful shutdown](graceful-shutdown.mdx) | Drain cleanly on SIGTERM, size `drain_timeout` against Kubernetes, and interpret exit codes. |
+| [Securing connections](securing-connections.mdx) | Connect to a TLS/mTLS/SASL-secured Kafka cluster with the opt-in `kafka-tls` feature; ClickHouse over HTTPS. |
 | [Manual assembly](manual-assembly.mdx) | Desugar every builder step into the public primitives it composes — the escape hatch. |
 
 Where to go next:

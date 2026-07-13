@@ -7,7 +7,7 @@ use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection};
 use etl_core::checkpoint::AckRef;
-use etl_core::deser::{Deserializer, EmitRecord};
+use etl_core::deser::{Deserializer, EmitRecord, RecFamily};
 use etl_core::error::DeserError;
 use etl_core::record::{Flow, PartitionId, RawPayload, Record};
 use http_body_util::Full;
@@ -179,11 +179,21 @@ fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
 }
 
 /// Retry `deserialize` until the async fetch lands or the deadline passes.
-fn drive_until_ready(
-    deser: &mut etl_avro::AvroValueDeserializer,
+///
+/// Generic over the deserializer family and emitter so both the apache value
+/// path and the `fast` typed path share one driver. The 20ms backoff is a
+/// retry cadence, not a sleep-poll: `deserialize` is itself the readiness
+/// probe (there is no external signal to block on), so no blocking wait helper
+/// applies here.
+fn drive_until_ready<F, O>(
+    deser: &mut dyn Deserializer<F>,
     payload: &[u8],
-    out: &mut Collected,
-) -> Result<(), DeserError> {
+    out: &mut O,
+) -> Result<(), DeserError>
+where
+    F: RecFamily,
+    O: for<'buf> EmitRecord<'buf, F::Rec<'buf>>,
+{
     let (ack, _rx) = AckRef::test_pair();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -531,17 +541,8 @@ async fn panicking_schema_parse_fails_only_the_apache_side_not_stalls() {
         let mut fast = builder.build_serde_fast::<EventRow>().unwrap();
         let payload = confluent_payload(77, 9);
         let rows = tokio::task::spawn_blocking(move || {
-            let (ack, _rx) = AckRef::test_pair();
             let mut out = CollectedRows(Vec::new());
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                match fast.deserialize(&raw(&payload), &ack, &mut out) {
-                    Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    other => return other.map(|()| out.0),
-                }
-            }
+            drive_until_ready(&mut fast, &payload, &mut out).map(|()| out.0)
         })
         .await
         .unwrap()
@@ -593,17 +594,8 @@ async fn fast_backend_reports_not_ready_then_decodes_after_fetch() {
 
     // The driver's retry loop, condensed.
     let rows = tokio::task::spawn_blocking(move || {
-        let (ack, _rx) = AckRef::test_pair();
         let mut out = CollectedRows(Vec::new());
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match deser.deserialize(&raw(&payload), &ack, &mut out) {
-                Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                other => return other.map(|()| out.0),
-            }
-        }
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
     })
     .await
     .unwrap()

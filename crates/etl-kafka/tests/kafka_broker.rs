@@ -238,23 +238,18 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         .set("group.id", "rev-commit")
         .create()
         .expect("probe");
-    let probe_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let mut tpl = rdkafka::TopicPartitionList::new();
-        tpl.add_partition(TOPIC, 0);
-        let committed = probe
-            .committed_offsets(tpl, Duration::from_secs(10))
-            .expect("committed");
-        if committed.elements()[0].offset() == rdkafka::Offset::Offset(50) {
-            break;
-        }
-        assert!(
-            Instant::now() < probe_deadline,
-            "revoked partition never committed offset 50: {:?}",
-            committed.elements()[0].offset()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    etl_test::wait_until(
+        Duration::from_secs(30),
+        "revoked partition committed offset 50",
+        || {
+            let mut tpl = rdkafka::TopicPartitionList::new();
+            tpl.add_partition(TOPIC, 0);
+            let committed = probe
+                .committed_offsets(tpl, Duration::from_secs(10))
+                .expect("committed");
+            committed.elements()[0].offset() == rdkafka::Offset::Offset(50)
+        },
+    );
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     joiner.join().expect("joiner thread");

@@ -1138,6 +1138,7 @@ name = "etl-kafka"
 version = "0.1.0"
 dependencies = [
  "etl-core",
+ "etl-test",
  "humantime-serde",
  "metrics",
  "metrics-exporter-prometheus",

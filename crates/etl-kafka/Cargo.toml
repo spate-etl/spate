@@ -17,6 +17,7 @@ serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+etl-test = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 serde_yaml = { workspace = true }

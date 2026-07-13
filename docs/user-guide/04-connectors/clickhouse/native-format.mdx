@@ -97,6 +97,11 @@ column and type. Fall back to `format: rowbinary` (which supports the wider
 set — see the [RowBinary type table](./README.mdx)) for tables that use
 them.
 
+`AggregateFunction` is unsupported by design in *both* formats — its state is
+opaque and version-dependent. Feed those tables with raw rows through a Null
+table + Materialized View instead: see
+[Ingesting into AggregatingMergeTree](./aggregating-mergetree.mdx).
+
 ## Semantics that do **not** change
 
 - **At-least-once / deduplication.** Same `insert_deduplication_token`,

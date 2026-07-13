@@ -228,6 +228,8 @@ async fn bare_server(tag: &str, password: &str) -> Server {
 // `container.rs` is the test binary's crate root, so its modules would resolve
 // as siblings in tests/ (each becoming its own binary). `#[path]` keeps them in
 // the tests/container/ subdirectory, part of this single binary.
+#[path = "container/aggregating_mv.rs"]
+mod aggregating_mv;
 #[path = "container/basics.rs"]
 mod basics;
 #[path = "container/distributed_check.rs"]

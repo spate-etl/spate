@@ -148,6 +148,35 @@ fn table_column_list(cols: &[ColumnRow]) -> String {
         .join(", ")
 }
 
+/// If a configured column's declared type is an `AggregateFunction(...)`,
+/// return an actionable error explaining the correct ingestion path.
+///
+/// The sink cannot write aggregate *states* directly: their wire form is the
+/// opaque, unframed, version-dependent internal serialization, and
+/// reproducing it client-side would couple us to one ClickHouse serialization
+/// version. A sink pointed straight at such a column is therefore a
+/// misconfiguration — the supported pattern is to INSERT raw rows into an
+/// `ENGINE = Null` landing table and let a `MATERIALIZED VIEW` build the
+/// states into the target.
+///
+/// Matched on the exact constructor name so `SimpleAggregateFunction(...)`,
+/// which stores the raw value and *is* directly insertable, is deliberately
+/// not flagged.
+fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
+    let ctor = type_.split_once('(').map(|(name, _)| name.trim())?;
+    if ctor != "AggregateFunction" {
+        return None;
+    }
+    Some(format!(
+        "configured column `{col}` has type `{type_}`: the sink cannot write \
+         aggregate states directly (their wire format is opaque and \
+         version-dependent). Insert raw rows into an `ENGINE = Null` landing \
+         table and let a `MATERIALIZED VIEW` compute the states \
+         (minState/maxState/sumMapState/...) into this table. Client-side \
+         aggregate-state serialization is not supported."
+    ))
+}
+
 /// Startup validation against every replica of every shard. `Ok(None)`
 /// when the mode is `Off`; `Ok(Some(schema))` for the encoder otherwise.
 pub(crate) async fn validate(
@@ -205,7 +234,11 @@ pub(crate) async fn validate(
                     c.default_kind
                 ));
             }
-            Some(_) => {}
+            Some(c) => {
+                if let Some(msg) = aggregate_function_remedy(col, &c.type_) {
+                    findings.push(msg);
+                }
+            }
         }
     }
     for c in &table_cols {
@@ -428,5 +461,34 @@ mod tests {
         let err = check_first_record(&s, &fields()).unwrap_err();
         assert!(err.contains("serialized 3 field(s) but 1 column(s)"));
         assert!(err.contains("#[serde(skip)]"));
+    }
+
+    #[test]
+    fn aggregate_function_columns_are_flagged_with_the_null_mv_remedy() {
+        for ty in [
+            "AggregateFunction(min, DateTime)",
+            "AggregateFunction(max, DateTime)",
+            "AggregateFunction(sumMap, Map(String, UInt64))",
+        ] {
+            let msg = aggregate_function_remedy("agg", ty)
+                .unwrap_or_else(|| panic!("`{ty}` should be flagged"));
+            assert!(msg.contains(ty), "{msg}");
+            assert!(msg.contains("Null"), "{msg}");
+            assert!(msg.contains("MATERIALIZED VIEW"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn directly_insertable_types_are_not_flagged() {
+        for ty in [
+            // SimpleAggregateFunction stores the raw value — insertable.
+            "SimpleAggregateFunction(sum, UInt64)",
+            "SimpleAggregateFunction(sumMap, Map(String, UInt64))",
+            "UInt64",
+            "Map(String, UInt64)",
+            "DateTime",
+        ] {
+            assert_eq!(aggregate_function_remedy("c", ty), None, "{ty}");
+        }
     }
 }

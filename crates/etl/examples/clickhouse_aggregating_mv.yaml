@@ -1,0 +1,48 @@
+# Ingesting raw events into an AggregatingMergeTree via a Null landing table
+# + Materialized View. The sink writes PLAIN event rows (bucket/dt/counts);
+# ClickHouse builds the min/max/sumMap aggregate states. See the example's
+# module docs for the three CREATE statements.
+# ${VAR:-default} interpolates from the environment.
+
+pipeline:
+  name: aggregating-mv
+  threads: 1
+
+checkpoint:
+  interval: 500ms
+
+metrics:
+  exporter: none
+
+source:
+  # The in-memory source is built programmatically in the example; this
+  # section only has to parse. A Kafka source would carry its own config.
+  memory: {}
+
+sink:
+  clickhouse:
+    table: ${CLICKHOUSE_TABLE:-events_null}
+    # Column order is the RowBinary wire contract: it must match the Event
+    # struct's field declaration order in the example.
+    columns: [bucket, dt, counts]
+    shards:
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+    user: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+    # Validate against the *Null* table's plain columns. Repointing this at
+    # the AggregatingMergeTree fails fast here: the sink cannot write
+    # aggregate states directly.
+    validate_schema: names
+    # Exactly-once through the Materialized View (ClickHouse >= 26.1): the
+    # sink stamps an insert_deduplication_token per batch; this setting makes
+    # that token cover the MV's writes into the target. The target also needs
+    # a dedup window (non_replicated_deduplication_window, or a Replicated*
+    # engine) — see the DDL in the example.
+    settings:
+      deduplicate_blocks_in_dependent_materialized_views: "1"
+    batch:
+      # Larger blocks let the MV pre-aggregate more per insert (fewer partial
+      # state parts). Kept modest here so the demo flushes promptly.
+      max_rows: 500000
+      max_bytes: 128MiB
+      linger: 200ms

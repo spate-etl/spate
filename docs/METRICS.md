@@ -49,6 +49,52 @@ a metric you deliberately want *outside* the `etl_` namespace. See
 | `etl_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Rebalance events observed. |
 | `etl_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
 
+## Kafka source (`etl_kafka_source_*`)
+
+Connector-owned families registered through the Kafka source's `Meter`
+(namespace `kafka`, role `source`). They translate the librdkafka statistics
+snapshot, emitted every `statistics_interval` (default 5s; `0s` disables the
+whole family) and drained on the controller thread — never on the record path.
+
+Counters are **absolute-mapped librdkafka totals** scoped to one consumer
+lifetime: the handles mirror the client's cumulative values (idempotent under
+duplicate delivery; `rate()`/`increase()` work natively), and after a process
+restart the series restart from the new consumer's totals — an ordinary
+counter reset to PromQL. The `broker` label is the librdkafka broker name
+(`host:port/id`), bounded by cluster topology and always on. The `rtt`/
+`throttle` gauges are librdkafka's HDR-histogram rolling-window estimates,
+converted to seconds; they are per-broker sampled quantiles and **cannot be
+aggregated** across brokers or processes (`max()` is the only defensible
+cross-series operator). Series backed by data librdkafka hasn't produced yet
+(an empty latency window, an unknown lag) are absent rather than `0`.
+
+| Metric | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `etl_kafka_source_tx_requests_total` | counter | | Requests sent to brokers. |
+| `etl_kafka_source_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
+| `etl_kafka_source_rx_responses_total` | counter | | Responses received from brokers. |
+| `etl_kafka_source_rx_bytes_total` | counter | | Protocol bytes received. |
+| `etl_kafka_source_rx_messages_total` | counter | | Messages consumed (excluding ignored). |
+| `etl_kafka_source_rx_message_bytes_total` | counter | | Message bytes consumed (including framing). |
+| `etl_kafka_source_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
+| `etl_kafka_source_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
+| `etl_kafka_source_broker_connects_total` | counter | | Connection attempts (including failed), summed across brokers. |
+| `etl_kafka_source_broker_disconnects_total` | counter | | Disconnections (broker, network, or otherwise), summed across brokers. |
+| `etl_kafka_source_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `etl_kafka_source_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
+| `etl_kafka_source_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
+| `etl_kafka_source_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
+| `etl_kafka_source_broker_throttle_avg_seconds` | gauge | `broker` | Mean broker throttle time over the last window. |
+| `etl_kafka_source_broker_throttle_p99_seconds` | gauge | `broker` | p99 broker throttle time over the last window (non-aggregatable). |
+| `etl_kafka_source_fetch_queue_messages` | gauge | | Prefetched messages queued client-side for the pipeline's topic. |
+| `etl_kafka_source_fetch_queue_bytes` | gauge | | Prefetched bytes queued client-side. |
+| `etl_kafka_source_reply_queue_depth` | gauge | | librdkafka ops awaiting `poll()` service (poll starvation indicator). |
+| `etl_kafka_source_group_rebalances_total` | counter | | Rebalances counted by librdkafka (`etl_source_rebalances_total` counts the callback events the framework observed). |
+| `etl_kafka_source_group_assignment_size` | gauge | | Partitions in the current group assignment. |
+| `etl_kafka_source_group_healthy` | gauge | | 1 while the member is settled (`up` + `steady`); 0 during joins/rebalances (state detail goes to debug logs). |
+| `etl_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
+| `etl_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `etl_source_lag_records` is the committed-basis view. |
+
 ## Deserializer (`etl_deser_*`)
 
 | Metric | Type | Extra labels | Meaning |
@@ -161,3 +207,10 @@ config section):
   still fire each `open_for` window, so the gauge stays 0 through failed
   probe cycles until one succeeds. Pair with a rising
   `etl_sink_replica_errors_total{replica}` to identify the failing endpoints.
+- `etl_kafka_source_group_healthy == 0` sustained — the consumer-group member
+  is stuck joining/rebalancing; pair with
+  `rate(etl_kafka_source_group_rebalances_total[15m])` to distinguish churn
+  from a wedged join.
+- `rate(etl_kafka_source_broker_tx_errors_total[5m]) > 0` or
+  `etl_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
+  by the `broker` label.

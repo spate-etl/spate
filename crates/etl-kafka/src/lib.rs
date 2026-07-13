@@ -29,6 +29,14 @@
 //!       fetch.message.max.bytes: "1048576"
 //! ```
 //!
+//! Observability: besides the framework's `etl_source_*` stage metrics, the
+//! source translates librdkafka's statistics snapshot (emitted every
+//! `statistics_interval`, default 5s) into connector-owned
+//! `etl_kafka_source_*` families — transport totals, per-broker health and
+//! round-trip time, client-side queue saturation, and consumer-group
+//! stability. See `docs/METRICS.md` § Kafka source for the full table;
+//! setting `statistics_interval: 0s` disables the families.
+//!
 //! This crate deliberately re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
 //! changes here (see `docs/DESIGN.md` § Dependency policy).
@@ -37,6 +45,7 @@ mod config;
 mod context;
 mod error;
 mod lane;
+mod metrics;
 mod source;
 
 pub use config::KafkaSourceConfig;

@@ -448,3 +448,117 @@ fn empty_assignment_completes_rebalance_protocol() {
     let rows = drain_lane(&mut lanes[0], 5);
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
+
+#[test]
+fn statistics_populate_kafka_source_metrics() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 5, 2, "stats");
+
+    // MockCluster runs real librdkafka, so a non-zero interval fires the
+    // stats callback; field values are environment-dependent, so this test
+    // asserts series presence (the plumbing), not values.
+    let mut cfg = config(&brokers, "stats");
+    cfg.statistics_interval = Duration::from_millis(100);
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        // The runtime would mint this Meter from `component_type()` via
+        // `Meter::for_component`; tests use the public constructor (prefix
+        // `etl_kafka_` instead of the role-scoped `etl_kafka_source_`).
+        let meter = etl_core::metrics::Meter::with_namespace("kafka", "stats", "source", "kafka");
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(meter))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        let _lanes = await_assignment(&mut source);
+
+        // Poll past at least one statistics interval; stop as soon as the
+        // families appear.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            source
+                .poll_events(Duration::from_millis(100))
+                .expect("poll_events");
+            let rendered = handle.render();
+            if rendered.contains("etl_kafka_group_assignment_size")
+                && rendered.contains("etl_kafka_rx_responses_total")
+                && rendered.contains("etl_kafka_broker_up")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "statistics series did not appear within deadline:\n{rendered}"
+            );
+        }
+    });
+
+    let rendered = handle.render();
+    for needle in [
+        // Fixed families (registered at open).
+        r#"etl_kafka_rx_responses_total{pipeline="stats",component="source",component_type="kafka"}"#,
+        "etl_kafka_reply_queue_depth",
+        "etl_kafka_fetch_queue_messages",
+        "etl_kafka_group_assignment_size",
+        "etl_kafka_group_healthy",
+        // Lazily-registered per-broker series (the MockCluster broker).
+        "etl_kafka_broker_up{",
+    ] {
+        assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+    }
+}
+
+#[test]
+fn statistics_disabled_registers_no_families() {
+    // `statistics_interval: 0s` must disable the whole `etl_kafka_source_*`
+    // family, not merely stop updating it. Registering the fixed handles at
+    // `open` regardless would leave them frozen at their unset default (e.g.
+    // `group_healthy 0`, a documented alert signal) even though librdkafka
+    // never emits a snapshot.
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let cfg = config(&brokers, "no-stats"); // config() leaves statistics off
+    assert!(cfg.statistics_interval.is_zero());
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        // A Meter is present (the runtime always mints one from a declared
+        // `component_type`); only the disabled interval should suppress the
+        // families.
+        let meter = etl_core::metrics::Meter::with_namespace("kafka", "stats", "source", "kafka");
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(meter))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        // Drive the control plane a few times; with stats off no snapshot
+        // ever arrives and nothing should register.
+        let _lanes = await_assignment(&mut source);
+        for _ in 0..5 {
+            source
+                .poll_events(Duration::from_millis(100))
+                .expect("poll_events");
+        }
+    });
+
+    let rendered = handle.render();
+    assert!(
+        !rendered.contains("etl_kafka_"),
+        "statistics disabled must register no `etl_kafka_*` series:\n{rendered}"
+    );
+}

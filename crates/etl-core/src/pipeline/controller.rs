@@ -64,6 +64,9 @@ pub(crate) struct ControllerContext<S: Source> {
     /// handed to it at `open`. `None` unless the source declared a
     /// non-reserved `component_type`.
     pub source_meter: Option<Meter>,
+    /// `metrics.per_partition_detail`, forwarded to the source so its own
+    /// per-partition families honour the same cardinality gate.
+    pub per_partition_detail: bool,
     pub pipeline_metrics: PipelineMetrics,
 }
 
@@ -85,6 +88,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         checkpoint_metrics,
         source_metrics,
         source_meter,
+        per_partition_detail,
         pipeline_metrics,
     } = ctx;
 
@@ -101,7 +105,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
 
     // Open the source with an issuer handle. A failure here is fatal
     // before any thread has data.
-    if let Err(e) = source.open(SourceCtx::new(checkpointer.handle()).with_meter(source_meter)) {
+    if let Err(e) = source.open(
+        SourceCtx::new(checkpointer.handle())
+            .with_meter(source_meter)
+            .with_partition_detail(per_partition_detail),
+    ) {
         state.failure = Some(FatalError {
             component: "source".into(),
             reason: format!("source open failed: {e}"),

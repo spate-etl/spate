@@ -17,6 +17,8 @@ serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }

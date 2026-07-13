@@ -1139,6 +1139,8 @@ version = "0.1.0"
 dependencies = [
  "etl-core",
  "humantime-serde",
+ "metrics",
+ "metrics-exporter-prometheus",
  "rdkafka",
  "serde",
  "testcontainers",

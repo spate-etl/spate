@@ -40,6 +40,7 @@
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext};
 use crate::lane::KafkaLane;
+use crate::metrics::KafkaStatsMetrics;
 use etl_core::checkpoint::AckIssuer;
 use etl_core::error::{ErrorClass, SourceError};
 use etl_core::metrics::SourceMetrics;
@@ -61,6 +62,10 @@ pub struct KafkaSource {
     consumer: Option<Arc<BaseConsumer<SourceContext>>>,
     issuer: Option<AckIssuer>,
     metrics: Option<SourceMetrics>,
+    /// Connector-owned `etl_kafka_source_*` families, resolved from the
+    /// runtime-minted Meter at `open`. `None` when the runtime provides no
+    /// Meter (e.g. the source is driven outside a pipeline).
+    stats_metrics: Option<KafkaStatsMetrics>,
     /// Lanes of the current assignment, by id.
     assignment: HashMap<LaneId, i32>,
     /// Lanes surfaced as revoked but not yet released by `unassign`. The
@@ -98,6 +103,7 @@ impl KafkaSource {
             consumer: None,
             issuer: None,
             metrics: None,
+            stats_metrics: None,
             assignment: HashMap::new(),
             revoking: HashMap::new(),
             next_lane: 0,
@@ -213,7 +219,8 @@ impl KafkaSource {
         Ok(lanes)
     }
 
-    /// Feed the latest librdkafka statistics into the lag metrics.
+    /// Feed the latest librdkafka statistics into the framework lag metrics
+    /// and the connector-owned `etl_kafka_source_*` families.
     fn publish_stats(&mut self) {
         let Some(consumer) = self.consumer.as_ref() else {
             return;
@@ -221,22 +228,24 @@ impl KafkaSource {
         let Some(stats) = consumer.context().stats.lock().expect("stats lock").take() else {
             return;
         };
-        let Some(metrics) = self.metrics.as_ref() else {
-            return;
-        };
-        let mut max_lag: u64 = 0;
-        if let Some(topic) = stats.topics.get(&self.config.topic) {
-            for (pid, p) in &topic.partitions {
-                if p.consumer_lag >= 0
-                    && let Ok(part) = u32::try_from(*pid)
-                {
-                    let lag = u64::try_from(p.consumer_lag).unwrap_or(0);
-                    max_lag = max_lag.max(lag);
-                    metrics.set_partition_lag(PartitionId(part), lag);
+        if let Some(metrics) = self.metrics.as_ref() {
+            let mut max_lag: u64 = 0;
+            if let Some(topic) = stats.topics.get(&self.config.topic) {
+                for (pid, p) in &topic.partitions {
+                    if p.consumer_lag >= 0
+                        && let Ok(part) = u32::try_from(*pid)
+                    {
+                        let lag = u64::try_from(p.consumer_lag).unwrap_or(0);
+                        max_lag = max_lag.max(lag);
+                        metrics.set_partition_lag(PartitionId(part), lag);
+                    }
                 }
             }
+            metrics.set_lag_max(max_lag);
         }
-        metrics.set_lag_max(max_lag);
+        if let Some(stats_metrics) = self.stats_metrics.as_mut() {
+            stats_metrics.update(&stats, &self.config.topic);
+        }
     }
 }
 
@@ -250,6 +259,10 @@ fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceErr
 impl Source for KafkaSource {
     type Lane = KafkaLane;
 
+    fn component_type(&self) -> &str {
+        "kafka"
+    }
+
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if self.consumer.is_some() {
             return Err(SourceError::Client {
@@ -257,6 +270,22 @@ impl Source for KafkaSource {
                 reason: "open() called twice".into(),
             });
         }
+        // Resolve the connector-owned metric handles once, before the poll
+        // loop — but only when statistics are enabled. With
+        // `statistics_interval: 0s` librdkafka never emits a snapshot, so
+        // registering the families would leave them frozen at their unset
+        // default forever (e.g. `group_healthy 0`, a documented alert
+        // signal) — disabling statistics must disable the families with
+        // them. `absolute()`-mapped counters are scoped to this consumer's
+        // lifetime — sound because open() creates the consumer exactly once
+        // (see the `metrics` module docs).
+        self.stats_metrics = if self.config.statistics_interval.is_zero() {
+            None
+        } else {
+            ctx.meter
+                .as_ref()
+                .map(|m| KafkaStatsMetrics::new(m.clone(), ctx.per_partition_detail))
+        };
         let consumer: BaseConsumer<SourceContext> = self
             .config
             .client_config()

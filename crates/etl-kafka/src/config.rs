@@ -102,8 +102,10 @@ pub struct KafkaSourceConfig {
     /// source reports a fatal startup error.
     #[serde(with = "humantime_serde", default = "default_startup_timeout")]
     pub startup_timeout: Duration,
-    /// Statistics emission interval feeding lag metrics. Zero disables
-    /// statistics.
+    /// librdkafka statistics emission interval, feeding the lag metrics and
+    /// the connector's `etl_kafka_source_*` families (broker health,
+    /// latency, queue saturation, group stability — see `docs/METRICS.md`).
+    /// Zero disables statistics and those families with it.
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
     pub statistics_interval: Duration,
     /// Raw librdkafka properties, applied verbatim after validation.

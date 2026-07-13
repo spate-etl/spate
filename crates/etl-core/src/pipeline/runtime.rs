@@ -404,6 +404,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 self.config.metrics.per_partition_detail,
             ),
             source_meter,
+            per_partition_detail: self.config.metrics.per_partition_detail,
             pipeline_metrics,
         };
         let controller_handle = match std::thread::Builder::new()

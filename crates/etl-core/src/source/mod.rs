@@ -102,6 +102,12 @@ pub struct SourceCtx {
     /// silently, a malformed value is logged and also yields `None`. Resolve
     /// handles from it once here in `open`; never on the poll path.
     pub meter: Option<Meter>,
+    /// Whether cardinality-sensitive per-partition series are enabled
+    /// (`metrics.per_partition_detail`). Gates a connector's own per-partition
+    /// families the same way it gates the framework's `etl_source_lag_records`
+    /// partition series: when `false`, register and emit only aggregate
+    /// (per-component or per-broker) series.
+    pub per_partition_detail: bool,
 }
 
 impl SourceCtx {
@@ -113,6 +119,7 @@ impl SourceCtx {
         SourceCtx {
             issuer,
             meter: None,
+            per_partition_detail: false,
         }
     }
 
@@ -121,6 +128,14 @@ impl SourceCtx {
     #[must_use]
     pub fn with_meter(mut self, meter: Option<Meter>) -> Self {
         self.meter = meter;
+        self
+    }
+
+    /// Enable cardinality-sensitive per-partition series. Called by the
+    /// runtime from `metrics.per_partition_detail`.
+    #[must_use]
+    pub fn with_partition_detail(mut self, enabled: bool) -> Self {
+        self.per_partition_detail = enabled;
         self
     }
 }
@@ -171,5 +186,21 @@ pub trait Source: Send {
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SourceCtx;
+    use crate::checkpoint::Checkpointer;
+
+    #[test]
+    fn source_ctx_partition_detail_defaults_off_and_round_trips() {
+        let cp = Checkpointer::new();
+        let ctx = SourceCtx::new(cp.handle());
+        assert!(!ctx.per_partition_detail);
+        assert!(ctx.meter.is_none());
+        let ctx = SourceCtx::new(cp.handle()).with_partition_detail(true);
+        assert!(ctx.per_partition_detail);
     }
 }

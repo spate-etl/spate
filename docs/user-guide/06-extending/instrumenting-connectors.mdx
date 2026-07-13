@@ -253,17 +253,25 @@ connector never wires the pipeline name, the labels, or the prefix.
 fn component_type(&self) -> &str { "kafka" }
 fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
     if let Some(m) = &ctx.meter {
-        self.lag = Some(m.gauge("consumer_lag", &[]));   // etl_kafka_source_consumer_lag
+        self.queued = Some(m.gauge("fetch_queue_messages", &[])); // etl_kafka_source_fetch_queue_messages
     }
     // ...
 }
 ```
+
+`SourceCtx` also carries `per_partition_detail` (the `metrics` config flag), so
+a connector's own per-partition families honour the same cardinality gate as
+the framework's.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
 (a sink's default) opts out silently, and a value that is a legal label but an
 illegal metric-name segment (e.g. `"clickhouse-v2"`) is logged at `warn` and
 also yields `None` — so a component only gets a scope once it declares a
-distinct, well-formed `component_type`. See `crates/etl-test`'s `MemorySource` /
-`CaptureWriter` for a worked example, exercised end-to-end in
+distinct, well-formed `component_type`. The **Kafka source is the production
+worked example**: `crates/etl-kafka/src/metrics.rs` translates the librdkafka
+statistics snapshot into the `etl_kafka_source_*` families documented in
+[Metrics](../../METRICS.md), including lazily-registered per-broker series and
+detail-gated per-partition series. For a minimal template see `crates/etl-test`'s
+`MemorySource` / `CaptureWriter`, exercised end-to-end in
 `crates/etl-test/tests/component_metrics.rs`.

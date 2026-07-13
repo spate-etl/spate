@@ -40,7 +40,7 @@ source:
 | `group_id` | string | required | Consumer group id. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). |
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). |
-| `statistics_interval` | duration | `5s` | Statistics emission interval feeding the lag metrics; `0s` disables statistics. |
+| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `etl_kafka_source_*` families (broker health, latency, queue saturation, group stability); `0s` disables statistics and those families with it. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist
@@ -129,4 +129,5 @@ here ([docs/DESIGN.md](../../DESIGN.md) § Dependency policy).
 - [Graceful shutdown](../03-guides/graceful-shutdown.mdx) — the drain
   choreography rebalances share.
 - [Monitoring](../05-deployment/monitoring.mdx) — consumer lag and
-  backpressure metrics.
+  backpressure metrics; the connector's own librdkafka-statistics families
+  (`etl_kafka_source_*`) are documented in [Metrics](../../METRICS.md).

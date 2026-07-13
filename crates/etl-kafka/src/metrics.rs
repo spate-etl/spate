@@ -1,0 +1,678 @@
+//! librdkafka statistics → `etl_kafka_source_*` metric families.
+//!
+//! [`KafkaStatsMetrics`] translates the periodic [`Statistics`] snapshot
+//! (captured by the `ClientContext::stats` callback, drained by
+//! `KafkaSource::publish_stats` on the controller thread) into the
+//! connector-owned families documented in `docs/METRICS.md` § Kafka source.
+//! All fixed handles are resolved from the runtime-minted
+//! [`Meter`](etl_core::metrics::Meter) once at `open`; per-broker and
+//! per-partition handles are registered lazily on first sighting — a
+//! control-plane path, never per record.
+//!
+//! # Counter identity
+//!
+//! librdkafka reports **cumulative totals** inside each snapshot; they are
+//! mirrored through [`Counter::absolute`], whose fetch-max contract makes
+//! duplicate delivery idempotent and lets PromQL `rate()`/`increase()` work
+//! natively. That mapping is sound only while the totals are monotonic, i.e.
+//! scoped to a single consumer handle: `KafkaSource::open` creates the
+//! consumer exactly once per source lifetime (a second `open` is a hard
+//! error). If in-process consumer recreation is ever introduced, these
+//! series would restart at zero and the fetch-max guard would silently
+//! flat-line them at the old high-water mark (see Vector issue #20697) —
+//! switch to delta accumulation against the previous snapshot instead.
+//!
+//! # Windows
+//!
+//! `rtt`/`throttle` gauges expose librdkafka's HDR-histogram rolling-window
+//! estimates. They are per-broker sampled quantiles over the last statistics
+//! interval and **cannot be aggregated** across brokers or processes
+//! (`max()` is the only defensible cross-series operator). librdkafka
+//! reports `rtt` in microseconds but `throttle` in milliseconds; both are
+//! converted to seconds here.
+
+use etl_core::metrics::{Counter, Gauge, Meter};
+use rdkafka::statistics::Statistics;
+use std::collections::{HashMap, HashSet};
+
+const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
+const TX_BYTES_TOTAL: &str = "tx_bytes_total";
+const RX_RESPONSES_TOTAL: &str = "rx_responses_total";
+const RX_BYTES_TOTAL: &str = "rx_bytes_total";
+const RX_MESSAGES_TOTAL: &str = "rx_messages_total";
+const RX_MESSAGE_BYTES_TOTAL: &str = "rx_message_bytes_total";
+const BROKER_TX_RETRIES_TOTAL: &str = "broker_tx_retries_total";
+const BROKER_REQ_TIMEOUTS_TOTAL: &str = "broker_req_timeouts_total";
+const BROKER_CONNECTS_TOTAL: &str = "broker_connects_total";
+const BROKER_DISCONNECTS_TOTAL: &str = "broker_disconnects_total";
+const BROKER_UP: &str = "broker_up";
+const BROKER_TX_ERRORS_TOTAL: &str = "broker_tx_errors_total";
+const BROKER_RTT_AVG_SECONDS: &str = "broker_rtt_avg_seconds";
+const BROKER_RTT_P99_SECONDS: &str = "broker_rtt_p99_seconds";
+const BROKER_THROTTLE_AVG_SECONDS: &str = "broker_throttle_avg_seconds";
+const BROKER_THROTTLE_P99_SECONDS: &str = "broker_throttle_p99_seconds";
+const FETCH_QUEUE_MESSAGES: &str = "fetch_queue_messages";
+const FETCH_QUEUE_BYTES: &str = "fetch_queue_bytes";
+const REPLY_QUEUE_DEPTH: &str = "reply_queue_depth";
+const GROUP_REBALANCES_TOTAL: &str = "group_rebalances_total";
+const GROUP_ASSIGNMENT_SIZE: &str = "group_assignment_size";
+const GROUP_HEALTHY: &str = "group_healthy";
+const PARTITION_FETCH_QUEUE_MESSAGES: &str = "partition_fetch_queue_messages";
+const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
+const L_BROKER: &str = "broker";
+const L_PARTITION: &str = "partition";
+
+/// Handles for the librdkafka statistics families. Owned by `KafkaSource`
+/// and only touched from the controller thread, so the lazy maps need no
+/// locking.
+#[derive(Debug)]
+pub(crate) struct KafkaStatsMetrics {
+    meter: Meter,
+    per_partition_detail: bool,
+    tx_requests: Counter,
+    tx_bytes: Counter,
+    rx_responses: Counter,
+    rx_bytes: Counter,
+    rx_messages: Counter,
+    rx_message_bytes: Counter,
+    broker_tx_retries: Counter,
+    broker_req_timeouts: Counter,
+    broker_connects: Counter,
+    broker_disconnects: Counter,
+    fetch_queue_messages: Gauge,
+    fetch_queue_bytes: Gauge,
+    reply_queue_depth: Gauge,
+    group_rebalances: Counter,
+    group_assignment_size: Gauge,
+    group_healthy: Gauge,
+    brokers: HashMap<String, BrokerHandles>,
+    partitions: HashMap<i32, PartitionHandles>,
+}
+
+/// Per-broker series, labelled `broker="<host:port/id>"` — bounded by
+/// cluster topology. The window gauges register lazily on the first
+/// non-empty window: an eagerly-registered gauge renders `0`, which for a
+/// latency reads as "no latency" rather than "no data".
+#[derive(Debug)]
+struct BrokerHandles {
+    up: Gauge,
+    tx_errors: Counter,
+    rtt: Option<WindowGauges>,
+    throttle: Option<WindowGauges>,
+}
+
+#[derive(Debug)]
+struct WindowGauges {
+    avg: Gauge,
+    p99: Gauge,
+}
+
+impl WindowGauges {
+    fn new(meter: &Meter, broker: &str, avg_name: &str, p99_name: &str) -> Self {
+        WindowGauges {
+            avg: meter.gauge(avg_name, &[(L_BROKER, broker.to_owned().into())]),
+            p99: meter.gauge(p99_name, &[(L_BROKER, broker.to_owned().into())]),
+        }
+    }
+
+    fn set(&self, avg_secs: f64, p99_secs: f64) {
+        self.avg.set(avg_secs);
+        self.p99.set(p99_secs);
+    }
+}
+
+impl BrokerHandles {
+    fn new(meter: &Meter, broker: &str) -> Self {
+        BrokerHandles {
+            up: meter.gauge(BROKER_UP, &[(L_BROKER, broker.to_owned().into())]),
+            tx_errors: meter.counter(
+                BROKER_TX_ERRORS_TOTAL,
+                &[(L_BROKER, broker.to_owned().into())],
+            ),
+            rtt: None,
+            throttle: None,
+        }
+    }
+}
+
+/// Per-partition series, gated by `metrics.per_partition_detail`. The lag
+/// gauge registers lazily on the first known value: librdkafka reports `-1`
+/// while lag is unknown (e.g. right after assignment), and rendering `0`
+/// there would mask real lag.
+#[derive(Debug)]
+struct PartitionHandles {
+    fetch_queue_messages: Gauge,
+    lag_stored: Option<Gauge>,
+}
+
+impl PartitionHandles {
+    fn new(meter: &Meter, partition: i32) -> Self {
+        PartitionHandles {
+            fetch_queue_messages: meter.gauge(
+                PARTITION_FETCH_QUEUE_MESSAGES,
+                &[(L_PARTITION, partition.to_string().into())],
+            ),
+            lag_stored: None,
+        }
+    }
+}
+
+impl KafkaStatsMetrics {
+    /// Resolve all fixed handles. Build-time only (called from `open`).
+    pub(crate) fn new(meter: Meter, per_partition_detail: bool) -> Self {
+        KafkaStatsMetrics {
+            tx_requests: meter.counter(TX_REQUESTS_TOTAL, &[]),
+            tx_bytes: meter.counter(TX_BYTES_TOTAL, &[]),
+            rx_responses: meter.counter(RX_RESPONSES_TOTAL, &[]),
+            rx_bytes: meter.counter(RX_BYTES_TOTAL, &[]),
+            rx_messages: meter.counter(RX_MESSAGES_TOTAL, &[]),
+            rx_message_bytes: meter.counter(RX_MESSAGE_BYTES_TOTAL, &[]),
+            broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, &[]),
+            broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, &[]),
+            broker_connects: meter.counter(BROKER_CONNECTS_TOTAL, &[]),
+            broker_disconnects: meter.counter(BROKER_DISCONNECTS_TOTAL, &[]),
+            fetch_queue_messages: meter.gauge(FETCH_QUEUE_MESSAGES, &[]),
+            fetch_queue_bytes: meter.gauge(FETCH_QUEUE_BYTES, &[]),
+            reply_queue_depth: meter.gauge(REPLY_QUEUE_DEPTH, &[]),
+            group_rebalances: meter.counter(GROUP_REBALANCES_TOTAL, &[]),
+            group_assignment_size: meter.gauge(GROUP_ASSIGNMENT_SIZE, &[]),
+            group_healthy: meter.gauge(GROUP_HEALTHY, &[]),
+            brokers: HashMap::new(),
+            partitions: HashMap::new(),
+            meter,
+            per_partition_detail,
+        }
+    }
+
+    /// Translate one statistics snapshot. Controller thread only.
+    pub(crate) fn update(&mut self, stats: &Statistics, topic: &str) {
+        self.tx_requests.absolute(to_u64(stats.tx));
+        self.tx_bytes.absolute(to_u64(stats.tx_bytes));
+        self.rx_responses.absolute(to_u64(stats.rx));
+        self.rx_bytes.absolute(to_u64(stats.rx_bytes));
+        self.rx_messages.absolute(to_u64(stats.rxmsgs));
+        self.rx_message_bytes.absolute(to_u64(stats.rxmsg_bytes));
+        self.reply_queue_depth.set(to_u64(stats.replyq) as f64);
+
+        self.update_brokers(stats);
+        self.update_partitions(stats, topic);
+
+        if let Some(cgrp) = &stats.cgrp {
+            self.group_rebalances.absolute(to_u64(cgrp.rebalance_cnt));
+            self.group_assignment_size
+                .set(f64::from(cgrp.assignment_size.max(0)));
+            // Boolean health rather than a state-labelled family: the state
+            // string sets are librdkafka-version-dependent and would mint
+            // unbounded label values.
+            let healthy = cgrp.state == "up" && cgrp.join_state == "steady";
+            self.group_healthy.set(if healthy { 1.0 } else { 0.0 });
+            if !healthy {
+                tracing::debug!(
+                    state = %cgrp.state,
+                    join_state = %cgrp.join_state,
+                    reason = %cgrp.rebalance_reason,
+                    "consumer group not settled"
+                );
+            }
+        }
+    }
+
+    fn update_brokers(&mut self, stats: &Statistics) {
+        let mut retries: u64 = 0;
+        let mut timeouts: u64 = 0;
+        let mut connects: u64 = 0;
+        let mut disconnects: u64 = 0;
+        let mut seen: HashSet<&str> = HashSet::new();
+        let meter = &self.meter;
+        for broker in stats.brokers.values() {
+            // `internal` is the `:0/internal` pseudo-broker; `logical`
+            // entries (group coordinator) mirror an underlying broker and
+            // would double-count.
+            if broker.source == "internal" || broker.source == "logical" {
+                continue;
+            }
+            retries += broker.txretries;
+            timeouts += broker.req_timeouts;
+            connects += to_u64(broker.connects.unwrap_or(0));
+            disconnects += to_u64(broker.disconnects.unwrap_or(0));
+
+            // Per-broker series only once the entry resolves to a real
+            // broker id, so unresolved bootstrap placeholders don't mint
+            // short-lived `/-1` series.
+            if broker.nodeid < 0 {
+                continue;
+            }
+            seen.insert(broker.name.as_str());
+            let handles = self
+                .brokers
+                .entry(broker.name.clone())
+                .or_insert_with(|| BrokerHandles::new(meter, &broker.name));
+            handles.up.set(if broker.state == "UP" { 1.0 } else { 0.0 });
+            handles.tx_errors.absolute(broker.txerrs);
+            // Publish window estimates only when the window sampled
+            // anything (see `BrokerHandles`).
+            if let Some(rtt) = broker.rtt.as_ref().filter(|w| w.cnt > 0) {
+                handles
+                    .rtt
+                    .get_or_insert_with(|| {
+                        WindowGauges::new(
+                            meter,
+                            &broker.name,
+                            BROKER_RTT_AVG_SECONDS,
+                            BROKER_RTT_P99_SECONDS,
+                        )
+                    })
+                    .set(us_to_secs(rtt.avg), us_to_secs(rtt.p99));
+            }
+            if let Some(throttle) = broker.throttle.as_ref().filter(|w| w.cnt > 0) {
+                handles
+                    .throttle
+                    .get_or_insert_with(|| {
+                        WindowGauges::new(
+                            meter,
+                            &broker.name,
+                            BROKER_THROTTLE_AVG_SECONDS,
+                            BROKER_THROTTLE_P99_SECONDS,
+                        )
+                    })
+                    .set(ms_to_secs(throttle.avg), ms_to_secs(throttle.p99));
+            }
+        }
+        // Summed across brokers (no label): monotonic within a consumer
+        // lifetime because broker entries are never removed.
+        self.broker_tx_retries.absolute(retries);
+        self.broker_req_timeouts.absolute(timeouts);
+        self.broker_connects.absolute(connects);
+        self.broker_disconnects.absolute(disconnects);
+        // Stop updating series for brokers that left the snapshot; the
+        // exporter keeps rendering the last value until its idle timeout.
+        self.brokers.retain(|name, _| seen.contains(name.as_str()));
+    }
+
+    fn update_partitions(&mut self, stats: &Statistics, topic: &str) {
+        let mut fetchq_msgs: u64 = 0;
+        let mut fetchq_bytes: u64 = 0;
+        let mut seen: HashSet<i32> = HashSet::new();
+        let meter = &self.meter;
+        if let Some(t) = stats.topics.get(topic) {
+            for (pid, p) in &t.partitions {
+                // Partition -1 is librdkafka's internal UnAssigned partition.
+                if *pid < 0 {
+                    continue;
+                }
+                fetchq_msgs += to_u64(p.fetchq_cnt);
+                fetchq_bytes += p.fetchq_size;
+                if self.per_partition_detail {
+                    seen.insert(*pid);
+                    let handles = self
+                        .partitions
+                        .entry(*pid)
+                        .or_insert_with(|| PartitionHandles::new(meter, *pid));
+                    handles
+                        .fetch_queue_messages
+                        .set(to_u64(p.fetchq_cnt) as f64);
+                    if p.consumer_lag_stored >= 0 {
+                        handles
+                            .lag_stored
+                            .get_or_insert_with(|| {
+                                meter.gauge(
+                                    PARTITION_LAG_STORED_RECORDS,
+                                    &[(L_PARTITION, pid.to_string().into())],
+                                )
+                            })
+                            .set(p.consumer_lag_stored as f64);
+                    }
+                }
+            }
+        }
+        self.fetch_queue_messages.set(fetchq_msgs as f64);
+        self.fetch_queue_bytes.set(fetchq_bytes as f64);
+        if self.per_partition_detail {
+            self.partitions.retain(|pid, _| seen.contains(pid));
+        }
+    }
+}
+
+fn to_u64(v: i64) -> u64 {
+    u64::try_from(v).unwrap_or(0)
+}
+
+fn us_to_secs(v: i64) -> f64 {
+    v as f64 / 1e6
+}
+
+fn ms_to_secs(v: i64) -> f64 {
+    v as f64 / 1e3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdkafka::statistics::{Broker, ConsumerGroup, Partition, Topic, Window};
+
+    /// Run `f` against a local Prometheus recorder and return the rendered
+    /// exposition. Handles must be resolved inside `f`.
+    fn render(f: impl FnOnce()) -> String {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, f);
+        handle.run_upkeep();
+        handle.render()
+    }
+
+    /// A test Meter under the `kafka` namespace: names render as
+    /// `etl_kafka_<local>` (the runtime's role-scoped variant would be
+    /// `etl_kafka_source_<local>`; the translation is identical).
+    fn meter() -> Meter {
+        Meter::with_namespace("kafka", "orders", "orders_in", "kafka")
+    }
+
+    const STD: &str = r#"pipeline="orders",component="orders_in",component_type="kafka""#;
+
+    fn broker(name: &str, source: &str, nodeid: i32) -> Broker {
+        Broker {
+            name: name.to_owned(),
+            nodename: name
+                .trim_end_matches(|c: char| c == '/' || c.is_ascii_digit())
+                .to_owned(),
+            source: source.to_owned(),
+            nodeid,
+            state: "UP".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn window(avg: i64, p99: i64, cnt: i64) -> Window {
+        Window {
+            avg,
+            p99,
+            cnt,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transport_counters_render_absolute_totals() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let stats = Statistics {
+                tx: 31,
+                tx_bytes: 4_096,
+                rx: 30,
+                rx_bytes: 2_048,
+                rxmsgs: 500,
+                rxmsg_bytes: 65_536,
+                replyq: 3,
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        for needle in [
+            &format!("etl_kafka_tx_requests_total{{{STD}}} 31") as &str,
+            &format!("etl_kafka_tx_bytes_total{{{STD}}} 4096"),
+            &format!("etl_kafka_rx_responses_total{{{STD}}} 30"),
+            &format!("etl_kafka_rx_bytes_total{{{STD}}} 2048"),
+            &format!("etl_kafka_rx_messages_total{{{STD}}} 500"),
+            &format!("etl_kafka_rx_message_bytes_total{{{STD}}} 65536"),
+            &format!("etl_kafka_reply_queue_depth{{{STD}}} 3"),
+        ] {
+            assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn window_units_convert_to_seconds() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let mut b = broker("k1:9092/1", "learned", 1);
+            b.rtt = Some(window(1_500, 3_000, 10)); // microseconds
+            b.throttle = Some(window(250, 500, 10)); // milliseconds
+            let stats = Statistics {
+                brokers: HashMap::from([(b.name.clone(), b)]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        let label = format!(r#"{STD},broker="k1:9092/1""#);
+        for needle in [
+            &format!("etl_kafka_broker_rtt_avg_seconds{{{label}}} 0.0015") as &str,
+            &format!("etl_kafka_broker_rtt_p99_seconds{{{label}}} 0.003"),
+            &format!("etl_kafka_broker_throttle_avg_seconds{{{label}}} 0.25"),
+            &format!("etl_kafka_broker_throttle_p99_seconds{{{label}}} 0.5"),
+        ] {
+            assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn empty_windows_and_missing_cgrp_publish_nothing() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let mut b = broker("k1:9092/1", "learned", 1);
+            b.rtt = Some(window(0, 0, 0)); // sampled nothing
+            b.throttle = None;
+            let stats = Statistics {
+                brokers: HashMap::from([(b.name.clone(), b)]),
+                cgrp: None,
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        assert!(
+            !rendered.contains("rtt_avg"),
+            "empty window published:\n{rendered}"
+        );
+        assert!(!rendered.contains("rtt_p99"));
+        assert!(!rendered.contains("throttle_avg"));
+        assert!(!rendered.contains("throttle_p99"));
+        // The `group_*` handles are fixed (registered in `new`), so with no
+        // cgrp they render at their unset default of 0 — assert only that
+        // health was never set to 1.
+        assert!(!rendered.contains(&format!("etl_kafka_group_healthy{{{STD}}} 1")));
+    }
+
+    #[test]
+    fn internal_logical_and_bootstrap_brokers_are_filtered() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let mut learned = broker("k1:9092/1", "learned", 1);
+            learned.txretries = 5;
+            learned.txerrs = 2;
+            let mut configured_bootstrap = broker("seed:9092/-1", "configured", -1);
+            configured_bootstrap.txretries = 7; // counts in sums, no per-broker series
+            let mut internal = broker(":0/internal", "internal", -1);
+            internal.txretries = 100; // excluded everywhere
+            let mut logical = broker("GroupCoordinator", "logical", 1);
+            logical.txretries = 50; // excluded everywhere
+            let stats = Statistics {
+                brokers: HashMap::from([
+                    (learned.name.clone(), learned),
+                    (configured_bootstrap.name.clone(), configured_bootstrap),
+                    (internal.name.clone(), internal),
+                    (logical.name.clone(), logical),
+                ]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        assert!(
+            rendered.contains(&format!("etl_kafka_broker_tx_retries_total{{{STD}}} 12")),
+            "sum should be learned(5) + configured(7):\n{rendered}"
+        );
+        assert!(rendered.contains(r#"broker="k1:9092/1""#));
+        assert!(
+            !rendered.contains(r#"broker="seed:9092/-1""#),
+            "bootstrap placeholder minted a series"
+        );
+        assert!(!rendered.contains("internal"));
+        assert!(!rendered.contains("GroupCoordinator"));
+    }
+
+    #[test]
+    fn group_health_truth_table() {
+        let cases = [
+            ("up", "steady", " 1"),
+            ("up", "wait-join", " 0"),
+            ("query-coord", "steady", " 0"),
+        ];
+        for (state, join_state, expect) in cases {
+            let rendered = render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), false);
+                let stats = Statistics {
+                    cgrp: Some(ConsumerGroup {
+                        state: state.to_owned(),
+                        join_state: join_state.to_owned(),
+                        rebalance_cnt: 4,
+                        assignment_size: 8,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                m.update(&stats, "orders");
+            });
+            let needle = format!("etl_kafka_group_healthy{{{STD}}}{expect}");
+            assert!(
+                rendered.contains(&needle),
+                "({state},{join_state}): missing `{needle}`:\n{rendered}"
+            );
+            assert!(rendered.contains(&format!("etl_kafka_group_rebalances_total{{{STD}}} 4")));
+            assert!(rendered.contains(&format!("etl_kafka_group_assignment_size{{{STD}}} 8")));
+        }
+    }
+
+    fn topic_with_partitions(topic: &str, parts: &[(i32, i64, u64, i64)]) -> Topic {
+        Topic {
+            topic: topic.to_owned(),
+            partitions: parts
+                .iter()
+                .map(|&(pid, fetchq_cnt, fetchq_size, lag_stored)| {
+                    (
+                        pid,
+                        Partition {
+                            partition: pid,
+                            fetchq_cnt,
+                            fetchq_size,
+                            consumer_lag_stored: lag_stored,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fetch_queue_aggregates_and_partition_detail_gating() {
+        // Detail off: aggregate only, no partition label.
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let stats = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions(
+                        "orders",
+                        &[(0, 10, 1_000, 5), (1, 20, 2_000, 7), (-1, 99, 9_999, 0)],
+                    ),
+                )]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        assert!(rendered.contains(&format!("etl_kafka_fetch_queue_messages{{{STD}}} 30")));
+        assert!(rendered.contains(&format!("etl_kafka_fetch_queue_bytes{{{STD}}} 3000")));
+        assert!(
+            !rendered.contains("partition="),
+            "detail off must not mint partition series:\n{rendered}"
+        );
+
+        // Detail on: per-partition series, pid -1 skipped, negative lag skipped.
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            let stats = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions(
+                        "orders",
+                        &[(0, 10, 1_000, 5), (1, 20, 2_000, -1), (-1, 99, 9_999, 0)],
+                    ),
+                )]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        assert!(rendered.contains(&format!(
+            r#"etl_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 10"#
+        )));
+        assert!(rendered.contains(&format!(
+            r#"etl_kafka_partition_lag_stored_records{{{STD},partition="0"}} 5"#
+        )));
+        assert!(rendered.contains(&format!(
+            r#"etl_kafka_partition_fetch_queue_messages{{{STD},partition="1"}} 20"#
+        )));
+        assert!(!rendered.contains(r#"partition="-1""#));
+        // Partition 1's lag was -1 (unknown): the lag gauge registers lazily
+        // on the first known value, so no series exists — an unknown lag must
+        // not render as `0`.
+        assert!(!rendered.contains(&format!(
+            r#"etl_kafka_partition_lag_stored_records{{{STD},partition="1"}}"#
+        )));
+    }
+
+    #[test]
+    fn revoked_partitions_stop_updating_after_retain() {
+        let mut m_holder: Option<KafkaStatsMetrics> = None;
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            let two = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions("orders", &[(0, 10, 0, 0), (1, 20, 0, 0)]),
+                )]),
+                ..Default::default()
+            };
+            m.update(&two, "orders");
+            let one = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions("orders", &[(0, 11, 0, 0)]),
+                )]),
+                ..Default::default()
+            };
+            m.update(&one, "orders");
+            m_holder = Some(m);
+        });
+        let m = m_holder.unwrap();
+        assert!(m.partitions.contains_key(&0));
+        assert!(
+            !m.partitions.contains_key(&1),
+            "retain must drop the revoked partition"
+        );
+        // The exporter still renders partition 1's last value until its idle
+        // timeout — only the handle is dropped.
+        assert!(rendered.contains(&format!(
+            r#"etl_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 11"#
+        )));
+    }
+
+    #[test]
+    fn absolute_counters_hold_the_high_water_mark_on_regression() {
+        // Documents the fetch-max contract: a regressing upstream total
+        // (impossible today — one consumer per open) would flat-line, not
+        // dip. See the module docs.
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let high = Statistics {
+                rxmsgs: 100,
+                ..Default::default()
+            };
+            m.update(&high, "orders");
+            let regressed = Statistics {
+                rxmsgs: 40,
+                ..Default::default()
+            };
+            m.update(&regressed, "orders");
+        });
+        assert!(rendered.contains(&format!("etl_kafka_rx_messages_total{{{STD}}} 100")));
+    }
+}

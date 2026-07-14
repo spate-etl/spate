@@ -23,6 +23,7 @@ Connectors are grouped by role:
 | [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
 | [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
+| [JSON](formats/json/README.mdx) | Format (deserializer) | `etl-json` | `json` | `deserializer: { json: ... }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 `features = ["full"]` on the `etl` facade enables all production
@@ -55,6 +56,12 @@ under `sources/` or `sinks/`.
   cache miss holds the batch and replays it when the schema lands — records
   are never dropped or duplicated by the mechanism. Undecodable payloads
   follow the deserializer's Skip/Fail policy like any poison payload.
+- **JSON (format)** — one payload decodes to 0..N records across the
+  single-document, NDJSON, and array framings; every derived record shares the
+  payload's ack, so the source offset commits only after all of them are
+  durably written. A malformed record follows the per-record Skip/Fail policy
+  (surfaced in `etl_json_deser_records_dropped_total`); NDJSON isolates errors
+  per line.
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so
   tests can assert the at-least-once behavior itself. Not for production.

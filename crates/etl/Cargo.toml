@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 etl-core = { workspace = true }
 etl-avro = { workspace = true, optional = true }
+etl-json = { workspace = true, optional = true }
 etl-kafka = { workspace = true, optional = true }
 etl-clickhouse = { workspace = true, optional = true }
 
@@ -83,9 +84,20 @@ required-features = ["full", "avro-fast"]
 name = "kafka_to_kafka_split"
 required-features = ["kafka"]
 
+[[example]]
+name = "json_ndjson_memory"
+required-features = ["json"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]
+json = ["dep:etl-json"]
+# JSON fidelity knobs passed through to etl-json (each implies `json`). Kept
+# out of `full`: they are deliberate, documented trade-offs — `arbitrary-precision`
+# in particular is crate-wide and interacts with flatten/untagged/RawValue.
+json-float-roundtrip = ["json", "etl-json/float-roundtrip"]
+json-arbitrary-precision = ["json", "etl-json/arbitrary-precision"]
+json-raw-value = ["json", "etl-json/raw-value"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
 # Fast Avro decode backend (implies `avro`). Deliberately excluded from
@@ -103,7 +115,7 @@ clickhouse-uuid = ["clickhouse", "etl-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "etl-clickhouse/chrono"]
 clickhouse-time = ["clickhouse", "etl-clickhouse/time"]
 clickhouse-rust-decimal = ["clickhouse", "etl-clickhouse/rust_decimal"]
-full = ["avro", "kafka", "clickhouse"]
+full = ["avro", "json", "kafka", "clickhouse"]
 
 [package.metadata.docs.rs]
 all-features = true

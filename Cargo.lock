@@ -237,6 +237,7 @@ dependencies = [
  "etl-avro",
  "etl-clickhouse",
  "etl-core",
+ "etl-json",
  "etl-kafka",
  "lz4_flex",
  "rdkafka",
@@ -1036,6 +1037,7 @@ dependencies = [
  "etl-avro",
  "etl-clickhouse",
  "etl-core",
+ "etl-json",
  "etl-kafka",
  "etl-test",
  "http-body-util",
@@ -1130,6 +1132,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yaml_serde",
+]
+
+[[package]]
+name = "etl-json"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "etl-core",
+ "etl-test",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
  "yaml_serde",
 ]
 

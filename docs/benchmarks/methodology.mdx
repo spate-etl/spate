@@ -62,6 +62,26 @@ for DESER in apache_owned fast_owned fast_borrowed; do
   done
 done
 
+# Cross-format decode → deser-formats.jsonl (no broker, no server; same data as
+# Avro and JSON). One invocation = one arm. Two workloads (SHAPE=order|batch), two
+# record modes (RECORD=typed|value); the batch runs Avro's nested datum against
+# JSON's single/array/ndjson framings — 12 arms, n = 9 reps each.
+for R in typed value; do
+  for F in avro json; do
+    SHAPE=order FORMAT=$F RECORD=$R REPS=9 \
+      RESULTS=benchmarks/results/deser-formats.jsonl \
+      cargo run -p benchmarks --release --bin deser_formats
+  done
+  SHAPE=batch FORMAT=avro RECORD=$R REPS=9 \
+    RESULTS=benchmarks/results/deser-formats.jsonl \
+    cargo run -p benchmarks --release --bin deser_formats
+  for FR in single array ndjson; do
+    SHAPE=batch FORMAT=json FRAMING=$FR RECORD=$R REPS=9 \
+      RESULTS=benchmarks/results/deser-formats.jsonl \
+      cargo run -p benchmarks --release --bin deser_formats
+  done
+done
+
 # ClickHouse Native vs RowBinary → clickhouse-native-format.jsonl (Docker ClickHouse 25.6)
 # 200k rows/insert, medians over 15 interleaved reps; SERVER=1 samples server CPU.
 # The committed data was recorded on 25.6 — pin CLICKHOUSE_IMAGE explicitly, because

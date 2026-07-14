@@ -1,0 +1,119 @@
+# JSON format
+
+The JSON deserializer (`etl-json`, feature `json` on the `etl` facade) decodes
+JSON payloads carried by a source into records — either your own serde types or
+dynamically-typed values. Three framings map onto the framework's "one payload →
+0..N records" contract, and `serde_json` (stable 1.x) does the parsing.
+
+Construct it from the pipeline's opaque section:
+
+```rust
+let deserializer = JsonDeserializerBuilder::from_component(deser_section)?
+    .with_metrics(ctx.pipeline, "main")
+    .build_serde::<Order>();
+```
+
+## Configuration
+
+The `deserializer: { json: ... }` section deserializes into `JsonSettings`
+(`crates/etl-json/src/config.rs`); unknown fields are rejected.
+
+```yaml
+deserializer:
+  json:
+    framing: single              # single | ndjson | array
+    on_error: skip               # skip | fail
+    reject_duplicate_keys: false # error on any repeated object key
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `framing` | string | `single` | How a payload is split into documents: `single`, `ndjson`, or `array`. |
+| `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop + count) or `fail` (surface a decode error). |
+| `reject_duplicate_keys` | bool | `false` | Reject (rather than silently keep the last value of) any JSON object with a duplicate key, at any depth. Parses each document a second time for the check. |
+
+## The three framings
+
+- **`single`** — the whole payload is one JSON document → one record. The
+  Kafka-message default. An empty or whitespace-only payload is a **tombstone**:
+  zero records, no error.
+- **`ndjson`** — newline-delimited JSON ([JSON Lines](https://jsonlines.org/)):
+  one JSON value per `\n`-separated line → one record per line. Blank lines are
+  skipped. This is the framing with **per-line error isolation** (a malformed
+  line is skipped or fails on its own; the rest still decode).
+- **`array`** — a top-level JSON array → one record per element, decoded in a
+  single pass. Error handling is **atomic**: a malformed array is dropped or
+  fails as one payload (use `ndjson` when you need per-record isolation).
+
+## Typed or dynamic records
+
+- `build_serde::<T>()` — decodes each document into your own
+  `T: serde::de::DeserializeOwned` struct. No `serde_json` types leak into your
+  pipeline. This is the flagship path — see
+  `crates/etl/examples/json_ndjson_memory.rs`.
+- `build_value()` — decodes into dynamically-typed `serde_json::Value` records,
+  for pipelines that inspect or route on structure not known at compile time.
+
+## Error handling
+
+A document that does not parse (or does not match the target type) is a
+record-level error, handled by `on_error`:
+
+- **`skip`** (default) — drop the record, count it in
+  `etl_json_deser_records_dropped_total{reason}`, and continue. Under `ndjson`
+  the good lines around a bad one still flow.
+- **`fail`** — surface a decode error on the first bad record.
+
+:::note `on_error: fail` and the chain's policy
+`fail` makes the deserializer *return* a decode error; whether that **stops** the
+pipeline or **drops the payload** is then the chain's deserializer error policy
+(`ErrorPolicy`, default `Skip`). Set the chain's policy to `Fail`
+(`.deser_error_policy(ErrorPolicy::Fail)`) for a bad record to stop the pipeline.
+The common case — per-record **skip** — needs no chain-side change.
+:::
+
+The connector-owned `etl_json_deser_*` families are minted when the builder is
+given a metrics scope with `.with_metrics(pipeline, component)`; they sit
+alongside the framework's generic `etl_deser_*` stage metrics, which wrap every
+decoder. Undecodable data that stops the pipeline replays under at-least-once —
+replay never loses records.
+
+## Fidelity & features
+
+- `reject_duplicate_keys` (config) turns `serde_json`'s silent last-value-wins on
+  duplicate object keys into a hard error — a guard against upstream corruption.
+- The `float-roundtrip` Cargo feature makes `f64` values survive
+  text→float→text exactly.
+- The `raw-value` feature exposes `serde_json`'s `RawValue` for late/partial
+  parsing (route on one field, forward the rest untouched).
+
+:::warning `arbitrary-precision`
+The `arbitrary-precision` feature preserves integers beyond `u64` and exact
+decimals, but it is **crate-wide** once enabled and interacts with
+`#[serde(flatten)]`, `#[serde(untagged)]`, and `RawValue`. Enable it
+deliberately for a decimal/money pipeline, not by default.
+:::
+
+By default, integers up to 64-bit are exact; values beyond that fall to `f64`
+(the standard JSON interop limit). Duplicate keys are last-value-wins unless
+`reject_duplicate_keys` is set. `NaN`/`Infinity` are not valid JSON and are
+rejected.
+
+## Backends
+
+Decoding uses `serde_json` (stable 1.x). The byte-slice → value step sits behind
+an internal seam, so a SIMD backend can be added later behind a Cargo feature
+without changing this API. `from_reader` is never used on the hot path — decoding
+always operates on the in-memory payload slice, which is both faster and lets the
+parser see the whole document at once.
+
+## Related
+
+- [Kafka source](../../sources/kafka/README.mdx) — a common source of the
+  payloads this format decodes.
+- [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail for
+  undecodable payloads.
+- [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
+  interacts with flow control.
+- [Deserialization formats benchmark](../../../../benchmarks/deserialization-formats.mdx)
+  — JSON framings vs Avro, decode throughput per record.

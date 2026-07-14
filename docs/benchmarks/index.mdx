@@ -94,6 +94,7 @@ failures.
 | Page | What it answers | Backing data |
 |---|---|---|
 | [Avro-fast pipeline](./avro-fast-pipeline.mdx) | The zero-copy decode A/B, CPU-bound and at scale | `avro_pipeline`, `e2e_kafka_clickhouse` |
+| [Deserialization formats](./deserialization-formats.mdx) | Decode throughput per record across all formats — Avro vs JSON and JSON's framings | `deser_formats` |
 | [ClickHouse format](./clickhouse-format.mdx) | Native vs RowBinary go/no-go | `ch_native_format` |
 | [Sink saturation](./sink-saturation.mdx) | The ClickHouse sink ceiling and where the sink becomes the limiter: threads, format, part size, async_insert, compression, shards | `ch_sink_saturation` |
 | [Multi-table split vs. MV](./multi-table-split.mdx) | ETL per-type routing vs. `Null`+materialized-view fan-out: throughput, server CPU/row, part size | `multi_table_split` |

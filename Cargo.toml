@@ -4,6 +4,7 @@ members = [
     "crates/etl",
     "crates/etl-core",
     "crates/etl-avro",
+    "crates/etl-json",
     "crates/etl-kafka",
     "crates/etl-clickhouse",
     "crates/etl-test",
@@ -23,6 +24,7 @@ categories = ["asynchronous", "data-structures"]
 # Internal crates — exact pins, versions move in lockstep via workspace.package.
 etl-core = { version = "=0.1.0", path = "crates/etl-core" }
 etl-avro = { version = "=0.1.0", path = "crates/etl-avro" }
+etl-json = { version = "=0.1.0", path = "crates/etl-json" }
 etl-kafka = { version = "=0.1.0", path = "crates/etl-kafka" }
 etl-clickhouse = { version = "=0.1.0", path = "crates/etl-clickhouse" }
 etl-test = { version = "=0.1.0", path = "crates/etl-test" }

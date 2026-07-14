@@ -8,6 +8,7 @@ emits ready-made records needs none. Configure one with a single-key
 | Format | Config tag | Summary |
 |---|---|---|
 | [Avro](avro/README.mdx) | `deserializer: { avro: ... }` | Confluent/schema-registry and single-object Avro; non-blocking schema fetches, Skip/Fail on undecodable payloads, optional [fast backend](avro/fast-backend.mdx). |
+| [JSON](json/README.mdx) | `deserializer: { json: ... }` | `serde_json`-backed single-document, NDJSON, and top-level-array framings; typed or dynamic records, per-record Skip/Fail with `etl_json_deser_*` metrics. |
 
 Deserialization is a small trait — the same [Extending](../../06-extending/README.mdx)
 guide covers writing your own decoder.

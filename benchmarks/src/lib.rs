@@ -29,6 +29,7 @@
 
 pub mod avro_batch;
 pub mod chstats;
+pub mod deser_sample;
 pub mod docker;
 pub mod prom;
 pub mod report;

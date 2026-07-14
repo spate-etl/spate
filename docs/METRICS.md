@@ -146,6 +146,20 @@ decision log) — the aggregate queue gauges below cover saturation.
 | `etl_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
 | `etl_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch. |
 
+## JSON deserializer (`etl_json_deser_*`)
+
+Connector-owned family registered through the JSON deserializer's `Meter`
+(namespace `json_deser`), minted when the builder is given a metrics scope with
+`.with_metrics(pipeline, component)`. It surfaces per-record drops the
+payload-granular `etl_deser_*` stage metrics above cannot see: under `ndjson`
+(or `array`) with `on_error: skip`, an individual bad record is dropped while the
+good records around it are emitted, so the `deserialize` call returns `Ok` and no
+`etl_deser_records_total{outcome=error}` is counted.
+
+| Metric | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `etl_json_deser_records_dropped_total` | counter | `reason` (`malformed`\|`duplicate_key`) | Records dropped by `on_error: skip` because they did not parse / match the target type (`malformed`) or contained a duplicate object key under `reject_duplicate_keys` (`duplicate_key`). |
+
 ## Operators (`etl_operator_*`)
 
 | Metric | Type | Extra labels | Meaning |

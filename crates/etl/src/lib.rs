@@ -14,7 +14,9 @@
 //! | `clickhouse-rust-decimal` | `rust_decimal::Decimal` conversions for `Decimal` columns |
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
 //! | `avro-fast` | Opt-in `serde_avro_fast` decode backend for [`avro`]: single-pass typed decode, borrowed (zero-copy) records. Not part of `full` — see the `etl-avro` docs for the license note |
-//! | `full` | All connectors (`avro`, `kafka`, `clickhouse`) |
+//! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
+//! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
+//! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`) |
 //!
 //! # Anatomy of a pipeline
 //!
@@ -135,6 +137,10 @@ pub mod prelude {
 /// Avro deserialization support (Confluent wire format, schema registry).
 #[cfg(feature = "avro")]
 pub use etl_avro as avro;
+
+/// JSON deserialization support (single-document, NDJSON, top-level array).
+#[cfg(feature = "json")]
+pub use etl_json as json;
 
 /// Kafka source and producer-sink connector.
 #[cfg(feature = "kafka")]

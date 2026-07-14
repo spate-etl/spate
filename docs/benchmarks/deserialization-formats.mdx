@@ -1,0 +1,144 @@
+---
+title: Deserialization formats
+sidebar_position: 3
+description: Decode throughput per record across every format the framework supports — Avro vs JSON, and JSON's framings — on identical data.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+import BenchStat, { StatRow } from '@site/src/components/Bench/BenchStat';
+
+export const framingLabels = {
+  datum: 'Avro (fast · nested datum)',
+  single: 'JSON (nested document)',
+  array: 'JSON (top-level array)',
+  ndjson: 'JSON (NDJSON)',
+};
+
+export const formatLabels = {
+  avro: 'Avro (fast)',
+  json: 'JSON (serde_json)',
+};
+
+# Deserialization formats
+
+Which format is cheapest to decode? This rig answers it fairly: the **same
+logical data** is encoded as both Avro and JSON and decoded CPU-bound (no broker,
+no server, no network in the loop), reported **per record** so every format — and
+every JSON framing — is a directly comparable bar. As the framework gains formats
+this chart grows with them; today it is Avro and JSON.
+
+Two workloads are measured: a **nested batch** of 50 richer readings (a bool, a
+float, and a small nested string array each) and a **single flat 15-field
+record**. Avro's `typed` arm uses the single-pass fast backend
+(`serde_avro_fast`) — Avro's recommended typed decoder and the fair peer to
+JSON's `serde_json`. See the [Avro-fast pipeline](avro-fast-pipeline.mdx) study
+for Avro's backend A/B in depth.
+
+## Batch — per-record decode cost
+
+Every bar below decodes the **identical 50 readings**; only the physical layout
+differs — Avro's nested datum, JSON as one nested document, as a top-level array,
+or as NDJSON (one reading per line). Throughput is normalized per reading.
+
+<BenchBars
+  bench="deser_formats"
+  where={{ shape: 'batch', record: 'typed' }}
+  metric="ns_per_event"
+  category="framing"
+  emphasize="datum"
+  labels={framingLabels}
+  title="Decode cost per record (typed)"
+  caption="Per-reading decode time for a 50-reading batch, by format and framing. Lower is better."
+/>
+
+<StatRow>
+  <BenchStat
+    emphasis
+    label="Avro (fast) vs JSON NDJSON — decode cost per record"
+    bench="deser_formats"
+    metric="ns_per_event"
+    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson' }}
+    denom={{ shape: 'batch', record: 'typed', framing: 'datum' }}
+    sub="typed decode · lower ns/record is better"
+  />
+  <BenchStat
+    label="JSON NDJSON vs JSON array — reframing overhead"
+    bench="deser_formats"
+    metric="ns_per_event"
+    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson' }}
+    denom={{ shape: 'batch', record: 'typed', framing: 'array' }}
+    sub="both serde_json typed · same 50 readings"
+  />
+</StatRow>
+
+Avro's compact binary datum decodes fastest — roughly **1.8×** cheaper per record
+than JSON typed, since JSON pays to parse text, unescape strings, and re-parse
+numbers. Among JSON's framings the difference is small: a nested document and a
+top-level array sit within a few percent of each other (the array marginally
+faster), while **NDJSON** trails by ~10–15% because it re-frames per line (a
+line split plus a fresh parse per
+record) instead of amortizing one parse across the whole batch. NDJSON buys that
+back in **per-line error isolation** and true streaming — the design trade-off
+the [JSON format](../user-guide/04-connectors/formats/json/README.mdx) page
+covers.
+
+### Typed vs dynamic
+
+Decoding into your own structs (`typed`) versus a dynamic tree
+(`serde_json::Value` / `apache_avro::Value`) is the other lever. The dynamic path
+allocates a node per field and is roughly **2× costlier** for both formats — use
+it only when the schema is unknown at compile time.
+
+<BenchBars
+  bench="deser_formats"
+  where={{ shape: 'batch', record: 'value' }}
+  metric="ns_per_event"
+  category="framing"
+  emphasize="datum"
+  labels={framingLabels}
+  title="Dynamic (value) decode cost per record"
+  caption="Same batch decoded into a dynamic value tree instead of typed structs. Lower is better."
+/>
+
+## Single record — a flat 15-field row
+
+The batch shape stresses nested-array and small-object decoding; this one is a
+single flat record decoded per payload, so it isolates per-field scalar cost.
+
+<BenchBars
+  bench="deser_formats"
+  where={{ shape: 'order', record: 'typed' }}
+  metric="ns_per_record"
+  category="format"
+  emphasize="avro"
+  labels={formatLabels}
+  title="Flat 15-field record — decode cost"
+  caption="Per-record decode time for one flat 15-field order. Lower is better."
+/>
+
+## Reproduce
+
+The rig is `benchmarks/src/bin/deser_formats.rs`; the shared shapes and both
+formats' encoders are in `benchmarks/src/deser_sample.rs`. One invocation
+measures one arm (mean of `REPS` reps, Student-t 95% CI). Sweep the matrix:
+
+```sh
+RESULTS=benchmarks/results/deser-formats.jsonl
+for R in typed value; do
+  for F in avro json; do
+    SHAPE=order FORMAT=$F RECORD=$R REPS=9 RESULTS=$RESULTS \
+      cargo run -p benchmarks --release --bin deser_formats
+  done
+  SHAPE=batch FORMAT=avro RECORD=$R REPS=9 RESULTS=$RESULTS \
+    cargo run -p benchmarks --release --bin deser_formats
+  for FR in single array ndjson; do
+    SHAPE=batch FORMAT=json FRAMING=$FR RECORD=$R REPS=9 RESULTS=$RESULTS \
+      cargo run -p benchmarks --release --bin deser_formats
+  done
+done
+```
+
+Per-format micro-benchmarks (criterion) live in each format crate —
+`crates/etl-json/benches/decode.rs` and `crates/etl-avro/benches/decode.rs`. See
+[Methodology](methodology.mdx) for the harness and the Report schema the charts
+read.

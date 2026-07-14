@@ -84,6 +84,20 @@ pub enum SourceEvent<L> {
     },
     /// Nothing happened within the timeout.
     Idle,
+    /// The source has permanently exhausted its input: every lane has
+    /// yielded its final batch and will only ever return `Ok(None)` again.
+    /// Bounded sources (backfills) emit this to request a graceful drain;
+    /// the runtime flushes chains, drains sinks, runs a final synchronous
+    /// commit, and exits with [`ExitState::Completed`](crate::pipeline::ExitState).
+    ///
+    /// Contract: a source must not report `Drained` while any lane still
+    /// holds unemitted data — a lane's exhaustion may only be decided by a
+    /// `poll` that returned `Ok(None)` after its final batch was consumed
+    /// (the poll→push→poll sequencing on the owning thread then guarantees
+    /// the final batch was fully pushed downstream). Emitting `Drained` is
+    /// idempotent: sources should keep returning it once drained.
+    /// Unbounded sources never emit it.
+    Drained,
 }
 
 /// Everything a source receives at [`Source::open`].

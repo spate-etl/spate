@@ -114,7 +114,12 @@ pub use crate::sink::{SinkDrainFn, SinkProbeFn};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExitState {
-    /// Drained and committed cleanly (SIGTERM or programmatic shutdown).
+    /// Drained and committed cleanly: a requested shutdown (SIGTERM or
+    /// programmatic), or a bounded source reporting
+    /// [`SourceEvent::Drained`](crate::source::SourceEvent::Drained) after
+    /// exhausting its input. For the drained case this additionally
+    /// guarantees every batch was acknowledged and the final watermark
+    /// commit persisted (anything less exits `Failed`).
     Completed,
     /// A fatal error stopped the pipeline; the process should exit
     /// non-zero.

@@ -8,7 +8,7 @@ use crate::config::{
     BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter, MetricsSection,
     PinningMode, PipelineConfig, PipelineSection,
 };
-use crate::error::{FatalError, SourceError};
+use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
 use crate::pipeline::runtime::RuntimeOptions;
 use crate::record::{PartitionId, RawPayload};
@@ -27,6 +27,9 @@ pub(crate) struct SourceLog {
     pub(crate) resumes: Vec<Vec<LaneId>>,
     pub(crate) flush_commits: usize,
     pub(crate) opened: bool,
+    /// When set, `commit` and `flush_commits` fail retryably — models a
+    /// checkpoint store outage (nothing is recorded as committed).
+    pub(crate) fail_commits: bool,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
 }
@@ -34,6 +37,9 @@ pub(crate) struct SourceLog {
 pub(crate) enum Script {
     Assign(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
+    /// Report the source permanently exhausted — models a bounded source
+    /// (backfill) requesting the graceful completion drain.
+    Drained,
     /// Panic inside `poll_events` — models a source bug that kills the
     /// controller thread outside its drain choreography.
     PanicPoll,
@@ -104,6 +110,14 @@ impl Source for FakeSource {
                     lanes: ids,
                 })
             }
+            Some(Script::Drained) => {
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .log
+                    .push("drained-delivered".into());
+                Ok(SourceEvent::Drained)
+            }
             Some(Script::PanicPoll) => panic!("scripted poll_events panic"),
             None => {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
@@ -114,6 +128,13 @@ impl Source for FakeSource {
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
         let mut log = self.shared.lock().unwrap();
+        if log.fail_commits {
+            log.log.push("commit-failed".into());
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: "scripted commit failure".into(),
+            });
+        }
         for &(p, o) in watermarks {
             let slot = log.committed.entry(p).or_insert(o);
             *slot = (*slot).max(o);
@@ -126,6 +147,12 @@ impl Source for FakeSource {
         let mut log = self.shared.lock().unwrap();
         log.flush_commits += 1;
         log.log.push("flush_commits".into());
+        if log.fail_commits {
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: "scripted flush failure".into(),
+            });
+        }
         Ok(())
     }
 

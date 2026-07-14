@@ -7,6 +7,7 @@
 //! | Feature | Enables |
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
+//! | `s3` | [`s3`] — bounded object-storage (S3) backfill source: streams a frozen bucket prefix, checkpoints to a manifest, self-terminates when exhausted |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
 //! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
 //! | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns |
@@ -16,7 +17,7 @@
 //! | `avro-fast` | Opt-in `serde_avro_fast` decode backend for [`avro`]: single-pass typed decode, borrowed (zero-copy) records. Not part of `full` — see the `etl-avro` docs for the license note |
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
-//! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`) |
+//! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`, `s3`) |
 //!
 //! # Anatomy of a pipeline
 //!
@@ -149,3 +150,7 @@ pub use etl_kafka as kafka;
 /// ClickHouse sink connector.
 #[cfg(feature = "clickhouse")]
 pub use etl_clickhouse as clickhouse;
+
+/// Bounded object-storage (S3) backfill source.
+#[cfg(feature = "s3")]
+pub use etl_s3 as s3;

@@ -71,6 +71,19 @@ Split into a control plane and a data plane:
   yielding borrowed payloads. For Kafka a lane is a partition queue; for the
   in-memory test source, a single lane.
 
+**Bounded sources.** A source whose input can be permanently exhausted (an
+object-storage backfill) reports `SourceEvent::Drained` from `poll_events`
+once every lane has yielded its final batch (a lane's exhaustion may only be
+decided by a poll that returned nothing *after* its final batch was pushed —
+the poll→push→poll sequencing on the owning thread makes this race-free).
+The controller then exits its loop into the ordinary drain choreography and
+the pipeline finishes with `ExitState::Completed` — no external shutdown
+trigger. `Completed` after a drained exit is a strong claim: the backstop
+after the final commit converts the run to `Failed` if any batch is still
+unacknowledged (a wedged sink) **or** the final watermark commit did not
+persist — a bounded job never reports itself done with data or offsets left
+behind. Unbounded sources never emit `Drained`.
+
 The Kafka source uses a **single consumer per process** with
 `split_partition_queue`: one consumer-group member per pod (small groups,
 fast rebalances), partitions mapped m:n onto pipeline threads under local
@@ -431,7 +444,11 @@ exactly-once.
   `drain_timeout` (default 25s, must be < `terminationGracePeriodSeconds`) →
   final synchronous commit → join. If a sink is down at the deadline,
   unflushed batches are abandoned loudly (metric + log) and replay on
-  restart — at-least-once holds either way.
+  restart — at-least-once holds either way. A bounded source's
+  `SourceEvent::Drained` enters this same choreography, with one addition:
+  abandoned batches or an unpersisted final commit downgrade the exit from
+  `Completed` to `Failed` (see the bounded-sources note under Source
+  abstraction).
 - **Probes**: `/readyz` = assignment received and sinks connected;
   `/healthz` = poll-loop heartbeat fresh AND no watermark stuck while data
   flows. Both on the admin server next to `/metrics`.
@@ -553,10 +570,12 @@ call. No `serde_avro_fast` types appear in the public API.
 
 | Crate | Role |
 |---|---|
-| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `avro-fast`, `full`). The only crate applications depend on. |
+| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `json`, `s3`, `full`, plus opt-in backend/TLS/type features — see its `Cargo.toml`). The only crate applications depend on. |
 | `etl-core` | Engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline runtime, config, metrics, admin server, telemetry. |
-| `etl-kafka` | Kafka source (single consumer + partition queues). |
+| `etl-kafka` | Kafka source (single consumer + partition queues) and producer sink. |
 | `etl-clickhouse` | ClickHouse `ShardWriter`. |
+| `etl-json` | JSON deserializer: single/ndjson/array framings; opt-in `simd` backend. |
+| `etl-s3` | Bounded S3/object-storage backfill source: sorted listing dealt into lanes, composite offsets, manifest checkpoints, drift-checked resume, self-terminating via `SourceEvent::Drained`. |
 | `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache; opt-in `fast` feature adds the `serde_avro_fast` backend (single-pass typed decode, borrowed/zero-copy records — see the dependency-policy note above). |
 | `etl-test` | Public in-memory source/sink mocks with scripting handles. |
 | `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |

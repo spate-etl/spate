@@ -23,6 +23,9 @@ etl-clickhouse = { workspace = true }
 etl-core = { workspace = true }
 etl-json = { workspace = true }
 etl-kafka = { workspace = true }
+etl-s3 = { workspace = true }
+flate2 = { workspace = true }
+tempfile = { workspace = true }
 lz4_flex = "0.11"
 rdkafka = { workspace = true }
 serde = { workspace = true }

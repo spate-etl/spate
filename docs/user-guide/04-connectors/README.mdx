@@ -20,6 +20,7 @@ Connectors are grouped by role:
 | Connector | Role | Crate | Feature on `etl` | Config tag |
 |---|---|---|---|---|
 | [Kafka](sources/kafka/README.mdx) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
+| [S3 (object storage)](sources/s3/README.mdx) | Source (bounded backfill) | `etl-s3` | `s3` | `source: { s3: ... }` |
 | [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
 | [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
@@ -39,6 +40,13 @@ under `sources/` or `sinks/`.
   synchronously before partitions are released. Backpressure pauses
   partitions without ever blocking the poll loop, so sink slowness cannot
   cause a consumer-group eviction. One topic per pipeline.
+- **S3 (source)** — a bounded backfill with connector-owned durability:
+  watermarks persist to a manifest object (object storage has no broker-side
+  commit), resumes validate the listing against the checkpoint and fail fast
+  on drift, and the self-terminating `Completed` exit additionally guarantees
+  every record was acknowledged and committed. One process per prefix — it
+  does not scale horizontally; see the
+  [limitation](sources/s3/README.mdx).
 - **Kafka (sink)** — a batch acknowledges only after **every** message's
   delivery report confirms, under forced `acks=all` + idempotence; a failed
   or timed-out report stalls the watermark and the batch replays.

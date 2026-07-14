@@ -1,0 +1,152 @@
+# S3 (object storage) source
+
+The S3 source (`etl-s3`, feature `s3` on the `etl` facade) runs a
+**bounded backfill**: point it at a bucket prefix and it streams every
+object's records through the pipeline, checkpoints its progress to a
+manifest object, and terminates the pipeline itself — `run()` returns
+`ExitState::Completed` — once the prefix is exhausted. `Completed` is a
+strong claim here: every record was durably written by the sink(s) *and*
+committed; an unacknowledged tail converts the exit into a failure so an
+incomplete backfill is never reported as done.
+
+Built on the [`object_store`](https://crates.io/crates/object_store)
+client (internal only — no `object_store` types in the public API), so
+`s3://`, and `file://` for infrastructure-free runs and tests, work out of
+the box.
+
+Construct it with the pipeline's I/O runtime handle:
+
+```rust
+let pipeline = Pipeline::from_config(config)?;
+let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?;
+let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
+// report.state == ExitState::Completed ⇒ the backfill is done and committed.
+```
+
+:::warning One process per prefix — no horizontal scaling
+
+The S3 source does **not** scale across pods. Object storage has no
+consumer-group protocol: two processes pointed at the same prefix each
+list and process the *entire* prefix (a full duplicate backfill) and race
+on the manifest. Run exactly one pipeline process per backfill and scale
+**vertically** with `lanes` and pipeline threads. Multi-pod sharding
+(Kubernetes Indexed Jobs) and event-driven ingestion (S3 → SQS) are
+planned follow-ups.
+
+:::
+
+## The frozen-key-set contract
+
+Resume positions are ordinals into the lexicographically-sorted listing,
+so the key set under the prefix **must not change** for the lifetime of
+the backfill, including across restarts. This is enforced, not hoped for:
+the manifest pins each lane's committed object key, its ETag, and a
+rolling hash of the lane's committed key prefix, and every resume
+re-validates them against a fresh listing. Keys added, removed, or
+overwritten below a committed position fail the pipeline with a drift
+error instead of replaying or skipping the wrong data. Write new data to a
+different prefix and run a new backfill over it.
+
+## Configuration
+
+The `source: { s3: ... }` section deserializes into `S3SourceConfig`
+(`crates/etl-s3/src/config.rs`); unknown fields are rejected with the
+offending key.
+
+```yaml
+source:
+  s3:
+    url: "s3://my-bucket/exports/2026-07/"
+    lanes: 4
+    format: ndjson
+    compression: auto
+    checkpoint:
+      url: "s3://my-bucket/_etl_checkpoints/exports-backfill.json"
+    store:
+      region: ${AWS_REGION:-eu-west-2}
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `url` | string | required | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. |
+| `lanes` | integer | `4` | Worker lanes (framework partitions). The sorted listing is dealt round-robin across lanes; each lane streams its slice sequentially, so this bounds read parallelism. Fixed for the lifetime of a checkpoint — changing it invalidates committed offsets (fatal at resume). |
+| `format` | `ndjson` | `ndjson` | Record framing. NDJSON: one record per line, whitespace-only lines skipped, an unterminated final line is a record. |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams fail the pipeline. |
+| `checkpoint.url` | string | required | Where the manifest object lives. Must **not** be under the source prefix (it would appear in the listing — rejected at load time). |
+| `checkpoint.store` | string map | `{}` | `object_store` options for the checkpoint store. Empty + same scheme/host as the source ⇒ the source's `store` options are reused. |
+| `checkpoint.timeout` | duration | `10s` | Bound on each manifest read/write; a slow save is retried on the next commit tick. |
+| `prefetch_bytes` | bytes | `8MiB` | Per-lane prefetch budget between the async fetcher and the pipeline thread. |
+| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
+| `max_record_bytes` | bytes | `64MiB` | Upper bound on a single record line (decoded bytes). A larger line fails the pipeline — NDJSON that big is almost always a malformed object (a whole JSON array uploaded as one line). |
+| `store` | string map | `{}` | Raw `object_store` options applied when building the store from `url` — credentials, `region`, `endpoint`, `allow_http`, timeouts. Bucket keys are rejected in any case spelling (the bucket comes from `url`). |
+
+## Offsets, checkpointing, resume
+
+A lane's `i64` offset packs *(object ordinal within the lane, record index
+within the object)*, which keeps one monotonic offset stream per lane
+across object boundaries — the same watermark contract every other source
+honors. Because object storage has no broker-side commit, `commit`
+persists watermarks to the **manifest object** at `checkpoint.url` on
+every checkpoint tick (single writer; a stale manifest costs replay, never
+loss).
+
+On restart the source loads the manifest, validates it (schema, lane
+count, source identity, per-lane key/ETag/prefix-hash — any mismatch is
+fatal), replays the in-progress object from its start discarding exactly
+the committed record count, and continues. Resumed reads are pinned to the
+committed ETag, so a same-key overwrite cannot silently change what a
+record index means; on a store that reports no ETags, a mid-object resume
+is refused outright (fatal) rather than replayed unverified. Delivery is
+**at-least-once**: everything after the last committed watermark replays
+after a crash; duplicates are possible, loss is not.
+
+Limits (fatal, checked before they can corrupt offsets): 8,388,608 objects
+per lane — raise `lanes` for bigger listings — and ~1.1 × 10¹² records per
+object. The startup listing is held in memory once for sorting; budget
+roughly 100 bytes per key.
+
+## Decoding records
+
+The source frames records; **deserialization stays in the operator
+chain**, exactly as with Kafka. Each NDJSON line arrives as one payload,
+so chain the [JSON deserializer](../../formats/json/README.mdx) with
+`single` framing:
+
+```rust
+let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
+    framing: JsonFraming::Single,
+    on_error: OnError::Skip, // per-record poison policy, counted in metrics
+    reject_duplicate_keys: false,
+})
+.build_serde::<MyRecord>();
+```
+
+Object-level read problems are not record errors: transient failures are
+retried inside the source (capped backoff, ranged re-reads pinned to the
+ETag), and anything unrecoverable — a missing key, a failed ETag
+precondition, corruption, auth — fails the pipeline so it restarts and
+replays from the watermark. There is no skip-an-object mode: silently
+losing a whole object is not a policy, it's an incident.
+
+## Metrics
+
+Framework stage families (`etl_source_*`) work as for any source. The
+connector's own families live under `etl_s3_source_*` — objects
+listed/completed/remaining, bytes read/decoded, GET retries — see
+[docs/METRICS.md](../../../../METRICS.md).
+
+## Testing
+
+The whole backfill lifecycle runs against `file://` URLs with no
+infrastructure (see `crates/etl/examples/s3_backfill.rs`, runnable with
+`cargo run -p etl --features s3,json --example s3_backfill`). The
+Docker-gated suite runs against a **SeaweedFS** S3 gateway
+(`cargo test -p etl-s3 -- --ignored --test-threads=1`) for real
+pagination, ETag, and resume semantics (ranged mid-stream retries are
+covered by in-memory fault-injection unit tests).
+
+## Related
+
+- [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx)
+- [JSON format](../../formats/json/README.mdx)
+- [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)

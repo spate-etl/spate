@@ -95,6 +95,24 @@ cross-series operator). Series backed by data librdkafka hasn't produced yet
 | `etl_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
 | `etl_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `etl_source_lag_records` is the committed-basis view. |
 
+## S3 source (`etl_s3_source_*`)
+
+Connector-owned families registered through the S3 source's `Meter`
+(namespace `s3`, role `source`). All handles are resolved once at `open`;
+counters are incremented at object/chunk/batch boundaries — never per
+record. `etl_source_records_total` / `etl_source_bytes_total` count framed
+records as for any source; these families add the object-level view of a
+bounded backfill.
+
+| Metric | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `etl_s3_source_objects_listed_total` | counter | | Objects discovered by the startup listing (per run; a resume lists everything again). |
+| `etl_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline. |
+| `etl_s3_source_objects_remaining` | gauge | | Objects not yet completed. Reaches 0 as the backfill finishes; `0` together with a `Completed` exit is the done signal. |
+| `etl_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
+| `etl_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
+| `etl_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; the attempt budget failing over surfaces as a pipeline failure. |
+
 ## Kafka sink (`etl_kafka_sink_*`)
 
 Connector-owned families registered through the Kafka sink's `Meter`

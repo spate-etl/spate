@@ -391,6 +391,128 @@ fn shutdown_flushes_chain_before_exit() {
     assert_eq!(report.final_watermarks, vec![(PartitionId(0), 5)]);
 }
 
+/// A bounded source reporting `Drained` completes the pipeline on its own —
+/// no external shutdown trigger — through the ordinary drain choreography:
+/// chain flush, sink drain, final synchronous commit.
+#[test]
+fn drained_source_completes_pipeline_without_external_trigger() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20, 20..30]);
+    // Model the bounded-source contract: Drained only after every lane's
+    // data has been polled and pushed.
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 30
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 30)]);
+    assert!(h.drained.load(Ordering::Relaxed), "sink drain must run");
+    let log = h.shared.lock().unwrap();
+    assert!(
+        log.flush_commits >= 1,
+        "drained completion must flush commits synchronously"
+    );
+}
+
+/// An empty bounded source (nothing to assign — e.g. an empty backfill
+/// listing) still completes cleanly via `Drained`.
+#[test]
+fn drained_before_any_data_completes_with_empty_watermarks() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(report.final_watermarks.is_empty());
+    assert!(h.drained.load(Ordering::Relaxed), "sink drain must run");
+}
+
+/// `Completed` after `Drained` must mean every batch was acknowledged and
+/// committed. If acknowledgements never resolve (a wedged sink abandoning
+/// batches at the drain deadline), the backstop converts the exit into a
+/// failure instead of reporting a silently incomplete backfill as done.
+#[test]
+fn drained_with_unacknowledged_batches_fails_instead_of_completing() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let h = start(move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        },
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    // Acks for both batches are held (never delivered, never failed) for the
+    // life of the test, so the final commit cycle still sees them pending.
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("drained exit with pending acks must fail, not complete");
+    };
+    assert_eq!(failure.component, "source");
+    assert!(
+        failure.reason.contains("unacknowledged"),
+        "{}",
+        failure.reason
+    );
+    assert!(report.final_watermarks.is_empty(), "nothing was committed");
+    drop(held);
+}
+
+/// `Completed` after `Drained` must also mean the final watermark commit
+/// persisted. When the checkpoint store is down for the whole run (every
+/// commit and the final flush fail retryably), all batches acknowledge
+/// fine — but nothing was durably committed, and there is no next tick to
+/// retry into. The backstop must fail the run instead of reporting a
+/// completion whose checkpoint holds stale offsets.
+#[test]
+fn drained_with_failing_commit_fails_instead_of_completing() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared.lock().unwrap().fail_commits = true;
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("drained exit with an unpersisted commit must fail, not complete");
+    };
+    assert_eq!(failure.component, "source");
+    assert!(
+        failure.reason.contains("did not persist"),
+        "{}",
+        failure.reason
+    );
+    assert!(
+        report.final_watermarks.is_empty(),
+        "nothing was durably committed"
+    );
+}
+
 #[test]
 fn source_error_classification() {
     let retryable = SourceError::Client {

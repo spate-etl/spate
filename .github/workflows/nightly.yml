@@ -44,6 +44,8 @@ jobs:
       - run: cargo test -p etl --test e2e -- --ignored
       - run: cargo test -p etl-kafka -- --ignored
       - run: cargo test -p etl-clickhouse -- --ignored
+      # SeaweedFS containers bind one S3 gateway each; run serially.
+      - run: cargo test -p etl-s3 -- --ignored --test-threads=1
 
   bench:
     name: Criterion + divan micro benches

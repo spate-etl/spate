@@ -15,9 +15,11 @@ etl-avro = { workspace = true, optional = true }
 etl-json = { workspace = true, optional = true }
 etl-kafka = { workspace = true, optional = true }
 etl-clickhouse = { workspace = true, optional = true }
+etl-s3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 apache-avro = { workspace = true }
+flate2 = { workspace = true }
 bytes = { workspace = true }
 clickhouse = { workspace = true }
 etl-test = { workspace = true }
@@ -28,6 +30,7 @@ metrics = { workspace = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
@@ -88,6 +91,10 @@ required-features = ["kafka"]
 name = "json_ndjson_memory"
 required-features = ["json"]
 
+[[example]]
+name = "s3_backfill"
+required-features = ["s3", "json"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]
@@ -107,6 +114,7 @@ json-raw-value = ["json", "etl-json/raw-value"]
 json-simd = ["json", "etl-json/simd"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
+s3 = ["dep:etl-s3"]
 # Fast Avro decode backend (implies `avro`). Deliberately excluded from
 # `full`: it pulls in `serde_avro_fast`, whose crates.io license metadata
 # (LGPL-3.0-only) conflicts with its repository license (MPL-2.0) — enabling
@@ -122,7 +130,7 @@ clickhouse-uuid = ["clickhouse", "etl-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "etl-clickhouse/chrono"]
 clickhouse-time = ["clickhouse", "etl-clickhouse/time"]
 clickhouse-rust-decimal = ["clickhouse", "etl-clickhouse/rust_decimal"]
-full = ["avro", "json", "kafka", "clickhouse"]
+full = ["avro", "json", "kafka", "clickhouse", "s3"]
 
 [package.metadata.docs.rs]
 all-features = true

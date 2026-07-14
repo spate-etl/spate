@@ -117,6 +117,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     }
 
     let mut last_commit = Instant::now();
+    // Set when the source reports `SourceEvent::Drained`: the loop exits into
+    // the ordinary drain sequence, and `Completed` is additionally required
+    // to mean "everything acknowledged and committed" (see the backstop after
+    // the final commit below).
+    let mut drained_exit = false;
 
     while state.failure.is_none() && !shutdown.load(Ordering::Relaxed) {
         // 1. Driver requests.
@@ -197,6 +202,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 );
             }
             Ok(SourceEvent::Idle) => {}
+            Ok(SourceEvent::Drained) => {
+                tracing::info!("source drained; starting graceful completion drain");
+                drained_exit = true;
+                break;
+            }
             Err(e) if is_fatal(&e) => {
                 state.failure = Some(FatalError {
                     component: "source".into(),
@@ -256,8 +266,52 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         &checkpoint_metrics,
         &health,
     );
-    if let Err(e) = source.flush_commits() {
+    let final_flush_failed = if let Err(e) = source.flush_commits() {
         tracing::error!(error = %e, "final commit flush failed; offsets will replay");
+        true
+    } else {
+        false
+    };
+
+    // Drained-exit backstop: a bounded source's `Completed` is read as "the
+    // job finished — every record durably committed", so both an
+    // unacknowledged tail (a sink that wedged during the drain and had
+    // batches abandoned at the deadline) and a final commit that did not
+    // persist (there is no next tick to retry a retryable failure into)
+    // must surface as a failure, not a clean exit. A healthy drain reaches
+    // this point with nothing pending and nothing uncommitted;
+    // signal-initiated shutdowns keep their existing semantics (replay on
+    // next start).
+    if drained_exit && state.failure.is_none() {
+        let pending = checkpointer.max_pending();
+        if pending > 0 {
+            state.failure = Some(FatalError {
+                component: "source".into(),
+                reason: format!(
+                    "source drained but unacknowledged batches remain (max {pending} on one \
+                     partition); their data was not durably committed — rerun to complete"
+                ),
+            });
+        } else if !state.pending_commit.is_empty() || final_flush_failed {
+            state.failure = Some(FatalError {
+                component: "source".into(),
+                reason: format!(
+                    "source drained and every batch was acknowledged, but the final \
+                     watermark commit did not persist ({} partition(s) uncommitted{}); \
+                     the checkpoint holds stale offsets — rerun to replay the tail and \
+                     complete",
+                    state.pending_commit.len(),
+                    if final_flush_failed {
+                        ", final flush failed"
+                    } else {
+                        ""
+                    },
+                ),
+            });
+        }
+        if state.failure.is_some() {
+            pipeline_metrics.set_state(PipelineState::Failed);
+        }
     }
 
     let report = ControllerReport {

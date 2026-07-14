@@ -84,7 +84,7 @@ I/O runtime is already alive, so:
 
 - `pipeline.io_handle()` — a `tokio::runtime::Handle` for background tasks
   that must start before `run` (the Avro schema-registry fetcher takes one;
-  see [Avro](../04-connectors/avro/README.mdx)).
+  see [Avro](../04-connectors/formats/avro/README.mdx)).
 - `pipeline.block_on(future)` — run an async pre-flight step to completion
   on the I/O runtime, blocking the current thread. The canonical use is
   ClickHouse schema validation

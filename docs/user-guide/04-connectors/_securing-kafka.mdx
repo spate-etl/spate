@@ -1,0 +1,69 @@
+{/*
+  Shared partial: Kafka TLS/mTLS/SASL configuration. Imported by both the
+  Kafka source and Kafka sink pages so the identical security matrix lives in
+  one place. The generic security model lives in
+  03-guides/securing-connections.mdx, which links here. Relative links below
+  resolve from this file's location (04-connectors/).
+*/}
+
+The bundled librdkafka is built **without TLS/SASL by default**, so connecting
+to a secured cluster needs the opt-in **`kafka-tls`** feature. Once enabled,
+every security property is set through the connector's raw `rdkafka:`
+passthrough — these keys are **not** on the denylist, and the configuration is
+identical for the Kafka source and the Kafka sink. Setting any security
+property **without** the feature fails fast at config load with an actionable
+message rather than an obscure runtime error.
+
+```toml
+# Cargo.toml
+etl = { version = "0.1", features = ["kafka-tls"] }   # implies "kafka"
+```
+
+### TLS (server authentication only)
+
+Encrypt the connection and verify the broker's certificate against a CA — the
+minimum for a cluster that terminates TLS but authenticates clients by SASL (or
+not at all):
+
+```yaml
+rdkafka:
+  security.protocol: ssl
+  ssl.ca.location: /etc/kafka/ca.pem   # omit to use the system trust store
+```
+
+### mTLS (client-certificate authentication)
+
+Add the client certificate and its private key; the broker authenticates the
+pipeline by certificate instead of (or alongside) SASL:
+
+```yaml
+rdkafka:
+  security.protocol: ssl
+  ssl.ca.location: /etc/kafka/ca.pem
+  ssl.certificate.location: /etc/kafka/client.pem
+  ssl.key.location: /etc/kafka/client.key
+  ssl.key.password: "${KAFKA_KEY_PASSWORD}"   # only if the key is encrypted
+```
+
+A PKCS#12 keystore works too (`ssl.keystore.location` + `ssl.keystore.password`)
+if you prefer a single bundle to separate PEM files.
+
+### SASL SCRAM or PLAIN over TLS
+
+Username/password authentication carried inside the TLS tunnel. Use `sasl_ssl`
+— never `sasl_plaintext`, which sends credentials in the clear:
+
+```yaml
+rdkafka:
+  security.protocol: sasl_ssl
+  sasl.mechanism: SCRAM-SHA-256          # or SCRAM-SHA-512, or PLAIN
+  sasl.username: "${KAFKA_USER}"
+  sasl.password: "${KAFKA_PASSWORD}"
+  ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
+```
+
+Keep secrets out of the file with
+[environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation)
+— `${VAR}` is substituted before parsing. For the build rationale (why the
+feature is opt-in, and the Kerberos/GSSAPI scope) see the generic
+[Securing connections](../03-guides/securing-connections.mdx) guide.

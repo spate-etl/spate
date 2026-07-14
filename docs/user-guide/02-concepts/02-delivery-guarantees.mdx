@@ -42,11 +42,11 @@ partition's watermark rather than being skipped — watch
 when the insert completes with `wait_end_of_query=1` — a synchronous server
 acknowledgement, which is exactly why the sink writes directly to shard-local
 tables rather than through a Distributed table. See the
-[ClickHouse connector](../04-connectors/clickhouse/README.mdx). For the
+[ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx). For the
 Kafka sink, a batch counts as durable when **every** message's delivery
 report has confirmed under `acks=all` — the write returns only then, so a
 single failed or timed-out report stalls the watermark and the batch
-replays. See the [Kafka sink](../04-connectors/kafka-sink.mdx).
+replays. See the [Kafka sink](../04-connectors/sinks/kafka/README.mdx).
 
 ## Teardown can't lose data
 
@@ -69,7 +69,7 @@ before the revoke completes** — so the next owner of the partition resumes
 from a correct offset. Every rebalance also bumps a per-partition *epoch*
 in the checkpointer, so stale acks from a revoked assignment can never
 advance a watermark that no longer belongs to this process. Details of the
-choreography are in the [Kafka connector](../04-connectors/kafka.mdx) and
+choreography are in the [Kafka connector](../04-connectors/sources/kafka/README.mdx) and
 [docs/DESIGN.md](../../DESIGN.md) § Source abstraction.
 
 ## Shutdown and crashes

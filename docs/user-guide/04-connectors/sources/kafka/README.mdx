@@ -1,5 +1,7 @@
 # Kafka source
 
+import SecuringKafka from '../../_securing-kafka.mdx';
+
 The Kafka source (`etl-kafka`, feature `kafka` on the `etl` facade) is
 built on `rdkafka` with a **single consumer per process**: one
 consumer-group member per pod, whose assigned partitions are split into
@@ -7,7 +9,7 @@ per-partition queues (`split_partition_queue`) and fanned across pipeline
 threads as lanes. Payload borrows stay local to the polling thread — zero
 copies out of librdkafka's buffers. Rationale and the validated trade-offs
 (group scale, unified drain choreography, ~3% vs per-thread consumers) are
-in [docs/DESIGN.md](../../DESIGN.md) § Source abstraction.
+in [docs/DESIGN.md](../../../../DESIGN.md) § Source abstraction.
 
 Construct it from the pipeline's opaque section:
 
@@ -71,27 +73,7 @@ rebalances.
 
 ## Security (TLS, mTLS, SASL)
 
-TLS/SASL is off by default (the bundled librdkafka is built without it).
-Enable the opt-in **`kafka-tls`** feature and set the security properties
-through the same `rdkafka:` passthrough — they are not denied:
-
-```yaml
-source:
-  kafka:
-    brokers: broker1:9093,broker2:9093
-    topic: orders
-    group_id: orders-etl
-    rdkafka:
-      security.protocol: ssl              # or sasl_ssl
-      ssl.ca.location: /etc/kafka/ca.pem
-      ssl.certificate.location: /etc/kafka/client.pem   # mTLS: client cert
-      ssl.key.location: /etc/kafka/client.key
-```
-
-Setting any security property without the feature is rejected at config load
-with an actionable message. The full property matrix (TLS, mTLS, SASL
-SCRAM/PLAIN, secrets via `${VAR}`) and the identical sink configuration are in
-[Securing connections](../03-guides/securing-connections.mdx).
+<SecuringKafka />
 
 ## How offsets are committed
 
@@ -109,7 +91,7 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   member never starts from an offset covering unwritten data.
 
 This is the mechanical heart of at-least-once; see
-[Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
+[Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 
 ## Lanes: partitions on pipeline threads
 
@@ -137,21 +119,21 @@ A source thread never blocks on a channel send. A poll loop parked in
 `send()` would stop polling, trip `max.poll.interval.ms`, get the member
 evicted, and turn sink slowness into a rebalance storm. This is a
 framework invariant, not a tuning choice — see
-[Backpressure](../02-concepts/03-backpressure.mdx).
+[Backpressure](../../../02-concepts/03-backpressure.mdx).
 :::
 
 ## Dependency note
 
 `etl-kafka` deliberately re-exports nothing from `rdkafka`: its types stay
 out of public signatures so `rdkafka` major bumps are not breaking changes
-here ([docs/DESIGN.md](../../DESIGN.md) § Dependency policy).
+here ([docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
 
 ## Related
 
-- [Configuring pipelines](../03-guides/configuring-pipelines.mdx) — how the
+- [Configuring pipelines](../../../03-guides/configuring-pipelines.mdx) — how the
   opaque section reaches this connector.
-- [Graceful shutdown](../03-guides/graceful-shutdown.mdx) — the drain
+- [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — the drain
   choreography rebalances share.
-- [Monitoring](../05-deployment/monitoring.mdx) — consumer lag and
+- [Monitoring](../../../05-deployment/monitoring.mdx) — consumer lag and
   backpressure metrics; the connector's own librdkafka-statistics families
-  (`etl_kafka_source_*`) are documented in [Metrics](../../METRICS.md).
+  (`etl_kafka_source_*`) are documented in [Metrics](../../../../METRICS.md).

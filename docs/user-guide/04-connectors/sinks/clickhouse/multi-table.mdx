@@ -3,14 +3,14 @@
 One pipeline can write to **several ClickHouse tables**, routing each record to
 the table for its kind — each table with its own columns, encoder, shard router,
 and part tuning. This is the connector-specific side of the
-[multi-sink split](../../02-concepts/06-multi-sink.mdx) concept: the split
+[multi-sink split](../../../02-concepts/06-multi-sink.mdx) concept: the split
 terminal is generic; here is how the pieces line up for ClickHouse.
 
 Reach for it when your stream carries genuinely different record types (each
 wanting its own columns and `ORDER BY`) and you'd rather the ETL fan them out
 than a `Null` table + one `MATERIALIZED VIEW` per type. The trade-off — ETL-side
 fan-out CPU and part control vs. server-side fan-out — is measured in the
-[multi-table split benchmark](../../../benchmarks/multi-table-split.mdx).
+[multi-table split benchmark](../../../../benchmarks/multi-table-split.mdx).
 
 ## Configuration: a `sinks:` map
 
@@ -44,7 +44,7 @@ sinks:
 
 `sink:` and `sinks:` are mutually exclusive; a single-sink pipeline keeps using
 `sink:` (addressed as `"default"`). See the
-[configuration reference](../../07-reference/configuration.mdx#sinks). Every key
+[configuration reference](../../../07-reference/configuration.mdx#sinks). Every key
 documented for a single [ClickHouse sink](README.mdx#configuration) applies
 per-entry.
 
@@ -86,7 +86,7 @@ let report = pipeline
 
 The complete, compiling program is `crates/etl/examples/multi_table_split.rs`
 (`--features full,avro-fast`). See the concept page for the
-[routing DSL walkthrough](../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
+[routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
 ## What carries over per table, unchanged
 
@@ -98,7 +98,7 @@ Each branch is a full ClickHouse sink, so everything on the
   chooses its own.
 - **Direct-to-shard writes** with `wait_end_of_query=1`; a table's write is its
   own durable-ack point. The split holds the source batch until *every* table it
-  touched has acked (see [delivery](../../02-concepts/06-multi-sink.mdx#at-least-once-across-tables-is-free)).
+  touched has acked (see [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-tables-is-free)).
 - **Per-batch `insert_deduplication_token`** per table. The same
   [window warning](README.mdx#deduplication-tokens--and-the-window-warning)
   applies: set `non_replicated_deduplication_window` on **every** target table,
@@ -124,7 +124,7 @@ record — inflating checkpoint lag and restart replay. Keep rare-table
 `linger` well under `checkpoint.stalled_fail_after`, and prefer sealing on a
 modest `max_rows` so `linger` only bites in genuine lulls. The full reasoning
 — including segregating the source by kind to dissolve the tension — is in the
-[concept page's trade-off section](../../02-concepts/06-multi-sink.mdx#the-trade-youre-making-part-size-vs-checkpoint-lag).
+[concept page's trade-off section](../../../02-concepts/06-multi-sink.mdx#the-trade-youre-making-part-size-vs-checkpoint-lag).
 :::
 
 ## `distributed_check` per table
@@ -136,7 +136,7 @@ with its cluster.
 
 ## Related
 
-- [Multi-sink split](../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once + part-size trade.
+- [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once + part-size trade.
 - [ClickHouse sink](README.mdx) — everything a single sink does, which each branch inherits.
-- [Multi-table split benchmark](../../../benchmarks/multi-table-split.mdx) — split vs `Null`+MV on a CPU-bound server.
-- [Configuration reference](../../07-reference/configuration.mdx#sinks) — the `sinks:` map.
+- [Multi-table split benchmark](../../../../benchmarks/multi-table-split.mdx) — split vs `Null`+MV on a CPU-bound server.
+- [Configuration reference](../../../07-reference/configuration.mdx#sinks) — the `sinks:` map.

@@ -90,14 +90,10 @@ satisfy `0 < low_ratio < high_ratio <= 1`.
 
 `${VAR}` forms interpolate from the process environment **on the raw text
 before YAML parsing** (Vector-compatible semantics) — the standard way to
-feed Kubernetes ConfigMap/Secret values in:
-
-| Form | Behavior |
-|---|---|
-| `${VAR}` | Substitute; **error** if unset (empty is allowed). |
-| `${VAR:-default}` | Substitute; use `default` if unset **or empty**. |
-| `${VAR:?message}` | Substitute; **error** with `message` if unset **or empty**. |
-| `$$` | A literal `$`. |
+feed Kubernetes ConfigMap/Secret values in. The four forms (`${VAR}`,
+`${VAR:-default}`, `${VAR:?message}`, `$$`) and their exact unset-vs-empty
+semantics are tabulated in the
+[configuration reference](../07-reference/configuration.mdx#environment-interpolation).
 
 Because substitution is textual and pre-parse, values are spliced verbatim:
 a value containing a newline is rejected outright (it would change the
@@ -128,10 +124,36 @@ This is what keeps connectors fully decoupled from the framework schema; the
 single-key shape is what lets every typed struct keep `deny_unknown_fields`.
 
 Each connector's body schema is documented on its page:
-[Kafka](../04-connectors/kafka.mdx) ·
-[ClickHouse](../04-connectors/clickhouse/README.mdx) ·
-[Avro](../04-connectors/avro/README.mdx) ·
+[Kafka](../04-connectors/sources/kafka/README.mdx) ·
+[ClickHouse](../04-connectors/sinks/clickhouse/README.mdx) ·
+[Avro](../04-connectors/formats/avro/README.mdx) ·
 [Memory](../04-connectors/memory.mdx).
+
+## Multiple named sinks {#multiple-named-sinks}
+
+A pipeline that writes to more than one destination declares `sinks:` — a
+`name -> component` map — **instead of** `sink:` (setting both, or neither, is a
+load error). Each entry is an ordinary single-key component with its own full
+configuration:
+
+```yaml
+sinks:
+  type_a:
+    clickhouse: { table: events_a, columns: [...], batch: { linger: 1s }, ... }
+  type_b:
+    clickhouse: { table: events_b, columns: [...], batch: { linger: 5s }, ... }
+```
+
+The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)
+resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on
+that sink's `etl_sink_*` metrics. A single `sink:` is exactly equivalent to a
+one-entry `sinks:` map under the reserved name `"default"` (which keeps the
+historical label `component="sink"`). The precise rules — reserved names, label
+equivalence — are tabulated in the
+[configuration reference](../07-reference/configuration.mdx#sinks). See
+[multi-sink split](../02-concepts/06-multi-sink.mdx) for the routing DSL and
+[ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) for the
+connector end-to-end.
 
 ## No hot reload
 

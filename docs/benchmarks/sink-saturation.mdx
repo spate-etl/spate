@@ -95,14 +95,14 @@ only signals the rig already has:
 - **`budget`** — the in-flight budget was set below the deployment sizing rule,
   which invalidates the arm for any ceiling claim. None of the committed arms
   carry this: the rig now **derives** its `MAX_INFLIGHT_MB` default from the
-  [backpressure sizing rule](../user-guide/04-connectors/clickhouse/performance-tuning.mdx#backpressure-budget)
+  [backpressure sizing rule](../user-guide/04-connectors/sinks/clickhouse/performance-tuning.mdx#backpressure-budget)
   (2 × in-flight bytes over the 0.5 low watermark) rather than a fixed 512 MB.
 
 That last point is the lesson of the first, invalidated recording: its budget
 (512 MB) was **below** the pipeline's own in-flight footprint, so the framework
 paused the source before the sink was full and reported a self-throttled rate as
 "the ceiling". The sizing rule the [tuning
-guide](../user-guide/04-connectors/clickhouse/performance-tuning.mdx#backpressure-budget)
+guide](../user-guide/04-connectors/sinks/clickhouse/performance-tuning.mdx#backpressure-budget)
 already prescribed predicts exactly that failure; deriving the budget from it
 removes the artifact, and the ceiling arm now runs with zero budget-limited reps.
 Across all 99 records, 77 reps are `sink`, 19 `generator` (the t2 arms and a few
@@ -231,7 +231,7 @@ win larger parts buy. It does **not** keep scaling: past ~440k rows/part the par
 size plateaus because the sink's `linger` (500 ms here) seals each batch before
 it reaches the larger row cap, so past ~1M rows the linger, not `max_rows`, is
 the effective sealer. The [sink tuning
-guide](../user-guide/04-connectors/clickhouse/performance-tuning.mdx) turns this
+guide](../user-guide/04-connectors/sinks/clickhouse/performance-tuning.mdx) turns this
 into a starting recommendation with the reasoning behind it. (The 4M-row arm
 carries a ~13 GB worst-case in-flight memory bound — the rig prints it at
 startup.)

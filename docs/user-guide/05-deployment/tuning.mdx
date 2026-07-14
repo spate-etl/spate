@@ -97,7 +97,7 @@ near `budget × low_ratio / (2 × shards × max_per_shard)`.
 Memory sizing follows: set the container memory limit above
 `max_inflight_bytes` plus librdkafka's prefetch caps
 (`queued.max.messages.kbytes`, set via the Kafka section's `rdkafka` map —
-see [Kafka](../04-connectors/kafka.mdx)), with headroom for batches held
+see [Kafka](../04-connectors/sources/kafka/README.mdx)), with headroom for batches held
 during retries.
 
 ## Queues: `SinkOptions::queue_capacity`

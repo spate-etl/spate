@@ -1,0 +1,18 @@
+# Sources
+
+A **source** feeds the pipeline: it polls an external system, hands records
+(or raw payloads for a [format](../formats/README.mdx) to decode) to the
+operator chain, and stores/commits watermarks only once the framework has
+durably written the data behind them. Configure one with a single-key
+`source:` section in the pipeline YAML.
+
+| Source | Config tag | Summary |
+|---|---|---|
+| [Kafka](kafka/README.mdx) | `source: { kafka: ... }` | Consumer-group member on `rdkafka`; per-partition lanes, pause/resume backpressure, at-least-once offset commits. |
+
+The [Memory / Capture](../memory.mdx) test connector also acts as a source
+(`source: { memory: {} }`); it is a dual-role dev aid documented at the
+connectors root, not here.
+
+Writing your own source is a small trait pair (`Source` + `SourceLane`) —
+see [Custom sources](../../06-extending/custom-source.mdx).

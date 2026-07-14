@@ -1,12 +1,14 @@
 # Kafka sink
 
+import SecuringKafka from '../../_securing-kafka.mdx';
+
 The Kafka sink (`etl-kafka`, feature `kafka` on the `etl` facade) is the
 producer half of the Kafka connector: pipelines terminate in a Kafka topic
 — Kafka → operator chain → Kafka for filter/reshape/fan-out. It is built
 on `rdkafka` with exactly **one producer per sink instance**, and a batch
 acknowledges only once **every** message's delivery report has confirmed —
 which is what lets the framework commit source offsets past it. Rationale
-and the ack wiring are in [docs/DESIGN.md](../../DESIGN.md) § Sink.
+and the ack wiring are in [docs/DESIGN.md](../../../../DESIGN.md) § Sink.
 
 Construct it from the pipeline's opaque section, and terminate the chain
 with one of the sink's encoder helpers (they bake the configured
@@ -20,7 +22,7 @@ let encoder = sink.encoder_bytes();      // payload passthrough
 ```
 
 One topic per sink instance: fan-out to multiple topics is the chain's
-[`split`](../02-concepts/06-multi-sink.mdx) terminal with one Kafka sink
+[`split`](../../../02-concepts/06-multi-sink.mdx) terminal with one Kafka sink
 per topic — see the `kafka_to_kafka_split` example.
 
 ## Configuration
@@ -47,7 +49,7 @@ sink:
 |---|---|---|---|
 | `brokers` | string | required | Comma-separated bootstrap servers. |
 | `topic` | string | required | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
-| `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever ([benchmark](../../benchmarks/kafka-sink.mdx)). |
+| `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever ([benchmark](../../../../benchmarks/kafka-sink.mdx)). |
 | `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing retryably. |
 | `max_message_bytes` | bytes | `1MB` (1,000,000) | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `etl_kafka_sink_*` families; `0s` disables statistics and those families with it. |
@@ -150,39 +152,23 @@ is down at the deadline, remaining batches are abandoned loudly
 Producer teardown is bounded: rdkafka's own drop purges queued and
 in-flight messages and joins its poll thread (≲1s).
 
-## Dependency and security notes
+## Security (TLS, mTLS, SASL)
 
-`etl-kafka` re-exports nothing from `rdkafka` (see
-[docs/DESIGN.md](../../DESIGN.md) § Dependency policy). The workspace's
-bundled librdkafka is built **without TLS/SASL by default**; producing to a
-secured cluster needs the opt-in **`kafka-tls`** feature, after which the
-security properties are set through the `rdkafka:` passthrough exactly as on
-the source:
+<SecuringKafka />
 
-```yaml
-sink:
-  kafka:
-    brokers: broker1:9093,broker2:9093
-    topic: orders-enriched
-    rdkafka:
-      security.protocol: sasl_ssl
-      sasl.mechanism: SCRAM-SHA-256
-      sasl.username: "${KAFKA_USER}"
-      sasl.password: "${KAFKA_PASSWORD}"
-      ssl.ca.location: /etc/kafka/ca.pem
-```
+## Dependency note
 
-Setting a security property without the feature is rejected at config load.
-The full matrix — TLS, mTLS client certificates, SASL SCRAM/PLAIN — is in
-[Securing connections](../03-guides/securing-connections.mdx).
+`etl-kafka` deliberately re-exports nothing from `rdkafka`: its types stay out
+of public signatures so `rdkafka` major bumps are not breaking changes here (see
+[docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
 
 ## Related
 
-- [Multi-sink pipelines](../02-concepts/06-multi-sink.mdx) — the `split`
+- [Multi-sink pipelines](../../../02-concepts/06-multi-sink.mdx) — the `split`
   terminal this sink fans out with; `kafka_to_kafka_split` is the worked
   example.
-- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — the
+- [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — the
   ack chain the delivery reports plug into.
-- [Monitoring](../05-deployment/monitoring.mdx) — the framework `etl_sink_*`
+- [Monitoring](../../../05-deployment/monitoring.mdx) — the framework `etl_sink_*`
   families; the connector's producer-statistics families
-  (`etl_kafka_sink_*`) are documented in [Metrics](../../METRICS.md).
+  (`etl_kafka_sink_*`) are documented in [Metrics](../../../../METRICS.md).

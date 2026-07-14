@@ -25,7 +25,7 @@ in config is load-bearing: shard `i` is the config's `i`-th entry, the `i`-th
 worker, and the `i`-th endpoint. Reordering the list re-homes data. A
 connector that mirrors an external cluster's placement can verify parts of
 this contract at startup and warn (advisorily) on apparent mis-ordering —
-see the [ClickHouse `distributed_check`](../04-connectors/clickhouse/distributed-parity.mdx)
+see the [ClickHouse `distributed_check`](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
 — but the ordering itself stays yours to get right.
 
 ## Routing happens once, at the terminal stage
@@ -180,7 +180,7 @@ absorbs them.
 
 ## Further reading
 
-- [ClickHouse Distributed parity](../04-connectors/clickhouse/distributed-parity.mdx)
+- [ClickHouse Distributed parity](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
   — making the router's placement bit-for-bit identical to a ClickHouse
   `Distributed` table's sharding expression, so cluster reads can prune shards.
 - [docs/DESIGN.md](../../DESIGN.md) § Sink — the canonical treatment of the

@@ -9,18 +9,26 @@ the same way: an opaque single-key section in the pipeline YAML, handed to
 the connector's factory (see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx)).
 
+Connectors are grouped by role:
+
+- **[Sources](sources/README.mdx)** — feed the pipeline.
+- **[Sinks](sinks/README.mdx)** — write records out.
+- **[Formats](formats/README.mdx)** — deserialize payloads into records.
+
 ## The matrix
 
 | Connector | Role | Crate | Feature on `etl` | Config tag |
 |---|---|---|---|---|
-| [Kafka](kafka.mdx) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
-| [Kafka](kafka-sink.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
-| [ClickHouse](clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](clickhouse/multi-table.mdx)) |
-| [Avro](avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
+| [Kafka](sources/kafka/README.mdx) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
+| [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
+| [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
+| [Avro](formats/avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 `features = ["full"]` on the `etl` facade enables all production
-connectors.
+connectors. Memory / Capture is a dual-role test connector — it is neither a
+production source nor sink, so it lives at the connectors root rather than
+under `sources/` or `sinks/`.
 
 ## Guarantee notes per connector
 
@@ -36,13 +44,13 @@ connectors.
   Idempotence covers only in-session producer retries — batch retries after
   partial delivery and crash replay both duplicate (never lose), so
   downstream consumers must tolerate duplicates. See the
-  [honesty section](kafka-sink.mdx).
+  [honesty section](sinks/kafka/README.mdx).
 - **ClickHouse (sink)** — a batch acknowledges only after the server
   confirms the insert end-to-end (`wait_end_of_query=1`, materialized views
   included). Deterministic dedup tokens make same-batch retries idempotent
   — **only if the table keeps a deduplication window**; crash replay is not
   covered, so target tables must tolerate duplicates. See the
-  [warning](clickhouse/README.mdx) — it is the sharpest edge in the framework.
+  [warning](sinks/clickhouse/README.mdx) — it is the sharpest edge in the framework.
 - **Avro (format)** — schema fetches never block a pipeline thread: a
   cache miss holds the batch and replays it when the schema lands — records
   are never dropped or duplicated by the mechanism. Undecodable payloads

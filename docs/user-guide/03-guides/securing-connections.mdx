@@ -1,140 +1,62 @@
 # Securing connections (TLS, mTLS, SASL)
 
-Connecting to a TLS- or SASL-secured Kafka cluster needs the transport
-compiled into librdkafka, which is **off by default**. Enable the opt-in
-`kafka-tls` feature and configure the security properties through the
-connector's raw `rdkafka:` passthrough — the configuration is identical for
-the source and the sink.
+etl-rs has no framework-wide security layer: **transport security is a property
+of each connector**, because every connector talks to its system over that
+system's own client (librdkafka for Kafka, an HTTP client for ClickHouse) with
+that client's own TLS/auth knobs. This page is the hub — it covers what *is*
+framework-wide (how secrets reach the config, and what happens when auth fails)
+and points at each connector's own security section for the concrete matrix.
 
-## Enabling the feature
+## Where each connector documents its security
 
-`kafka-tls` turns on rdkafka's `ssl-vendored`, which compiles OpenSSL from
-source into the static build. It is off by default and excluded from `full`
-because the vendored build adds time and needs `perl` plus a C compiler in the
-toolchain — the default build has no OpenSSL in its tree at all.
+| Connector | Transport | Auth methods | Build gate | Details |
+|---|---|---|---|---|
+| Kafka source | TLS / mTLS over librdkafka | client cert, SASL SCRAM/PLAIN | opt-in `kafka-tls` feature | [Kafka source → Security](../04-connectors/sources/kafka/README.mdx#security-tls-mtls-sasl) |
+| Kafka sink | TLS / mTLS over librdkafka | client cert, SASL SCRAM/PLAIN | opt-in `kafka-tls` feature | [Kafka sink → Security](../04-connectors/sinks/kafka/README.mdx#security-tls-mtls-sasl) |
+| ClickHouse sink | TLS over `https://` (rustls) | `user` / `password` | none (always available) | [ClickHouse → Security](../04-connectors/sinks/clickhouse/README.mdx#security-tls) |
 
-```toml
-# Cargo.toml
-etl = { version = "0.1", features = ["kafka-tls"] }   # implies "kafka"
-```
+The Kafka source and sink share one security matrix (the `rdkafka:` passthrough
+is identical for both). ClickHouse needs no feature flag — an `https://` replica
+URL is encrypted out of the box; client-certificate (mTLS) auth to ClickHouse is
+a tracked follow-up. Kerberos/GSSAPI for Kafka is a separate, heavier build and
+is also a tracked follow-up.
 
-```sh
-cargo build --features etl/kafka-tls
-```
+## Secrets stay out of the file
 
-The feature unlocks **TLS** (encrypted, broker-authenticated transport),
-**mTLS** (client-certificate authentication), and **SASL SCRAM/PLAIN over
-TLS**. Kerberos/GSSAPI is not included (a separate, heavier build) — a tracked
-follow-up.
-
-If you set any security property **without** the feature, the pipeline fails
-fast at config load — on both the source and the sink — with an actionable
-message rather than an obscure runtime error:
-
-```
-invalid configuration: source.kafka.rdkafka requests TLS/SASL, but this
-build was compiled without it; rebuild with the `kafka-tls` feature
-(etl = { features = ["kafka-tls"] })
-```
-
-## How security is configured
-
-There is no typed `security:` section — TLS/SASL is set entirely through the
-raw `rdkafka:` map so `rdkafka`'s own property names carry over unchanged and
-no `rdkafka` types leak into the framework's API. These properties are **not**
-on the passthrough denylist; the framework only reserves the keys it owns for
-correctness (see the [Kafka source](../04-connectors/kafka.mdx) and
-[Kafka sink](../04-connectors/kafka-sink.mdx) pages). Keep secrets out of the
-file with [environment interpolation](configuring-pipelines.mdx) — `${VAR}` is
-substituted before parsing.
-
-### TLS (server authentication only)
-
-Encrypt the connection and verify the broker's certificate against a CA. This
-is the minimum for a cluster that terminates TLS but authenticates clients by
-SASL (or not at all).
-
-```yaml
-source:
-  kafka:
-    brokers: broker1:9093,broker2:9093
-    topic: orders
-    group_id: orders-etl
-    rdkafka:
-      security.protocol: ssl
-      ssl.ca.location: /etc/kafka/ca.pem   # omit to use the system trust store
-```
-
-### mTLS (client-certificate authentication)
-
-Add the client certificate and its private key. The broker authenticates the
-pipeline by the certificate instead of (or alongside) SASL.
-
-```yaml
-sink:
-  kafka:
-    brokers: broker1:9093,broker2:9093
-    topic: orders-enriched
-    rdkafka:
-      security.protocol: ssl
-      ssl.ca.location: /etc/kafka/ca.pem
-      ssl.certificate.location: /etc/kafka/client.pem
-      ssl.key.location: /etc/kafka/client.key
-      ssl.key.password: "${KAFKA_KEY_PASSWORD}"   # only if the key is encrypted
-```
-
-A PKCS#12 keystore works too (`ssl.keystore.location` + `ssl.keystore.password`)
-if you prefer a single bundle to separate PEM files.
-
-### SASL SCRAM or PLAIN over TLS
-
-Username/password authentication carried inside the TLS tunnel. Use
-`sasl_ssl` (SASL over TLS) — never `sasl_plaintext`, which sends credentials in
-the clear.
-
-```yaml
-source:
-  kafka:
-    brokers: broker1:9093,broker2:9093
-    topic: orders
-    group_id: orders-etl
-    rdkafka:
-      security.protocol: sasl_ssl
-      sasl.mechanism: SCRAM-SHA-256          # or SCRAM-SHA-512, or PLAIN
-      sasl.username: "${KAFKA_USER}"
-      sasl.password: "${KAFKA_PASSWORD}"
-      ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
-```
-
-The same `rdkafka:` block under `sink: { kafka: ... }` secures a producer sink
-identically.
-
-## ClickHouse
-
-The ClickHouse sink needs no feature flag for TLS: point a replica at an
-`https://` URL and the connection is encrypted (rustls is always compiled in),
-with `user`/`password` authenticating over it.
+Never commit credentials. Every value in the config — including inside connector
+bodies — is
+[environment-interpolated](configuring-pipelines.mdx#environment-interpolation)
+before parsing, so pass secrets in from the environment (a Kubernetes
+Secret, a vault sidecar) and reference them with `${VAR}`:
 
 ```yaml
 sink:
   clickhouse:
-    shards:
-      - replicas: ["https://ch-1.internal:8443", "https://ch-2.internal:8443"]
-    user: etl
-    password: "${CLICKHOUSE_PASSWORD}"
+    password: "${CLICKHOUSE_PASSWORD}"     # quote the site — see interpolation caveats
 ```
 
-See the [ClickHouse connector](../04-connectors/clickhouse/README.mdx) for the
-full sink schema. ClickHouse **client-certificate (mTLS)** authentication is not
-yet supported — a tracked follow-up.
+Interpolation is textual and pre-parse, so **quote the value site** when a secret
+may contain YAML-significant characters. The four `${...}` forms and the
+quoting rules are in
+[Configuring pipelines](configuring-pipelines.mdx#environment-interpolation).
+
+## A bad credential stops the pipeline loudly
+
+Authentication and TLS failures are a **fatal error class**, not a retryable
+one: a wrong password, an untrusted CA, or a rejected client certificate fails
+the pipeline fast with an actionable message rather than silently stalling or
+looping. That is deliberate — a security misconfiguration should surface at
+startup (or at the first connection), not degrade into a stuck consumer. See
+[Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for how fatal
+error classes propagate, and [Error handling](../02-concepts/04-error-handling.mdx)
+for the Skip/Fail taxonomy they sit outside of.
 
 ## Related
 
-- [Kafka source](../04-connectors/kafka.mdx) and
-  [Kafka sink](../04-connectors/kafka-sink.mdx) — the passthrough and the
-  denylist these properties ride through.
-- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — a SASL/TLS
-  auth failure is a fatal error class, so a bad credential stops the pipeline
-  loudly rather than silently stalling.
+- [Kafka source](../04-connectors/sources/kafka/README.mdx) ·
+  [Kafka sink](../04-connectors/sinks/kafka/README.mdx) — the `rdkafka:`
+  passthrough these properties ride through, and the denylist they must avoid.
+- [ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx) — the
+  `https://` replica model and `user`/`password` auth.
 - [Configuration reference](../07-reference/configuration.mdx) — every key,
-  including the `kafka-tls` build feature.
+  including the `kafka-tls` build feature and the interpolation forms.

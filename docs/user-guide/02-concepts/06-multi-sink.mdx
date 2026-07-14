@@ -112,7 +112,7 @@ in has durably written. Two properties fall straight out of the shared ack:
 
 ## The trade you're making: part size vs. checkpoint lag
 
-Per-table part size is governed by each sink's [`batch`](../04-connectors/clickhouse/README.mdx)
+Per-table part size is governed by each sink's [`batch`](../04-connectors/sinks/clickhouse/README.mdx)
 (`max_rows` / `max_bytes` / `linger`). To build **big parts** on a low-volume
 table you raise its `linger`. But the watermark is **poll-batch-granular**, and
 a batch is held until every destination it touched has flushed:
@@ -166,7 +166,7 @@ difference on a CPU-bound server.
 ## Further reading
 
 - [Sink sharding](05-sink-sharding.mdx) — the per-table shard tier each branch still uses.
-- [ClickHouse multi-table](../04-connectors/clickhouse/multi-table.mdx) — the connector-specific end-to-end (config, encoders, per-table tuning).
+- [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) — the connector-specific end-to-end (config, encoders, per-table tuning).
 - [Configuration reference](../07-reference/configuration.mdx#sinks) — the `sinks:` map.
 - [Delivery guarantees](02-delivery-guarantees.mdx) — the shared-ack model the cross-table hold builds on.
 - [Error handling](04-error-handling.mdx) — the `Skip`/`Fail` policy the `unmatched` case reuses.

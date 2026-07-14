@@ -226,21 +226,21 @@ Plan such a change as a migration — backfill or rebuild the moved keys'
 rows, or delete the old shard's copies. A plain restart with unchanged
 topology is the benign case: replayed rows land on the same shard, where
 dedup tokens and the collapse pattern apply as usual. See
-[Delivery guarantees](../../02-concepts/02-delivery-guarantees.mdx).
+[Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 :::
 
 ## Related
 
-- [Sink sharding](../../02-concepts/05-sink-sharding.mdx) — the connector-
+- [Sink sharding](../../../02-concepts/05-sink-sharding.mdx) — the connector-
   agnostic concept: shards, router tiers, hot shards, and why routing must be
   deterministic.
 - [ClickHouse sink](./README.mdx) — the full config reference and
   [why the sink writes direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table).
 - [Permissions](./permissions.mdx) — the `system.clusters` / `system.tables`
   grants the `distributed_check` guard needs.
-- [docs/DESIGN.md](../../../DESIGN.md) § Sink — the routing seam and the
+- [docs/DESIGN.md](../../../../DESIGN.md) § Sink — the routing seam and the
   two-tier router model.
 - [Performance tuning](./performance-tuning.mdx) — sizing shards, batches, and
   in-flight concurrency once the topology is set.
-- [Backpressure](../../02-concepts/03-backpressure.mdx) — how one saturated
+- [Backpressure](../../../02-concepts/03-backpressure.mdx) — how one saturated
   shard pauses the pipeline, which sharding by key can concentrate.

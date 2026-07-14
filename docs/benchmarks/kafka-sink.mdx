@@ -14,7 +14,7 @@ export const queueLabels = { '100000': '100k', '250000': '250k', '500000': '500k
 # Kafka producer sink (2026-07)
 
 How fast can the pipeline produce to Kafka through the [producer
-sink](../user-guide/04-connectors/kafka-sink.mdx), and **what does the framework
+sink](../user-guide/04-connectors/sinks/kafka/README.mdx), and **what does the framework
 cost over librdkafka itself**? This rig isolates the client path: an in-process
 generator source (no source broker) drives the real chain, sink pool, and
 runtime into one `ThreadedProducer` at full tilt. Throughput is read from

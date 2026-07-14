@@ -1,0 +1,13 @@
+# Formats
+
+A **format** (deserializer) decodes raw source payloads into typed records
+before they reach the operator chain. It is optional — a source that already
+emits ready-made records needs none. Configure one with a single-key
+`deserializer:` section in the pipeline YAML.
+
+| Format | Config tag | Summary |
+|---|---|---|
+| [Avro](avro/README.mdx) | `deserializer: { avro: ... }` | Confluent/schema-registry and single-object Avro; non-blocking schema fetches, Skip/Fail on undecodable payloads, optional [fast backend](avro/fast-backend.mdx). |
+
+Deserialization is a small trait — the same [Extending](../../06-extending/README.mdx)
+guide covers writing your own decoder.

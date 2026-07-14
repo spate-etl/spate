@@ -9,7 +9,7 @@ the source is never the bottleneck and the sink's own limits show through. Your
 optimum depends on your rows, your network, and whether your ClickHouse is
 CPU-, IO-, or client-bound, so treat every value here as a place to start
 measuring, not a fixed answer. The full study is on the
-[Sink saturation](../../../benchmarks/sink-saturation.mdx) benchmark page.
+[Sink saturation](../../../../benchmarks/sink-saturation.mdx) benchmark page.
 
 ## The mental model
 
@@ -104,7 +104,7 @@ insert count: request compression runs there, so at very high byte rates the
 compression threads can saturate two workers and become the limit. Raise
 `io_threads` then — but sparingly, because the derived pipeline-thread count is
 `available_parallelism` minus the I/O reserve, so every extra I/O worker is one
-fewer hot-path thread (see [Deployment tuning](../../05-deployment/tuning.mdx)).
+fewer hot-path thread (see [Deployment tuning](../../../05-deployment/tuning.mdx)).
 On a host where ClickHouse runs **locally**, remember the server needs cores too:
 client threads (pipeline `threads` + `io_threads`) and the server compete for the
 same machine, so oversubscribing the client starves the server it is feeding.
@@ -118,7 +118,7 @@ backpressure:
 
 This is the global ceiling on bytes admitted into the sink but not yet durably
 written. Size it with the established sizing rule in
-[Deployment tuning](../../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes),
+[Deployment tuning](../../../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes),
 which sizes the budget's **low watermark** (default `low_ratio` 0.5) against
 everything the sink legitimately keeps in flight:
 
@@ -287,6 +287,6 @@ merges are few, and adjust the batch size and writer concurrency from there.
 
 - [ClickHouse sink](./README.mdx) — the full sink configuration reference.
 - [Native format](./native-format.mdx) — the RowBinary vs Native trade in depth.
-- [Sink saturation benchmark](../../../benchmarks/sink-saturation.mdx) — the
+- [Sink saturation benchmark](../../../../benchmarks/sink-saturation.mdx) — the
   measurements these recommendations are drawn from.
-- [Deployment tuning](../../05-deployment/tuning.mdx) — pipeline-wide tuning.
+- [Deployment tuning](../../../05-deployment/tuning.mdx) — pipeline-wide tuning.

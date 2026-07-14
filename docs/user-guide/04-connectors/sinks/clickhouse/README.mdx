@@ -52,23 +52,32 @@ sink:
 | `user` | string | none | Username (interpolate secrets via `${VAR}`). |
 | `password` | string | none | Password (interpolate secrets via `${VAR}`). |
 | `settings` | string map | `{}` | Extra per-insert ClickHouse settings. `insert_deduplication_token`, `insert_deduplicate`, and `wait_end_of_query` are managed by the sink and cannot be overridden. |
-| `batch.max_rows` | integer | `500000` | Seal a batch after this many rows. |
-| `batch.max_bytes` | byte size | `128MiB` | Seal after this many encoded (uncompressed) bytes. |
-| `batch.linger` | duration | `1s` | Seal a partial batch after this long — bounds latency at low throughput. |
-| `inflight.max_per_shard` | integer | `2` | Concurrent in-flight batches per shard (to different replicas). |
-| `retry.initial` | duration | `100ms` | First backoff delay. |
-| `retry.max` | duration | `10s` | Backoff cap. |
-| `retry.multiplier` | float | `2.0` | Backoff growth factor. |
-| `retry.jitter` | float | `0.2` | Jitter fraction (`0..1`). |
-| `retry.max_attempts` | integer | `0` | Attempt cap; `0` = unbounded (retry until the drain deadline — the at-least-once default). |
-| `breaker.failure_threshold` | integer | `3` | Consecutive failures before a replica is quarantined. |
-| `breaker.open_for` | duration | `5s` | Quarantine duration before a half-open probe. |
-| `breaker.half_open_probes` | integer | `1` | Probe writes allowed while half-open. |
-| `timeouts.send` | duration | `30s` | Per-send timeout (one frame reaching the socket). |
+| `batch` / `inflight` / `retry` / `breaker` | sections | framework defaults | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool); the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
+| `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
 | `compression` | string | `lz4` | Transport (HTTP-body) compression: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in 1..22. Unrelated to on-disk column codecs. |
-| `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](../../03-guides/schema-validation.mdx). |
+| `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](../../../03-guides/schema-validation.mdx). |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
+
+## Security (TLS)
+
+No feature flag is needed for TLS: point a replica at an `https://` URL and the
+connection is encrypted (rustls is always compiled in), with `user`/`password`
+authenticating over it. Keep the password out of the file with `${VAR}`
+[interpolation](../../../03-guides/configuring-pipelines.mdx#environment-interpolation).
+
+```yaml
+sink:
+  clickhouse:
+    shards:
+      - replicas: ["https://ch-1.internal:8443", "https://ch-2.internal:8443"]
+    user: etl
+    password: "${CLICKHOUSE_PASSWORD}"
+```
+
+Client-certificate (**mTLS**) authentication is not yet supported — a tracked
+follow-up. For the framework-wide view of transport security across connectors,
+see [Securing connections](../../../03-guides/securing-connections.mdx).
 
 ## RowBinary on pipeline threads
 
@@ -86,7 +95,7 @@ configured `columns` list and the row struct's **field declaration
 order** must match; reordering either is a breaking change to the
 pipeline. `validate_schema: names` (or `full`) plus
 `ClickHouseEncoder::with_schema` turns this contract into a fail-fast
-check — see [Schema validation](../../03-guides/schema-validation.mdx). The
+check — see [Schema validation](../../../03-guides/schema-validation.mdx). The
 full type mapping is in the crate's `rowbinary` module docs.
 :::
 
@@ -113,7 +122,7 @@ And the honest limit: tokens cover *same-batch retries* only. Crash replay
 re-batches with different boundaries and different tokens, so replayed rows
 land again. Design target tables to tolerate duplicates —
 `ReplacingMergeTree` with a version column is the sanctioned pattern. See
-[Delivery guarantees](../../02-concepts/02-delivery-guarantees.mdx).
+[Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 
 ## Replica rotation and the circuit breaker
 
@@ -173,7 +182,7 @@ restart instead — the watermark stalls either way. Recovery is automatic
 once any probe succeeds. This whole-shard condition is surfaced distinctly
 as `etl_sink_shard_healthy == 0` (with per-replica
 `etl_sink_replica_errors_total` to attribute the failures); see
-[docs/METRICS.md](../../../METRICS.md).
+[docs/METRICS.md](../../../../METRICS.md).
 
 ## Why direct-to-shard, not a Distributed table
 
@@ -197,7 +206,7 @@ replica of every shard** that drives the sinks-connected half of
 insert clients would report the write path healthy merely because probing
 keeps its connections warm. Manual assemblies hand `probe_fn()` to
 `SinkRuntime.probe` directly (see
-[Manual assembly](../../03-guides/manual-assembly.mdx)).
+[Manual assembly](../../../03-guides/manual-assembly.mdx)).
 
 ## Related
 
@@ -214,9 +223,9 @@ keeps its connections warm. Manual assemblies hand `probe_fn()` to
   prune shards, plus the opt-in startup check that keeps the two aligned.
 - [Permissions](./permissions.mdx) — the ClickHouse GRANTs the sink machinery
   needs (minimal `INSERT`, plus the conditional system-table reads).
-- [Schema validation](../../03-guides/schema-validation.mdx) — the
+- [Schema validation](../../../03-guides/schema-validation.mdx) — the
   `validate_schema` modes end to end.
-- [Tuning](../../05-deployment/tuning.mdx) — batch sizing and its coupling to
+- [Tuning](../../../05-deployment/tuning.mdx) — batch sizing and its coupling to
   `backpressure.max_inflight_bytes` (the sizing rule).
-- [Graceful shutdown](../../03-guides/graceful-shutdown.mdx) — what happens to
+- [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — what happens to
   in-flight batches at the drain deadline.

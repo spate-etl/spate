@@ -19,6 +19,14 @@ export const formatLabels = {
   json: 'JSON (serde_json)',
 };
 
+export const backendLabels = {
+  serde_json: 'serde_json (default)',
+  'simd-json': 'simd-json (opt-in)',
+  single: 'single doc',
+  array: 'array',
+  ndjson: 'NDJSON',
+};
+
 # Deserialization formats
 
 Which format is cheapest to decode? This rig answers it fairly: the **same
@@ -43,12 +51,13 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
 <BenchBars
   bench="deser_formats"
   where={{ shape: 'batch', record: 'typed' }}
+  exclude={{ backend: ['simd-json', 'memcpy_baseline'] }}
   metric="ns_per_event"
   category="framing"
   emphasize="datum"
   labels={framingLabels}
   title="Decode cost per record (typed)"
-  caption="Per-reading decode time for a 50-reading batch, by format and framing. Lower is better."
+  caption="Per-reading decode time for a 50-reading batch, by format and framing (serde_json). Lower is better."
 />
 
 <StatRow>
@@ -57,7 +66,7 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
     label="Avro (fast) vs JSON NDJSON — decode cost per record"
     bench="deser_formats"
     metric="ns_per_event"
-    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson' }}
+    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson', backend: 'serde_json' }}
     denom={{ shape: 'batch', record: 'typed', framing: 'datum' }}
     sub="typed decode · lower ns/record is better"
   />
@@ -65,8 +74,8 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
     label="JSON NDJSON vs JSON array — reframing overhead"
     bench="deser_formats"
     metric="ns_per_event"
-    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson' }}
-    denom={{ shape: 'batch', record: 'typed', framing: 'array' }}
+    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson', backend: 'serde_json' }}
+    denom={{ shape: 'batch', record: 'typed', framing: 'array', backend: 'serde_json' }}
     sub="both serde_json typed · same 50 readings"
   />
 </StatRow>
@@ -108,13 +117,91 @@ single flat record decoded per payload, so it isolates per-field scalar cost.
 <BenchBars
   bench="deser_formats"
   where={{ shape: 'order', record: 'typed' }}
+  exclude={{ backend: ['simd-json', 'memcpy_baseline'] }}
   metric="ns_per_record"
   category="format"
   emphasize="avro"
   labels={formatLabels}
   title="Flat 15-field record — decode cost"
-  caption="Per-record decode time for one flat 15-field order. Lower is better."
+  caption="Per-record decode time for one flat 15-field order (serde_json). Lower is better."
 />
+
+## SIMD backend — serde_json vs simd-json {#simd-backend}
+
+Everything above decodes with `serde_json`, the default backend. The byte-slice
+→ value step sits behind an internal seam, so the opt-in **`simd`** Cargo feature
+(`json-simd` on the `etl` facade) swaps in
+[`simd-json`](https://github.com/simd-lite/simd-json) — a SIMD-accelerated parser
+— with no API change. Same 50 readings, same typed decode; only the parser
+differs.
+
+<BenchBars
+  bench="deser_formats"
+  where={{ shape: 'batch', record: 'typed', format: 'json' }}
+  exclude={{ backend: 'memcpy_baseline' }}
+  metric="ns_per_event"
+  category="framing"
+  series="backend"
+  emphasize="simd-json"
+  order={['single doc', 'array', 'NDJSON']}
+  seriesOrder={['serde_json', 'simd-json']}
+  labels={backendLabels}
+  title="serde_json vs simd-json — typed decode per record"
+  caption="The identical 50 readings decoded by each backend, per framing. Lower is better."
+/>
+
+<StatRow>
+  <BenchStat
+    emphasis
+    label="simd-json vs serde_json — single document"
+    bench="deser_formats"
+    metric="ns_per_event"
+    numer={{ shape: 'batch', record: 'typed', framing: 'single', backend: 'serde_json' }}
+    denom={{ shape: 'batch', record: 'typed', framing: 'single', backend: 'simd-json' }}
+    sub="typed decode · higher × = simd-json faster"
+  />
+  <BenchStat
+    label="Mandatory in-place-parse copy"
+    bench="deser_formats"
+    metric="ns_per_event"
+    where={{ shape: 'batch', record: 'typed', framing: 'single', backend: 'memcpy_baseline' }}
+    sub="per reading · negligible vs the ~150–240 ns decode"
+  />
+</StatRow>
+
+simd-json parses a **mutable** buffer in place (it unescapes strings into the
+buffer). The framework hands the decoder a *borrowed, immutable* payload — for a
+Kafka message it is librdkafka-owned memory, and at-least-once replay needs the
+original bytes intact — so the payload is copied into a reused thread-local
+buffer first, and the parser's own scratch buffers are reused across calls too.
+Both are per-message allocations a production integration avoids; the
+`memcpy_baseline` bar isolates what remains — the copy itself, about **1 ns per
+reading**, under 1% of the decode.
+
+On the **single-document** and **top-level-array** framings — one parse over the
+whole payload, and the JSON connector's Kafka-message default — simd-json decodes
+roughly **1.4× faster** than serde_json. On **NDJSON** (50 independent line
+parses) the gap narrows to ~1.15× as per-parse overhead dominates, and on the
+flat single-record `order` shape it is ~1.25×. Every arm is faster; the win is
+largest exactly where one large document is parsed.
+
+:::note Measured on aarch64
+These numbers are from an Apple M5 Max (aarch64, NEON) — the machine every page
+here uses. simd-json's speedup is architecture-sensitive; an x86-64 host with
+AVX2 was not measured. serde_json remains the default backend, and `simd` is a
+per-deployment opt-in worth benchmarking on your own hardware and payloads.
+:::
+
+:::warning Not byte-for-byte identical
+`simd-json` is a different parser, so decode is not semantically identical to
+`serde_json` on every input. It **rejects integer literals outside the
+`i64`/`u64` range** that `serde_json` accepts as `f64` (such a document is dropped
+as `malformed`, or fails the payload under `on_error: fail`), normalizes `-0` to
+`0`, and does not honor the `serde_json`-specific `arbitrary-precision`,
+`raw-value`, or `float-roundtrip` features. The duplicate-key guard is unaffected —
+it always runs on `serde_json`. Ordinary-range numbers decode identically;
+validate against your own payloads before switching.
+:::
 
 ## Reproduce
 
@@ -135,6 +222,22 @@ for R in typed value; do
     SHAPE=batch FORMAT=json FRAMING=$FR RECORD=$R REPS=9 RESULTS=$RESULTS \
       cargo run -p benchmarks --release --bin deser_formats
   done
+done
+
+# simd-json backend — rebuild with the feature; JSON typed arms.
+SHAPE=order FORMAT=json RECORD=typed REPS=9 RESULTS=$RESULTS \
+  cargo run -p benchmarks --release --bin deser_formats --features json-simd
+for FR in single array ndjson; do
+  SHAPE=batch FORMAT=json FRAMING=$FR RECORD=typed REPS=9 RESULTS=$RESULTS \
+    cargo run -p benchmarks --release --bin deser_formats --features json-simd
+done
+
+# memcpy-only baseline — the copy simd-json's mutable-buffer parse pays.
+SHAPE=order FORMAT=json RECORD=typed COPY_ONLY=1 REPS=9 RESULTS=$RESULTS \
+  cargo run -p benchmarks --release --bin deser_formats
+for FR in single array ndjson; do
+  SHAPE=batch FORMAT=json FRAMING=$FR RECORD=typed COPY_ONLY=1 REPS=9 RESULTS=$RESULTS \
+    cargo run -p benchmarks --release --bin deser_formats
 done
 ```
 

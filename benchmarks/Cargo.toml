@@ -7,6 +7,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Pass-through selector for the deser_formats simd-json arm. Rebuild the rig
+# with this feature; the emitted `backend` variant tracks the compiled seam.
+json-simd = ["etl-json/simd"]
+
 [dependencies]
 apache-avro = { workspace = true }
 bytes = { workspace = true }

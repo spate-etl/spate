@@ -18,12 +18,17 @@ default = []
 float-roundtrip = ["serde_json/float_roundtrip"]
 arbitrary-precision = ["serde_json/arbitrary_precision"]
 raw-value = ["serde_json/raw_value"]
-# simd = ["dep:sonic-rs"]  # future: opt-in SIMD backend behind the decode seam
+# Opt-in SIMD decode backend behind the byte-slice → value seam (`backend.rs`).
+# Off by default; when on, `decode_one` parses with simd-json instead of
+# serde_json. The dup-key structural guard always stays on serde_json. See the
+# deserialization-formats benchmark study for the serde_json/simd-json A/B.
+simd = ["dep:simd-json"]
 
 [dependencies]
 etl-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+simd-json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

@@ -98,6 +98,13 @@ json = ["dep:etl-json"]
 json-float-roundtrip = ["json", "etl-json/float-roundtrip"]
 json-arbitrary-precision = ["json", "etl-json/arbitrary-precision"]
 json-raw-value = ["json", "etl-json/raw-value"]
+# Opt-in simd-json decode backend for JSON (implies `json`). Deliberately
+# excluded from `full`: it pulls in simd-json (SIMD JSON parsing) — a decode
+# speedup on the single-document/array path over serde_json, per the
+# deserialization-formats benchmark study. Permissively licensed (no compliance
+# caveat like avro-fast), but kept opt-in so `full` stays lean. See the JSON
+# connector docs.
+json-simd = ["json", "etl-json/simd"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
 # Fast Avro decode backend (implies `avro`). Deliberately excluded from

@@ -17,6 +17,15 @@
 //! One invocation measures one arm, a mean over `REPS` reps with a Student-t
 //! 95% CI. Sweep the matrix by running it repeatedly.
 //!
+//! JSON arms are tagged with a `backend` variant from the compiled-in
+//! [`etl_json::BACKEND_ID`] (`serde_json`, or `simd-json` when the crate is
+//! built with the `simd` feature) so the same rig, rebuilt per backend, sweeps
+//! the JSON-backend comparison. `COPY_ONLY=1` measures a memcpy-only baseline
+//! (`backend=memcpy_baseline`) that isolates the mandatory owned-copy cost a
+//! mutable-buffer parser (simd-json) pays over serde_json's immutable-slice
+//! parse in this framework — subtract it to recover the raw engine speed. Avro
+//! arms carry no `backend` key.
+//!
 //! Env:
 //! - `SHAPE`   `order` | `batch`  (default `batch`)
 //! - `FORMAT`  `avro` | `json`  (default `json`)
@@ -26,6 +35,7 @@
 //! - `THREADS` parallelism (default 1)
 //! - `DURATION_S` measurement window per rep (default 3)
 //! - `REPS`    repetitions for the mean + CI (default 5)
+//! - `COPY_ONLY` `1` measures the memcpy-only baseline instead of decoding (JSON)
 //! - `RESULTS` append the JSONL record to this path
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -102,6 +112,48 @@ where
         handles
             .into_iter()
             .map(|h| h.join().expect("decode thread"))
+            .sum::<u64>()
+    });
+    ((calls * per_call) as f64, start.elapsed().as_secs_f64())
+}
+
+/// Copy `payload` into a reused scratch buffer in a tight loop until `stop`,
+/// returning the number of copies made. The memcpy-only baseline: it mirrors
+/// [`decode_calls`]'s loop structure exactly, minus the parse, so its
+/// per-event number is directly subtractable from a parsing arm's.
+fn copy_calls(payload: &[u8], stop: &AtomicBool) -> u64 {
+    // A reused buffer, exactly as the simd-json backend keeps a thread-local
+    // scratch — so the baseline charges only the memcpy, never a per-call alloc.
+    let mut scratch: Vec<u8> = Vec::with_capacity(payload.len());
+    let mut calls = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        for _ in 0..4096 {
+            scratch.clear();
+            scratch.extend_from_slice(payload);
+            std::hint::black_box(scratch.as_slice());
+            calls += 1;
+        }
+    }
+    calls
+}
+
+/// Drive the memcpy baseline across `threads` for `duration`. Mirrors
+/// [`run_decode`] so the per-event normalization is identical.
+fn run_copy(payload: &[u8], per_call: u64, threads: usize, duration: Duration) -> (f64, f64) {
+    let stop = AtomicBool::new(false);
+    let start = Instant::now();
+    let calls = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let stop = &stop;
+                scope.spawn(move || copy_calls(payload, stop))
+            })
+            .collect();
+        std::thread::sleep(duration);
+        stop.store(true, Ordering::Relaxed);
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("copy thread"))
             .sum::<u64>()
     });
     ((calls * per_call) as f64, start.elapsed().as_secs_f64())
@@ -306,6 +358,7 @@ fn main() {
     let threads = env_u64("THREADS", 1) as usize;
     let duration = Duration::from_secs(env_u64("DURATION_S", 3));
     let reps = env_u64("REPS", 5);
+    let copy_only = env_u64("COPY_ONLY", 0) != 0;
 
     // Effective framing: Avro is always the single nested datum; a JSON order
     // is one document; a JSON batch takes the configured framing.
@@ -323,19 +376,36 @@ fn main() {
         "ns_per_event"
     };
 
+    // JSON arms are tagged with the compiled-in backend; the memcpy baseline is
+    // tagged `memcpy_baseline`. Avro carries no `backend` key (it is not a JSON
+    // backend, and the running binary's `BACKEND_ID` reflects only how etl-json
+    // was compiled, not how the Avro arm decoded).
+    let backend: Option<&str> = if copy_only {
+        Some("memcpy_baseline")
+    } else if format == "json" {
+        Some(etl_json::BACKEND_ID)
+    } else {
+        None
+    };
+
     let payload = build_payload(&format, &shape, &framing, events);
     eprintln!(
         "── deser_formats SHAPE={shape} FORMAT={format} FRAMING={framing} RECORD={record} \
-         EVENTS={events} THREADS={threads} REPS={reps} ({} bytes) ──",
+         BACKEND={} EVENTS={events} THREADS={threads} REPS={reps} ({} bytes) ──",
+        backend.unwrap_or("-"),
         payload.len()
     );
 
     let mut rps_samples = Vec::with_capacity(reps as usize);
     let mut nspe_samples = Vec::with_capacity(reps as usize);
     for r in 0..reps {
-        let (n, secs) = run_arm(
-            &format, &shape, &record, &framing, &payload, per_call, threads, duration,
-        );
+        let (n, secs) = if copy_only {
+            run_copy(&payload, per_call, threads, duration)
+        } else {
+            run_arm(
+                &format, &shape, &record, &framing, &payload, per_call, threads, duration,
+            )
+        };
         let rps = n / secs;
         let nspe = if n > 0.0 { secs * 1e9 / n } else { 0.0 };
         eprintln!(
@@ -356,6 +426,9 @@ fn main() {
         .variant("framing", framing.clone())
         .variant("record", record.clone())
         .variant("threads", threads as u64);
+    if let Some(backend) = backend {
+        rep = rep.variant("backend", backend);
+    }
     if shape == "batch" {
         rep = rep.variant("events", events);
     }

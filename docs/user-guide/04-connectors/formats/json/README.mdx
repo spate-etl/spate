@@ -101,11 +101,36 @@ rejected.
 
 ## Backends
 
-Decoding uses `serde_json` (stable 1.x). The byte-slice → value step sits behind
-an internal seam, so a SIMD backend can be added later behind a Cargo feature
-without changing this API. `from_reader` is never used on the hot path — decoding
-always operates on the in-memory payload slice, which is both faster and lets the
-parser see the whole document at once.
+Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value step
+sits behind an internal seam, so the opt-in **`simd`** Cargo feature (`json-simd`
+on the `etl` facade) swaps in [`simd-json`](https://github.com/simd-lite/simd-json),
+a SIMD-accelerated parser, with no change to the builder API — `build_serde` and
+`build_value` are identical either way. `from_reader` is never used on the hot
+path — decoding always operates on the in-memory payload slice, which is both
+faster and lets the parser see the whole document at once.
+
+`simd` decodes roughly **1.4× faster** than `serde_json` on the
+single-document and array framings (the Kafka-message default), narrowing to
+~1.15× on NDJSON — see the [deserialization-formats benchmark](../../../../benchmarks/deserialization-formats.mdx#simd-backend)
+for the full A/B and the aarch64 caveat. It is **off by default** and excluded
+from the facade's `full` feature: it is a per-deployment choice worth
+benchmarking on your own hardware and payloads. A note on how it works — simd-json
+parses a mutable buffer in place, so the framework copies each borrowed payload
+into a reused thread-local buffer first (measured negligible, ~1% of the decode);
+the `reject_duplicate_keys` guard always runs on `serde_json`, so duplicate-key
+handling is identical either way.
+
+`simd` is **not** byte-for-byte identical to `serde_json` on numbers, though — it
+is a different parser. `simd-json` **rejects integer literals outside the
+`i64`/`u64` range** (which `serde_json` accepts, coercing to `f64`), so a document
+`serde_json` decodes may instead be dropped as `malformed` — or fail the whole
+payload under `on_error: fail` — under `simd`; it also normalizes `-0` to `0`.
+And because parsing is done by `simd-json` rather than `serde_json`, the
+`serde_json`-specific knobs `json-float-roundtrip`, `json-arbitrary-precision`,
+and `json-raw-value` do **not** apply under `simd` (arbitrary precision is
+silently lost; `RawValue` capture is unsupported). For payloads of ordinary-range
+numbers the backends agree — but benchmark **and** validate against your own data
+before switching.
 
 ## Related
 

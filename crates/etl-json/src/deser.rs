@@ -49,8 +49,8 @@ impl Reason {
 /// injected duplicate-key rejection, while a *syntax*/EOF error is just
 /// malformed input the structural pass happened to reach before the decode
 /// did — which must still be reported as `malformed`, not `duplicate_key`.
-fn dup_check_reason(e: &serde_json::Error) -> Reason {
-    if e.is_data() {
+fn dup_check_reason(e: &backend::DecodeError) -> Reason {
+    if e.is_data {
         Reason::DuplicateKey
     } else {
         Reason::Malformed
@@ -208,7 +208,7 @@ impl DecoderCore {
 
     /// Apply the error policy to a decode failure: `Skip` counts it and
     /// returns `Ok`, `Fail` returns [`DeserError::Malformed`].
-    fn on_item_error(&self, e: &serde_json::Error, reason: Reason) -> Result<(), DeserError> {
+    fn on_item_error(&self, e: &backend::DecodeError, reason: Reason) -> Result<(), DeserError> {
         match self.on_error {
             OnError::Skip => {
                 if let Some(m) = &self.metrics {

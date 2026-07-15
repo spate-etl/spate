@@ -26,6 +26,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod deser;
 pub mod error;
+pub mod framing;
 pub mod metrics;
 #[cfg(not(loom))]
 pub mod ops;
@@ -39,4 +40,5 @@ pub mod source;
 pub mod telemetry;
 
 pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};
+pub use framing::FramingContract;
 pub use record::{Flow, PartitionId, RawPayload, Record, RecordMeta};

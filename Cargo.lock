@@ -1194,6 +1194,7 @@ dependencies = [
  "etl-test",
  "metrics",
  "metrics-exporter-prometheus",
+ "proptest",
  "serde",
  "serde_json",
  "simd-json",

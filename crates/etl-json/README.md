@@ -18,6 +18,13 @@ One payload maps to 0..N records, chosen by `framing`:
 - `array` — a top-level JSON array → one record per element (decoded in one
   pass; a malformed array is handled atomically).
 
+Those frame a payload already in memory (a Kafka message). For a **streaming**
+source that never holds a whole object in RAM (`etl-s3`, an HTTP body), the
+crate also owns the byte-stream framer: `NdjsonFramer` is a chunk-fed, bounded
+`RecordFramer` the source runs to cut the stream into records — wire it in with
+`S3Source::with_framer(|| Box::new(NdjsonFramer::new(max)))`, then the
+deserializer decodes each line in `single` mode.
+
 ## Configuration
 
 ```yaml

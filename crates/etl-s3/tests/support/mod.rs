@@ -3,11 +3,73 @@
 #![allow(dead_code)]
 
 use etl_core::config::PipelineConfig;
+use etl_core::framing::RecordFramer;
 use etl_core::ops::{ChunkConfig, chain_owned};
 use etl_core::pipeline::{Pipeline, RuntimeOptions, ShutdownHandle};
 use etl_core::sink::KeyHashRouter;
 use etl_s3::S3Source;
 use etl_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
+use std::collections::VecDeque;
+use std::io;
+
+/// A newline-delimited [`RecordFramer`] for the integration suites: `etl-s3`
+/// no longer ships a framer, so the tests supply one, mirroring `etl-json`'s
+/// `NdjsonFramer` without depending on a format crate. Splits on `\n`, strips
+/// one trailing `\r`, skips whitespace-only lines, keeps an unterminated final
+/// line.
+#[derive(Default)]
+pub(crate) struct LineFramer {
+    partial: Vec<u8>,
+    ready: VecDeque<Vec<u8>>,
+    decoded: u64,
+}
+
+impl RecordFramer for LineFramer {
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.decoded += bytes.len() as u64;
+        for &b in bytes {
+            if b == b'\n' {
+                self.flush_line();
+            } else {
+                self.partial.push(b);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if !self.partial.is_empty() {
+            self.flush_line();
+        }
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        self.ready.pop_front()
+    }
+
+    fn decoded_bytes(&self) -> u64 {
+        self.decoded
+    }
+}
+
+impl LineFramer {
+    fn flush_line(&mut self) {
+        if self.partial.last() == Some(&b'\r') {
+            self.partial.pop();
+        }
+        if self.partial.iter().all(u8::is_ascii_whitespace) {
+            self.partial.clear();
+            return;
+        }
+        self.ready.push_back(std::mem::take(&mut self.partial));
+    }
+}
+
+/// The default framer every suite wires into its source (NDJSON line framing).
+pub(crate) fn line_framer(source: S3Source) -> S3Source {
+    source.with_framer(|| Box::new(LineFramer::default()))
+}
 
 /// A pipeline running in the background plus its observation handles.
 pub(crate) struct Launched {
@@ -25,10 +87,23 @@ pub(crate) fn launch_scripted(
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
+    launch_customized(yaml, options, pre, line_framer)
+}
+
+/// Like [`launch_scripted`], but `make_source` may customize the source
+/// (e.g. `.with_framer(...)`) before it is handed to the runtime.
+pub(crate) fn launch_customized(
+    yaml: &str,
+    options: RuntimeOptions,
+    pre: impl FnOnce(&SinkScript),
+    make_source: impl FnOnce(S3Source) -> S3Source,
+) -> Launched {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml).expect("config parses"))
         .expect("pipeline builds");
-    let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
-        .expect("source config");
+    let source = make_source(
+        S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
+            .expect("source config"),
+    );
     let (sink, script) = capture_sink(1, 1);
     pre(&script);
     let runtime = pipeline

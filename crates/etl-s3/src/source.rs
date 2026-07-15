@@ -17,6 +17,7 @@ use crate::fetch::{
     BACKOFF_CAP, FetcherParams, MAX_ATTEMPTS, ObjectEntry, assign_lanes, list_all, run_fetcher,
     validate_resume,
 };
+use crate::framer::FramerFactory;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::offset::Position;
@@ -26,6 +27,7 @@ use crate::store::{
 use etl_core::checkpoint::AckIssuer;
 use etl_core::config::{ComponentConfig, ConfigError};
 use etl_core::error::{ErrorClass, SourceError};
+use etl_core::framing::{FramingContract, RecordFramer};
 use etl_core::record::PartitionId;
 use etl_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use object_store::ObjectStore;
@@ -97,6 +99,10 @@ pub struct S3Source {
     /// Durable watermark storage; the object-store manifest by default,
     /// swappable via [`with_offset_store`](S3Source::with_offset_store).
     offset_store: Option<Box<dyn OffsetStore>>,
+    /// The per-object record framer, supplied by the chosen format via
+    /// [`with_framer`](S3Source::with_framer). Required before the pipeline
+    /// opens the source — `etl-s3` is a transport and owns no framing itself.
+    framer: Option<FramerFactory>,
     issuer: Option<AckIssuer>,
     metrics: Option<S3Metrics>,
     /// The data store, built from `config.url` at `open`.
@@ -130,6 +136,7 @@ impl S3Source {
             config,
             handle: io,
             offset_store: None,
+            framer: None,
             issuer: None,
             metrics: None,
             store: None,
@@ -158,10 +165,29 @@ impl S3Source {
         self
     }
 
+    /// Set the record framer that cuts each object's byte stream into records.
+    /// `etl-s3` is a transport and owns no framing, so this is **required**:
+    /// supply the framer for the objects' format — e.g. `etl-json`'s
+    /// `NdjsonFramer` for NDJSON — before the pipeline opens the source.
+    ///
+    /// `factory` builds a fresh
+    /// [`RecordFramer`](etl_core::framing::RecordFramer) per object (framers are
+    /// per-object stateful and each lane frames its own slice). A framed source
+    /// always emits one record per payload, so its
+    /// [`FramingContract`] is [`PerRecord`](FramingContract::PerRecord) and the
+    /// paired deserializer decodes a single unit.
+    #[must_use]
+    pub fn with_framer<F>(mut self, factory: F) -> S3Source
+    where
+        F: Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
+    {
+        self.framer = Some(Arc::new(factory));
+        self
+    }
+
     fn identity(&self) -> SourceIdentity {
         SourceIdentity {
             url: self.config.url.clone(),
-            format: self.config.format,
             compression: self.config.compression,
         }
     }
@@ -250,6 +276,9 @@ impl S3Source {
         };
         let mut lanes = Vec::new();
         let mut already_complete: u64 = 0;
+        // Supplied once via `with_framer` (checked at `open`), cloned per lane
+        // (each lane frames its own slice).
+        let make_framer = self.framer.clone().expect("framer set at open");
 
         for (i, slice) in slices.into_iter().enumerate() {
             let lane_ix = i as u32;
@@ -288,7 +317,7 @@ impl S3Source {
                 self.handle.clone(),
                 issuer.clone(),
                 self.config.compression,
-                self.config.max_record_bytes.as_u64() as usize,
+                Arc::clone(&make_framer),
                 resume,
                 Arc::clone(&eof),
                 self.metrics.clone(),
@@ -322,11 +351,25 @@ impl Source for S3Source {
         "s3"
     }
 
+    fn framing_contract(&self) -> FramingContract {
+        // A framed source always emits one record per payload. (The framer is
+        // required; a missing one is caught at `open`.)
+        FramingContract::PerRecord
+    }
+
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if !matches!(self.phase, Phase::Created) {
             return Err(SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: "source opened twice".into(),
+            });
+        }
+        if self.framer.is_none() {
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: "S3Source has no record framer; supply one with `with_framer(...)` \
+                         (e.g. etl-json's NdjsonFramer) before running the pipeline"
+                    .into(),
             });
         }
         // Defense in depth for hand-constructed configs; cheap.

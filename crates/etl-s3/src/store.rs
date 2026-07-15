@@ -8,11 +8,13 @@
 //! backend without touching the source.
 //!
 //! Beyond watermarks, the manifest pins what the watermarks *mean*:
-//! the lane count, the source identity (url/format/compression — these
-//! change record indexing), and per lane the object key, its ETag, and a
-//! rolling hash of the lane's committed key prefix. A resume validates all
-//! of it against the fresh listing and fails fast on drift instead of
-//! replaying or skipping the wrong data.
+//! the lane count, the source identity (url/compression — these change how
+//! objects are read), and per lane the object key, its ETag, and a rolling
+//! hash of the lane's committed key prefix. A resume validates all of it
+//! against the fresh listing and fails fast on drift instead of replaying or
+//! skipping the wrong data. (Record framing is now supplied by the format at
+//! assembly time, not the source, so it is out of the source identity — see
+//! [`framer`](crate::framer).)
 
 use etl_core::error::ErrorClass;
 use object_store::ObjectStoreExt as _;
@@ -22,13 +24,23 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{Compression, Format};
+use crate::config::Compression;
 
-/// Version of the manifest layout **and** of everything that defines
-/// record indexing (the framing rules in [`framer`](crate::framer), the
-/// listing order, the round-robin lane assignment). Changing any of those
-/// bumps this, and an old manifest is rejected rather than misread.
-pub const MANIFEST_SCHEMA: u32 = 1;
+/// Version of the manifest layout **and** of the offset/index scheme this
+/// source owns: the lexicographic listing order, the round-robin lane
+/// assignment, and the composite `(ordinal, record index)` offset layout.
+/// Changing any of those bumps this, and an old manifest is rejected rather
+/// than misread.
+///
+/// The record framer is deliberately **not** covered here: it is supplied by
+/// the caller at assembly time
+/// ([`with_framer`](crate::S3Source::with_framer)) and is opaque to the
+/// manifest, so the framework cannot detect a framer swap. Its record
+/// boundaries are part of the frozen-backfill contract — keep the same framer
+/// across a resume, exactly as the key set and object contents must stay frozen
+/// (see the crate docs). A framer that reframes the committed bytes differently
+/// silently replays or skips records, the same way a mutated object would.
+pub const MANIFEST_SCHEMA: u32 = 2;
 
 /// What the source was pointed at when the manifest was written. A resume
 /// with a different identity would reinterpret the committed offsets, so
@@ -37,8 +49,6 @@ pub const MANIFEST_SCHEMA: u32 = 1;
 pub struct SourceIdentity {
     /// The configured source URL (bucket + prefix), verbatim.
     pub url: String,
-    /// Record framing.
-    pub format: Format,
     /// Compression policy.
     pub compression: Compression,
 }
@@ -320,7 +330,6 @@ mod tests {
     fn identity() -> SourceIdentity {
         SourceIdentity {
             url: "s3://bucket/exports/".into(),
-            format: Format::Ndjson,
             compression: Compression::Auto,
         }
     }
@@ -370,7 +379,9 @@ mod tests {
             (&b"not json"[..], "not valid JSON"),
             (&br#"{"lanes": 2}"#[..], "no schema field"),
             (&br#"{"schema": 99}"#[..], "not the supported version"),
-            (&br#"{"schema": 1, "lanes": "two"}"#[..], "does not match"),
+            // Right schema (must equal MANIFEST_SCHEMA), wrong field type: the
+            // failure comes from the struct decode, not the schema probe.
+            (&br#"{"schema": 2, "lanes": "two"}"#[..], "does not match"),
         ] {
             rt.block_on(store.put(&path, body.to_vec().into())).unwrap();
             let mut s = ObjectManifestStore::new(

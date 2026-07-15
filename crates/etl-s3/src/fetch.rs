@@ -528,7 +528,6 @@ mod tests {
                 1,
                 crate::store::SourceIdentity {
                     url: "s3://b/p/".into(),
-                    format: crate::config::Format::Ndjson,
                     compression: crate::config::Compression::Auto,
                 },
             );

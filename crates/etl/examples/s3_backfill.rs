@@ -9,8 +9,11 @@
 //!
 //! Object storage here is a local directory (`file://`); against real S3
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
-//! through the `store` map. The source hands each NDJSON line to the
-//! chain as one payload, so the JSON deserializer runs `single` framing.
+//! through the `store` map. The S3 source is format-agnostic: we wire the
+//! format's framer into it in code — `etl-json`'s [`NdjsonFramer`] — so it
+//! hands each NDJSON line to the chain as one payload, and
+//! `for_source_framing` then derives the JSON deserializer's `single`
+//! granularity from the source instead of it being hand-set.
 //!
 //! ```sh
 //! cargo run -p etl --features s3,json --example s3_backfill
@@ -19,7 +22,7 @@
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use etl::json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use etl::json::{JsonDeserializerBuilder, NdjsonFramer};
 use etl::prelude::*;
 use etl::s3::S3Source;
 use etl_test::{TestEncoder, capture_sink};
@@ -45,6 +48,8 @@ source:
     lanes: 2
     checkpoint:
       url: "file://{state}/manifest.json"
+deserializer:
+  json: {{}}
 sink: {{ capture: {{}} }}
 "#,
         data = root.join("data").display(),
@@ -55,7 +60,19 @@ sink: {{ capture: {{}} }}
 /// One full pipeline run; returns the rows the sink durably wrote.
 fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
-    let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?;
+    // The S3 source is a transport; the format supplies the framer. Wire in
+    // `etl-json`'s NDJSON framer (bounded at 64 MiB per record) so each line
+    // becomes one payload. The `deserializer: { json: {} }` section carries
+    // only decode knobs — no `framing:` — and the framework derives the
+    // granularity from the source.
+    let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
+        .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
+    let deser_section = pipeline
+        .config()
+        .deserializer
+        .as_ref()
+        .ok_or("this pipeline requires a `deserializer` section")?
+        .clone();
     let (sink, script) = capture_sink(1, 1);
     let sink = sink.with_pool_config({
         let mut cfg = SinkPoolConfig::default();
@@ -65,15 +82,15 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
 
     let report = pipeline
         .sink(sink)?
-        .chains(|ctx| {
-            // The S3 lane frames NDJSON: one line = one payload → `single`.
-            let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
-                framing: JsonFraming::Single,
-                on_error: OnError::Skip,
-                reject_duplicate_keys: false,
-            })
-            .with_metrics(ctx.pipeline.clone(), "main")
-            .build_serde::<Reading>();
+        .chains(move |ctx| {
+            // The S3 lane already frames NDJSON (one line = one payload), so
+            // `for_source_framing` derives `single` from the source and would
+            // reject a `framing:` that double-frames it.
+            let deser = JsonDeserializerBuilder::from_component(&deser_section)
+                .and_then(|b| b.for_source_framing(ctx.source_framing))
+                .expect("deserializer config")
+                .with_metrics(ctx.pipeline.clone(), "main")
+                .build_serde::<Reading>();
             chain_owned::<Reading, _>(deser)
                 .with_metrics(ctx.pipeline, "main")
                 .filter(|r: &Reading| r.value.is_finite())

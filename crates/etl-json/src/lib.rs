@@ -17,6 +17,15 @@
 //!   [error policy](JsonSettings); use `ndjson` when you need per-record
 //!   isolation.
 //!
+//! Those three frame a payload already resident in memory (a Kafka message).
+//! For a **streaming** source that never holds a whole object in RAM — an
+//! `etl-s3` object, an HTTP body — the connector also owns the byte-stream
+//! framer: [`NdjsonFramer`] is a chunk-fed, bounded
+//! [`RecordFramer`](etl_core::framing::RecordFramer) the source runs to cut the
+//! stream into records, then hands each to the deserializer in `single` mode.
+//! Framing this way is a format concern, so it lives here rather than in the
+//! source.
+//!
 //! # Errors and metrics
 //!
 //! A document that does not parse (or does not match the target type) is a
@@ -59,11 +68,13 @@
 mod backend;
 mod config;
 mod deser;
+mod framing;
 mod metrics;
 
 pub use backend::BACKEND_ID;
 pub use config::{JsonConfigError, JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
 pub use deser::{JsonSerdeDeserializer, JsonValueDeserializer};
+pub use framing::NdjsonFramer;
 
 /// Dynamically-typed JSON record, re-exported for the [`JsonValueDeserializer`]
 /// path. Unlike Avro's value type this is a stable 1.x dependency, so it does

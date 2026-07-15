@@ -149,6 +149,53 @@ impl Source for CounterSource {
   bounded-queue pushback alone, but a pausable source keeps memory flat
   under sink pressure.
 
+## Framing: turning bytes into records
+
+A source emits `RawPayload`s; a deserializer decodes one payload into records.
+For a message source (Kafka) the message boundary *is* the record boundary, so
+nothing extra is needed. For a **streaming** source — an object-storage
+backfill, an HTTP chunked body, a WebSocket stream — one transfer is a large
+byte stream that must be cut into records *before* the deserializer sees them.
+That cutting is **framing**. The *seam* is transport-agnostic and lives in
+`etl_core::framing`, but the concrete framer is a property of the **format**, so
+it is owned by the format crate and handed to a source at assembly time:
+
+```rust
+pub trait RecordFramer: Send {
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()>;   // fed decoded bytes
+    fn finish(&mut self) -> io::Result<()>;               // end of stream/object
+    fn pop(&mut self) -> Option<Vec<u8>>;                 // next completed record
+    fn decoded_bytes(&self) -> u64;                       // metrics
+}
+```
+
+A framer **must be a pure function of the byte stream** — the record sequence
+must not depend on how bytes arrive in chunks — so a source that resumes by
+record index replays deterministically. `etl-json` ships `NdjsonFramer` (NDJSON
+line framing) as the format's impl; a future `etl-avro` would ship a container
+framer. `FramerWriter` bridges a `Write`-based decompressor to a framer so
+compression stays orthogonal. The `etl-s3` source drives this seam and takes the
+framer via `S3Source::with_framer` — so the source stays format-agnostic and any
+streaming source reuses the same framer.
+
+Tell the framework how your payloads are framed with **`framing_contract`**, so
+framing is established once (on the source) instead of coordinating it with the
+deserializer by hand:
+
+```rust
+fn framing_contract(&self) -> FramingContract {
+    FramingContract::PerRecord    // one record per payload → deserializer decodes a single unit
+    // default is WholePayload    // whole payloads → the deserializer frames (e.g. JSON ndjson/array)
+}
+```
+
+The contract reaches the chain as `ctx.source_framing`; a deserializer builder
+like `JsonDeserializerBuilder::for_source_framing` uses it to derive its
+granularity and reject a double-framing configuration (source frames *and*
+deserializer frames). Not every layout fits this model — columnar, footer-indexed
+formats (Parquet/ORC/Arrow) have no per-record byte boundary and belong to a
+future record-batch reader source, not a framer.
+
 ## Epochs and rebalances
 
 Assignment changes are where at-least-once is won or lost:

@@ -71,6 +71,26 @@ Split into a control plane and a data plane:
   yielding borrowed payloads. For Kafka a lane is a partition queue; for the
   in-memory test source, a single lane.
 
+**Framing.** Sources emit `RawPayload` bytes; a deserializer decodes one
+payload. Streaming sources must first cut a byte stream into records — that
+step is *framing*. `etl_core::framing` owns only the **seam** — the
+`RecordFramer` trait, the `FramerWriter` decompressor shim, and the
+`FramingContract` handshake — because how a byte stream splits into records is
+a property of the format, not the transport. The concrete framers are owned by
+the **format** crates: `etl-json` provides the newline-delimited `NdjsonFramer`,
+a future `etl-avro` an object-container block framer, and so on. A source stays
+format-agnostic and receives its framer at pipeline-assembly time
+(`S3Source::with_framer`), so one framer serves every streaming source (S3
+today, HTTP/WebSocket tomorrow) and no source hard-codes a format. A framer
+must be a pure function of the byte stream so resume-by-record-index is
+deterministic. `Source::framing_contract` declares whether the source emits one
+record per payload (`PerRecord`, what a framed source reports) or whole payloads
+the deserializer frames (`WholePayload`, the default); the framework threads it
+through `ChainCtx` so a deserializer builder derives its granularity and rejects
+double-framing. Columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
+per-record byte boundary and do not fit this byte-payload model — they would
+arrive through a separate record-batch reader source, not a framer.
+
 **Bounded sources.** A source whose input can be permanently exhausted (an
 object-storage backfill) reports `SourceEvent::Drained` from `poll_events`
 once every lane has yielded its final batch (a lane's exhaustion may only be

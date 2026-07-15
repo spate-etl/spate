@@ -41,10 +41,6 @@ fn default_checkpoint_timeout() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_max_record_bytes() -> ByteSize {
-    ByteSize::mib(64)
-}
-
 /// Debug view of a raw option map: keys are configuration, values may be
 /// credentials (`aws_secret_access_key`, session tokens) — never print
 /// them.
@@ -56,18 +52,6 @@ impl std::fmt::Debug for Redacted<'_> {
             .entries(self.0.keys().map(|k| (k, "<redacted>")))
             .finish()
     }
-}
-
-/// Record framing of the objects under the prefix.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum Format {
-    /// Newline-delimited JSON: one record per line. Whitespace-only lines
-    /// are skipped and do not consume a record index. An unterminated final
-    /// line is a record.
-    #[default]
-    Ndjson,
 }
 
 /// Compression codec of the objects under the prefix.
@@ -135,9 +119,6 @@ pub struct S3SourceConfig {
     /// so this bounds read parallelism.
     #[serde(default = "default_lanes")]
     pub lanes: u32,
-    /// Record framing of the objects.
-    #[serde(default)]
-    pub format: Format,
     /// Compression codec of the objects.
     #[serde(default)]
     pub compression: Compression,
@@ -151,12 +132,6 @@ pub struct S3SourceConfig {
     /// Target size of a single buffered chunk.
     #[serde(default = "default_chunk_bytes")]
     pub chunk_bytes: ByteSize,
-    /// Upper bound on a single record line (decoded bytes). A line larger
-    /// than this fails the pipeline: NDJSON that big is almost always a
-    /// malformed object (a whole JSON array uploaded as one line), and an
-    /// unbounded line would buffer without limit.
-    #[serde(default = "default_max_record_bytes")]
-    pub max_record_bytes: ByteSize,
     /// Raw `object_store` options, applied when building the store from
     /// `url` (credentials, region, endpoint, timeouts, ...). Bucket keys
     /// are rejected — the bucket comes from `url`.
@@ -171,12 +146,10 @@ impl std::fmt::Debug for S3SourceConfig {
         f.debug_struct("S3SourceConfig")
             .field("url", &self.url)
             .field("lanes", &self.lanes)
-            .field("format", &self.format)
             .field("compression", &self.compression)
             .field("checkpoint", &self.checkpoint)
             .field("prefetch_bytes", &self.prefetch_bytes)
             .field("chunk_bytes", &self.chunk_bytes)
-            .field("max_record_bytes", &self.max_record_bytes)
             .field("store", &Redacted(&self.store))
             .finish()
     }
@@ -203,11 +176,6 @@ impl S3SourceConfig {
         if self.chunk_bytes.as_u64() == 0 {
             return Err(ConfigError::Validation(
                 "source.s3.chunk_bytes must not be zero".into(),
-            ));
-        }
-        if self.max_record_bytes.as_u64() == 0 {
-            return Err(ConfigError::Validation(
-                "source.s3.max_record_bytes must not be zero".into(),
             ));
         }
         if self.prefetch_bytes.as_u64() < self.chunk_bytes.as_u64() {
@@ -299,11 +267,9 @@ mod tests {
     fn minimal_config_gets_documented_defaults() {
         let cfg = S3SourceConfig::from_component_config(&section(&minimal())).unwrap();
         assert_eq!(cfg.lanes, 4);
-        assert_eq!(cfg.format, Format::Ndjson);
         assert_eq!(cfg.compression, Compression::Auto);
         assert_eq!(cfg.prefetch_bytes, ByteSize::mib(8));
         assert_eq!(cfg.chunk_bytes, ByteSize::kib(512));
-        assert_eq!(cfg.max_record_bytes, ByteSize::mib(64));
         assert_eq!(cfg.checkpoint.timeout, Duration::from_secs(10));
         assert!(cfg.store.is_empty());
         assert!(cfg.checkpoint.store.is_empty());
@@ -387,7 +353,6 @@ mod tests {
         for extra in [
             "  lanes: 0\n",
             "  chunk_bytes: 0\n",
-            "  max_record_bytes: 0\n",
             "  prefetch_bytes: 4KiB\n  chunk_bytes: 1MiB\n",
         ] {
             let body = format!("{}{extra}", minimal());
@@ -400,11 +365,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_and_unknown_variants_are_rejected() {
-        for extra in [
-            "  prefix: also-here\n",
-            "  format: parquet\n",
-            "  compression: xz\n",
-        ] {
+        for extra in ["  prefix: also-here\n", "  compression: xz\n"] {
             let body = format!("{}{extra}", minimal());
             assert!(
                 S3SourceConfig::from_component_config(&section(&body)).is_err(),

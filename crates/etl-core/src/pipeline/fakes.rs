@@ -79,6 +79,12 @@ impl FakeSource {
 impl Source for FakeSource {
     type Lane = FakeLane;
 
+    // A distinctive non-default value so tests can prove the source's own
+    // contract (not the trait default) reaches `ChainCtx`.
+    fn framing_contract(&self) -> crate::framing::FramingContract {
+        crate::framing::FramingContract::PerRecord
+    }
+
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         self.shared.lock().unwrap().opened = true;
         self.issuer = Some(ctx.issuer);

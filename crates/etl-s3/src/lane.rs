@@ -18,7 +18,7 @@
 
 use crate::config::Compression;
 use crate::fetch::ChunkMsg;
-use crate::framer::{Codec, ObjectFramer};
+use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
 use etl_core::checkpoint::{AckIssuer, AckRef};
@@ -99,7 +99,7 @@ impl S3Lane {
         handle: tokio::runtime::Handle,
         issuer: AckIssuer,
         compression: Compression,
-        max_record_bytes: usize,
+        make_framer: FramerFactory,
         resume: Option<Position>,
         eof: Arc<AtomicBool>,
         metrics: Option<S3Metrics>,
@@ -111,7 +111,7 @@ impl S3Lane {
             handle,
             issuer,
             compression,
-            framer: ObjectFramer::new(max_record_bytes),
+            framer: ObjectFramer::new(make_framer),
             resume,
             pending_discard: 0,
             current: None,
@@ -455,6 +455,7 @@ impl<'a> PayloadBatch<'a> for S3Batch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TestLineFramer;
     use etl_core::checkpoint::Checkpointer;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -484,7 +485,7 @@ mod tests {
             rt.handle().clone(),
             checkpointer.handle(),
             Compression::Auto,
-            1 << 20,
+            Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             resume,
             Arc::clone(&eof),
             None,

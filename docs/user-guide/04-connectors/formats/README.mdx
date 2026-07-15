@@ -10,5 +10,44 @@ emits ready-made records needs none. Configure one with a single-key
 | [Avro](avro/README.mdx) | `deserializer: { avro: ... }` | Confluent/schema-registry and single-object Avro; non-blocking schema fetches, Skip/Fail on undecodable payloads, optional [fast backend](avro/fast-backend.mdx). |
 | [JSON](json/README.mdx) | `deserializer: { json: ... }` | `serde_json`-backed single-document, NDJSON, and top-level-array framings; typed or dynamic records, per-record Skip/Fail with `etl_json_deser_*` metrics. |
 
+## Framing vs deserialization
+
+Two distinct steps turn source bytes into records:
+
+- **Framing** — cutting a byte stream into records. This is *source* territory,
+  because record boundaries must line up with the source's offsets and resume
+  (an S3 backfill runs the format's framer over each object so it can checkpoint
+  mid-object). A message source like Kafka does no framing — the message
+  boundary is the record boundary. Framing is a *format* concern, so the framer
+  is owned by the format crate (`etl-json`'s `NdjsonFramer`, ...) and wired into
+  a streaming source in code — the source stays format-agnostic.
+- **Deserialization** — decoding one framed payload into a typed record. This is
+  also the *format*, and it is identical whatever the source: the same JSON or
+  Avro decoder serves Kafka and S3 alike.
+
+When a streaming source is given a framer it frames one record per payload, and
+the framework derives the deserializer's granularity from the source's contract.
+So the `deserializer:` section carries only decode knobs — no `framing:`:
+
+```rust
+// The framer is wired on the source in code (framing is a format concern):
+let source = S3Source::from_component_config(section, io)?
+    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
+```
+
+```yaml
+source:
+  s3: { url: "s3://bucket/exports/", checkpoint: { ... } }
+deserializer:
+  json: {}          # granularity derived from the source → single
+```
+
+Setting `framing: ndjson` here while the source already line-frames is a
+**double-framing** error, rejected at startup. A source that emits *whole*
+payloads (Kafka, or a future whole-object mode) instead lets the deserializer
+frame — `framing: ndjson` / `array` then apply. The rule is: exactly one side
+frames.
+
 Deserialization is a small trait — the same [Extending](../../06-extending/README.mdx)
-guide covers writing your own decoder.
+guide covers writing your own decoder, and the framing seam (`RecordFramer`) that
+sits in front of it.

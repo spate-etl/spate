@@ -15,6 +15,7 @@ pub use barrier::DrainBarrier;
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
 use crate::error::SourceError;
+use crate::framing::FramingContract;
 use crate::metrics::Meter;
 use crate::record::{PartitionId, RawPayload};
 use std::time::Duration;
@@ -169,6 +170,17 @@ pub trait Source: Send {
     /// (its framework stage metrics are unaffected).
     fn component_type(&self) -> &str {
         "source"
+    }
+
+    /// How the payloads this source emits are framed, so the framework can
+    /// pair it with a deserializer without the two being coordinated by hand
+    /// (see [`FramingContract`]). A source that splits its own bytes into one
+    /// record per payload returns [`FramingContract::PerRecord`]; the default
+    /// is [`FramingContract::WholePayload`] — the source emits whole payloads
+    /// and the deserializer owns framing (Kafka, and any source that does not
+    /// frame).
+    fn framing_contract(&self) -> FramingContract {
+        FramingContract::WholePayload
     }
 
     /// Connect and prepare. Called once before any other method.

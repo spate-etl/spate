@@ -15,6 +15,7 @@
 use crate::deser::{DecoderCore, JsonSerdeDeserializer, JsonValueDeserializer};
 use crate::metrics::JsonDeserMetrics;
 use etl_core::config::ComponentConfig;
+use etl_core::framing::FramingContract;
 use etl_core::metrics::{Meter, SharedString};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -74,6 +75,17 @@ pub enum JsonConfigError {
     /// The component section did not deserialize.
     #[error(transparent)]
     Config(#[from] etl_core::config::ConfigError),
+    /// The source already frames one record per payload, but the deserializer
+    /// is configured to frame the payload too (double-framing).
+    #[error(
+        "the source frames one record per payload, but the JSON deserializer is set \
+         to `framing: {framing:?}` — remove `framing` (or set it to `single`), or use \
+         a whole-object source format that lets the deserializer frame"
+    )]
+    DoubleFraming {
+        /// The offending deserializer framing.
+        framing: JsonFraming,
+    },
 }
 
 /// Builder produced from the opaque config section; hands out either the
@@ -97,6 +109,30 @@ impl JsonDeserializerBuilder {
         JsonDeserializerBuilder {
             settings,
             metrics: None,
+        }
+    }
+
+    /// Derive and validate framing against the source's
+    /// [`FramingContract`](etl_core::framing::FramingContract), so the format
+    /// is declared once (on the source) instead of coordinating the source's
+    /// framing with `framing:` by hand.
+    ///
+    /// - [`PerRecord`](FramingContract::PerRecord): the source already frames
+    ///   one record per payload, so the deserializer must decode a single
+    ///   document. `framing: single` (the default) is used; any other
+    ///   `framing` is a [`DoubleFraming`](JsonConfigError::DoubleFraming)
+    ///   error.
+    /// - [`WholePayload`](FramingContract::WholePayload): the deserializer owns
+    ///   framing — the configured `framing` (`single` / `ndjson` / `array`) is
+    ///   honored unchanged.
+    pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, JsonConfigError> {
+        match contract {
+            FramingContract::PerRecord if self.settings.framing != JsonFraming::Single => {
+                Err(JsonConfigError::DoubleFraming {
+                    framing: self.settings.framing,
+                })
+            }
+            _ => Ok(self),
         }
     }
 
@@ -187,5 +223,46 @@ mod tests {
         let cfg = component("framing: yaml\n");
         let err = JsonDeserializerBuilder::from_component(&cfg).unwrap_err();
         assert!(err.to_string().to_lowercase().contains("framing"), "{err}");
+    }
+
+    #[test]
+    fn per_record_source_derives_single_and_rejects_double_framing() {
+        // Omitted framing (defaults to single) under a per-record source is fine.
+        let b =
+            JsonDeserializerBuilder::from_component(&ComponentConfig::new("json", YamlValue::Null))
+                .unwrap()
+                .for_source_framing(FramingContract::PerRecord)
+                .unwrap();
+        assert_eq!(b.settings.framing, JsonFraming::Single);
+
+        // Explicit single is fine too.
+        JsonDeserializerBuilder::from_component(&component("framing: single\n"))
+            .unwrap()
+            .for_source_framing(FramingContract::PerRecord)
+            .unwrap();
+
+        // ndjson / array double-frame an already-framed source.
+        for framing in ["ndjson", "array"] {
+            let err = JsonDeserializerBuilder::from_component(&component(&format!(
+                "framing: {framing}\n"
+            )))
+            .unwrap()
+            .for_source_framing(FramingContract::PerRecord)
+            .unwrap_err();
+            assert!(
+                matches!(err, JsonConfigError::DoubleFraming { .. }),
+                "{framing}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_payload_source_honors_configured_framing() {
+        for framing in ["single", "ndjson", "array"] {
+            JsonDeserializerBuilder::from_component(&component(&format!("framing: {framing}\n")))
+                .unwrap()
+                .for_source_framing(FramingContract::WholePayload)
+                .unwrap();
+        }
     }
 }

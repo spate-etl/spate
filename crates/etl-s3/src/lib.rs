@@ -24,10 +24,14 @@
 //!   listing identity (per-lane key/etag/rolling hash) so a listing that
 //!   changed between runs fails fast instead of replaying or skipping the
 //!   wrong data.
-//! - **Records are framed, not decoded, here.** The source emits one raw
-//!   payload per NDJSON line (after streaming gzip/zstd decompression);
-//!   deserialization stays in the operator chain (`etl-json` etc.), exactly
-//!   as with the Kafka source.
+//! - **Records are framed, not decoded, here.** The source is
+//!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
+//!   through a [`RecordFramer`](etl_core::framing::RecordFramer) *you supply*
+//!   for the objects' format via
+//!   [`S3Source::with_framer`](crate::S3Source::with_framer) — e.g. `etl-json`'s
+//!   `NdjsonFramer` for NDJSON — emitting one raw payload per framed record.
+//!   Deserialization then stays in the operator chain (`etl-json` etc.),
+//!   exactly as with the Kafka source.
 //!
 //! # The frozen-key-set contract
 //!
@@ -57,8 +61,10 @@ mod metrics;
 mod offset;
 mod source;
 mod store;
+#[cfg(test)]
+mod testutil;
 
-pub use config::{CheckpointStoreConfig, Compression, Format, S3SourceConfig};
+pub use config::{CheckpointStoreConfig, Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
 pub use store::{

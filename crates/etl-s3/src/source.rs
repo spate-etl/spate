@@ -30,7 +30,8 @@ use etl_core::error::{ErrorClass, SourceError};
 use etl_core::framing::{FramingContract, RecordFramer};
 use etl_core::record::PartitionId;
 use etl_core::source::{LaneId, Source, SourceCtx, SourceEvent};
-use object_store::ObjectStore;
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::{ObjectStore, ObjectStoreScheme};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -379,8 +380,8 @@ impl Source for S3Source {
         })?;
 
         let url = parse(&self.config.url)?;
-        let (store, prefix) = object_store::parse_url_opts(&url, opts(&self.config.store))
-            .map_err(|e| SourceError::Client {
+        let (store, prefix) =
+            build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: format!("building the object store for {}: {e}", self.config.url),
             })?;
@@ -397,8 +398,8 @@ impl Source for S3Source {
             } else {
                 &self.config.checkpoint.store
             };
-            let (ck_store, ck_path) = object_store::parse_url_opts(&ck_url, opts(ck_opts))
-                .map_err(|e| SourceError::Client {
+            let (ck_store, ck_path) =
+                build_store(&ck_url, ck_opts).map_err(|e| SourceError::Client {
                     class: ErrorClass::Fatal,
                     reason: format!(
                         "building the checkpoint store for {}: {e}",
@@ -623,4 +624,134 @@ fn parse(url: &str) -> Result<Url, SourceError> {
 
 fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
     map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// Build the object store for `url`, applying the raw `store` passthrough
+/// `options`.
+///
+/// For S3, credentials and region are seeded from the standard AWS
+/// environment via [`AmazonS3Builder::from_env`] — the same mechanism the AWS
+/// SDK uses — so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
+/// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
+/// The explicit `options` are overlaid on top and win over the environment;
+/// the bucket comes from the URL. `object_store::parse_url_opts` (which every
+/// other scheme still uses) deliberately does *not* read the environment, so
+/// the S3 scheme is special-cased here.
+///
+/// We must not simply pass `std::env::vars()` through `parse_url_opts`:
+/// `AmazonS3ConfigKey` parses *unprefixed* keys (`region`, `token`,
+/// `endpoint`, ...), so an unrelated environment variable could hijack the
+/// client. `from_env` guards on the `AWS_` prefix; we rely on that.
+fn build_store(
+    url: &Url,
+    options: &std::collections::BTreeMap<String, String>,
+) -> Result<(Box<dyn ObjectStore>, object_store::path::Path), object_store::Error> {
+    // `ObjectStoreScheme::parse` returns the scheme and the in-store `Path` —
+    // the very call `parse_url_opts` makes, so `path` is the exact listing
+    // prefix it would return and every committed offset that depends on it
+    // stays valid.
+    let (scheme, path) = ObjectStoreScheme::parse(url)?;
+    // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
+    // tests) keeps the stock, scheme-generic behaviour.
+    if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
+        return object_store::parse_url_opts(url, opts(options));
+    }
+    let builder = apply_options(AmazonS3Builder::from_env().with_url(url.as_str()), options);
+    let store = builder.build()?;
+    Ok((Box::new(store), path))
+}
+
+/// Overlay the raw `store` passthrough options onto an S3 builder. Keys that
+/// are not recognised object_store configuration are ignored (matching
+/// `parse_url_opts`); a later key wins, so these override any environment
+/// value seeded by [`AmazonS3Builder::from_env`].
+fn apply_options(
+    mut builder: AmazonS3Builder,
+    options: &std::collections::BTreeMap<String, String>,
+) -> AmazonS3Builder {
+    for (k, v) in options {
+        if let Ok(key) = k.to_ascii_lowercase().parse::<AmazonS3ConfigKey>() {
+            builder = builder.with_config(key, v.clone());
+        }
+    }
+    builder
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn apply_options_overrides_env_seeded_values() {
+        // A builder already seeded from the environment (as `from_env` would).
+        let seeded = AmazonS3Builder::new()
+            .with_config(AmazonS3ConfigKey::Region, "env-region")
+            .with_config(AmazonS3ConfigKey::Endpoint, "http://env-endpoint");
+        let b = apply_options(seeded, &map(&[("aws_region", "opt-region")]));
+        assert_eq!(
+            b.get_config_value(&AmazonS3ConfigKey::Region).as_deref(),
+            Some("opt-region"),
+            "an explicit passthrough option overrides the environment"
+        );
+        assert_eq!(
+            b.get_config_value(&AmazonS3ConfigKey::Endpoint).as_deref(),
+            Some("http://env-endpoint"),
+            "a key we did not set leaves the seeded value intact"
+        );
+    }
+
+    #[test]
+    fn apply_options_sets_pod_identity_keys_and_ignores_unknown() {
+        const URI: &str = "http://169.254.170.23/v1/credentials";
+        const TOKEN: &str =
+            "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token";
+        let b = apply_options(
+            AmazonS3Builder::new(),
+            &map(&[
+                ("aws_container_credentials_full_uri", URI),
+                ("aws_container_authorization_token_file", TOKEN),
+                // Not an object_store key — must be ignored, not panic.
+                ("not_a_real_key", "whatever"),
+            ]),
+        );
+        assert_eq!(
+            b.get_config_value(&AmazonS3ConfigKey::ContainerCredentialsFullUri)
+                .as_deref(),
+            Some(URI)
+        );
+        assert_eq!(
+            b.get_config_value(&AmazonS3ConfigKey::ContainerAuthorizationTokenFile)
+                .as_deref(),
+            Some(TOKEN)
+        );
+    }
+
+    /// The S3 listing prefix must be byte-identical to what `parse_url_opts`
+    /// produced before this change — committed offsets depend on it.
+    #[test]
+    fn build_store_s3_prefix_matches_parse_url_opts() {
+        let url = Url::parse("s3://bucket/exports/2026/").unwrap();
+        let (_, got) = build_store(&url, &BTreeMap::new()).unwrap();
+        let (_, want) =
+            object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn build_store_delegates_non_s3_schemes() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = Url::from_directory_path(dir.path()).unwrap();
+        let (_, got) = build_store(&url, &BTreeMap::new()).unwrap();
+        let (_, want) =
+            object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
+        assert_eq!(got, want, "file:// delegates to parse_url_opts unchanged");
+    }
 }

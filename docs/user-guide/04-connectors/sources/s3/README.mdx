@@ -75,12 +75,56 @@ source:
 | `checkpoint.timeout` | duration | `10s` | Bound on each manifest read/write; a slow save is retried on the next commit tick. |
 | `prefetch_bytes` | bytes | `8MiB` | Per-lane prefetch budget between the async fetcher and the pipeline thread. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
-| `store` | string map | `{}` | Raw `object_store` options applied when building the store from `url` — credentials, `region`, `endpoint`, `allow_http`, timeouts. Bucket keys are rejected in any case spelling (the bucket comes from `url`). |
+| `store` | string map | `{}` | Raw `object_store` options applied **on top of the environment** when building the store from `url` — override `region`, `endpoint`, credentials, `allow_http`, timeouts. See [Credentials & region](#credentials--region). Bucket keys are rejected in any case spelling (the bucket comes from `url`). |
 
 The record **format is not a config key** — the S3 source is a transport and
 owns no framing. You wire the format's framer into the source in code (see
 [Decoding records](#decoding-records)); the per-record size bound lives on the
 framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
+
+### Credentials & region
+
+For S3 URLs, credentials and region resolve from the **standard AWS
+environment variables** automatically: the source seeds the client with
+`AmazonS3Builder::from_env()`. That covers **EKS Pod Identity**
+(`AWS_CONTAINER_CREDENTIALS_FULL_URI` +
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), **IRSA**
+(`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), ECS task roles, EC2 IMDS,
+static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_SESSION_TOKEN`), and `AWS_REGION` / `AWS_DEFAULT_REGION`. In a correctly
+configured EKS pod (Pod Identity or IRSA) you typically need **no** `store`
+credentials at all.
+
+Only **environment variables** are read — **not** file-based profiles
+(`AWS_PROFILE`, `~/.aws/credentials`, `~/.aws/config`) or SSO token caches
+(object_store carries no AWS SDK, so it resolves neither). If you authenticate
+locally with a named profile or `aws sso login`, materialize that profile's
+credentials into the environment first — the AWS CLI v2 resolves the profile
+(SSO included) and prints ready-to-eval exports:
+
+```sh
+eval "$(aws configure export-credentials --profile my-profile --format env)"
+```
+
+That sets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`,
+all of which `from_env` picks up (run `aws sso login` first if the session has
+expired). Alternatively, set the keys under `store`, or use a `file://` URL to
+skip AWS entirely for local runs.
+
+Anything under `store` overrides the environment — pin a `region`, point at a
+custom `endpoint`, or supply static keys explicitly. You can also force a
+provider by passing its keys through `store` (values interpolate from the
+environment):
+
+```yaml
+    store:
+      # Usually unnecessary — EKS injects these and from_env picks them up;
+      # shown for when you want to pin them explicitly.
+      aws_container_credentials_full_uri: "${AWS_CONTAINER_CREDENTIALS_FULL_URI}"
+      aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
+```
+
+Non-S3 schemes (`file://`) do not read the AWS environment.
 
 ## Offsets, checkpointing, resume
 

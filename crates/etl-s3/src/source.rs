@@ -238,6 +238,11 @@ impl S3Source {
                 });
             }
         };
+        // Whether this run is resuming from an existing manifest (vs a fresh
+        // backfill). A resume silently skips already-committed objects, so it is
+        // surfaced loudly (WARN) once the skip count is known — see below, after
+        // the slices are dealt into lanes.
+        let resuming = manifest.is_some();
         let manifest = match manifest {
             Some(m) => {
                 m.check_compatible(self.config.lanes, &self.identity())
@@ -246,11 +251,6 @@ impl S3Source {
                         reason,
                     })?;
                 validate_resume(&slices, &m)?;
-                tracing::info!(
-                    lanes = self.config.lanes,
-                    committed_lanes = m.lane_states.len(),
-                    "resuming backfill from the checkpoint manifest"
-                );
                 m
             }
             None => {
@@ -340,6 +340,26 @@ impl S3Source {
             lanes = lanes.len(),
             "object listing dealt into lanes; streaming"
         );
+        // A resume skips every already-committed object. That is silent at the
+        // data layer (fewer rows land, no error is raised), so make it loud: a
+        // stale manifest left from a prior run is a common cause of an
+        // apparently "half" load. Absence of this WARN means a fresh backfill.
+        if resuming {
+            let remaining = (total_objects as u64).saturating_sub(already_complete);
+            let committed_lanes = running.manifest.lane_states.len();
+            let lane_count = lanes.len();
+            tracing::warn!(
+                committed_objects = already_complete,
+                remaining_objects = remaining,
+                total_objects,
+                committed_lanes,
+                lanes = lane_count,
+                "resuming from an existing checkpoint manifest ({committed_lanes} of {lane_count} lanes \
+                 have committed progress): {already_complete} of {total_objects} fully-committed objects \
+                 will be SKIPPED, and partly-read objects resume mid-stream. If a fresh backfill was \
+                 intended, remove the manifest at the checkpoint URL and restart."
+            );
+        }
         self.phase = Phase::Running(running);
         Ok(SourceEvent::LanesAssigned(lanes))
     }

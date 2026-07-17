@@ -1,9 +1,15 @@
 //! The async edge: one startup listing, then one fetcher task per lane
-//! streaming object bytes to the pipeline thread.
+//! reading object bytes to the pipeline thread.
 //!
 //! Runs on the pipeline's I/O runtime. Every channel send `await`s — a
 //! fetcher never blocks a runtime worker, so sink workers sharing the
 //! runtime keep running while lanes are back-pressured.
+//!
+//! Each ETag-pinned object is read as a sequence of **bounded ranged GETs,
+//! each drained fully into memory before any chunk is forwarded**. Releasing
+//! the connection between windows is deliberate: a back-pressured lane then
+//! parks on buffered bytes, never an idle S3 body that the client's request
+//! timeout (or an intermediary) would reset mid-stream. See [`stream_object`].
 //!
 //! # Determinism
 //!
@@ -190,6 +196,22 @@ fn validate_lane_resume(
             ),
         ));
     }
+    // Committed with an ETag, but the fresh listing reports none for that key.
+    // Early drift detection would then rest entirely on the fetch-time
+    // `if_match` — which a store that stopped reporting ETags may not honor —
+    // so the object's content can no longer be verified against the committed
+    // record indexes. Refuse rather than resume over unverifiable content.
+    if state.etag.is_some() && entry.etag.is_none() {
+        return Err(drift_error(
+            lane,
+            format!(
+                "object \"{}\" at committed ordinal {ordinal} was committed with an \
+                 ETag but the listing now reports none, so its content can no longer \
+                 be verified on resume",
+                entry.key
+            ),
+        ));
+    }
     // A mid-object watermark replays the object and discards the committed
     // record count, which is only sound if the content provably didn't
     // change. Without a committed ETag to pin the re-read to, a same-key
@@ -233,6 +255,11 @@ pub(crate) struct FetcherParams {
     pub(crate) resume_etag: Option<String>,
     /// Upper bound on a single [`ChunkMsg::Chunk`].
     pub(crate) chunk_bytes: usize,
+    /// Upper bound on one bounded ranged GET (the per-lane read-ahead window,
+    /// the source's `prefetch_bytes`). Each window is drained fully into memory
+    /// before any chunk is forwarded, so the S3 connection is released before a
+    /// back-pressured hand-off — see [`stream_object`].
+    pub(crate) range_bytes: usize,
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
@@ -260,6 +287,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         start_ordinal,
         resume_etag,
         chunk_bytes,
+        range_bytes,
         tx,
         pause,
         retry_base,
@@ -295,6 +323,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             &store,
             entry,
             pinned_etag.as_deref(),
+            range_bytes,
             chunk_bytes,
             &tx,
             &pause,
@@ -330,17 +359,182 @@ async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(
     Ok(())
 }
 
-/// Stream one object's bytes as bounded chunks. `Ok(true)` = complete,
-/// `Ok(false)` = receiver dropped (shutdown), `Err` = terminal failure.
+/// Stream one object's bytes as bounded [`ChunkMsg::Chunk`]s. `Ok(true)` =
+/// complete, `Ok(false)` = receiver dropped (shutdown), `Err` = terminal
+/// failure.
+///
+/// When the object's content is pinned by an ETag (S3 always supplies one, as
+/// does `object_store`'s `LocalFileSystem`) the read is a sequence of **bounded
+/// ranged GETs, each drained fully into memory before any chunk is forwarded**
+/// ([`stream_object_ranged`]) — so a lane parked on backpressure only ever
+/// holds buffered bytes, never an idle GET body that S3 (or an intermediary)
+/// could reset or time out mid-stream. Without an ETag a resumed ranged read
+/// could splice two object versions, so such stores keep a single continuous
+/// stream ([`stream_object_streaming`]).
 #[expect(
     clippy::too_many_arguments,
-    reason = "internal seam between run_fetcher and the retry loop"
+    reason = "internal seam between run_fetcher and the read loops"
 )]
 async fn stream_object(
     lane: u32,
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     pinned_etag: Option<&str>,
+    range_bytes: usize,
+    chunk_bytes: usize,
+    tx: &mpsc::Sender<ChunkMsg>,
+    pause: &AtomicBool,
+    retry_base: Duration,
+    retries: Option<&etl_core::metrics::Counter>,
+) -> Result<bool, SourceError> {
+    match pinned_etag {
+        Some(etag) => {
+            stream_object_ranged(
+                lane,
+                store,
+                entry,
+                etag,
+                range_bytes,
+                chunk_bytes,
+                tx,
+                pause,
+                retry_base,
+                retries,
+            )
+            .await
+        }
+        None => {
+            stream_object_streaming(
+                lane,
+                store,
+                entry,
+                chunk_bytes,
+                tx,
+                pause,
+                retry_base,
+                retries,
+            )
+            .await
+        }
+    }
+}
+
+/// Pinned read path: walk the object in `range_bytes` windows, each a
+/// short-lived ranged GET **fully buffered before the hand-off**. Releasing the
+/// connection the moment a window is read is the whole point: a paused or
+/// back-pressured lane then holds only `range_bytes` of buffered read-ahead,
+/// never an idle body left un-polled past the client's request timeout. The
+/// ETag pin keeps the multi-GET read splice-safe — an overwrite between windows
+/// trips the `if_match` precondition instead of blending versions.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal read loop, mirrors stream_object_streaming"
+)]
+async fn stream_object_ranged(
+    lane: u32,
+    store: &Arc<dyn ObjectStore>,
+    entry: &ObjectEntry,
+    etag: &str,
+    range_bytes: usize,
+    chunk_bytes: usize,
+    tx: &mpsc::Sender<ChunkMsg>,
+    pause: &AtomicBool,
+    retry_base: Duration,
+    retries: Option<&etl_core::metrics::Counter>,
+) -> Result<bool, SourceError> {
+    let path = Path::from(entry.key.as_str());
+    let window = range_bytes.max(1) as u64;
+    let mut delivered: u64 = 0;
+    let mut attempt: u32 = 0;
+
+    while delivered < entry.size {
+        let end = (delivered + window).min(entry.size);
+        let options = GetOptions {
+            if_match: Some(etag.to_owned()),
+            range: Some(GetRange::Bounded(delivered..end)),
+            ..Default::default()
+        };
+        // One bounded request, drained fully into memory at network speed. The
+        // connection is released here — *before* the possibly-long hand-off
+        // below — so backpressure never leaves an idle S3 body open.
+        let buffered = match store.get_opts(&path, options).await {
+            Ok(result) => match result.bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    retry_or_fail(
+                        lane,
+                        entry,
+                        &e,
+                        delivered,
+                        &mut attempt,
+                        retry_base,
+                        retries,
+                    )
+                    .await?;
+                    continue;
+                }
+            },
+            Err(e) => {
+                retry_or_fail(
+                    lane,
+                    entry,
+                    &e,
+                    delivered,
+                    &mut attempt,
+                    retry_base,
+                    retries,
+                )
+                .await?;
+                continue;
+            }
+        };
+        let read = buffered.len() as u64;
+        if read == 0 {
+            // A conforming store never returns an empty bounded range; guard
+            // anyway so a misbehaving one fails the lane rather than spinning.
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!(
+                    "lane {lane}: ranged read of \"{}\" at byte {delivered} returned no bytes",
+                    entry.key
+                ),
+            });
+        }
+        // Forward the buffered window. No connection is open here, so a paused /
+        // back-pressured lane only parks on bytes already in memory.
+        let mut bytes = buffered;
+        while !bytes.is_empty() {
+            let take = bytes.len().min(chunk_bytes);
+            let chunk = bytes.split_to(take);
+            if pause_gate(pause, tx).await.is_err() {
+                return Ok(false);
+            }
+            if tx.send(ChunkMsg::Chunk(chunk)).await.is_err() {
+                return Ok(false);
+            }
+        }
+        delivered += read;
+        // A completed window is progress: reset the retry budget so an object
+        // larger than one failure-free window still finishes.
+        attempt = 0;
+    }
+    Ok(true)
+}
+
+/// Unpinned read path (store reports no ETag): a single continuous stream. A
+/// resumed ranged GET across a failure could splice two object versions when
+/// the content is not pinned, so a mid-object break is fatal rather than
+/// resumed. This holds the body open across the hand-off — acceptable only
+/// because it is the fallback for stores that cannot be safely range-resumed;
+/// S3 and `LocalFileSystem` always report an ETag and take the ranged path.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal read loop, mirrors stream_object_ranged"
+)]
+async fn stream_object_streaming(
+    lane: u32,
+    store: &Arc<dyn ObjectStore>,
+    entry: &ObjectEntry,
     chunk_bytes: usize,
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
@@ -352,16 +546,14 @@ async fn stream_object(
     let mut attempt: u32 = 0;
 
     'attempts: loop {
-        // Delivered everything the listing said the object holds — a rare
-        // retry landing exactly at the end needs no further GET.
+        // In this fallback `delivered` is always 0: a mid-object stream error
+        // is fatal below (no ETag to pin a resumed read), so a retry never
+        // resumes partway. The guard therefore only fires for a zero-length
+        // object, and every GET re-reads the whole object un-ranged.
         if delivered >= entry.size {
             return Ok(true);
         }
-        let options = GetOptions {
-            if_match: pinned_etag.map(str::to_owned),
-            range: (delivered > 0).then_some(GetRange::Offset(delivered)),
-            ..Default::default()
-        };
+        let options = GetOptions::default();
         let result = match store.get_opts(&path, options).await {
             Ok(r) => r,
             Err(e) => {
@@ -398,10 +590,9 @@ async fn stream_object(
                     attempt = 0;
                 }
                 Some(Err(e)) => {
-                    // Resuming mid-object requires the ETag pin; without
-                    // one, a silent overwrite between attempts could
-                    // splice two object versions.
-                    if delivered > 0 && pinned_etag.is_none() {
+                    // Without an ETag a resumed read could splice two object
+                    // versions, so a mid-object break cannot be retried.
+                    if delivered > 0 {
                         return Err(SourceError::Client {
                             class: ErrorClass::Fatal,
                             reason: format!(
@@ -560,6 +751,13 @@ mod tests {
         let err = validate_resume(std::slice::from_ref(&slice), &rewritten).unwrap_err();
         assert!(err.to_string().contains("overwritten"), "{err}");
 
+        // Committed with an ETag, but the fresh listing reports none for the
+        // key: the object can no longer be verified on resume, so refuse.
+        let listing_lost_etag = vec![entry("a", 1, None), entry("b", 1, None)];
+        let committed_with_etag = manifest_with(state(1, "b", "e-b", &["a", "b"]));
+        let err = validate_resume(&[listing_lost_etag], &committed_with_etag).unwrap_err();
+        assert!(err.to_string().contains("reports none"), "{err}");
+
         // Mid-object watermark with no committed ETag: the replayed
         // discard cannot be verified, so the resume must refuse rather
         // than risk silently skipping records.
@@ -577,9 +775,29 @@ mod tests {
 
     // ---------------------------------------------------- fetcher tests --
 
+    /// The shape of a `GetOptions::range`, recorded so tests can assert which
+    /// read path ran: the pinned path issues `Bounded` windows, the streaming
+    /// fallback a single un-ranged (`Full`) or `Offset` resume GET.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RangeKind {
+        Full,
+        Offset(u64),
+        Bounded(u64, u64),
+    }
+
+    fn range_kind(range: &Option<GetRange>) -> RangeKind {
+        match range {
+            None => RangeKind::Full,
+            Some(GetRange::Offset(o)) => RangeKind::Offset(*o),
+            Some(GetRange::Bounded(r)) => RangeKind::Bounded(r.start, r.end),
+            Some(GetRange::Suffix(_)) => unreachable!("the fetcher never issues a suffix range"),
+        }
+    }
+
     /// Wraps a store, failing the first `fail_gets` `get_opts` calls with a
     /// retryable error, and cutting the first `cut_streams` result streams
-    /// after `cut_after` bytes with a retryable error.
+    /// after `cut_after` bytes with a retryable error. Records every requested
+    /// range in `ranges` for read-path assertions.
     #[derive(Debug)]
     struct FlakyStore {
         inner: InMemory,
@@ -587,6 +805,7 @@ mod tests {
         cut_streams: AtomicU32,
         cut_after: usize,
         gets: AtomicU32,
+        ranges: std::sync::Mutex<Vec<RangeKind>>,
     }
 
     impl FlakyStore {
@@ -597,7 +816,12 @@ mod tests {
                 cut_streams: AtomicU32::new(0),
                 cut_after: 0,
                 gets: AtomicU32::new(0),
+                ranges: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn recorded_ranges(&self) -> Vec<RangeKind> {
+            self.ranges.lock().unwrap().clone()
         }
 
         fn generic(what: &str) -> object_store::Error {
@@ -639,6 +863,7 @@ mod tests {
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
             self.gets.fetch_add(1, Ordering::Relaxed);
+            self.ranges.lock().unwrap().push(range_kind(&options.range));
             if self
                 .fail_gets
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -749,6 +974,7 @@ mod tests {
         slice: Vec<ObjectEntry>,
         start_ordinal: u32,
         chunk_bytes: usize,
+        range_bytes: usize,
     ) -> Vec<ChunkMsg> {
         let (tx, mut rx) = mpsc::channel(64);
         let params = FetcherParams {
@@ -758,6 +984,7 @@ mod tests {
             start_ordinal,
             resume_etag: None,
             chunk_bytes,
+            range_bytes,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
@@ -790,7 +1017,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> =
             Arc::new(seeded(&[("p/a", b"aaaaaaaaaa"), ("p/b", b"bb")]).await);
         let slice = listed(&store).await;
-        let msgs = collect_fetch(store, slice, 0, 4).await;
+        let msgs = collect_fetch(store, slice, 0, 4, 64).await;
         for m in &msgs {
             if let ChunkMsg::Chunk(b) = m {
                 assert!(b.len() <= 4, "chunk over the bound: {}", b.len());
@@ -810,7 +1037,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> =
             Arc::new(seeded(&[("p/a", b"first"), ("p/b", b"second")]).await);
         let slice = listed(&store).await;
-        let msgs = collect_fetch(store, slice, 1, 64).await;
+        let msgs = collect_fetch(store, slice, 1, 64, 64).await;
         assert_eq!(
             assembled(&msgs),
             vec![("p/b".to_string(), b"second".to_vec())]
@@ -823,7 +1050,7 @@ mod tests {
         flaky.fail_gets.store(2, Ordering::Relaxed);
         let store: Arc<dyn ObjectStore> = Arc::new(flaky);
         let slice = listed(&store).await;
-        let msgs = collect_fetch(store, slice, 0, 64).await;
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
         assert_eq!(
             assembled(&msgs),
             vec![("p/a".to_string(), b"payload".to_vec())]
@@ -840,19 +1067,22 @@ mod tests {
         flaky.cut_streams.store(1, Ordering::Relaxed);
         let store: Arc<dyn ObjectStore> = Arc::new(flaky);
         let slice = listed(&store).await;
-        let msgs = collect_fetch(store, slice, 0, 4).await;
+        // range_bytes 8 → the 20-byte object spans three windows; the cut lands
+        // inside the first, which is re-read whole (nothing was forwarded yet).
+        let msgs = collect_fetch(store, slice, 0, 4, 8).await;
         assert_eq!(
             assembled(&msgs),
             vec![("p/a".to_string(), body.to_vec())],
-            "resumed read must splice exactly at the cut"
+            "a window that fails mid-read is retried cleanly, without gap or dup"
         );
     }
 
     #[tokio::test]
     async fn missing_object_fails_the_lane_fatally() {
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"x")]).await);
-        // A slice naming a key that does not exist (drifted listing).
-        let slice = vec![entry("p/ghost", 1, None)];
+        // A slice naming a key that does not exist (drifted listing); an ETag
+        // from the stale listing routes it through the ranged read path.
+        let slice = vec![entry("p/ghost", 1, Some("\"e\""))];
         let (tx, mut rx) = mpsc::channel(8);
         let params = FetcherParams {
             lane: 0,
@@ -861,6 +1091,7 @@ mod tests {
             start_ordinal: 0,
             resume_etag: None,
             chunk_bytes: 64,
+            range_bytes: 64,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
@@ -890,6 +1121,7 @@ mod tests {
             start_ordinal: 0,
             resume_etag: None,
             chunk_bytes: 64,
+            range_bytes: 64,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
@@ -919,6 +1151,7 @@ mod tests {
             start_ordinal: 0,
             resume_etag: None,
             chunk_bytes: 2,
+            range_bytes: 64,
             tx,
             pause: Arc::clone(&pause),
             retry_base: Duration::from_millis(1),
@@ -954,6 +1187,7 @@ mod tests {
             start_ordinal: 0,
             resume_etag: None,
             chunk_bytes: 8,
+            range_bytes: 4096,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
@@ -965,5 +1199,88 @@ mod tests {
             .await
             .expect("fetcher must end promptly when the lane is dropped")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinned_reads_walk_the_object_in_bounded_contiguous_windows() {
+        // 20-byte object, 8-byte windows → 0..8, 8..16, 16..20.
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", b"0123456789abcdefghij")]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        assert!(
+            slice[0].etag.is_some(),
+            "InMemory reports an ETag → pinned path"
+        );
+        let msgs = collect_fetch(Arc::clone(&store), slice, 0, 4, 8).await;
+        assert_eq!(
+            assembled(&msgs),
+            vec![("p/a".to_string(), b"0123456789abcdefghij".to_vec())]
+        );
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![
+                RangeKind::Bounded(0, 8),
+                RangeKind::Bounded(8, 16),
+                RangeKind::Bounded(16, 20),
+            ],
+            "windows must be bounded, contiguous, and cover the object exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_backpressured_lane_buffers_one_window_and_fetches_no_further() {
+        // 16-byte object, 8-byte windows → two windows. With a capacity-1
+        // channel nobody drains, the fetcher must read the FIRST window in full
+        // — proving the connection is released before the hand-off — then block
+        // on the send, never starting the second window. That bounds peak
+        // per-lane memory to one window under backpressure.
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", b"0123456789abcdef")]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, _rx) = mpsc::channel(1); // ObjectStart fills the one slot; never drained
+        let params = FetcherParams {
+            lane: 0,
+            store: Arc::clone(&store),
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 4,
+            range_bytes: 8,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+        };
+        let task = tokio::spawn(run_fetcher(params));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Bounded(0, 8)],
+            "one window fetched: the first is fully read, the second is not \
+             started while the hand-off is blocked"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_object_without_an_etag_uses_the_streaming_fallback() {
+        let flaky = Arc::new(FlakyStore::new(seeded(&[("p/a", b"hello world")]).await));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let mut slice = listed(&store).await;
+        slice[0].etag = None; // store reports no ETag → one continuous stream
+        let msgs = collect_fetch(Arc::clone(&store), slice, 0, 4, 4).await;
+        assert_eq!(
+            assembled(&msgs),
+            vec![("p/a".to_string(), b"hello world".to_vec())]
+        );
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Full],
+            "the fallback issues a single un-ranged GET, never a bounded window"
+        );
     }
 }

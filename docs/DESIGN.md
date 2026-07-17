@@ -59,6 +59,21 @@ One process runs one pipeline.
 - **Control plane**: a controller services source events (rebalances,
   statistics), owns shutdown, and runs commit ticks.
 
+**Concurrency is not parallelism.** `io_threads` sizes the tokio worker pool
+that drives *async* edge work — a small M driving N≫M concurrent tasks, since
+every task yields at its `await`. It is deliberately *not* one thread per
+in-flight operation, so it should not be scaled to the number of source lanes or
+sink in-flight inserts. CPU-bound decode/encode runs on the **pipeline threads**
+instead. A source's lane count is read *concurrency*: effective decode
+parallelism is `min(lanes, pipeline.threads)`, so lanes beyond the driver-thread
+count add read-ahead memory and open connections without more throughput. The
+runtime emits a startup warning when a source (via `Source::advisory_lane_count`)
+declares far more lanes than there are pipeline threads. The S3 backfill source
+makes this concrete: each lane holds at most one `prefetch_bytes` read-ahead
+window and, because an object read is a sequence of bounded ranged GETs each
+drained into memory before hand-off, never an idle open connection while
+back-pressured.
+
 ## Source abstraction
 
 Split into a control plane and a data plane:

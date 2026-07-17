@@ -115,8 +115,15 @@ pub struct S3SourceConfig {
     /// URLs work for infrastructure-free runs and tests.
     pub url: String,
     /// Number of lanes (framework partitions). The listing is dealt
-    /// round-robin across lanes; each lane streams its slice sequentially,
-    /// so this bounds read parallelism.
+    /// round-robin across lanes; each lane reads its slice sequentially, so
+    /// this bounds read parallelism.
+    ///
+    /// Lanes are read *concurrency*, not decode *parallelism*: decoding runs on
+    /// the pipeline's driver threads (`pipeline.threads`), so effective decode
+    /// parallelism is `min(lanes, pipeline.threads)`. Lanes beyond the driver
+    /// thread count buy no throughput — only read-ahead memory
+    /// (`lanes × prefetch_bytes`) and open connections. Size this near
+    /// `pipeline.threads`; the runtime warns when it far exceeds them.
     #[serde(default = "default_lanes")]
     pub lanes: u32,
     /// Compression codec of the objects.
@@ -125,8 +132,19 @@ pub struct S3SourceConfig {
     /// Durable watermark storage (required — this is what makes the
     /// backfill resumable).
     pub checkpoint: CheckpointStoreConfig,
-    /// Per-lane prefetch budget: bytes buffered between the async fetcher
-    /// and the pipeline thread.
+    /// Per-lane read-ahead budget: the size of each lane's in-memory read
+    /// window. A lane fetches one window at a time as a bounded ranged GET and
+    /// drains it before fetching the next, so peak per-lane *read-ahead* is
+    /// ~one window and total source read-ahead is `lanes × prefetch_bytes` (the
+    /// decoded records a lane holds while framing are a separate, smaller
+    /// budget). An object at or below this size is read in a single GET.
+    ///
+    /// Keep this modest. A large window is read as one long-held GET — which
+    /// works against the connection release this source relies on — and a
+    /// single window must complete inside the client request timeout (the
+    /// `store` `timeout` option, 30s by default), so an oversized window on a
+    /// slow link degrades into repeated whole-window retries. The 8 MiB default
+    /// suits typical objects.
     #[serde(default = "default_prefetch_bytes")]
     pub prefetch_bytes: ByteSize,
     /// Target size of a single buffered chunk.

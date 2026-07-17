@@ -31,7 +31,7 @@ use etl_core::framing::{FramingContract, RecordFramer};
 use etl_core::record::PartitionId;
 use etl_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
-use object_store::{ObjectStore, ObjectStoreScheme};
+use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -41,6 +41,16 @@ use url::Url;
 /// First backoff step for fetcher-internal GET retries and for the
 /// startup (listing / manifest-load) retries.
 const RETRY_BASE: Duration = Duration::from_millis(200);
+
+/// Fetcher→lane channel depth, in chunks. The per-lane read-ahead is the
+/// `prefetch_bytes` window each fetcher buffers in memory (see [`fetch`]), so
+/// this channel is only a small hand-off buffer: its chunks are zero-copy
+/// views into that one window, not extra copies. Keeping it shallow bounds
+/// peak per-lane read-ahead to ~one window under sustained backpressure: a
+/// paused fetcher blocks partway through draining its current window and never
+/// fetches the next one, so at most one window is alive per lane. (The decoded
+/// records the lane holds while framing are a separate, smaller budget.)
+const LANE_HANDOFF_CHUNKS: usize = 4;
 
 /// Capped exponential backoff before retryable-startup attempt
 /// `attempt` (1-based).
@@ -263,9 +273,11 @@ impl S3Source {
         let store = Arc::clone(self.store.as_ref().expect("store built at open"));
         let total_objects: usize = slices.iter().map(Vec::len).sum();
         let chunk_bytes = self.config.chunk_bytes.as_u64() as usize;
-        let capacity =
-            usize::try_from(self.config.prefetch_bytes.as_u64() / chunk_bytes as u64).unwrap_or(1);
-        let capacity = capacity.max(1);
+        // Each fetcher reads one `prefetch_bytes` window at a time into memory
+        // (a bounded ranged GET), then hands it off; the window is the
+        // read-ahead, so the channel stays a shallow hand-off buffer.
+        let range_bytes = self.config.prefetch_bytes.as_u64() as usize;
+        let capacity = LANE_HANDOFF_CHUNKS;
 
         let mut running = Running {
             manifest,
@@ -306,6 +318,7 @@ impl S3Source {
                 start_ordinal,
                 resume_etag: state.and_then(|s| s.etag.clone()),
                 chunk_bytes,
+                range_bytes,
                 tx,
                 pause: Arc::clone(&pause),
                 retry_base: RETRY_BASE,
@@ -338,7 +351,10 @@ impl S3Source {
         tracing::info!(
             objects = total_objects,
             lanes = lanes.len(),
-            "object listing dealt into lanes; streaming"
+            // Committed up front: each lane reads one `prefetch_bytes` window
+            // into memory at a time, so this is the source's peak read-ahead.
+            readahead_bytes = lanes.len() as u64 * self.config.prefetch_bytes.as_u64(),
+            "object listing dealt into lanes; reading in bounded ranged gets"
         );
         // A resume skips every already-committed object. That is silent at the
         // data layer (fewer rows land, no error is raised), so make it loud: a
@@ -376,6 +392,12 @@ impl Source for S3Source {
         // A framed source always emits one record per payload. (The framer is
         // required; a missing one is caught at `open`.)
         FramingContract::PerRecord
+    }
+
+    fn advisory_lane_count(&self) -> Option<usize> {
+        // Known from config up front; lets the runtime warn on a lanes ≫ threads
+        // over-subscription (extra lanes cost read-ahead memory, not throughput).
+        Some(self.config.lanes as usize)
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
@@ -676,9 +698,42 @@ fn build_store(
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
         return object_store::parse_url_opts(url, opts(options));
     }
-    let builder = apply_options(AmazonS3Builder::from_env().with_url(url.as_str()), options);
-    let store = builder.build()?;
+    // Harden the HTTP client (idle-connection recycling, explicit timeouts)
+    // before overlaying the operator's `store` options, so the passthrough
+    // still wins — see `harden_client_defaults`.
+    let builder = harden_client_defaults(AmazonS3Builder::from_env().with_url(url.as_str()));
+    let store = apply_options(builder, options).build()?;
     Ok((Box::new(store), path))
+}
+
+/// Conservative HTTP-client defaults for the S3 backend, applied *before* the
+/// operator's `store` passthrough so the passthrough still overrides them (and
+/// so unrelated client options seeded from the environment — `allow_http`, a
+/// proxy — are left untouched, unlike a wholesale `with_client_options`).
+///
+/// `pool_idle_timeout` is the load-bearing one: object_store leaves it unset, so
+/// a lane can pull a connection the server (or an intermediary) has already
+/// half-closed and fail its next request with an incomplete-message body error
+/// — the churn a back-pressured backfill provokes. Recycling idle connections
+/// after 30s avoids that. `read_timeout` bounds an otherwise-unbounded stalled
+/// body read; `connect_timeout` pins object_store's own 5s default explicitly.
+/// The overall request `timeout` keeps object_store's 30s default: bounded
+/// ranged GETs (see [`fetch`](crate::fetch)) each complete at network speed,
+/// well inside it.
+fn harden_client_defaults(builder: AmazonS3Builder) -> AmazonS3Builder {
+    builder
+        .with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::ConnectTimeout),
+            "5s",
+        )
+        .with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::ReadTimeout),
+            "30s",
+        )
+        .with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::PoolIdleTimeout),
+            "30s",
+        )
 }
 
 /// Overlay the raw `store` passthrough options onto an S3 builder. Keys that
@@ -763,6 +818,41 @@ mod tests {
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn advisory_lane_count_reports_configured_lanes() {
+        // The runtime reads this to warn on a lanes ≫ pipeline.threads
+        // over-subscription; it must reflect the configured lane count.
+        let yaml = "s3:\n  url: s3://bucket/exports/\n  lanes: 7\n  \
+                    checkpoint:\n    url: s3://bucket/_etl/b.json\n";
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let section = ComponentConfig::new("s3", value["s3"].clone());
+        let source =
+            S3Source::from_component_config(&section, tokio::runtime::Handle::current()).unwrap();
+        assert_eq!(source.advisory_lane_count(), Some(7));
+    }
+
+    #[test]
+    fn hardened_client_defaults_are_set_and_overridable() {
+        let idle = AmazonS3ConfigKey::Client(ClientConfigKey::PoolIdleTimeout);
+        let b = harden_client_defaults(AmazonS3Builder::new());
+        assert_eq!(
+            b.get_config_value(&idle).as_deref(),
+            Some("30s"),
+            "pool-idle recycling is on by default, so half-closed connections are \
+             not reused"
+        );
+        // The operator's `store` passthrough still wins over the hardened value.
+        let overridden = apply_options(
+            harden_client_defaults(AmazonS3Builder::new()),
+            &map(&[("pool_idle_timeout", "5s")]),
+        );
+        assert_eq!(
+            overridden.get_config_value(&idle).as_deref(),
+            Some("5s"),
+            "a store: entry overrides the hardened default"
+        );
     }
 
     #[test]

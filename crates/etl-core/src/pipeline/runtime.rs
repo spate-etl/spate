@@ -175,6 +175,23 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         if threads == 0 || self.config.pipeline.io_threads == 0 {
             return Err(StartError::Config("thread counts must be non-zero".into()));
         }
+        // Advisory: a source declaring far more lanes than there are driver
+        // threads gains no decode parallelism from the surplus — effective
+        // parallelism is min(lanes, threads) — so the extra lanes only add
+        // read-ahead memory and open connections. Warn, don't clamp: some
+        // sources want lanes >= threads for full coverage, and lanes are the
+        // source's to choose.
+        if let Some(lanes) = self.source.advisory_lane_count()
+            && lanes > threads.saturating_mul(2)
+        {
+            tracing::warn!(
+                lanes,
+                threads,
+                "source declares many more lanes than pipeline threads; effective decode \
+                 parallelism is min(lanes, threads), so the surplus adds read-ahead memory and \
+                 open connections without more throughput — consider lanes nearer `pipeline.threads`"
+            );
+        }
         let pipeline_name = self.config.pipeline.name.clone();
 
         // The source's declared component_type feeds both its stage-metric

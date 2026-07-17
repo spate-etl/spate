@@ -183,6 +183,17 @@ pub trait Source: Send {
         FramingContract::WholePayload
     }
 
+    /// How many lanes (framework partitions) this source will hand out, if it
+    /// knows before [`open`](Source::open). Purely advisory: the runtime uses it
+    /// only to warn when a source is configured with far more lanes than there
+    /// are pipeline threads to decode them (effective decode parallelism is
+    /// `min(lanes, threads)`). `None` (the default) means "unknown / don't
+    /// check" — a source whose partition count is only known after connecting
+    /// (e.g. Kafka, from the broker) simply omits it.
+    fn advisory_lane_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Connect and prepare. Called once before any other method.
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError>;
 

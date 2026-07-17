@@ -1,0 +1,113 @@
+# Source coordination
+
+Brokered sources bring their own coordination: a Kafka consumer group
+assigns partitions across processes, and running a second replica Just
+Works. Broker-less sources — object-store backfills, database range
+scans, file tails — have no group protocol. Two processes pointed at the
+same input each see *all* of it, so scaling out means duplicating every
+record.
+
+The coordination layer closes that gap with a **dynamic work-stealing
+coordinator–worker model**. It is not a data path — records never flow
+through it — and it is not a new deployable: every pipeline replica runs
+the same binary, and the only added infrastructure is a small,
+low-latency key-value store (NATS JetStream in the shipped backend).
+
+## The model
+
+**A planner enumerates the work as splits.** A split is one leasable unit
+of work — an object-store source plans object lists bin-packed by bytes;
+a database source plans balanced id ranges. Each split has a
+deterministic id, an opaque descriptor (everything a worker needs to
+process it), and a weight. The planner is source code, provided by the
+connector; the framework decides *where* and *when* it runs: only on the
+fleet's current **leader**, elected by a lease on a well-known key in the
+store. Workers receive split descriptors through the store and never
+re-enumerate the input — one listing per plan, fleet-wide.
+
+**Workers lease splits toward a bounded working set.** Each worker claims
+splits up to `min(max_in_flight, fair share)` and materializes a data
+lane per split it holds. Unclaimed splits sit unleased in the store: they
+are the queue. A lease is a TTL'd key the owner heartbeats at a third of
+the lease duration; work distribution is push-driven (workers watch the
+store), so a released or expired split is picked up in milliseconds, not
+poll intervals.
+
+**Failures flow back automatically.** A dead worker stops heartbeating;
+its leases expire one TTL later and peers claim them, resuming each split
+from its last committed progress. A worker that is alive but over-loaded
+gets balanced instead: a peer below its share with nothing unclaimed
+steals one split from the most-loaded owner — pairwise, at most one per
+cycle, so ownership converges to ±1 balance and never oscillates.
+
+**Commits are fenced.** Every split's durable record carries a
+monotonically increasing epoch, bumped on every ownership change, and a
+progress commit is a compare-and-swap on that record. A stale owner — a
+network-partitioned zombie, a GC-paused straggler whose lease was stolen —
+loses the swap: **nothing is written**, the worker is told the split is
+lost, and the durable progress remains exactly what the live owner
+committed. Progress can replay; it can never regress. The same fence
+covers the leader: a newly elected leader bumps the plan record (moving
+its CAS revision), so a deposed leader's in-flight plan write loses the
+swap and a stale plan is never published.
+
+## Delivery contract
+
+At-least-once, nothing stronger. Ownership handoffs may briefly overlap —
+a taken-over split's uncommitted tail is replayed by the new owner, and a
+zombie may emit records for one commit interval before its next write
+fences. Both produce **duplicates, never loss**. Design target tables to
+tolerate replays, exactly as for a restart.
+
+## Poison splits
+
+A split that keeps killing its owners (or that the source explicitly
+reports as unprocessable) consumes a delivery attempt per failed tenancy.
+At the attempt cap it is **quarantined**: parked, visible in the store
+and in `etl_coordination_splits_quarantined`, and never re-offered.
+Graceful releases and rebalance steals consume no attempts — only
+non-graceful ends are poison evidence.
+
+Quarantine deliberately blocks completion: a bounded job with quarantined
+splits finishes as **stalled**, not complete — declaring success over
+planned-but-unprocessed data would dress loss up as a green exit. The
+embedding source decides whether a stall is fatal (the default) or a
+drain-with-warning.
+
+## Completion
+
+A planner declares its enumeration **final** (a bounded backfill) or
+**open** (a discovery job the leader re-plans on an interval). For final
+plans, once every split has committed terminal progress, every worker —
+including idle standbys that never owned a split — observes completion
+and drains. The standby matters: it covers an owner dying at the finish
+line.
+
+## Why an external store
+
+An earlier design coordinated instances over the checkpoint object store
+itself (S3 conditional writes), trading latency for zero extra
+infrastructure. It was rejected on review before merging: it made an
+object store the required substrate for *every* coordinated source — a
+database source would deploy S3 just to coordinate — and object-store
+round-trips are poll-based and slow, which caps how fast work can be
+distributed and stolen. The full record of that reversal lives in the
+design log (`docs/DESIGN.md`). The store dependency is deliberately
+narrow: six primitives (create-if-absent, compare-and-swap, guarded
+delete, point read, prefix watch, listing) behind a public trait, so
+Redis- or etcd-class backends can be added without touching the protocol.
+Correctness never leans on the store's clock or its watch semantics —
+fencing is the only correctness mechanism; the store supplies latency.
+
+## What this is not
+
+- **Not exactly-once.** Handovers duplicate; they never lose.
+- **Not a data path.** Only coordination metadata (split records, leases,
+  the plan) touches the store; records flow through the pipeline as
+  always.
+- **Not required.** A single instance without a coordinator behaves
+  exactly as before; coordination is opt-in per source.
+
+Continue with [Scaling out](../05-deployment/scaling-out.mdx) for
+deployment, or [Custom sources](../06-extending/custom-source.mdx#coordination-aware-sources)
+to make your own source coordinated.

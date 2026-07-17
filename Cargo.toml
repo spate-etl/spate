@@ -7,6 +7,7 @@ members = [
     "crates/etl-json",
     "crates/etl-kafka",
     "crates/etl-clickhouse",
+    "crates/etl-coordination",
     "crates/etl-s3",
     "crates/etl-test",
     "benchmarks",
@@ -28,6 +29,10 @@ etl-avro = { version = "=0.1.0", path = "crates/etl-avro" }
 etl-json = { version = "=0.1.0", path = "crates/etl-json" }
 etl-kafka = { version = "=0.1.0", path = "crates/etl-kafka" }
 etl-clickhouse = { version = "=0.1.0", path = "crates/etl-clickhouse" }
+# default-features = false so the etl facade can gate the NATS tree
+# behind its own `coordination-nats` feature (memory-only embedding must
+# not drag async-nats in).
+etl-coordination = { version = "=0.1.0", path = "crates/etl-coordination", default-features = false }
 etl-s3 = { version = "=0.1.0", path = "crates/etl-s3" }
 etl-test = { version = "=0.1.0", path = "crates/etl-test" }
 
@@ -81,8 +86,15 @@ apache-avro = "0.21"
 # Object-storage client for etl-s3. 0.x like rdkafka/clickhouse: internal
 # only, no types in public APIs (dependency policy in docs/DESIGN.md).
 object_store = "0.14"
+# NATS client for etl-coordination's JetStream KV backend. 0.x policy as
+# above: single minor, internal only, never in public signatures. The
+# `server_2_11` feature (in defaults) gates the limit-marker KV config the
+# lease buckets depend on; the paired server version floor is asserted at
+# startup.
+async-nats = "0.49"
 url = "2"
 futures-util = { version = "0.3", default-features = false }
+base64 = "0.22"
 flate2 = "1.1"
 zstd = "0.13"
 # Exact pin: =2.1.0 is the release the benchmarks and the license review

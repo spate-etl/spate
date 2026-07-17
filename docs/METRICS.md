@@ -240,6 +240,39 @@ series carry its name as the `component` label (a single sink uses
 | `etl_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `etl_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |
 
+## Coordination (`etl_coordination_*`)
+
+Registered only when a source runs with multi-instance split coordination
+(the `coordination`/`coordination-nats` features' backend, or any custom `SplitCoordinator`
+handed a `CoordinationMetrics`). They fire alongside the source's own
+`etl_source_rebalances_total` / `etl_source_lanes_active`.
+
+| Metric | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `etl_coordination_splits_owned` | gauge | | Splits this worker currently leases (its working set). |
+| `etl_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). |
+| `etl_coordination_splits_quarantined` | gauge | | Splits parked after exhausting delivery attempts — **alert on > 0**: a bounded job with quarantined splits ends stalled, not complete. |
+| `etl_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. |
+| `etl_coordination_leader` | gauge | | 1 while this worker holds the planner leadership lease. |
+| `etl_coordination_idle` | gauge | | 1 while this worker owns no splits and observes as a standby. |
+| `etl_coordination_acquisitions_total` | counter | `reason` (`create`\|`released`\|`reclaimed`\|`expired`\|`stolen`) | Split leases acquired, by how the split became claimable. `expired` spikes mean workers are dying; steady `stolen` means chronic imbalance. |
+| `etl_coordination_revocations_total` | counter | `reason` (`fenced`\|`starved`) | Splits lost involuntarily: fenced by a peer's higher epoch, or self-fenced after a full lease without a successful write (store unreachable). |
+| `etl_coordination_releases_total` | counter | | Voluntary hand-backs (graceful shutdown, scale-down). |
+| `etl_coordination_splits_planned_total` | counter | | Splits this worker wrote into the plan while leader. |
+| `etl_coordination_replans_total` | counter | `outcome` (`ok`\|`error`\|`noop`) | Planner runs while leader; `noop` = the enumeration produced nothing new (the normal steady state of an open plan). |
+| `etl_coordination_split_failures_total` | counter | | Explicit poison reports (`fail`) from the source. |
+| `etl_coordination_quarantines_total` | counter | | Splits parked at the attempt cap. |
+| `etl_coordination_writes_total` | counter | `outcome` (`ok`\|`conflict`\|`error`) | Split-record writes. `conflict` is a lost compare-and-swap — fencing working as designed, alarming only in bulk. |
+| `etl_coordination_write_duration_seconds` | histogram | | Split-record write round-trip. |
+| `etl_coordination_replan_duration_seconds` | histogram | | One planner run (enumeration included). |
+| `etl_coordination_reconcile_duration_seconds` | histogram | | One full reconcile listing (the missed-watch-event backstop). |
+| `etl_coordination_store_op_duration_seconds` | histogram | `op` (`get`\|`put`\|`delete`\|`list`\|`watch`) | Store primitive round-trips — the NATS latency view. |
+
+Cardinality note: a coordinated source's checkpoint partitions are minted
+per split *tenancy* (monotonic), so per-partition series under
+`metrics.per_partition_detail: true` grow over a long, churny job; the
+default (off) is unaffected.
+
 ## End-to-end
 
 | Metric | Type | Extra labels | Meaning |

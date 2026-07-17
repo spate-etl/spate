@@ -1,0 +1,123 @@
+# Scaling out
+
+One process runs one pipeline. Scaling *up* means threads and shards
+(see [Tuning](tuning.mdx)); scaling *out* means several
+identical replicas dividing one source's work. How that division happens
+depends on the source:
+
+| Source | Scale-out story |
+|---|---|
+| Kafka | Native: run N replicas in one consumer group; the broker assigns partitions. Nothing extra to deploy. |
+| S3 backfill | Planned — the coordinated wiring for `etl-s3` is tracked in [#39](https://github.com/marcuskainth/etl-rs/issues/39); today one instance owns a backfill. |
+| Custom broker-less sources | The [coordination seam](../02-concepts/07-source-coordination.mdx): a planner, the `CoordinationDriver`, and a coordinator backend. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
+
+The rest of this page covers deploying the coordination backend that
+broker-less sources share.
+
+## NATS: the coordination store
+
+Coordinated instances meet in a NATS JetStream key-value store. Records
+never flow through it — it carries split records, leases, and the plan,
+at a request rate of roughly one small write per held split per third of
+a lease (a handful of writes per second per worker).
+
+Requirements:
+
+- **NATS server ≥ 2.11** with JetStream enabled (`-js`). The lease
+  protocol rides on per-message age limits and KV limit markers, which
+  shipped in 2.11 — the worker verifies the version at startup and fails
+  actionably against an older server.
+- One **job name** per coordinated job (the `job` field): it suffixes the
+  two KV buckets (`etl_coordination_{job}_state` / `..._lease`). Two
+  different jobs must never share one; a fingerprint check rejects
+  misconfigured workers before they can touch anything.
+
+Development and CI: a single `nats:2.11` container is enough —
+
+```yaml
+# docker-compose.yml
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js"]
+    ports: ["4222:4222"]
+
+  pipeline:
+    image: your-pipeline
+    deploy: { replicas: 2 }
+    environment:
+      NATS_URL: nats://nats:4222
+      # instance_id from the container hostname — unique per replica
+```
+
+Production HA: a 3-node NATS cluster with JetStream and `replicas: 3` on
+the NATS store config (`NatsConfig`, not the `coordination:` tuning
+section below), so the buckets survive a NATS node loss. What a
+full NATS outage does to the pipeline: heartbeats fail, workers
+**self-fence** after one lease without a successful write (they stop
+their splits rather than run unfenced), commits surface as retryable, and
+everything resumes where it left off when the store returns — degraded,
+never corrupted.
+
+## Kubernetes
+
+A plain `Deployment` — no StatefulSet, no persistent volumes, no
+per-replica configuration:
+
+- **`instance_id` from the pod name.** It must be unique per live
+  replica; a stable identity lets a restarted pod reclaim its own splits
+  instantly instead of waiting out the lease. Two live processes sharing
+  an id is detected and fatal. (Pod names contain dots' worth of
+  uniqueness already; the id charset is `[A-Za-z0-9_-]` — substitute any
+  dots.)
+- **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
+  replica drains, commits, and releases its splits on the way out, so
+  peers pick them up immediately; a SIGKILL'd one is covered by lease
+  expiry instead.
+- Readiness/liveness probes are unchanged (the admin server's endpoints).
+
+Scaling events behave like Kafka rebalances, but incremental: a new
+replica claims unowned splits first, then steals — one split at a time,
+from the most-loaded worker — until balanced. A scaled-down replica's
+released splits are claimed within milliseconds.
+
+## Tuning
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `lease_duration` | 30s | Takeover latency after an ungraceful death. Heartbeats run at a third of it. Lower = faster failover, more store traffic, more sensitivity to pauses. |
+| `max_in_flight` | 8 | The working set: splits a worker holds (and processes) at once — also its data-lane count. Size it like a thread pool. |
+| `max_attempts` | 4 | Failing tenancies before a split is quarantined. |
+| `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
+| `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
+
+Split sizing is the planner's job, not a config knob: aim for roughly
+uniform-cost splits in the tens-of-MB to ~128 MB range (or the row-count
+equivalent) — big enough that lease traffic is noise, small enough that
+takeovers and steals move useful quanta of work.
+
+## Failure modes
+
+| Failure | What happens |
+|---|---|
+| Replica killed (OOM, node loss) | Its leases expire after one `lease_duration`; peers claim the splits and **resume from the last committed progress**. The uncommitted tail replays: duplicates, never loss. |
+| Replica drained (SIGTERM) | Final commit, then release: peers claim immediately, no lease wait, no attempt consumed. |
+| Zombie resumes after takeover | Its next commit loses the record CAS: nothing written, split reported lost locally. The duplicate window is at most one commit interval. |
+| Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. |
+| NATS unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
+| Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `etl_coordination_splits_quarantined`. |
+| Scale-up | New replicas claim unowned work, then steal pairwise toward ±1 balance. Stolen splits replay at most one commit interval. |
+| Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
+| Duplicate `instance_id` | Two live twins would ping-pong reclaims forever; the protocol detects the foreign process on the shared id and stops with a fatal, actionable error. |
+
+## Observability
+
+The `etl_coordination_*` families (see
+[METRICS.md](https://github.com/marcuskainth/etl-rs/blob/main/docs/METRICS.md))
+carry the whole story: `splits_owned` per worker, `live_workers` for the
+fleet view, `leader` for who plans, `acquisitions_total` by reason
+(`create`/`released`/`reclaimed`/`expired`/`stolen`),
+`revocations_total` (`fenced`/`starved`), `splits_quarantined` for
+poison, and store-op latency histograms for the NATS round-trips.
+`etl_coordination_writes_total{outcome="conflict"}` is fencing working as
+designed — alarming only in bulk.

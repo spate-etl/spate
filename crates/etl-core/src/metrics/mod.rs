@@ -33,6 +33,7 @@
 
 mod backpressure;
 mod checkpoint;
+mod coordination;
 mod deser;
 mod labels;
 mod meter;
@@ -45,6 +46,9 @@ mod source;
 
 pub use backpressure::BackpressureMetrics;
 pub use checkpoint::CheckpointMetrics;
+pub use coordination::{
+    AcquireReason, CoordinationMetrics, ReplanOutcome, SplitLossReason, StoreOp, WriteOutcome,
+};
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
 pub use meter::Meter;
@@ -382,6 +386,24 @@ mod tests {
             cp.commit(true, Duration::from_millis(4));
             cp.set_watermark_age(Duration::from_secs(1));
 
+            let coord = CoordinationMetrics::new(&labels());
+            coord.set_splits_owned(3);
+            coord.set_splits_completed(1);
+            coord.set_splits_quarantined(1);
+            coord.set_live_workers(2);
+            coord.set_leader(true);
+            coord.set_idle(false);
+            coord.acquired(AcquireReason::Expired);
+            coord.lost(SplitLossReason::Fenced);
+            coord.released(1);
+            coord.planned(8);
+            coord.replan(ReplanOutcome::Noop, Duration::from_millis(20));
+            coord.failed();
+            coord.quarantined();
+            coord.write(WriteOutcome::Conflict, Duration::from_millis(8));
+            coord.reconcile(Duration::from_millis(15));
+            coord.store_op(StoreOp::Put, Duration::from_micros(600));
+
             let pl = PipelineMetrics::new(&labels(), "0.1.0");
             pl.set_state(PipelineState::Running);
             pl.set_threads(4);
@@ -400,6 +422,10 @@ mod tests {
             r#"etl_sink_replica_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 1"#,
             r#"etl_sink_shard_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3"} 0"#,
             r#"etl_checkpoint_commits_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 1"#,
+            r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="expired"} 1"#,
+            r#"etl_coordination_replans_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="noop"} 1"#,
+            r#"etl_coordination_writes_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="conflict"} 1"#,
+            r#"etl_coordination_leader{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,
             r#"etl_pipeline_state{pipeline="orders",component="orders_kafka",component_type="kafka",state="running"} 1"#,
             r#"etl_pipeline_info{pipeline="orders",component="orders_kafka",component_type="kafka",version="0.1.0"} 1"#,
         ] {

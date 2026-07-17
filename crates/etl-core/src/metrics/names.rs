@@ -27,6 +27,8 @@ pub const L_REPLICA: &str = "replica";
 pub const L_REASON: &str = "reason";
 /// Outcome label (`ok`, `error`).
 pub const L_OUTCOME: &str = "outcome";
+/// Store-primitive label on coordination store-op timings.
+pub const L_OP: &str = "op";
 /// Rebalance event label (`assign`, `revoke`).
 pub const L_EVENT: &str = "event";
 /// Error taxonomy class label (`retryable`, `record_level`, `fatal`).
@@ -151,6 +153,50 @@ pub const CHECKPOINT_COMMIT_DURATION_SECONDS: &str = "etl_checkpoint_commit_dura
 /// alert signal.
 pub const CHECKPOINT_WATERMARK_AGE_SECONDS: &str = "etl_checkpoint_watermark_age_seconds";
 
+// Coordination (multi-instance split leases for broker-less sources).
+
+/// Splits currently leased by this worker.
+pub const COORDINATION_SPLITS_OWNED: &str = "etl_coordination_splits_owned";
+/// Splits observed completed across the fleet (bounded jobs).
+pub const COORDINATION_SPLITS_COMPLETED: &str = "etl_coordination_splits_completed";
+/// Splits parked in quarantine after exhausting delivery attempts.
+pub const COORDINATION_SPLITS_QUARANTINED: &str = "etl_coordination_splits_quarantined";
+/// Distinct live workers observed, including this instance.
+pub const COORDINATION_LIVE_WORKERS: &str = "etl_coordination_live_workers";
+/// 1 while this worker holds the planner leadership lease.
+pub const COORDINATION_LEADER: &str = "etl_coordination_leader";
+/// 1 while this worker owns no splits and observes as a standby.
+pub const COORDINATION_IDLE: &str = "etl_coordination_idle";
+/// Split acquisitions, by [`L_REASON`] (`create`, `released`, `reclaimed`,
+/// `expired`, `stolen`).
+pub const COORDINATION_ACQUISITIONS_TOTAL: &str = "etl_coordination_acquisitions_total";
+/// Splits lost involuntarily, by [`L_REASON`] (`fenced`, `starved`).
+pub const COORDINATION_REVOCATIONS_TOTAL: &str = "etl_coordination_revocations_total";
+/// Voluntary split releases (graceful shutdown or scale-down).
+pub const COORDINATION_RELEASES_TOTAL: &str = "etl_coordination_releases_total";
+/// Splits written into the plan by this worker while leader (seeded
+/// create-if-absent; replayed ids that already exist are not counted).
+pub const COORDINATION_SPLITS_PLANNED_TOTAL: &str = "etl_coordination_splits_planned_total";
+/// Planner runs while leader, by [`L_OUTCOME`] (`ok`, `error`, `noop`).
+pub const COORDINATION_REPLANS_TOTAL: &str = "etl_coordination_replans_total";
+/// Explicit split failure reports (`SplitCoordinator::fail`).
+pub const COORDINATION_SPLIT_FAILURES_TOTAL: &str = "etl_coordination_split_failures_total";
+/// Splits parked after exhausting their delivery attempts.
+pub const COORDINATION_QUARANTINES_TOTAL: &str = "etl_coordination_quarantines_total";
+/// Split-record writes, by [`L_OUTCOME`] (`ok`, `conflict`, `error`).
+pub const COORDINATION_WRITES_TOTAL: &str = "etl_coordination_writes_total";
+/// Split-record write round-trip time.
+pub const COORDINATION_WRITE_DURATION_SECONDS: &str = "etl_coordination_write_duration_seconds";
+/// One planner run while leader (enumeration included).
+pub const COORDINATION_REPLAN_DURATION_SECONDS: &str = "etl_coordination_replan_duration_seconds";
+/// One full reconcile listing (the watch-loss backstop).
+pub const COORDINATION_RECONCILE_DURATION_SECONDS: &str =
+    "etl_coordination_reconcile_duration_seconds";
+/// Store primitive round-trip time, by [`L_OP`] (`get`, `put`, `delete`,
+/// `list`, `watch`).
+pub const COORDINATION_STORE_OP_DURATION_SECONDS: &str =
+    "etl_coordination_store_op_duration_seconds";
+
 // End to end.
 
 /// Source-to-durable-write latency, observed per acknowledged batch.
@@ -188,6 +234,14 @@ pub const COUNTERS: &[&str] = &[
     SINK_REPLICA_ERRORS_TOTAL,
     SINK_ABANDONED_BATCHES_TOTAL,
     CHECKPOINT_COMMITS_TOTAL,
+    COORDINATION_ACQUISITIONS_TOTAL,
+    COORDINATION_REVOCATIONS_TOTAL,
+    COORDINATION_RELEASES_TOTAL,
+    COORDINATION_SPLITS_PLANNED_TOTAL,
+    COORDINATION_REPLANS_TOTAL,
+    COORDINATION_SPLIT_FAILURES_TOTAL,
+    COORDINATION_QUARANTINES_TOTAL,
+    COORDINATION_WRITES_TOTAL,
 ];
 
 /// Every gauge name.
@@ -204,6 +258,12 @@ pub const GAUGES: &[&str] = &[
     SINK_SHARD_HEALTHY,
     CHECKPOINT_PENDING_BATCHES,
     CHECKPOINT_WATERMARK_AGE_SECONDS,
+    COORDINATION_SPLITS_OWNED,
+    COORDINATION_SPLITS_COMPLETED,
+    COORDINATION_SPLITS_QUARANTINED,
+    COORDINATION_LIVE_WORKERS,
+    COORDINATION_LEADER,
+    COORDINATION_IDLE,
     PIPELINE_INFO,
     PIPELINE_STATE,
     PIPELINE_THREADS,
@@ -218,6 +278,10 @@ pub const HISTOGRAMS: &[&str] = &[
     SINK_BATCH_BYTES,
     SINK_FLUSH_DURATION_SECONDS,
     CHECKPOINT_COMMIT_DURATION_SECONDS,
+    COORDINATION_WRITE_DURATION_SECONDS,
+    COORDINATION_REPLAN_DURATION_SECONDS,
+    COORDINATION_RECONCILE_DURATION_SECONDS,
+    COORDINATION_STORE_OP_DURATION_SECONDS,
     E2E_LATENCY_SECONDS,
 ];
 
@@ -244,6 +308,7 @@ pub const RESERVED_ROOTS: &[&str] = &[
     "backpressure",
     "sink",
     "checkpoint",
+    "coordination",
     "e2e",
     "pipeline",
 ];

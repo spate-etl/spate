@@ -1,0 +1,42 @@
+[package]
+name = "etl-coordination"
+description = "Distributed work-stealing coordination backend for the etl-rs pipeline framework: a leader-elected planner enumerates weighted splits into a shared low-latency store (NATS JetStream KV); workers lease, heartbeat, and steal them with epoch-fenced resumable commits. Applications should depend on the `etl` facade crate with the `coordination` feature (in-memory store) or `coordination-nats` (the NATS backend)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["nats"]
+# The NATS JetStream KV store backend. Off leaves the store trait, the
+# protocol, and the in-memory store (tests, single-process embedding).
+nats = ["dep:async-nats"]
+
+[dependencies]
+async-nats = { workspace = true, optional = true }
+base64 = { workspace = true }
+etl-core = { workspace = true }
+foldhash = { workspace = true }
+# `alloc` is load-bearing for the feature-off build: BoxStream and
+# StreamExt::boxed vanish without it once async-nats (which unified it
+# in) is disabled.
+futures-util = { workspace = true, features = ["alloc"] }
+humantime-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_yaml = { workspace = true }
+testcontainers = { workspace = true, features = ["blocking"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

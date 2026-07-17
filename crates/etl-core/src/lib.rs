@@ -24,6 +24,9 @@ pub use bytes;
 pub mod backpressure;
 pub mod checkpoint;
 pub mod config;
+// References `source` types, so it shares the source module's loom gate.
+#[cfg(not(loom))]
+pub mod coordination;
 pub mod deser;
 pub mod error;
 pub mod framing;

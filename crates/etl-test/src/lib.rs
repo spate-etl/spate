@@ -65,6 +65,7 @@
 //! ([`TestDeserializer::fail_on_prefix`]); for property tests, enable the
 //! `proptest` feature and use [`strategies`].
 
+mod coordination;
 mod deser;
 mod run;
 mod sink;
@@ -73,6 +74,7 @@ mod source;
 #[cfg(feature = "proptest")]
 pub mod strategies;
 
+pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
 pub use run::{PipelineRun, wait_until};
 pub use sink::{

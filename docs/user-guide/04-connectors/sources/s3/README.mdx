@@ -25,13 +25,14 @@ let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
 
 :::warning One process per prefix — no horizontal scaling
 
-The S3 source does **not** scale across pods. Object storage has no
+The S3 source does **not** scale across pods yet. Object storage has no
 consumer-group protocol: two processes pointed at the same prefix each
 list and process the *entire* prefix (a full duplicate backfill) and race
 on the manifest. Run exactly one pipeline process per backfill and scale
-**vertically** with `lanes` and pipeline threads. Multi-pod sharding
-(Kubernetes Indexed Jobs) and event-driven ingestion (S3 → SQS) are
-planned follow-ups.
+**vertically** with `lanes` and pipeline threads. Wiring this source to
+the framework's [coordination layer](../../../02-concepts/07-source-coordination.mdx)
+(planner-sized splits, leased and stolen across replicas) is tracked in
+[#39](https://github.com/marcuskainth/etl-rs/issues/39).
 
 :::
 

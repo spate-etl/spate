@@ -96,17 +96,67 @@ replay after restart.
 
 ### Epoch
 
-The assignment generation in the checkpointer, bumped on every rebalance
-(`Checkpointer::begin_epoch`). Acks issued under a previous epoch are
-discarded, so a stale acknowledgement from a revoked assignment can never
-advance the new assignment's watermarks.
+Three generations share the name, all monotonic, all fencing something:
+the **assignment epoch** in the checkpointer, bumped on every rebalance
+(`Checkpointer::begin_epoch`) so acks issued under a previous assignment
+are discarded; the **lease epoch** (`LeaseEpoch`) on a coordinated
+[split](#split), bumped on every ownership change so a stale owner's
+commit loses its compare-and-swap; and the **plan generation**, bumped by
+every newly elected coordination leader so a deposed leader's plan write
+is rejected.
+
+### Fencing token
+
+A monotonically increasing number a writer must present with a write, so
+that a writer whose authority lapsed (an expired lease, a paused process)
+is *rejected by the store* rather than trusted. In coordinated sources
+the token is the split record's revision/epoch, and the fenced write is
+the progress commit itself: a fenced commit writes **nothing**. Leases
+alone cannot provide this — only the store-side check can.
 
 ### Lane
 
 The data-plane unit of a source (`SourceLane`): one pollable stream pinned
 to one pipeline thread, yielding borrowed payload batches. For Kafka, a
-lane is a partition queue; lanes map m:n onto pipeline threads.
-`etl_source_lanes_active` counts them.
+lane is a partition queue; lanes map m:n onto pipeline threads. In a
+coordinated source, lanes are purely local: the `CoordinationDriver`
+materializes one lane per in-flight [split](#split) and renumbers them
+per assignment cycle. `etl_source_lanes_active` counts them.
+
+### Lease
+
+A time-bounded claim on one [split](#split): a TTL'd key in the
+coordination store that the owner rewrites (heartbeats) at a third of the
+lease duration. A dead owner stops heartbeating and the lease expires,
+releasing the split to the fleet; a live owner that cannot reach the
+store self-fences after one full lease. Leases provide *liveness*;
+correctness comes from the [fencing token](#fencing-token).
+
+### Quarantine
+
+Where poison [splits](#split) go: a split whose tenancies keep ending in
+failure consumes a delivery attempt per non-graceful end and is parked at
+the cap — visible, never re-offered, and blocking `AllComplete` (a
+bounded job with quarantined work ends stalled, not falsely complete).
+
+### Split
+
+The leasable work unit of a coordinated source, enumerated by the
+source's `SplitPlanner` (an object-store source: an object list
+bin-packed by bytes; a database source: an id range). Deterministic id,
+opaque descriptor, weight hint; progress commits are per-split, fenced,
+and resumable — a taken-over split continues from its last committed
+watermark. Distinct from a [lane](#lane) (local execution) and a
+[partition](#partition) (checkpoint bookkeeping).
+
+### Work stealing
+
+How a coordinated fleet stays balanced without a central assigner: a
+worker below its share with nothing unclaimed takes one split from the
+most-loaded owner — only when the victim holds at least two more than the
+thief, so every transfer strictly narrows the gap and ownership converges
+to ±1 without oscillating. The victim keeps working until its next write
+fences, bounding the duplicate window to one commit interval.
 
 ### Partition
 

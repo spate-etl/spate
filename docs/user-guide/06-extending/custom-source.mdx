@@ -233,3 +233,237 @@ the `etl-test` harness. To run it for real, hand it to the builder:
 `pipeline.sink(...)?.chains(...).run(source)` — the source stays a terminal
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
+
+## Coordination-aware sources
+
+A broker-less source can let several pipeline replicas divide its work by
+plugging into the [coordination seam](../02-concepts/07-source-coordination.mdx).
+You implement two small traits — *what the work is* and *how to read one
+piece of it* — and embed the framework's `CoordinationDriver`, which owns
+all of the assignment choreography, fencing bookkeeping, and completion
+tracking. Everything below is the complete wiring; the runnable version
+is `crates/etl/examples/coordinated_pipeline.rs`.
+
+### 1. Plan the work: `SplitPlanner`
+
+The planner enumerates the input as **splits** — leasable work units with
+deterministic ids. It runs only on the fleet's elected leader; workers
+receive the descriptors and never re-enumerate.
+
+```rust
+use etl::coordination::{
+    CoordinationError, PlanContext, PlanFinality, PlannedSplit, SplitId,
+    SplitPlan, SplitPlanner, SplitSpec,
+};
+
+struct MyPlanner { /* connection/config it plans from */ }
+
+impl SplitPlanner for MyPlanner {
+    /// Config-derived job identity (NEVER derived from the enumeration).
+    /// Byte-equal across every worker of the job, or the odd one out is
+    /// rejected at startup.
+    fn fingerprint(&self) -> String {
+        "my-source:v1:table=orders".into()
+    }
+
+    /// May do real I/O (a LIST, an index scan) — it runs off the async
+    /// loop. Idempotency contract: unchanged work yields the same ids.
+    fn plan(&mut self, ctx: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
+        let splits = vec![PlannedSplit::new(
+            SplitSpec::new(
+                SplitId::new("rows-000000-000125")?,
+                b"0..125".to_vec(),          // opaque descriptor, keep it small
+            )
+            .with_weight(125),               // cost hint (bytes, rows)
+        )];
+        // Final = bounded job (completion is reachable). Open = the leader
+        // re-runs the planner on the replan interval; persist a cursor via
+        // `.with_planner_state(...)` and read it back from `ctx.planner_state`.
+        Ok(SplitPlan::new(splits, PlanFinality::Final))
+    }
+}
+```
+
+Sizing guidance: roughly uniform-cost splits, tens of MB to ~128 MB (or
+the row-count equivalent). Migrating from a pre-coordination checkpoint:
+attach it with `PlannedSplit::with_seed(progress)` — seeds are
+first-writer-wins and never overwrite live progress. A brand-new source
+plans without seeds; an empty `Final` plan completes immediately.
+
+### 2. Read the work: `SplitSource`
+
+Implement the driver's callbacks on your **lane-assembly context** — the
+sub-struct holding what lane construction needs — not on the source
+itself, so the driver (a sibling field) and the context borrow disjointly:
+
+```rust
+use etl::coordination::driver::{SplitOpening, SplitSource};
+use etl::coordination::{SplitId, SplitProgress, SplitSpec};
+
+impl SplitSource for MyCtx {
+    type Lane = MyLane;
+
+    /// Materialize the data lane for a gained (or re-assigned) split.
+    /// `opening.resume` is the authoritative committed progress; start
+    /// exactly there. Spawn fetchers here; never block on data.
+    fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<MyLane, SourceError> {
+        let resume = opening.resume.map_or(0, |p| p.watermark);
+        Ok(MyLane::new(opening.lane, opening.partition, /* … */ resume))
+    }
+
+    /// Drift-check carried progress (etag pins, schema versions) before
+    /// trusting it. Default accepts. Rejecting stops the pipeline.
+    fn validate_resume(&self, split: &SplitSpec, p: &SplitProgress) -> Result<(), SourceError> {
+        Ok(())
+    }
+
+    /// Snapshot committable progress at an acked watermark: opaque resume
+    /// state plus whether this watermark COMPLETES the split (fully
+    /// delivered and fully acknowledged — you own that accounting).
+    fn encode_commit(&mut self, split: &SplitId, watermark: i64) -> Result<SplitProgress, SourceError> {
+        Ok(SplitProgress::new(watermark, vec![]))
+    }
+
+    /// Completion sweep for splits with no new watermark this tick (empty
+    /// splits; tails acked exactly at the previous commit): Some(terminal)
+    /// when done, None while data is in flight.
+    fn sweep(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
+        Ok(None)
+    }
+
+    /// The split's lane is being retired (lost, completed, shutdown):
+    /// DETACH its fetcher — never abort it, the pipeline thread may still
+    /// be draining the lane. Must not block.
+    fn close_split(&mut self, split: &SplitId) {}
+}
+```
+
+### 3. Delegate the choreography: `CoordinationDriver`
+
+```rust
+use etl::coordination::driver::CoordinationDriver;
+use etl::coordination::SplitCoordinator;
+
+struct MySource {
+    driver: CoordinationDriver,
+    ctx: MyCtx,
+    started: bool,
+}
+
+impl Source for MySource {
+    type Lane = MyLane;
+
+    fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+        self.ctx.issuer = Some(ctx.issuer);
+        Ok(())
+    }
+
+    fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<MyLane>, SourceError> {
+        if !self.started {
+            self.started = true;
+            // Joins the job and returns SourceEvent::LanesAssigned(vec![]) —
+            // the EMPTY ready signal. It bumps the controller's assignment
+            // epoch and marks the pipeline running while claims race;
+            // splits arrive as later assignments.
+            return self.driver.start(Box::new(MyPlanner { /* … */ }));
+        }
+        self.driver.poll_events(&mut self.ctx, timeout)
+    }
+
+    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
+        self.driver.commit(&mut self.ctx, watermarks)
+    }
+    // flush_commits: keep the default no-op. A commit that returns Ok is
+    // either durable in the store or (after a transient store failure)
+    // cached by the driver and recommitted on the next tick — the
+    // previous durable state stays authoritative meanwhile, so a crash
+    // before the recommit only widens replay, never loses data.
+}
+
+impl Drop for MySource {
+    fn drop(&mut self) {
+        self.driver.release(); // graceful handoff: peers claim instantly
+    }
+}
+```
+
+What the driver owns so you don't: dense lane ids per assignment cycle; a
+fresh `PartitionId` per tenancy (so a late drain-commit from a lost split
+resolves to a retired tenancy and is skipped — no zombie folds); the
+eager revoke-all/assign-full contract; fenced-commit triage (`Fenced` →
+quarantine the tenancy, surface the loss; `Retryable` → recommit next
+tick); completion sweeps; `AllComplete` → `Drained`. A **stalled** job
+(quarantined splits blocking completion) is a fatal error by default —
+build the driver with `CoordinationDriver::new(...).stall_drains(true)`
+(a consuming builder, applied at construction) to turn it into a
+drain-with-warning. Report a poison split you cannot process with
+`driver.fail(&mut ctx, &split, "reason")`: it consumes a delivery attempt
+and hands the split back (quarantine happens at the attempt cap).
+
+### 4. Construct a backend
+
+The coordinator is injected at assembly time, exactly like the framer
+seam. Production (NATS, feature `coordination-nats`, server ≥ 2.11):
+
+```rust
+use etl::coordination::store::nats::{NatsConfig, NatsStore};
+use etl::coordination::{CoordinationConfig, StoreCoordinator};
+
+// One value drives the store's TTL and the coordinator's lease_duration.
+// They must match — StoreCoordinator::new fails fast on a divergence
+// (heartbeats pace from the config, expiry runs on the store's clock).
+let coordination = CoordinationConfig {
+    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
+    ..CoordinationConfig::default()
+};
+let store = NatsStore::new(
+    // `job`: one per coordinated job — it suffixes the KV bucket names.
+    NatsConfig::new(vec!["nats://nats:4222".into()], "orders-backfill"),
+    coordination.lease_duration,
+)?;
+let coordinator = StoreCoordinator::new(
+    store,
+    coordination,
+    pipeline.io_handle(),
+    None, // or Some(CoordinationMetrics::new(&labels)) — see below
+)?;
+let source = MySource::new(Box::new(coordinator));
+```
+
+(`NatsConfig::new` gives anonymous plaintext defaults; set `credentials`,
+`tls`, and `replicas` on the value for production clusters.)
+
+Tests and single-process runs swap the store — nothing else changes, and
+the `coordination` feature alone suffices (no NATS dependency tree):
+
+```rust
+use etl::coordination::store::memory::MemoryStore;
+let store = MemoryStore::new(coordination.lease_duration);
+```
+
+Connection notes: `NatsStore::new` is synchronous — the connection and
+bucket provisioning happen lazily under the coordinator's startup retry
+budget, so a down NATS at boot retries with backoff and a
+misconfiguration (old server, a `lease_duration` changed mid-job, a
+store TTL diverging from the coordination config) fails fast with an
+actionable message. Credentials never appear in `Debug` output.
+
+### Metrics
+
+The `etl_coordination_*` families are framework-owned and pre-registered:
+build `CoordinationMetrics::new(&labels)` at assembly time — after
+`Pipeline::from_config` has installed the recorder, alongside the
+backend construction above — and pass it to `StoreCoordinator::new`
+(metrics are a constructor parameter; there is no later hook). Passing
+`None` runs without coordination metrics; nothing registers per-record.
+
+### Testing
+
+`etl-test`'s `scripted_coordinator()` drives your driver choreography
+without a store or clock: script gains/losses/quarantines and commit
+outcomes (`Fenced`/`Retryable`/`Fatal`), assert on observed commits,
+failure reports, and releases; `take_planner()` hands back the planner
+your source registered so a test can run it directly and feed its plan
+back through `gain(...)`. For the real protocol end to end, run two
+sources over one shared `MemoryStore` in a test — the pattern of
+`crates/etl/examples/coordinated_pipeline.rs`.

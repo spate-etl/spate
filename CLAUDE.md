@@ -15,7 +15,8 @@ cargo fmt --all
 cargo bench -p etl-core                        # criterion + divan micro benches
 cargo bench -p etl-avro --features fast        # fast-backend decode variants need the feature
 RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
-cargo check -p etl --examples --all-features   # all ten examples compile
+cargo check -p etl --examples --all-features   # all examples compile
+cargo check -p etl-coordination --no-default-features --tests  # feature-off matrix (CI runs --all-features and misses it)
 cargo run -p etl --example memory_pipeline     # runnable without infrastructure
 docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
 ```

@@ -17,7 +17,9 @@
 //! | `avro-fast` | Opt-in `serde_avro_fast` decode backend for [`avro`]: single-pass typed decode, borrowed (zero-copy) records. Not part of `full` — see the `etl-avro` docs for the license note |
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
-//! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`, `s3`) |
+//! | `coordination` | [`coordination`] backend — multi-instance work-stealing for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `etl::coordination` without any feature |
+//! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11) on top of [`coordination`]; pulls the async-nats dependency tree |
+//! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`, `coordination-nats`, `s3`) |
 //!
 //! # Anatomy of a pipeline
 //!
@@ -154,3 +156,13 @@ pub use etl_clickhouse as clickhouse;
 /// Bounded object-storage (S3) backfill source.
 #[cfg(feature = "s3")]
 pub use etl_s3 as s3;
+
+// Without the feature, `etl::coordination` resolves to the seam module
+// (traits, events, the driver) through the `etl_core::*` glob above. With
+// it, this explicit re-export shadows the glob with the backend crate —
+// which itself re-exports the same seam types — so the one path serves
+// both worlds and the backend types simply appear alongside.
+/// Multi-instance work-stealing coordination backend (NATS JetStream KV
+/// + in-memory store). The seam and driver need no feature.
+#[cfg(feature = "coordination")]
+pub use etl_coordination as coordination;

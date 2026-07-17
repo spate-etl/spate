@@ -27,6 +27,13 @@ backpressure budget and its sizing rule, queue capacities, checkpoint
 timing, and core pinning — with the exact defaults and why each knob moves
 what it moves.
 
+## [Scaling out](scaling-out.mdx)
+
+Several identical replicas dividing one source's work: Kafka's native
+consumer groups, and the coordination layer for broker-less sources —
+deploying the NATS store, Kubernetes patterns (plain Deployments, pod-name
+instance ids), lease tuning, and the failure-mode table.
+
 ## Related reading
 
 - [Graceful shutdown](../03-guides/graceful-shutdown.mdx) — the drain

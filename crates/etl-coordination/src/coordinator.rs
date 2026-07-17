@@ -8,6 +8,7 @@
 //! `std::sync::mpsc` receives, so a wedged runtime cannot deadlock the
 //! controller.
 
+use crate::clock::{Clock, SystemClock};
 use crate::config::CoordinationConfig;
 use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
@@ -20,6 +21,7 @@ use etl_core::coordination::{
 };
 use etl_core::metrics::CoordinationMetrics;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -36,6 +38,7 @@ const COMMAND_DEPTH: usize = 64;
 pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     store: S,
     config: CoordinationConfig,
+    clock: Arc<dyn Clock>,
     io: tokio::runtime::Handle,
     metrics: Option<CoordinationMetrics>,
     instance: String,
@@ -78,6 +81,26 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         io: tokio::runtime::Handle,
         metrics: Option<CoordinationMetrics>,
     ) -> Result<StoreCoordinator<S>, CoordinationError> {
+        StoreCoordinator::with_clock(store, config, io, metrics, Arc::new(SystemClock))
+    }
+
+    /// Like [`new`](StoreCoordinator::new) but drives the starvation
+    /// self-fence from an injected [`Clock`]. A frozen clock makes fencing
+    /// deterministic under CI scheduler jitter — pass the same clock to the
+    /// store so its lease expiry stays coherent. See [`crate::clock`].
+    ///
+    /// # Errors
+    ///
+    /// Fatal on invalid configuration, a current-thread runtime, or a
+    /// store whose lease TTL diverges from `config.lease_duration`.
+    #[doc(hidden)]
+    pub fn with_clock(
+        store: S,
+        config: CoordinationConfig,
+        io: tokio::runtime::Handle,
+        metrics: Option<CoordinationMetrics>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<StoreCoordinator<S>, CoordinationError> {
         config.validate()?;
         if io.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
             return Err(fatal(
@@ -106,6 +129,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         Ok(StoreCoordinator {
             store,
             config,
+            clock,
             io,
             metrics,
             instance,
@@ -310,6 +334,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         let task = Task::new(
             store,
             self.config.clone(),
+            self.clock.clone(),
             fingerprint,
             self.instance.clone(),
             self.nonce.clone(),

@@ -14,6 +14,7 @@
 //! (it was still the owner; progress is monotone) and is adopted by the
 //! claimant on its CAS retry — less replay, not a violation.
 
+use crate::clock::Clock;
 use crate::config::CoordinationConfig;
 use crate::error::{fatal, store_error};
 use crate::leader::PlanRun;
@@ -32,6 +33,7 @@ use etl_core::coordination::{
 use etl_core::metrics::{AcquireReason, CoordinationMetrics, SplitLossReason, WriteOutcome};
 use futures_util::StreamExt as _;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -87,6 +89,10 @@ struct OwnedSplit {
 pub(crate) struct Task<S: CoordinationStore> {
     pub(crate) store: S,
     pub(crate) config: CoordinationConfig,
+    /// Time source for the starvation self-fence. `SystemClock` in
+    /// production; frozen in tests so scheduler jitter cannot spuriously
+    /// expire a held lease. Renewal cadence still uses real `.elapsed()`.
+    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) fingerprint: String,
     pub(crate) fp: u64,
     pub(crate) instance: String,
@@ -141,6 +147,7 @@ impl<S: CoordinationStore> Task<S> {
     pub(crate) fn new(
         store: S,
         config: CoordinationConfig,
+        clock: Arc<dyn Clock>,
         fingerprint: String,
         instance: String,
         nonce: String,
@@ -154,6 +161,7 @@ impl<S: CoordinationStore> Task<S> {
         Task {
             store,
             config,
+            clock,
             fingerprint,
             fp,
             instance,
@@ -1266,7 +1274,7 @@ impl<S: CoordinationStore> Task<S> {
             id.to_string(),
             OwnedSplit {
                 lease_rev,
-                last_ok_write: Instant::now(),
+                last_ok_write: self.clock.now(),
             },
         );
         Ok(())
@@ -1298,8 +1306,11 @@ impl<S: CoordinationStore> Task<S> {
         }
         // Starvation self-fence: any owned split without a successful
         // write for a full lease is dropped before peers must fight our
-        // zombie for it.
-        let now = Instant::now();
+        // zombie for it. Reads `clock` (not real time) so a frozen test
+        // clock cannot self-fence a lease the scheduler merely stalled;
+        // `last_ok_write` is stamped from the same clock, so the difference
+        // is 0 while frozen. Production `SystemClock` is real wall time.
+        let now = self.clock.now();
         let starved: Vec<String> = self
             .owned
             .iter()
@@ -1373,6 +1384,13 @@ impl<S: CoordinationStore> Task<S> {
         let Some(owned) = self.owned.get(id) else {
             return Ok(());
         };
+        // Cadence gate: skip if we renewed within the last interval. This
+        // MUST stay real `.elapsed()`, not `clock.now()`. `last_ok_write` is
+        // stamped from `clock`; under a frozen test clock `clock.now() -
+        // last_ok_write` is always 0, which would gate out every renewal and
+        // never exercise the fault. `.elapsed()` measures real wall time, so
+        // renewals still fire on cadence (identical to `Instant::now()` under
+        // the production `SystemClock`).
         if owned.last_ok_write.elapsed() < self.config.renew_interval() {
             return Ok(());
         }
@@ -1398,7 +1416,7 @@ impl<S: CoordinationStore> Task<S> {
             Ok(CasOutcome::Won(rev)) => {
                 if let Some(owned) = self.owned.get_mut(id) {
                     owned.lease_rev = rev;
-                    owned.last_ok_write = Instant::now();
+                    owned.last_ok_write = self.clock.now();
                 }
                 if let Some(state) = self.splits.get_mut(id)
                     && let Some((_, lease_rev)) = &mut state.lease
@@ -1420,7 +1438,7 @@ impl<S: CoordinationStore> Task<S> {
                             // delivery attempt on the reclaim).
                             if let Some(owned) = self.owned.get_mut(id) {
                                 owned.lease_rev = entry.revision;
-                                owned.last_ok_write = Instant::now();
+                                owned.last_ok_write = self.clock.now();
                             }
                             if let Some(state) = self.splits.get_mut(id) {
                                 state.lease = Some((lease, entry.revision));

@@ -25,6 +25,12 @@ pub use etl_core::coordination::*;
 pub mod config;
 pub mod store;
 
+// Time seam behind lease expiry and the self-fence: `SystemClock` in
+// production, a frozen/advanced clock in tests. `#[doc(hidden)]` keeps it off
+// the documented, semver-stable surface while staying reachable from the
+// external `tests/` binaries.
+#[doc(hidden)]
+pub mod clock;
 mod coordinator;
 mod error;
 mod leader;
@@ -32,6 +38,7 @@ mod protocol;
 mod records;
 mod task;
 
+pub use clock::{Clock, SystemClock};
 pub use config::CoordinationConfig;
 pub use coordinator::StoreCoordinator;
 

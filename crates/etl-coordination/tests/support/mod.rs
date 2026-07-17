@@ -6,11 +6,13 @@
 
 use etl_coordination::store::memory::MemoryStore;
 use etl_coordination::{
-    CoordinationConfig, CoordinationError, CoordinationEvent, MemoryCoordinator, PlanContext,
-    PlanFinality, PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner, SplitProgress,
-    SplitSpec, StoreCoordinator,
+    Clock, CoordinationConfig, CoordinationError, CoordinationEvent, MemoryCoordinator,
+    PlanContext, PlanFinality, PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner,
+    SplitProgress, SplitSpec, StoreCoordinator,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Test lease: short enough for fast takeover tests, far above the
@@ -43,6 +45,42 @@ pub fn runtime() -> tokio::runtime::Runtime {
 
 pub fn store() -> MemoryStore {
     MemoryStore::new(LEASE)
+}
+
+/// A frozen (optionally advanceable) [`Clock`] for deterministic lease
+/// fencing. `now()` is a fixed base plus an atomic offset, so a real
+/// wall-clock stall (a CI scheduler starving the renewal task) can never
+/// move it — the starvation self-fence and store expiry only fire when the
+/// test advances time, not when the process is merely slow. Share one
+/// instance between the store and the coordinator so both stay coherent.
+#[derive(Debug)]
+pub struct TestClock {
+    base: tokio::time::Instant,
+    offset_nanos: AtomicU64,
+}
+
+impl TestClock {
+    /// A clock frozen at construction. Build it after [`runtime`] exists so
+    /// `tokio::time::Instant::now()` reads the runtime's clock.
+    pub fn frozen() -> Arc<TestClock> {
+        Arc::new(TestClock {
+            base: tokio::time::Instant::now(),
+            offset_nanos: AtomicU64::new(0),
+        })
+    }
+
+    /// Move the clock forward. Unused by the current suite — here so genuine
+    /// expiry/takeover tests can drive time deterministically.
+    pub fn advance(&self, by: Duration) {
+        self.offset_nanos
+            .fetch_add(by.as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> tokio::time::Instant {
+        self.base + Duration::from_nanos(self.offset_nanos.load(Ordering::Relaxed))
+    }
 }
 
 pub fn worker(

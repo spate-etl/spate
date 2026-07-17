@@ -4,13 +4,17 @@
 //! Backs the default-CI integration suites and single-process embedding
 //! (several pipeline instances in one process sharing an
 //! `Arc<MemoryStore>`), and doubles as the reference implementation for
-//! custom backends. Ephemeral expiry runs on real time via a lazily
-//! spawned sweeper task, so realistic sub-second lease tests need no
-//! clock plumbing.
+//! custom backends. Ephemeral expiry runs via a lazily spawned sweeper
+//! task against an injected [`Clock`](crate::clock::Clock) — real wall time
+//! by default ([`new`](MemoryStore::new)), so realistic sub-second lease
+//! tests need no clock plumbing, or a frozen clock
+//! ([`with_clock`](MemoryStore::with_clock)) when expiry must be
+//! deterministic under scheduler jitter.
 
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
+use crate::clock::{Clock, SystemClock};
 use futures_util::StreamExt as _;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -66,6 +70,9 @@ struct Inner {
     ephemeral: Space,
     lease_ttl: Duration,
     sweeper_started: AtomicBool,
+    /// Time source for ephemeral deadlines and expiry. `SystemClock` in
+    /// production; a frozen clock in tests makes expiry deterministic.
+    clock: Arc<dyn Clock>,
 }
 
 impl Inner {
@@ -85,15 +92,25 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// A store whose ephemeral keyspace expires keys `lease_ttl` after
-    /// their last write.
+    /// their last write, on real wall time.
     #[must_use]
     pub fn new(lease_ttl: Duration) -> MemoryStore {
+        MemoryStore::with_clock(lease_ttl, Arc::new(SystemClock))
+    }
+
+    /// Like [`new`](MemoryStore::new) but drives ephemeral expiry from an
+    /// injected [`Clock`]. A frozen clock makes lease expiry deterministic
+    /// under CI scheduler jitter — see [`crate::clock`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock(lease_ttl: Duration, clock: Arc<dyn Clock>) -> MemoryStore {
         MemoryStore {
             inner: Arc::new(Inner {
                 durable: Space::new(),
                 ephemeral: Space::new(),
                 lease_ttl,
                 sweeper_started: AtomicBool::new(false),
+                clock,
             }),
         }
     }
@@ -116,7 +133,7 @@ impl MemoryStore {
                 let Some(inner) = weak.upgrade() else {
                     return; // store dropped; sweeper dies with it
                 };
-                let now = Instant::now();
+                let now = inner.clock.now();
                 // Draw and broadcast under the lock, like every other
                 // write path — see `delete`.
                 let mut entries = inner.ephemeral.lock();
@@ -137,11 +154,17 @@ impl MemoryStore {
 
     /// Drop an ephemeral entry that expired between sweeps: reads must
     /// never observe a logically dead key. Broadcasts the deletion (the
-    /// sweeper cannot — the entry is gone before its next pass).
-    fn expire_in_place(space: &Space, entries: &mut BTreeMap<String, Versioned>, key: &str) {
+    /// sweeper cannot — the entry is gone before its next pass). `now` is
+    /// the caller's clock snapshot, so every op in a call shares one instant.
+    fn expire_in_place(
+        space: &Space,
+        entries: &mut BTreeMap<String, Versioned>,
+        key: &str,
+        now: Instant,
+    ) {
         let dead = entries
             .get(key)
-            .is_some_and(|v| v.deadline.is_some_and(|d| d <= Instant::now()));
+            .is_some_and(|v| v.deadline.is_some_and(|d| d <= now));
         if dead {
             entries.remove(key);
             let _ = space.watchers.send(WatchEvent::Delete {
@@ -154,7 +177,7 @@ impl MemoryStore {
     fn deadline_for(&self, ks: Keyspace) -> Option<Instant> {
         match ks {
             Keyspace::Durable => None,
-            Keyspace::Ephemeral => Some(Instant::now() + self.inner.lease_ttl),
+            Keyspace::Ephemeral => Some(self.inner.clock.now() + self.inner.lease_ttl),
         }
     }
 }
@@ -179,7 +202,7 @@ impl CoordinationStore for MemoryStore {
         // write's event (the watch contract is ordered per key, and the
         // task layer trusts revisions to order puts against deletes).
         let mut entries = space.lock();
-        Self::expire_in_place(space, &mut entries, key);
+        Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
         if entries.contains_key(key) {
             return Ok(CasOutcome::Lost);
         }
@@ -213,7 +236,7 @@ impl CoordinationStore for MemoryStore {
         let space = self.inner.space(ks);
         // Broadcast under the lock — see `create`.
         let mut entries = space.lock();
-        Self::expire_in_place(space, &mut entries, key);
+        Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
         let Some(current) = entries.get_mut(key) else {
             return Ok(CasOutcome::Lost);
         };
@@ -235,7 +258,7 @@ impl CoordinationStore for MemoryStore {
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         let space = self.inner.space(ks);
         let mut entries = space.lock();
-        Self::expire_in_place(space, &mut entries, key);
+        Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
         Ok(entries.get(key).map(|v| Entry {
             key: key.to_string(),
             value: v.value.clone(),
@@ -256,7 +279,7 @@ impl CoordinationStore for MemoryStore {
         // fresh key's put BELOW this delete — reading a live lease as
         // expired.
         let mut entries = space.lock();
-        Self::expire_in_place(space, &mut entries, key);
+        Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
         match (entries.get(key), expected) {
             (None, _) => Ok(CasOutcome::Won(Revision(0))), // vacuous
             (Some(v), Some(rev)) if v.revision != rev => Ok(CasOutcome::Lost),
@@ -329,7 +352,7 @@ impl CoordinationStore for MemoryStore {
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
         let space = self.inner.space(ks);
         let mut entries = space.lock();
-        let now = Instant::now();
+        let now = self.inner.clock.now();
         let mut expired = Vec::new();
         entries.retain(|key, v| {
             let live = v.deadline.is_none_or(|d| d > now);

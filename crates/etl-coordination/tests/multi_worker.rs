@@ -224,9 +224,11 @@ fn live_twins_sharing_an_instance_id_are_fatal() {
     });
 
     // A second LIVE process with the same instance id fast-reclaims the
-    // split (it cannot tell itself from a dead predecessor). The victim's
-    // next renewal sees its own id under a foreign nonce: Fatal, naming
-    // the misconfiguration.
+    // split (it cannot tell itself from a dead predecessor). Whichever twin
+    // sees its own id under a foreign nonce first reports it: Fatal, naming
+    // the misconfiguration; the other survives. Which one gets there first is
+    // a reclaim-ordering race, so we poll BOTH — pinning the report to a
+    // single worker times out whenever the other twin is the reporter.
     let mut second = worker(&store, rt.handle(), Some("pod-1"));
     second.start(planner()).unwrap();
     let mut held_second = Held::default();
@@ -238,11 +240,19 @@ fn live_twins_sharing_an_instance_id_are_fatal() {
     );
 
     let deadline = Instant::now() + support::DEADLINE;
-    let error = loop {
-        assert!(Instant::now() < deadline, "victim never reported the twin");
-        match first.poll(Duration::from_millis(25)) {
-            Ok(events) => held_first.fold(events),
-            Err(e) => break e,
+    let error = 'outer: loop {
+        assert!(
+            Instant::now() < deadline,
+            "neither twin reported the shared instance_id"
+        );
+        for (twin, held) in [
+            (&mut first, &mut held_first),
+            (&mut second, &mut held_second),
+        ] {
+            match twin.poll(Duration::from_millis(25)) {
+                Ok(events) => held.fold(events),
+                Err(e) => break 'outer e,
+            }
         }
     };
     assert_eq!(error.kind, CoordinationErrorKind::Fatal);

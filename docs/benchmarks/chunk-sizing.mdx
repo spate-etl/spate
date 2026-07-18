@@ -1,0 +1,194 @@
+---
+title: Chunk sizing
+sidebar_position: 5
+description: How chunk target and queue capacity trade throughput against flush latency — and why both defaults stay where they are.
+---
+
+import BenchBars from '@site/src/components/Bench/BenchBars';
+
+export const chunkLabels = {
+  64: '64 KiB (default)',
+  128: '128 KiB',
+  256: '256 KiB',
+  512: '512 KiB',
+  1024: '1 MiB',
+};
+
+export const queueLabels = {
+  8: '8 (default)',
+  64: '64',
+  256: '256',
+  1024: '1024',
+};
+
+# Chunk sizing and queue capacity
+
+The chain terminal seals a **chunk** once its encoded buffer reaches
+`ChunkConfig::target_bytes` (default 64 KiB) and hands it to a per-shard
+bounded queue (`SinkOptions::queue_capacity`, default 8). Neither knob bounds
+insert size — shard workers merge chunks into full batches. What they govern is
+**handoff rate** and **how long a chunk waits before a worker sees it**.
+
+This page exists because both defaults look small, and the obvious instinct is
+to raise them. The measurements say: raise the chunk target only when you have
+a specific symptom, and leave queue capacity alone.
+
+## Why the earlier thread-scaling curves were misleading
+
+[Framework overhead](framework-overhead.mdx) reports a synthetic ceiling that
+peaks at 2 pipeline threads, and [Sink saturation](sink-saturation.mdx) peaks
+at 4. Neither is a framework scaling limit: both rigs swept `THREADS` while
+holding **egress width fixed** — `pipeline_synthetic` hardcoded 2 I/O workers,
+`ch_sink_saturation` pinned shards and `io_threads` across its sweep. Each
+curve peaked at roughly its own fixed egress width.
+
+The `pipeline_scaling` rig sweeps threads with `SHARDS` and `IO_THREADS` scaled
+alongside (`EGRESS=scaled`) and the in-flight budget derived per arm from the
+[sizing rule](../DESIGN.md). Under those conditions the framework keeps
+scaling, and the chunk target decides how far.
+
+<BenchBars
+  bench="pipeline_scaling"
+  metric="records_per_s"
+  category="threads"
+  series="chunk_kib"
+  emphasize={1024}
+  labels={chunkLabels}
+  title="Framework ceiling vs pipeline threads, by chunk target"
+  caption="Generator source, null writer, no broker and no server — the framework alone. Egress width scaled with thread count; in-flight budget derived per arm. Medians of 3."
+/>
+
+At the default 64 KiB the curve flattens and then falls back, while backpressure
+pause events climb steeply. At 1 MiB the pauses stay at **zero** across the
+whole sweep and scaling efficiency at 8 threads is roughly double.
+
+<BenchBars
+  bench="pipeline_scaling"
+  metric="backpressure_pause_events"
+  category="threads"
+  series="chunk_kib"
+  emphasize={1024}
+  labels={chunkLabels}
+  title="Backpressure pause events over the same window"
+  caption="Lower is better. The sink here is a null writer that completes instantly — every one of these pauses is the handoff rate, not sink slowness."
+/>
+
+That second chart is the load-bearing one, because the sink is a null writer
+that completes **instantly**. There is no sink slowness available to signal. The
+pauses are caused purely by chunks arriving faster than the shard workers can
+service them — the queue-full trigger is **rate-driven, not only
+capacity-driven**.
+
+## The same lever against a real sink
+
+The synthetic rig runs an order of magnitude above any real sink, so the
+question is whether the lever survives contact with one. It does, though
+substantially attenuated — and it is not free.
+
+<BenchBars
+  bench="ch_sink_chunk_sizing"
+  metric="rows_per_s"
+  category="chunk_kib"
+  where={{ queue_cap: 256, threads: 8 }}
+  emphasize={1024}
+  labels={chunkLabels}
+  title="Throughput vs chunk target (ClickHouse, ENGINE=Null)"
+  caption="8 pipeline threads, queue capacity 256, in-flight budget pinned at 8 GiB so the budget is identical across arms. Medians of 3."
+/>
+
+<BenchBars
+  bench="ch_sink_chunk_sizing"
+  metric="sink_flush_p99"
+  category="chunk_kib"
+  where={{ queue_cap: 256, threads: 8 }}
+  emphasize={1024}
+  labels={chunkLabels}
+  title="Flush p99 vs chunk target — the cost side"
+  caption="Same arms. Lower is better: throughput and flush latency rise together."
+/>
+
+**There is no knee.** Throughput and flush latency climb in near lockstep
+across the whole range, so no chunk target dominates the others. The shipped
+64 KiB default sits deliberately at the low-latency end. Raise it when you have
+the specific symptom — backpressure pauses while the sink itself is idle — and
+accept the latency in exchange.
+
+:::caution[Pin the budget when comparing chunk sizes]
+The [sizing rule](../DESIGN.md) makes the in-flight budget a function of
+`chunk.target_bytes`, so a naive A/B that lets the budget float changes **two**
+variables at once. Doing that here inflated the apparent gain by roughly a
+third. Every arm above pins `MAX_INFLIGHT_MB` to the same value.
+:::
+
+## Queue capacity: the small default is the right one
+
+<BenchBars
+  bench="ch_sink_chunk_sizing"
+  metric="rows_per_s"
+  category="queue_cap"
+  where={{ chunk_kib: 64, threads: 8 }}
+  emphasize={8}
+  labels={queueLabels}
+  title="Throughput vs queue capacity"
+  caption="8 pipeline threads at the default 64 KiB chunk target, budget pinned. Medians of 3."
+/>
+
+<BenchBars
+  bench="ch_sink_chunk_sizing"
+  metric="sink_flush_p99"
+  category="queue_cap"
+  where={{ chunk_kib: 64, threads: 8 }}
+  emphasize={8}
+  labels={queueLabels}
+  title="Flush p99 vs queue capacity"
+  caption="Same arms. The default holds the best p99 by an order of magnitude."
+/>
+
+This one is **not** a smooth trade, and the shape matters more than the
+endpoints. Moving off the default to the next step up pays roughly an order of
+magnitude of flush p99 for a few percent of throughput — a clearly bad trade,
+because the queue bounds the latency of whatever sits in it and the first step
+away from a shallow queue is where almost all of that latency appears. Past
+that point the curve inverts: the deepest arm buys substantially more
+throughput for comparatively little further latency.
+
+So the practical guidance is narrower than "keep it small":
+
+- The default is **latency-optimal by a wide margin**, and that is what
+  [Tuning](../user-guide/05-deployment/tuning.mdx) means by *signal, not
+  buffer*.
+- If you leave it, **leave it decisively**. An intermediate depth pays most of
+  the latency cost for very little of the throughput gain.
+- The throughput on the table is not negligible — this is a real choice for a
+  throughput-dominant pipeline, not a knob to leave alone on principle.
+
+## Reading the pause counter
+
+`etl_backpressure_pause_events_total` is **not** on its own a misconfiguration
+signal. In the queue-capacity arms above, the configuration with the best
+latency also recorded the *most* pauses. Pauses mean the source was throttled;
+whether that is healthy depends on what was throttling it.
+
+| Symptom | Likely cause | Lever |
+|---|---|---|
+| Pauses high, sink flush p99 low, sink not saturated | chunk handoff rate | raise `chunk.target_bytes` |
+| Pauses high, sink flush p99 high | sink genuinely behind | more shards / `inflight.max_per_shard` / a faster sink |
+| Pauses high, `etl_backpressure_inflight_bytes` near the cap | budget undersized | apply the sizing rule |
+
+:::note[`etl_queue_full_events_total` is blind in these rigs]
+That counter is registered by `ShardQueues::attach_metrics`, which is only
+reached through the pipeline **builder**. Every benchmark rig assembles the
+runtime directly, so the series is structurally always zero there and cannot be
+used as a validity check. The pause counter and flush histogram are the usable
+signals. Pipelines built through the normal builder API do record it.
+:::
+
+## Caveats
+
+Single 18-core machine; ClickHouse runs in a container on the same cores, so
+absolute rates are not a cluster result — the within-run A/B is what these arms
+establish. `pipeline_scaling` arms stay within
+`threads + io_threads + 1 <= cores`; the rig marks any arm that exceeds it
+`OVERSUBSCRIBED` in its note, and none of the published arms do. The synthetic
+rig's payload is low-entropy filler, which flatters compression-free paths.
+Reproduce with the invocations in [Methodology](methodology.mdx).

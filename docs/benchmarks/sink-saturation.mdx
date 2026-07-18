@@ -46,6 +46,14 @@ client is **generator-limited below 4 threads** (it cannot feed the sink fast
 enough), the sink **saturates at 4**, and the host is **oversubscribed above 4**
 (client and server fight for the same cores).
 
+:::info[Host oversubscription is not the only term above 4 threads]
+These arms hold the chunk target at its 64 KiB default. On the same box, at 8
+threads, raising it recovers a substantial fraction of the falloff — so part of
+what reads as oversubscription here is chunk **handoff rate** saturating the
+shard workers. See [Chunk sizing](chunk-sizing.mdx), which pins the in-flight
+budget across arms to isolate that variable.
+:::
+
 <BenchBars
   bench="ch_sink_saturation"
   metric="rows_per_s"

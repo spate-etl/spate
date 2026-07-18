@@ -44,6 +44,42 @@ THREADS_LIST=1,2,4,8 SHARDS=2 PAYLOAD=256 WORK_US=0 DURATION_S=30 \
   RESULTS=benchmarks/results/pipeline-synthetic-baseline.jsonl \
   cargo run -p benchmarks --release --bin pipeline_synthetic
 
+# Thread scaling with egress scaled → pipeline-scaling.jsonl (no broker, no server)
+# Same rig under a distinct BENCH name: the published pipeline_synthetic records
+# predate the egress/lane/chunk variants, so emitting these under that name would
+# give them a different variant identity and double the bars on the
+# framework-overhead page. EGRESS=scaled derives SHARDS/IO_THREADS from THREADS;
+# the in-flight budget is derived per arm from the DESIGN.md sizing rule.
+# Two chunk arms x threads 1/2/4/6/8, 3 reps each. Arms stay within
+# threads + io_threads + 1 <= cores; the rig flags any that do not.
+for rep in 1 2 3; do for t in 1 2 4 6 8; do for cfg in 64:64 1024:512; do \
+  BENCH=pipeline_scaling RUN_ONE=1 EGRESS=scaled THREADS=$t DURATION_S=20 \
+  CHUNK_KIB=${cfg%%:*} QUEUE_CAP=${cfg##*:} \
+  RESULTS=benchmarks/results/pipeline-scaling.jsonl \
+    cargo run -p benchmarks --release --bin pipeline_synthetic; \
+done; done; done
+
+# Chunk/queue trade-off vs a real sink → ch-sink-chunk-sizing.jsonl
+# MAX_INFLIGHT_MB is pinned so the budget is identical across arms: the sizing
+# rule makes the derived budget a function of chunk.target_bytes, so letting it
+# float would change two variables at once (that inflated the apparent gain by
+# ~1/3 before it was caught). Chunk sweep at the default queue depth, then a
+# queue sweep at the default chunk target; the shared arm merges reps.
+for rep in 1 2 3; do \
+  for ck in 64 128 256 512 1024; do \
+    BENCH=ch_sink_chunk_sizing RUN_ONE=1 ENGINE=Null THREADS=8 CHUNK_KIB=$ck \
+    QUEUE_CAP=256 MAX_INFLIGHT_MB=8192 DURATION_S=20 WARMUP_S=8 \
+    RESULTS=benchmarks/results/ch-sink-chunk-sizing.jsonl \
+      cargo run -p benchmarks --release --bin ch_sink_saturation; \
+  done; \
+  for qc in 8 64 1024; do \
+    BENCH=ch_sink_chunk_sizing RUN_ONE=1 ENGINE=Null THREADS=8 CHUNK_KIB=64 \
+    QUEUE_CAP=$qc MAX_INFLIGHT_MB=8192 DURATION_S=20 WARMUP_S=8 \
+    RESULTS=benchmarks/results/ch-sink-chunk-sizing.jsonl \
+      cargo run -p benchmarks --release --bin ch_sink_saturation; \
+  done; \
+done
+
 # CPU-bound Avro A/B → avro-fast-pipeline.jsonl (no broker, no server; 50 events/datum)
 # One invocation = one arm (chosen by STAGE/DESER/FORMAT env), a median over REPS.
 # STAGE=decode isolates the decoder (3 DESER arms); STAGE=pipeline adds flat_map +

@@ -35,7 +35,12 @@
 //!
 //! Env: THREADS_LIST (1,2,4) | THREADS (1) SHARDS (4) IO_THREADS (4)
 //! INFLIGHT_PER_SHARD (2) BATCH_MAX_ROWS (262144) BATCH_MAX_MB (128)
-//! LINGER_MS (500) QUEUE_CAP (256) MAX_INFLIGHT_MB (derived, see run_one)
+//! LINGER_MS (500) QUEUE_CAP (256) CHUNK_KIB (64) BENCH (ch_sink_saturation)
+//!
+//! NOTE: the committed `ch_sink_saturation` dataset predates the `chunk_kib`
+//! variant. Recording new arms under that bench name requires re-recording the
+//! whole matrix; a one-off study should set `BENCH` to its own name instead.
+//! MAX_INFLIGHT_MB (derived, see run_one)
 //! MAX_PENDING_BATCHES (8192) FORMAT (rowbinary) COMPRESSION (lz4)
 //! ENGINE (Null) ASYNC_INSERT (0) MAX_INSERT_BLOCK_SIZE (unset)
 //! PAYLOAD (256) DURATION_S (30) WARMUP_S (5) CHECKPOINT_INTERVAL_MS (1000)
@@ -146,6 +151,11 @@ fn run_one() {
     let batch_max_mb = env_u64("BATCH_MAX_MB", 128);
     let linger_ms = env_u64("LINGER_MS", 500);
     let queue_cap = env_u64("QUEUE_CAP", 256) as usize;
+    // Chunk target governs how many queue handoffs (and how many in-flight
+    // budget CAS operations) each shard worker must service per second. The
+    // synthetic rig showed it dominating throughput once the chain outruns the
+    // workers; swept here to find out whether that carries to a real sink.
+    let chunk_kib = env_u64("CHUNK_KIB", 64);
     // Default inflight budget from the deployment sizing rule (docs/user-guide/
     // 05-deployment/tuning.md): `max_inflight_bytes × low_ratio` must cover the
     // fully-formed in-flight batches plus the queued 64 KiB chunks admitted to
@@ -154,10 +164,10 @@ fn run_one() {
     // would otherwise under-provision. low_ratio is 0.5 (config default); an
     // undersized budget self-throttles the rig below the sink's real capacity.
     const LOW_RATIO: f64 = 0.5;
-    const CHUNK_MIB: f64 = 64.0 / 1024.0; // 64 KiB chunk target
+    let chunk_mib: f64 = chunk_kib as f64 / 1024.0;
     let derived_mb = (2.0
         * (shards as f64 * inflight as f64 * batch_max_mb as f64
-            + shards as f64 * queue_cap as f64 * CHUNK_MIB)
+            + shards as f64 * queue_cap as f64 * chunk_mib)
         / LOW_RATIO)
         .ceil() as u64;
     let max_inflight_mb = env_u64("MAX_INFLIGHT_MB", derived_mb.max(1024));
@@ -319,13 +329,17 @@ fn run_one() {
         match &native_schema {
             Some(schema) => {
                 let enc = NativeEncoder::<Owned<BenchRow>>::new(Arc::clone(schema));
+                let chunk_cfg = ChunkConfig {
+                    target_bytes: (chunk_kib * 1024) as usize,
+                    ..ChunkConfig::default()
+                };
                 chain_owned::<Vec<u8>, _>(BytesPassthrough)
                     .with_metrics("ch-saturation", "main")
                     .map(to_row)
                     .sink(
                         enc,
                         router,
-                        ChunkConfig::default(),
+                        chunk_cfg,
                         chain_queues.clone(),
                         Arc::clone(&chain_budget),
                     )
@@ -333,13 +347,17 @@ fn run_one() {
             }
             None => {
                 let enc = ClickHouseEncoder::<Owned<BenchRow>>::new();
+                let chunk_cfg = ChunkConfig {
+                    target_bytes: (chunk_kib * 1024) as usize,
+                    ..ChunkConfig::default()
+                };
                 chain_owned::<Vec<u8>, _>(BytesPassthrough)
                     .with_metrics("ch-saturation", "main")
                     .map(to_row)
                     .sink(
                         enc,
                         router,
-                        ChunkConfig::default(),
+                        chunk_cfg,
                         chain_queues.clone(),
                         Arc::clone(&chain_budget),
                     )
@@ -428,7 +446,7 @@ fn run_one() {
     };
     let produced_delta = c1.saturating_sub(c0);
 
-    let mut rep = Report::measurement("ch_sink_saturation")
+    let mut rep = Report::measurement(env_str("BENCH", "ch_sink_saturation").as_str())
         .variant("engine", engine.clone())
         .variant("format", ch_format)
         .variant("compression", compression.clone())
@@ -441,6 +459,7 @@ fn run_one() {
         .variant("batch_max_mb", batch_max_mb)
         .variant("linger_ms", linger_ms)
         .variant("queue_cap", queue_cap as u64)
+        .variant("chunk_kib", chunk_kib)
         .variant("max_inflight_mb", max_inflight_mb)
         .variant("max_pending_batches", max_pending_batches)
         .variant("payload_bytes", payload as u64)

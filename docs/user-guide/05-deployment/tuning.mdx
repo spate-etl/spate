@@ -100,6 +100,27 @@ Memory sizing follows: set the container memory limit above
 see [Kafka](../04-connectors/sources/kafka/README.mdx)), with headroom for batches held
 during retries.
 
+## Chunk sizing: `ChunkConfig::target_bytes`
+
+The chain terminal encodes rows into a per-shard buffer and seals a **chunk**
+once it reaches `target_bytes` (default **64 KiB**), then hands it to that
+shard's queue. Chunks are not insert sizes — shard workers merge them into
+full batches — so this knob does not bound insert size. What it governs is
+**handoff rate**: at 64 KiB a 256-byte row yields roughly 250 rows per chunk,
+so a fast chain generates tens of thousands of queue operations per shard per
+second, each one also a seal and an in-flight budget update.
+
+Raise it when the chain outruns the shard workers — the symptom is backpressure
+pauses while the sink itself is idle (see the note below). Leave it alone for
+latency-sensitive pipelines: throughput and flush latency rise together, with
+**no knee** in the measured range, so there is no setting that dominates. The
+trade curve is on [Chunk sizing](../../benchmarks/chunk-sizing.mdx); the
+default sits deliberately at the low-latency end of it.
+
+At low throughput this knob is inert — a chunk that never reaches
+`target_bytes` is flushed by the driver's idle timer instead, so raising it
+does not strand rows.
+
 ## Queues: `SinkOptions::queue_capacity`
 
 The bounded chunk queue between pipeline threads and each shard worker,
@@ -109,6 +130,37 @@ This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
 It exists to signal, not to buffer: a full queue is the per-shard
 backpressure trigger (`etl_queue_full_events_total`). Keep it small; the
 global byte budget, not the queue, is the intended smoothing buffer.
+
+That "keep it small" is measured — see
+[Chunk sizing](../../benchmarks/chunk-sizing.mdx) — but it is a genuine trade,
+not a free default. The queue bounds the latency of whatever sits in it, so a
+deeper queue means a chunk waits longer before a shard worker ever sees it. The
+default holds the best flush p99 by an order of magnitude; a deep queue can be
+worth tens of percent of throughput on a saturated pipeline.
+
+The curve is **not** smooth, so choose an end of it rather than a middle: the
+first step up from the default costs nearly all of the latency for almost none
+of the throughput, while the deepest settings recover the throughput for
+comparatively little more. Stay at the default for latency-sensitive pipelines;
+if throughput dominates, go well past the next step up rather than nudging.
+
+:::note[A full queue does not always mean the sink is slow]
+The queue-full trigger is **rate-driven as well as capacity-driven**. It fires
+whenever chunks arrive faster than a shard worker can service them — which can
+happen while the sink itself has plenty of headroom, purely because the chain
+is producing many small chunks. Measured against a null writer that completes
+instantly (no sink slowness by construction), a fast chain still drove hundreds
+of pause events at the default chunk target, and raising
+`ChunkConfig::target_bytes` removed them entirely.
+
+The operational consequence: **a high `etl_backpressure_pause_events_total` is
+not by itself a misconfiguration.** In the measurements behind
+[Chunk sizing](../../benchmarks/chunk-sizing.mdx) the *best-latency*
+configuration also had the *most* pauses. Read pause counts together with
+`etl_sink_flush_duration_seconds` and sink throughput before tuning against
+them — and if pauses are high while the sink is demonstrably idle, reach for
+chunk size, not queue capacity.
+:::
 
 ## Checkpointing: `checkpoint.*`
 

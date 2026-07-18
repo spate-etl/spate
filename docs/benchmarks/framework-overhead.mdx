@@ -31,6 +31,15 @@ sink pool → null writer; 256 B payloads, 2 shards, 2 I/O threads, 64 KiB chunk
   caption="Zero-work records saturate the fixed egress side (2 shard workers), so the throughput peak is at 2 threads — this is a ceiling harness, not a scaling proof."
 />
 
+:::info[This curve is not the framework's thread-scaling limit]
+The peak at 2 threads is the fixed 2-shard / 2-worker egress side saturating,
+not the framework failing to scale. [Chunk sizing](chunk-sizing.mdx) re-runs the
+same rig with egress width scaled alongside thread count and the in-flight
+budget derived per arm; under those conditions throughput keeps climbing well
+past 2 threads. Read that page before drawing any conclusion about how far a
+single process scales.
+:::
+
 <BenchBars
   bench="pipeline_synthetic"
   metric="records_per_s_per_thread"

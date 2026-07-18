@@ -15,6 +15,7 @@ use crate::records::{self, LeaseVal, SplitProgressRecord};
 use crate::store::metered::Metered;
 use crate::store::{CoordinationStore, Keyspace};
 use crate::task::{Command, Task, TaskEvent};
+use etl_core::coordination::ControlWaker;
 use etl_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitId,
     SplitPlanner, SplitProgress,
@@ -45,6 +46,9 @@ pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     nonce: String,
     running: Option<Running>,
     failed: Option<(CoordinationErrorKind, String)>,
+    /// Set by the driver before `start`; handed to the task so every
+    /// queued event also wakes the driver's park.
+    waker: Option<ControlWaker>,
 }
 
 struct Running {
@@ -136,6 +140,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             nonce,
             running: None,
             failed: None,
+            waker: None,
         })
     }
 
@@ -342,6 +347,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             metrics,
             command_rx,
             event_tx,
+            self.waker.clone(),
         );
         let join = self.io.spawn(task.run());
         self.running = Some(Running {
@@ -353,7 +359,11 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         Ok(())
     }
 
-    fn poll(&mut self, timeout: Duration) -> Result<Vec<CoordinationEvent>, CoordinationError> {
+    fn set_waker(&mut self, waker: ControlWaker) {
+        self.waker = Some(waker);
+    }
+
+    fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
         self.check_failed()?;
         let Some(running) = self.running.as_mut() else {
             return Err(fatal("coordinator polled before start"));
@@ -370,23 +380,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                     failure = Some((kind, reason));
                     break;
                 }
-                Err(std_mpsc::TryRecvError::Empty) => {
-                    if out.is_empty() && !timeout.is_zero() {
-                        match running.events.recv_timeout(timeout) {
-                            Ok(TaskEvent::Coordination(event)) => {
-                                Self::observe(&mut running.held, &event);
-                                out.push(event);
-                                continue; // drain whatever queued behind it
-                            }
-                            Ok(TaskEvent::Failed(kind, reason)) => {
-                                failure = Some((kind, reason));
-                                break;
-                            }
-                            Err(_) => break, // timeout or disconnect: empty poll
-                        }
-                    }
-                    break;
-                }
+                // Nothing queued. This call never blocks — the driver owns
+                // the wait and the task wakes it when it enqueues.
+                Err(std_mpsc::TryRecvError::Empty) => break,
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     if out.is_empty() {
                         return Err(self.drain_failure());

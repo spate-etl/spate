@@ -57,7 +57,6 @@
 
 use crate::error::ErrorClass;
 use std::fmt;
-use std::time::Duration;
 
 pub mod driver;
 
@@ -463,9 +462,9 @@ pub trait SplitPlanner: Send {
 ///
 /// ```
 /// use etl_core::coordination::{
-///     CoordinationError, CoordinationEvent, PlanContext, PlanFinality, PlannedSplit,
-///     SplitCoordinator, SplitId, SplitPlan, SplitPlanner, SplitProgress, SplitSpec,
-///     LeaseEpoch,
+///     ControlWaker, CoordinationError, CoordinationEvent, PlanContext, PlanFinality,
+///     PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner, SplitProgress,
+///     SplitSpec, LeaseEpoch,
 /// };
 /// use std::collections::BTreeMap;
 /// use std::time::Duration;
@@ -497,7 +496,9 @@ pub trait SplitPlanner: Send {
 ///         Ok(())
 ///     }
 ///
-///     fn poll(&mut self, _t: Duration) -> Result<Vec<CoordinationEvent>, CoordinationError> {
+///     fn set_waker(&mut self, _w: ControlWaker) {}
+///
+///     fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
 ///         let mut events = std::mem::take(&mut self.pending);
 ///         if self.total > 0
 ///             && self.committed.len() == self.total
@@ -544,14 +545,14 @@ pub trait SplitPlanner: Send {
 ///
 /// let mut c: Box<dyn SplitCoordinator> = Box::new(LocalCoordinator::default());
 /// c.start(Box::new(TwoSplits)).unwrap();
-/// let gained = c.poll(Duration::ZERO).unwrap();
+/// let gained = c.poll().unwrap();
 /// assert_eq!(gained.len(), 2);
 /// for id in ["a", "b"] {
 ///     let id = SplitId::new(id).unwrap();
 ///     c.commit(&id, &SplitProgress::completed(10, vec![])).unwrap();
 /// }
 /// assert!(matches!(
-///     c.poll(Duration::ZERO).unwrap().last(),
+///     c.poll().unwrap().last(),
 ///     Some(CoordinationEvent::AllComplete)
 /// ));
 /// ```
@@ -562,11 +563,23 @@ pub trait SplitCoordinator: Send {
     /// once, before any other method.
     fn start(&mut self, planner: Box<dyn SplitPlanner>) -> Result<(), CoordinationError>;
 
-    /// Ownership and job-state changes since the last call, blocking at
-    /// most `timeout` when none are pending — the source delegates its
-    /// idle wait here. Returns all pending events at once, in per-split
-    /// order.
-    fn poll(&mut self, timeout: Duration) -> Result<Vec<CoordinationEvent>, CoordinationError>;
+    /// Hand the backend the handle it signals when it has events to
+    /// deliver. Called once, before [`start`](SplitCoordinator::start).
+    ///
+    /// The control-plane wait lives in
+    /// [`CoordinationDriver`](driver::CoordinationDriver), not here,
+    /// because completions arrive from two directions the backend cannot
+    /// see between them: the backend's own machinery, and the *lanes*
+    /// reaching end-of-input on pipeline threads. A backend that parks
+    /// internally cannot be woken by the second, which is why
+    /// [`poll`](SplitCoordinator::poll) does not block. Signal this waker
+    /// whenever a later `poll` would return something.
+    fn set_waker(&mut self, waker: ControlWaker);
+
+    /// Ownership and job-state changes since the last call. **Must not
+    /// block** — return whatever is pending, including nothing. The driver
+    /// parks on the [`ControlWaker`] instead.
+    fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError>;
 
     /// Fenced durable commit of one owned split's progress. `Ok` means
     /// durable. [`Fenced`](CoordinationErrorKind::Fenced) means the split
@@ -602,6 +615,45 @@ pub trait SplitCoordinator: Send {
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
 }
 
+/// Wakes a coordinated source's control-plane wait.
+///
+/// Cheap to clone and safe to signal from any thread — including a
+/// pipeline thread on the data path, because [`wake`](ControlWaker::wake)
+/// never blocks. The channel behind it holds a single slot, so a burst of
+/// signals collapses into one wakeup, and a signal that lands while the
+/// driver is between its check and its park is buffered rather than lost.
+///
+/// Signal it for anything the driver would otherwise only notice between
+/// waits: a backend with events ready, a lane reaching end-of-input, a
+/// lane reporting poison.
+#[derive(Clone, Debug)]
+pub struct ControlWaker(crossbeam_channel::Sender<()>);
+
+impl ControlWaker {
+    /// A waker attached to nothing: [`wake`](ControlWaker::wake) is a
+    /// no-op. For unit tests that construct a lane without a driver, and
+    /// for sources that have no control-plane park to interrupt.
+    #[must_use]
+    pub fn inert() -> ControlWaker {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+        ControlWaker(tx)
+    }
+
+    /// Wake the driver if it is parked, or make its next park return
+    /// immediately. Never blocks.
+    pub fn wake(&self) {
+        // Full slot means a wakeup is already pending — nothing to add.
+        let _ = self.0.try_send(());
+    }
+}
+
+/// The waker and the parking half the driver owns.
+pub(crate) fn control_channel() -> (ControlWaker, crossbeam_channel::Receiver<()>) {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    (ControlWaker(tx), rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,10 +665,9 @@ mod tests {
             Ok(())
         }
 
-        fn poll(
-            &mut self,
-            _timeout: Duration,
-        ) -> Result<Vec<CoordinationEvent>, CoordinationError> {
+        fn set_waker(&mut self, _waker: ControlWaker) {}
+
+        fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
             Ok(vec![])
         }
 
@@ -658,7 +709,7 @@ mod tests {
         // Compiles only if both traits are dyn-compatible (the seam's contract).
         let mut c: Box<dyn SplitCoordinator> = Box::new(NoopCoordinator);
         c.start(Box::new(NoopPlanner)).unwrap();
-        assert!(c.poll(Duration::ZERO).unwrap().is_empty());
+        assert!(c.poll().unwrap().is_empty());
         c.release(&[SplitId::new("s-0").unwrap()]).unwrap();
     }
 

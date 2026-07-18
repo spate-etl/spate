@@ -7,7 +7,7 @@
 //! | Feature | Enables |
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
-//! | `s3` | [`s3`] — bounded object-storage (S3) backfill source: streams a frozen bucket prefix, checkpoints to a manifest, self-terminates when exhausted |
+//! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through an injected coordinator (solo in-process by default; progress is ephemeral without a durable store), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open) |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
 //! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
 //! | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns |

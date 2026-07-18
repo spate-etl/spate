@@ -1,29 +1,45 @@
-//! Bounded object-storage (S3) backfill source for `etl-rs`.
+//! Coordinated object-storage (S3) backfill source for `etl-rs`.
 //!
 //! Point the source at a bucket/prefix and it streams every object's
-//! records through the pipeline: a **bounded** job that checkpoints
-//! durably, resumes after a restart, and self-terminates (the pipeline
-//! exits [`Completed`](etl_core::pipeline::ExitState)) once the prefix is
-//! exhausted. Delivery is at-least-once: a restart replays from the last
-//! committed position, so duplicates are possible and loss is not.
+//! records through the pipeline: a **bounded** job that self-terminates
+//! (the pipeline exits [`Completed`](etl_core::pipeline::ExitState)) once
+//! the prefix is exhausted. Delivery is at-least-once: a resume replays
+//! from the last committed position, so duplicates are possible and loss
+//! is not.
 //!
 //! # Shape
 //!
-//! - **Lanes, not objects, are partitions.** The source runs a fixed number
-//!   of lanes (`lanes: K`); the object listing is dealt round-robin across
-//!   them, and each lane streams its slice sequentially. One lane is one
-//!   framework partition with one monotonic offset stream.
-//! - **Offsets are composite.** A record's `i64` offset packs (object
-//!   ordinal within the lane, record index within the object) — an
-//!   internal 23/40-bit layout, versioned by [`MANIFEST_SCHEMA`] — which
-//!   satisfies the checkpoint tracker's contiguous watermark contract
-//!   across object boundaries.
-//! - **Commits are connector-durable.** Object storage has no broker-side
-//!   commit, so watermarks are persisted to a small manifest object (see
-//!   `checkpoint.url`) on every commit tick. The manifest also pins the
-//!   listing identity (per-lane key/etag/rolling hash) so a listing that
-//!   changed between runs fails fast instead of replaying or skipping the
-//!   wrong data.
+//! - **Work is planned as splits.** The fleet's elected leader lists the
+//!   prefix once and packs the sorted listing into **splits** — small
+//!   batches of whole objects, ~64 MiB by default — each with a
+//!   deterministic identity ([`split_id_for`]) and a self-contained
+//!   [`SplitDescriptor`] carrying its member keys, sizes, and ETags.
+//!   Workers lease splits through the coordination store and read them
+//!   straight from the descriptors: **workers never list**.
+//! - **One lane per in-flight split.** A gained split materializes one
+//!   data lane (one framework partition, one monotonic offset stream); a
+//!   record's `i64` offset packs (member ordinal within the split, record
+//!   index within the object). `coordination.max_in_flight` bounds the
+//!   working set and therefore read parallelism.
+//! - **Progress lives in the coordination store — nowhere else.** Commits
+//!   are fenced per-split writes; a lost or stolen split resumes on its
+//!   next owner from the acked watermark, drift-checked against the
+//!   descriptor's ETag pins. The coordinator is **assembly wiring**: hand
+//!   one in via [`S3Source::with_coordinator`] (e.g. `etl-coordination`'s
+//!   `StoreCoordinator` over its NATS JetStream store) and every replica
+//!   of the pipeline shares the backfill, steals from stragglers, and
+//!   takes over from the dead. Without one the source runs solo over an
+//!   in-process store: correct, but a restart replays the prefix (a
+//!   startup WARN says so). This crate names no concrete backend — which
+//!   store a deployment uses is the deployer's choice, not a connector
+//!   compile-time feature.
+//! - **Bad objects poison their split, not the pipeline.** An object
+//!   deleted after planning, overwritten under its ETag pin, corrupt, or
+//!   unreadable past the retry budget hands its split back (surfaced in
+//!   `etl_s3_source_objects_failed_total{reason}`); at the attempt cap
+//!   the split is quarantined. A bounded job with quarantined splits ends
+//!   **failed**, never silently incomplete. Credentials/configuration
+//!   errors are still immediately fatal.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](etl_core::framing::RecordFramer) *you supply*
@@ -33,24 +49,29 @@
 //!   Deserialization then stays in the operator chain (`etl-json` etc.),
 //!   exactly as with the Kafka source.
 //!
-//! # The frozen-key-set contract
+//! # Split identity and drift
 //!
-//! The bucket prefix must not change for the lifetime of the backfill,
-//! including across restarts: resume positions are ordinals into the
-//! lexicographic listing. Keys added, removed, or overwritten below a
-//! committed position are detected at resume (manifest key/etag/hash
-//! checks) and fail the pipeline. Write new data to a different prefix and
-//! run a new backfill over it instead.
+//! A split's id digests its sorted member keys **and ETags** (plus the
+//! packing-algorithm version), and every GET is pinned `If-Match` to the
+//! descriptor's ETag. The consequences:
 //!
-//! # Scaling
+//! - Replanning an unchanged prefix reproduces identical ids — replans
+//!   are create-if-absent no-ops, and completed splits stay completed.
+//! - An **overwritten** object shows up as a new split (new id) on the
+//!   next plan; under an in-flight split it trips the `If-Match` pin and
+//!   poisons the split. Either way it can never silently splice into
+//!   committed progress.
+//! - A **deleted** object poisons only the splits that still needed it.
 //!
-//! One pipeline process owns one prefix. The source does **not** scale
-//! horizontally: running two processes over the same prefix duplicates the
-//! entire backfill (each lists everything) and they race on the manifest.
-//! Scale vertically with `lanes` and pipeline threads.
+//! Prefer an append-only prefix for the lifetime of a backfill; by
+//! default the listing is taken once (`refresh_listing: false`), so
+//! late-arriving keys are simply not part of the job.
 //!
 //! No `object_store` types appear in this crate's public API (the same
-//! dependency policy that keeps rdkafka out of `etl-kafka`'s).
+//! dependency policy that keeps rdkafka out of `etl-kafka`'s). The one
+//! seam that would break it, `S3Source::with_store`, is gated behind the
+//! off-by-default `testing` feature so tests can inject wrapped or
+//! fault-injecting stores without that type reaching a real consumer.
 
 mod config;
 mod error;
@@ -59,14 +80,14 @@ mod framer;
 mod lane;
 mod metrics;
 mod offset;
+mod planner;
 mod source;
-mod store;
+mod split;
+mod split_ctx;
 #[cfg(test)]
 mod testutil;
 
-pub use config::{CheckpointStoreConfig, Compression, S3SourceConfig};
+pub use config::{Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
-pub use store::{
-    LaneState, MANIFEST_SCHEMA, Manifest, OffsetStore, OffsetStoreError, SourceIdentity,
-};
+pub use split::{DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, split_id_for};

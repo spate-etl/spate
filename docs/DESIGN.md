@@ -66,9 +66,9 @@ in-flight operation, so it should not be scaled to the number of source lanes or
 sink in-flight inserts. CPU-bound decode/encode runs on the **pipeline threads**
 instead. A source's lane count is read *concurrency*: effective decode
 parallelism is `min(lanes, pipeline.threads)`, so lanes beyond the driver-thread
-count add read-ahead memory and open connections without more throughput. The
-runtime emits a startup warning when a source (via `Source::advisory_lane_count`)
-declares far more lanes than there are pipeline threads. The S3 backfill source
+count add read-ahead memory and open connections without more throughput —
+size lane counts (Kafka partitions per member, a coordinator's
+`max_in_flight`) near `pipeline.threads`. The S3 backfill source
 makes this concrete: each lane holds at most one `prefetch_bytes` read-ahead
 window and, because an object read is a sequence of bounded ranged GETs each
 drained into memory before hand-off, never an idle open connection while
@@ -269,11 +269,13 @@ Two contracts guard the drop-resolves-Delivered convention:
   (the chain's terminal stage does this for parked chunks and partial
   buffers; sink workers fail abandoned batches). Over-failing is always
   safe — it costs replay, never loss.
-- **Eager assignment.** `Checkpointer::begin_epoch` replaces all trackers,
-  so `LanesAssigned` must describe the full assignment following a full
-  revocation. Incremental/cooperative assignment requires an additive
-  checkpointer extension (future work); the controller defensively drains
-  and commits live lanes if a source violates this.
+- **Eager assignment, additive gains.** `Checkpointer::begin_epoch`
+  replaces all trackers, so `LanesAssigned` must describe the full
+  assignment following a full revocation; the controller defensively
+  drains and commits live lanes if a source violates this. Incremental
+  gains use `SourceEvent::LanesAdded` / `Checkpointer::extend_epoch`
+  instead: fresh partitions join the *current* epoch without disturbing
+  in-flight acks — the coordinated-source gain path.
 
 ### Considered alternative: fail-by-default record acknowledgements
 
@@ -610,7 +612,7 @@ call. No `serde_avro_fast` types appear in the public API.
 | `etl-kafka` | Kafka source (single consumer + partition queues) and producer sink. |
 | `etl-clickhouse` | ClickHouse `ShardWriter`. |
 | `etl-json` | JSON deserializer: single/ndjson/array framings; opt-in `simd` backend. |
-| `etl-s3` | Bounded S3/object-storage backfill source: sorted listing dealt into lanes, composite offsets, manifest checkpoints, drift-checked resume, self-terminating via `SourceEvent::Drained`. |
+| `etl-s3` | Coordinated S3/object-storage backfill source: leader-planned splits (listing-order packing, digest-identified descriptors carrying member keys+ETags), one lane per leased split with composite split-relative offsets, per-split fenced progress as the only checkpoint, object-level poison → quarantine, self-terminating via `AllComplete` → `SourceEvent::Drained`. No coordination backend appears in its public API or its cargo features — the coordinator is injected at assembly (`with_coordinator`); solo runs fall back to `etl-coordination`'s in-process `MemoryStore`, which is linked unconditionally (ephemeral progress). |
 | `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache; opt-in `fast` feature adds the `serde_avro_fast` backend (single-pass typed decode, borrowed/zero-copy records — see the dependency-policy note above). |
 | `etl-coordination` | Multi-instance work-stealing coordination backend for broker-less sources: leader-elected planning, TTL'd split leases with heartbeats and pairwise stealing, epoch-fenced resumable commits — over a public six-primitive store trait with an in-memory store (tests, embedding) and a NATS JetStream KV store (server ≥ 2.11, default `nats` feature). The seam it implements (`SplitPlanner`/`SplitCoordinator`) and the reusable source-side `CoordinationDriver` live in `etl-core::coordination` — synchronous and tokio-free (no async runtime in etl-core). |
 | `etl-test` | Public in-memory source/sink mocks with scripting handles, plus a scripted `SplitCoordinator` for coordinated-source tests. |
@@ -656,4 +658,11 @@ call. No `serde_avro_fast` types appear in the public API.
 | Split delivery attempts | increment only on non-graceful tenancy ends (expiry takeover, reclaim, explicit `fail`); quarantine at the cap; quarantined splits block `AllComplete` → the job ends `Stalled` | graceful releases and balance steals are not poison evidence; completing a bounded job over unprocessed planned data would dress loss up as a green exit |
 | Split ids | deterministic, planner-derived, `[A-Za-z0-9_-]{1,128}` | replans and leader failovers become create-if-absent no-ops; ids embed in store keys on any backend |
 | Coordinated source DX | seam traits + a framework-owned `CoordinationDriver` in `etl-core` (sync, tokio-free); backends injected at assembly like the framer seam | the event↔assignment choreography (tenancy partitions, fenced quarantine, completion sweep) is source-generic and where the subtle bugs live — one audited implementation instead of one per connector |
+| Coordinated gains & completion latency | additive gains: a gain mints a fresh, never-reused lane per tenancy (`LanesAdded`, `extend_epoch`) — no revoke-then-reassign cycle; eager terminal commit: end-of-input lanes surface as `CommitReady` (`SplitSource::take_finishing`) and the runtime chases their final acks within one commit interval; completed splits leave barrier-less via `LanesRetired` (terminal commit already proved nothing is in flight) | a split's completion must not cost a commit-tick quantum (~ interval / max_in_flight of wall time), and a routine gain must never drain flowing lanes — the drain-and-reassign cycle both crashed mid-flow commits and cost O(splits) re-reads of uncommitted tails |
 | Split record layout | two durable records per split: an immutable spec record (descriptor, written once at planning) and a small progress record (owner, epoch, attempts, watermark) that is the CAS target for every claim, fence, and commit; `planned` is recounted from an authoritative listing at every publish | commit cost must not scale with descriptor size (a bin-packed object list can be hundreds of KiB, rewritten on every commit under a one-record layout); the recount makes a leader crash or failed publish between seeding and publishing self-heal instead of desynchronizing terminal detection forever |
+| S3 scale-out | always-coordinated single path: solo = one instance over an internal in-process store (ephemeral progress, WARNed); the manifest checkpoint is deleted | two checkpoint mechanisms means two commit paths, two resume validators, and a lane/split impedance mismatch; at 0.1.x the dual path was pure liability — durable solo resume is delegated to a durable coordination store |
+| S3 split packing | listing-order first-fit with a 10-bin lookback and a per-object open cost of `max(size, target/16)`; default target 64 MiB; an object ≥ target gets its own split | pure, streamable function of the listing (Iceberg/Trino practice; Spark's sort-then-pack costs O(files) driver memory and prefix locality); the cost floor structurally caps a split at ~16 members, bounding descriptors well under store value caps |
+| S3 split identity | truncated SHA-256 over sorted member keys + ETags + a packing-version constant, base64url — public derivation (`split_id_for`) | replans are create-if-absent no-ops; an overwrite becomes new work instead of silently matching stale progress; a packing change is an explicit epoch; the digest is persisted identity where a collision silently drops work, so it must survive adversarial key names; out-of-process producers (event-driven planners, single-shot invocations) can mint identical ids |
+| S3 poison policy | object-level failures (deleted after planning, `If-Match` drift, corrupt content, exhausted read budget) poison the split via `driver.fail`; credentials/config stay pipeline-fatal; `Stalled` stays fatal | one bad object must not kill a fleet-wide backfill, and a bounded job with quarantined splits must never end as a green `Completed`; the failure-class split follows scope (one object vs. every object on every instance) |
+| Coordinator wiring | assembly-only: sources accept `Box<dyn SplitCoordinator>` (`with_coordinator`) and carry no backend config or features; the source YAML keeps only what shapes the work itself (planner knobs like `split_target_bytes`/`refresh_listing`) | per-connector backend config multiplies (connectors × backends) in features and config surface; the deployer's binary is the right owner of "which store" — new backends then need zero connector changes |
+| Control-plane wait ownership | the **driver** parks, not the backend: `SplitCoordinator::poll` takes no timeout and must not block, `set_waker` (no default) hands it a single-slot `ControlWaker` that lanes clone too and signal on two edges — end-of-input and poison | a coordinated source waits on two signals arriving from different directions: backend events, and lanes reaching end-of-input *on pipeline threads*. Only the driver sees both, so a wait inside the backend can only ever be woken by half of them — a finishing lane was noticed between waits, and every completion sat out the remainder of one. Capping that wait bounded the damage at the cost of polling the control plane 200×/s; moving it removes both. A defaulted `set_waker` would be worse than none: the backend parks internally *and* the driver parks on top |

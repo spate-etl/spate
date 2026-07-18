@@ -74,6 +74,18 @@ impl Metric {
         }
     }
 
+    /// A byte throughput, recorded as `MB/s` in the SI sense — 10^6 bytes, not
+    /// 2^20.
+    ///
+    /// Rigs had drifted apart on this: two sites divided by `1024 * 1024` and
+    /// two by `1e6`, all four emitting the same `MB/s` string, so the same
+    /// physical throughput read 4.86% apart with nothing in the record to tell
+    /// which convention produced it. Take the rate in bytes/s and let this pick
+    /// the divisor, so a new rig cannot reintroduce the split.
+    pub fn bytes_per_s(bytes_per_s: f64) -> Self {
+        Self::maximize(bytes_per_s / 1e6, "MB/s")
+    }
+
     /// Attaches a 95% confidence interval.
     #[must_use]
     pub fn with_ci(mut self, low: f64, high: f64) -> Self {
@@ -306,6 +318,20 @@ mod tests {
         let line = serde_json::to_string(&Report::verdict("ch_native_format")).expect("serialize");
         assert!(!line.contains("note"), "{line}");
         assert!(line.contains(r#""kind":"verdict""#), "{line}");
+    }
+
+    #[test]
+    fn byte_rates_are_si_megabytes() {
+        // The whole point of the helper: one divisor, so rigs cannot drift onto
+        // 2^20 while still labelling the result "MB/s".
+        let m = Metric::bytes_per_s(1_048_576.0);
+        assert_eq!(m.unit, "MB/s");
+        assert!(m.higher_is_better);
+        assert!(
+            (m.value - 1.048576).abs() < 1e-12,
+            "1 MiB/s must record as 1.048576 MB/s, got {}",
+            m.value
+        );
     }
 
     #[test]

@@ -94,12 +94,18 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     let mut last_data = Instant::now();
     let mut flushed_since_data = false;
     let mut pause_started: Option<Instant> = None;
+    // Consecutive empty lane polls; resets on data (or on lane-set change,
+    // where a stale count could only cause one early blocking poll).
+    let mut empty_polls: usize = 0;
+    // A control message received while parked with no lanes (see the
+    // lane-less wait below); handled by the drain at the top of the loop.
+    let mut parked: Option<ThreadControl<L>> = None;
 
     loop {
         health.heartbeat(params.thread);
 
         // 1. Control messages (never block).
-        while let Ok(msg) = control.try_recv() {
+        while let Some(msg) = parked.take().or_else(|| control.try_recv().ok()) {
             match msg {
                 ThreadControl::AddLane(lane) => lanes.push(lane),
                 ThreadControl::StopLanes {
@@ -129,6 +135,28 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     for _ in 0..stopped {
                         barrier.arrive();
                     }
+                }
+                ThreadControl::FlushNow => {
+                    // A lane hit end-of-input: push its tail out now so the
+                    // acks it is waiting on can resolve, instead of holding
+                    // the unit of work open for a full `idle_flush` lull.
+                    match chain.flush() {
+                        PushOutcome::Done => flushed_since_data = true,
+                        PushOutcome::Blocked { .. } => bp.on_send_rejected(),
+                        PushOutcome::Fatal(error) => {
+                            let _ = events.send(DriverEvent::Fatal {
+                                thread: params.thread,
+                                error,
+                            });
+                        }
+                    }
+                }
+                ThreadControl::DropLanes { lanes: drop } => {
+                    // Committed-and-complete lanes: drop them and keep
+                    // polling. No flush — their records are already
+                    // sink-durable, and flushing here would emit a partial
+                    // chunk and stall this thread once per completed unit.
+                    lanes.retain(|l| !drop.contains(&l.id()));
                 }
                 ThreadControl::Shutdown { barrier, deadline } => {
                     flush_until(
@@ -165,7 +193,21 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 
         // 3. Poll one lane (round-robin), or idle.
         if lanes.is_empty() {
-            std::thread::sleep(params.poll_timeout);
+            // Wait on the control channel, not the clock. A thread with no
+            // lanes is waiting for exactly one thing — a control message —
+            // and sleeping out the full poll timeout delays every one of
+            // them by up to that long: `Shutdown` at the end of a job, and
+            // `AddLane` every time a coordinated source hands this thread
+            // its next unit of work.
+            match control.recv_timeout(params.poll_timeout) {
+                Ok(msg) => parked = Some(msg),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    // The controller is gone and no message can arrive;
+                    // keep the idle cadence rather than spinning hot.
+                    std::thread::sleep(params.poll_timeout);
+                }
+            }
             idle_flush(
                 chain.as_mut(),
                 &mut last_data,
@@ -181,18 +223,31 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         let lane_idx = next_lane;
         next_lane += 1;
 
+        // Head-of-line guard: while any lane in the rotation is producing,
+        // poll with a zero timeout so one empty lane (a fetcher cold start,
+        // a starved partition queue) never parks the thread while sibling
+        // lanes hold ready data. Only after a full empty pass does the next
+        // poll block for the real timeout — same idle CPU as always, but
+        // data never waits behind an empty sibling.
+        let lane_timeout = if empty_polls >= lanes.len() {
+            params.poll_timeout
+        } else {
+            Duration::ZERO
+        };
+
         let owned_ids: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
         // The poll result borrows the lane's buffers, so the lanes cannot
         // move into the parking loop until this block ends; the fatal is
         // latched here and acted on after.
         let fatal_reported = {
             let poll_started = Instant::now();
-            let polled = lanes[lane_idx].poll(params.max_records, params.poll_timeout);
+            let polled = lanes[lane_idx].poll(params.max_records, lane_timeout);
             source_metrics.poll_duration(poll_started.elapsed());
 
             let mut fatal_reported = false;
             match polled {
                 Ok(Some(mut batch)) => {
+                    empty_polls = 0;
                     last_data = Instant::now();
                     flushed_since_data = false;
                     let mut counting = CountingBatch::new(&mut batch);
@@ -220,6 +275,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     }
                 }
                 Ok(None) => {
+                    empty_polls = empty_polls.saturating_add(1);
                     idle_flush(
                         chain.as_mut(),
                         &mut last_data,
@@ -241,6 +297,10 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     fatal_reported = true;
                 }
                 Err(e) => {
+                    // Counts toward the empty pass: a lane looping on a
+                    // retryable error must degrade to the blocking cadence,
+                    // not spin hot on zero-timeout polls.
+                    empty_polls = empty_polls.saturating_add(1);
                     crate::rate_limited_warn!(
                         POLL_ERROR_WARN,
                         thread = params.thread,
@@ -300,6 +360,11 @@ fn park_until_shutdown<L: SourceLane>(
                     barrier.arrive();
                 }
             }
+            Ok(ThreadControl::DropLanes { lanes: drop }) => {
+                lanes.retain(|l| !drop.contains(&l.id()));
+            }
+            // Chain already dropped here; nothing to flush.
+            Ok(ThreadControl::FlushNow) => {}
             Ok(ThreadControl::Shutdown { barrier, .. }) => {
                 lanes.clear();
                 barrier.arrive();

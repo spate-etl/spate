@@ -100,6 +100,10 @@ required-features = ["s3", "json"]
 name = "coordinated_pipeline"
 required-features = ["coordination"]
 
+[[example]]
+name = "s3_coordinated_backfill"
+required-features = ["s3", "json", "coordination"]
+
 [features]
 default = []
 avro = ["dep:etl-avro"]

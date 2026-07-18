@@ -12,9 +12,11 @@
 //!
 //! Every continuous ownership span of a split — from `Gained` to whatever
 //! ends it — is one **tenancy**, and each tenancy gets a fresh, never
-//! reused [`PartitionId`]. Lane ids are dense per assignment cycle
-//! (re-numbered on every [`SourceEvent::LanesAssigned`]); partition ids
-//! are stable for the life of the tenancy. Watermarks arrive keyed by
+//! reused [`PartitionId`] *and* a fresh, never reused [`LaneId`]: a lane
+//! materializes exactly once, when its tenancy's split is staged for
+//! opening, and lives untouched until the tenancy ends. Gains are
+//! additive ([`SourceEvent::LanesAdded`]) — flowing lanes are never
+//! drained because a peer's split arrived. Watermarks come back keyed by
 //! partition, so a late drain-commit from a lane that lost its split
 //! resolves to a retired tenancy and is skipped — a stale write cannot be
 //! folded, committed, or resurrected by construction.
@@ -26,18 +28,24 @@
 //!
 //! 1. Pending losses → partial [`SourceEvent::LanesRevoked`] (barrier
 //!    sized one party per lane, matching the runtime's drain contract).
-//! 2. Staged gains → [`SourceEvent::LanesAssigned`] with the **full** live
-//!    set (the controller defensively drains live lanes on assignment, so
-//!    retained splits are re-opened from their resume cache).
+//!    Once delivered, the retired tenancies they belonged to have
+//!    absorbed every late watermark they can see and are pruned.
+//! 2. Staged gains → [`SourceEvent::LanesAdded`] with lanes for the
+//!    newly-gained splits only; existing lanes and their in-flight acks
+//!    are untouched.
 //! 3. Otherwise poll the coordinator (the idle wait delegates there),
 //!    fold its events into the tenancy table, and sweep for completions.
 //! 4. [`CoordinationEvent::AllComplete`] → [`SourceEvent::Drained`];
 //!    [`CoordinationEvent::Stalled`] → a fatal error by default
 //!    (see [`stall_drains`](CoordinationDriver::stall_drains)).
+//! 5. Nothing staged and some lane newly at end-of-input
+//!    ([`SplitSource::take_finishing`]) → [`SourceEvent::CommitReady`],
+//!    so the runtime chases the final acks instead of waiting out its
+//!    commit tick.
 
 use super::{
-    CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
-    SplitId, SplitPlanner, SplitProgress, SplitSpec,
+    ControlWaker, CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch,
+    SplitCoordinator, SplitId, SplitPlanner, SplitProgress, SplitSpec,
 };
 use crate::error::{ErrorClass, SourceError};
 use crate::record::PartitionId;
@@ -46,9 +54,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-/// Everything the driver hands a source when a split's lane must be
-/// (re-)materialized: on first gain and again on every reassignment cycle
-/// while the split stays owned.
+/// Everything the driver hands a source when a split's lane is
+/// materialized — exactly once per tenancy, when the gain is staged into
+/// a [`SourceEvent::LanesAdded`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SplitOpening<'a> {
@@ -57,13 +65,19 @@ pub struct SplitOpening<'a> {
     /// Authoritative progress to resume from (already validated via
     /// [`SplitSource::validate_resume`]); `None` for a fresh split.
     pub resume: Option<&'a SplitProgress>,
-    /// Dense lane id for this assignment cycle.
+    /// Lane id minted for this tenancy's lifetime; never reused by this
+    /// source.
     pub lane: LaneId,
     /// Stable partition id for this tenancy — the key under which this
     /// split's watermarks come back to [`CoordinationDriver::commit`].
     pub partition: PartitionId,
     /// Fencing token of the current tenancy.
     pub epoch: LeaseEpoch,
+    /// Wakes the control-plane wait. Clone it into the lane and signal it
+    /// the moment the lane decides end-of-input or reports poison —
+    /// otherwise the driver only notices between waits and the split's
+    /// completion waits out an idle timeout.
+    pub waker: &'a ControlWaker,
 }
 
 /// What the driver needs from the embedding source.
@@ -112,15 +126,32 @@ pub trait SplitSource {
     /// The split's lane is being retired (lost, fenced, completed, or
     /// shutdown): detach its fetcher — never abort it, the pipeline thread
     /// may still be draining the lane. Must not block.
+    ///
+    /// This is the end of the tenancy: the driver never calls
+    /// [`SplitSource::encode_commit`] or [`SplitSource::sweep`] for the
+    /// split afterwards (its tenancy is retired first, and retired
+    /// tenancies absorb late watermarks), so the source may drop the
+    /// split's state here.
     fn close_split(&mut self, split: &SplitId);
+
+    /// Splits whose lanes decided end-of-input since the last call (the
+    /// edge, not the level). The driver surfaces them as
+    /// [`SourceEvent::CommitReady`] so the runtime chases their final acks
+    /// instead of waiting out the commit tick — the split then completes
+    /// (and frees its working-set slot) within milliseconds of its last
+    /// record becoming sink-durable. Purely a latency hint; the default
+    /// reports none.
+    fn take_finishing(&mut self) -> Vec<SplitId> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum TenancyState {
-    /// Owned; lane live or awaiting the next assignment cycle.
+    /// Owned; lane live or staged to open.
     Live,
     /// Ownership over (lost, fenced, failed, completed); entry retained
-    /// only to absorb late watermarks until the next assignment cycle.
+    /// only to absorb late watermarks until its revocation is delivered.
     Retired,
 }
 
@@ -145,17 +176,27 @@ struct Tenancy {
 /// source; see the [module docs](self) for the protocol it implements.
 pub struct CoordinationDriver {
     coordinator: Box<dyn SplitCoordinator>,
+    /// Parking half of the control-plane wakeup; the waker half is held by
+    /// the backend and by every lane this driver opened.
+    wait: crossbeam_channel::Receiver<()>,
+    waker: ControlWaker,
     tenancies: BTreeMap<PartitionId, Tenancy>,
     by_split: BTreeMap<SplitId, PartitionId>,
     /// Lanes whose loss must still surface as a partial revoke.
     pending_lost: Vec<LaneId>,
-    /// The live set changed; the full assignment must be re-emitted.
-    reassign: bool,
+    /// Lanes of completed tenancies: terminal progress reached the store,
+    /// so they leave without a drain barrier.
+    pending_retired: Vec<LaneId>,
+    /// Tenancies gained but not yet materialized: their lanes go out in
+    /// the next [`SourceEvent::LanesAdded`].
+    pending_open: Vec<PartitionId>,
     all_complete: bool,
     stalled: Option<(u64, u64)>,
     stall_drains: bool,
     started: bool,
     next_partition: u32,
+    /// Lane ids are minted once per tenancy and never reused.
+    next_lane: u32,
 }
 
 impl fmt::Debug for CoordinationDriver {
@@ -164,7 +205,8 @@ impl fmt::Debug for CoordinationDriver {
             .field("tenancies", &self.tenancies.len())
             .field("live", &self.by_split.len())
             .field("pending_lost", &self.pending_lost.len())
-            .field("reassign", &self.reassign)
+            .field("pending_retired", &self.pending_retired.len())
+            .field("pending_open", &self.pending_open.len())
             .field("all_complete", &self.all_complete)
             .field("stalled", &self.stalled)
             .field("started", &self.started)
@@ -175,18 +217,24 @@ impl fmt::Debug for CoordinationDriver {
 impl CoordinationDriver {
     /// Wrap a coordinator handle.
     #[must_use]
-    pub fn new(coordinator: Box<dyn SplitCoordinator>) -> CoordinationDriver {
+    pub fn new(mut coordinator: Box<dyn SplitCoordinator>) -> CoordinationDriver {
+        let (waker, wait) = super::control_channel();
+        coordinator.set_waker(waker.clone());
         CoordinationDriver {
             coordinator,
+            wait,
+            waker,
             tenancies: BTreeMap::new(),
             by_split: BTreeMap::new(),
             pending_lost: Vec::new(),
-            reassign: false,
+            pending_retired: Vec::new(),
+            pending_open: Vec::new(),
             all_complete: false,
             stalled: None,
             stall_drains: false,
             started: false,
             next_partition: 0,
+            next_lane: 0,
         }
     }
 
@@ -223,85 +271,112 @@ impl CoordinationDriver {
     ) -> Result<SourceEvent<S::Lane>, SourceError> {
         assert!(self.started, "poll_events before start");
 
-        // 1. Losses first: stop lost lanes before anything else runs.
-        if !self.pending_lost.is_empty() {
-            let lanes = std::mem::take(&mut self.pending_lost);
-            let barrier = DrainBarrier::new(lanes.len());
-            return Ok(SourceEvent::LanesRevoked { lanes, barrier });
-        }
+        // Staged work can be consumed without producing an event — a batch
+        // of gains every one of which was retired before it could open — and
+        // then the drain has to look again. Loop rather than recurse: the
+        // fall-through below runs a second `coordinator.poll()`, so under
+        // recursion the depth tracked how many such batches a backend
+        // produced back to back, with nothing structural bounding it.
+        let mut park = timeout;
+        loop {
+            // 1. Losses first: stop lost lanes before anything else runs.
+            if !self.pending_lost.is_empty() {
+                let lanes = std::mem::take(&mut self.pending_lost);
+                let barrier = DrainBarrier::new(lanes.len());
+                return Ok(SourceEvent::LanesRevoked { lanes, barrier });
+            }
 
-        // 2. Staged gains, as the controller contract's two-step: revoke
-        // every live lane first (their tenancies stay — they respawn from
-        // the resume cache), then emit the full new assignment.
-        if self.reassign {
-            let live: Vec<LaneId> = self
-                .tenancies
-                .values_mut()
-                .filter(|t| t.state == TenancyState::Live)
-                .filter_map(|t| t.lane.take())
-                .collect();
-            if !live.is_empty() {
-                // Detach fetchers now: the pipeline threads are about to
-                // drain the old lane objects.
-                let retained: Vec<SplitId> = self
-                    .tenancies
-                    .values()
-                    .filter(|t| t.state == TenancyState::Live)
-                    .map(|t| t.split.id.clone())
-                    .collect();
-                for split in retained {
-                    source.close_split(&split);
+            // 1b. Completed tenancies leave barrier-less: their terminal
+            // progress is in the store and nothing is in flight behind them.
+            if !self.pending_retired.is_empty() {
+                let lanes = std::mem::take(&mut self.pending_retired);
+                return Ok(SourceEvent::LanesRetired { lanes });
+            }
+
+            // Reaching here means every queued revocation has been delivered
+            // and the controller has drained + committed those lanes (its
+            // revoke choreography is synchronous), so retired tenancies have
+            // absorbed every late watermark they can ever see. Prune them.
+            self.tenancies.retain(|_, t| t.state == TenancyState::Live);
+
+            // 2. Staged gains: additive lanes for the newly-gained splits
+            // only. Existing lanes are untouched — a routine gain must never
+            // drain flowing lanes.
+            if !self.pending_open.is_empty() {
+                let lanes = self.open_pending(source)?;
+                if !lanes.is_empty() {
+                    return Ok(SourceEvent::LanesAdded(lanes));
                 }
-                let barrier = DrainBarrier::new(live.len());
-                return Ok(SourceEvent::LanesRevoked {
-                    lanes: live,
-                    barrier,
-                });
             }
-            self.reassign = false;
-            return self.materialize(source).map(SourceEvent::LanesAssigned);
-        }
 
-        // 3. Terminal states, once the choreography above has quiesced.
-        if let Some((completed, quarantined)) = self.stalled {
-            if self.stall_drains {
-                tracing::warn!(
-                    completed,
-                    quarantined,
-                    "job stalled; draining as configured"
-                );
-                return Ok(SourceEvent::Drained);
-            }
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "coordinated job stalled: {completed} splits completed but {quarantined} \
+            // 3. Terminal states, once the choreography above has quiesced.
+            if let Some((completed, quarantined)) = self.stalled {
+                if self.stall_drains {
+                    tracing::warn!(
+                        completed,
+                        quarantined,
+                        "job stalled; draining as configured"
+                    );
+                    return Ok(SourceEvent::Drained);
+                }
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: format!(
+                        "coordinated job stalled: {completed} splits completed but {quarantined} \
                      are quarantined and out of delivery attempts; inspect \
                      etl_coordination_splits_quarantined and requeue or exclude them"
-                ),
-            });
-        }
-        if self.all_complete {
-            return Ok(SourceEvent::Drained);
+                    ),
+                });
+            }
+            if self.all_complete {
+                return Ok(SourceEvent::Drained);
+            }
+
+            // 4. Drain the coordinator (never blocks — the wait is ours, at
+            // the end of this function).
+            let events = self.coordinator.poll().map_err(as_source_error)?;
+            for event in events {
+                self.apply(source, event)?;
+            }
+
+            // 5. Completion sweep over live, uncommitted-terminal tenancies.
+            self.sweep(source)?;
+
+            if !self.pending_lost.is_empty()
+                || !self.pending_retired.is_empty()
+                || !self.pending_open.is_empty()
+                || self.all_complete
+                || self.stalled.is_some()
+            {
+                // Something is staged: go round and surface it on this same
+                // call, without parking on the way.
+                park = Duration::ZERO;
+                continue;
+            }
+            break;
         }
 
-        // 4. Poll the coordinator; the source's idle wait delegates here.
-        let events = self.coordinator.poll(timeout).map_err(as_source_error)?;
-        for event in events {
-            self.apply(source, event)?;
+        // 5. Nothing staged: surface newly-finishing splits so the runtime
+        // chases their final acks instead of waiting out its commit tick.
+        let finishing = source.take_finishing();
+        if !finishing.is_empty() {
+            let partitions: Vec<PartitionId> = finishing
+                .iter()
+                .filter_map(|split| self.by_split.get(split).copied())
+                .collect();
+            if !partitions.is_empty() {
+                return Ok(SourceEvent::CommitReady { partitions });
+            }
         }
 
-        // 5. Completion sweep over live, uncommitted-terminal tenancies.
-        self.sweep(source)?;
-
-        if !self.pending_lost.is_empty()
-            || self.reassign
-            || self.all_complete
-            || self.stalled.is_some()
-        {
-            // Something is staged; surface it on this same call (bounded
-            // recursion — every staged branch above returns).
-            return self.poll_events(source, Duration::ZERO);
+        // 6. Nothing to report: park here, not inside the backend. Both
+        // producers signal the same waker — the backend when it has events,
+        // a lane the moment it decides end-of-input or reports poison — so
+        // a completion surfaces in microseconds instead of waiting out the
+        // remainder of this timeout. The sender half lives on `self`, so
+        // the channel can never disconnect and this can never spin.
+        if !park.is_zero() {
+            let _ = self.wait.recv_timeout(park);
         }
         Ok(SourceEvent::Idle)
     }
@@ -315,8 +390,9 @@ impl CoordinationDriver {
     ) -> Result<(), SourceError> {
         for &(partition, watermark) in watermarks {
             let Some(tenancy) = self.tenancies.get(&partition) else {
-                // Pruned tenancy: a drain commit that lost the race with
-                // reassignment. Its data replays under the new owner.
+                // Pruned tenancy: a drain commit that arrived after its
+                // retirement was fully delivered. Its data replays under
+                // the new owner.
                 continue;
             };
             if tenancy.state == TenancyState::Retired || tenancy.fenced || tenancy.completed {
@@ -413,7 +489,7 @@ impl CoordinationDriver {
                         completed: false,
                     },
                 );
-                self.reassign = true;
+                self.pending_open.push(partition);
             }
             CoordinationEvent::Lost { split } => {
                 if let Some(&partition) = self.by_split.get(&split) {
@@ -457,50 +533,77 @@ impl CoordinationDriver {
         self.by_split.remove(&tenancy.split.id);
         let split = tenancy.split.id.clone();
         if let Some(lane) = tenancy.lane.take() {
-            self.pending_lost.push(lane);
+            if tenancy.completed {
+                // Fully delivered, acked, and committed: nothing can be
+                // in flight, so the lane leaves without a drain barrier.
+                self.pending_retired.push(lane);
+            } else {
+                self.pending_lost.push(lane);
+            }
         }
         source.close_split(&split);
     }
 
-    /// Emit the full live assignment: prune retired tenancies (nothing
-    /// stale can arrive for them once the controller re-epochs), then
-    /// re-open every live split with dense lane ids ordered by split id.
-    fn materialize<S: SplitSource>(&mut self, source: &mut S) -> Result<Vec<S::Lane>, SourceError> {
-        self.tenancies.retain(|_, t| t.state == TenancyState::Live);
-
-        // Detach any still-attached fetchers: the controller is about to
-        // drain the old lane objects; the re-opened splits get fresh ones.
-        let respawn: Vec<PartitionId> = self
-            .tenancies
-            .iter()
-            .filter(|(_, t)| t.lane.is_some())
-            .map(|(&p, _)| p)
-            .collect();
-        for partition in respawn {
-            let split = self.tenancies[&partition].split.id.clone();
-            source.close_split(&split);
-            if let Some(t) = self.tenancies.get_mut(&partition) {
-                t.lane = None;
+    /// Materialize lanes for the staged gains only. Each tenancy opens
+    /// exactly once, with a lane id minted for its lifetime; a staged
+    /// tenancy that ended before it could open (gained then immediately
+    /// lost or fenced) is skipped — its retirement already handled it.
+    ///
+    /// All-or-nothing: a failure part way through undoes the whole batch
+    /// and re-stages it. Anything else strands the lanes already built —
+    /// they never reach the runtime, yet their tenancies stay `Live`
+    /// holding a lane id, which the `lane.is_some()` guard then skips
+    /// forever. The splits would keep their leases, heartbeated and
+    /// unreadable, and the job would stall instead of failing.
+    fn open_pending<S: SplitSource>(
+        &mut self,
+        source: &mut S,
+    ) -> Result<Vec<S::Lane>, SourceError> {
+        let staged = std::mem::take(&mut self.pending_open);
+        let mut lanes = Vec::with_capacity(staged.len());
+        // Tenancies this call minted a lane for, so a failure can undo them.
+        let mut opened: Vec<PartitionId> = Vec::new();
+        for idx in 0..staged.len() {
+            let partition = staged[idx];
+            let Some(tenancy) = self.tenancies.get_mut(&partition) else {
+                continue; // retired and pruned before it could open
+            };
+            if tenancy.state != TenancyState::Live || tenancy.lane.is_some() {
+                continue;
             }
-        }
-
-        let mut order: Vec<(SplitId, PartitionId)> =
-            self.by_split.iter().map(|(s, &p)| (s.clone(), p)).collect();
-        order.sort();
-
-        let mut lanes = Vec::with_capacity(order.len());
-        for (index, (_, partition)) in order.iter().enumerate() {
-            let lane_id = LaneId(u32::try_from(index).expect("lane count fits u32"));
-            let tenancy = self.tenancies.get_mut(partition).expect("live tenancy");
+            let lane_id = LaneId(self.next_lane);
+            self.next_lane = self
+                .next_lane
+                .checked_add(1)
+                .expect("lane ids exhausted (u32)");
             tenancy.lane = Some(lane_id);
             let opening = SplitOpening {
                 split: &tenancy.split,
                 resume: tenancy.progress.as_ref(),
                 lane: lane_id,
-                partition: *partition,
+                partition,
                 epoch: tenancy.epoch,
+                waker: &self.waker,
             };
-            lanes.push(source.open_split(opening)?);
+            match source.open_split(opening) {
+                Ok(lane) => {
+                    lanes.push(lane);
+                    opened.push(partition);
+                }
+                Err(e) => {
+                    // Dropping the lanes detaches whatever `open_split`
+                    // spawned for them; clearing `lane` lets the retry mint
+                    // a fresh id (ids are burned, never reused).
+                    drop(lanes);
+                    for p in opened.iter().chain(std::iter::once(&partition)) {
+                        if let Some(t) = self.tenancies.get_mut(p) {
+                            t.lane = None;
+                        }
+                    }
+                    self.pending_open = staged;
+                    return Err(e);
+                }
+            }
         }
         Ok(lanes)
     }
@@ -583,6 +686,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     // ------------------------------------------------------------------
     // Scripted coordinator double (the shape etl-test later publishes).
@@ -595,6 +699,7 @@ mod tests {
         fails: Vec<(SplitId, String)>,
         released: Vec<SplitId>,
         started: bool,
+        waker: Option<ControlWaker>,
     }
 
     #[derive(Clone, Default)]
@@ -602,7 +707,11 @@ mod tests {
 
     impl Script {
         fn push(&self, events: Vec<CoordinationEvent>) {
-            self.0.lock().unwrap().batches.push_back(events);
+            let mut st = self.0.lock().unwrap();
+            st.batches.push_back(events);
+            if let Some(w) = &st.waker {
+                w.wake();
+            }
         }
 
         fn fail_next_commit(&self, split: &str, kind: CoordinationErrorKind) {
@@ -636,10 +745,11 @@ mod tests {
             Ok(())
         }
 
-        fn poll(
-            &mut self,
-            _timeout: Duration,
-        ) -> Result<Vec<CoordinationEvent>, CoordinationError> {
+        fn set_waker(&mut self, waker: ControlWaker) {
+            self.0.0.lock().unwrap().waker = Some(waker);
+        }
+
+        fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
             Ok(self
                 .0
                 .0
@@ -749,12 +859,24 @@ mod tests {
         sweeps: Rc<RefCell<HashMap<String, SplitProgress>>>,
         complete_at: HashMap<String, i64>,
         reject_resume: bool,
+        finishing: Vec<String>,
+        /// Split ids whose `open_split` fails. Consumed per attempt, so a
+        /// retry of the same split succeeds.
+        fail_open: Vec<String>,
     }
 
     impl SplitSource for TestSource {
         type Lane = StubLane;
 
         fn open_split(&mut self, o: SplitOpening<'_>) -> Result<StubLane, SourceError> {
+            let id = o.split.id.as_str().to_string();
+            if let Some(i) = self.fail_open.iter().position(|s| *s == id) {
+                self.fail_open.remove(i);
+                return Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    reason: format!("open_split failed for {id}"),
+                });
+            }
             self.opened.push((
                 o.split.id.as_str().to_string(),
                 o.resume.map(|p| p.watermark),
@@ -803,6 +925,13 @@ mod tests {
         fn close_split(&mut self, split: &SplitId) {
             self.closed.push(split.as_str().to_string());
         }
+
+        fn take_finishing(&mut self) -> Vec<SplitId> {
+            std::mem::take(&mut self.finishing)
+                .into_iter()
+                .map(|s| SplitId::new(&s).unwrap())
+                .collect()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -838,25 +967,161 @@ mod tests {
     // Scenarios (each replays a defect class from the PR #34 review).
 
     #[test]
-    fn gains_coalesce_into_one_dense_assignment() {
+    fn a_signal_cuts_the_control_plane_park_short() {
+        // The driver owns the control-plane wait precisely so that both
+        // producers can end it: the backend, and a *lane* deciding
+        // end-of-input on a pipeline thread. If a `wake()` call site is
+        // ever dropped, the symptom is silent — completions simply wait out
+        // an idle timeout again — so assert the park is interruptible
+        // rather than trusting the wiring.
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        let park = Duration::from_millis(400);
+
+        // Control: nothing pending and nothing signalling, so the full
+        // timeout elapses. Without this the test would pass even if
+        // `poll_events` never parked at all.
+        let t0 = Instant::now();
+        assert!(matches!(
+            d.poll_events(&mut s, park).unwrap(),
+            SourceEvent::Idle
+        ));
+        let idle = t0.elapsed();
+        assert!(
+            idle >= park / 2,
+            "expected a real park, returned after {idle:?}"
+        );
+
+        // A signal landing mid-park ends it. The event itself surfaces on
+        // the following call — the drain runs at the top of `poll_events` —
+        // so this asserts the wakeup, not the delivery.
+        let signaller = script.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            signaller.push(vec![CoordinationEvent::AllComplete]);
+        });
+        let t1 = Instant::now();
+        let _ = d.poll_events(&mut s, park).unwrap();
+        let woken = t1.elapsed();
+        handle.join().unwrap();
+        assert!(
+            woken < park / 2,
+            "a signal must cut the park short, but it ran {woken:?} of {park:?}"
+        );
+        assert!(matches!(
+            d.poll_events(&mut s, Duration::ZERO).unwrap(),
+            SourceEvent::Drained
+        ));
+    }
+
+    #[test]
+    fn a_failed_open_undoes_the_whole_batch_instead_of_stranding_lanes() {
+        // `open_split` failing part way through must not abandon the lanes
+        // already built: they never reach the runtime, yet their tenancies
+        // would keep a lane id, be skipped by the `lane.is_some()` guard on
+        // every later attempt, and hold their leases — heartbeated,
+        // unreadable, and a stalled job rather than a failed one.
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource {
+            fail_open: vec!["b".into()],
+            ..TestSource::default()
+        };
+
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        let err = d
+            .poll_events(&mut s, Duration::ZERO)
+            .expect_err("the failing open must surface");
+        assert!(err.to_string().contains("open_split failed for b"), "{err}");
+        assert_eq!(s.opened.len(), 1, "a opened before b failed");
+
+        // The retry re-stages the whole batch and yields both lanes.
+        let event = poll(&mut d, &mut s);
+        let SourceEvent::LanesAdded(lanes) = event else {
+            panic!("expected both lanes after the retry, got {event:?}");
+        };
+        assert_eq!(lanes.len(), 2);
+        let reopened: Vec<&str> = s.opened.iter().map(|o| o.0.as_str()).collect();
+        assert_eq!(reopened, ["a", "a", "b"], "a re-opens on the retry");
+        // The rolled-back ids are burned, never reused.
+        assert_eq!(lanes[0].id(), LaneId(2));
+        assert_eq!(lanes[1].id(), LaneId(3));
+    }
+
+    #[test]
+    fn gains_coalesce_into_one_added_batch() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
 
         script.push(vec![gained("b", 1, Some(7)), gained("a", 1, None)]);
         let event = poll(&mut d, &mut s);
-        let SourceEvent::LanesAssigned(lanes) = event else {
-            panic!("expected assignment, got {event:?}");
+        let SourceEvent::LanesAdded(lanes) = event else {
+            panic!("expected added lanes, got {event:?}");
         };
         assert_eq!(lanes.len(), 2);
-        // Dense lane ids ordered by split id; distinct tenancy partitions.
-        assert_eq!(s.opened[0].0, "a");
+        // Lane ids minted in gain order; distinct tenancy partitions.
+        assert_eq!(s.opened[0].0, "b");
         assert_eq!(s.opened[0].2, LaneId(0));
-        assert_eq!(s.opened[1].0, "b");
+        assert_eq!(s.opened[0].1, Some(7), "carried progress reaches open");
+        assert_eq!(s.opened[1].0, "a");
         assert_eq!(s.opened[1].2, LaneId(1));
-        assert_eq!(s.opened[1].1, Some(7), "carried progress reaches open");
         assert_ne!(s.opened[0].3, s.opened[1].3);
         assert_eq!(d.assignments().len(), 2);
+    }
+
+    #[test]
+    fn a_mid_flow_gain_never_touches_live_lanes_and_their_commits_fold() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        let a_partition = s.opened[0].3;
+
+        // Split b arrives while a is live and flowing: strictly additive.
+        script.push(vec![gained("b", 1, None)]);
+        let event = poll(&mut d, &mut s);
+        let SourceEvent::LanesAdded(lanes) = event else {
+            panic!("expected added lanes, got {event:?}");
+        };
+        assert_eq!(lanes.len(), 1, "only the new split's lane");
+        assert!(
+            s.closed.is_empty(),
+            "a routine gain must never detach flowing fetchers"
+        );
+
+        // The commit window that killed the pipeline pre-fix: a's acked
+        // watermark lands right after the gain. It must fold normally.
+        d.commit(&mut s, &[(a_partition, 42)]).unwrap();
+        assert_eq!(s.encoded, vec![("a".to_string(), 42)]);
+        assert_eq!(script.commits().len(), 1);
+        assert_eq!(script.commits()[0].0.as_str(), "a");
+        // a's lane is the original — never re-minted by the gain.
+        assert!(
+            d.assignments()
+                .contains(&(SplitId::new("a").unwrap(), LaneId(0)))
+        );
+    }
+
+    #[test]
+    fn finishing_splits_surface_as_commit_ready_once() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        let a_partition = s.opened[0].3;
+
+        s.finishing.push("a".to_string());
+        let event = poll(&mut d, &mut s);
+        let SourceEvent::CommitReady { partitions } = event else {
+            panic!("expected commit-ready, got {event:?}");
+        };
+        assert_eq!(partitions, vec![a_partition]);
+        // Edge, not level: the hint is consumed.
+        assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
     }
 
     #[test]
@@ -930,9 +1195,8 @@ mod tests {
         assert!(s.encoded.is_empty());
 
         // ...and the mid-cycle Lost that follows the fence is a no-op,
-        // while a re-gain (higher epoch) starts a fresh tenancy — via the
-        // contract's two-step: revoke the still-live lane (b), then the
-        // full assignment.
+        // while a re-gain (higher epoch) starts a fresh tenancy — added
+        // beside b's untouched live lane, never draining it.
         script.push(vec![
             CoordinationEvent::Lost {
                 split: SplitId::new("a").unwrap(),
@@ -940,21 +1204,16 @@ mod tests {
             gained("a", 3, Some(10)),
         ]);
         let event = poll(&mut d, &mut s);
-        assert!(
-            matches!(event, SourceEvent::LanesRevoked { ref lanes, .. } if lanes.len() == 1),
-            "live lanes are revoked before the reassignment, got {event:?}"
-        );
-        let event = poll(&mut d, &mut s);
-        let SourceEvent::LanesAssigned(lanes) = event else {
-            panic!("expected reassignment, got {event:?}");
+        let SourceEvent::LanesAdded(lanes) = event else {
+            panic!("expected an added lane for the re-gain, got {event:?}");
         };
-        assert_eq!(lanes.len(), 2);
-        let reopened = s.opened.last().unwrap();
-        assert_eq!(reopened.0, "b", "sorted order: b re-opened last has lane 1");
-        let a_again = &s.opened[s.opened.len() - 2];
+        assert_eq!(lanes.len(), 1, "only the fresh tenancy's lane");
+        assert_eq!(s.closed, vec!["a"], "b's fetcher was never detached");
+        let a_again = s.opened.last().unwrap();
         assert_eq!(a_again.0, "a");
         assert_eq!(a_again.4, 3, "fresh tenancy under the new epoch");
         assert_ne!(a_again.3, a_partition, "fresh partition — no reuse");
+        assert_eq!(a_again.2, LaneId(2), "fresh lane id — never reused");
     }
 
     #[test]
@@ -972,15 +1231,16 @@ mod tests {
             },
             gained("a", 2, Some(5)),
         ]);
-        // Loss first (revoke), then the re-gain materializes.
+        // Loss first (revoke), then the re-gain's lane is added fresh.
         let event = poll(&mut d, &mut s);
         assert!(matches!(event, SourceEvent::LanesRevoked { .. }));
         let event = poll(&mut d, &mut s);
-        assert!(matches!(event, SourceEvent::LanesAssigned(ref l) if l.len() == 1));
+        assert!(matches!(event, SourceEvent::LanesAdded(ref l) if l.len() == 1));
         let reopened = s.opened.last().unwrap();
         assert_eq!(reopened.4, 2);
         assert_eq!(reopened.1, Some(5), "resume from the carried progress");
         assert_ne!(reopened.3, first_partition);
+        assert_eq!(reopened.2, LaneId(1), "lane ids are never recycled");
     }
 
     #[test]
@@ -1013,11 +1273,13 @@ mod tests {
         s.sweeps
             .borrow_mut()
             .insert("a".into(), SplitProgress::completed(9, vec![]));
-        // The sweep commits terminal progress and retires the lane; the
-        // revoke surfaces on this same poll (staged-work fastpath).
+        // The sweep commits terminal progress and retires the lane; being
+        // complete (nothing in flight by construction), it leaves
+        // barrier-less on this same poll (staged-work fastpath).
         let event = poll(&mut d, &mut s);
         assert!(
-            matches!(event, SourceEvent::LanesRevoked { ref lanes, .. } if lanes[..] == [LaneId(0)])
+            matches!(event, SourceEvent::LanesRetired { ref lanes } if lanes[..] == [LaneId(0)]),
+            "completed lanes retire without a drain barrier, got {event:?}"
         );
         assert_eq!(script.commits().len(), 1);
         assert!(script.commits()[0].1.completed);
@@ -1030,7 +1292,7 @@ mod tests {
         d.commit(&mut s, &[(b_partition, 20)]).unwrap();
         assert!(script.commits().last().unwrap().1.completed);
         let event = poll(&mut d, &mut s);
-        assert!(matches!(event, SourceEvent::LanesRevoked { .. }));
+        assert!(matches!(event, SourceEvent::LanesRetired { .. }));
     }
 
     #[test]

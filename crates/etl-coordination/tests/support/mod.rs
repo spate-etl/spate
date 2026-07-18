@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 pub const LEASE: Duration = Duration::from_millis(1500);
 
 /// How long `drive` waits before declaring a scenario stuck.
+/// Pacing for the direct-drive helpers below, which poll a coordinator
+/// without a driver to park on.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
 pub const DEADLINE: Duration = Duration::from_secs(20);
 
 pub fn config(instance_id: Option<&str>) -> CoordinationConfig {
@@ -199,8 +203,14 @@ pub fn drive(
     while !done(held) {
         assert!(Instant::now() < deadline, "timed out: {what}");
         let events = coordinator
-            .poll(Duration::from_millis(25))
+            .poll()
             .unwrap_or_else(|e| panic!("poll failed while {what}: {e}"));
+        if events.is_empty() {
+            // `poll` no longer blocks — the driver owns the wait in the
+            // real pipeline. These helpers drive a coordinator directly,
+            // so pace the predicate check rather than spinning hot.
+            std::thread::sleep(POLL_INTERVAL);
+        }
         held.fold(events);
     }
 }
@@ -217,8 +227,11 @@ pub fn drive_pair<C: SplitCoordinator>(
         assert!(Instant::now() < deadline, "timed out: {what}");
         for (coordinator, held) in [(&mut *a.0, &mut *a.1), (&mut *b.0, &mut *b.1)] {
             let events = coordinator
-                .poll(Duration::from_millis(10))
+                .poll()
                 .unwrap_or_else(|e| panic!("poll failed while {what}: {e}"));
+            if events.is_empty() {
+                std::thread::sleep(POLL_INTERVAL);
+            }
             held.fold(events);
         }
     }

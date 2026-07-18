@@ -36,6 +36,9 @@ pub(crate) struct SourceLog {
 
 pub(crate) enum Script {
     Assign(Vec<LaneSpec>),
+    /// Additive gain — lanes join the *current* epoch, as a coordinated
+    /// source emits for an incremental unit of work.
+    Add(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
     /// Report the source permanently exhausted — models a bounded source
     /// (backfill) requesting the graceful completion drain.
@@ -107,6 +110,20 @@ impl Source for FakeSource {
                     })
                     .collect();
                 Ok(SourceEvent::LanesAssigned(lanes))
+            }
+            Some(Script::Add(specs)) => {
+                let issuer = self.issuer.as_ref().expect("open before add");
+                let lanes = specs
+                    .into_iter()
+                    .map(|s| FakeLane {
+                        id: s.id,
+                        partition: s.partition,
+                        batches: s.batches.into(),
+                        current: Vec::new(),
+                        issuer: issuer.clone(),
+                    })
+                    .collect();
+                Ok(SourceEvent::LanesAdded(lanes))
             }
             Some(Script::Revoke(ids)) => {
                 let mut log = self.shared.lock().unwrap();

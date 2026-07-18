@@ -133,8 +133,10 @@ impl Source for CounterSource {
 - **`open`** runs once, before anything else, and hands you the
   `AckIssuer`. Connect here.
 - **`poll_events`** services control-plane work (rebalance callbacks,
-  statistics) and returns the next `SourceEvent`: `LanesAssigned(lanes)`,
-  `LanesRevoked { lanes, barrier }`, or `Idle`. The runtime calls it
+  statistics) and returns the next `SourceEvent` — for a simple source
+  `LanesAssigned(lanes)`, `LanesRevoked { lanes, barrier }`, or `Idle`
+  (the full set, including the additive and completion events, is under
+  [Epochs and rebalances](#epochs-and-rebalances)). The runtime calls it
   regularly **regardless of backpressure state** — pausing data never
   pauses the control plane, which is how group liveness survives a slow
   sink.
@@ -203,17 +205,33 @@ Assignment changes are where at-least-once is won or lost:
 - **`LanesAssigned` bumps the assignment epoch** in the checkpointer, and
   acks issued under a previous epoch are discarded — a stale ack from a
   revoked assignment can never advance a new epoch's watermark.
-- **Assignment is eager**: `begin_epoch` replaces all trackers, so a
+- **`LanesAssigned` is eager**: `begin_epoch` replaces all trackers, so a
   `LanesAssigned` event must describe the **full** assignment following a
-  full revocation, not a delta. (Incremental/cooperative assignment is
-  future work; the controller defensively drains and commits live lanes if
-  a source violates this.)
+  full revocation, not a delta. (The controller defensively drains and
+  commits live lanes if a source violates this.)
+- **`LanesAdded` is the additive alternative**: new lanes join the
+  *current* epoch; existing lanes and their in-flight acks are untouched.
+  Lane ids must be new — never reuse an id from the source's lifetime —
+  and each lane's partition must be fresh, not one revoked earlier in the
+  epoch. Coordinated sources emit this for split gains, so a routine gain
+  never drains flowing lanes.
 - **`LanesRevoked` carries a `DrainBarrier`.** The runtime trips it for the
   owning pipeline threads, which stop the lanes, flush in-flight records,
   and arrive at the barrier. Complete the revocation — final synchronous
   commit included — only after `DrainBarrier::wait` returns. This is the
   choreography that lets a scale-down cost only the uncommitted tail; see
   [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
+- **`LanesRetired` removes finished lanes without a barrier** — strictly
+  for lanes whose input is fully delivered, acknowledged, *and committed*
+  (e.g. a coordinated split whose terminal progress reached the store), so
+  by contract nothing unflushed or uncommitted can exist behind them. If
+  any in-flight data or uncommitted acknowledgement may remain, use
+  `LanesRevoked`.
+- **`CommitReady { partitions }` is a latency hint**: the named lanes have
+  decided end-of-input, and a commit outside the periodic tick is
+  worthwhile now. The runtime briefly tightens its commit cadence for
+  those partitions only — bounded by one commit interval — until their
+  acks quiesce. Correctness never depends on it.
 
 :::warning
 Never block inside `poll_events` waiting on data-plane progress you
@@ -288,7 +306,23 @@ Sizing guidance: roughly uniform-cost splits, tens of MB to ~128 MB (or
 the row-count equivalent). Migrating from a pre-coordination checkpoint:
 attach it with `PlannedSplit::with_seed(progress)` — seeds are
 first-writer-wins and never overwrite live progress. A brand-new source
-plans without seeds; an empty `Final` plan completes immediately.
+plans without seeds; an empty `Final` plan completes immediately. (A
+source whose legacy checkpoint cannot be mapped onto splits may prefer a
+clean cutover instead — see *Retrofitting an existing source* below.)
+
+Two practicalities the signatures don't show:
+
+- **The planner brings its own I/O.** `PlanContext` carries no client and
+  no runtime handle — capture both at construction. `plan` runs on the
+  blocking pool, so `Handle::block_on(async_listing())` inside it is the
+  intended shape (this is how `etl-s3`'s planner runs its LIST).
+- **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
+  names (S3 keys, table names) rarely qualify — never embed them. Digest
+  them instead: `etl-s3` hashes the sorted member keys *and their ETags*
+  plus a packing-version constant (truncated SHA-256, base64url), so
+  replans are id-stable, an overwritten object becomes *new* work rather
+  than silently matching stale progress, and a packing change retires old
+  ids as an explicit epoch.
 
 ### 2. Read the work: `SplitSource`
 
@@ -304,39 +338,88 @@ impl SplitSource for MyCtx {
     type Lane = MyLane;
 
     /// Materialize the data lane for a gained (or re-assigned) split.
-    /// `opening.resume` is the authoritative committed progress; start
-    /// exactly there. Spawn fetchers here; never block on data.
+    /// The descriptor the planner wrote arrives verbatim in
+    /// `opening.split.descriptor` — decode it here; a worker never saw
+    /// the planner run. `opening.resume` is the authoritative committed
+    /// progress (already `validate_resume`-checked); start exactly there.
+    /// Spawn fetchers here; never block on data. Clone `opening.waker`
+    /// into the lane — see the wakeup contract below.
     fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<MyLane, SourceError> {
+        let work = MyDescriptor::decode(&opening.split.descriptor)?;
         let resume = opening.resume.map_or(0, |p| p.watermark);
-        Ok(MyLane::new(opening.lane, opening.partition, /* … */ resume))
+        Ok(MyLane::new(
+            opening.lane,
+            opening.partition,
+            work,
+            resume,
+            opening.waker.clone(),
+        ))
     }
 
-    /// Drift-check carried progress (etag pins, schema versions) before
-    /// trusting it. Default accepts. Rejecting stops the pipeline.
+    /// Drift-check carried progress (etag pins, schema versions) against
+    /// this instance's view before trusting it. Default accepts.
+    /// Rejecting stops the pipeline.
     fn validate_resume(&self, split: &SplitSpec, p: &SplitProgress) -> Result<(), SourceError> {
-        Ok(())
+        let pin = MyResumeState::decode(&p.state)?;      // same payload encode_commit writes
+        pin.check_against(&MyDescriptor::decode(&split.descriptor)?)
     }
 
-    /// Snapshot committable progress at an acked watermark: opaque resume
-    /// state plus whether this watermark COMPLETES the split (fully
-    /// delivered and fully acknowledged — you own that accounting).
+    /// Snapshot committable progress at an acked watermark. The `state`
+    /// payload is yours: version it, round-trip everything the NEXT owner
+    /// needs (etag pins, schema versions) — it comes back in
+    /// `opening.resume` and `validate_resume`. Mint
+    /// `SplitProgress::completed` when this watermark COMPLETES the split
+    /// (fully delivered and fully acknowledged — you own that accounting;
+    /// the usual shape is "the lane recorded its terminal watermark T at
+    /// end-of-input, and this acked watermark equals it").
     fn encode_commit(&mut self, split: &SplitId, watermark: i64) -> Result<SplitProgress, SourceError> {
-        Ok(SplitProgress::new(watermark, vec![]))
+        let state = self.resume_state_at(split, watermark).encode();
+        Ok(if self.terminal_watermark(split) == Some(watermark) {
+            SplitProgress::completed(watermark, state)
+        } else {
+            SplitProgress::new(watermark, state)
+        })
     }
 
-    /// Completion sweep for splits with no new watermark this tick (empty
-    /// splits; tails acked exactly at the previous commit): Some(terminal)
-    /// when done, None while data is in flight.
+    /// Completion sweep for splits that will never produce another
+    /// watermark: a split whose members yield ZERO records (empty
+    /// objects, an empty id range), or whose final ack landed exactly at
+    /// the previous commit. Return `Some(SplitProgress::completed(...))`
+    /// when done, `None` while data is in flight — without this, a
+    /// recordless split never finishes and the job never completes.
     fn sweep(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
-        Ok(None)
+        let Some(t) = self.terminal_watermark(split) else { return Ok(None) };
+        Ok(self.fully_acked_at(split, t)
+            .then(|| SplitProgress::completed(t, self.resume_state_at(split, t).encode())))
     }
 
-    /// The split's lane is being retired (lost, completed, shutdown):
-    /// DETACH its fetcher — never abort it, the pipeline thread may still
-    /// be draining the lane. Must not block.
+    /// The split's lane is being retired (lost, fenced, completed, or
+    /// shutdown): DETACH its fetcher — never abort it, the pipeline
+    /// thread may still be draining the lane. Must not block. This is the
+    /// END OF THE TENANCY: the driver never calls `encode_commit` or
+    /// `sweep` for the split afterwards, so drop its state here.
     fn close_split(&mut self, split: &SplitId) {}
 }
 ```
+
+Progress must be **split-relative**: a watermark encodes a position
+*within the split's own descriptor* (`etl-s3`: member ordinal + record
+index), never a position in some whole-input enumeration — the next owner
+has only the descriptor to interpret it against. State is per-tenancy:
+`close_split` ends one (nothing can follow it, so drop the split's state
+there), and a later re-gain is a fresh tenancy — `open_split` rebuilds
+from the carried progress.
+
+One more optional callback, **`take_finishing`** (default: reports none),
+is a pure latency hint: return the splits whose lanes decided
+end-of-input since the last call (the edge, not the level), and the
+driver surfaces them as `SourceEvent::CommitReady` — the runtime then
+chases their final acks with a temporarily tightened commit cadence
+(bounded by one commit interval) instead of waiting out the periodic
+tick, so a split completes and frees its working-set slot within
+milliseconds of its last record becoming sink-durable. Completion is
+correct without it; the terminal commit lands on the next tick either
+way.
 
 ### 3. Delegate the choreography: `CoordinationDriver`
 
@@ -348,6 +431,20 @@ struct MySource {
     driver: CoordinationDriver,
     ctx: MyCtx,
     started: bool,
+}
+
+impl MySource {
+    /// The coordinator is injected, fully built, at assembly time (§4) —
+    /// expose this as a `with_coordinator(...)` builder on a config-driven
+    /// source. The driver is just a wrapper: `CoordinationDriver::new`
+    /// takes the boxed coordinator and nothing else.
+    fn new(coordinator: Box<dyn SplitCoordinator>) -> MySource {
+        MySource {
+            driver: CoordinationDriver::new(coordinator),
+            ctx: MyCtx::default(),
+            started: false,
+        }
+    }
 }
 
 impl Source for MySource {
@@ -364,7 +461,7 @@ impl Source for MySource {
             // Joins the job and returns SourceEvent::LanesAssigned(vec![]) —
             // the EMPTY ready signal. It bumps the controller's assignment
             // epoch and marks the pipeline running while claims race;
-            // splits arrive as later assignments.
+            // splits then arrive additively (SourceEvent::LanesAdded).
             return self.driver.start(Box::new(MyPlanner { /* … */ }));
         }
         self.driver.poll_events(&mut self.ctx, timeout)
@@ -387,18 +484,67 @@ impl Drop for MySource {
 }
 ```
 
-What the driver owns so you don't: dense lane ids per assignment cycle; a
-fresh `PartitionId` per tenancy (so a late drain-commit from a lost split
-resolves to a retired tenancy and is skipped — no zombie folds); the
-eager revoke-all/assign-full contract; fenced-commit triage (`Fenced` →
-quarantine the tenancy, surface the loss; `Retryable` → recommit next
-tick); completion sweeps; `AllComplete` → `Drained`. A **stalled** job
+What the driver owns so you don't: additive gains (each gain mints a
+fresh, never-reused lane id and joins the running assignment via
+`LanesAdded` — flowing lanes are never drained because a peer's split
+arrived); a fresh `PartitionId` per tenancy (so a late drain-commit from
+a lost split resolves to a retired tenancy and is skipped — no zombie
+folds); the exit split — losses and fences leave through `LanesRevoked`
+with the drain barrier, while completed splits leave barrier-less through
+`LanesRetired` (their terminal commit already proved nothing is in
+flight); fenced-commit triage (`Fenced` → quarantine the tenancy, surface
+the loss; `Retryable` → recommit next tick); completion sweeps and the
+`take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
+`Drained`. A **stalled** job
 (quarantined splits blocking completion) is a fatal error by default —
 build the driver with `CoordinationDriver::new(...).stall_drains(true)`
 (a consuming builder, applied at construction) to turn it into a
 drain-with-warning. Report a poison split you cannot process with
 `driver.fail(&mut ctx, &split, "reason")`: it consumes a delivery attempt
 and hands the split back (quarantine happens at the attempt cap).
+
+**Poison travels a side channel, never a lane error.** A lane `poll`
+error is terminal for the whole pipeline, and `fail` needs `&mut self` on
+the source — which a lane, polled on a pipeline thread, does not have. So
+an object-level failure (a deleted or corrupt input) must not surface as
+a poll error: the lane sends a report over a channel (`std::sync::mpsc`
+works; the lane goes quiescent, returning empty polls), and the source
+drains that channel at the top of `poll_events`, calling `driver.fail`
+for each report before delegating to `driver.poll_events`. `etl-s3`'s
+lane/context pair is the production reference.
+
+**Signal the waker on the edges the control plane cannot see.** The
+driver — not the backend — owns the control-plane wait, because the two
+things worth waking for arrive from different directions: the backend's
+events, and *your lanes* reaching end-of-input on pipeline threads. Only
+the driver sees both. `SplitOpening::waker` is a `ControlWaker`: clone it
+into every lane and call `wake()` on exactly two edges — when the lane
+decides end-of-input, and when it reports poison. Both are per-tenancy
+edges, never the per-record path.
+
+Signalling is non-blocking, a burst collapses into one wakeup, and a
+signal arriving between the driver's check and its park is buffered
+rather than lost — so the ordering rule is simply *make the state visible
+first, then wake*. Dropping a `wake()` call is silent: the work still
+completes, it just waits out a full idle timeout first, so a split's
+completion (and the working-set slot it frees) is delayed by up to
+`event_poll_timeout` instead of surfacing in microseconds.
+
+The same contract binds a coordination **backend**: `SplitCoordinator::poll`
+takes no timeout and must not block — return whatever is pending,
+including nothing — and `set_waker` hands over the handle to signal
+whenever a later `poll` would return something. There is deliberately no
+default `set_waker`: a no-op one would leave the backend parking
+internally *and* the driver parking on top.
+
+**How a coordinated job ends.** On a `Final` plan, once every split is
+committed complete, every instance — including idle standbys — observes
+`AllComplete`; the driver returns `SourceEvent::Drained` and a bounded
+runtime exits `ExitState::Completed` with the usual guarantee (every
+acked record durably committed). `Stalled` surfaces as a fatal error →
+`ExitState::Failed` (or a warned drain under `stall_drains(true)`). An
+`Open` plan never reports either — operators stop those jobs with a
+signal drain.
 
 ### 4. Construct a backend
 
@@ -448,14 +594,41 @@ misconfiguration (old server, a `lease_duration` changed mid-job, a
 store TTL diverging from the coordination config) fails fast with an
 actionable message. Credentials never appear in `Debug` output.
 
+### Retrofitting an existing source
+
+A source that already implements `Source` with its own lane dealing and a
+whole-source checkpoint retrofits in three moves (this is exactly how
+`etl-s3` was converted — read it as the reference):
+
+1. **Extract the lane assembly** out of the source into the sibling
+   context struct: everything `open_split` needs to spawn a fetcher and
+   build a lane (client, framer/decoder factories, buffers, metrics
+   handles). The source keeps only the driver, the context, and config.
+2. **Replace self-dealt lanes with driver assignment.** Whatever loop
+   dealt the enumerated work across N lanes becomes the planner (the
+   enumeration, leader-only) plus `open_split` (one lane per gained
+   split). Static assignment, EOF flags, and "all lanes done" logic all
+   disappear — the driver owns assignment cycles and completion.
+3. **Decide the checkpoint story.** Per-split fenced progress in the
+   coordination store replaces the whole-source checkpoint; they cannot
+   coexist as two sources of truth. If old progress maps cleanly onto
+   splits, seed it (`PlannedSplit::with_seed`); if the old layout is
+   keyed by something splits don't preserve (as etl-s3's per-lane
+   round-robin manifest was), make a clean cutover — delete the legacy
+   path, and let the job fingerprint refuse any config that could
+   misread old state.
+
 ### Metrics
 
 The `etl_coordination_*` families are framework-owned and pre-registered:
-build `CoordinationMetrics::new(&labels)` at assembly time — after
-`Pipeline::from_config` has installed the recorder, alongside the
-backend construction above — and pass it to `StoreCoordinator::new`
-(metrics are a constructor parameter; there is no later hook). Passing
-`None` runs without coordination metrics; nothing registers per-record.
+build `CoordinationMetrics::new(&labels)` and pass it to
+`StoreCoordinator::new` (metrics are a constructor parameter; there is no
+later hook). The `labels` are `ComponentLabels` — at assembly time build
+them yourself (after `Pipeline::from_config` has installed the recorder);
+a source constructing its own fallback coordinator inside `open` reuses
+its meter's: `ctx.meter.as_ref().map(|m| CoordinationMetrics::new(m.labels()))`.
+Passing `None` runs without coordination metrics; nothing registers
+per-record.
 
 ### Testing
 

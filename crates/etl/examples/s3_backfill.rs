@@ -1,11 +1,14 @@
 //! Bounded S3 backfill, runnable without any infrastructure.
 //!
 //! Point the S3 source at a bucket prefix and it streams every object's
-//! NDJSON records through the pipeline, checkpoints to a manifest object,
-//! and **terminates the pipeline itself** once the prefix is exhausted —
-//! no shutdown trigger. A second run resumes from the manifest and, with
-//! nothing new to read, exits immediately with zero records: that is the
-//! at-least-once resume contract in miniature.
+//! NDJSON records through the pipeline and **terminates the pipeline
+//! itself** once the prefix is exhausted — no shutdown trigger. Solo (no
+//! coordinator injected) the source keeps its progress in an in-process
+//! store, so a second run replays the whole prefix — at-least-once, safe
+//! but wasteful, and the startup WARN says so. Durable resume and
+//! multi-instance sharing come from injecting a coordinator over a
+//! durable backend via `with_coordinator` — see the
+//! `s3_coordinated_backfill` example.
 //!
 //! Object storage here is a local directory (`file://`); against real S3
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
@@ -45,15 +48,11 @@ metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"
-    lanes: 2
-    checkpoint:
-      url: "file://{state}/manifest.json"
 deserializer:
   json: {{}}
 sink: {{ capture: {{}} }}
 "#,
         data = root.join("data").display(),
-        state = root.join("state").display(),
     )
 }
 
@@ -129,7 +128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (codec picked per object by extension).
     let root = tempfile::tempdir()?;
     std::fs::create_dir_all(root.path().join("data"))?;
-    std::fs::create_dir_all(root.path().join("state"))?;
     std::fs::write(
         root.path().join("data/2026-07-13.ndjson"),
         concat!(
@@ -155,21 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("rows written ({}): {rows:?}", rows.len());
     assert_eq!(rows.len(), 4);
 
-    println!("\n── run 2: resume of a finished backfill ──");
-    let rows = run_once(&yaml)?;
+    println!("\n── run 2: rerun on an ephemeral (solo) store ──");
+    let mut rows = run_once(&yaml)?;
+    rows.sort();
     println!(
-        "rows written ({}): everything was already committed in the manifest",
+        "rows written ({}): solo progress died with run 1, so the rerun replayed \
+         the prefix — inject a coordinator over a durable backend for real resume",
         rows.len()
     );
-    assert!(rows.is_empty());
-
-    println!(
-        "\nmanifest at {}:",
-        root.path().join("state/manifest.json").display()
-    );
-    println!(
-        "{}",
-        std::fs::read_to_string(root.path().join("state/manifest.json"))?
-    );
+    assert_eq!(rows.len(), 4);
     Ok(())
 }

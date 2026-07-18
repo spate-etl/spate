@@ -13,7 +13,7 @@
 //!   CODECS=zstd s3_backfill    # subset
 //!
 //! Env: OBJECTS (64) | RECORDS_PER_OBJECT (20000) | PAYLOAD (256)
-//! LANES (4) | THREADS (2) | CODECS (none,gzip,zstd)
+//! SPLIT_TARGET_MB (64) | THREADS (2) | CODECS (none,gzip,zstd)
 //! RESULTS (append JSONL path)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -56,7 +56,21 @@ fn line(i: usize, payload: usize) -> String {
     format!("{head}{}{tail}", "x".repeat(pad))
 }
 
-fn stage(dir: &std::path::Path, codec: &str, objects: usize, records: usize, payload: usize) {
+/// Stages the objects and returns the **decoded** size of one object in bytes.
+///
+/// The caller reports throughput against this rather than against
+/// `records * payload`: `line` pads to a fixed width only while there is room
+/// for the index, and its `.max(1)` floor silently widens the high-index lines
+/// once `PAYLOAD` gets close to the JSON scaffolding. Measuring the body keeps
+/// `decoded_mb_per_s` honest if that ever happens; the assertion below keeps it
+/// from happening quietly.
+fn stage(
+    dir: &std::path::Path,
+    codec: &str,
+    objects: usize,
+    records: usize,
+    payload: usize,
+) -> u64 {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).expect("data dir");
     std::fs::create_dir_all(dir.join("state")).expect("state dir");
@@ -65,6 +79,14 @@ fn stage(dir: &std::path::Path, codec: &str, objects: usize, records: usize, pay
         body.extend_from_slice(line(i, payload).as_bytes());
         body.push(b'\n');
     }
+    assert_eq!(
+        body.len(),
+        records * payload,
+        "PAYLOAD={payload} is too small to hold a {records}-record index plus \
+         its JSON scaffolding, so the records are not uniformly sized and the \
+         arm is not comparable with the others — raise PAYLOAD or lower \
+         RECORDS_PER_OBJECT",
+    );
     for o in 0..objects {
         match codec {
             "none" => {
@@ -90,18 +112,19 @@ fn stage(dir: &std::path::Path, codec: &str, objects: usize, records: usize, pay
             other => panic!("unknown codec {other}"),
         }
     }
+    body.len() as u64
 }
 
 fn run_codec(codec: &str) {
     let objects = env_u64("OBJECTS", 64) as usize;
     let records = env_u64("RECORDS_PER_OBJECT", 20_000) as usize;
     let payload = env_u64("PAYLOAD", 256) as usize;
-    let lanes = env_u64("LANES", 4);
+    let split_target_mb = env_u64("SPLIT_TARGET_MB", 64);
     let threads = env_u64("THREADS", 2) as usize;
     let total_records = (objects * records) as u64;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    stage(dir.path(), codec, objects, records, payload);
+    let decoded_bytes = stage(dir.path(), codec, objects, records, payload) * objects as u64;
     let stored_bytes: u64 = std::fs::read_dir(dir.path().join("data"))
         .expect("dir")
         .map(|e| e.expect("entry").metadata().expect("meta").len())
@@ -115,13 +138,10 @@ metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
 source:
   s3:
     url: "file://{data}/"
-    lanes: {lanes}
-    checkpoint:
-      url: "file://{state}/manifest.json"
+    split_target_bytes: {split_target_mb}MiB
 sink: {{ nullsink: {{}} }}
 "#,
         data = dir.path().join("data").display(),
-        state = dir.path().join("state").display(),
     );
     let config = PipelineConfig::from_str(&yaml).expect("config");
     let source_section = config.source.clone();
@@ -165,8 +185,9 @@ sink: {{ nullsink: {{}} }}
         probe: None,
     };
 
-    let source =
-        S3Source::from_component_config(&source_section, io.handle().clone()).expect("source");
+    let source = S3Source::from_component_config(&source_section, io.handle().clone())
+        .expect("source")
+        .with_framer(|| Box::new(etl_json::NdjsonFramer::new(64 << 20)));
 
     let chain_queues = queues;
     let chain_budget = Arc::clone(&budget);
@@ -200,13 +221,12 @@ sink: {{ nullsink: {{}} }}
         "conservation: every staged record lands exactly once in a clean run"
     );
 
-    let decoded_bytes = total_records * payload as u64;
     Report::measurement("s3_backfill")
         .variant("codec", codec)
         .variant("objects", objects as u64)
         .variant("records_per_object", records as u64)
         .variant("payload_bytes", payload as u64)
-        .variant("lanes", lanes)
+        .variant("split_target_mb", split_target_mb)
         .variant("threads", threads as u64)
         .metric("wall_s", Metric::minimize(wall, "s"))
         .metric(
@@ -215,11 +235,11 @@ sink: {{ nullsink: {{}} }}
         )
         .metric(
             "decoded_mb_per_s",
-            Metric::maximize(decoded_bytes as f64 / wall / 1e6, "MB/s"),
+            Metric::bytes_per_s(decoded_bytes as f64 / wall),
         )
         .metric(
             "stored_mb_per_s",
-            Metric::maximize(stored_bytes as f64 / wall / 1e6, "MB/s"),
+            Metric::bytes_per_s(stored_bytes as f64 / wall),
         )
         .metric(
             "records_total",

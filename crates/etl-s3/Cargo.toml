@@ -1,6 +1,6 @@
 [package]
 name = "etl-s3"
-description = "Bounded object-storage (S3) backfill source for the etl-rs pipeline framework: a self-terminating NDJSON backfill with durable manifest checkpoints and drift-checked resume. Applications should depend on the `etl` facade crate with the `s3` feature."
+description = "Coordinated object-storage (S3) backfill source for the etl-rs pipeline framework: an elected leader plans the prefix into splits, workers lease them with fenced per-split progress in a coordination store, resume is drift-checked against ETag pins, and the job self-terminates when the plan completes. Applications should depend on the `etl` facade crate with the `s3` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,24 +9,37 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Test-only injection seams (currently `S3Source::with_store`). Off by
+# default and never enabled by the `etl` facade, so the `object_store`
+# types they expose stay out of every real consumer's API surface.
+testing = []
+
 [dependencies]
+base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+etl-coordination = { workspace = true }
 etl-core = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
-humantime-serde = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
-twox-hash = { workspace = true }
 url = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# Self dev-dependency purely to switch on the `testing` seams for this
+# crate's own integration tests; dependents never see them.
+etl-s3 = { path = ".", features = ["testing"] }
+# The NATS backend for the Docker-gated durable-resume suite; a dev-only
+# feature — dependents of etl-s3 never link async-nats through it.
+etl-coordination = { workspace = true, features = ["nats"] }
 etl-test = { workspace = true }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }

@@ -40,13 +40,16 @@ under `sources/` or `sinks/`.
   synchronously before partitions are released. Backpressure pauses
   partitions without ever blocking the poll loop, so sink slowness cannot
   cause a consumer-group eviction. One topic per pipeline.
-- **S3 (source)** — a bounded backfill with connector-owned durability:
-  watermarks persist to a manifest object (object storage has no broker-side
-  commit), resumes validate the listing against the checkpoint and fail fast
-  on drift, and the self-terminating `Completed` exit additionally guarantees
-  every record was acknowledged and committed. One process per prefix — it
-  does not scale horizontally; see the
-  [limitation](sources/s3/README.mdx).
+- **S3 (source)** — a coordinated, bounded backfill: the elected leader
+  plans the prefix into splits, replicas lease and steal them, and
+  progress lives as per-split fenced commits in the coordination store
+  (object storage has no broker-side commit). Resumes drift-check carried
+  progress against the split's ETag-pinned descriptor; bad objects
+  quarantine their split instead of silently skipping; the
+  self-terminating `Completed` exit additionally guarantees every record
+  was acknowledged and committed. Scales horizontally by running more
+  replicas with a shared coordinator — see
+  [the connector page](sources/s3/README.mdx).
 - **Kafka (sink)** — a batch acknowledges only after **every** message's
   delivery report confirms, under forced `acks=all` + idempotence; a failed
   or timed-out report stalls the watermark and the batch replays.

@@ -1,13 +1,22 @@
 # S3 (object storage) source
 
 The S3 source (`etl-s3`, feature `s3` on the `etl` facade) runs a
-**bounded backfill**: point it at a bucket prefix and it streams every
-object's records through the pipeline, checkpoints its progress to a
-manifest object, and terminates the pipeline itself — `run()` returns
-`ExitState::Completed` — once the prefix is exhausted. `Completed` is a
-strong claim here: every record was durably written by the sink(s) *and*
-committed; an unacknowledged tail converts the exit into a failure so an
-incomplete backfill is never reported as done.
+**coordinated, bounded backfill**: point it at a bucket prefix and it
+streams every object's records through the pipeline and terminates the
+pipeline itself — `run()` returns `ExitState::Completed` — once every
+split of the prefix is committed complete. `Completed` is a strong claim
+here: every record was durably written by the sink(s) *and* committed; an
+unacknowledged tail converts the exit into a failure so an incomplete
+backfill is never reported as done.
+
+Work is planned as **splits**. The fleet's elected leader lists the
+prefix once and packs the sorted listing into splits — batches of whole
+objects, ~`split_target_bytes` each — with deterministic ids and
+self-contained descriptors (member keys, sizes, ETags). Workers lease
+splits through the coordination store and read them straight from the
+descriptors: **workers never list**. Solo and multi-instance are the same
+code path; the only difference is which coordination store the
+coordinator points at.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only — no `object_store` types in the public API), so
@@ -18,65 +27,132 @@ Construct it with the pipeline's I/O runtime handle:
 
 ```rust
 let pipeline = Pipeline::from_config(config)?;
-let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?;
+let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?
+    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
 let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
 // report.state == ExitState::Completed ⇒ the backfill is done and committed.
 ```
 
-:::warning One process per prefix — no horizontal scaling
+## Scaling out — and the solo default
 
-The S3 source does **not** scale across pods yet. Object storage has no
-consumer-group protocol: two processes pointed at the same prefix each
-list and process the *entire* prefix (a full duplicate backfill) and race
-on the manifest. Run exactly one pipeline process per backfill and scale
-**vertically** with `lanes` and pipeline threads. Wiring this source to
-the framework's [coordination layer](../../../02-concepts/07-source-coordination.mdx)
-(planner-sized splits, leased and stolen across replicas) is tracked in
-[#39](https://github.com/marcuskainth/etl-rs/issues/39).
+The coordinator is **assembly wiring** ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
+build one over a durable store and inject it, and every replica of the
+same pipeline shares the backfill — splits are leased, stolen from
+stragglers, and taken over from dead instances, with per-split fenced
+commits making the handoffs replay-safe. (The NATS store below needs the
+`etl` facade's `coordination-nats` feature; `etl-s3` itself carries no
+backend feature at all — see [Scaling out](../../../05-deployment/scaling-out.mdx).)
+
+```rust
+use etl::coordination::store::nats::{NatsConfig, NatsStore};
+use etl::coordination::{CoordinationConfig, StoreCoordinator};
+
+let tuning = CoordinationConfig {
+    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
+    ..CoordinationConfig::default()
+};
+let store = NatsStore::new(
+    NatsConfig::new(vec!["nats://nats:4222".into()], "exports-backfill"),
+    tuning.lease_duration,
+)?;
+let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
+let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?
+    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)))
+    .with_coordinator(Box::new(coordinator));
+```
+
+Deployment shape, tuning, and failure modes: [Scaling out](../../../05-deployment/scaling-out.mdx).
+The runnable two-instance version is
+`crates/etl/examples/s3_coordinated_backfill.rs`.
+
+:::warning No coordinator ⇒ solo, with **ephemeral** progress
+
+With no `with_coordinator(...)`, the source runs the same coordinated
+path over an internal in-process store. That is correct and
+self-terminating — but the store dies with the process, so **a restart
+replays the whole prefix** (at-least-once: wasteful, never lossy). A
+startup WARN says exactly this. Durable resume requires a durable
+coordination store (the NATS wiring above); there is no manifest
+checkpoint anymore.
 
 :::
 
-## The frozen-key-set contract
+## Split identity and drift
 
-Resume positions are ordinals into the lexicographically-sorted listing,
-so the key set under the prefix **must not change** for the lifetime of
-the backfill, including across restarts. This is enforced, not hoped for:
-the manifest pins each lane's committed object key, its ETag, and a
-rolling hash of the lane's committed key prefix, and every resume
-re-validates them against a fresh listing. Keys added, removed, or
-overwritten below a committed position fail the pipeline with a drift
-error instead of replaying or skipping the wrong data. Write new data to a
-different prefix and run a new backfill over it.
+A split's id digests its sorted member keys **and their ETags** (plus a
+packing-version constant), and every GET is pinned `If-Match` to the
+descriptor's ETag. What that buys:
+
+- **Replans are no-ops** over an unchanged prefix: same listing, same
+  packing, same ids — create-if-absent in the store, completed splits
+  stay completed.
+- **An overwritten object can never splice.** Under an in-flight split
+  the pin trips (a `Precondition` failure poisons the split); on a
+  replanned listing the new content is a *new* split id, never a silent
+  match against stale progress.
+- **A deleted object** poisons only the splits that still needed it.
+
+Prefer an **append-only prefix** for the lifetime of a backfill. By
+default the listing is taken once (`refresh_listing: false`), so keys
+that arrive later are simply not part of the job; with
+`refresh_listing: true` the leader re-lists on the coordinator's replan
+interval and plans new objects as additional splits (an **open** job that
+never self-terminates — stop it with a signal drain).
 
 ## Configuration
 
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
 (`crates/etl-s3/src/config.rs`); unknown fields are rejected with the
-offending key.
+offending key. Coordination is deliberately **not** here — see above.
 
 ```yaml
 source:
   s3:
     url: "s3://my-bucket/exports/2026-07/"
-    lanes: 4
     compression: auto
-    checkpoint:
-      url: "s3://my-bucket/_etl_checkpoints/exports-backfill.json"
+    split_target_bytes: 64MiB
     store:
       region: ${AWS_REGION:-eu-west-2}
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `url` | string | required | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. |
-| `lanes` | integer | `4` | Worker lanes (framework partitions). The sorted listing is dealt round-robin across lanes; each lane streams its slice sequentially, so this bounds read parallelism. Fixed for the lifetime of a checkpoint — changing it invalidates committed offsets (fatal at resume). |
-| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams fail the pipeline. |
-| `checkpoint.url` | string | required | Where the manifest object lives. Must **not** be under the source prefix (it would appear in the listing — rejected at load time). |
-| `checkpoint.store` | string map | `{}` | `object_store` options for the checkpoint store. Empty + same scheme/host as the source ⇒ the source's `store` options are reused. |
-| `checkpoint.timeout` | duration | `10s` | Bound on each manifest read/write; a slow save is retried on the next commit tick. |
-| `prefetch_bytes` | bytes | `8MiB` | Per-lane prefetch budget between the async fetcher and the pipeline thread. |
+| `url` | string | required | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. Part of the job fingerprint — byte-identical across every instance of a coordinated job. |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution and stealing. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
+| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
 | `store` | string map | `{}` | Raw `object_store` options applied **on top of the environment** when building the store from `url` — override `region`, `endpoint`, credentials, `allow_http`, timeouts. See [Credentials & region](#credentials--region). Bucket keys are rejected in any case spelling (the bucket comes from `url`). |
+
+Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
+different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
+`split_target_bytes` enters the job fingerprint as its **decoded byte
+count** — so a replica spelling it `64MB` is refused at startup against a
+fleet on the `64MiB` default. Spellings that decode to the same number of
+bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
+match across replicas, not the text.
+
+### Sizing splits against `pipeline.threads`
+
+A split is read by one lane, and a lane is pinned to the pipeline thread it
+was handed to — there is no work stealing between threads. So the split
+count, not just the split size, sets how evenly the work divides: a plan
+yielding five equal splits across two threads gives one thread three and the
+other two, and the job finishes when the loaded thread does.
+
+Aim for a split count that is a multiple of `pipeline.threads`, or large
+enough that one extra split is a small share of the total. Prefixes of many
+small objects get this for free (packing coalesces them); a handful of large
+objects is where it bites, since an object at or above the target always
+gets a split of its own and the count is then fixed by the data. Raising
+`split_target_bytes` coarsens the split set and can make imbalance *worse* —
+check the resulting count rather than assuming bigger is better.
+
+Removed in the coordinated rework (a stale config fails at load with the
+offending key): `lanes` (read parallelism is the coordinator's
+`max_in_flight` — one data lane per in-flight split) and the entire
+`checkpoint:` section (progress lives in the coordination store).
 
 The record **format is not a config key** — the S3 source is a transport and
 owns no framing. You wire the format's framer into the source in code (see
@@ -127,30 +203,32 @@ environment):
 
 Non-S3 schemes (`file://`) do not read the AWS environment.
 
-## Offsets, checkpointing, resume
+## Offsets, progress, resume
 
-A lane's `i64` offset packs *(object ordinal within the lane, record index
-within the object)*, which keeps one monotonic offset stream per lane
-across object boundaries — the same watermark contract every other source
-honors. Because object storage has no broker-side commit, `commit`
-persists watermarks to the **manifest object** at `checkpoint.url` on
-every checkpoint tick (single writer; a stale manifest costs replay, never
-loss).
+A lane's `i64` offset packs *(member ordinal within the split, record
+index within the object)*, which keeps one monotonic offset stream per
+split across object boundaries — the same watermark contract every other
+source honors. `commit` routes acked watermarks into **per-split fenced
+progress records** in the coordination store; each carries a versioned
+key/ETag pin for its position. Fencing means a split's previous owner can
+never overwrite its successor's progress — a stale commit loses the CAS,
+writes nothing, and the split simply replays its uncommitted tail on the
+new owner.
 
-On restart the source loads the manifest, validates it (schema, lane
-count, source identity, per-lane key/ETag/prefix-hash — any mismatch is
-fatal), replays the in-progress object from its start discarding exactly
-the committed record count, and continues. Resumed reads are pinned to the
-committed ETag, so a same-key overwrite cannot silently change what a
-record index means; on a store that reports no ETags, a mid-object resume
-is refused outright (fatal) rather than replayed unverified. Delivery is
-**at-least-once**: everything after the last committed watermark replays
-after a crash; duplicates are possible, loss is not.
+On a gain with carried progress, the source drift-checks the progress
+against the split's descriptor (key and ETag at the watermark's ordinal;
+a mid-object resume with no pin anywhere is refused), replays the
+in-progress object from its start discarding exactly the committed record
+count, and continues. Delivery is **at-least-once**: everything after the
+last committed watermark replays after a crash or handoff; duplicates are
+possible, loss is not.
 
-Limits (fatal, checked before they can corrupt offsets): 8,388,608 objects
-per lane — raise `lanes` for bigger listings — and ~1.1 × 10¹² records per
-object. The startup listing is held in memory once for sorting; budget
-roughly 100 bytes per key.
+Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
+overflows it **poisons its split** before any offset can be corrupted —
+handed back, retried, and quarantined at the attempt cap like any other
+object-terminal failure (see below). Split member counts are structurally
+capped by the packing floor, far below the ordinal limit. The leader holds the listing in
+memory once per plan; budget roughly 100 bytes per key.
 
 ## Decoding records
 
@@ -182,32 +260,48 @@ For a different object layout, supply a different `RecordFramer` — a custom on
 via `S3Source::with_framer`, or another format's framer — no fork required. The
 framer is **required**: a source built without one refuses to start.
 
-Object-level read problems are not record errors: transient failures are
-retried inside the source (capped backoff, ranged re-reads pinned to the
-ETag), and anything unrecoverable — a missing key, a failed ETag
-precondition, corruption, auth — fails the pipeline so it restarts and
-replays from the watermark. There is no skip-an-object mode: silently
-losing a whole object is not a policy, it's an incident.
+## Errors: poison splits, not skipped objects
+
+Object-level read problems are not record errors, and (new in the
+coordinated rework) they are not instant pipeline failures either.
+Transient failures are retried inside the source (capped backoff, ranged
+re-reads pinned to the ETag). Anything object-terminal — a key deleted
+after planning, an overwrite tripping the `If-Match` pin, corrupt or
+truncated content, an exhausted retry budget — **poisons the split**: the
+split is handed back to the coordinator (counted in
+`etl_s3_source_objects_failed_total{reason}`), retried on another
+delivery attempt, and **quarantined** at the attempt cap. A bounded job
+with quarantined splits ends **failed** (`Stalled`), never as a silently
+partial `Completed` — alert on `etl_coordination_splits_quarantined > 0`.
+Credentials, permission, and client-configuration errors still fail the
+pipeline immediately (no peer would fare better). There is still no
+skip-an-object mode: losing a whole object silently is not a policy, it's
+an incident — quarantine keeps it loud *and* lets the rest of the
+backfill finish first.
 
 ## Metrics
 
 Framework stage families (`etl_source_*`) work as for any source. The
 connector's own families live under `etl_s3_source_*` — objects
-listed/completed/remaining, bytes read/decoded, GET retries — see
+listed (leader-only)/completed/remaining, object failures by reason,
+bytes read/decoded, GET retries — and a coordinated run adds the
+`etl_coordination_*` families; see
 [docs/METRICS.md](../../../../METRICS.md).
 
 ## Testing
 
-The whole backfill lifecycle runs against `file://` URLs with no
-infrastructure (see `crates/etl/examples/s3_backfill.rs`, runnable with
-`cargo run -p etl --features s3,json --example s3_backfill`). The
-Docker-gated suite runs against a **SeaweedFS** S3 gateway
-(`cargo test -p etl-s3 -- --ignored --test-threads=1`) for real
-pagination, ETag, and resume semantics (ranged mid-stream retries are
-covered by in-memory fault-injection unit tests).
+The whole coordinated lifecycle runs against `file://` URLs with no
+infrastructure: solo (`crates/etl/examples/s3_backfill.rs`) and
+two-instance (`crates/etl/examples/s3_coordinated_backfill.rs`, over a
+shared in-process store). The Docker-gated suites run against a
+**SeaweedFS** S3 gateway, and — for durable resume and multi-instance
+over the production backend — SeaweedFS plus a NATS 2.11 container
+(`cargo test -p etl-s3 -- --ignored --test-threads=1`).
 
 ## Related
 
+- [Scaling out](../../../05-deployment/scaling-out.mdx)
+- [Source coordination](../../../02-concepts/07-source-coordination.mdx)
 - [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx)
 - [JSON format](../../formats/json/README.mdx)
 - [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)

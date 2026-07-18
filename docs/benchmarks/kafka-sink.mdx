@@ -41,7 +41,7 @@ Harness: `benchmarks/src/bin/kafka_sink_saturation.rs`; the matrix and env are i
 ## The client-path overhead ceiling
 
 The headline: through the full framework path the sink sustains **~1.21M
-records/s** (≈296 MB/s of payload) at the default settings — about **half** the
+records/s** (≈310 MB/s of payload) at the default settings — about **half** the
 **~2.49M records/s** a bare librdkafka produce loop reaches on the same broker
 with the same forced `acks=all + idempotence`, unframed. The gap is what the
 connector-internal framing (encode on the pipeline threads, parse on the writer),
@@ -211,8 +211,8 @@ consume side.
 - The broker runs an aggressive retention (`retention.ms=10s`,
   `retention.bytes=128 MiB`/partition) so the multi-arm matrix does not fill disk;
   the light background segment purge is part of the shared-host cost.
-- Payload throughput (MB/s) counts the 256-byte payload only, not the framing,
-  headers, or per-message wire overhead.
+- Payload throughput is SI MB/s — 10^6 bytes, not 2^20 — and counts the
+  256-byte payload only, not the framing, headers, or per-message wire overhead.
 - Every arm records the broker version, the derived in-flight budget, the
   producer-queue depth and broker latencies, and its own provenance in the JSONL,
   so a re-run on new hardware is directly comparable.

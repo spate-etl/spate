@@ -77,6 +77,9 @@ bytes = "1"
 core_affinity = "0.8"
 foldhash = "0.2"
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
+# Split identity in etl-s3: ids are persisted, so the digest must hold up
+# even for adversarially-named keys (a collision would silently drop work).
+sha2 = "0.10"
 
 # Connector dependencies. 0.x crates with breaking minors are held to a
 # single minor; Cargo.lock pins exact patches.

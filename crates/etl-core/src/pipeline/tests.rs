@@ -368,6 +368,110 @@ fn pending_batch_limit_pauses_then_resumes_lanes() {
 }
 
 #[test]
+fn a_lane_added_under_pending_pressure_starts_paused() {
+    // Pending-pressure pauses *every* assigned lane, so a lane arriving
+    // mid-pressure must join the pause rather than read on beside its
+    // paused siblings. Waiting for the next commit tick is not enough:
+    // inside the hysteresis band (pending between half the limit and the
+    // limit) neither the engage nor the release branch fires, so an
+    // unpaused newcomer can keep pulling indefinitely. This is also the
+    // only lane-placement path a coordinated source ever uses.
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 3;
+    let h = start_with_config(cfg, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        },
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
+    wait_for(
+        "pending pressure engages on the original lane",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .pauses
+                .iter()
+                .any(|p| p.contains(&LaneId(0)))
+        },
+    );
+    wait_for(
+        "all six batches are in flight",
+        Duration::from_secs(5),
+        || held.lock().unwrap().len() == 6,
+    );
+
+    // Settle into the hysteresis band, where the periodic tick cannot
+    // rescue a mis-started lane: resolving four batches leaves pending at
+    // 2, which is neither above the limit (engage) nor below half of it
+    // (release), so `apply_pending_pressure` does nothing from here on.
+    // The advancing watermark is the signal that the tick has folded them.
+    held.lock().unwrap().drain(..4);
+    wait_for(
+        "the resolved batches are committed, leaving pending in the band",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .committed
+                .get(&PartitionId(0))
+                .is_some_and(|&w| w >= 40)
+        },
+    );
+
+    // A fresh lane on a fresh partition joins while pressure is engaged.
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(100..110))),
+        }]));
+    wait_for(
+        "the added lane is paused too",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .pauses
+                .iter()
+                .any(|p| p.contains(&LaneId(1)))
+        },
+    );
+
+    // Clearing the pressure releases both lanes together.
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    wait_for(
+        "both lanes resume once pending drains",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .resumes
+                .iter()
+                .any(|r| r.contains(&LaneId(1)))
+        },
+    );
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+#[test]
 fn shutdown_flushes_chain_before_exit() {
     let h = start(|shared, log| FakeChain {
         shared,

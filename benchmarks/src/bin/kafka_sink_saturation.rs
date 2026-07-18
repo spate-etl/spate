@@ -390,7 +390,7 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
     } else {
         0.0
     };
-    let mb_per_s = rps * cfg.payload as f64 / (1024.0 * 1024.0);
+    let byte_rate = rps * cfg.payload as f64;
 
     // ── Downstream verdict (client path vs broker) ──
     // Primary: the raw baseline is the broker-headroom oracle. ratio ≥ 0.9 ⇒ the
@@ -439,7 +439,7 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
             "records_per_s_per_thread",
             Metric::maximize(rps / cfg.threads as f64, "records/s"),
         )
-        .metric("mb_per_s", Metric::maximize(mb_per_s, "MB/s"))
+        .metric("mb_per_s", Metric::bytes_per_s(byte_rate))
         .metric("sink_records", Metric::maximize(sink_records, "records"))
         .metric(
             "produced_total",
@@ -593,12 +593,12 @@ fn run_raw(bootstrap: &str, cfg: &Cfg) {
     } else {
         0.0
     };
-    let mb_per_s = rps * cfg.payload as f64 / (1024.0 * 1024.0);
+    let byte_rate = rps * cfg.payload as f64;
 
     cfg.base_variants(Report::measurement("kafka_sink_saturation"))
         .variant("threads", cfg.raw_send_threads as u64)
         .metric("records_per_s", Metric::maximize(rps, "records/s"))
-        .metric("mb_per_s", Metric::maximize(mb_per_s, "MB/s"))
+        .metric("mb_per_s", Metric::bytes_per_s(byte_rate))
         .metric("sink_records", Metric::maximize(delivered_delta, "records"))
         .note(format!(
             "raw rdkafka baseline (acks=all + idempotence, unframed): rps = \

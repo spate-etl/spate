@@ -73,6 +73,15 @@ pub enum SourceEvent<L> {
     /// New lanes were assigned; the runtime distributes them across
     /// pipeline threads. The source bumps its assignment epoch first.
     LanesAssigned(Vec<L>),
+    /// Additional lanes join the *current* assignment epoch; existing
+    /// lanes are untouched and their in-flight batches keep resolving.
+    /// Coordinated sources emit this for incremental split gains so a
+    /// routine gain never drains flowing lanes (contrast
+    /// [`SourceEvent::LanesAssigned`], whose eager-rebalance contract
+    /// replaces the full lane set). Lane ids must be new — never reuse an
+    /// id from this source's lifetime — and each lane's partition must be
+    /// fresh, not one revoked earlier in the epoch.
+    LanesAdded(Vec<L>),
     /// Lanes are being revoked. The runtime trips the [`DrainBarrier`] for
     /// the owning threads, which stop the lanes, flush in-flight records,
     /// and arrive; the source completes the revocation (final synchronous
@@ -83,8 +92,34 @@ pub enum SourceEvent<L> {
         /// Barrier the owning pipeline threads arrive at once drained.
         barrier: DrainBarrier,
     },
+    /// Lanes whose work is finished are leaving the assignment: their
+    /// input is fully delivered, acknowledged, *and committed* (e.g. a
+    /// coordinated split whose terminal progress reached the store), so
+    /// by contract nothing unflushed or uncommitted can exist behind
+    /// them. The runtime removes them without a drain barrier — pure
+    /// bookkeeping, no pipeline stall. Sources must use
+    /// [`SourceEvent::LanesRevoked`] instead whenever any in-flight data
+    /// or uncommitted acknowledgement may remain.
+    LanesRetired {
+        /// The finished lanes.
+        lanes: Vec<LaneId>,
+    },
     /// Nothing happened within the timeout.
     Idle,
+    /// A hint that a commit outside the periodic tick is worthwhile *now*
+    /// for the named partitions: their lanes have decided end-of-input,
+    /// and the source cannot finalize their unit of work (e.g. complete a
+    /// coordinated split, freeing its working-set slot) until the acked
+    /// watermark reaches it through `Source::commit`. The runtime responds
+    /// by briefly tightening its commit cadence *for those partitions
+    /// only* — flowing partitions keep the periodic tick — until their
+    /// acks quiesce or one commit interval elapses. Purely a latency
+    /// optimization: correctness never depends on it, and sources that
+    /// never emit it get the periodic cadence.
+    CommitReady {
+        /// Partitions whose final acks are worth chasing.
+        partitions: Vec<PartitionId>,
+    },
     /// The source has permanently exhausted its input: every lane has
     /// yielded its final batch and will only ever return `Ok(None)` again.
     /// Bounded sources (backfills) emit this to request a graceful drain;
@@ -181,17 +216,6 @@ pub trait Source: Send {
     /// frame).
     fn framing_contract(&self) -> FramingContract {
         FramingContract::WholePayload
-    }
-
-    /// How many lanes (framework partitions) this source will hand out, if it
-    /// knows before [`open`](Source::open). Purely advisory: the runtime uses it
-    /// only to warn when a source is configured with far more lanes than there
-    /// are pipeline threads to decode them (effective decode parallelism is
-    /// `min(lanes, threads)`). `None` (the default) means "unknown / don't
-    /// check" — a source whose partition count is only known after connecting
-    /// (e.g. Kafka, from the broker) simply omits it.
-    fn advisory_lane_count(&self) -> Option<usize> {
-        None
     }
 
     /// Connect and prepare. Called once before any other method.

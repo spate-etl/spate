@@ -12,8 +12,9 @@
 use super::ack::AckTx;
 use super::tracker::{PartitionTracker, ResolveOutcome};
 use super::{AckMsg, AckRef, BatchId};
+use crate::error::FatalError;
 use crate::record::PartitionId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -124,6 +125,10 @@ pub struct Checkpointer {
     shared_epoch: Arc<AtomicU32>,
     epoch: u32,
     trackers: HashMap<PartitionId, PartitionTracker>,
+    /// Every partition admitted to the current epoch, including ones since
+    /// revoked. `trackers` alone cannot enforce the additive contract: a
+    /// revocation removes the tracker, so a re-add would look fresh.
+    admitted: HashSet<PartitionId>,
 }
 
 impl Default for Checkpointer {
@@ -149,6 +154,7 @@ impl Checkpointer {
             shared_epoch: Arc::new(AtomicU32::new(0)),
             epoch: 0,
             trackers: HashMap::new(),
+            admitted: HashSet::new(),
         }
     }
 
@@ -183,9 +189,65 @@ impl Checkpointer {
             .iter()
             .map(|&p| (p, PartitionTracker::new()))
             .collect();
+        // A new epoch clears the admission ledger: every issuer restarts its
+        // sequences on the epoch change, so a partition may legitimately
+        // reappear here.
+        self.admitted = partitions.iter().copied().collect();
         // Publish after trackers exist: an issuer that observes the new
         // epoch will have its registrations accepted.
         self.shared_epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Add partitions to the *current* epoch without disturbing existing
+    /// trackers (additive lane gains — [`SourceEvent::LanesAdded`]). The
+    /// epoch does not change, so in-flight batches for existing partitions
+    /// keep resolving; only genuinely new partitions may be added — a
+    /// partition revoked mid-epoch can only return in a new epoch, and
+    /// re-adding a live partition would discard its ack state.
+    ///
+    /// Ordering contract: as with [`Checkpointer::begin_epoch`], call this
+    /// *before* distributing the new lanes to pipeline threads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FatalError`] if a partition was already admitted to this
+    /// epoch, whether it is still live or has since been revoked. Both are
+    /// source bugs, and the revoked case is the dangerous one: its tracker
+    /// is gone, so it *looks* fresh, while issuers keep their sequence
+    /// counters until the epoch changes. Admitting it would pair a
+    /// mid-sequence registration with a tracker expecting zero, and
+    /// [`PartitionTracker::register`] would panic on the controller thread —
+    /// taking down the pipeline with a message naming neither this method
+    /// nor the contract that was broken.
+    ///
+    /// [`SourceEvent::LanesAdded`]: crate::source::SourceEvent::LanesAdded
+    /// [`PartitionTracker::register`]: crate::checkpoint::PartitionTracker::register
+    pub fn extend_epoch(&mut self, partitions: &[PartitionId]) -> Result<(), FatalError> {
+        // Check before mutating: a rejected extension must leave the epoch
+        // exactly as it was.
+        for &p in partitions {
+            if self.admitted.contains(&p) {
+                let live = if self.trackers.contains_key(&p) {
+                    "is already tracked"
+                } else {
+                    "was revoked earlier in this epoch"
+                };
+                return Err(FatalError {
+                    component: "checkpoint".into(),
+                    reason: format!(
+                        "additive assignment reused partition {} which {live}; every \
+                         added lane must carry a partition never seen in this epoch \
+                         (a returning partition needs a new epoch)",
+                        p.0
+                    ),
+                });
+            }
+        }
+        for &p in partitions {
+            self.trackers.insert(p, PartitionTracker::new());
+            self.admitted.insert(p);
+        }
+        Ok(())
     }
 
     /// Drop tracking for revoked partitions mid-epoch (partial revocation
@@ -333,6 +395,61 @@ mod tests {
             }
         );
         assert_eq!(cp.take_watermarks(), vec![(P0, 200)]);
+    }
+
+    #[test]
+    fn extend_epoch_adds_partitions_without_disturbing_inflight_acks() {
+        let (mut cp, mut issuer) = checkpointer(&[P0]);
+        // In flight on P0 before the extension...
+        let ack = issuer.issue(P0, 99);
+        cp.extend_epoch(&[P1]).unwrap();
+        // ...still resolves after it: the epoch did not change.
+        drop(ack);
+        drop(issuer.issue(P1, 9));
+        let stats = cp.drain();
+        assert_eq!(stats.applied, 2);
+        assert_eq!(stats.stale_epoch, 0);
+        assert_eq!(cp.take_watermarks(), vec![(P0, 100), (P1, 10)]);
+    }
+
+    #[test]
+    fn extend_epoch_rejects_a_live_partition() {
+        let (mut cp, _issuer) = checkpointer(&[P0]);
+        let err = cp.extend_epoch(&[P0]).unwrap_err();
+        assert!(err.reason.contains("already tracked"), "{err}");
+    }
+
+    #[test]
+    fn extend_epoch_rejects_a_partition_revoked_earlier_in_the_epoch() {
+        // The dangerous half of the contract. `revoke` drops the tracker, so
+        // a re-add looks fresh — but issuers keep their sequence counters
+        // until the epoch changes, so the next batch registers mid-sequence
+        // against a tracker expecting zero. That used to panic inside
+        // `PartitionTracker::register`, on the controller thread, naming
+        // neither this method nor the contract it broke.
+        let (mut cp, mut issuer) = checkpointer(&[P0]);
+        drop(issuer.issue(P0, 9));
+        cp.drain();
+        cp.revoke(&[P0]);
+
+        let err = cp.extend_epoch(&[P0]).unwrap_err();
+        assert_eq!(err.component, "checkpoint");
+        assert!(
+            err.reason.contains("revoked earlier in this epoch"),
+            "{err}"
+        );
+
+        // Rejected means unchanged: the partition is still revoked, so the
+        // issuer's next batch is discarded as stale rather than registered —
+        // its registration and its resolution both.
+        drop(issuer.issue(P0, 19));
+        let stats = cp.drain();
+        assert_eq!(stats.applied, 0);
+        assert_eq!(stats.stale_epoch, 2);
+
+        // A new epoch is how it legitimately returns.
+        cp.begin_epoch(&[P0], 2);
+        cp.extend_epoch(&[P1]).unwrap();
     }
 
     #[test]

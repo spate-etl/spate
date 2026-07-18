@@ -52,6 +52,26 @@ pub(crate) enum ThreadControl<L> {
         barrier: DrainBarrier,
         deadline: Instant,
     },
+    /// Flush the chain's partial terminal state now, without waiting out
+    /// the idle-flush lull
+    /// ([`SourceEvent::CommitReady`](crate::source::SourceEvent::CommitReady)).
+    ///
+    /// A lane that reached genuine end-of-input has no more data coming, so
+    /// its tail would otherwise sit in the chain until `idle_flush` elapses
+    /// — unacknowledged, and therefore blocking the completion of whatever
+    /// unit of work it belongs to. Best-effort and unsynchronised: the
+    /// controller does not wait, and a blocked chain simply retries on the
+    /// ordinary lull check.
+    FlushNow,
+    /// Drop the listed lanes without flushing or synchronising
+    /// ([`SourceEvent::LanesRetired`](crate::source::SourceEvent::LanesRetired)):
+    /// their input is fully delivered, acknowledged *and* committed, so
+    /// nothing of theirs can sit unflushed in the chain. Pure bookkeeping —
+    /// no barrier, no deadline, no `flush_until`. Forcing a flush here would
+    /// fragment sink batches and park the thread once per completed unit of
+    /// work; sources with anything in flight must use
+    /// [`ThreadControl::StopLanes`] instead.
+    DropLanes { lanes: Vec<LaneId> },
     /// Stop everything (shutdown): flush the chain, drop all lanes, arrive
     /// once at `barrier`, and exit the thread.
     Shutdown {

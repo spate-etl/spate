@@ -26,6 +26,7 @@ use crate::records::{
 use crate::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent, WatchStream,
 };
+use etl_core::coordination::ControlWaker;
 use etl_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitId, SplitPlanner,
     SplitProgress,
@@ -102,6 +103,10 @@ pub(crate) struct Task<S: CoordinationStore> {
     pub(crate) metrics: Option<CoordinationMetrics>,
     pub(crate) commands: mpsc::Receiver<Command>,
     pub(crate) events: std_mpsc::Sender<TaskEvent>,
+    /// Signalled after every event pushed to `events`: the driver parks on
+    /// it rather than inside `SplitCoordinator::poll`, so an event that is
+    /// only queued is an event the driver has not been told about.
+    pub(crate) waker: Option<ControlWaker>,
 
     // Observed store state.
     pub(crate) splits: BTreeMap<String, SplitState>,
@@ -155,11 +160,13 @@ impl<S: CoordinationStore> Task<S> {
         metrics: Option<CoordinationMetrics>,
         commands: mpsc::Receiver<Command>,
         events: std_mpsc::Sender<TaskEvent>,
+        waker: Option<ControlWaker>,
     ) -> Task<S> {
         let seed = protocol::stable_hash_str(0, &format!("{instance}/{nonce}"));
         let fp = records::fingerprint_hash(&fingerprint);
         Task {
             store,
+            waker,
             config,
             clock,
             fingerprint,
@@ -198,6 +205,9 @@ impl<S: CoordinationStore> Task<S> {
             let _ = self
                 .events
                 .send(TaskEvent::Failed(e.kind, e.reason.clone()));
+            if let Some(w) = &self.waker {
+                w.wake();
+            }
         }
     }
 
@@ -307,6 +317,9 @@ impl<S: CoordinationStore> Task<S> {
         // The handle side is unbounded; a send fails only when the handle
         // is gone, and the command channel closure stops the loop then.
         let _ = self.events.send(TaskEvent::Coordination(event));
+        if let Some(w) = &self.waker {
+            w.wake();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -920,7 +933,7 @@ impl<S: CoordinationStore> Task<S> {
         if self.parting {
             // Leaving the fleet: observe only. No claims, no steals, no
             // leadership — the released work belongs to the others now.
-            self.check_terminal()?;
+            self.check_terminal().await?;
             self.update_gauges();
             return Ok(());
         }
@@ -928,7 +941,7 @@ impl<S: CoordinationStore> Task<S> {
             self.try_elect().await?;
         }
         self.claim_pass().await?;
-        self.check_terminal()?;
+        self.check_terminal().await?;
         self.update_gauges();
         Ok(())
     }
@@ -1222,6 +1235,13 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => {
                 tracing::warn!(split = %id, error = %e, "quarantine write failed; next tick retries");
                 self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
+                // Re-arm the scan, or "next tick retries" is a lie:
+                // `claim_pass` takes the flag before its target check, so a
+                // worker already at target never re-derives this candidate.
+                // The split would sit `Runnable` at the attempts cap
+                // forever, counting toward neither tally, and the bounded
+                // job would hang instead of stalling.
+                self.quarantine_scan = true;
                 Ok(())
             }
         }
@@ -1729,7 +1749,27 @@ impl<S: CoordinationStore> Task<S> {
     // ------------------------------------------------------------------
     // Terminal detection.
 
-    fn check_terminal(&mut self) -> Result<(), CoordinationError> {
+    /// Decide whether the job is over, and how.
+    ///
+    /// Two properties matter more than promptness here, because the verdict
+    /// latches forever and a wrong `AllComplete` reports an incomplete
+    /// backfill as a success:
+    ///
+    /// - **Quarantine blocks completion explicitly.** The invariant is not
+    ///   left to fall out of `completed == total` arithmetic; one slipped
+    ///   tally would otherwise dress unprocessed data up as a green exit.
+    /// - **The verdict is rendered against an authoritative listing**, not
+    ///   against this worker's watch-fed view and not against
+    ///   `plan.planned`. `planned` is only a lower bound: `finish_plan`
+    ///   seeds split records *before* it recounts and publishes, and both
+    ///   publish-failure paths leave the seeded records behind, so a
+    ///   `Final` plan — which never replans — can name fewer splits than
+    ///   the store actually holds. Judging a *subset* that happens to be
+    ///   all-complete is exactly how a quarantined split goes unseen.
+    ///
+    /// The listing costs one store round trip and is gated behind a local
+    /// pre-check, so it runs essentially once per job.
+    async fn check_terminal(&mut self) -> Result<(), CoordinationError> {
         if self.terminal_reported {
             return Ok(());
         }
@@ -1739,16 +1779,46 @@ impl<S: CoordinationStore> Task<S> {
         if plan.finality != records::PlanFinalityRepr::Final {
             return Ok(());
         }
-        // Only judge completion against a fully-caught-up view: the plan
-        // record says how many splits exist (recounted from the store on
-        // every publish, so a partially-failed planner run cannot leave
-        // it permanently short).
+        let planned = plan.planned;
+        // Cheap gate: only pay for the listing once this worker's own view
+        // both covers what the plan promised and looks terminal. `planned`
+        // is a lower bound (see above), so this is `<`, not `!=` — an
+        // undercounting plan record must not freeze the verdict forever.
+        let local = self.splits.len() as u64;
+        if local < planned || self.completed_count + self.quarantined_count != local {
+            return Ok(());
+        }
+
+        // Authoritative recount. Applying the entries is idempotent —
+        // `upsert_progress` drops anything at or behind a revision it has
+        // already folded — so this doubles as the catch-up for a view that
+        // was missing records.
+        let entries = match self
+            .store
+            .list(Keyspace::Durable, records::SPLIT_PREFIX)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                // Refusing to judge is the safe direction: the job keeps
+                // running and re-judges on a later tick.
+                tracing::warn!(error = %e, "terminal listing failed; deferring the verdict");
+                return Ok(());
+            }
+        };
+        for entry in &entries {
+            self.apply_state_put(entry)?;
+        }
+
         let total = self.splits.len() as u64;
-        if total != plan.planned {
+        if total != entries.len() as u64 {
+            // The listing and the folded view disagree on cardinality —
+            // records outside `split.` prefixing, or a concurrent seed.
+            // Judge nothing this tick.
             return Ok(());
         }
         let (completed, quarantined) = (self.completed_count, self.quarantined_count);
-        if completed == total {
+        if completed == total && quarantined == 0 {
             self.terminal_reported = true;
             self.emit(CoordinationEvent::AllComplete);
         } else if completed + quarantined == total {

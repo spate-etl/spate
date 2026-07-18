@@ -1,11 +1,22 @@
 //! S3 source configuration: typed fields plus a validated raw
 //! `object_store` option passthrough.
+//!
+//! Deliberately absent: any coordination-backend configuration. The
+//! source takes a fully built coordinator at assembly time
+//! ([`S3Source::with_coordinator`](crate::S3Source::with_coordinator)) —
+//! which backend to use, and its tuning, is the deployer's wiring, not
+//! this connector's.
+//!
+//! What is here splits in two. `url`, `compression`, `split_target_bytes`
+//! and `refresh_listing` shape the **work itself**: they feed the job
+//! fingerprint and must be byte-equal across every instance of a
+//! coordinated job. `prefetch_bytes`, `chunk_bytes` and `store` are how
+//! *this* instance reads that work, and may differ per replica.
 
 use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::Duration;
 use url::Url;
 
 /// `object_store` option keys the framework owns. Setting them through the
@@ -25,10 +36,6 @@ const DENYLIST: &[(&str, &str)] = &[
     ("aws_bucket_name", "owned by the typed `url` field"),
 ];
 
-fn default_lanes() -> u32 {
-    4
-}
-
 fn default_prefetch_bytes() -> ByteSize {
     ByteSize::mib(8)
 }
@@ -37,9 +44,14 @@ fn default_chunk_bytes() -> ByteSize {
     ByteSize::kib(512)
 }
 
-fn default_checkpoint_timeout() -> Duration {
-    Duration::from_secs(10)
+fn default_split_target_bytes() -> ByteSize {
+    ByteSize::mib(64)
 }
+
+/// Floor for `split_target_bytes`: below ~1 MiB the per-object open-cost
+/// floor collapses and packing degenerates into thousands of one-object
+/// splits, taxing the coordination store for no read-parallelism gain.
+const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
 
 /// Debug view of a raw option map: keys are configuration, values may be
 /// credentials (`aws_secret_access_key`, session tokens) — never print
@@ -71,73 +83,41 @@ pub enum Compression {
     Zstd,
 }
 
-/// Where the source persists its committed watermarks (the manifest
-/// object). Object storage has no broker-side commit, so this is what makes
-/// a backfill resumable.
-#[derive(Clone, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct CheckpointStoreConfig {
-    /// Full URL of the manifest object, e.g.
-    /// `s3://my-bucket/_etl_checkpoints/dns-backfill.json`. Must not live
-    /// under the source prefix (it would appear in the listing).
-    pub url: String,
-    /// Raw `object_store` options for the checkpoint store. When empty and
-    /// the manifest lives on the same scheme and host as the source, the
-    /// source's `store` options are reused.
-    #[serde(default)]
-    pub store: BTreeMap<String, String>,
-    /// Bound on each manifest read/write. A commit slower than this is
-    /// retried on the next commit tick.
-    #[serde(with = "humantime_serde", default = "default_checkpoint_timeout")]
-    pub timeout: Duration,
-}
-
-// Hand-written: the `store` map carries credentials; `{:?}` must never
-// print them.
-impl std::fmt::Debug for CheckpointStoreConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CheckpointStoreConfig")
-            .field("url", &self.url)
-            .field("timeout", &self.timeout)
-            .field("store", &Redacted(&self.store))
-            .finish()
-    }
-}
-
 /// Configuration of an `S3Source`, deserialized from the pipeline's opaque
 /// `source: { s3: ... }` section.
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct S3SourceConfig {
     /// Bucket and prefix to backfill, e.g. `s3://my-bucket/exports/2026/`.
-    /// Every object under the prefix is read; the key set must not change
-    /// for the lifetime of the backfill (see the crate docs). `file://`
-    /// URLs work for infrastructure-free runs and tests.
+    /// Every object under the prefix is read; the planned key set is
+    /// pinned per split (see the crate docs). `file://` URLs work for
+    /// infrastructure-free runs and tests.
     pub url: String,
-    /// Number of lanes (framework partitions). The listing is dealt
-    /// round-robin across lanes; each lane reads its slice sequentially, so
-    /// this bounds read parallelism.
-    ///
-    /// Lanes are read *concurrency*, not decode *parallelism*: decoding runs on
-    /// the pipeline's driver threads (`pipeline.threads`), so effective decode
-    /// parallelism is `min(lanes, pipeline.threads)`. Lanes beyond the driver
-    /// thread count buy no throughput — only read-ahead memory
-    /// (`lanes × prefetch_bytes`) and open connections. Size this near
-    /// `pipeline.threads`; the runtime warns when it far exceeds them.
-    #[serde(default = "default_lanes")]
-    pub lanes: u32,
     /// Compression codec of the objects.
     #[serde(default)]
     pub compression: Compression,
-    /// Durable watermark storage (required — this is what makes the
-    /// backfill resumable).
-    pub checkpoint: CheckpointStoreConfig,
+    /// Target size of one split — the unit of work distribution and
+    /// stealing. Objects are packed toward it in listing order with a
+    /// per-object cost floor of a sixteenth of the target, so a split
+    /// holds at most ~16 objects; an object at or above the target gets a
+    /// split of its own. Part of the job fingerprint: every instance of a
+    /// coordinated job must agree on it. Default 64 MiB.
+    #[serde(default = "default_split_target_bytes")]
+    pub split_target_bytes: ByteSize,
+    /// Re-list the prefix on the coordinator's replan interval, planning
+    /// newly arrived objects as additional splits (an **open** plan: the
+    /// job never self-terminates). Default `false`: one listing, a
+    /// bounded backfill that completes.
+    #[serde(default)]
+    pub refresh_listing: bool,
     /// Per-lane read-ahead budget: the size of each lane's in-memory read
     /// window. A lane fetches one window at a time as a bounded ranged GET and
     /// drains it before fetching the next, so peak per-lane *read-ahead* is
-    /// ~one window and total source read-ahead is `lanes × prefetch_bytes` (the
-    /// decoded records a lane holds while framing are a separate, smaller
-    /// budget). An object at or below this size is read in a single GET.
+    /// ~one window and total source read-ahead is
+    /// `in-flight splits × prefetch_bytes` (the decoded records a lane holds
+    /// while framing are a separate, smaller budget). An object at or below
+    /// this size is read in a single GET.
     ///
     /// Keep this modest. A large window is read as one long-held GET — which
     /// works against the connection release this source relies on — and a
@@ -163,9 +143,9 @@ impl std::fmt::Debug for S3SourceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3SourceConfig")
             .field("url", &self.url)
-            .field("lanes", &self.lanes)
             .field("compression", &self.compression)
-            .field("checkpoint", &self.checkpoint)
+            .field("split_target_bytes", &self.split_target_bytes)
+            .field("refresh_listing", &self.refresh_listing)
             .field("prefetch_bytes", &self.prefetch_bytes)
             .field("chunk_bytes", &self.chunk_bytes)
             .field("store", &Redacted(&self.store))
@@ -184,13 +164,7 @@ impl S3SourceConfig {
 
     /// Cross-field validation, including the passthrough denylist.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let source = parse_url("source.s3.url", &self.url)?;
-        let checkpoint = parse_url("source.s3.checkpoint.url", &self.checkpoint.url)?;
-        if self.lanes == 0 {
-            return Err(ConfigError::Validation(
-                "source.s3.lanes must be at least 1".into(),
-            ));
-        }
+        parse_url("source.s3.url", &self.url)?;
         if self.chunk_bytes.as_u64() == 0 {
             return Err(ConfigError::Validation(
                 "source.s3.chunk_bytes must not be zero".into(),
@@ -202,32 +176,21 @@ impl S3SourceConfig {
                 self.prefetch_bytes, self.chunk_bytes
             )));
         }
-        for (map, section) in [
-            (&self.store, "source.s3.store"),
-            (&self.checkpoint.store, "source.s3.checkpoint.store"),
-        ] {
-            // Case-insensitive: object_store lowercases option keys before
-            // parsing, so `Bucket:` would otherwise slip past the check.
-            for key in map.keys() {
-                let lowered = key.to_ascii_lowercase();
-                if let Some((_, why)) = DENYLIST.iter().find(|(denied, _)| *denied == lowered) {
-                    return Err(ConfigError::Validation(format!(
-                        "{section}.\"{key}\" cannot be overridden: {why}"
-                    )));
-                }
-            }
-        }
-        // The manifest must never appear in the backfill's own listing: a
-        // checkpoint under the source prefix would be read back as data (and
-        // mutate the "frozen" key set on every commit).
-        if same_store(&source, &checkpoint)
-            && checkpoint.path().starts_with(&normalized_prefix(&source))
-        {
+        if self.split_target_bytes.as_u64() < SPLIT_TARGET_FLOOR {
             return Err(ConfigError::Validation(format!(
-                "source.s3.checkpoint.url ({}) must not live under the source prefix ({}); \
-                 the manifest would show up in the backfill's own listing",
-                self.checkpoint.url, self.url
+                "source.s3.split_target_bytes ({}) must be at least 1MiB",
+                self.split_target_bytes
             )));
+        }
+        // Case-insensitive: object_store lowercases option keys before
+        // parsing, so `Bucket:` would otherwise slip past the check.
+        for key in self.store.keys() {
+            let lowered = key.to_ascii_lowercase();
+            if let Some((_, why)) = DENYLIST.iter().find(|(denied, _)| *denied == lowered) {
+                return Err(ConfigError::Validation(format!(
+                    "source.s3.store.\"{key}\" cannot be overridden: {why}"
+                )));
+            }
         }
         Ok(())
     }
@@ -242,8 +205,8 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
     }
     let url = Url::parse(value)
         .map_err(|e| ConfigError::Validation(format!("{field} is not a valid URL: {e}")))?;
-    // `memory://` builds a fresh empty store on every parse, so the source,
-    // its checkpoint, and any test setup would each see a different store.
+    // `memory://` builds a fresh empty store on every parse, so the source
+    // and any test setup would each see a different store.
     if url.scheme() == "memory" {
         return Err(ConfigError::Validation(format!(
             "{field}: memory:// creates a new empty store per component and cannot be \
@@ -251,19 +214,6 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
         )));
     }
     Ok(url)
-}
-
-/// Whether two URLs address the same underlying store (scheme + authority).
-fn same_store(a: &Url, b: &Url) -> bool {
-    a.scheme() == b.scheme() && a.authority() == b.authority()
-}
-
-/// The source path as a prefix: normalized to end in exactly one `/` so
-/// `starts_with` cannot match a sibling key that merely shares leading
-/// characters (`exports/2026-old` vs `exports/2026/`).
-fn normalized_prefix(source: &Url) -> String {
-    let path = source.path().trim_end_matches('/');
-    format!("{path}/")
 }
 
 #[cfg(test)]
@@ -277,32 +227,63 @@ mod tests {
     }
 
     fn minimal() -> String {
-        "  url: s3://bucket/exports/\n  checkpoint:\n    url: s3://bucket/_etl/backfill.json\n"
-            .to_string()
+        "  url: s3://bucket/exports/\n".to_string()
     }
 
     #[test]
     fn minimal_config_gets_documented_defaults() {
         let cfg = S3SourceConfig::from_component_config(&section(&minimal())).unwrap();
-        assert_eq!(cfg.lanes, 4);
         assert_eq!(cfg.compression, Compression::Auto);
         assert_eq!(cfg.prefetch_bytes, ByteSize::mib(8));
         assert_eq!(cfg.chunk_bytes, ByteSize::kib(512));
-        assert_eq!(cfg.checkpoint.timeout, Duration::from_secs(10));
+        assert_eq!(cfg.split_target_bytes, ByteSize::mib(64));
+        assert!(!cfg.refresh_listing);
         assert!(cfg.store.is_empty());
-        assert!(cfg.checkpoint.store.is_empty());
+    }
+
+    #[test]
+    fn planner_knobs_parse_and_floor() {
+        let body = format!(
+            "{}  split_target_bytes: 32MB\n  refresh_listing: true\n",
+            minimal()
+        );
+        let cfg = S3SourceConfig::from_component_config(&section(&body)).unwrap();
+        assert_eq!(cfg.split_target_bytes, ByteSize::mb(32));
+        assert!(cfg.refresh_listing);
+
+        let low = format!("{}  split_target_bytes: 64KB\n", minimal());
+        let err = S3SourceConfig::from_component_config(&section(&low)).unwrap_err();
+        assert!(err.to_string().contains("split_target_bytes"), "{err}");
+    }
+
+    #[test]
+    fn removed_knobs_are_rejected() {
+        // `lanes`, `checkpoint:`, and a source-level `coordination:` all
+        // died with the manifest checkpoint and the assembly-only
+        // coordinator wiring; deny_unknown_fields turns a stale config
+        // into a load error.
+        for extra in [
+            "  lanes: 4\n",
+            "  checkpoint:\n    url: s3://bucket/_etl/b.json\n",
+            "  coordination:\n    nats:\n      servers: [\"nats://n:4222\"]\n",
+        ] {
+            let body = format!("{}{extra}", minimal());
+            assert!(
+                S3SourceConfig::from_component_config(&section(&body)).is_err(),
+                "must reject removed knob: {extra}"
+            );
+        }
     }
 
     #[test]
     fn debug_never_prints_store_values() {
         let body = format!(
-            "{}  store:\n    aws_secret_access_key: hunter2\n  checkpoint:\n    url: s3://bucket/_etl/backfill.json\n    store:\n      aws_session_token: hunter3\n",
-            "  url: s3://bucket/exports/\n"
+            "{}  store:\n    aws_secret_access_key: hunter2\n",
+            minimal()
         );
         let cfg = S3SourceConfig::from_component_config(&section(&body)).unwrap();
         let printed = format!("{cfg:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
-        assert!(!printed.contains("hunter3"), "{printed}");
         assert!(
             printed.contains("aws_secret_access_key") && printed.contains("<redacted>"),
             "keys stay visible for debugging: {printed}"
@@ -310,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn bucket_aliases_are_rejected_in_both_passthroughs() {
+    fn bucket_aliases_are_rejected_in_the_passthrough() {
         // object_store lowercases option keys before parsing, so the
         // denylist must catch every case spelling too.
         for key in [
@@ -324,52 +305,19 @@ mod tests {
             let body = format!("{}  store:\n    {key}: other\n", minimal());
             let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
             assert!(err.to_string().contains(key), "error names the key: {err}");
-
-            let body = format!(
-                "  url: s3://bucket/exports/\n  checkpoint:\n    url: s3://bucket/_etl/b.json\n    store:\n      {key}: other\n"
-            );
-            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
-            assert!(
-                err.to_string().contains("checkpoint.store"),
-                "error names the section: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn checkpoint_under_the_source_prefix_is_rejected() {
-        let body =
-            "  url: s3://bucket/exports/\n  checkpoint:\n    url: s3://bucket/exports/state.json\n";
-        let err = S3SourceConfig::from_component_config(&section(body)).unwrap_err();
-        assert!(err.to_string().contains("listing"), "{err}");
-    }
-
-    #[test]
-    fn checkpoint_on_a_sibling_prefix_or_other_store_is_accepted() {
-        for body in [
-            // Sibling prefix in the same bucket.
-            "  url: s3://bucket/exports/\n  checkpoint:\n    url: s3://bucket/_etl/state.json\n",
-            // Prefix that shares leading characters but is a different key.
-            "  url: s3://bucket/exports\n  checkpoint:\n    url: s3://bucket/exports-meta/state.json\n",
-            // Different bucket entirely, same path.
-            "  url: s3://bucket/exports/\n  checkpoint:\n    url: s3://other/exports/state.json\n",
-        ] {
-            S3SourceConfig::from_component_config(&section(body)).unwrap();
         }
     }
 
     #[test]
     fn memory_scheme_is_rejected_with_guidance() {
-        let body =
-            "  url: memory:///data/\n  checkpoint:\n    url: memory:///state.json\n".to_string();
-        let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+        let err = S3SourceConfig::from_component_config(&section("  url: memory:///data/\n"))
+            .unwrap_err();
         assert!(err.to_string().contains("file://"), "actionable: {err}");
     }
 
     #[test]
-    fn zero_lanes_and_bad_buffer_sizes_are_rejected() {
+    fn bad_buffer_sizes_are_rejected() {
         for extra in [
-            "  lanes: 0\n",
             "  chunk_bytes: 0\n",
             "  prefetch_bytes: 4KiB\n  chunk_bytes: 1MiB\n",
         ] {
@@ -394,7 +342,6 @@ mod tests {
 
     #[test]
     fn file_urls_are_accepted() {
-        let body = "  url: file:///tmp/objects/\n  checkpoint:\n    url: file:///tmp/state/backfill.json\n";
-        S3SourceConfig::from_component_config(&section(body)).unwrap();
+        S3SourceConfig::from_component_config(&section("  url: file:///tmp/objects/\n")).unwrap();
     }
 }

@@ -1,133 +1,89 @@
 //! The control plane: [`S3Source`] implements the framework's
-//! [`Source`] trait.
+//! [`Source`] trait by delegating the entire assignment choreography to
+//! the coordination layer's `CoordinationDriver`.
 //!
-//! Lifecycle: `open` builds the stores and spawns the listing task;
-//! `poll_events` hands out the K lanes once the (sorted) listing and the
-//! manifest agree, then idles until every lane reports end-of-slice and
-//! returns [`SourceEvent::Drained`] — the bounded-job completion signal.
-//! `commit` folds advanced watermarks into the manifest and durably saves
-//! it through the [`OffsetStore`].
+//! Lifecycle: `open` builds the data store, takes the coordinator the
+//! deployer assembled ([`S3Source::with_coordinator`]; a solo in-process
+//! one is built when none was injected), and stashes the planner; the
+//! first `poll_events` joins the job via `driver.start` (leader-only
+//! listing + packing happen in the planner), and every later call drains
+//! poison reports into `driver.fail` and then delegates to
+//! `driver.poll_events` — split gains materialize lanes through the
+//! sibling [`SplitCtx`], losses retire them, `AllComplete` drains the
+//! pipeline. `commit` routes acked watermarks into per-split fenced
+//! progress commits; the coordination store is the source's **only**
+//! progress store.
 //!
-//! Assignment is static: one epoch, no rebalances, each lane its own
-//! framework partition. Backpressure `pause`/`resume` toggles per-lane
-//! flags the fetchers honor between sends.
+//! No coordination backend appears in this crate's public API or in its
+//! cargo features: which store a deployment uses (NATS today, others
+//! tomorrow) is assembly wiring, kept out of every connector on purpose.
+//! The one backend it does link is `etl-coordination`'s in-process
+//! `MemoryStore`, unconditionally, as the solo fallback below.
 
 use crate::config::S3SourceConfig;
-use crate::fetch::{
-    BACKOFF_CAP, FetcherParams, MAX_ATTEMPTS, ObjectEntry, assign_lanes, list_all, run_fetcher,
-    validate_resume,
-};
-use crate::framer::FramerFactory;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
-use crate::offset::Position;
-use crate::store::{
-    LaneState, Manifest, ObjectManifestStore, OffsetStore, SourceIdentity, chain_hash,
-};
-use etl_core::checkpoint::AckIssuer;
+use crate::planner::{S3Planner, job_fingerprint};
+use crate::split_ctx::SplitCtx;
+use etl_coordination::store::memory::MemoryStore;
+use etl_coordination::{CoordinationConfig, StoreCoordinator};
 use etl_core::config::{ComponentConfig, ConfigError};
+use etl_core::coordination::driver::CoordinationDriver;
+use etl_core::coordination::{PlanFinality, SplitCoordinator};
 use etl_core::error::{ErrorClass, SourceError};
 use etl_core::framing::{FramingContract, RecordFramer};
+use etl_core::metrics::CoordinationMetrics;
 use etl_core::record::PartitionId;
 use etl_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use std::time::Duration;
 use url::Url;
 
-/// First backoff step for fetcher-internal GET retries and for the
-/// startup (listing / manifest-load) retries.
+/// First backoff step for fetcher-internal GET retries.
 const RETRY_BASE: Duration = Duration::from_millis(200);
 
-/// Fetcher→lane channel depth, in chunks. The per-lane read-ahead is the
-/// `prefetch_bytes` window each fetcher buffers in memory (see [`fetch`]), so
-/// this channel is only a small hand-off buffer: its chunks are zero-copy
-/// views into that one window, not extra copies. Keeping it shallow bounds
-/// peak per-lane read-ahead to ~one window under sustained backpressure: a
-/// paused fetcher blocks partway through draining its current window and never
-/// fetches the next one, so at most one window is alive per lane. (The decoded
-/// records the lane holds while framing are a separate, smaller budget.)
-const LANE_HANDOFF_CHUNKS: usize = 4;
-
-/// Capped exponential backoff before retryable-startup attempt
-/// `attempt` (1-based).
-fn startup_backoff(attempt: u32) -> Duration {
-    RETRY_BASE
-        .saturating_mul(1 << (attempt - 1).min(16))
-        .min(BACKOFF_CAP)
-}
-
-/// Where the source is in its bounded lifecycle.
-enum Phase {
+/// Where the source is in its lifecycle.
+enum State {
     /// Constructed, not yet opened.
     Created,
-    /// Listing task in flight.
-    Listing {
-        join: tokio::task::JoinHandle<Result<Vec<ObjectEntry>, object_store::Error>>,
-        /// Retryable listing failures so far; the attempt budget
-        /// ([`MAX_ATTEMPTS`]) turns a persistent outage into a fatal error
-        /// instead of an invisible forever-retry.
-        restarts: u32,
-    },
-    /// Listing done and dealt into slices; manifest load (retryable)
-    /// still pending.
-    Prepared {
-        slices: Vec<Vec<ObjectEntry>>,
-        /// Retryable manifest-load failures so far, same budget as above.
-        attempts: u32,
-        /// Earliest next attempt — retries are paced with capped backoff,
-        /// never hot-looped through the controller.
-        next_attempt: Instant,
-    },
-    /// Lanes handed out; streaming.
-    Running(Running),
+    /// Opened: driver and lane-assembly context live side by side (they
+    /// borrow disjointly); the planner is handed to the driver on the
+    /// first `poll_events`. Boxed: the open state dwarfs `Created` and
+    /// lives once per source.
+    Open(Box<OpenState>),
 }
 
-struct Running {
-    manifest: Manifest,
-    /// Per-lane slices, shared with the fetchers (commit looks up keys
-    /// and ETags by ordinal).
-    slices: Vec<Arc<Vec<ObjectEntry>>>,
-    /// Per-lane rolling key-prefix hashes (`prefix_hashes[lane][i]` =
-    /// chain hash of keys `0..=i`), precomputed so commits are O(1).
-    prefix_hashes: Vec<Vec<u64>>,
-    /// Per-lane end-of-slice flags, set by the lanes.
-    eof: Vec<Arc<AtomicBool>>,
-    /// Per-lane fetcher pause flags.
-    pause: Vec<Arc<AtomicBool>>,
-    /// Fetcher tasks (aborted on drop).
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+/// The contents of [`State::Open`].
+struct OpenState {
+    driver: CoordinationDriver,
+    ctx: SplitCtx,
+    planner: Option<S3Planner>,
 }
 
-/// Bounded object-storage backfill source. See the crate docs for the
-/// delivery model and the frozen-key-set contract.
+/// Coordinated object-storage backfill source. See the crate docs for the
+/// delivery model and the split identity/drift contract.
 pub struct S3Source {
     config: S3SourceConfig,
     handle: tokio::runtime::Handle,
-    /// Durable watermark storage; the object-store manifest by default,
-    /// swappable via [`with_offset_store`](S3Source::with_offset_store).
-    offset_store: Option<Box<dyn OffsetStore>>,
     /// The per-object record framer, supplied by the chosen format via
     /// [`with_framer`](S3Source::with_framer). Required before the pipeline
     /// opens the source — `etl-s3` is a transport and owns no framing itself.
-    framer: Option<FramerFactory>,
-    issuer: Option<AckIssuer>,
-    metrics: Option<S3Metrics>,
-    /// The data store, built from `config.url` at `open`.
+    framer: Option<crate::framer::FramerFactory>,
+    /// A coordinator injected via [`with_coordinator`](S3Source::with_coordinator),
+    /// overriding the config-driven store construction.
+    coordinator: Option<Box<dyn SplitCoordinator>>,
+    /// A data store injected via the `testing`-gated `with_store` seam.
     store: Option<Arc<dyn ObjectStore>>,
-    /// The listing prefix within `store`, from `config.url`.
-    prefix: Option<object_store::path::Path>,
-    phase: Phase,
+    state: State,
 }
 
 impl std::fmt::Debug for S3Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Source")
             .field("url", &self.config.url)
-            .field("lanes", &self.config.lanes)
+            .field("opened", &matches!(self.state, State::Open { .. }))
             .finish()
     }
 }
@@ -139,20 +95,17 @@ impl S3Source {
     ///
     /// The handle **must belong to a multi-thread runtime** that outlives
     /// the pipeline (the pipeline's I/O runtime satisfies both): the
-    /// source and its lanes briefly block pipeline threads on it, which a
-    /// current-thread runtime cannot drive.
+    /// source, its lanes, and the coordinator briefly block pipeline
+    /// threads on it, which a current-thread runtime cannot drive.
     #[must_use]
     pub fn new(config: S3SourceConfig, io: tokio::runtime::Handle) -> S3Source {
         S3Source {
             config,
             handle: io,
-            offset_store: None,
             framer: None,
-            issuer: None,
-            metrics: None,
+            coordinator: None,
             store: None,
-            prefix: None,
-            phase: Phase::Created,
+            state: State::Created,
         }
     }
 
@@ -167,15 +120,6 @@ impl S3Source {
         ))
     }
 
-    /// Replace the durable watermark backend (default: a JSON manifest
-    /// object at `checkpoint.url`). Must be called before the pipeline
-    /// opens the source.
-    #[must_use]
-    pub fn with_offset_store(mut self, store: Box<dyn OffsetStore>) -> S3Source {
-        self.offset_store = Some(store);
-        self
-    }
-
     /// Set the record framer that cuts each object's byte stream into records.
     /// `etl-s3` is a transport and owns no framing, so this is **required**:
     /// supply the framer for the objects' format — e.g. `etl-json`'s
@@ -183,7 +127,7 @@ impl S3Source {
     ///
     /// `factory` builds a fresh
     /// [`RecordFramer`](etl_core::framing::RecordFramer) per object (framers are
-    /// per-object stateful and each lane frames its own slice). A framed source
+    /// per-object stateful and each lane frames its own split). A framed source
     /// always emits one record per payload, so its
     /// [`FramingContract`] is [`PerRecord`](FramingContract::PerRecord) and the
     /// paired deserializer decodes a single unit.
@@ -196,188 +140,35 @@ impl S3Source {
         self
     }
 
-    fn identity(&self) -> SourceIdentity {
-        SourceIdentity {
-            url: self.config.url.clone(),
-            compression: self.config.compression,
-        }
+    /// Hand the source its coordinator — **the** multi-instance seam.
+    /// Build any [`SplitCoordinator`] at assembly time (e.g.
+    /// `StoreCoordinator` over the NATS store from `etl-coordination`,
+    /// with your own tuning) and inject it here; run more replicas of the
+    /// same pipeline against the same backend and they share the
+    /// backfill. Must be called before the pipeline opens the source.
+    ///
+    /// Without it the source runs **solo** over an in-process store:
+    /// correct and self-terminating, but progress is ephemeral — a
+    /// restart replays the whole prefix (a startup WARN says so).
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: Box<dyn SplitCoordinator>) -> S3Source {
+        self.coordinator = Some(coordinator);
+        self
     }
 
-    /// Finish startup once the listing is in: deal slices, load and
-    /// validate the manifest, hand out lanes, spawn fetchers. `attempts`
-    /// counts prior retryable manifest-load failures.
-    fn finish_prepare(
-        &mut self,
-        slices: Vec<Vec<ObjectEntry>>,
-        attempts: u32,
-    ) -> Result<SourceEvent<S3Lane>, SourceError> {
-        let offset_store = self
-            .offset_store
-            .as_mut()
-            .expect("offset store built at open");
-        let manifest = match offset_store.load() {
-            Ok(m) => m,
-            Err(e) => {
-                let reason = format!("loading the checkpoint manifest: {}", e.reason);
-                if e.class != ErrorClass::Retryable {
-                    return Err(SourceError::Client {
-                        class: e.class,
-                        reason,
-                    });
-                }
-                let attempts = attempts + 1;
-                // A persistent outage fails fast (the crate's retry
-                // philosophy — see the fetcher's attempt budget) instead
-                // of wedging the pipeline in an invisible retry loop.
-                if attempts >= MAX_ATTEMPTS {
-                    return Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("{reason} (still failing after {attempts} attempts)"),
-                    });
-                }
-                // Retryable: keep the listing, back off, try again on a
-                // later poll.
-                self.phase = Phase::Prepared {
-                    slices,
-                    attempts,
-                    next_attempt: Instant::now() + startup_backoff(attempts),
-                };
-                return Err(SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason,
-                });
-            }
-        };
-        // Whether this run is resuming from an existing manifest (vs a fresh
-        // backfill). A resume silently skips already-committed objects, so it is
-        // surfaced loudly (WARN) once the skip count is known — see below, after
-        // the slices are dealt into lanes.
-        let resuming = manifest.is_some();
-        let manifest = match manifest {
-            Some(m) => {
-                m.check_compatible(self.config.lanes, &self.identity())
-                    .map_err(|reason| SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason,
-                    })?;
-                validate_resume(&slices, &m)?;
-                m
-            }
-            None => {
-                tracing::info!(lanes = self.config.lanes, "starting a fresh backfill");
-                Manifest::new(self.config.lanes, self.identity())
-            }
-        };
-
-        let issuer = self.issuer.clone().expect("issuer stashed at open");
-        let store = Arc::clone(self.store.as_ref().expect("store built at open"));
-        let total_objects: usize = slices.iter().map(Vec::len).sum();
-        let chunk_bytes = self.config.chunk_bytes.as_u64() as usize;
-        // Each fetcher reads one `prefetch_bytes` window at a time into memory
-        // (a bounded ranged GET), then hands it off; the window is the
-        // read-ahead, so the channel stays a shallow hand-off buffer.
-        let range_bytes = self.config.prefetch_bytes.as_u64() as usize;
-        let capacity = LANE_HANDOFF_CHUNKS;
-
-        let mut running = Running {
-            manifest,
-            slices: Vec::new(),
-            prefix_hashes: Vec::new(),
-            eof: Vec::new(),
-            pause: Vec::new(),
-            tasks: Vec::new(),
-        };
-        let mut lanes = Vec::new();
-        let mut already_complete: u64 = 0;
-        // Supplied once via `with_framer` (checked at `open`), cloned per lane
-        // (each lane frames its own slice).
-        let make_framer = self.framer.clone().expect("framer set at open");
-
-        for (i, slice) in slices.into_iter().enumerate() {
-            let lane_ix = i as u32;
-            let state = running.manifest.lane_states.get(&lane_ix);
-            let resume = state.map(|s| Position::decode(s.watermark));
-            let start_ordinal = resume.map_or(0, |p| p.ordinal);
-            already_complete += u64::from(start_ordinal);
-
-            let mut hashes = Vec::with_capacity(slice.len());
-            let mut h = 0u64;
-            for e in &slice {
-                h = chain_hash(h, &e.key);
-                hashes.push(h);
-            }
-
-            let slice = Arc::new(slice);
-            let eof = Arc::new(AtomicBool::new(false));
-            let pause = Arc::new(AtomicBool::new(false));
-            let (tx, rx) = mpsc::channel(capacity);
-            let task = self.handle.spawn(run_fetcher(FetcherParams {
-                lane: lane_ix,
-                store: Arc::clone(&store),
-                slice: Arc::clone(&slice),
-                start_ordinal,
-                resume_etag: state.and_then(|s| s.etag.clone()),
-                chunk_bytes,
-                range_bytes,
-                tx,
-                pause: Arc::clone(&pause),
-                retry_base: RETRY_BASE,
-                retries: self.metrics.as_ref().map(|m| m.get_retries.clone()),
-            }));
-            lanes.push(S3Lane::new(
-                LaneId(lane_ix),
-                PartitionId(lane_ix),
-                rx,
-                self.handle.clone(),
-                issuer.clone(),
-                self.config.compression,
-                Arc::clone(&make_framer),
-                resume,
-                Arc::clone(&eof),
-                self.metrics.clone(),
-            ));
-            running.slices.push(slice);
-            running.prefix_hashes.push(hashes);
-            running.eof.push(eof);
-            running.pause.push(pause);
-            running.tasks.push(task);
-        }
-
-        if let Some(m) = &self.metrics {
-            m.objects_listed.increment(total_objects as u64);
-            m.objects_remaining
-                .set((total_objects as u64).saturating_sub(already_complete) as f64);
-        }
-        tracing::info!(
-            objects = total_objects,
-            lanes = lanes.len(),
-            // Committed up front: each lane reads one `prefetch_bytes` window
-            // into memory at a time, so this is the source's peak read-ahead.
-            readahead_bytes = lanes.len() as u64 * self.config.prefetch_bytes.as_u64(),
-            "object listing dealt into lanes; reading in bounded ranged gets"
-        );
-        // A resume skips every already-committed object. That is silent at the
-        // data layer (fewer rows land, no error is raised), so make it loud: a
-        // stale manifest left from a prior run is a common cause of an
-        // apparently "half" load. Absence of this WARN means a fresh backfill.
-        if resuming {
-            let remaining = (total_objects as u64).saturating_sub(already_complete);
-            let committed_lanes = running.manifest.lane_states.len();
-            let lane_count = lanes.len();
-            tracing::warn!(
-                committed_objects = already_complete,
-                remaining_objects = remaining,
-                total_objects,
-                committed_lanes,
-                lanes = lane_count,
-                "resuming from an existing checkpoint manifest ({committed_lanes} of {lane_count} lanes \
-                 have committed progress): {already_complete} of {total_objects} fully-committed objects \
-                 will be SKIPPED, and partly-read objects resume mid-stream. If a fresh backfill was \
-                 intended, remove the manifest at the checkpoint URL and restart."
-            );
-        }
-        self.phase = Phase::Running(running);
-        Ok(SourceEvent::LanesAssigned(lanes))
+    /// Test seam: replace the data store built from `config.url` (the URL
+    /// still supplies the listing prefix). Lets tests wrap the store with
+    /// failure- or call-counting decorators.
+    ///
+    /// Behind the off-by-default `testing` feature because it exposes an
+    /// `object_store` type, which this crate's public API otherwise avoids
+    /// entirely; no stability promise attaches to it.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<dyn ObjectStore>) -> S3Source {
+        self.store = Some(store);
+        self
     }
 }
 
@@ -394,27 +185,21 @@ impl Source for S3Source {
         FramingContract::PerRecord
     }
 
-    fn advisory_lane_count(&self) -> Option<usize> {
-        // Known from config up front; lets the runtime warn on a lanes ≫ threads
-        // over-subscription (extra lanes cost read-ahead memory, not throughput).
-        Some(self.config.lanes as usize)
-    }
-
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        if !matches!(self.phase, Phase::Created) {
+        if !matches!(self.state, State::Created) {
             return Err(SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: "source opened twice".into(),
             });
         }
-        if self.framer.is_none() {
+        let Some(make_framer) = self.framer.clone() else {
             return Err(SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: "S3Source has no record framer; supply one with `with_framer(...)` \
                          (e.g. etl-json's NdjsonFramer) before running the pipeline"
                     .into(),
             });
-        }
+        };
         // Defense in depth for hand-constructed configs; cheap.
         self.config.validate().map_err(|e| SourceError::Client {
             class: ErrorClass::Fatal,
@@ -422,222 +207,133 @@ impl Source for S3Source {
         })?;
 
         let url = parse(&self.config.url)?;
-        let (store, prefix) =
-            build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!("building the object store for {}: {e}", self.config.url),
-            })?;
-        let store: Arc<dyn ObjectStore> = Arc::from(store);
-
-        if self.offset_store.is_none() {
-            let ck_url = parse(&self.config.checkpoint.url)?;
-            // An empty checkpoint `store` section on the same store means
-            // "same options as the source" (documented on the field).
-            let same_store =
-                ck_url.scheme() == url.scheme() && ck_url.authority() == url.authority();
-            let ck_opts = if self.config.checkpoint.store.is_empty() && same_store {
-                &self.config.store
-            } else {
-                &self.config.checkpoint.store
-            };
-            let (ck_store, ck_path) =
-                build_store(&ck_url, ck_opts).map_err(|e| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!(
-                        "building the checkpoint store for {}: {e}",
-                        self.config.checkpoint.url
-                    ),
-                })?;
-            self.offset_store = Some(Box::new(ObjectManifestStore::new(
-                Arc::from(ck_store),
-                ck_path,
-                self.config.checkpoint.timeout,
-                self.handle.clone(),
-            )));
-        }
-
-        self.issuer = Some(ctx.issuer);
-        self.metrics = ctx.meter.as_ref().map(S3Metrics::new);
-        let listing_store = Arc::clone(&store);
-        let listing_prefix = prefix.clone();
-        self.store = Some(store);
-        self.prefix = Some(prefix);
-        self.phase = Phase::Listing {
-            join: self
-                .handle
-                .spawn(async move { list_all(&listing_store, Some(&listing_prefix)).await }),
-            restarts: 0,
+        let (store, prefix) = match self.store.take() {
+            // Injected store: the URL still names the listing prefix.
+            Some(store) => {
+                let (_, path) =
+                    ObjectStoreScheme::parse(&url).map_err(|e| SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason: format!("parsing {}: {e}", self.config.url),
+                    })?;
+                (store, path)
+            }
+            None => {
+                let (store, path) =
+                    build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason: format!("building the object store for {}: {e}", self.config.url),
+                    })?;
+                (Arc::from(store), path)
+            }
         };
+
+        let metrics = ctx.meter.as_ref().map(S3Metrics::new);
+        let coordinator = match self.coordinator.take() {
+            Some(injected) => injected,
+            None => {
+                // Coordination metrics are opt-in and constructor-injected
+                // (there is no later hook); the solo coordinator shares
+                // the source's labels.
+                let coord_metrics = ctx
+                    .meter
+                    .as_ref()
+                    .map(|m| CoordinationMetrics::new(m.labels()));
+                solo_coordinator(self.handle.clone(), coord_metrics)?
+            }
+        };
+
+        let finality = if self.config.refresh_listing {
+            PlanFinality::Open
+        } else {
+            PlanFinality::Final
+        };
+        let planner = S3Planner::new(
+            Arc::clone(&store),
+            Some(prefix),
+            self.handle.clone(),
+            self.config.split_target_bytes.as_u64(),
+            finality,
+            job_fingerprint(
+                &self.config.url,
+                self.config.compression,
+                self.config.split_target_bytes.as_u64(),
+                self.config.refresh_listing,
+            ),
+            metrics.clone(),
+        );
+        let split_ctx = SplitCtx::new(
+            store,
+            self.handle.clone(),
+            ctx.issuer,
+            make_framer,
+            self.config.compression,
+            self.config.chunk_bytes.as_u64() as usize,
+            self.config.prefetch_bytes.as_u64() as usize,
+            RETRY_BASE,
+            metrics,
+        );
+        self.state = State::Open(Box::new(OpenState {
+            driver: CoordinationDriver::new(coordinator),
+            ctx: split_ctx,
+            planner: Some(planner),
+        }));
         Ok(())
     }
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<S3Lane>, SourceError> {
-        match &mut self.phase {
-            Phase::Created => Err(SourceError::Client {
+        let State::Open(open) = &mut self.state else {
+            return Err(SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: "poll_events before open".into(),
-            }),
-            Phase::Listing { join, restarts } => {
-                let restarts = *restarts;
-                let handle = self.handle.clone();
-                let outcome = handle.block_on(async { tokio::time::timeout(timeout, join).await });
-                match outcome {
-                    Err(_) => Ok(SourceEvent::Idle), // still listing
-                    Ok(Err(join_err)) => Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("listing task failed: {join_err}"),
-                    }),
-                    Ok(Ok(Err(e))) => {
-                        let err = crate::error::source_error("listing objects", &e);
-                        // Retryable listing failures restart the listing
-                        // (with backoff, under the shared attempt budget);
-                        // the controller logs and keeps polling.
-                        if matches!(&err, SourceError::Client { class, .. } if *class == ErrorClass::Retryable)
-                        {
-                            let restarts = restarts + 1;
-                            if restarts >= MAX_ATTEMPTS {
-                                return Err(SourceError::Client {
-                                    class: ErrorClass::Fatal,
-                                    reason: format!(
-                                        "listing objects still failing after {restarts} \
-                                         attempts: {e}"
-                                    ),
-                                });
-                            }
-                            let store =
-                                Arc::clone(self.store.as_ref().expect("store built at open"));
-                            let prefix = self.prefix.clone().expect("prefix stored at open");
-                            let backoff = startup_backoff(restarts);
-                            self.phase = Phase::Listing {
-                                join: self.handle.spawn(async move {
-                                    tokio::time::sleep(backoff).await;
-                                    list_all(&store, Some(&prefix)).await
-                                }),
-                                restarts,
-                            };
-                        }
-                        Err(err)
-                    }
-                    Ok(Ok(Ok(entries))) => {
-                        let slices = assign_lanes(entries, self.config.lanes)?;
-                        self.finish_prepare(slices, 0)
-                    }
-                }
-            }
-            Phase::Prepared {
-                slices,
-                attempts,
-                next_attempt,
-            } => {
-                // Pace the retry: never re-attempt (or hot-loop the
-                // controller) before the backoff elapses.
-                let now = Instant::now();
-                if now < *next_attempt {
-                    std::thread::sleep((*next_attempt - now).min(timeout));
-                    if Instant::now() < *next_attempt {
-                        return Ok(SourceEvent::Idle);
-                    }
-                }
-                let (slices, attempts) = (std::mem::take(slices), *attempts);
-                self.finish_prepare(slices, attempts)
-            }
-            Phase::Running(r) => {
-                let drained = |r: &Running| r.eof.iter().all(|f| f.load(Ordering::Acquire));
-                if drained(r) {
-                    return Ok(SourceEvent::Drained);
-                }
-                // Idle wait; lanes stream independently of this thread.
-                std::thread::sleep(timeout);
-                if drained(&*r) {
-                    Ok(SourceEvent::Drained)
-                } else {
-                    Ok(SourceEvent::Idle)
-                }
-            }
+            });
+        };
+        let OpenState {
+            driver,
+            ctx,
+            planner,
+        } = open.as_mut();
+        if let Some(planner) = planner.take() {
+            // Join the job; the empty ready signal — splits arrive as
+            // later assignments while claims race.
+            return driver.start(Box::new(planner));
         }
+        // Object-level failures first: hand each poisoned split back (a
+        // delivery attempt is consumed; quarantine happens at the cap).
+        for report in ctx.drain_poison() {
+            tracing::warn!(
+                split = %report.split,
+                reason = report.kind.reason_label(),
+                detail = %report.reason,
+                "object-level failure; handing the split back to the coordinator"
+            );
+            driver.fail(ctx, &report.split, &report.reason)?;
+        }
+        driver.poll_events(ctx, timeout)
     }
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        let Phase::Running(r) = &mut self.phase else {
-            debug_assert!(watermarks.is_empty(), "watermarks before assignment");
+        let State::Open(open) = &mut self.state else {
+            debug_assert!(watermarks.is_empty(), "watermarks before open");
             return Ok(());
         };
-        for &(partition, watermark) in watermarks {
-            let lane = partition.0;
-            let pos = Position::decode(watermark);
-            let (Some(slice), Some(hashes)) = (
-                r.slices.get(lane as usize),
-                r.prefix_hashes.get(lane as usize),
-            ) else {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("commit for unknown lane {lane}"),
-                });
-            };
-            let ordinal = pos.ordinal as usize;
-            let (Some(entry), Some(&keys_hash)) = (slice.get(ordinal), hashes.get(ordinal)) else {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!(
-                        "lane {lane} watermark {watermark} decodes to ordinal {ordinal}, \
-                         outside its {}-object slice — offset accounting bug",
-                        slice.len()
-                    ),
-                });
-            };
-            r.manifest.lane_states.insert(
-                lane,
-                LaneState {
-                    watermark,
-                    ordinal: pos.ordinal,
-                    key: entry.key.clone(),
-                    etag: entry.etag.clone(),
-                    keys_hash,
-                },
-            );
-        }
-        self.offset_store
-            .as_mut()
-            .expect("offset store built at open")
-            .save(&r.manifest)
-            .map_err(|e| SourceError::Client {
-                class: e.class,
-                reason: format!("saving the checkpoint manifest: {}", e.reason),
-            })
+        let OpenState { driver, ctx, .. } = open.as_mut();
+        driver.commit(ctx, watermarks)
     }
 
-    fn flush_commits(&mut self) -> Result<(), SourceError> {
-        let Phase::Running(r) = &self.phase else {
-            return Ok(());
-        };
-        self.offset_store
-            .as_mut()
-            .expect("offset store built at open")
-            .save(&r.manifest)
-            .map_err(|e| SourceError::Client {
-                class: e.class,
-                reason: format!("flushing the checkpoint manifest: {}", e.reason),
-            })
-    }
+    // `flush_commits` keeps the trait's no-op default: an Ok fenced commit
+    // is already store-durable, and a Retryable one is driver-cached and
+    // recommitted on the next tick.
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        if let Phase::Running(r) = &self.phase {
-            for id in lanes {
-                if let Some(flag) = r.pause.get(id.0 as usize) {
-                    flag.store(true, Ordering::Relaxed);
-                }
-            }
+        if let State::Open(open) = &self.state {
+            open.ctx.set_paused(lanes, true);
         }
         Ok(())
     }
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        if let Phase::Running(r) = &self.phase {
-            for id in lanes {
-                if let Some(flag) = r.pause.get(id.0 as usize) {
-                    flag.store(false, Ordering::Relaxed);
-                }
-            }
+        if let State::Open(open) = &self.state {
+            open.ctx.set_paused(lanes, false);
         }
         Ok(())
     }
@@ -645,16 +341,36 @@ impl Source for S3Source {
 
 impl Drop for S3Source {
     fn drop(&mut self) {
-        match &self.phase {
-            Phase::Listing { join, .. } => join.abort(),
-            Phase::Running(r) => {
-                for t in &r.tasks {
-                    t.abort();
-                }
-            }
-            _ => {}
+        if let State::Open(open) = &mut self.state {
+            // Graceful hand-back: peers claim the splits without waiting
+            // out the lease. Fetchers are detached and exit as their lanes
+            // drop.
+            open.driver.release();
         }
     }
+}
+
+/// The fallback when no coordinator was injected: a solo, in-process
+/// coordinator with default tuning. Correct and self-terminating, but its
+/// store dies with the process — hence the WARN.
+fn solo_coordinator(
+    handle: tokio::runtime::Handle,
+    metrics: Option<CoordinationMetrics>,
+) -> Result<Box<dyn SplitCoordinator>, SourceError> {
+    tracing::warn!(
+        "no coordinator injected: running solo over an in-process store; progress is \
+         EPHEMERAL and a restart replays the entire prefix (at-least-once, safe but \
+         wasteful) — inject one via with_coordinator (e.g. a StoreCoordinator over a \
+         durable backend) for durable resume and multi-instance sharing"
+    );
+    let tuning = CoordinationConfig::default();
+    let store = MemoryStore::new(tuning.lease_duration);
+    let coordinator =
+        StoreCoordinator::new(store, tuning, handle, metrics).map_err(|e| SourceError::Client {
+            class: e.class(),
+            reason: format!("building the solo coordinator: {e}"),
+        })?;
+    Ok(Box::new(coordinator))
 }
 
 fn parse(url: &str) -> Result<Url, SourceError> {
@@ -690,7 +406,7 @@ fn build_store(
 ) -> Result<(Box<dyn ObjectStore>, object_store::path::Path), object_store::Error> {
     // `ObjectStoreScheme::parse` returns the scheme and the in-store `Path` —
     // the very call `parse_url_opts` makes, so `path` is the exact listing
-    // prefix it would return and every committed offset that depends on it
+    // prefix it would return and every planned descriptor that depends on it
     // stays valid.
     let (scheme, path) = ObjectStoreScheme::parse(url)?;
     // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
@@ -810,7 +526,7 @@ mod tests {
     }
 
     /// The S3 listing prefix must be byte-identical to what `parse_url_opts`
-    /// produced before this change — committed offsets depend on it.
+    /// produces — planned descriptors and their offsets depend on it.
     #[test]
     fn build_store_s3_prefix_matches_parse_url_opts() {
         let url = Url::parse("s3://bucket/exports/2026/").unwrap();
@@ -818,19 +534,6 @@ mod tests {
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want);
-    }
-
-    #[tokio::test]
-    async fn advisory_lane_count_reports_configured_lanes() {
-        // The runtime reads this to warn on a lanes ≫ pipeline.threads
-        // over-subscription; it must reflect the configured lane count.
-        let yaml = "s3:\n  url: s3://bucket/exports/\n  lanes: 7\n  \
-                    checkpoint:\n    url: s3://bucket/_etl/b.json\n";
-        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let section = ComponentConfig::new("s3", value["s3"].clone());
-        let source =
-            S3Source::from_component_config(&section, tokio::runtime::Handle::current()).unwrap();
-        assert_eq!(source.advisory_lane_count(), Some(7));
     }
 
     #[test]

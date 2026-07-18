@@ -192,7 +192,7 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     let mut settle_until: Option<Instant> = None;
     loop {
         assert!(Instant::now() < deadline, "adoption never settled");
-        for event in worker.poll(Duration::from_millis(25)).expect("poll") {
+        for event in worker.poll().expect("poll") {
             assert!(
                 !matches!(
                     event,

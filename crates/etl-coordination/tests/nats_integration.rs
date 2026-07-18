@@ -100,8 +100,8 @@ fn partition_takeover_and_completion_over_real_nats() {
     // the bucket's max_age per message, exactly as the spike pinned.
     let hold_until = Instant::now() + LEASE * 5 / 2;
     while Instant::now() < hold_until {
-        held_a.fold(a.poll(Duration::from_millis(50)).unwrap());
-        held_b.fold(b.poll(Duration::from_millis(50)).unwrap());
+        held_a.fold(a.poll().unwrap());
+        held_b.fold(b.poll().unwrap());
     }
     assert_eq!(
         held_a.splits.len() + held_b.splits.len(),
@@ -209,7 +209,7 @@ fn servers_below_the_floor_are_rejected_actionably() {
             let deadline = Instant::now() + support::DEADLINE;
             loop {
                 assert!(Instant::now() < deadline, "old server never rejected");
-                if let Err(e) = w.poll(Duration::from_millis(50)) {
+                if let Err(e) = w.poll() {
                     break e;
                 }
             }

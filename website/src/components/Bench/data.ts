@@ -205,9 +205,44 @@ const COMPACT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 1,
 });
 
+/**
+ * Byte-rate units, ascending. Decimal (1000-step), matching the `bytes` branch
+ * below and how the rigs divide — see `benchmarks/src/bin/s3_backfill.rs`,
+ * which emits MB/s as `bytes / 1e6`.
+ */
+const BYTE_RATE = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+
+/**
+ * Rescale a byte rate onto the rung that keeps it readable. Normalising to
+ * bytes/s first means a small value scales *down* correctly (0.004 MB/s →
+ * "4.00 KB/s"), not just a large one up.
+ */
+function formatByteRate(value: number, rung: number): string {
+  let v = value * 1000 ** rung;
+  let i = 0;
+  const digits = (x: number): number => (x >= 100 ? 0 : x >= 10 ? 1 : 2);
+  // Promote on the *rounded* value, not the raw one: 999.9 rounds to zero
+  // decimals as "1000", which would print "1000 MB/s" rather than "1.00 GB/s".
+  while (i < BYTE_RATE.length - 1) {
+    const a = Math.abs(v);
+    if (a < 1000 && Number(a.toFixed(digits(a))) < 1000) break;
+    v /= 1000;
+    i += 1;
+  }
+  const a = Math.abs(v);
+  return `${v.toFixed(digits(a))} ${BYTE_RATE[i]}`;
+}
+
 /** A compact, unit-aware label for a bar tip (e.g. "54 ns", "18.5M/s"). */
 export function formatTip(value: number, unit: string): string {
-  if (unit === 'records/s' || unit === 'rows/s' || unit.endsWith('/s')) {
+  // Byte rates carry their own magnitude prefix, so the generic "/s" branch
+  // below would compact the NUMBER and drop the prefix — 2924 MB/s rendered as
+  // "2.9K/s", a figure with no unit at all. Rescale within the ladder instead.
+  const rung = BYTE_RATE.indexOf(unit);
+  if (rung !== -1) return formatByteRate(value, rung);
+  if (unit.endsWith('/s')) {
+    // A count rate (records/s, rows/s): the noun is carried by the axis title,
+    // so only the magnitude matters here.
     return `${COMPACT.format(value)}/s`;
   }
   if (unit === 'bytes') {

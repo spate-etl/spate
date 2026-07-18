@@ -13,10 +13,16 @@ use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::metrics::{CheckpointMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics};
 use crate::record::PartitionId;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// Poll cadence while fast-commit partitions are being chased
+/// ([`SourceEvent::CommitReady`]): tight enough that a finishing split's
+/// final ack commits within ~a millisecond of resolving, bounded to one
+/// commit interval by the chase deadline.
+const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
 
 /// Signals the controller sends the runtime's main thread.
 #[derive(Debug)]
@@ -117,6 +123,14 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     }
 
     let mut last_commit = Instant::now();
+    // Fast-commit mode (`SourceEvent::CommitReady`): partitions whose final
+    // acks are being chased with a tightened cadence, each with its OWN
+    // deadline bounding its chase to one commit interval. Per-partition is
+    // load-bearing: a single shared deadline is re-armed by every new hint,
+    // so on a job where units of work finish continuously a permanently
+    // stalled partition would never age out and the controller would stay
+    // pinned at `FAST_COMMIT_POLL` indefinitely.
+    let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
     // Set when the source reports `SourceEvent::Drained`: the loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
     // to mean "everything acknowledged and committed" (see the backstop after
@@ -141,6 +155,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 &mut state,
                 &checkpoint_metrics,
                 &health,
+                None,
             );
 
             // A watermark stalled behind a failed batch is permanent —
@@ -171,8 +186,15 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             break;
         }
 
-        // 3. Source control-plane events.
-        match source.poll_events(event_poll_timeout) {
+        // 3. Source control-plane events. Fast-commit mode tightens the
+        // wait so chased acks are committed within ~a millisecond of
+        // resolving instead of on the next periodic tick.
+        let poll_timeout = if fast_commit.is_empty() {
+            event_poll_timeout
+        } else {
+            event_poll_timeout.min(FAST_COMMIT_POLL)
+        };
+        match source.poll_events(poll_timeout) {
             Ok(SourceEvent::LanesAssigned(lanes)) => {
                 handle_assign(
                     lanes,
@@ -201,6 +223,51 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     drain_timeout,
                 );
             }
+            Ok(SourceEvent::LanesRetired { lanes }) => {
+                handle_retired::<S>(
+                    lanes,
+                    &mut checkpointer,
+                    &mut state,
+                    &control_txs,
+                    &source_metrics,
+                );
+            }
+            Ok(SourceEvent::LanesAdded(lanes)) => {
+                handle_added::<S>(
+                    lanes,
+                    &mut source,
+                    &mut checkpointer,
+                    &mut state,
+                    &control_txs,
+                    &source_metrics,
+                );
+            }
+            Ok(SourceEvent::CommitReady { partitions }) => {
+                // Chasing the commit is useless while the records are still
+                // buffered in the chain: flush the owning threads first so
+                // the acks being chased can actually resolve. Without this
+                // the tail sits until `idle_flush` elapses, and the unit of
+                // work costs a full lull to complete.
+                let mut threads: BTreeSet<usize> = BTreeSet::new();
+                for p in &partitions {
+                    threads.extend(
+                        state
+                            .assignment
+                            .values()
+                            .filter(|(part, _)| part == p)
+                            .map(|&(_, thread)| thread),
+                    );
+                }
+                for thread in threads {
+                    let _ = control_txs[thread].send(ThreadControl::FlushNow);
+                }
+                // Each hinted partition gets its own window; re-hinting one
+                // that is already being chased does not extend it.
+                let until = Instant::now() + commit_interval;
+                for p in partitions {
+                    fast_commit.entry(p).or_insert(until);
+                }
+            }
             Ok(SourceEvent::Idle) => {}
             Ok(SourceEvent::Drained) => {
                 tracing::info!("source drained; starting graceful completion drain");
@@ -215,6 +282,36 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "retryable source control-plane error");
+            }
+        }
+
+        // 3b. Chase fast-commit partitions: commit just them, standing down
+        // once each is fully resolved and flushed — or at the deadline, so
+        // a stalled batch falls back to the periodic tick instead of
+        // spinning here.
+        if !fast_commit.is_empty() && state.failure.is_none() {
+            // Age out partitions past their own window first: a batch that
+            // never resolves falls back to the periodic tick instead of
+            // holding the tightened cadence open.
+            let now = Instant::now();
+            fast_commit.retain(|_, &mut until| now < until);
+            if !fast_commit.is_empty() {
+                let chasing: BTreeSet<PartitionId> = fast_commit.keys().copied().collect();
+                commit_cycle(
+                    &mut source,
+                    &mut checkpointer,
+                    &mut state,
+                    &checkpoint_metrics,
+                    &health,
+                    Some(&chasing),
+                );
+                // Stand down when the unit of work is actually done — its
+                // lane left the assignment — not merely because its acks
+                // look quiet for an instant. A momentary lull between the
+                // flush and the sink's acknowledgement would otherwise end
+                // the chase early and leave the final watermark to the
+                // periodic tick, costing a full commit interval.
+                fast_commit.retain(|&p, _| state.assignment.values().any(|&(part, _)| part == p));
             }
         }
     }
@@ -265,6 +362,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         &mut state,
         &checkpoint_metrics,
         &health,
+        None,
     );
     let final_flush_failed = if let Err(e) = source.flush_commits() {
         tracing::error!(error = %e, "final commit flush failed; offsets will replay");
@@ -470,6 +568,7 @@ fn commit_cycle<S: Source>(
     state: &mut State,
     metrics: &CheckpointMetrics,
     health: &HealthState,
+    only: Option<&BTreeSet<PartitionId>>,
 ) {
     let stats = checkpointer.drain();
     if stats.stale_epoch > 0 || stats.unknown > 0 {
@@ -497,13 +596,26 @@ fn commit_cycle<S: Source>(
     if state.pending_commit.is_empty() {
         return;
     }
-    let positions: Vec<(PartitionId, i64)> =
-        state.pending_commit.iter().map(|(&p, &o)| (p, o)).collect();
+    // A fast-commit pass (`only`) sends just the chased partitions; the
+    // rest keep the periodic cadence so a hint never amplifies commit
+    // traffic for splits that are still flowing.
+    let positions: Vec<(PartitionId, i64)> = state
+        .pending_commit
+        .iter()
+        .filter(|(p, _)| only.is_none_or(|f| f.contains(p)))
+        .map(|(&p, &o)| (p, o))
+        .collect();
+    if positions.is_empty() {
+        return;
+    }
     let started = Instant::now();
     match source.commit(&positions) {
         Ok(()) => {
             metrics.commit(true, started.elapsed());
-            state.committed.append(&mut state.pending_commit);
+            for &(p, o) in &positions {
+                state.pending_commit.remove(&p);
+                state.committed.insert(p, o);
+            }
         }
         Err(e) if is_fatal(&e) => {
             metrics.commit(false, started.elapsed());
@@ -595,6 +707,68 @@ fn handle_assign<S: Source>(
     pipeline_metrics.set_state(PipelineState::Running);
 }
 
+/// Merge additional lanes into the *current* assignment epoch
+/// ([`SourceEvent::LanesAdded`]): existing lanes and their in-flight acks
+/// are untouched. The checkpointer's epoch is extended with the new
+/// partitions before any new lane reaches a pipeline thread — the same
+/// ordering contract as a full assignment.
+fn handle_added<S: Source>(
+    lanes: Vec<S::Lane>,
+    source: &mut S,
+    checkpointer: &mut Checkpointer,
+    state: &mut State,
+    control_txs: &[crossbeam_channel::Sender<ThreadControl<S::Lane>>],
+    source_metrics: &SourceMetrics,
+) {
+    if lanes.is_empty() {
+        return;
+    }
+    let mut groups: HashMap<PartitionId, Vec<S::Lane>> = HashMap::new();
+    for lane in lanes {
+        groups.entry(lane.partition()).or_default().push(lane);
+    }
+    let partitions: Vec<PartitionId> = groups.keys().copied().collect();
+    if let Err(e) = checkpointer.extend_epoch(&partitions) {
+        state.failure.get_or_insert(e);
+        return;
+    }
+
+    let mut added: Vec<LaneId> = Vec::new();
+    for (partition, group) in groups {
+        let thread = state
+            .thread_load
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| **load)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        for lane in group {
+            let id = lane.id();
+            state.assignment.insert(id, (partition, thread));
+            state.thread_load[thread] += 1;
+            added.push(id);
+            let _ = control_txs[thread].send(ThreadControl::AddLane(lane));
+        }
+    }
+
+    // Checkpoint pending-pressure is engaged for *every* assigned lane
+    // (see `apply_pending_pressure`), so a lane arriving mid-pressure must
+    // join it rather than run free beside paused siblings. Waiting for the
+    // next tick is not enough: inside the hysteresis band neither the
+    // engage nor the release branch fires, so an unpaused newcomer can keep
+    // reading indefinitely. Driver backpressure needs no equivalent — it
+    // stops the owning thread's polling wholesale.
+    if !state.pending_paused.is_empty() {
+        match source.pause(&added) {
+            Ok(()) => state.pending_paused.extend(added.iter().copied()),
+            Err(e) => {
+                tracing::warn!(error = %e, "pausing an added lane under pending pressure failed")
+            }
+        }
+    }
+    source_metrics.set_lanes_active(state.assignment.len());
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "controller state is deliberately spread across owners"
@@ -623,6 +797,60 @@ fn handle_revoke<S: Source>(
         health,
         drain_timeout,
     );
+    source_metrics.set_lanes_active(state.assignment.len());
+}
+
+/// Remove finished lanes ([`SourceEvent::LanesRetired`]): their work is
+/// fully delivered, acknowledged, and committed, so there is no drain
+/// barrier to wait on and nothing to commit — and, critically, nothing to
+/// flush. The owning threads get a [`ThreadControl::DropLanes`], which they
+/// service by dropping the lanes and carrying straight on polling.
+///
+/// This is a hot path: a bounded backfill retires one lane per completed
+/// unit of work (a coordinated split), so anything synchronous here is paid
+/// O(splits) times. Routing it through `StopLanes` instead would run a full
+/// `flush_until` per completed split — fragmenting sink batches and parking
+/// the owning thread on a blocked chain — which is exactly the cost this
+/// event exists to avoid.
+fn handle_retired<S: Source>(
+    lanes: Vec<LaneId>,
+    checkpointer: &mut Checkpointer,
+    state: &mut State,
+    control_txs: &[crossbeam_channel::Sender<ThreadControl<S::Lane>>],
+    source_metrics: &SourceMetrics,
+) {
+    let mut by_thread: HashMap<usize, Vec<LaneId>> = HashMap::new();
+    for lane in &lanes {
+        if let Some(&(_, thread)) = state.assignment.get(lane) {
+            by_thread.entry(thread).or_default().push(*lane);
+        } else {
+            tracing::warn!(lane = lane.0, "retirement for an unassigned lane");
+        }
+    }
+    for (thread, subset) in by_thread {
+        let _ = control_txs[thread].send(ThreadControl::DropLanes { lanes: subset });
+    }
+
+    let mut retired_parts: HashSet<PartitionId> = lanes
+        .iter()
+        .filter_map(|l| state.assignment.get(l).map(|&(p, _)| p))
+        .collect();
+    for lane in &lanes {
+        if let Some((_, thread)) = state.assignment.remove(lane) {
+            state.thread_load[thread] = state.thread_load[thread].saturating_sub(1);
+        }
+        state.paused.remove(lane);
+        state.pending_paused.remove(lane);
+    }
+    // Drop tracking only for partitions with no remaining lanes; their
+    // late acknowledgements (none exist by contract) would be stale.
+    let live_partitions: HashSet<PartitionId> =
+        state.assignment.values().map(|&(p, _)| p).collect();
+    let to_revoke: Vec<PartitionId> = retired_parts
+        .drain()
+        .filter(|p| !live_partitions.contains(p))
+        .collect();
+    checkpointer.revoke(&to_revoke);
     source_metrics.set_lanes_active(state.assignment.len());
 }
 
@@ -674,7 +902,14 @@ fn revoke_lanes<S: Source>(
 
     // Commit everything the drain acknowledged, then forget the partitions
     // that no longer have lanes.
-    commit_cycle(source, checkpointer, state, checkpoint_metrics, health);
+    commit_cycle(
+        source,
+        checkpointer,
+        state,
+        checkpoint_metrics,
+        health,
+        None,
+    );
     if let Err(e) = source.flush_commits() {
         tracing::warn!(error = %e, "flush of stored commits failed during revocation");
     }

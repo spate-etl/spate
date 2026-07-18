@@ -7,13 +7,13 @@
 //! the script observes every commit, failure report, and release — no
 //! store, no clock, fully deterministic.
 
+use etl_core::coordination::ControlWaker;
 use etl_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
     SplitId, SplitPlanner, SplitProgress, SplitSpec,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 #[derive(Default)]
 struct State {
@@ -24,6 +24,7 @@ struct State {
     released: Vec<SplitId>,
     planner: Option<Box<dyn SplitPlanner>>,
     started: bool,
+    waker: Option<ControlWaker>,
 }
 
 /// A [`SplitCoordinator`] whose events and outcomes are scripted by the
@@ -74,6 +75,7 @@ impl CoordinatorScript {
             epoch: LeaseEpoch(epoch),
             progress,
         });
+        self.wake();
     }
 
     /// Queue a [`CoordinationEvent::Lost`] for the next poll.
@@ -81,6 +83,7 @@ impl CoordinatorScript {
         self.lock().events.push(CoordinationEvent::Lost {
             split: split.clone(),
         });
+        self.wake();
     }
 
     /// Queue a [`CoordinationEvent::Quarantined`] for the next poll.
@@ -89,11 +92,13 @@ impl CoordinatorScript {
             split: split.clone(),
             attempts,
         });
+        self.wake();
     }
 
     /// Queue [`CoordinationEvent::AllComplete`] for the next poll.
     pub fn all_complete(&self) {
         self.lock().events.push(CoordinationEvent::AllComplete);
+        self.wake();
     }
 
     /// Queue [`CoordinationEvent::Stalled`] for the next poll.
@@ -102,6 +107,7 @@ impl CoordinatorScript {
             completed,
             quarantined,
         });
+        self.wake();
     }
 
     /// Script the outcome of the next `commit` for `split` (repeat to
@@ -161,6 +167,14 @@ impl CoordinatorScript {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("coordinator script poisoned")
     }
+
+    /// Wake the driver's control-plane park so a scripted event is picked
+    /// up immediately instead of waiting out the caller's poll timeout.
+    fn wake(&self) {
+        if let Some(w) = &self.lock().waker {
+            w.wake();
+        }
+    }
 }
 
 impl SplitCoordinator for ScriptedCoordinator {
@@ -171,7 +185,14 @@ impl SplitCoordinator for ScriptedCoordinator {
         Ok(())
     }
 
-    fn poll(&mut self, _timeout: Duration) -> Result<Vec<CoordinationEvent>, CoordinationError> {
+    fn set_waker(&mut self, waker: ControlWaker) {
+        self.state
+            .lock()
+            .expect("coordinator script poisoned")
+            .waker = Some(waker);
+    }
+
+    fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
         // Deterministic and non-blocking: queued events are one batch;
         // an empty queue returns immediately rather than waiting out the
         // timeout, so test loops never stall.
@@ -260,11 +281,11 @@ mod tests {
         // lose+gain queued together arrive as one batch, in order.
         script.gain(split, 1, None);
         script.lose(&id);
-        let batch = coordinator.poll(Duration::ZERO).unwrap();
+        let batch = coordinator.poll().unwrap();
         assert_eq!(batch.len(), 2);
         assert!(matches!(batch[0], CoordinationEvent::Gained { .. }));
         assert!(matches!(batch[1], CoordinationEvent::Lost { .. }));
-        assert!(coordinator.poll(Duration::ZERO).unwrap().is_empty());
+        assert!(coordinator.poll().unwrap().is_empty());
 
         // Scripted commit outcomes drain in order, then commits succeed.
         script.fail_next_commit(&id, CoordinationErrorKind::Retryable);

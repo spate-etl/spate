@@ -9,7 +9,7 @@ mod support;
 use etl_coordination::store::memory::MemoryStore;
 use etl_coordination::store::{CasOutcome, CoordinationStore as _, Keyspace};
 use etl_coordination::{CoordinationErrorKind, SplitCoordinator, SplitProgress};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use support::{
     Held, LEASE, PhasedPlanner, crash, drive, drive_pair, runtime, split_id, store, worker,
 };
@@ -42,8 +42,8 @@ fn racing_workers_partition_the_splits_and_complete_collectively() {
     // then re-check — a balanced fleet must hold its assignment.
     let settle_until = Instant::now() + LEASE * 2;
     while Instant::now() < settle_until {
-        held_a.fold(a.poll(Duration::from_millis(10)).unwrap());
-        held_b.fold(b.poll(Duration::from_millis(10)).unwrap());
+        held_a.fold(a.poll().unwrap());
+        held_b.fold(b.poll().unwrap());
     }
     assert_eq!(held_a.splits.len(), 4, "balance must hold once reached");
     assert_eq!(held_b.splits.len(), 4);
@@ -72,7 +72,7 @@ fn racing_workers_partition_the_splits_and_complete_collectively() {
                     Err(e) => panic!("commit failed: {e}"),
                 }
             }
-            held.fold(coordinator.poll(Duration::from_millis(10)).unwrap());
+            held.fold(coordinator.poll().unwrap());
         }
     }
 }
@@ -249,7 +249,7 @@ fn live_twins_sharing_an_instance_id_are_fatal() {
             (&mut first, &mut held_first),
             (&mut second, &mut held_second),
         ] {
-            match twin.poll(Duration::from_millis(25)) {
+            match twin.poll() {
                 Ok(events) => held.fold(events),
                 Err(e) => break 'outer e,
             }
@@ -378,7 +378,7 @@ fn poison_splits_quarantine_and_stall_instead_of_false_success() {
             held.splits.remove("bad");
             failures += 1;
         }
-        held.fold(a.poll(Duration::from_millis(25)).unwrap());
+        held.fold(a.poll().unwrap());
     }
     assert_eq!(held.quarantined[0].0, "bad");
     assert_eq!(
@@ -453,8 +453,8 @@ fn a_newcomer_steals_from_a_loaded_worker() {
     // Steady state: balanced fleets do not oscillate.
     let before: Vec<String> = held_b.splits.keys().cloned().collect();
     std::thread::sleep(LEASE * 2);
-    held_a.fold(a.poll(Duration::ZERO).unwrap());
-    held_b.fold(b.poll(Duration::ZERO).unwrap());
+    held_a.fold(a.poll().unwrap());
+    held_b.fold(b.poll().unwrap());
     let after: Vec<String> = held_b.splits.keys().cloned().collect();
     assert_eq!(before, after, "balance must not oscillate");
     assert_eq!(held_a.splits.len(), 2);

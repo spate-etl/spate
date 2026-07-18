@@ -1,5 +1,5 @@
-//! The async edge: one startup listing, then one fetcher task per lane
-//! reading object bytes to the pipeline thread.
+//! The async edge: the shared listing helper and one fetcher task per
+//! gained split, reading its member objects' bytes to the pipeline thread.
 //!
 //! Runs on the pipeline's I/O runtime. Every channel send `await`s — a
 //! fetcher never blocks a runtime worker, so sink workers sharing the
@@ -14,26 +14,29 @@
 //! # Determinism
 //!
 //! [`ObjectStore::list`](object_store::ObjectStore::list) guarantees no
-//! ordering, so the listing is collected once and sorted by key; the
-//! sorted listing is dealt round-robin across lanes. Both steps are pure,
-//! so a restart over an unchanged key set reproduces every lane slice —
-//! and with it every (ordinal, record index) offset — exactly.
+//! ordering, so [`list_all`] collects the listing and sorts it by key
+//! before the planner packs it. A fetcher never lists: it reads its
+//! split's member objects in descriptor order, so every (ordinal, record
+//! index) offset is minted against the immutable descriptor — identical
+//! under every owner of the split.
 //!
 //! # Retries
 //!
 //! Transient GET failures are retried inside the fetcher with capped
 //! exponential backoff, resuming from the last delivered byte with a
 //! ranged GET **conditioned on the object's ETag** — a splice of two
-//! different object versions is impossible. An object whose store returns
-//! no ETag cannot be resumed mid-stream safely and fails the lane instead.
-//! Persistent failure (attempt budget exhausted) and non-retryable classes
-//! (missing key, failed precondition, auth) fail the lane: the pipeline
-//! restarts and replays from the committed watermark.
+//! different object versions is impossible. Persistent failure (attempt
+//! budget exhausted) and the object-level non-retryable classes (missing
+//! key, failed precondition) **poison the split** — it is handed back for
+//! a peer to retry, and quarantined at the attempt cap — while
+//! credentials/configuration failures stay fatal for the pipeline. An
+//! object whose store returns no ETag cannot be resumed mid-stream safely
+//! and poisons the split on a mid-object break instead.
 
 use crate::error::classify;
-use crate::offset::{MAX_ORDINAL, Position};
-use crate::store::{LaneState, Manifest, chain_hash};
+use crate::split_ctx::PoisonKind;
 use bytes::Bytes;
+use etl_core::coordination::SplitId;
 use etl_core::error::{ErrorClass, SourceError};
 use futures_util::StreamExt as _;
 use object_store::path::Path;
@@ -72,8 +75,32 @@ pub(crate) enum ChunkMsg {
     Chunk(Bytes),
     /// The current object's bytes are complete.
     ObjectEnd,
-    /// The lane cannot continue; the error is terminal for the pipeline.
-    LaneFailed(SourceError),
+    /// The lane cannot continue reading its split.
+    LaneFailed(SplitFailure),
+}
+
+/// How a split read failed — the classification that decides whether one
+/// object condemns the split (poison, handled by the coordinator) or the
+/// whole pipeline (fatal).
+#[derive(Debug)]
+pub(crate) enum SplitFailure {
+    /// Object-level failure: a member was deleted after planning, was
+    /// overwritten under its ETag pin, is corrupt, or exhausted its read
+    /// budget. The split is handed back for a peer to retry; it never
+    /// fails the pipeline directly.
+    Poison(PoisonKind, String),
+    /// Instance- or configuration-level failure (credentials, permissions,
+    /// client misconfiguration): terminal for the pipeline.
+    Fatal(SourceError),
+}
+
+impl std::fmt::Display for SplitFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SplitFailure::Poison(_, reason) => write!(f, "split poisoned: {reason}"),
+            SplitFailure::Fatal(e) => write!(f, "{e}"),
+        }
+    }
 }
 
 /// Collect and sort the full listing under `prefix`. Memory is
@@ -97,157 +124,12 @@ pub(crate) async fn list_all(
     Ok(entries)
 }
 
-/// Deal the sorted listing round-robin into `lanes` slices. Ordinals are
-/// indexes into each slice.
-pub(crate) fn assign_lanes(
-    entries: Vec<ObjectEntry>,
-    lanes: u32,
-) -> Result<Vec<Vec<ObjectEntry>>, SourceError> {
-    let mut slices: Vec<Vec<ObjectEntry>> = (0..lanes).map(|_| Vec::new()).collect();
-    for (i, entry) in entries.into_iter().enumerate() {
-        slices[i % lanes as usize].push(entry);
-    }
-    for (lane, slice) in slices.iter().enumerate() {
-        if slice.len() > MAX_ORDINAL as usize + 1 {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "lane {lane} would hold {} objects, above the composite-offset \
-                     limit of {}; raise `lanes` to spread the listing wider",
-                    slice.len(),
-                    MAX_ORDINAL as u64 + 1,
-                ),
-            });
-        }
-    }
-    Ok(slices)
-}
-
-/// Validate a loaded manifest against the fresh listing: every committed
-/// position must still mean what it meant when it was written.
-pub(crate) fn validate_resume(
-    slices: &[Vec<ObjectEntry>],
-    manifest: &Manifest,
-) -> Result<(), SourceError> {
-    for (&lane, state) in &manifest.lane_states {
-        let slice = slices.get(lane as usize).ok_or_else(|| {
-            drift_error(
-                lane,
-                format!(
-                    "manifest has lane {lane} but only {} lanes exist",
-                    slices.len()
-                ),
-            )
-        })?;
-        validate_lane_resume(lane, slice, state)?;
-    }
-    Ok(())
-}
-
-fn validate_lane_resume(
-    lane: u32,
-    slice: &[ObjectEntry],
-    state: &LaneState,
-) -> Result<(), SourceError> {
-    let ordinal = state.ordinal as usize;
-    let Some(entry) = slice.get(ordinal) else {
-        return Err(drift_error(
-            lane,
-            format!(
-                "committed ordinal {ordinal} but the lane's slice now holds only {} \
-                 objects — keys were removed below the committed position",
-                slice.len()
-            ),
-        ));
-    };
-    if entry.key != state.key {
-        return Err(drift_error(
-            lane,
-            format!(
-                "committed ordinal {ordinal} was \"{}\", the listing now has \"{}\" \
-                 there — keys were added or removed below the committed position",
-                state.key, entry.key
-            ),
-        ));
-    }
-    let mut hash = 0u64;
-    for e in &slice[..=ordinal] {
-        hash = chain_hash(hash, &e.key);
-    }
-    if hash != state.keys_hash {
-        return Err(drift_error(
-            lane,
-            format!(
-                "the key sequence below committed ordinal {ordinal} changed \
-                 (rolling hash mismatch) even though the key at the ordinal matches"
-            ),
-        ));
-    }
-    if let (Some(listed), Some(committed)) = (&entry.etag, &state.etag)
-        && listed != committed
-    {
-        return Err(drift_error(
-            lane,
-            format!(
-                "object \"{}\" at committed ordinal {ordinal} was overwritten \
-                 (etag {committed} committed, {listed} listed) — its record \
-                 indexes are no longer meaningful",
-                entry.key
-            ),
-        ));
-    }
-    // Committed with an ETag, but the fresh listing reports none for that key.
-    // Early drift detection would then rest entirely on the fetch-time
-    // `if_match` — which a store that stopped reporting ETags may not honor —
-    // so the object's content can no longer be verified against the committed
-    // record indexes. Refuse rather than resume over unverifiable content.
-    if state.etag.is_some() && entry.etag.is_none() {
-        return Err(drift_error(
-            lane,
-            format!(
-                "object \"{}\" at committed ordinal {ordinal} was committed with an \
-                 ETag but the listing now reports none, so its content can no longer \
-                 be verified on resume",
-                entry.key
-            ),
-        ));
-    }
-    // A mid-object watermark replays the object and discards the committed
-    // record count, which is only sound if the content provably didn't
-    // change. Without a committed ETag to pin the re-read to, a same-key
-    // overwrite could silently skip records — refuse instead.
-    if state.etag.is_none() && Position::decode(state.watermark).record > 0 {
-        return Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "lane {lane}: the committed position is mid-object (\"{}\", {} records \
-                 committed) but the store reported no ETag at commit time, so the \
-                 object's content cannot be verified on resume; start a fresh \
-                 checkpoint to re-run over the current listing",
-                entry.key,
-                Position::decode(state.watermark).record
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn drift_error(lane: u32, detail: String) -> SourceError {
-    SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!(
-            "lane {lane}: the object listing changed under the checkpoint ({detail}); \
-             the backfill's key set must stay frozen — start a fresh checkpoint to \
-             re-run over the current listing"
-        ),
-    }
-}
-
 /// Everything one fetcher task needs.
 pub(crate) struct FetcherParams {
-    pub(crate) lane: u32,
+    /// The split being read; names the work in failure reports and logs.
+    pub(crate) split: SplitId,
     pub(crate) store: Arc<dyn ObjectStore>,
-    /// The lane's full slice, ordinal order.
+    /// The split's member objects, ordinal order.
     pub(crate) slice: Arc<Vec<ObjectEntry>>,
     /// First ordinal to fetch (the committed watermark's object).
     pub(crate) start_ordinal: u32,
@@ -269,19 +151,19 @@ pub(crate) struct FetcherParams {
     pub(crate) retries: Option<etl_core::metrics::Counter>,
 }
 
-/// How many attempts one object GET — and, in the source, one startup
-/// listing or manifest load — gets before failing. Failing fast (and
-/// replaying from the watermark after a restart) beats a backfill wedged
-/// invisibly in an endless retry loop.
+/// How many attempts one object GET — and, in the planner, one prefix
+/// listing — gets before escalating. Failing fast (a poisoned split, a
+/// fatal plan) beats a backfill wedged invisibly in an endless retry
+/// loop.
 pub(crate) const MAX_ATTEMPTS: u32 = 8;
 pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PAUSE_POLL: Duration = Duration::from_millis(25);
 
-/// Stream the lane's slice. Ends by dropping `tx` (the lane observes a
-/// closed channel = end of slice) or after a `LaneFailed`.
+/// Stream the split's member objects. Ends by dropping `tx` (the lane
+/// observes a closed channel = end of input) or after a `LaneFailed`.
 pub(crate) async fn run_fetcher(params: FetcherParams) {
     let FetcherParams {
-        lane,
+        split,
         store,
         slice,
         start_ordinal,
@@ -295,7 +177,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
-        // The listing guard bounds slice lengths, so ordinals always fit.
+        // The planner's member cap bounds split sizes, so ordinals always
+        // fit the composite-offset layout.
         let ordinal = ordinal as u32;
         // Pin the GET to the exact content the offsets were (or will be)
         // minted against: the committed ETag for the resume object, the
@@ -319,7 +202,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             return; // lane dropped: shutdown
         }
         match stream_object(
-            lane,
+            &split,
             &store,
             entry,
             pinned_etag.as_deref(),
@@ -376,7 +259,7 @@ async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(
     reason = "internal seam between run_fetcher and the read loops"
 )]
 async fn stream_object(
-    lane: u32,
+    split: &SplitId,
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     pinned_etag: Option<&str>,
@@ -386,11 +269,11 @@ async fn stream_object(
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&etl_core::metrics::Counter>,
-) -> Result<bool, SourceError> {
+) -> Result<bool, SplitFailure> {
     match pinned_etag {
         Some(etag) => {
             stream_object_ranged(
-                lane,
+                split,
                 store,
                 entry,
                 etag,
@@ -405,7 +288,7 @@ async fn stream_object(
         }
         None => {
             stream_object_streaming(
-                lane,
+                split,
                 store,
                 entry,
                 chunk_bytes,
@@ -431,7 +314,7 @@ async fn stream_object(
     reason = "internal read loop, mirrors stream_object_streaming"
 )]
 async fn stream_object_ranged(
-    lane: u32,
+    split: &SplitId,
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     etag: &str,
@@ -441,14 +324,16 @@ async fn stream_object_ranged(
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&etl_core::metrics::Counter>,
-) -> Result<bool, SourceError> {
+) -> Result<bool, SplitFailure> {
     let path = Path::from(entry.key.as_str());
     let window = range_bytes.max(1) as u64;
     let mut delivered: u64 = 0;
     let mut attempt: u32 = 0;
 
     while delivered < entry.size {
-        let end = (delivered + window).min(entry.size);
+        // Saturating: `entry.size` is remote listing data and may be
+        // adversarially close to u64::MAX.
+        let end = delivered.saturating_add(window).min(entry.size);
         let options = GetOptions {
             if_match: Some(etag.to_owned()),
             range: Some(GetRange::Bounded(delivered..end)),
@@ -462,7 +347,7 @@ async fn stream_object_ranged(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     retry_or_fail(
-                        lane,
+                        split,
                         entry,
                         &e,
                         delivered,
@@ -476,7 +361,7 @@ async fn stream_object_ranged(
             },
             Err(e) => {
                 retry_or_fail(
-                    lane,
+                    split,
                     entry,
                     &e,
                     delivered,
@@ -491,14 +376,15 @@ async fn stream_object_ranged(
         let read = buffered.len() as u64;
         if read == 0 {
             // A conforming store never returns an empty bounded range; guard
-            // anyway so a misbehaving one fails the lane rather than spinning.
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "lane {lane}: ranged read of \"{}\" at byte {delivered} returned no bytes",
+            // anyway so a misbehaving one poisons the object rather than
+            // spinning.
+            return Err(SplitFailure::Poison(
+                PoisonKind::Undecodable,
+                format!(
+                    "split {split}: ranged read of \"{}\" at byte {delivered} returned no bytes",
                     entry.key
                 ),
-            });
+            ));
         }
         // Forward the buffered window. No connection is open here, so a paused /
         // back-pressured lane only parks on bytes already in memory.
@@ -532,7 +418,7 @@ async fn stream_object_ranged(
     reason = "internal read loop, mirrors stream_object_ranged"
 )]
 async fn stream_object_streaming(
-    lane: u32,
+    split: &SplitId,
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     chunk_bytes: usize,
@@ -540,7 +426,7 @@ async fn stream_object_streaming(
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&etl_core::metrics::Counter>,
-) -> Result<bool, SourceError> {
+) -> Result<bool, SplitFailure> {
     let path = Path::from(entry.key.as_str());
     let mut delivered: u64 = 0;
     let mut attempt: u32 = 0;
@@ -558,7 +444,7 @@ async fn stream_object_streaming(
             Ok(r) => r,
             Err(e) => {
                 retry_or_fail(
-                    lane,
+                    split,
                     entry,
                     &e,
                     delivered,
@@ -590,21 +476,36 @@ async fn stream_object_streaming(
                     attempt = 0;
                 }
                 Some(Err(e)) => {
-                    // Without an ETag a resumed read could splice two object
-                    // versions, so a mid-object break cannot be retried.
                     if delivered > 0 {
-                        return Err(SourceError::Client {
-                            class: ErrorClass::Fatal,
-                            reason: format!(
-                                "lane {lane}: read of \"{}\" failed mid-object at byte \
+                        // Scope decides, same as `retry_or_fail`: a
+                        // credentials/permission/config failure holds for
+                        // every object on every instance, so it is
+                        // pipeline-fatal even mid-stream. Everything else
+                        // stays object-level: without an ETag a resumed read
+                        // could splice two object versions, so a mid-object
+                        // break cannot be retried by this owner — poison.
+                        if crate::error::is_pipeline_fatal(&e) {
+                            return Err(SplitFailure::Fatal(SourceError::Client {
+                                class: ErrorClass::Fatal,
+                                reason: format!(
+                                    "split {split}: reading \"{}\" failed mid-object at byte \
+                                     {delivered}: {e}",
+                                    entry.key
+                                ),
+                            }));
+                        }
+                        return Err(SplitFailure::Poison(
+                            PoisonKind::Undecodable,
+                            format!(
+                                "split {split}: read of \"{}\" failed mid-object at byte \
                                  {delivered} and the store reports no ETag to pin a \
                                  resumed read to: {e}",
                                 entry.key
                             ),
-                        });
+                        ));
                     }
                     retry_or_fail(
-                        lane,
+                        split,
                         entry,
                         &e,
                         delivered,
@@ -623,22 +524,33 @@ async fn stream_object_streaming(
 
 /// Back off and bump the attempt counter for a retryable error; escalate
 /// non-retryable classes and exhausted budgets.
+///
+/// Escalation splits by scope: credentials/config failures are pipeline
+/// [`Fatal`](SplitFailure::Fatal); everything else — a deleted or
+/// overwritten object (`NotFound`, a failed `if_match` precondition), or a
+/// read that keeps failing past the attempt budget — is object-level
+/// [`Poison`](SplitFailure::Poison), handled by handing the split back.
 async fn retry_or_fail(
-    lane: u32,
+    split: &SplitId,
     entry: &ObjectEntry,
     e: &object_store::Error,
     delivered: u64,
     attempt: &mut u32,
     retry_base: Duration,
     retries: Option<&etl_core::metrics::Counter>,
-) -> Result<(), SourceError> {
+) -> Result<(), SplitFailure> {
     if classify(e) != ErrorClass::Retryable {
-        return Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "lane {lane}: reading \"{}\" failed at byte {delivered}: {e}",
-                entry.key
-            ),
+        let reason = format!(
+            "split {split}: reading \"{}\" failed at byte {delivered}: {e}",
+            entry.key
+        );
+        return Err(if crate::error::is_pipeline_fatal(e) {
+            SplitFailure::Fatal(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason,
+            })
+        } else {
+            SplitFailure::Poison(crate::error::poison_kind(e), reason)
         });
     }
     *attempt += 1;
@@ -646,20 +558,20 @@ async fn retry_or_fail(
         c.increment(1);
     }
     if *attempt >= MAX_ATTEMPTS {
-        return Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "lane {lane}: reading \"{}\" still failing at byte {delivered} after \
-                 {MAX_ATTEMPTS} attempts: {e}",
+        return Err(SplitFailure::Poison(
+            PoisonKind::RetriesExhausted,
+            format!(
+                "split {split}: reading \"{}\" still failing at byte {delivered} after \
+             {MAX_ATTEMPTS} attempts: {e}",
                 entry.key
             ),
-        });
+        ));
     }
     let backoff = retry_base
         .saturating_mul(1 << (*attempt - 1).min(16))
         .min(BACKOFF_CAP);
     tracing::warn!(
-        lane,
+        split = %split,
         key = %entry.key,
         attempt = *attempt,
         delivered,
@@ -687,92 +599,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn round_robin_assignment_is_deterministic() {
-        let entries: Vec<ObjectEntry> = (0..7).map(|i| entry(&format!("k{i}"), 1, None)).collect();
-        let slices = assign_lanes(entries, 3).unwrap();
-        let keys: Vec<Vec<&str>> = slices
-            .iter()
-            .map(|s| s.iter().map(|e| e.key.as_str()).collect())
-            .collect();
-        assert_eq!(keys[0], ["k0", "k3", "k6"]);
-        assert_eq!(keys[1], ["k1", "k4"]);
-        assert_eq!(keys[2], ["k2", "k5"]);
-    }
-
-    #[test]
-    fn resume_validation_catches_each_drift_kind() {
-        let slice = vec![
-            entry("a", 1, Some("e-a")),
-            entry("b", 1, Some("e-b")),
-            entry("c", 1, Some("e-c")),
-        ];
-        let state = |ordinal: u32, key: &str, etag: &str, hash_keys: &[&str]| LaneState {
-            watermark: 0,
-            ordinal,
-            key: key.into(),
-            etag: Some(etag.into()),
-            keys_hash: hash_keys.iter().fold(0, |h, k| chain_hash(h, k)),
-        };
-        let manifest_with = |st: LaneState| {
-            let mut m = Manifest::new(
-                1,
-                crate::store::SourceIdentity {
-                    url: "s3://b/p/".into(),
-                    compression: crate::config::Compression::Auto,
-                },
-            );
-            m.lane_states.insert(0, st);
-            m
-        };
-
-        // Healthy resume.
-        let ok = manifest_with(state(1, "b", "e-b", &["a", "b"]));
-        validate_resume(std::slice::from_ref(&slice), &ok).unwrap();
-
-        // Ordinal beyond the listing.
-        let short = manifest_with(state(9, "z", "e", &["a"]));
-        let err = validate_resume(std::slice::from_ref(&slice), &short).unwrap_err();
-        assert!(err.to_string().contains("removed"), "{err}");
-
-        // Key mismatch at the ordinal.
-        let moved = manifest_with(state(1, "was-here", "e-b", &["a", "was-here"]));
-        let err = validate_resume(std::slice::from_ref(&slice), &moved).unwrap_err();
-        assert!(err.to_string().contains("added or removed"), "{err}");
-
-        // Compensating drift below the ordinal: key at ordinal matches,
-        // prefix hash does not.
-        let swapped = manifest_with(state(1, "b", "e-b", &["other", "b"]));
-        let err = validate_resume(std::slice::from_ref(&slice), &swapped).unwrap_err();
-        assert!(err.to_string().contains("rolling hash"), "{err}");
-
-        // Same key overwritten (etag change).
-        let rewritten = manifest_with(state(1, "b", "old-etag", &["a", "b"]));
-        let err = validate_resume(std::slice::from_ref(&slice), &rewritten).unwrap_err();
-        assert!(err.to_string().contains("overwritten"), "{err}");
-
-        // Committed with an ETag, but the fresh listing reports none for the
-        // key: the object can no longer be verified on resume, so refuse.
-        let listing_lost_etag = vec![entry("a", 1, None), entry("b", 1, None)];
-        let committed_with_etag = manifest_with(state(1, "b", "e-b", &["a", "b"]));
-        let err = validate_resume(&[listing_lost_etag], &committed_with_etag).unwrap_err();
-        assert!(err.to_string().contains("reports none"), "{err}");
-
-        // Mid-object watermark with no committed ETag: the replayed
-        // discard cannot be verified, so the resume must refuse rather
-        // than risk silently skipping records.
-        let mut unpinned = state(1, "b", "unused", &["a", "b"]);
-        unpinned.etag = None;
-        unpinned.watermark = Position {
-            ordinal: 1,
-            record: 3,
-        }
-        .encode()
-        .unwrap();
-        let err = validate_resume(&[slice], &manifest_with(unpinned)).unwrap_err();
-        assert!(err.to_string().contains("no ETag"), "{err}");
-    }
-
     // ---------------------------------------------------- fetcher tests --
 
     /// The shape of a `GetOptions::range`, recorded so tests can assert which
@@ -796,16 +622,22 @@ mod tests {
 
     /// Wraps a store, failing the first `fail_gets` `get_opts` calls with a
     /// retryable error, and cutting the first `cut_streams` result streams
-    /// after `cut_after` bytes with a retryable error. Records every requested
-    /// range in `ranges` for read-path assertions.
+    /// after `cut_after` bytes (with a retryable error, or `PermissionDenied`
+    /// when `cut_fatal` is set). Records every requested range in `ranges`
+    /// for read-path assertions.
     #[derive(Debug)]
     struct FlakyStore {
         inner: InMemory,
         fail_gets: AtomicU32,
         cut_streams: AtomicU32,
         cut_after: usize,
+        cut_fatal: bool,
         gets: AtomicU32,
         ranges: std::sync::Mutex<Vec<RangeKind>>,
+        /// Payload streams drained to completion (a cut or abandoned body
+        /// never counts) — the observable that separates "window fully
+        /// buffered before hand-off" from "connection held open".
+        bodies_drained: Arc<AtomicU32>,
     }
 
     impl FlakyStore {
@@ -815,8 +647,43 @@ mod tests {
                 fail_gets: AtomicU32::new(0),
                 cut_streams: AtomicU32::new(0),
                 cut_after: 0,
+                cut_fatal: false,
                 gets: AtomicU32::new(0),
                 ranges: std::sync::Mutex::new(Vec::new()),
+                bodies_drained: Arc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn bodies_drained(&self) -> u32 {
+            self.bodies_drained.load(Ordering::Relaxed)
+        }
+
+        /// Chain an end-of-stream marker onto the payload: it fires only
+        /// when the body is polled all the way to its natural end.
+        fn track_drain(&self, result: GetResult) -> GetResult {
+            let GetResult {
+                payload,
+                meta,
+                range,
+                attributes,
+                extensions,
+            } = result;
+            let stream = match payload {
+                GetResultPayload::Stream(s) => s,
+                #[allow(unreachable_patterns)]
+                _ => unreachable!("InMemory yields streams"),
+            };
+            let drained = Arc::clone(&self.bodies_drained);
+            let marker = futures_util::stream::poll_fn(move |_| {
+                drained.fetch_add(1, Ordering::Relaxed);
+                std::task::Poll::Ready(None::<object_store::Result<Bytes>>)
+            });
+            GetResult {
+                payload: GetResultPayload::Stream(Box::pin(stream.chain(marker))),
+                meta,
+                range,
+                attributes,
+                extensions,
             }
         }
 
@@ -828,6 +695,17 @@ mod tests {
             object_store::Error::Generic {
                 store: "flaky",
                 source: what.to_owned().into(),
+            }
+        }
+
+        fn cut_error(fatal: bool) -> object_store::Error {
+            if fatal {
+                object_store::Error::PermissionDenied {
+                    path: "k".into(),
+                    source: "injected permission loss".into(),
+                }
+            } else {
+                Self::generic("injected stream cut")
             }
         }
     }
@@ -878,6 +756,7 @@ mod tests {
                 .is_ok()
             {
                 let cut_after = self.cut_after;
+                let cut_fatal = self.cut_fatal;
                 let GetResult {
                     payload,
                     meta,
@@ -895,13 +774,13 @@ mod tests {
                     let out: Vec<object_store::Result<Bytes>> = match item {
                         Ok(bytes) => {
                             if sent >= cut_after {
-                                vec![Err(Self::generic("injected stream cut"))]
+                                vec![Err(Self::cut_error(cut_fatal))]
                             } else {
                                 let take = bytes.len().min(cut_after - sent);
                                 sent += take;
                                 let mut out = vec![Ok(bytes.slice(0..take))];
                                 if sent >= cut_after {
-                                    out.push(Err(Self::generic("injected stream cut")));
+                                    out.push(Err(Self::cut_error(cut_fatal)));
                                 }
                                 out
                             }
@@ -918,7 +797,7 @@ mod tests {
                     extensions,
                 });
             }
-            Ok(result)
+            Ok(self.track_drain(result))
         }
 
         fn delete_stream(
@@ -978,7 +857,7 @@ mod tests {
     ) -> Vec<ChunkMsg> {
         let (tx, mut rx) = mpsc::channel(64);
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store,
             slice: Arc::new(slice),
             start_ordinal,
@@ -1078,14 +957,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_object_fails_the_lane_fatally() {
+    async fn missing_object_poisons_the_split() {
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"x")]).await);
-        // A slice naming a key that does not exist (drifted listing); an ETag
-        // from the stale listing routes it through the ranged read path.
+        // A slice naming a key that does not exist (deleted after planning);
+        // an ETag from the stale listing routes it through the ranged path.
         let slice = vec![entry("p/ghost", 1, Some("\"e\""))];
         let (tx, mut rx) = mpsc::channel(8);
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store,
             slice: Arc::new(slice),
             start_ordinal: 0,
@@ -1098,24 +977,28 @@ mod tests {
             retries: None,
         };
         tokio::spawn(run_fetcher(params));
-        let mut saw_failure = false;
+        let mut saw_poison = false;
         while let Some(m) = rx.recv().await {
-            if let ChunkMsg::LaneFailed(SourceError::Client { class, reason }) = m {
-                assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                saw_failure = true;
+            if let ChunkMsg::LaneFailed(failure) = m {
+                let SplitFailure::Poison(kind, reason) = failure else {
+                    panic!("a missing object is split poison, not pipeline-fatal: {failure}");
+                };
+                assert_eq!(kind, PoisonKind::NotFound);
+                assert!(reason.contains("p/ghost"), "{reason}");
+                saw_poison = true;
             }
         }
-        assert!(saw_failure);
+        assert!(saw_poison);
     }
 
     #[tokio::test]
-    async fn stale_etag_pin_fails_the_lane_fatally() {
+    async fn stale_etag_pin_poisons_the_split() {
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"new content")]).await);
         let mut slice = listed(&store).await;
         slice[0].etag = Some("\"stale\"".into());
         let (tx, mut rx) = mpsc::channel(8);
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store,
             slice: Arc::new(slice),
             start_ordinal: 0,
@@ -1128,14 +1011,17 @@ mod tests {
             retries: None,
         };
         tokio::spawn(run_fetcher(params));
-        let mut saw_failure = false;
+        let mut saw_poison = false;
         while let Some(m) = rx.recv().await {
-            if let ChunkMsg::LaneFailed(e) = m {
-                assert!(e.to_string().contains("Fatal"), "{e}");
-                saw_failure = true;
+            if let ChunkMsg::LaneFailed(failure) = m {
+                assert!(
+                    matches!(failure, SplitFailure::Poison(PoisonKind::EtagDrift, _)),
+                    "an overwrite under the pin is split poison: {failure}"
+                );
+                saw_poison = true;
             }
         }
-        assert!(saw_failure, "a failed precondition must fail the lane");
+        assert!(saw_poison, "a failed precondition must poison the split");
     }
 
     #[tokio::test]
@@ -1145,7 +1031,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1); // tiny: sends interleave with pauses
         let pause = Arc::new(AtomicBool::new(true));
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store,
             slice: Arc::new(slice),
             start_ordinal: 0,
@@ -1181,7 +1067,7 @@ mod tests {
         let slice = listed(&store).await;
         let (tx, rx) = mpsc::channel(1);
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store,
             slice: Arc::new(slice),
             start_ordinal: 0,
@@ -1243,7 +1129,7 @@ mod tests {
         let slice = listed(&store).await;
         let (tx, _rx) = mpsc::channel(1); // ObjectStart fills the one slot; never drained
         let params = FetcherParams {
-            lane: 0,
+            split: SplitId::new("s3-test").unwrap(),
             store: Arc::clone(&store),
             slice: Arc::new(slice),
             start_ordinal: 0,
@@ -1260,10 +1146,65 @@ mod tests {
         assert_eq!(
             flaky.recorded_ranges(),
             vec![RangeKind::Bounded(0, 8)],
-            "one window fetched: the first is fully read, the second is not \
-             started while the hand-off is blocked"
+            "one window fetched: the second is not started while the \
+             hand-off is blocked"
+        );
+        // Issuance alone can't distinguish "window fully buffered before
+        // the hand-off" from "body held open while blocked on the send":
+        // the drain marker fires only when the payload stream is read to
+        // its natural end, so a regression to lazy streaming (connection
+        // pinned during backpressure) fails here.
+        assert_eq!(
+            flaky.bodies_drained(),
+            1,
+            "the first window's body must be fully drained (connection \
+             released) before the fetcher blocks on the hand-off"
         );
         task.abort();
+    }
+
+    /// Run a fetcher over one no-ETag object whose stream is cut after
+    /// `cut_after` bytes, returning the terminal `LaneFailed` failure.
+    async fn no_etag_mid_stream_failure(cut_fatal: bool) -> SplitFailure {
+        let flaky = FlakyStore {
+            cut_after: 4,
+            cut_fatal,
+            ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+        };
+        flaky.cut_streams.store(1, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let mut slice = listed(&store).await;
+        slice[0].etag = None; // no pin → streaming fallback, no mid-object resume
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        match msgs.into_iter().last() {
+            Some(ChunkMsg::LaneFailed(failure)) => failure,
+            other => panic!("a mid-stream break without an ETag must fail the lane: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_stream_permission_loss_without_etag_is_pipeline_fatal() {
+        // Credentials/permission failures hold for every object on every
+        // instance: no peer fares better, so poisoning (hand-back + retry
+        // elsewhere) would serialize the same failure across the fleet.
+        let failure = no_etag_mid_stream_failure(true).await;
+        let SplitFailure::Fatal(e) = failure else {
+            panic!("PermissionDenied mid-stream must be pipeline-fatal, got: {failure}");
+        };
+        assert!(e.to_string().contains("p/a"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn mid_stream_generic_failure_without_etag_poisons_the_split() {
+        // A transport break after bytes were delivered cannot be resumed
+        // without an ETag pin (a re-read could splice two versions):
+        // object-level poison, never pipeline-fatal.
+        let failure = no_etag_mid_stream_failure(false).await;
+        let SplitFailure::Poison(kind, reason) = failure else {
+            panic!("a generic mid-stream break is split poison, got: {failure}");
+        };
+        assert_eq!(kind, PoisonKind::Undecodable);
+        assert!(reason.contains("no ETag"), "{reason}");
     }
 
     #[tokio::test]

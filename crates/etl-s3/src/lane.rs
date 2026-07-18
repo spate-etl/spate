@@ -5,28 +5,34 @@
 //! assigns each record its composite offset, and hands out borrowed
 //! payload batches with one [`AckRef`] each.
 //!
-//! Two rules here are load-bearing for correctness:
+//! Three rules here are load-bearing for correctness:
 //!
-//! - **EOF is only decided by a `poll` that returns `Ok(None)`** after
-//!   observing the channel closed with nothing buffered. The driver's
-//!   poll→push→poll sequencing on one thread then guarantees the lane's
-//!   final batch was fully pushed downstream before the source can report
-//!   [`SourceEvent::Drained`](etl_core::source::SourceEvent).
+//! - **End-of-input is only decided by a `poll` that returns `Ok(None)`**
+//!   after observing the channel closed with nothing buffered. The
+//!   driver's poll→push→poll sequencing on one thread then guarantees the
+//!   lane's final batch was fully pushed downstream before that decision
+//!   records the terminal watermark.
 //! - **Blocking is bounded.** When idle the lane waits on the channel via
 //!   the I/O runtime with the poll timeout applied — it never busy-spins
 //!   and never parks longer than the driver allows.
+//! - **Poison never surfaces as a poll error.** A lane `poll` error is
+//!   terminal for the whole pipeline, so object-level failures (deleted,
+//!   overwritten, corrupt, or unreadable objects) are reported through the
+//!   [`PoisonReport`] side channel instead and the lane goes quiescent;
+//!   only instance-level failures (credentials, wiring) return `Err`.
 
 use crate::config::Compression;
-use crate::fetch::ChunkMsg;
+use crate::fetch::{ChunkMsg, SplitFailure};
 use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
+use crate::split_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use etl_core::checkpoint::{AckIssuer, AckRef};
+use etl_core::coordination::{ControlWaker, SplitId};
 use etl_core::error::{ErrorClass, SourceError};
 use etl_core::record::{PartitionId, RawPayload};
 use etl_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -68,14 +74,30 @@ pub struct S3Lane {
     /// once the queue drains.
     pending_end: bool,
     held: Vec<HeldRecord>,
-    eof: Arc<AtomicBool>,
+    /// The split this lane reads; names the work in poison reports.
+    split: SplitId,
+    /// Carries the terminal watermark to the control plane at the
+    /// end-of-input decision.
+    tracker: Arc<SplitTracker>,
+    /// Side channel for object-level failures (see the module docs).
+    poison_tx: std::sync::mpsc::Sender<PoisonReport>,
+    /// Wakes the control plane. Signalled on the two edges the driver
+    /// would otherwise only notice between waits: end-of-input, and
+    /// poison. Never on the per-record path.
+    waker: ControlWaker,
+    /// The split hit poison: everything undelivered was discarded and
+    /// every later poll idles with `Ok(None)` until the lane is retired.
+    poisoned: bool,
+    /// One past the last emitted record's offset — the terminal watermark
+    /// `T` once end-of-input is observed. Starts at the resume watermark
+    /// (0 fresh), so a tenancy that emits nothing terminates exactly where
+    /// it began.
+    watermark_candidate: i64,
     /// Sticky terminal failure: every later poll re-reports it.
     failed: Option<(ErrorClass, String)>,
     metrics: Option<S3Metrics>,
     /// Decoded bytes already counted into the metrics.
     decoded_reported: u64,
-    #[cfg(debug_assertions)]
-    last_emitted: i64,
 }
 
 impl std::fmt::Debug for S3Lane {
@@ -101,9 +123,16 @@ impl S3Lane {
         compression: Compression,
         make_framer: FramerFactory,
         resume: Option<Position>,
-        eof: Arc<AtomicBool>,
+        split: SplitId,
+        tracker: Arc<SplitTracker>,
+        poison_tx: std::sync::mpsc::Sender<PoisonReport>,
+        waker: ControlWaker,
         metrics: Option<S3Metrics>,
     ) -> S3Lane {
+        let watermark_candidate = resume.map_or(0, |p| {
+            p.encode()
+                .expect("a decoded resume position always re-encodes")
+        });
         S3Lane {
             id,
             partition,
@@ -117,12 +146,15 @@ impl S3Lane {
             current: None,
             pending_end: false,
             held: Vec::new(),
-            eof,
+            split,
+            tracker,
+            poison_tx,
+            waker,
+            poisoned: false,
+            watermark_candidate,
             failed: None,
             metrics,
             decoded_reported: 0,
-            #[cfg(debug_assertions)]
-            last_emitted: -1,
         }
     }
 
@@ -132,8 +164,31 @@ impl S3Lane {
         SourceError::Client { class, reason }
     }
 
+    /// Report object-level poison and go quiescent. Everything undelivered
+    /// is discarded — none of it was acked, so replay by the split's next
+    /// owner cannot lose data — and every later poll idles with
+    /// `Ok(None)` until the control plane retires the lane.
+    fn poison(&mut self, kind: PoisonKind, reason: String) {
+        self.held.clear();
+        self.current = None;
+        self.pending_end = false;
+        self.pending_discard = 0;
+        self.poisoned = true;
+        // The receiver disappearing (shutdown) makes the report moot.
+        let _ = self.poison_tx.send(PoisonReport {
+            split: self.split.clone(),
+            kind,
+            reason,
+        });
+        // The report is only read between control-plane waits; wake so the
+        // split is handed back now rather than an idle timeout from now.
+        self.waker.wake();
+    }
+
     /// Move framed records into `held`, assigning composite offsets, until
-    /// the framer queue is empty or the batch is full.
+    /// the framer queue is empty or the batch is full. May poison the
+    /// split (an object over the per-object record limit); the caller
+    /// checks `self.poisoned` after every call.
     fn drain_framer(&mut self, max_records: usize) -> Result<(), SourceError> {
         while self.held.len() < max_records {
             let Some(bytes) = self.framer.pop_record() else {
@@ -148,15 +203,18 @@ impl S3Lane {
                 .as_mut()
                 .expect("framed records only exist within an object");
             if cur.next_record > MAX_RECORD_INDEX {
+                // A property of the object's content: it will overflow on
+                // every owner, which is exactly what quarantine is for.
                 let key = cur.key.clone();
-                return Err(self.fail(
-                    ErrorClass::Fatal,
+                self.poison(
+                    PoisonKind::Undecodable,
                     format!(
                         "object \"{key}\" holds more than {} records, the composite-offset \
-                         limit per object",
+                     limit per object",
                         MAX_RECORD_INDEX + 1
                     ),
-                ));
+                );
+                return Ok(());
             }
             let pos = Position {
                 ordinal: cur.ordinal,
@@ -167,11 +225,11 @@ impl S3Lane {
                 Err(e) => return Err(self.fail(ErrorClass::Fatal, e.to_string())),
             };
             cur.next_record += 1;
-            #[cfg(debug_assertions)]
-            {
-                debug_assert!(offset > self.last_emitted, "offsets must be monotonic");
-                self.last_emitted = offset;
-            }
+            debug_assert!(
+                offset >= self.watermark_candidate,
+                "offsets must be monotonic"
+            );
+            self.watermark_candidate = offset + 1;
             self.held.push(HeldRecord {
                 offset,
                 event_time_ms: cur.event_time_ms,
@@ -181,27 +239,32 @@ impl S3Lane {
         Ok(())
     }
 
-    /// Complete a pending object end once its records have drained.
-    fn finalize_object(&mut self) -> Result<(), SourceError> {
+    /// Complete a pending object end once its records have drained. May
+    /// poison the split (content drift); the caller checks
+    /// `self.poisoned`.
+    fn finalize_object(&mut self) {
         debug_assert!(self.pending_end && self.framer.queued() == 0);
         let cur = self.current.take().expect("finalize without an object");
         self.pending_end = false;
         if self.pending_discard > 0 {
-            return Err(self.fail(
-                ErrorClass::Fatal,
+            // The object now frames fewer records than were committed
+            // against it — its content changed underneath the pin.
+            self.poison(
+                PoisonKind::EtagDrift,
                 format!(
                     "object \"{}\" ended {} records short of its committed position — \
-                     its content changed under the checkpoint (the key set and object \
-                     contents must stay frozen for the backfill's lifetime)",
+                 its content changed under the checkpoint (the key set and object \
+                 contents must stay frozen for the backfill's lifetime)",
                     cur.key, self.pending_discard
                 ),
-            ));
+            );
+            return;
         }
+        self.tracker.object_done();
         if let Some(m) = &self.metrics {
             m.objects_completed.increment(1);
             m.objects_remaining.decrement(1.0);
         }
-        Ok(())
     }
 
     /// Apply one fetcher message to the framing state.
@@ -218,10 +281,11 @@ impl S3Lane {
                 );
                 let codec = Codec::resolve(self.compression, &key);
                 if let Err(e) = self.framer.begin_object(codec) {
-                    return Err(self.fail(
-                        ErrorClass::Fatal,
+                    self.poison(
+                        PoisonKind::Undecodable,
                         format!("starting decode of \"{key}\": {e}"),
-                    ));
+                    );
+                    return Ok(());
                 }
                 // The committed watermark's record index is how many
                 // records of the resume object are already committed:
@@ -258,10 +322,10 @@ impl S3Lane {
                         .current
                         .as_ref()
                         .map_or_else(String::new, |c| c.key.clone());
-                    return Err(self.fail(
-                        ErrorClass::Fatal,
+                    self.poison(
+                        PoisonKind::Undecodable,
                         format!("decoding \"{key}\": {e} (corrupt or truncated object?)"),
-                    ));
+                    );
                 }
                 Ok(())
             }
@@ -271,15 +335,20 @@ impl S3Lane {
                         .current
                         .as_ref()
                         .map_or_else(String::new, |c| c.key.clone());
-                    return Err(self.fail(
-                        ErrorClass::Fatal,
+                    self.poison(
+                        PoisonKind::Undecodable,
                         format!("finishing decode of \"{key}\": {e} (truncated object?)"),
-                    ));
+                    );
+                    return Ok(());
                 }
                 self.pending_end = true;
                 Ok(())
             }
-            ChunkMsg::LaneFailed(e) => {
+            ChunkMsg::LaneFailed(SplitFailure::Poison(kind, reason)) => {
+                self.poison(kind, reason);
+                Ok(())
+            }
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(e)) => {
                 let (class, reason) = match e {
                     SourceError::Client { class, reason } => (class, reason),
                     other => (ErrorClass::Fatal, other.to_string()),
@@ -322,13 +391,30 @@ impl SourceLane for S3Lane {
                 reason: reason.clone(),
             });
         }
+        if self.poisoned {
+            // Quiescent until the control plane retires the lane; bounded
+            // idle, never a busy-spin, never an error (a poll error would
+            // fail the pipeline — poison must not).
+            std::thread::sleep(timeout);
+            return Ok(None);
+        }
         self.held.clear();
         let deadline = Instant::now() + timeout;
+        // Whether this poll has already tried the channel. The deadline
+        // must not short-circuit the *first* receive: with `timeout` zero
+        // (the driver's head-of-line rotation) `now >= deadline` is true
+        // immediately, and bailing before `try_recv` would report the lane
+        // empty while a chunk sits ready in its channel — starving it for
+        // as long as a sibling lane keeps the rotation fed.
+        let mut recv_attempted = false;
 
         loop {
             self.drain_framer(max_records)?;
-            if self.pending_end && self.framer.queued() == 0 {
-                self.finalize_object()?;
+            if self.pending_end && !self.poisoned && self.framer.queued() == 0 {
+                self.finalize_object();
+            }
+            if self.poisoned {
+                return Ok(None);
             }
             if self.held.len() >= max_records {
                 break;
@@ -340,13 +426,18 @@ impl SourceLane for S3Lane {
             // The deadline caps the whole poll, not just the idle wait: a
             // stream of chunks that frames no records (one enormous line,
             // whitespace floods) must still return control to the driver —
-            // heartbeats and shutdown are processed between polls.
-            if Instant::now() >= deadline {
+            // heartbeats and shutdown are processed between polls. Checked
+            // only once a receive has been attempted, so a zero-timeout
+            // poll still consumes one ready chunk (and the framing pass at
+            // the top of the next iteration turns it into records) before
+            // this bails.
+            if recv_attempted && Instant::now() >= deadline {
                 if self.held.is_empty() {
                     return Ok(None);
                 }
                 break;
             }
+            recv_attempted = true;
             let msg = match self.rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(TryRecvError::Empty) => {
@@ -373,11 +464,16 @@ impl SourceLane for S3Lane {
                 Err(TryRecvError::Disconnected) => None,
             };
             match msg {
-                Some(m) => self.on_msg(m)?,
+                Some(m) => {
+                    self.on_msg(m)?;
+                    if self.poisoned {
+                        return Ok(None);
+                    }
+                }
                 None => {
                     // Channel closed. Mid-object it means the fetcher died
                     // without reporting (it always sends LaneFailed on
-                    // error), so only a clean end-of-slice may pass.
+                    // error), so only a clean end-of-input may pass.
                     if self.current.is_some() {
                         return Err(self.fail(
                             ErrorClass::Fatal,
@@ -390,12 +486,19 @@ impl SourceLane for S3Lane {
                         continue; // drain the tail first
                     }
                     if !self.held.is_empty() {
-                        break; // final batch now; EOF on the next poll
+                        break; // final batch now; the decision on the next poll
                     }
                     // Nothing buffered anywhere and no more input: this
-                    // poll's Ok(None) is the EOF decision (see module
-                    // docs).
-                    self.eof.store(true, Ordering::Release);
+                    // poll's Ok(None) is the end-of-input decision (see
+                    // module docs) — everything emitted was already handed
+                    // out, so `watermark_candidate` is the terminal
+                    // watermark.
+                    self.tracker.set_terminal(self.watermark_candidate);
+                    // Completion is decided here, on a pipeline thread; the
+                    // control plane reads it via `take_finishing` between
+                    // waits. Wake so the split completes and frees its
+                    // working-set slot in microseconds. Once per lane.
+                    self.waker.wake();
                     return Ok(None);
                 }
             }
@@ -469,7 +572,8 @@ mod tests {
     struct LaneRig {
         lane: S3Lane,
         tx: Option<mpsc::Sender<ChunkMsg>>,
-        eof: Arc<AtomicBool>,
+        tracker: Arc<SplitTracker>,
+        poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
         _rt: tokio::runtime::Runtime,
     }
 
@@ -477,7 +581,8 @@ mod tests {
         let rt = runtime();
         let (tx, rx) = mpsc::channel(64);
         let checkpointer = Checkpointer::new();
-        let eof = Arc::new(AtomicBool::new(false));
+        let tracker = Arc::new(SplitTracker::new());
+        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
         let lane = S3Lane::new(
             LaneId(0),
             PartitionId(0),
@@ -487,13 +592,17 @@ mod tests {
             Compression::Auto,
             Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             resume,
-            Arc::clone(&eof),
+            SplitId::new("s3-test").unwrap(),
+            Arc::clone(&tracker),
+            poison_tx,
+            ControlWaker::inert(),
             None,
         );
         LaneRig {
             lane,
             tx: Some(tx),
-            eof,
+            tracker,
+            poison_rx,
             _rt: rt,
         }
     }
@@ -557,23 +666,44 @@ mod tests {
     }
 
     #[test]
-    fn eof_is_reported_on_the_poll_after_the_final_batch() {
+    fn terminal_watermark_is_recorded_on_the_poll_after_the_final_batch() {
         let mut r = rig(None);
         start(&r, 0, "p/a.ndjson");
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"only\n")));
         send(&r, ChunkMsg::ObjectEnd);
-        r.tx.take(); // close the channel: slice exhausted
+        r.tx.take(); // close the channel: input exhausted
         let records = poll_batch(&mut r.lane, 512).unwrap();
         assert_eq!(records.len(), 1);
         assert!(
-            !r.eof.load(Ordering::Acquire),
-            "EOF must not show while the final batch is being handed out"
+            r.tracker.terminal().is_none(),
+            "no terminal while the final batch is being handed out"
         );
         assert!(poll_batch(&mut r.lane, 512).is_none());
-        assert!(
-            r.eof.load(Ordering::Acquire),
-            "EOF decided by the None poll"
+        let expected = Position {
+            ordinal: 0,
+            record: 1,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(
+            r.tracker.terminal(),
+            Some(expected),
+            "terminal = one past the last emitted record, decided by the None poll"
         );
+    }
+
+    #[test]
+    fn empty_input_terminates_at_the_resume_watermark() {
+        // A tenancy that emits nothing (resume exactly at end-of-input)
+        // must terminate exactly where it began.
+        let resume = Position {
+            ordinal: 2,
+            record: 3,
+        };
+        let mut r = rig(Some(resume));
+        r.tx.take(); // nothing to read
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert_eq!(r.tracker.terminal(), Some(resume.encode().unwrap()));
     }
 
     #[test]
@@ -634,8 +764,9 @@ mod tests {
     }
 
     #[test]
-    fn resume_object_shorter_than_committed_is_fatal_drift() {
-        // Watermark says 3 records are committed; the object now has 1.
+    fn resume_object_shorter_than_committed_poisons_the_split() {
+        // Watermark says 3 records are committed; the object now has 1 —
+        // content drift. Object-level, so it must not error the poll.
         let mut r = rig(Some(Position {
             ordinal: 0,
             record: 3,
@@ -643,24 +774,53 @@ mod tests {
         start(&r, 0, "p/a.ndjson");
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"only\n")));
         send(&r, ChunkMsg::ObjectEnd);
-        let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(err.to_string().contains("short"), "{err}");
-        let again = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(again.to_string().contains("short"), "failure is sticky");
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        let report = r.poison_rx.try_recv().expect("a poison report");
+        assert!(report.reason.contains("short"), "{}", report.reason);
+        assert_eq!(report.split.as_str(), "s3-test");
+        // Quiescent thereafter: no error, no duplicate report, no
+        // terminal watermark (the split did not finish).
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(r.poison_rx.try_recv().is_err(), "poison reports once");
+        assert!(r.tracker.terminal().is_none());
     }
 
     #[test]
-    fn lane_failure_message_is_terminal() {
+    fn fetcher_poison_goes_quiescent_and_discards_undelivered_records() {
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\n")));
+        send(
+            &r,
+            ChunkMsg::LaneFailed(SplitFailure::Poison(
+                PoisonKind::NotFound,
+                "object vanished".into(),
+            )),
+        );
+        // The framed-but-unacked record must not be delivered past the
+        // poison: replay by the next owner would then duplicate it
+        // harmlessly, but delivering it here while reporting failure
+        // would tangle the split's accounting.
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        let report = r.poison_rx.try_recv().expect("a poison report");
+        assert!(report.reason.contains("vanished"), "{}", report.reason);
+    }
+
+    #[test]
+    fn fetcher_fatal_failure_is_terminal() {
         let mut r = rig(None);
         send(
             &r,
-            ChunkMsg::LaneFailed(SourceError::Client {
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::Client {
                 class: ErrorClass::Fatal,
-                reason: "listing drifted".into(),
-            }),
+                reason: "access denied".into(),
+            })),
         );
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(err.to_string().contains("listing drifted"), "{err}");
+        assert!(err.to_string().contains("access denied"), "{err}");
+        let again = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
+        assert!(again.to_string().contains("access denied"), "sticky");
+        assert!(r.poison_rx.try_recv().is_err(), "fatal is not poison");
     }
 
     #[test]
@@ -673,7 +833,10 @@ mod tests {
         // newline and the object never ends, so nothing is emittable.
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
         assert!(err.to_string().contains("mid-object"), "{err}");
-        assert!(!r.eof.load(Ordering::Acquire), "a dead lane is not EOF");
+        assert!(
+            r.tracker.terminal().is_none(),
+            "a dead lane never terminates"
+        );
     }
 
     #[test]
@@ -704,6 +867,6 @@ mod tests {
             started.elapsed() >= Duration::from_millis(50),
             "idle poll must block up to the timeout, not busy-spin"
         );
-        assert!(!r.eof.load(Ordering::Acquire), "idle is not EOF");
+        assert!(r.tracker.terminal().is_none(), "idle is not end-of-input");
     }
 }

@@ -106,12 +106,13 @@ bounded backfill.
 
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|
-| `etl_s3_source_objects_listed_total` | counter | | Objects discovered by the startup listing (per run; a resume lists everything again). |
-| `etl_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline. |
-| `etl_s3_source_objects_remaining` | gauge | | Objects not yet completed. Reaches 0 as the backfill finishes; `0` together with a `Completed` exit is the done signal. |
+| `etl_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the instance that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
+| `etl_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this instance. |
+| `etl_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this instance's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `etl_coordination_*` split gauges, not from summing this. |
 | `etl_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
 | `etl_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
-| `etl_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; the attempt budget failing over surfaces as a pipeline failure. |
+| `etl_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
+| `etl_s3_source_objects_failed_total` | counter | `reason` | Objects that poisoned their split: `not_found` (deleted after planning), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `etl_coordination_splits_quarantined`. |
 
 ## Kafka sink (`etl_kafka_sink_*`)
 

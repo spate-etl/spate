@@ -52,8 +52,8 @@ impl RecordFramer for SemicolonSplitter {
     }
 }
 
-fn s3_section(url: &str, checkpoint: &str) -> ComponentConfig {
-    let yaml = format!("s3:\n  url: \"{url}\"\n  checkpoint:\n    url: \"{checkpoint}\"\n");
+fn s3_section(url: &str) -> ComponentConfig {
+    let yaml = format!("s3:\n  url: \"{url}\"\n");
     let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
     ComponentConfig::new("s3", value["s3"].clone())
 }
@@ -64,10 +64,7 @@ fn a_framed_source_reports_per_record() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let section = s3_section(
-        "file:///tmp/etl-s3-framing/data/",
-        "file:///tmp/etl-s3-framing/s.json",
-    );
+    let section = s3_section("file:///tmp/etl-s3-framing/data/");
 
     // The source is format-agnostic; the caller supplies the framer. A framed
     // source always emits one record per payload.
@@ -81,7 +78,6 @@ fn a_framed_source_reports_per_record() {
 fn a_source_without_a_framer_fails_to_start() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("data")).unwrap();
-    std::fs::create_dir_all(dir.path().join("state")).unwrap();
 
     let yaml = format!(
         r#"
@@ -91,18 +87,14 @@ metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
 source:
   s3:
     url: "file://{data}/"
-    lanes: 1
-    checkpoint:
-      url: "file://{state}/manifest.json"
 sink: {{ capture: {{}} }}
 "#,
         data = dir.path().join("data").display(),
-        state = dir.path().join("state").display(),
     );
 
     // No framer supplied (identity `make_source`): the source must refuse to
     // open rather than silently framing nothing.
-    let launched = launch_customized(&yaml, test_options(), |_| {}, |s| s);
+    let launched = launch_customized(&yaml, test_options(), |_| {}, |s, _io| s);
     let report = launched
         .run
         .wait_exit(Duration::from_secs(30))
@@ -122,7 +114,6 @@ sink: {{ capture: {{}} }}
 fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("data")).unwrap();
-    std::fs::create_dir_all(dir.path().join("state")).unwrap();
     // A single object with `;`-separated records — not newline-delimited.
     std::fs::write(dir.path().join("data/records.txt"), b"alpha;beta;gamma").unwrap();
 
@@ -134,20 +125,16 @@ metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
 source:
   s3:
     url: "file://{data}/"
-    lanes: 1
-    checkpoint:
-      url: "file://{state}/manifest.json"
 sink: {{ capture: {{}} }}
 "#,
         data = dir.path().join("data").display(),
-        state = dir.path().join("state").display(),
     );
 
     let launched = launch_customized(
         &yaml,
         test_options(),
         |_| {},
-        |source| source.with_framer(|| Box::new(SemicolonSplitter::default())),
+        |source, _io| source.with_framer(|| Box::new(SemicolonSplitter::default())),
     );
     let report = launched
         .run

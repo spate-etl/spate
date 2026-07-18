@@ -2,6 +2,11 @@
 // Each test binary compiles this module independently and uses a subset.
 #![allow(dead_code)]
 
+pub(crate) mod seaweed;
+pub(crate) mod spy;
+
+use etl_coordination::store::memory::MemoryStore;
+use etl_coordination::{CoordinationConfig, StoreCoordinator};
 use etl_core::config::PipelineConfig;
 use etl_core::framing::RecordFramer;
 use etl_core::ops::{ChunkConfig, chain_owned};
@@ -11,6 +16,7 @@ use etl_s3::S3Source;
 use etl_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
 use std::collections::VecDeque;
 use std::io;
+use std::time::Duration;
 
 /// A newline-delimited [`RecordFramer`] for the integration suites: `etl-s3`
 /// no longer ships a framer, so the tests supply one, mirroring `etl-json`'s
@@ -87,22 +93,78 @@ pub(crate) fn launch_scripted(
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    launch_customized(yaml, options, pre, line_framer)
+    launch_customized(yaml, options, pre, |source, _io| line_framer(source))
+}
+
+/// Coordination tuning every suite shares: floors-compliant and fast.
+/// The store a test builds (via [`shared_store`]) must use
+/// [`TEST_LEASE`] — the coordinator fails fast on a store/config lease
+/// divergence.
+pub(crate) const TEST_LEASE: Duration = Duration::from_secs(1);
+
+pub(crate) fn test_tuning() -> CoordinationConfig {
+    CoordinationConfig {
+        lease_duration: TEST_LEASE,
+        op_timeout: Duration::from_millis(200),
+        replan_interval: TEST_LEASE,
+        ..CoordinationConfig::default()
+    }
+}
+
+/// An in-process coordination store tests share across pipeline launches
+/// (the "durable" store of the infrastructure-free suites: it outlives a
+/// pipeline, not the process).
+pub(crate) fn shared_store() -> MemoryStore {
+    MemoryStore::new(TEST_LEASE)
+}
+
+/// Launch a pipeline whose source coordinates over `store` — the seam
+/// that lets several launches (sequential resumes or concurrent
+/// instances) share one job.
+pub(crate) fn launch_on_store(
+    yaml: &str,
+    options: RuntimeOptions,
+    store: &MemoryStore,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    launch_tuned(yaml, options, store, test_tuning(), pre)
+}
+
+/// [`launch_on_store`] with explicit coordinator tuning (instance ids,
+/// working-set bounds, attempt caps). `tuning.lease_duration` must stay
+/// [`TEST_LEASE`] to match the store.
+pub(crate) fn launch_tuned(
+    yaml: &str,
+    options: RuntimeOptions,
+    store: &MemoryStore,
+    tuning: CoordinationConfig,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    let store = store.clone();
+    launch_customized(yaml, options, pre, move |source, io| {
+        let coordinator =
+            StoreCoordinator::new(store, tuning, io, None).expect("coordinator builds");
+        line_framer(source).with_coordinator(Box::new(coordinator))
+    })
 }
 
 /// Like [`launch_scripted`], but `make_source` may customize the source
-/// (e.g. `.with_framer(...)`) before it is handed to the runtime.
+/// (e.g. `.with_framer(...)`, `.with_coordinator(...)`) before it is
+/// handed to the runtime; it receives the pipeline's I/O handle for
+/// coordinator construction.
 pub(crate) fn launch_customized(
     yaml: &str,
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
-    make_source: impl FnOnce(S3Source) -> S3Source,
+    make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml).expect("config parses"))
         .expect("pipeline builds");
+    let io = pipeline.io_handle();
     let source = make_source(
-        S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
+        S3Source::from_component_config(&pipeline.config().source, io.clone())
             .expect("source config"),
+        io,
     );
     let (sink, script) = capture_sink(1, 1);
     pre(&script);

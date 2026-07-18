@@ -8,11 +8,44 @@ depends on the source:
 | Source | Scale-out story |
 |---|---|
 | Kafka | Native: run N replicas in one consumer group; the broker assigns partitions. Nothing extra to deploy. |
-| S3 backfill | Planned — the coordinated wiring for `etl-s3` is tracked in [#39](https://github.com/marcuskainth/etl-rs/issues/39); today one instance owns a backfill. |
+| S3 backfill | Native via the coordination seam: the elected leader lists the prefix once and packs it into splits; replicas lease, steal, and take over splits with fenced per-split commits. Wire a coordinator into the source (below) and run N replicas. |
 | Custom broker-less sources | The [coordination seam](../02-concepts/07-source-coordination.mdx): a planner, the `CoordinationDriver`, and a coordinator backend. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
 
 The rest of this page covers deploying the coordination backend that
 broker-less sources share.
+
+## Wiring the S3 source
+
+The coordinator is assembly wiring — no `coordination:` YAML on the
+source ([why](../07-reference/configuration.mdx#code-level-knobs-not-yaml)).
+Every replica runs the same binary with the same source config (`url`,
+`compression`, `split_target_bytes`, and `refresh_listing` are part of
+the job fingerprint and must match byte-exactly), plus a coordinator over
+the shared store:
+
+```rust
+use etl::coordination::store::nats::{NatsConfig, NatsStore};
+use etl::coordination::{CoordinationConfig, StoreCoordinator};
+
+let pipeline = Pipeline::from_config(config)?;
+let tuning = CoordinationConfig {
+    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
+    ..CoordinationConfig::default()              // lease 30s, max_in_flight 8, …
+};
+let store = NatsStore::new(
+    NatsConfig::new(vec![std::env::var("NATS_URL")?], "exports-backfill"),
+    tuning.lease_duration, // one value drives store TTL and lease — must match
+)?;
+let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
+let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
+    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)))
+    .with_coordinator(Box::new(coordinator));
+```
+
+(The `etl` facade needs the `coordination-nats` feature for the NATS
+store; `coordination` alone gives the in-memory store and the seam.
+Runnable two-instance version:
+`crates/etl/examples/s3_coordinated_backfill.rs`.)
 
 ## NATS: the coordination store
 
@@ -91,10 +124,12 @@ released splits are claimed within milliseconds.
 | `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
 | `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
 
-Split sizing is the planner's job, not a config knob: aim for roughly
-uniform-cost splits in the tens-of-MB to ~128 MB range (or the row-count
-equivalent) — big enough that lease traffic is noise, small enough that
-takeovers and steals move useful quanta of work.
+Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
+~128 MB range (or the row-count equivalent) — big enough that lease
+traffic is noise, small enough that takeovers and steals move useful
+quanta of work. For most sources that is the planner's design, not a
+knob; the S3 source exposes it as `split_target_bytes` (default 64 MiB)
+because object sizes vary wildly between prefixes.
 
 ## Failure modes
 

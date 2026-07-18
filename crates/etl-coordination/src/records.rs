@@ -322,10 +322,16 @@ pub(crate) struct PlanRecord {
     pub(crate) generation: u64,
     /// Whether the enumeration is final.
     pub(crate) finality: PlanFinalityRepr,
-    /// Splits planned (progress records live in the store). Recounted
-    /// from an authoritative listing on every publish, so a leader crash
-    /// or failed publish between seeding and publishing self-heals on the
-    /// next run instead of desynchronizing terminal detection forever.
+    /// Splits planned (progress records live in the store), recounted from
+    /// an authoritative listing on every *successful* publish.
+    ///
+    /// Treat it as a **lower bound**, not a census: seeding happens before
+    /// the recount, and a publish that loses its CAS or errors leaves the
+    /// seeded records behind — a `Final` plan then never replans, so the
+    /// count stays short for the life of the job. Terminal detection
+    /// therefore uses it only to tell whether a worker has caught up, and
+    /// renders its verdict against a fresh listing (see
+    /// `Task::check_terminal`).
     pub(crate) planned: u64,
     /// Base64 of the planner's opaque cursor.
     pub(crate) planner_state: Option<String>,

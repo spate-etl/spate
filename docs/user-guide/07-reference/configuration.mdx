@@ -166,11 +166,27 @@ connector end-to-end.
 
 ## Code-level knobs (not YAML)
 
-Two knobs live in the assembly code rather than the file, because they are
-properties of the chain you write, not the deployment.
+These knobs live in the assembly code rather than the file, because they
+are properties of the program you write, not the deployment.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `SinkOptions::queue_capacity` | integer | `8` | Bounded chunk-queue depth between pipeline threads and each shard worker (`Pipeline::sink_with`). Must be non-zero. |
 | `ChunkConfig::target_bytes` | integer | `65536` (64 KiB) | Chunk seal size at the chain's terminal stage. Workers merge chunks into full batches, so this does not bound insert sizes. |
 | `ChunkConfig::encode_policy` | `Skip` \| `Fail` | `Skip` | Policy for record-level encoder failures ([Error handling](../02-concepts/04-error-handling.mdx)). |
+
+**Coordination is assembly wiring, not source YAML.** A coordinated
+source takes a fully built coordinator through its `with_coordinator`
+builder (e.g. `StoreCoordinator` over the NATS store, with a
+`CoordinationConfig` for `lease_duration`, `instance_id`,
+`max_in_flight`, …) — no connector grows per-backend config keys or
+compile-time features, and new store backends need no connector changes.
+The wiring recipe lives in
+[Coordination-aware sources](../06-extending/custom-source.mdx#coordination-aware-sources)
+and the deployment shape in [Scaling out](../05-deployment/scaling-out.mdx);
+what stays in the source YAML is the work and how this instance reads it.
+For S3 the two are worth telling apart: `url`, `compression`,
+`split_target_bytes` and `refresh_listing` shape the *work itself*, form
+the job fingerprint, and must be byte-equal across every instance, while
+`prefetch_bytes`, `chunk_bytes` and `store` are local read tuning and may
+differ per replica.

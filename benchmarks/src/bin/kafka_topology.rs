@@ -261,7 +261,7 @@ fn main() {
                 )
                 .metric(
                     "mb_per_s",
-                    Metric::maximize(records_per_s * cfg.payload as f64 / 1e6, "MB/s"),
+                    Metric::bytes_per_s(records_per_s * cfg.payload as f64),
                 )
                 .metric(
                     "p99_gap_us",

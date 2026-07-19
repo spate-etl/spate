@@ -109,9 +109,24 @@ pub struct KafkaSourceConfig {
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
     pub statistics_interval: Duration,
     /// Raw librdkafka properties, applied verbatim after validation.
-    /// Framework-owned properties (see crate docs) are rejected;
-    /// prefetch backstops (`queued.min.messages`,
-    /// `queued.max.messages.kbytes`) may be tuned here.
+    /// Framework-owned properties (see crate docs) are rejected.
+    ///
+    /// The framework sets no prefetch cap of its own, so
+    /// `queued.min.messages` (default 100000) and
+    /// `queued.max.messages.kbytes` (default 65536) sit at librdkafka's
+    /// defaults and bound memory *per assigned partition* — per-partition
+    /// because this source splits partition queues; on an unsplit consumer
+    /// the byte cap would apply once, to the whole client.
+    ///
+    /// librdkafka multiplies the kbytes figure by 1000, so the default is
+    /// 65.5 MB per partition and a 100-partition assignment can hold up to
+    /// ~6.6 GB of prefetched messages.
+    ///
+    /// Lowering them here caps that, at a throughput cost that is steep on a
+    /// backlogged consumer. Note also that librdkafka clamps `fetch.max.bytes`
+    /// to `queued.max.messages.kbytes * 1024` unless `fetch.max.bytes` is set
+    /// explicitly, so capping the queue silently shrinks the fetch size too.
+    /// See the Kafka source tuning guide.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
 }
@@ -170,10 +185,20 @@ impl KafkaSourceConfig {
         for (k, v) in &self.rdkafka {
             cc.set(k, v);
         }
-        // Prefetch memory backstop, overridable through the passthrough.
-        if !self.rdkafka.contains_key("queued.min.messages") {
-            cc.set("queued.min.messages", "1000");
-        }
+        // Prefetch depth is deliberately left at librdkafka's own defaults
+        // (`queued.min.messages` 100000, `queued.max.messages.kbytes` 65536)
+        // so behaviour is predictable and reasoning transfers from librdkafka's
+        // documentation like it does for every other Kafka client.
+        //
+        // This crate previously forced `queued.min.messages` to 1000 as a
+        // memory backstop. Measured cost of that backstop on a backlogged
+        // consumer: 11x end-to-end (193k -> 2.11M msg/s through the full
+        // pipeline) and 22-76x on the raw client path depending on message
+        // size, because the local fetch queue sits empty and every driver
+        // thread blocks on the broker. A memory cap that costs an order of
+        // magnitude of throughput is the wrong default; deployments that need
+        // the memory bounded set it through `rdkafka` below, where the trade
+        // is visible.
         cc.set("bootstrap.servers", &self.brokers);
         cc.set("group.id", &self.group_id);
         // The framework's commit mechanism: offsets are stored explicitly
@@ -289,12 +314,34 @@ mod tests {
         assert_eq!(
             cc.get("queued.min.messages"),
             Some("5000"),
-            "backstop is overridable"
+            "prefetch depth is tunable"
         );
         assert_eq!(cc.get("enable.auto.offset.store"), Some("false"));
         assert_eq!(cc.get("enable.auto.commit"), Some("true"));
         assert_eq!(cc.get("auto.commit.interval.ms"), Some("5000"));
         assert_eq!(cc.get("enable.partition.eof"), Some("false"));
+    }
+
+    /// The framework must not set a prefetch cap of its own. Forcing
+    /// `queued.min.messages` down to 1000 cost 11x end-to-end throughput on a
+    /// backlogged consumer, because the local fetch queue stays empty and the
+    /// driver threads block on the broker. Leaving the key unset means
+    /// librdkafka's documented default (100000) applies and users can reason
+    /// about it exactly as they would for any other Kafka client.
+    ///
+    /// Asserting `None` rather than a value is the point: a default that
+    /// merely equals librdkafka's would still be the framework's, and would
+    /// silently diverge the day librdkafka changed its own.
+    #[test]
+    fn prefetch_is_left_at_the_librdkafka_default() {
+        let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
+        let cc = cfg.client_config();
+        assert_eq!(
+            cc.get("queued.min.messages"),
+            None,
+            "the framework must not pin prefetch depth"
+        );
+        assert_eq!(cc.get("queued.max.messages.kbytes"), None);
     }
 
     /// A TLS/SASL passthrough is accepted only when the `tls` feature compiled

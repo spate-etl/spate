@@ -64,8 +64,11 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
   Guaranteed QoS and integer CPU requests; otherwise it just sets affinity
   inside the shared cpuset. Leave it `off` unless you run that setup.
 - Memory: the dominant knobs are `backpressure.max_inflight_bytes` (in
-  the framework) plus librdkafka's prefetch caps; size `resources.limits`
-  above their sum with headroom for batches held during retries.
+  the framework) plus librdkafka's prefetch, which is charged **per assigned
+  partition** and sits outside the in-flight budget — at the default
+  `queued.max.messages.kbytes` (65.5 MB) a 100-partition assignment can hold
+  ~6.6 GB. Size `resources.limits` above the sum with headroom for batches held
+  during retries, and cap prefetch explicitly if the assignment is wide.
 
 ## Backpressure and batch sizing
 

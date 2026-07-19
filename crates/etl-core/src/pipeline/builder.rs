@@ -875,6 +875,55 @@ mod tests {
         assert_eq!(threads, vec![0, 1], "one ChainCtx per pipeline thread");
     }
 
+    /// Regression: the runtime must hand the source the framework's
+    /// source-stage handles at `open`.
+    ///
+    /// `SourceMetrics::set_lag_max` has exactly one possible caller — the
+    /// source, because only the client can see the log end. Those handles
+    /// used to be reachable only through a connector-side builder that
+    /// nothing in the tree called, so `etl_source_lag_records` rendered a
+    /// permanent `0` on every Kafka pipeline: a maximally backlogged consumer
+    /// reported no lag, and any alert or autoscaler keyed on it read as
+    /// caught up. Nothing failed; the series was simply always zero. Assert
+    /// the seam is connected.
+    #[test]
+    fn source_open_receives_the_stage_metrics() {
+        let (source, shared, script) = FakeSource::new();
+        script
+            .lock()
+            .unwrap()
+            .push_back(Script::Assign(vec![LaneSpec {
+                id: LaneId(0),
+                partition: PartitionId(0),
+                batches: batches(&[0..2, 2..4]),
+            }]));
+        let chain_shared = Arc::new(ChainShared::default());
+        let cs = Arc::clone(&chain_shared);
+        let log = Arc::clone(&shared);
+        let runtime = Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .sink(null_sink(1))
+            .expect("sink")
+            .chains(move |_| fake_chain(&cs, &log))
+            .runtime_options(test_options())
+            .into_runtime(source)
+            .expect("into_runtime");
+
+        let shutdown = runtime.shutdown_handle();
+        let join = std::thread::spawn(move || runtime.run());
+        wait_for("source opened", Duration::from_secs(5), || {
+            shared.lock().unwrap().opened
+        });
+        shutdown.trigger();
+        join.join().unwrap().unwrap();
+
+        assert!(
+            shared.lock().unwrap().stage_metrics_attached,
+            "the runtime must share SourceMetrics with the source at open, \
+             or consumer lag can never be published"
+        );
+    }
+
     /// The whole-builder happy path through `run()` (not `into_runtime`),
     /// exercised over the real SinkPool: completes and commits.
     #[test]

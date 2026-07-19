@@ -48,9 +48,16 @@ Backpressure is resumable mid-batch: if `try_send` fails partway through a
 batch, the chain records the exact resume point — already-processed records
 are never re-run through the operators.
 
-Independently of all pipeline state, the Kafka source sets librdkafka's own
-prefetch caps (`queued.min.messages`, `queued.max.messages.kbytes`) as a
-hard memory backstop.
+Note that the in-flight budget does **not** bound librdkafka's prefetch. The
+Kafka source sets no prefetch cap of its own, so `queued.min.messages` and
+`queued.max.messages.kbytes` sit at librdkafka's defaults (100000 messages /
+65.5 MB, whichever binds first) and are charged **per assigned partition** —
+a 100-partition assignment can hold ~6.6 GB of prefetched messages outside
+the budget entirely. Cap it through the source's `rdkafka` map if that
+matters, and read
+[Kafka source performance tuning](../04-connectors/sources/kafka/performance-tuning.mdx#prefetch)
+first: prefetch depth is the single largest throughput term for a backlogged
+consumer — measured at 22–76x — and cutting it is expensive.
 
 ## Sizing the budget
 

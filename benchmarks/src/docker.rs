@@ -72,54 +72,176 @@ fn tcp_open(host: &str, port: u16) -> bool {
         })
 }
 
-/// Ensure a Kafka broker is reachable on `localhost:9092`, starting an
-/// `apache/kafka:4.1.0` container (`etl-bench-kafka`) if nothing answers.
-/// Returns the bootstrap string.
+/// Resolve the broker to use and a name for the `broker` variant key.
+///
+/// `BOOTSTRAP` points at an external broker, whose implementation the rig
+/// cannot detect — set `BROKER` alongside it to label the records, or they
+/// record `external`, which is at least honest about not knowing.
+#[must_use]
+pub fn resolve_broker() -> (String, String) {
+    match std::env::var("BOOTSTRAP") {
+        Ok(bootstrap) => (
+            bootstrap,
+            std::env::var("BROKER").unwrap_or_else(|_| "external".to_owned()),
+        ),
+        Err(_) => {
+            let (bootstrap, broker) = ensure_broker();
+            (bootstrap, broker.name().to_owned())
+        }
+    }
+}
+
+/// Whether a container of this name is currently running.
+fn container_running(name: &str) -> bool {
+    docker_try(&["inspect", "-f", "{{.State.Running}}", name]).is_ok_and(|s| s == "true")
+}
+
+/// The bench broker implementation, selected by `BROKER`.
+///
+/// Redpanda is the default because it is not a JVM process: a source-ceiling
+/// measurement is a broker-latency measurement, and a JVM broker injects
+/// stop-the-world GC pauses into exactly the quantity being measured. Apache
+/// Kafka remains available for cross-checking a result against the reference
+/// implementation.
+///
+/// The choice is identity-defining for any throughput number, so rigs record
+/// it as a variant key — a Redpanda figure and a Kafka figure must never
+/// aggregate into one median.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Broker {
+    /// `redpandadata/redpanda` — the default. No JVM, so no GC pause lands in
+    /// the middle of a fetch measurement.
+    Redpanda,
+    /// `apache/kafka` — the reference implementation, for cross-checking.
+    Kafka,
+}
+
+impl Broker {
+    /// The `broker` variant value recorded alongside every measurement.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Broker::Redpanda => "redpanda",
+            Broker::Kafka => "kafka",
+        }
+    }
+
+    fn container(self) -> &'static str {
+        match self {
+            Broker::Redpanda => "etl-bench-redpanda",
+            Broker::Kafka => "etl-bench-kafka",
+        }
+    }
+
+    fn image(self) -> &'static str {
+        match self {
+            Broker::Redpanda => "redpandadata/redpanda:v26.1.13",
+            Broker::Kafka => "apache/kafka:4.1.0",
+        }
+    }
+
+    fn from_env() -> Self {
+        match std::env::var("BROKER").as_deref().unwrap_or("redpanda") {
+            "redpanda" => Broker::Redpanda,
+            "kafka" => Broker::Kafka,
+            other => panic!("unknown BROKER {other} (redpanda|kafka)"),
+        }
+    }
+}
+
+/// Ensure the bench broker is reachable on `localhost:9092`, starting it if
+/// nothing answers. Returns the bootstrap string and which broker it is.
 ///
 /// When `KAFKA_CPUS` is set, a freshly started container is capped at that
 /// many cores (`--cpus=$KAFKA_CPUS`), mirroring [`ensure_clickhouse`]'s
 /// `CLICKHOUSE_CPUS` so a co-located client and broker share the host
 /// predictably (the `kafka_sink_saturation` broker-headroom budget). Unset
 /// leaves the broker uncapped — the pre-existing behaviour the consumer rigs
-/// rely on. Like the ClickHouse path, reuse keys only on the port, so a broker
-/// already RUNNING is reused as-is and `KAFKA_CPUS` is ignored for it; pass
-/// `FRESH=1` to force a remove+recreate at the new cap.
-pub fn ensure_kafka() -> String {
+/// rely on. A broker already RUNNING is reused as-is and `KAFKA_CPUS` is
+/// ignored for it; pass `FRESH=1` to force a remove+recreate at the new cap.
+///
+/// Unlike the ClickHouse path, reuse does **not** key on the port alone: it
+/// requires the *expected* container to be the one running. A Kafka container
+/// left over from an earlier run answers 9092 exactly as Redpanda does, and
+/// reusing it would record the run against a broker it never touched.
+pub fn ensure_broker() -> (String, Broker) {
     let bootstrap = "localhost:9092".to_owned();
+    let broker = Broker::from_env();
+    let running = container_running(broker.container());
     // FRESH=1 forces a cold container even when a broker already answers.
-    if !fresh_requested() && tcp_open("localhost", 9092) {
+    if !fresh_requested() && running && tcp_open("localhost", 9092) {
         if std::env::var("KAFKA_CPUS").is_ok() {
             eprintln!(
-                "reusing running etl-bench-kafka; KAFKA_CPUS is ignored for a \
-                 reused container (pass FRESH=1 to recreate at the new cap)"
+                "reusing running {}; KAFKA_CPUS is ignored for a reused \
+                 container (pass FRESH=1 to recreate at the new cap)",
+                broker.container()
             );
         }
-        return bootstrap;
+        return (bootstrap, broker);
     }
+    assert!(
+        running || !tcp_open("localhost", 9092),
+        "something already answers localhost:9092 but it is not {}. Stop it, or \
+         point the rig at it with BOOTSTRAP so the run is not recorded against \
+         a broker it never used.",
+        broker.container()
+    );
+    // Both names are cleared: switching BROKER between runs otherwise leaves
+    // the other implementation holding the port.
+    remove_container("etl-bench-redpanda");
     remove_container("etl-bench-kafka");
+
     let cpus = std::env::var("KAFKA_CPUS").ok();
     let cpus_arg = cpus.as_ref().map(|c| format!("--cpus={c}"));
     eprintln!(
-        "starting etl-bench-kafka (apache/kafka:4.1.0{}) ...",
+        "starting {} ({}{}) ...",
+        broker.container(),
+        broker.image(),
         cpus_arg
             .as_ref()
             .map(|a| format!(", {a}"))
             .unwrap_or_default()
     );
-    let mut args: Vec<&str> = vec!["run", "-d", "--name", "etl-bench-kafka", "-p", "9092:9092"];
+    let mut args: Vec<&str> = vec!["run", "-d", "--name", broker.container(), "-p", "9092:9092"];
     if let Some(arg) = &cpus_arg {
         args.push(arg);
     }
-    args.push("apache/kafka:4.1.0");
+    args.push(broker.image());
+    // Redpanda needs its listeners named explicitly, and `--overprovisioned`
+    // is load-bearing rather than cosmetic here: by default Redpanda busy-polls
+    // one core per shard, which on a co-located rig burns CPU the client under
+    // test needs and turns a consumer measurement into a scheduling contest.
+    let smp = std::env::var("REDPANDA_SMP").unwrap_or_else(|_| "8".to_owned());
+    let redpanda_args = [
+        "redpanda",
+        "start",
+        "--node-id",
+        "0",
+        "--check=false",
+        "--overprovisioned",
+        "--kafka-addr",
+        "PLAINTEXT://0.0.0.0:9092",
+        "--advertise-kafka-addr",
+        "PLAINTEXT://localhost:9092",
+        "--smp",
+        &smp,
+        "--memory",
+        "4G",
+        "--reserve-memory",
+        "0M",
+    ];
+    if broker == Broker::Redpanda {
+        args.extend_from_slice(&redpanda_args);
+    }
     docker(&args);
     let deadline = Instant::now() + Duration::from_secs(90);
     while !tcp_open("localhost", 9092) {
-        assert!(Instant::now() < deadline, "kafka did not become reachable");
+        assert!(Instant::now() < deadline, "broker did not become reachable");
         std::thread::sleep(Duration::from_millis(500));
     }
     // Port-open precedes broker readiness; give the listener a beat.
     std::thread::sleep(Duration::from_secs(2));
-    bootstrap
+    (bootstrap, broker)
 }
 
 /// Ensure a ClickHouse server on `localhost:18123` (HTTP), starting a

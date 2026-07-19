@@ -61,7 +61,10 @@ pub struct KafkaSource {
     config: KafkaSourceConfig,
     consumer: Option<Arc<BaseConsumer<SourceContext>>>,
     issuer: Option<AckIssuer>,
-    metrics: Option<SourceMetrics>,
+    /// The framework's source-stage handles, shared by the runtime at `open`.
+    /// Only consumer lag is published through them — the runtime records
+    /// everything else. `None` when the source is driven outside a pipeline.
+    metrics: Option<Arc<SourceMetrics>>,
     /// Connector-owned `etl_kafka_source_*` families, resolved from the
     /// runtime-minted Meter at `open`. `None` when the runtime provides no
     /// Meter (e.g. the source is driven outside a pipeline).
@@ -122,14 +125,6 @@ impl KafkaSource {
         Ok(Self::new(KafkaSourceConfig::from_component_config(
             section,
         )?))
-    }
-
-    /// Attach pre-registered source metrics (consumer lag, rebalances).
-    /// Optional; without it the source only logs.
-    #[must_use]
-    pub fn with_metrics(mut self, metrics: SourceMetrics) -> Self {
-        self.metrics = Some(metrics);
-        self
     }
 
     fn consumer(&self) -> Result<&Arc<BaseConsumer<SourceContext>>, SourceError> {
@@ -229,19 +224,29 @@ impl KafkaSource {
             return;
         };
         if let Some(metrics) = self.metrics.as_ref() {
-            let mut max_lag: u64 = 0;
+            // librdkafka reports `consumer_lag = -1` while the lag is unknown
+            // — before the first commit, and for any partition whose leader
+            // has not answered yet. Publishing the running max unconditionally
+            // would render `0` there, which is indistinguishable from "caught
+            // up": a maximally backlogged consumer would report no lag at all
+            // and every alert keyed on it would stay green. Hold the previous
+            // value instead, and only publish once some partition has a
+            // number. The per-partition series is gated the same way.
+            let mut max_lag: Option<u64> = None;
             if let Some(topic) = stats.topics.get(&self.config.topic) {
                 for (pid, p) in &topic.partitions {
                     if p.consumer_lag >= 0
                         && let Ok(part) = u32::try_from(*pid)
                     {
                         let lag = u64::try_from(p.consumer_lag).unwrap_or(0);
-                        max_lag = max_lag.max(lag);
+                        max_lag = Some(max_lag.unwrap_or(0).max(lag));
                         metrics.set_partition_lag(PartitionId(part), lag);
                     }
                 }
             }
-            metrics.set_lag_max(max_lag);
+            if let Some(max_lag) = max_lag {
+                metrics.set_lag_max(max_lag);
+            }
         }
         if let Some(stats_metrics) = self.stats_metrics.as_mut() {
             stats_metrics.update(&stats, &self.config.topic);
@@ -287,6 +292,7 @@ impl Source for KafkaSource {
         // them. `absolute()`-mapped counters are scoped to this consumer's
         // lifetime — sound because open() creates the consumer exactly once
         // (see the `metrics` module docs).
+        self.metrics = ctx.stage_metrics.clone();
         self.stats_metrics = if self.config.statistics_interval.is_zero() {
             None
         } else {

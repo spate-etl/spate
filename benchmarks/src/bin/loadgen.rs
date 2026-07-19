@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 pub const BENCH_SCHEMA: &str = r#"{"type":"record","name":"BenchEvent","fields":[{"name":"id","type":"long"},{"name":"body","type":"string"}]}"#;
 
 fn main() {
-    let bootstrap = std::env::var("BOOTSTRAP").unwrap_or_else(|_| docker::ensure_kafka());
+    let (bootstrap, _broker) = docker::resolve_broker();
     let topic = env_str("TOPIC", "bench-load");
     let partitions = env_u64("PARTITIONS", 4) as i32;
     let rate = env_u64("RATE", 0);

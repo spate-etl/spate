@@ -65,7 +65,9 @@ pub(crate) struct ControllerContext<S: Source> {
     /// running forever, committing nothing for that partition).
     pub stalled_fail_after: Duration,
     pub checkpoint_metrics: CheckpointMetrics,
-    pub source_metrics: SourceMetrics,
+    /// Shared with the source at `open` so it can publish consumer lag, which
+    /// only the client can measure. The controller records everything else.
+    pub source_metrics: Arc<SourceMetrics>,
     /// The source's custom-metrics scope (`etl_<component_type>_source_*`),
     /// handed to it at `open`. `None` unless the source declared a
     /// non-reserved `component_type`.
@@ -114,6 +116,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     if let Err(e) = source.open(
         SourceCtx::new(checkpointer.handle())
             .with_meter(source_meter)
+            .with_stage_metrics(Some(Arc::clone(&source_metrics)))
             .with_partition_detail(per_partition_detail),
     ) {
         state.failure = Some(FatalError {

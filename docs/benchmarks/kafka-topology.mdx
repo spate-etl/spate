@@ -19,6 +19,32 @@ consumer + `split_partition_queue` fanned across threads. Harness:
 Hand-recorded during the original spike — no machine-readable backing; the
 confirmation run below is the machine-backed follow-up.
 
+:::caution[The zero-work numbers below do not describe the shipped connector]
+Re-measured 2026-07 on a corrected harness. Two problems with the table:
+
+**It ran at a prefetch depth the framework did not use.** The v1 harness never
+set `queued.min.messages`, so it inherited librdkafka's default of 100000,
+while `etl-kafka` pinned 1000. That one difference is worth **22–76x** on a
+backlogged consumer, so the "~3.3–3.7M single-instance ceiling" was never a
+measurement of this connector — it was a measurement of librdkafka's defaults.
+The framework override has since been removed (the two now agree), and the
+throughput/memory trade is documented in
+[Kafka source performance tuning](../user-guide/04-connectors/sources/kafka/performance-tuning.mdx#prefetch).
+
+**The harness had an anti-scaling term of its own.** It incremented a
+process-wide atomic — a compare-exchange, a store and a fetch-add on one cache
+line — for every message on every thread, and re-read it in each loop
+condition. Thread-count arms were therefore measuring cache-line contention as
+much as Kafka.
+
+What survives re-measurement: the thread curve is genuinely negative for a
+single consumer instance (1 thread 5.15M → 8 threads 2.06M at prefetch 100000,
+64 B, on a harness with no shared state on the hot path), so "extra threads on
+one instance reduce throughput" stands, and with it the decision below. The
+10 µs/record confirmation run is unaffected — at that work level the arms are
+work-bound, far below any fetch ceiling.
+:::
+
 | Config | A: per-thread | B: split queues | B vs A |
 |---|---|---|---|
 | 16 partitions, 4 threads, no work | 7.74M rec/s | 2.90M rec/s | −62% |
@@ -75,3 +101,90 @@ same figure the confirmation reported before — a stable, real result at realis
 per-record work. (A contaminated earlier run under concurrent compile load showed
 −24% — single-instance fetch is more sensitive to CPU starvation; benchmark on a
 quiet machine.)
+
+## Source ceiling: what actually sets it (2026-07)
+
+The re-measurement that produced the caveat above. `kafka_source_ceiling`,
+`WORK_US=0` so nothing but the fetch path is measured, backlogged 16-partition
+topic on one local **Redpanda** broker, every arm interleaved with every other,
+medians over 3 reps.
+
+Redpanda rather than Apache Kafka because a source-ceiling number is a
+broker-latency number, and a JVM broker injects stop-the-world GC pauses into
+exactly the quantity being measured. The broker is recorded as a variant key,
+so these arms never aggregate with the Kafka-broker figures above.
+
+**Prefetch depth is the dominant term** — 22x at 64 B, 76x at 256 B between the
+shallowest and deepest arm. But the knee is not at a fixed message count *or* a
+fixed byte volume: 256 B saturates by `queued.min.messages` 10000 (≈2.5 MB per
+partition) while 64 B keeps climbing to 300000 (≈18 MB). Sizing by a fixed byte
+target would under-provision small messages by ~7x.
+
+<BenchBars
+  bench="kafka_source_ceiling"
+  metric="records_per_s"
+  category="queued_min_messages"
+  where={{ payload_bytes: 64, threads: 1 }}
+  emphasize="100000"
+  title="Prefetch depth, 64 B messages (1 thread)"
+  caption="librdkafka's default is 100000, emphasised. Still 14% short of the plateau at 300000; flat from there to 3000000, where the 65.5 MB byte cap binds."
+/>
+
+<BenchBars
+  bench="kafka_source_ceiling"
+  metric="records_per_s"
+  category="queued_min_messages"
+  where={{ payload_bytes: 256, threads: 1 }}
+  emphasize="100000"
+  title="Prefetch depth, 256 B messages (1 thread)"
+  caption="Saturated by 10000 — a tenth of the count the 64 B curve needs, but only a seventh of the bytes."
+/>
+
+**The ceiling is a message rate, not a byte rate.** Both sizes plateau around
+5–6M msg/s, which is 358 MB/s at 64 B and 1264 MB/s at 256 B. Per-message
+overhead runs out first, which is why smaller messages need deeper queues to
+keep the fetch loop busy.
+
+**Thread count does not help and consistently hurts.** Draining one client's
+partition queues from several threads contends inside librdkafka. The curve
+falls monotonically at both sizes.
+
+<BenchBars
+  bench="kafka_source_ceiling"
+  metric="records_per_s"
+  category="threads"
+  where={{ payload_bytes: 64, queued_min_messages: 100000 }}
+  emphasize="1"
+  title="Pipeline threads on one consumer instance (64 B, prefetch 100000)"
+  caption="One thread per instance is fastest; each additional thread draining the same client costs throughput."
+/>
+
+<BenchBars
+  bench="kafka_source_ceiling"
+  metric="records_per_s"
+  category="threads"
+  where={{ payload_bytes: 256, queued_min_messages: 100000 }}
+  emphasize="1"
+  title="Pipeline threads on one consumer instance (256 B, prefetch 100000)"
+  caption="Same shape at the larger message size — the decline is a property of the client, not of the payload."
+/>
+
+The same sweep through the **real framework path** — `KafkaSource` with acks and
+checkpointing, an `ENGINE=Null` sink so the source is the limiter, egress scaled
+with threads — is recorded as `e2e_kafka_source_bound`:
+
+<BenchBars
+  bench="e2e_kafka_source_bound"
+  metric="source_records_per_s"
+  category="queued_min_messages"
+  emphasize="0"
+  title="Prefetch depth through the full pipeline (8 threads)"
+  caption="0 means the property is left unset, i.e. the shipped default. 11x between the previously pinned 1000 and librdkafka's default."
+/>
+
+Note the e2e arms run at 8 threads, where the raw-client curve above shows a
+single instance is already past its best — so 2.11M msg/s is the *pipeline's*
+source throughput at that width, not the single-instance ceiling.
+
+Sizing guidance derived from this study lives in
+[Kafka source performance tuning](../user-guide/04-connectors/sources/kafka/performance-tuning.mdx).

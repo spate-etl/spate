@@ -1,0 +1,280 @@
+# Kafka source performance tuning
+
+This page is about making the Kafka source **faster**: which knobs move
+consumption throughput, in what order to reach for them, and how to tell when
+you have run out of vertical headroom and should scale out instead. It assumes
+you have already established that the source is the binding side — see
+[Where to start](../../../05-deployment/tuning.mdx#where-to-start).
+
+Numbers here come from the
+[Kafka source ceiling](../../../../benchmarks/kafka-topology.mdx) benchmark: a
+backlogged 16-partition topic on a single local Redpanda broker, every arm
+interleaved with every other, medians over three runs. Your optimum depends on
+message size, partition count, broker fan-out, and compression, so treat every
+value as a place to start measuring — the shape of each curve transfers, the
+absolute numbers do not.
+
+## The mental model
+
+Three facts from librdkafka determine almost everything on this page
+([FAQ](https://github.com/confluentinc/librdkafka/wiki/FAQ)):
+
+1. **One thread per broker, per client instance.** A client with connections to
+   three brokers has three fetch threads.
+2. **At most one outstanding Fetch request per broker connection.** All
+   partitions led by the same broker are multiplexed into that one request,
+   round-robin for fairness.
+3. **A partition is included in the next Fetch only while its local queue holds
+   less than `queued.min.messages` *and* less than
+   `queued.max.messages.kbytes`.**
+
+Together these say: consumption throughput is
+`(bytes per Fetch response) x (Fetch requests in flight) / round-trip time`.
+You raise it by making each fetch **bigger** (prefetch and fetch sizing) or by
+having **more of them in flight** (more brokers, then more instances). Adding
+pipeline threads raises neither.
+
+:::tip[The byte cap is per-partition here, by design]
+`queued.min.messages` is documented as "per topic+partition" on any consumer,
+so it is not what splitting changes. `queued.max.messages.kbytes` is:
+librdkafka applies it to the *single* consumer queue on a stock high-level
+consumer "regardless of the number of partitions", and **per partition** when
+separate partition queues are used
+([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)).
+This connector calls `split_partition_queue` per partition, so aggregate
+prefetch — and the memory arithmetic below — scales with your assignment
+rather than being divided by it.
+:::
+
+## Start here: raise prefetch until throughput stops improving {#prefetch}
+
+This is the highest-leverage knob by a wide margin. On a backlogged consumer
+the measured spread between a shallow queue and a deep one is **22x at 64 B
+messages and 76x at 256 B** — larger than every other knob on this page put
+together.
+
+The mechanism is fact 3 above. A partition is only included in the next Fetch
+while its local queue is under the threshold, so a shallow queue means the
+partition is frequently *excluded*, and the same throughput needs
+proportionally more round trips.
+
+**There is no single right number, and in particular there is no invariant
+byte target.** The
+[benchmark](../../../../benchmarks/kafka-topology.mdx#source-ceiling-what-actually-sets-it-2026-07)
+sweeps eight depths at 64 B and six at 256 B:
+
+- **256 B** is saturated by `queued.min.messages` **10000** — about 2.5 MB
+  buffered per partition.
+- **64 B** is still climbing at 100000 and only plateaus at **300000** — about
+  18 MB per partition, and **14% faster than the default**.
+
+So the byte volume at the knee differs by roughly 7x between the two sizes;
+sizing by a fixed byte target would under-provision small messages badly. The
+message count is not invariant either — it differs by 30x. Treat both as
+starting points and measure:
+
+1. Start at librdkafka's default (100000).
+2. Double it and re-measure. If throughput moves, double again.
+3. Stop when it stops moving, then check the memory arithmetic below.
+
+Small messages need the deepest queues, because the ceiling here is a
+**message-rate** ceiling rather than a byte-rate one: both sizes top out
+around 5–6M msg/s, which is 358 MB/s at 64 B but 1264 MB/s at 256 B. Per-message
+overhead is what runs out first, so the smaller your messages, the more of them
+you must buffer to keep the fetch loop busy.
+
+```yaml
+source:
+  kafka:
+    brokers: ${KAFKA_BROKERS}
+    topic: events
+    group_id: events-etl
+    rdkafka:
+      queued.min.messages: "300000"        # small messages: raise it
+      queued.max.messages.kbytes: "131072" # only needed if the byte cap binds
+```
+
+The framework sets neither property, so both sit at librdkafka's own defaults
+(100000 and 65536) and reasoning transfers directly from librdkafka's
+documentation.
+
+### The byte cap wins
+
+`queued.max.messages.kbytes` has higher priority than the message count —
+whichever binds first stops the fetch. librdkafka multiplies it by 1000, so
+the default of **65536** is **65.5 MB per partition**, and raising
+`queued.min.messages` past `65.5 MB / avg_message_bytes` does nothing until
+you raise the byte cap too. At 64 B that ceiling is about 1.02M messages,
+which is why the sweep is flat from 300000 to 3000000.
+
+That also makes it the cap that bounds memory, because it bounds bytes
+directly:
+
+```
+worst-case prefetch = partitions x min(queued.min.messages x avg_message_bytes,
+                                       queued.max.messages.kbytes x 1000)
+```
+
+At the defaults a 100-partition assignment can hold **up to ~6.6 GB**. This
+sits outside the [in-flight budget](../../../02-concepts/03-backpressure.mdx)
+entirely — the budget governs what the pipeline holds, not what the client
+prefetches — so if your pod has a memory limit, set
+`queued.max.messages.kbytes` explicitly.
+
+:::warning[Capping the queue also shrinks the fetch]
+Unless you set `fetch.max.bytes` yourself, librdkafka clamps it to
+`queued.max.messages.kbytes x 1024` at client construction
+([`rdkafka_conf.c`](https://github.com/confluentinc/librdkafka/blob/master/src/rdkafka_conf.c)).
+Setting `queued.max.messages.kbytes: "4096"` to bound memory therefore also
+drops `fetch.max.bytes` from 50 MB to 4 MiB — a second throughput cut you did
+not ask for. Set `fetch.max.bytes` explicitly whenever you lower the byte cap.
+:::
+
+### If you must cap prefetch, lower the refill backoff too
+
+When a partition's queue crosses a threshold, librdkafka stops fetching it and
+waits `fetch.queue.backoff.ms` (default **1000**) before reconsidering. With a
+shallow queue and a fast consumer, that backoff — not the queue size — becomes
+the limiter: the queue drains in milliseconds and then idles. If a memory limit
+forces you to cap prefetch, drop this to a few tens of milliseconds so the
+partition is re-offered promptly.
+
+### Diagnosing it
+
+The honest answer is that **no gauge tells you prefetch is mis-set — only a
+sweep does.** Raise `queued.min.messages`, re-measure, and see whether
+throughput moves. Two series are still worth reading, with their limits
+understood:
+
+`etl_kafka_source_fetch_queue_messages` is the local queue depth. A value at or
+near **zero** means the pipeline is draining the queue as fast as the broker
+refills it, i.e. the source is **broker-bound** rather than chain- or
+sink-bound. It does *not* separate "prefetch is too shallow" from "prefetch is
+fine and the broker is simply the limit": in our own benchmark it reads ~0 both
+at the shallow depth that runs 22x slow *and* at the depth we recommend. Use it
+to decide whether the bottleneck is upstream or downstream of the source, not
+to size the queue.
+
+`etl_source_lag_records` is the consumer lag, and a lag that is large and not
+shrinking is the signal that catching up matters at all — prefetch depth is
+only worth tuning when there is a backlog to prefetch.
+
+:::note[Prefetch only matters when there is a backlog]
+A consumer caught up with its producers is tail-following: nothing is buffered
+to prefetch, so the caps are inert. Prefetch depth matters when you are
+*catching up* — after a deployment, a rebalance, an outage, or a backfill —
+which is exactly when throughput matters.
+:::
+
+## Then: make each fetch carry more
+
+Once the queue thresholds are not the limiter, the per-request sizing is what
+caps how much a single round trip can return.
+
+| property | default | raise it when |
+|---|---|---|
+| `fetch.message.max.bytes` | 1 MB | messages or per-partition batches exceed ~1 MB, or you have few partitions and want bigger per-partition reads |
+| `fetch.max.bytes` | 50 MB | many partitions on one broker — this caps the *whole* response, so it is divided across them |
+| `fetch.min.bytes` | 1 | see below |
+| `fetch.wait.max.ms` | 500 | see below |
+
+Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
+`fetch.max.bytes`, but only while you leave it unset — pinning it is a
+documented way to break fetches after raising `fetch.max.bytes`
+([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)).
+
+:::warning[Property-name trap]
+librdkafka spells it **`fetch.wait.max.ms`**. Apache/Java spells it
+`fetch.max.wait.ms` — the words are transposed. The `rdkafka` map takes
+librdkafka names, and an unrecognised property is not silently ignored, so copy
+settings from librdkafka's documentation rather than from Java tuning guides.
+:::
+
+### `fetch.min.bytes` and `fetch.wait.max.ms` are not catch-up knobs
+
+The broker returns when either `fetch.min.bytes` has accumulated or
+`fetch.wait.max.ms` expires. Raising `fetch.min.bytes` (Confluent suggests
+~100000 for throughput-oriented consumers) trades latency for fewer, fuller
+requests and less broker CPU per byte.
+
+But on a **backlogged** consumer the data is already there, so `fetch.min.bytes`
+is satisfied instantly and neither knob binds. They are worth tuning for
+steady-state topics and for reducing broker request load — not for catch-up
+throughput.
+
+One interaction specific to at-least-once delivery: an outstanding Fetch blocks
+queued `OffsetCommit` requests on the same connection for up to
+`fetch.wait.max.ms`. Raising it slows commits, which lengthens the replay
+window after a crash.
+
+### Knobs that are already optimal here
+
+`check.crcs` defaults to **false** in librdkafka and this connector leaves it
+there. `enable.partition.eof` also defaults to false, and the connector pins it
+— it is on the framework-owned denylist, because EOF events would pollute the
+partition queues the pipeline polls, so you cannot change it either way.
+Advice to disable both for throughput is written for the Java client, where
+`check.crcs` defaults to true. There is nothing to win.
+
+## Threads: do not add them for the source
+
+Partitions map onto pipeline threads as lanes
+([Lanes](./README.mdx#lanes-partitions-on-pipeline-threads)), so raising
+`pipeline.threads` looks like it should speed up consumption. For a single
+consumer instance it does the opposite — draining one client's partition queues
+from several threads contends inside librdkafka, and the
+[measured curve](../../../../benchmarks/kafka-topology.mdx#source-ceiling-what-actually-sets-it-2026-07)
+falls monotonically from one thread to eight at both message sizes: 5.15M to
+2.06M msg/s at 64 B, 5.18M to 2.71M at 256 B.
+
+While prefetch is shallow, thread count barely moves at all: a starved source
+is waiting on the broker, not on CPU. That flatness is itself a useful
+diagnostic — **if adding threads changes nothing, you are fetch-bound, not
+CPU-bound.**
+
+Size `pipeline.threads` for what your **chain and sink** need — deserialization,
+transforms, and encoding are what genuinely parallelize.
+
+## When you have run out of vertical headroom
+
+In roughly this order:
+
+1. **More brokers.** In-flight fetches scale with the number of *leader* brokers
+   you consume from, because each broker connection carries one. This is the
+   only way to add fetch concurrency to a single consumer instance.
+2. **More partitions — but only if they spread across more brokers.** Extra
+   partitions on brokers you already consume from add queue depth, not fetch
+   concurrency, since they multiplex into the same request.
+3. **More replicas.** Each pod is an independent client with its own thread and
+   connection per broker, so this multiplies fetch concurrency. The ceiling is
+   one consuming member per partition — beyond that, members sit idle.
+
+:::caution[Scaling events are stop-the-world here]
+This connector uses eager assignment; cooperative-sticky is rejected at load
+time. Every replica added or removed triggers a full group rebalance during
+which no member consumes. Scaling out is not free, which is the practical
+argument for extracting vertical throughput first.
+:::
+
+### Compression
+
+Decompression happens on the **per-broker fetch thread** — the same thread doing
+that broker's network I/O — so it is parallelised per broker, not per partition.
+A broker leading many hot partitions decompresses all of them on one core.
+
+If you control the producers and consumption is decompression-bound, **lz4**
+decompresses fastest; zstd buys a better ratio at higher CPU cost, worth it when
+you are network- or storage-bound rather than CPU-bound. We have not measured
+the message rate at which decompression saturates a fetch thread, so treat this
+as directional.
+
+## Related
+
+- [Kafka source](./README.mdx) — configuration, the `rdkafka` passthrough and
+  its denylist, offsets, lanes, and backpressure.
+- [Where to start](../../../05-deployment/tuning.mdx#where-to-start) — the
+  find-the-bottleneck loop this page slots into.
+- [Kafka source ceiling benchmark](../../../../benchmarks/kafka-topology.mdx) —
+  the study these numbers come from.
+- [librdkafka CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)
+  — the authority for every property above.

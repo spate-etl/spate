@@ -353,9 +353,15 @@ evicted from the consumer group, and turns sink slowness into a rebalance
 storm. Acks are likewise never allowed to block: the ack path is
 unbounded/atomic by construction.
 
-librdkafka's own prefetch caps (`queued.min.messages`,
-`queued.max.messages.kbytes`) are set as a hard memory backstop independent
-of pipeline state.
+A connector's own client-side buffering is outside the in-flight budget and is
+left at the client library's defaults rather than pinned by the framework: the
+budget governs what the pipeline holds, not what a driver prefetches. The Kafka
+source therefore sets neither `queued.min.messages` nor
+`queued.max.messages.kbytes`, and a deployment that needs that memory bounded
+caps it through the source's `rdkafka` passthrough. (This crate previously
+forced `queued.min.messages` to 1000 as a memory backstop and measured 11x
+slower end-to-end on a backlogged consumer — 193k against 2.11M msg/s; sizing
+guidance now lives with the connector.)
 
 ## Sink
 

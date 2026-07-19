@@ -16,8 +16,9 @@ use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
 use crate::error::SourceError;
 use crate::framing::FramingContract;
-use crate::metrics::Meter;
+use crate::metrics::{Meter, SourceMetrics};
 use crate::record::{PartitionId, RawPayload};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Identifier of one source lane within an assignment (dense,
@@ -152,6 +153,18 @@ pub struct SourceCtx {
     /// silently, a malformed value is logged and also yields `None`. Resolve
     /// handles from it once here in `open`; never on the poll path.
     pub meter: Option<Meter>,
+    /// The framework's own source-stage handles (`etl_source_*`), shared with
+    /// the controller. A source that can observe its own consumer lag
+    /// publishes it here — [`SourceMetrics::set_lag_max`] and
+    /// [`SourceMetrics::set_partition_lag`] have no other caller, because the
+    /// framework cannot compute lag without the client's view of the log end.
+    /// `None` only when the source is driven outside a pipeline (tests, or a
+    /// direct `open` call), in which case lag simply goes unpublished.
+    ///
+    /// Everything else on these handles — records, bytes, poll duration,
+    /// rebalances, active lanes — is recorded by the runtime itself; a source
+    /// must not touch those.
+    pub stage_metrics: Option<Arc<SourceMetrics>>,
     /// Whether cardinality-sensitive per-partition series are enabled
     /// (`metrics.per_partition_detail`). Gates a connector's own per-partition
     /// families the same way it gates the framework's `etl_source_lag_records`
@@ -169,6 +182,7 @@ impl SourceCtx {
         SourceCtx {
             issuer,
             meter: None,
+            stage_metrics: None,
             per_partition_detail: false,
         }
     }
@@ -178,6 +192,15 @@ impl SourceCtx {
     #[must_use]
     pub fn with_meter(mut self, meter: Option<Meter>) -> Self {
         self.meter = meter;
+        self
+    }
+
+    /// Share the framework's source-stage handles so the source can publish
+    /// the one series only it can measure: consumer lag. Called by the
+    /// runtime with the same instance the controller records against.
+    #[must_use]
+    pub fn with_stage_metrics(mut self, metrics: Option<Arc<SourceMetrics>>) -> Self {
+        self.stage_metrics = metrics;
         self
     }
 

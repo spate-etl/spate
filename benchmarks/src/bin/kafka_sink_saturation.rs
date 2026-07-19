@@ -1,7 +1,8 @@
 //! Kafka producer-sink saturation: an in-process generator source (no source
 //! broker) driven through the real chain, sink pool, and runtime into the
-//! Kafka producer sink at full tilt, against a local `apache/kafka:4.1.0`
-//! broker. It answers three questions and controls for the one confounder the
+//! Kafka producer sink at full tilt, against a local broker (`BROKER`,
+//! default Redpanda — see `docker::ensure_broker`; recorded as a variant, so
+//! Redpanda and Apache Kafka figures never share a bar). It answers three questions and controls for the one confounder the
 //! ClickHouse saturation rig never had to:
 //!
 //! 1. **Client-path overhead** — `MODE=framework` (the full path: encode →
@@ -40,17 +41,19 @@
 //! INFLIGHT_PER_SHARD (2) BATCH_MAX_ROWS (500000) BATCH_MAX_MB (256)
 //! LINGER_MS (1000) QUEUE_CAP (64) QUEUE_BUFFERING_MAX_MESSAGES (100000)
 //! MAX_INFLIGHT_MB (derived) PAYLOAD (256) PARTITIONS (16)
-//! TOPIC (bench-kafka-sink) DURATION_S (15) WARMUP_S (5)
+//! TOPIC (bench-kafka-sink; the partition count is appended, so a PARTITIONS
+//! sweep gets one correctly shaped topic per arm) DURATION_S (15) WARMUP_S (5)
 //! STATISTICS_INTERVAL_MS (1000) CHECKPOINT_INTERVAL_MS (1000)
 //! MAX_PENDING_BATCHES (8192) RAW_SEND_THREADS (1) KAFKA_CPUS (recorded)
 //! RAW_BASELINE_RPS (optional; enables framework_over_raw) RESULTS (JSONL path)
 //! Env (sweep, parent only): SWEEP (env name) SWEEP_LIST (csv) REPS (3)
 //! BOOTSTRAP (external broker; skips docker) FRESH (recreate broker)
+//! BROKER (redpanda|kafka, default redpanda; recorded on every arm)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::SyntheticSource;
-use benchmarks::{docker, env_str, env_u64, prom};
+use benchmarks::{docker, ensure_topic_with, env_str, env_u64, prom};
 use etl_core::backpressure::InflightBudget;
 use etl_core::config::{ComponentConfig, PipelineConfig};
 use etl_core::deser::BytesPassthrough;
@@ -59,8 +62,7 @@ use etl_core::ops::{ChunkConfig, RunnableChain, chain_owned};
 use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 use etl_core::record::RecordMeta;
 use etl_core::sink::{ShardRouter, ShardWriter, SinkPool, shard_queues};
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-use rdkafka::client::{ClientContext, DefaultClientContext};
+use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::message::DeliveryResult;
 use rdkafka::producer::{BaseRecord, Producer, ProducerContext, ThreadedProducer};
@@ -107,6 +109,9 @@ struct Cfg {
     raw_send_threads: usize,
     kafka_cpus: Option<u64>,
     raw_baseline_rps: Option<f64>,
+    /// Which broker implementation served the run — identity-defining for
+    /// every throughput number here, so it rides in the variant map.
+    broker: String,
 }
 
 impl Cfg {
@@ -124,7 +129,16 @@ impl Cfg {
             queue_buffering: env_u64("QUEUE_BUFFERING_MAX_MESSAGES", 100_000),
             payload: env_u64("PAYLOAD", 256) as usize,
             partitions: env_u64("PARTITIONS", 16) as i32,
-            topic: env_str("TOPIC", "bench-kafka-sink"),
+            // The partition count is part of the name so that sweeping
+            // PARTITIONS gives each arm its own correctly shaped topic. A
+            // single pinned name cannot work: the first arm fixes the
+            // partition count, and every later arm either aborts on the
+            // mismatch check or silently measures the wrong shape.
+            topic: format!(
+                "{}-p{}",
+                env_str("TOPIC", "bench-kafka-sink"),
+                env_u64("PARTITIONS", 16)
+            ),
             duration: Duration::from_secs(env_u64("DURATION_S", 15)),
             warmup: Duration::from_secs(env_u64("WARMUP_S", 5)),
             stat_ms: env_u64("STATISTICS_INTERVAL_MS", 1000),
@@ -137,6 +151,7 @@ impl Cfg {
             raw_baseline_rps: std::env::var("RAW_BASELINE_RPS")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            broker: env_str("BROKER", "redpanda"),
         }
     }
 
@@ -148,7 +163,8 @@ impl Cfg {
             .variant("partitions", i64::from(self.partitions))
             .variant("shards", self.shards as u64)
             .variant("batch_max_rows", self.batch_max_rows)
-            .variant("queue_buffering_max_messages", self.queue_buffering);
+            .variant("queue_buffering_max_messages", self.queue_buffering)
+            .variant("broker", self.broker.clone());
         if let Some(c) = self.kafka_cpus {
             rep = rep.variant("kafka_cpus", c);
         }
@@ -160,32 +176,23 @@ impl Cfg {
 /// tens of millions of messages per arm across the whole matrix never fills the
 /// broker's disk — Kafka purges old segments continuously. Producer throughput
 /// writes to the active segment and is unaffected; the light background purge is
-/// noted as a caveat on the results page. Idempotent: an existing topic (from a
-/// prior arm) already carries these configs.
+/// noted as a caveat on the results page. Idempotent across arms of one sweep:
+/// the topic name carries the partition count, so a reused topic was created
+/// by this same call and already carries these configs. A topic of the same
+/// name created some other way keeps whatever settings it had — delete it if
+/// the retention shape matters.
 fn ensure_bench_topic(bootstrap: &str, topic: &str, partitions: i32) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .create()
-        .expect("admin client");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1))
-        .set("retention.ms", "10000")
-        .set("retention.bytes", "134217728") // 128 MiB/partition steady-state cap
-        .set("segment.bytes", "134217728")
-        .set("segment.ms", "5000");
-    let results = rt
-        .block_on(admin.create_topics(&[new_topic], &AdminOptions::new()))
-        .expect("create_topics call");
-    for result in results {
-        match result {
-            Ok(_) => {}
-            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
-            Err((name, code)) => panic!("failed to create topic {name}: {code}"),
-        }
-    }
+    ensure_topic_with(
+        bootstrap,
+        topic,
+        partitions,
+        &[
+            ("retention.ms", "10000"),
+            ("retention.bytes", "134217728"), // 128 MiB/partition steady-state cap
+            ("segment.bytes", "134217728"),
+            ("segment.ms", "5000"),
+        ],
+    );
 }
 
 fn install_metrics() -> MetricsHandle {
@@ -631,16 +638,16 @@ fn main() {
     // Resolve the broker: external BOOTSTRAP, else the local bench container
     // (honouring scalar KAFKA_CPUS + FRESH). The parent owns the broker; children
     // reuse it via BOOTSTRAP so only one process manages docker.
-    let bootstrap = std::env::var("BOOTSTRAP").unwrap_or_else(|_| docker::ensure_kafka());
+    let (bootstrap, broker) = docker::resolve_broker();
 
     if env_u64("RUN_ONE", 0) != 0 {
         run_one(&bootstrap);
         return;
     }
 
-    let topic = env_str("TOPIC", "bench-kafka-sink");
-    let partitions = env_u64("PARTITIONS", 16) as i32;
-    ensure_bench_topic(&bootstrap, &topic, partitions);
+    // The topic is created by each child from its own PARTITIONS, not here:
+    // the parent only knows the scalar value, and pre-creating at it would
+    // pin the shape for every arm of a PARTITIONS sweep.
 
     // Sweep exactly one env dimension (SWEEP over SWEEP_LIST); other knobs are
     // held from the scalar env. KAFKA_CPUS is varied across separate invocations
@@ -664,6 +671,9 @@ fn main() {
             let mut cmd = std::process::Command::new(std::env::current_exe().expect("exe"));
             cmd.env("RUN_ONE", "1")
                 .env("BOOTSTRAP", &bootstrap)
+                // The parent resolved (and possibly started) the broker; pin
+                // the label so every arm records what actually served it.
+                .env("BROKER", &broker)
                 .env_remove("SWEEP")
                 .env_remove("SWEEP_LIST")
                 .env_remove("FRESH");

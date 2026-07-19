@@ -27,6 +27,11 @@ pub(crate) struct SourceLog {
     pub(crate) resumes: Vec<Vec<LaneId>>,
     pub(crate) flush_commits: usize,
     pub(crate) opened: bool,
+    /// Whether `open` received the framework's source-stage handles. Guards
+    /// the seam a source publishes consumer lag through: the handles were
+    /// once reachable only via a builder nothing called, so the lag gauge
+    /// rendered a permanent zero on every pipeline.
+    pub(crate) stage_metrics_attached: bool,
     /// When set, `commit` and `flush_commits` fail retryably — models a
     /// checkpoint store outage (nothing is recorded as committed).
     pub(crate) fail_commits: bool,
@@ -89,7 +94,11 @@ impl Source for FakeSource {
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().opened = true;
+        {
+            let mut log = self.shared.lock().unwrap();
+            log.opened = true;
+            log.stage_metrics_attached = ctx.stage_metrics.is_some();
+        }
         self.issuer = Some(ctx.issuer);
         Ok(())
     }

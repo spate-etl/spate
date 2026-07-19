@@ -399,10 +399,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
                 self.config.metrics.per_partition_detail,
             ),
-            source_metrics: SourceMetrics::new(
+            source_metrics: Arc::new(SourceMetrics::new(
                 &ComponentLabels::new(pipeline_name.clone(), "source", source_ct.clone()),
                 self.config.metrics.per_partition_detail,
-            ),
+            )),
             source_meter,
             per_partition_detail: self.config.metrics.per_partition_detail,
             pipeline_metrics,

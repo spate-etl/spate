@@ -129,15 +129,58 @@ ROWS=200000 ITERS=41 REPS=15 SERVER=1 \
   cargo run -p benchmarks --release --bin ch_native_format
 
 # Kafka consumer topology → kafka-topology-confirm.jsonl (local single-broker Kafka)
-# 16 partitions × 4 threads × 10 µs/record × 10M × 256 B. The binary takes a
+# 16 partitions × 4 threads × 10 µs/record × 256 B. The binary takes a
 # `produce|consume` subcommand (no-arg exits 2). Pre-fill the topic once — its name
 # derives from PARTITIONS×PAYLOAD, so one fill serves both modes — then consume
-# 2 reps per mode.
-PARTITIONS=16 THREADS=4 WORK_US=10 MESSAGES=10000000 PAYLOAD=256 \
+# 2 reps per mode. `consume` is time-boxed by DURATION_S (MESSAGES only sizes the
+# fill), and exits 3 if it drained the topic — a drain measures how fast a topic
+# empties, not a throughput ceiling, so treat a 3 as "produce more and rerun".
+PARTITIONS=16 THREADS=4 PAYLOAD=256 MESSAGES=10000000 \
   cargo run -p benchmarks --release --bin kafka_topology produce
 for MODE in perthread split; do for _ in 1 2; do \
-  MODE=$MODE PARTITIONS=16 THREADS=4 WORK_US=10 MESSAGES=10000000 PAYLOAD=256 \
+  MODE=$MODE PARTITIONS=16 THREADS=4 WORK_US=10 PAYLOAD=256 DURATION_S=30 \
     RESULTS=benchmarks/results/kafka-topology-confirm.jsonl \
+    cargo run -p benchmarks --release --bin kafka_topology consume; \
+done; done
+
+# Kafka source ceiling → kafka-source-ceiling.jsonl (raw client, no framework)
+# The prefetch × threads sweep behind the tuning guidance, on a Redpanda broker
+# (BROKER defaults to redpanda; it is recorded as a variant key, so Redpanda and
+# Apache Kafka arms never aggregate). WORK_US=0 so the fetch path is the only
+# thing measured; QUEUED_MIN_MESSAGES=0 means "set nothing", the shipped default.
+#
+# BOTH payload sizes are swept, and the payload loop is INSIDE the rep loop so
+# the two sizes interleave — the cross-size comparison is the page's headline
+# claim, and running one size then the other is exactly the sequential A/B that
+# has faked a 30% delta from thermal drift on this box.
+#
+# The backlog must outlast a saturated window: `consume` exits 3 and emits
+# nothing if it drains the topic (a drain measures how fast a topic empties,
+# not a ceiling), and exits 4 if messages leaked to a main queue.
+for b in 64 256; do
+  PARTITIONS=16 PAYLOAD=$b MESSAGES=60000000 \
+    cargo run -p benchmarks --release --bin kafka_topology produce
+done
+for rep in 1 2 3; do
+  for q in 1000 3000 10000 30000 100000 300000; do for b in 64 256; do \
+    MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
+      THREADS=1 PAYLOAD=$b QUEUED_MIN_MESSAGES=$q \
+      RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
+      cargo run -p benchmarks --release --bin kafka_topology consume; \
+  done; done
+  for t in 1 2 4 8; do for b in 64 256; do \
+    MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
+      THREADS=$t PAYLOAD=$b QUEUED_MIN_MESSAGES=100000 \
+      RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
+      cargo run -p benchmarks --release --bin kafka_topology consume; \
+  done; done
+done
+# Where the byte cap binds, 64 B only: flat from 300000 up, because
+# queued.max.messages.kbytes (65536 x 1000 = 65.5 MB) caps at ~1.02M messages.
+for rep in 1 2 3; do for q in 1000000 3000000; do \
+  MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
+    THREADS=1 PAYLOAD=64 QUEUED_MIN_MESSAGES=$q \
+    RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
     cargo run -p benchmarks --release --bin kafka_topology consume; \
 done; done
 
@@ -155,10 +198,34 @@ for rep in 1 2 3; do
              "fast_borrowed native" "fast_borrowed rowbinary"; do
     set -- $arm
     DESER=$1 FORMAT=$2 RATE=0 DURATION_S=30 EVENTS=20 PARTITIONS=4 THREADS=2 \
+      EGRESS=fixed LOAD=concurrent \
       RESULTS=benchmarks/results/e2e-kafka-clickhouse.jsonl \
       cargo run -p benchmarks --release --bin e2e_kafka_clickhouse
   done
 done
+
+# Source-bound end-to-end → e2e-kafka-source-bound.jsonl (local containers)
+# The same rig arranged so the SOURCE is the limiter rather than the sink, which
+# is what makes it comparable with the raw-client kafka_source_ceiling numbers:
+#   ENGINE=Null      the ~5.9M rows/s Null ceiling finally exceeds the source's
+#   LOAD=prefill     fill the topic first, then run with NO producer — against a
+#                    concurrent producer the consumer is tail-following, so there
+#                    is no backlog to prefetch and the dominant term cannot show
+#   EGRESS=scaled    shards/io_threads track THREADS so egress is not the limiter
+#   DESER=none       1 row per message, so rows/s and msg/s are the same quantity
+# QUEUED_MIN_MESSAGES=0 means "set nothing", exercising the shipped default path
+# rather than a value that merely happens to equal it. Pin TOPIC so the prefill
+# is paid once: each run gets a fresh per-pid group and re-reads from offset 0.
+# PREFILL must outlast the window — the rig exits 3 and emits nothing if the
+# source consumed the whole backlog, which measures a drain, not a ceiling.
+for rep in 1 2 3; do for q in 1000 10000 0; do
+  BENCH=e2e_kafka_source_bound DESER=none FORMAT=rowbinary \
+    ENGINE=Null LOAD=prefill EGRESS=scaled TOPIC=bench-e2e-source \
+    PARTITIONS=16 PAYLOAD=64 PREFILL=100000000 THREADS=8 RATE=0 \
+    DURATION_S=15 PER_PARTITION_DETAIL=1 QUEUED_MIN_MESSAGES=$q \
+    RESULTS=benchmarks/results/e2e-kafka-source-bound.jsonl \
+    cargo run -p benchmarks --release --bin e2e_kafka_clickhouse
+done; done
 
 # ClickHouse sink saturation → ch-sink-saturation.jsonl (Docker ClickHouse 26.3)
 # In-process generator (no broker) → real chain → sharded ClickHouse sink at full

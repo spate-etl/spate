@@ -9,9 +9,9 @@ use etl_core::error::{DeserError, SinkError, SourceError};
 use etl_core::record::{PartitionId, RawPayload, Record};
 use etl_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use etl_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Zero-copy record: a view of the payload bytes.
 #[derive(Debug)]
@@ -96,6 +96,72 @@ impl ShardWriter for NullWriter {
         self.batches.fetch_add(1, Ordering::Relaxed);
         self.rows.fetch_add(batch.rows, Ordering::Relaxed);
         async { Ok(()) }
+    }
+}
+
+/// A [`NullWriter`] that paces acknowledgement to a fixed row rate.
+///
+/// The rig needs a backfill to last tens of seconds so coordination spans
+/// dozens of heartbeat rounds, but the S3 source has no throttle hook. The
+/// proven lever is sink pacing: a slow acknowledgement fills the in-flight
+/// budget, which backpressures the chain and pauses the source. This writer is
+/// that lever with no I/O.
+///
+/// Pacing is on an **absolute schedule**, not a per-batch sleep: the first
+/// batch anchors a start instant, and every batch completes no earlier than
+/// `start + cumulative_rows / rows_per_s`. A per-batch `sleep(rows/rate)` would
+/// undercount whenever batches overlap (the sink pool holds several in flight
+/// per shard) and drift with linger; the absolute schedule holds the aggregate
+/// rate at `rows_per_s` regardless of concurrency.
+#[derive(Debug)]
+pub struct ThrottledNullWriter {
+    batches: AtomicU64,
+    rows: AtomicU64,
+    rows_per_s: f64,
+    start: OnceLock<Instant>,
+}
+
+impl ThrottledNullWriter {
+    /// A writer pacing acknowledgement to `rows_per_s` rows per second.
+    pub fn new(rows_per_s: f64) -> ThrottledNullWriter {
+        ThrottledNullWriter {
+            batches: AtomicU64::new(0),
+            rows: AtomicU64::new(0),
+            rows_per_s,
+            start: OnceLock::new(),
+        }
+    }
+
+    /// Rows durably "written".
+    pub fn rows(&self) -> u64 {
+        self.rows.load(Ordering::Relaxed)
+    }
+
+    /// Batches "written".
+    pub fn batches(&self) -> u64 {
+        self.batches.load(Ordering::Relaxed)
+    }
+}
+
+impl ShardWriter for ThrottledNullWriter {
+    type Endpoint = ();
+
+    fn write_batch(
+        &self,
+        _endpoint: &Self::Endpoint,
+        batch: &SealedBatch,
+    ) -> impl Future<Output = Result<(), SinkError>> + Send {
+        let start = *self.start.get_or_init(Instant::now);
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        let cumulative = self.rows.fetch_add(batch.rows, Ordering::Relaxed) + batch.rows;
+        // The instant by which this many rows should have been acked.
+        let target = start + Duration::from_secs_f64(cumulative as f64 / self.rows_per_s);
+        async move {
+            if let Some(wait) = target.checked_duration_since(Instant::now()) {
+                tokio::time::sleep(wait).await;
+            }
+            Ok(())
+        }
     }
 }
 

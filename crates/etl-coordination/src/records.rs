@@ -24,6 +24,7 @@
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
+//! | Ephemeral | `handoff.{victim}`  | [`HandoffVal`]          — cooperative handoff request |
 
 use crate::error::fatal;
 use base64::Engine as _;
@@ -46,6 +47,8 @@ pub(crate) const SPLIT_PREFIX: &str = "split.";
 pub(crate) const SPEC_PREFIX: &str = "spec.";
 /// Prefix of worker presence keys in the ephemeral keyspace.
 pub(crate) const WORKER_PREFIX: &str = "worker.";
+/// Prefix of cooperative handoff-request keys in the ephemeral keyspace.
+pub(crate) const HANDOFF_PREFIX: &str = "handoff.";
 
 /// `split.{id}` key (durable progress record / ephemeral lease).
 pub(crate) fn split_key(id: &SplitId) -> String {
@@ -80,6 +83,16 @@ pub(crate) fn parse_spec_key(key: &str) -> Option<&str> {
 /// The instance encoded in a `worker.{instance}` key, if it is one.
 pub(crate) fn parse_worker_key(key: &str) -> Option<&str> {
     key.strip_prefix(WORKER_PREFIX)
+}
+
+/// `handoff.{victim}` cooperative handoff-request key.
+pub(crate) fn handoff_key(victim: &str) -> String {
+    format!("{HANDOFF_PREFIX}{victim}")
+}
+
+/// The victim instance encoded in a `handoff.{victim}` key, if it is one.
+pub(crate) fn parse_handoff_key(key: &str) -> Option<&str> {
+    key.strip_prefix(HANDOFF_PREFIX)
 }
 
 /// Stable 64-bit digest of the job fingerprint, stamped into every split
@@ -431,6 +444,30 @@ pub(crate) struct WorkerVal {
     pub(crate) nonce: String,
 }
 
+/// The ephemeral cooperative-handoff request value at `handoff.{victim}`,
+/// written by an under-target requester asking the victim to drain and
+/// release one split. Liveness-only: losing or expiring it costs a
+/// rebalance opportunity, never correctness — the durable progress-record
+/// CAS stays the sole fence. Deliberately carries no round number: rounds
+/// are worker-local scalars and must never be compared across machines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandoffVal {
+    pub(crate) schema: u32,
+    /// The under-target worker asking for a split.
+    pub(crate) requester: String,
+    /// The requester's per-process nonce (diagnostics; lets a restarted
+    /// requester recognize — and overwrite — its predecessor's key).
+    pub(crate) nonce: String,
+    /// The split the victim chose to drain, CAS-annotated by the victim
+    /// before the drain starts. This is the grant's *attribution*: the
+    /// requester marks exactly this split as incoming (never inferring a
+    /// grant from lease traffic), and a request whose key vanishes after
+    /// a grant was annotated is served, not blipped — so it must not be
+    /// re-created.
+    pub(crate) granted: Option<String>,
+}
+
 /// Encode any of the small lease values.
 pub(crate) fn encode_val<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).expect("lease value serializes")
@@ -557,6 +594,35 @@ mod tests {
             SplitProgressRecord::planned(&id, 0, Some(&SplitProgress::completed(10, vec![])));
         assert_eq!(record.status, SplitStatus::Completed);
         assert!(record.progress().unwrap().unwrap().completed);
+    }
+
+    #[test]
+    fn handoff_values_round_trip_and_reject_alien_shapes() {
+        let val = HandoffVal {
+            schema: SCHEMA,
+            requester: "worker-b".to_string(),
+            nonce: "n-1".to_string(),
+            granted: None,
+        };
+        let parsed: HandoffVal = parse_val(&handoff_key("worker-a"), &encode_val(&val)).unwrap();
+        assert_eq!(parsed, val);
+        let annotated = HandoffVal {
+            granted: Some("split-7".to_string()),
+            ..val.clone()
+        };
+        let parsed: HandoffVal =
+            parse_val(&handoff_key("worker-a"), &encode_val(&annotated)).unwrap();
+        assert_eq!(parsed, annotated);
+
+        let err = parse_val::<HandoffVal>("handoff.worker-a", b"not json").unwrap_err();
+        assert!(err.to_string().contains("another system"), "{err}");
+        let err =
+            parse_val::<HandoffVal>("handoff.worker-a", br#"{"schema":2,"who":"x"}"#).unwrap_err();
+        assert!(err.to_string().contains("unreadable"), "{err}");
+
+        assert_eq!(handoff_key("worker-a"), "handoff.worker-a");
+        assert_eq!(parse_handoff_key("handoff.worker-a"), Some("worker-a"));
+        assert_eq!(parse_handoff_key("worker.worker-a"), None);
     }
 
     #[test]

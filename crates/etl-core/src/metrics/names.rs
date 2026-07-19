@@ -168,12 +168,16 @@ pub const COORDINATION_LEADER: &str = "etl_coordination_leader";
 /// 1 while this worker owns no splits and observes as a standby.
 pub const COORDINATION_IDLE: &str = "etl_coordination_idle";
 /// Split acquisitions, by [`L_REASON`] (`create`, `released`, `reclaimed`,
-/// `expired`, `stolen`).
+/// `expired`, `stolen`, `handoff`).
 pub const COORDINATION_ACQUISITIONS_TOTAL: &str = "etl_coordination_acquisitions_total";
 /// Splits lost involuntarily, by [`L_REASON`] (`fenced`, `starved`).
 pub const COORDINATION_REVOCATIONS_TOTAL: &str = "etl_coordination_revocations_total";
 /// Voluntary split releases (graceful shutdown or scale-down).
 pub const COORDINATION_RELEASES_TOTAL: &str = "etl_coordination_releases_total";
+/// Cooperative split handoffs, by outcome (`requested`, `granted`,
+/// `timeout`, `aborted`) — the consent-first live-owner transfer that a
+/// granted move completes replay-free.
+pub const COORDINATION_HANDOFFS_TOTAL: &str = "etl_coordination_handoffs_total";
 /// Splits written into the plan by this worker while leader (seeded
 /// create-if-absent; replayed ids that already exist are not counted).
 pub const COORDINATION_SPLITS_PLANNED_TOTAL: &str = "etl_coordination_splits_planned_total";
@@ -237,6 +241,7 @@ pub const COUNTERS: &[&str] = &[
     COORDINATION_ACQUISITIONS_TOTAL,
     COORDINATION_REVOCATIONS_TOTAL,
     COORDINATION_RELEASES_TOTAL,
+    COORDINATION_HANDOFFS_TOTAL,
     COORDINATION_SPLITS_PLANNED_TOTAL,
     COORDINATION_REPLANS_TOTAL,
     COORDINATION_SPLIT_FAILURES_TOTAL,

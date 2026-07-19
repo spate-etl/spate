@@ -284,6 +284,7 @@ dependencies = [
  "crossbeam-channel",
  "etl-avro",
  "etl-clickhouse",
+ "etl-coordination",
  "etl-core",
  "etl-json",
  "etl-kafka",

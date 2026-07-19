@@ -96,6 +96,21 @@ pub fn worker(
         .expect("coordinator")
 }
 
+/// A worker with a non-default cooperative-handoff round budget. A large
+/// budget makes the fallback steal effectively never fire inside a test
+/// window (every move must be a consented handoff); a budget of 1 forces
+/// the fallback after a single unanswered round.
+pub fn worker_handoff_rounds(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+    handoff_rounds: u32,
+) -> MemoryCoordinator {
+    let mut config = config(instance_id);
+    config.handoff_rounds = handoff_rounds;
+    StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+}
+
 /// A deterministic, cursor-driven planner: phase `n` returns
 /// `phases[n]` and persists cursor `n + 1`; past the end it returns an
 /// empty plan with the last phase's finality. Cursor-keyed, so replans

@@ -20,6 +20,36 @@ pub enum AcquireReason {
     Expired,
     /// Steal from an over-loaded live owner, for balance.
     Stolen,
+    /// Cooperative handoff from a live owner that drained and released the
+    /// split first — the resume point covers everything it emitted, so the
+    /// claim is replay-free (unlike [`Stolen`](AcquireReason::Stolen)).
+    Handoff,
+}
+
+/// Outcome of one cooperative split handoff (the `outcome` label on
+/// `etl_coordination_handoffs_total`), the consent-first live-owner
+/// transfer that replaces a replaying steal when the owner is responsive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HandoffOutcome {
+    /// A requester wrote a handoff request naming an over-loaded victim.
+    Requested,
+    /// A victim drained a split, committed its tail, and released it — a
+    /// replay-free transfer (the requester claims it as
+    /// [`AcquireReason::Handoff`]).
+    Granted,
+    /// A request went unanswered for the full round budget and fell back
+    /// to a replaying steal (the dead/stuck-owner path). Counted on the
+    /// requester; a late grant may still land afterwards, so one request
+    /// can count both `Timeout` and (on the victim) `Granted`.
+    Timeout,
+    /// A victim's granted drain ended without the full-commit release: it
+    /// was fenced mid-drain (a fallback steal or expiry took the split)
+    /// or the release write failed. Counted on the victim. A request the
+    /// *requester* abandons (withdrawn as unjustified, superseded, or
+    /// claimable work reappearing) ends with no terminal outcome at all —
+    /// the outcomes are per-side events, not a partition of requests.
+    Aborted,
 }
 
 /// Why a split lease was lost involuntarily (the `reason` label on
@@ -92,9 +122,14 @@ pub struct CoordinationMetrics {
     acquired_reclaimed: Counter,
     acquired_expired: Counter,
     acquired_stolen: Counter,
+    acquired_handoff: Counter,
     lost_fenced: Counter,
     lost_starved: Counter,
     releases: Counter,
+    handoffs_requested: Counter,
+    handoffs_granted: Counter,
+    handoffs_timeout: Counter,
+    handoffs_aborted: Counter,
     splits_planned: Counter,
     replans_ok: Counter,
     replans_error: Counter,
@@ -133,6 +168,13 @@ impl CoordinationMetrics {
         };
         let replans =
             |outcome| labels.counter1(names::COORDINATION_REPLANS_TOTAL, names::L_OUTCOME, outcome);
+        let handoffs = |outcome| {
+            labels.counter1(
+                names::COORDINATION_HANDOFFS_TOTAL,
+                names::L_OUTCOME,
+                outcome,
+            )
+        };
         let writes =
             |outcome| labels.counter1(names::COORDINATION_WRITES_TOTAL, names::L_OUTCOME, outcome);
         let store_op = |op| {
@@ -154,9 +196,14 @@ impl CoordinationMetrics {
             acquired_reclaimed: acquired("reclaimed"),
             acquired_expired: acquired("expired"),
             acquired_stolen: acquired("stolen"),
+            acquired_handoff: acquired("handoff"),
             lost_fenced: lost("fenced"),
             lost_starved: lost("starved"),
             releases: labels.counter(names::COORDINATION_RELEASES_TOTAL),
+            handoffs_requested: handoffs("requested"),
+            handoffs_granted: handoffs("granted"),
+            handoffs_timeout: handoffs("timeout"),
+            handoffs_aborted: handoffs("aborted"),
             splits_planned: labels.counter(names::COORDINATION_SPLITS_PLANNED_TOTAL),
             replans_ok: replans("ok"),
             replans_error: replans("error"),
@@ -215,6 +262,17 @@ impl CoordinationMetrics {
             AcquireReason::Reclaimed => self.acquired_reclaimed.increment(1),
             AcquireReason::Expired => self.acquired_expired.increment(1),
             AcquireReason::Stolen => self.acquired_stolen.increment(1),
+            AcquireReason::Handoff => self.acquired_handoff.increment(1),
+        }
+    }
+
+    /// Record one cooperative-handoff outcome.
+    pub fn handoff(&self, outcome: HandoffOutcome) {
+        match outcome {
+            HandoffOutcome::Requested => self.handoffs_requested.increment(1),
+            HandoffOutcome::Granted => self.handoffs_granted.increment(1),
+            HandoffOutcome::Timeout => self.handoffs_timeout.increment(1),
+            HandoffOutcome::Aborted => self.handoffs_aborted.increment(1),
         }
     }
 

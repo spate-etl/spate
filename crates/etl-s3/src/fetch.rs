@@ -145,6 +145,14 @@ pub(crate) struct FetcherParams {
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
+    /// Cooperative-handoff stop (set by `SplitCtx::begin_handoff`): checked
+    /// only at object boundaries — including the *between-objects* pause
+    /// wait; the mid-object pause waits deliberately ignore it — **never
+    /// mid-object**. On stop the fetcher returns, dropping `tx` at a boundary —
+    /// a channel close indistinguishable from a natural end of slice, so the
+    /// lane takes its clean end-of-input path and never the mid-object Fatal
+    /// path (see [`run_fetcher`]).
+    pub(crate) stop: Arc<AtomicBool>,
     /// First backoff step (doubles per attempt, capped; tests shrink it).
     pub(crate) retry_base: Duration,
     /// `etl_s3_source_get_retries_total`, when metrics are attached.
@@ -172,11 +180,20 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         range_bytes,
         tx,
         pause,
+        stop,
         retry_base,
         retries,
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
+        // Cooperative handoff: stop only ever takes effect here, at an object
+        // boundary, before any `ObjectStart` for this object. Dropping `tx`
+        // now closes the channel exactly as a natural end of slice would, so
+        // the lane's end-of-input decision (`set_terminal` + waker) fires
+        // unmodified and the mid-object Fatal path is never reachable.
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         // The planner's member cap bounds split sizes, so ordinals always
         // fit the composite-offset layout.
         let ordinal = ordinal as u32;
@@ -188,7 +205,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         } else {
             entry.etag.clone()
         };
-        if pause_gate(&pause, &tx).await.is_err() {
+        if pause_gate(&pause, Some(&stop), &tx).await.is_err() {
             return;
         }
         let started = tx
@@ -232,9 +249,26 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
 
 /// Wait while paused. Fails when the lane is gone (channel closed), so a
 /// paused fetcher still exits promptly on shutdown.
-async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(), ()> {
+///
+/// `stop` is passed `Some` only by the **between-objects** caller: a
+/// cooperative handoff that lands while the fetcher is back-pressured must be
+/// noticed promptly, and returning here is safe because no object is open. The
+/// mid-object callers pass `None` — a stop must never end the wait between an
+/// `ObjectStart` and its `ObjectEnd` (that would close the channel with the
+/// lane's object still open, tripping its Fatal path); mid-object they simply
+/// wait for unpause and let the boundary check act.
+async fn pause_gate(
+    pause: &AtomicBool,
+    stop: Option<&AtomicBool>,
+    tx: &mpsc::Sender<ChunkMsg>,
+) -> Result<(), ()> {
     while pause.load(Ordering::Relaxed) {
         if tx.is_closed() {
+            return Err(());
+        }
+        if let Some(stop) = stop
+            && stop.load(Ordering::Relaxed)
+        {
             return Err(());
         }
         tokio::time::sleep(PAUSE_POLL).await;
@@ -392,7 +426,7 @@ async fn stream_object_ranged(
         while !bytes.is_empty() {
             let take = bytes.len().min(chunk_bytes);
             let chunk = bytes.split_to(take);
-            if pause_gate(pause, tx).await.is_err() {
+            if pause_gate(pause, None, tx).await.is_err() {
                 return Ok(false);
             }
             if tx.send(ChunkMsg::Chunk(chunk)).await.is_err() {
@@ -464,7 +498,7 @@ async fn stream_object_streaming(
                     while !bytes.is_empty() {
                         let take = bytes.len().min(chunk_bytes);
                         let chunk = bytes.split_to(take);
-                        if pause_gate(pause, tx).await.is_err() {
+                        if pause_gate(pause, None, tx).await.is_err() {
                             return Ok(false);
                         }
                         if tx.send(ChunkMsg::Chunk(chunk)).await.is_err() {
@@ -866,6 +900,7 @@ mod tests {
             range_bytes,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -973,6 +1008,7 @@ mod tests {
             range_bytes: 64,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -1007,6 +1043,7 @@ mod tests {
             range_bytes: 64,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -1040,6 +1077,7 @@ mod tests {
             range_bytes: 64,
             tx,
             pause: Arc::clone(&pause),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -1076,6 +1114,7 @@ mod tests {
             range_bytes: 4096,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -1138,6 +1177,7 @@ mod tests {
             range_bytes: 8,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
         };
@@ -1222,6 +1262,146 @@ mod tests {
             flaky.recorded_ranges(),
             vec![RangeKind::Full],
             "the fallback issues a single un-ranged GET, never a bounded window"
+        );
+    }
+
+    // ----------------------------------------- cooperative-handoff stop --
+
+    #[tokio::test]
+    async fn a_preset_stop_ends_the_fetcher_before_reading_anything() {
+        // Stop set before the fetcher starts: the boundary check at the top
+        // of the loop fires before any `ObjectStart`, so `tx` is dropped with
+        // no object open. The lane reads a closed channel and takes its clean
+        // end-of-input path — a handoff at a boundary is indistinguishable
+        // from a natural end of slice.
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(seeded(&[("p/a", b"aaaa"), ("p/b", b"bbbb")]).await);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let params = FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 64,
+            range_bytes: 64,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(true)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+        };
+        let task = tokio::spawn(run_fetcher(params));
+        let mut msgs = Vec::new();
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        task.await.unwrap();
+        assert!(
+            msgs.is_empty(),
+            "a fetcher that starts stopped reads nothing: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paused_fetcher_notices_the_stop_and_closes_cleanly() {
+        // A back-pressured fetcher parked in the pause wait must give up its
+        // split promptly when a handoff sets `stop`, closing the channel at
+        // the (pre-first-object) boundary rather than waiting out the pause.
+        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"aaaa")]).await);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let pause = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 64,
+            range_bytes: 64,
+            tx,
+            pause: Arc::clone(&pause),
+            stop: Arc::clone(&stop),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+        };
+        let task = tokio::spawn(run_fetcher(params));
+        // Parked on the pause: nothing arrives.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(rx.try_recv().is_err(), "a paused fetcher delivers nothing");
+        // Stop while paused: the fetcher must exit without ever unpausing. A
+        // timeout draining the channel would mean the stop was ignored.
+        stop.store(true, Ordering::Relaxed);
+        let mut msgs = Vec::new();
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(m) = rx.recv().await {
+                msgs.push(m);
+            }
+        })
+        .await;
+        assert!(
+            drained.is_ok(),
+            "a paused fetcher must notice the stop promptly"
+        );
+        task.await.unwrap();
+        assert!(msgs.is_empty(), "no object was ever started: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_finishes_the_open_object_then_cuts_at_the_boundary() {
+        // A stop observed mid-object must never close the channel there (that
+        // trips the lane's mid-object Fatal path): the fetcher finishes the
+        // open object and returns only at the next boundary, before starting
+        // the next object.
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(seeded(&[("p/a", b"0123456789"), ("p/b", b"bbbb")]).await);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(1); // interleave sends with receipts
+        let pause = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 2,
+            range_bytes: 64,
+            tx,
+            pause: Arc::clone(&pause),
+            stop: Arc::clone(&stop),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+        };
+        let task = tokio::spawn(run_fetcher(params));
+        // Take the first object's start and one data chunk — now mid-object —
+        // then pause and stop the fetcher.
+        let m0 = rx.recv().await.unwrap();
+        assert!(matches!(m0, ChunkMsg::ObjectStart { ordinal: 0, .. }));
+        let m1 = rx.recv().await.unwrap();
+        assert!(matches!(m1, ChunkMsg::Chunk(_)), "mid the first object");
+        pause.store(true, Ordering::Relaxed);
+        stop.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        pause.store(false, Ordering::Relaxed); // let it drain to the boundary
+        let mut msgs = vec![m0, m1];
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        task.await.unwrap();
+        // No failure, and the first object completed intact while the second
+        // never started: the stop took effect only at the boundary.
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ChunkMsg::LaneFailed(_))),
+            "a boundary stop is a clean channel close, never a failure"
+        );
+        assert_eq!(
+            assembled(&msgs),
+            vec![("p/a".to_string(), b"0123456789".to_vec())],
+            "the open object finishes; the boundary stop precedes the next object"
         );
     }
 }

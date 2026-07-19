@@ -345,6 +345,27 @@ pub enum CoordinationEvent {
         /// The split no longer owned.
         split: SplitId,
     },
+    /// A peer has requested this split cooperatively: it is over-loaded
+    /// with nothing unclaimed to take, so instead of stealing it asks the
+    /// owner to give the split up gracefully. The owner may stop intake at
+    /// a safe boundary, chase the split's tail to a final fenced commit,
+    /// and release it — the requester then resumes from a resume point
+    /// covering everything the owner emitted, so the transfer replays
+    /// nothing.
+    ///
+    /// Honouring the request is optional and ignoring it is always safe:
+    /// the requester falls back to a replaying steal once its round budget
+    /// elapses, so an owner that cannot stop intake cleanly simply
+    /// declines — through the driver's
+    /// [`SplitSource::begin_handoff`](driver::SplitSource::begin_handoff),
+    /// which defaults to declining — and the move degrades to today's
+    /// bounded-replay steal. The event is idempotent: a requester may
+    /// re-emit it every round its request stays outstanding.
+    HandoffRequested {
+        /// The split a peer wants handed over. It may be one this instance
+        /// does not (or no longer) hold; such a request is a silent no-op.
+        split: SplitId,
+    },
     /// The split exhausted its delivery attempts (repeated owner deaths or
     /// explicit [`fail`](SplitCoordinator::fail) reports) and was parked.
     /// It will not be re-offered; it stays visible in the store and in the
@@ -613,6 +634,36 @@ pub trait SplitCoordinator: Send {
     /// attempts. Best-effort and idempotent; splits not released simply
     /// expire.
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
+
+    /// Release splits handed over through a cooperative handoff — the owner
+    /// has drained each split, committed its tail, and now grants it to the
+    /// requester. Semantically a [`release`](SplitCoordinator::release)
+    /// (attempt-free, best-effort, idempotent), but distinguished so a
+    /// handoff-aware backend can record the grant and never mistake a
+    /// single-split handoff for a departure from the fleet.
+    ///
+    /// Defaulted to [`release`](SplitCoordinator::release) so existing
+    /// backends keep working — a grant then reads as an ordinary hand-back
+    /// — and so the trait stays dyn-compatible. A backend that implements
+    /// the handoff protocol overrides it.
+    fn release_handoff(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
+        self.release(splits)
+    }
+
+    /// Decline a [`HandoffRequested`](CoordinationEvent::HandoffRequested)
+    /// the embedder cannot serve — the source refused to stop the split's
+    /// intake, or the split is not in a drainable state. Without this
+    /// feedback a handoff-aware backend would hold its one-grant-at-a-time
+    /// slot until the requester gives up, freezing rebalancing against
+    /// this worker; a decline lets it re-pick a different split
+    /// immediately. Best-effort and idempotent; declining a split that
+    /// was never offered is a no-op.
+    ///
+    /// Defaulted to a no-op so existing backends keep working and the
+    /// trait stays dyn-compatible.
+    fn decline_handoff(&mut self, _split: &SplitId) -> Result<(), CoordinationError> {
+        Ok(())
+    }
 }
 
 /// Wakes a coordinated source's control-plane wait.
@@ -711,6 +762,9 @@ mod tests {
         c.start(Box::new(NoopPlanner)).unwrap();
         assert!(c.poll().unwrap().is_empty());
         c.release(&[SplitId::new("s-0").unwrap()]).unwrap();
+        // The defaulted handoff release delegates to `release`, staying
+        // dyn-compatible and callable through the trait object.
+        c.release_handoff(&[SplitId::new("s-0").unwrap()]).unwrap();
     }
 
     #[test]

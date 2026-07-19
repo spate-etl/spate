@@ -33,6 +33,7 @@ pub mod deser_sample;
 pub mod docker;
 pub mod prom;
 pub mod report;
+pub mod s3data;
 pub mod synthetic;
 
 use std::time::{Duration, Instant};

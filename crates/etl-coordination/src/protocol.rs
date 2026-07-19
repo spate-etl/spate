@@ -231,6 +231,100 @@ pub(crate) fn steal_candidate(
         .map(str::to_string)
 }
 
+/// Per-owner total runnable load: splits with an observed spec and a live
+/// foreign lease, grouped by lease owner — the same accounting
+/// [`steal_candidate`] applies for its imbalance rule, shared by the
+/// handoff rules so "load" cannot drift between the two paths.
+fn owner_loads<'a>(
+    splits: &'a BTreeMap<String, SplitState>,
+    instance: &str,
+) -> HashMap<&'a str, usize> {
+    let mut loads: HashMap<&str, usize> = HashMap::new();
+    for state in splits.values() {
+        if state.progress.status != SplitStatus::Runnable || state.spec.is_none() {
+            continue;
+        }
+        if let Some((lease, _)) = &state.lease
+            && lease.owner != instance
+        {
+            *loads.entry(lease.owner.as_str()).or_default() += 1;
+        }
+    }
+    loads
+}
+
+/// Pick the victim for a cooperative handoff request: the most-loaded
+/// live owner over `own + 1` (the steal's pairwise rule, measured on
+/// total load), skipping owners that already have an outstanding request
+/// key — one drain per victim at a time, and contended victims spread
+/// requesters across the fleet. Unlike [`steal_candidate`] there is no
+/// committed-watermark gate: the victim's drain-then-commit manufactures
+/// the resume point, so even a victim holding only never-committed splits
+/// is requestable (the round-counted steal fallback still cannot move
+/// those — worst case degrades exactly to today's wait-for-first-commit).
+pub(crate) fn handoff_victim(
+    splits: &BTreeMap<String, SplitState>,
+    requested: impl Fn(&str) -> bool,
+    instance: &str,
+    own: usize,
+    seed: u64,
+) -> Option<String> {
+    owner_loads(splits, instance)
+        .into_iter()
+        .filter(|(owner, load)| *load > own + 1 && !requested(owner))
+        .max_by_key(|(owner, load)| (*load, stable_hash_str(seed, owner)))
+        .map(|(owner, _)| owner.to_string())
+}
+
+/// Whether an outstanding request against `victim` is still justified:
+/// its total load still exceeds `own + 1`. When this stops holding the
+/// requester withdraws the key and may re-target next round.
+pub(crate) fn handoff_justified(
+    splits: &BTreeMap<String, SplitState>,
+    victim: &str,
+    instance: &str,
+    own: usize,
+) -> bool {
+    owner_loads(splits, instance)
+        .get(victim)
+        .is_some_and(|load| *load > own + 1)
+}
+
+/// The victim's grant decision: hash-pick one held runnable split (the
+/// same tie-break a steal uses), granted only while the pairwise rule
+/// still holds against the requester's *observed* load — a victim that
+/// has since drained down, or a requester that has since been fed, gets
+/// no grant. No committed-watermark gate (see [`handoff_victim`]).
+pub(crate) fn handoff_grant(
+    splits: &BTreeMap<String, SplitState>,
+    owned: impl Fn(&str) -> bool,
+    requester: &str,
+    instance: &str,
+    seed: u64,
+) -> Option<String> {
+    let held: Vec<&str> = splits
+        .iter()
+        .filter(|(id, state)| state.progress.status == SplitStatus::Runnable && owned(id))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let requester_load = owner_loads(splits, instance)
+        .get(requester)
+        .copied()
+        .unwrap_or(0);
+    if held.len() <= requester_load + 1 {
+        return None;
+    }
+    held.into_iter()
+        .max_by_key(|id| stable_hash_str(seed, id))
+        .map(str::to_string)
+}
+
+/// Round-counted fallback trigger — the handoff's only "timer". Rounds
+/// advance on heartbeats, so no clock is read anywhere on this path.
+pub(crate) fn handoff_fallback_due(since_round: u64, round: u64, handoff_rounds: u32) -> bool {
+    round.saturating_sub(since_round) >= u64::from(handoff_rounds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +662,165 @@ mod tests {
         assert!(victim.starts_with("ripe-"), "{victim}");
     }
 
+    /// The cold-start shape again — but a handoff request may name the
+    /// greedy owner even though nothing has committed: the drain
+    /// manufactures the resume point a steal would have to wait for.
+    #[test]
+    fn handoff_victim_ignores_the_committed_watermark_gate() {
+        let states = (0..8)
+            .map(|i| {
+                state(
+                    record(
+                        &format!("s{i}"),
+                        SplitStatus::Runnable,
+                        Some("greedy"),
+                        1,
+                        0,
+                    ),
+                    1,
+                    Some(lease("greedy", "n", 1)),
+                )
+            })
+            .collect();
+        let map = splits(states);
+        assert_eq!(steal_candidate(&map, "me", 0, 7), None);
+        assert_eq!(
+            handoff_victim(&map, |_| false, "me", 0, 7).as_deref(),
+            Some("greedy")
+        );
+    }
+
+    #[test]
+    fn handoff_victim_applies_the_pairwise_rule_on_total_load() {
+        let mut states = vec![];
+        for i in 0..4 {
+            states.push(state(
+                record(
+                    &format!("rich-{i}"),
+                    SplitStatus::Runnable,
+                    Some("rich"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("rich", "n", 1)),
+            ));
+        }
+        states.push(state(
+            record("poor-0", SplitStatus::Runnable, Some("poor"), 1, 0),
+            1,
+            Some(lease("poor", "n", 1)),
+        ));
+        let map = splits(states);
+
+        assert_eq!(
+            handoff_victim(&map, |_| false, "me", 0, 7).as_deref(),
+            Some("rich"),
+            "most-loaded owner"
+        );
+        // Holding 3 against rich's 4: 4 > 3+1 is false — no request.
+        assert_eq!(handoff_victim(&map, |_| false, "me", 3, 7), None);
+        assert!(handoff_justified(&map, "rich", "me", 2));
+        assert!(!handoff_justified(&map, "rich", "me", 3));
+        assert!(
+            !handoff_justified(&map, "gone", "me", 0),
+            "an owner with no observed load never justifies a request"
+        );
+    }
+
+    #[test]
+    fn handoff_victim_skips_victims_already_requested() {
+        let mut states = vec![];
+        for i in 0..5 {
+            states.push(state(
+                record(&format!("a-{i}"), SplitStatus::Runnable, Some("busy"), 1, 0),
+                1,
+                Some(lease("busy", "n", 1)),
+            ));
+        }
+        for i in 0..3 {
+            states.push(state(
+                record(
+                    &format!("b-{i}"),
+                    SplitStatus::Runnable,
+                    Some("second"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("second", "n", 1)),
+            ));
+        }
+        let map = splits(states);
+
+        assert_eq!(
+            handoff_victim(&map, |v| v == "busy", "me", 0, 7).as_deref(),
+            Some("second"),
+            "a requested victim falls through to the next-loaded owner"
+        );
+        assert_eq!(
+            handoff_victim(&map, |_| true, "me", 0, 7),
+            None,
+            "every victim already requested: nothing to write"
+        );
+    }
+
+    #[test]
+    fn handoff_grant_is_hash_picked_and_rechecks_the_pairwise_rule() {
+        let mut states = vec![];
+        for i in 0..4 {
+            states.push(state(
+                record(
+                    &format!("mine-{i}"),
+                    SplitStatus::Runnable,
+                    Some("me"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("me", "n", 1)),
+            ));
+        }
+        let held = |id: &str| id.starts_with("mine-");
+        let map = splits(states.clone());
+
+        // Requester observed holding nothing: grant, deterministic by seed.
+        let picked = handoff_grant(&map, held, "asker", "me", 7).expect("grant");
+        assert!(picked.starts_with("mine-"), "{picked}");
+        assert_eq!(handoff_grant(&map, held, "asker", "me", 7), Some(picked));
+
+        // The requester has since been fed to within one of us: no grant.
+        for i in 0..3 {
+            states.push(state(
+                record(
+                    &format!("theirs-{i}"),
+                    SplitStatus::Runnable,
+                    Some("asker"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("asker", "n", 1)),
+            ));
+        }
+        let map = splits(states);
+        assert_eq!(
+            handoff_grant(&map, held, "asker", "me", 7),
+            None,
+            "4 > 3+1 is false: the imbalance evaporated before the grant"
+        );
+    }
+
+    #[test]
+    fn handoff_fallback_is_counted_in_rounds() {
+        assert!(!handoff_fallback_due(10, 12, 3));
+        assert!(handoff_fallback_due(10, 13, 3));
+        assert!(handoff_fallback_due(10, 100, 3));
+        // A stale since_round ahead of the current round saturates to zero
+        // elapsed rounds rather than wrapping into an instant fallback.
+        assert!(!handoff_fallback_due(20, 10, 3));
+    }
+
     #[test]
     fn working_set_target_caps_fair_share() {
         assert_eq!(target(1000, 4, 8), 8, "capped by max_in_flight");
@@ -669,6 +922,70 @@ mod tests {
             prop_assert!(t <= cap as usize);
             if t < cap as usize {
                 prop_assert!(t * workers >= incomplete);
+            }
+        }
+
+        /// A handoff request is only ever written against a genuinely
+        /// over-loaded, un-requested foreign owner (the steal's pairwise
+        /// discipline, minus the commit gate).
+        #[test]
+        fn handoff_victim_is_pairwise_and_never_self_or_requested(
+            victim_count in 0usize..12,
+            own in 0usize..12,
+            requested in any::<bool>(),
+            seed in any::<u64>(),
+        ) {
+            let states: Vec<SplitState> = (0..victim_count)
+                .map(|i| {
+                    state(
+                        record(&format!("s{i}"), SplitStatus::Runnable, Some("victim"), 1, 0),
+                        1,
+                        Some(lease("victim", "n", 1)),
+                    )
+                })
+                .collect();
+            let map = splits(states);
+            match handoff_victim(&map, |_| requested, "me", own, seed) {
+                Some(victim) => {
+                    prop_assert_eq!(victim.as_str(), "victim");
+                    prop_assert!(victim_count > own + 1);
+                    prop_assert!(!requested);
+                }
+                None => prop_assert!(victim_count <= own + 1 || requested),
+            }
+        }
+
+        /// A grant only picks from the victim's own held runnable set, and
+        /// only while handing one over still narrows the gap.
+        #[test]
+        fn handoff_grant_picks_only_held_splits_under_the_pairwise_rule(
+            held_count in 0usize..12,
+            requester_count in 0usize..12,
+            seed in any::<u64>(),
+        ) {
+            let mut states: Vec<SplitState> = (0..held_count)
+                .map(|i| {
+                    state(
+                        record(&format!("mine-{i}"), SplitStatus::Runnable, Some("me"), 1, 0),
+                        1,
+                        Some(lease("me", "n", 1)),
+                    )
+                })
+                .collect();
+            for i in 0..requester_count {
+                states.push(state(
+                    record(&format!("theirs-{i}"), SplitStatus::Runnable, Some("asker"), 1, 0),
+                    1,
+                    Some(lease("asker", "n", 1)),
+                ));
+            }
+            let map = splits(states);
+            match handoff_grant(&map, |id| id.starts_with("mine-"), "asker", "me", seed) {
+                Some(granted) => {
+                    prop_assert!(granted.starts_with("mine-"));
+                    prop_assert!(held_count > requester_count + 1);
+                }
+                None => prop_assert!(held_count <= requester_count + 1),
             }
         }
 

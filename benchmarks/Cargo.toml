@@ -20,6 +20,9 @@ crossbeam-channel = { workspace = true }
 # licence exceptions it needs are already scoped in deny.toml.
 etl-avro = { workspace = true, features = ["fast"] }
 etl-clickhouse = { workspace = true }
+# `default-features = false` (from the workspace entry) drops the NATS backend:
+# the coordinated rig runs over the in-memory store, no broker.
+etl-coordination = { workspace = true }
 etl-core = { workspace = true }
 etl-json = { workspace = true }
 etl-kafka = { workspace = true }

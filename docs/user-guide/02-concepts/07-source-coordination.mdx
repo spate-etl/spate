@@ -36,14 +36,22 @@ poll intervals.
 **Failures flow back automatically.** A dead worker stops heartbeating;
 its leases expire one TTL later and peers claim them, resuming each split
 from its last committed progress. A worker that is alive but over-loaded
-gets balanced instead: a peer below its share with nothing unclaimed
-steals one split from the most-loaded owner — pairwise, at most one per
-cycle, so ownership converges to ±1 balance at stable load. (As a
-bounded job drains, completions re-arm the rule and a nearly-done split
-can move again; each move re-reads at most one commit interval.) Only a
-split that has committed at least once is stolen: without a resume point
-the new owner would re-read it from the beginning instead of from the
-uncommitted tail, so balancing waits for the first checkpoint.
+gets balanced by consent instead: a peer below its share with nothing
+unclaimed writes a **handoff request** — pairwise, against the
+most-loaded owner, at most one outstanding per victim — and the owner
+answers by draining one split (intake stopped, the emitted tail
+acknowledged, the final watermark committed) and releasing it, so the
+transfer replays nothing. Ownership converges to ±1 balance at stable
+load; as a bounded job drains, completions re-arm the rule and a
+nearly-done split can move again, draining first each time, so churn
+costs latency, not rows. A victim that cannot answer — dead, wedged,
+paused — is covered by the fallback: after `handoff_rounds` heartbeat
+rounds the requester **steals** the lease outright. Only a split that
+has committed at least once can be stolen (without a resume point the
+thief would re-read it from the beginning), and the thief resumes from
+that commit, re-reading at most one commit interval. The embedding
+source's driver services requests automatically; a source that ignores
+them simply degrades to the steal path.
 
 **Commits are fenced.** Every split's durable record carries a
 monotonically increasing epoch, bumped on every ownership change, and a
@@ -58,11 +66,13 @@ swap and a stale plan is never published.
 
 ## Delivery contract
 
-At-least-once, nothing stronger. Ownership handoffs may briefly overlap —
-a taken-over split's uncommitted tail is replayed by the new owner, and a
-zombie may emit records for one commit interval before its next write
-fences. Both produce **duplicates, never loss**. Design target tables to
-tolerate replays, exactly as for a restart.
+At-least-once, nothing stronger. A granted cooperative handoff transfers
+cleanly — the victim drains and commits before releasing — but takeovers
+and fallback steals may briefly overlap ownership: a taken-over split's
+uncommitted tail is replayed by the new owner, and a zombie may emit
+records for one commit interval before its next write fences. Overlaps
+produce **duplicates, never loss**. Design target tables to tolerate
+replays, exactly as for a restart.
 
 ## Poison splits
 
@@ -70,8 +80,8 @@ A split that keeps killing its owners (or that the source explicitly
 reports as unprocessable) consumes a delivery attempt per failed tenancy.
 At the attempt cap it is **quarantined**: parked, visible in the store
 and in `etl_coordination_splits_quarantined`, and never re-offered.
-Graceful releases and rebalance steals consume no attempts — only
-non-graceful ends are poison evidence.
+Graceful releases, cooperative handoffs, and rebalance steals consume no
+attempts — only non-graceful ends are poison evidence.
 
 Quarantine deliberately blocks completion: a bounded job with quarantined
 splits finishes as **stalled**, not complete — declaring success over

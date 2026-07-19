@@ -44,6 +44,14 @@ pub struct CoordinationConfig {
     /// up; steady-state operations are not budgeted — they retry on the
     /// next tick and escalate through lease expiry. Default 8.
     pub startup_max_attempts: u32,
+    /// Heartbeat rounds a cooperative handoff request may stay unanswered
+    /// before this worker falls back to a fenced CAS steal of the
+    /// victim's lease. Rounds advance on heartbeats (a third of the
+    /// lease, jittered) and the first counted round may be partially
+    /// elapsed, so three rounds is *up to* one `lease_duration` — the
+    /// same bound that governs dead-owner takeover; a live victim's drain
+    /// normally finishes well inside one round. Default 3.
+    pub handoff_rounds: u32,
 }
 
 impl Default for CoordinationConfig {
@@ -57,6 +65,7 @@ impl Default for CoordinationConfig {
             replan_interval: Duration::from_secs(60),
             reconcile_interval: Duration::from_secs(30),
             startup_max_attempts: 8,
+            handoff_rounds: 3,
         }
     }
 }
@@ -108,6 +117,13 @@ impl CoordinationConfig {
         if self.startup_max_attempts == 0 {
             return Err(fatal("startup_max_attempts must be >= 1"));
         }
+        if self.handoff_rounds == 0 {
+            return Err(fatal(
+                "handoff_rounds must be >= 1: the fallback steal must give a live victim \
+                 at least one round boundary to answer (the budget spans round \
+                 boundaries, so the first counted round may be partially elapsed)",
+            ));
+        }
         Ok(())
     }
 
@@ -131,6 +147,7 @@ mod tests {
         assert_eq!(config.renew_interval(), Duration::from_secs(10));
         assert_eq!(config.max_attempts, 4);
         assert_eq!(config.max_in_flight, 8);
+        assert_eq!(config.handoff_rounds, 3, "≈ one lease at renew_interval");
     }
 
     #[test]
@@ -186,6 +203,13 @@ mod tests {
                     ..Default::default()
                 },
                 "instance_id",
+            ),
+            (
+                CoordinationConfig {
+                    handoff_rounds: 0,
+                    ..Default::default()
+                },
+                "handoff_rounds",
             ),
         ];
         for (config, needle) in cases {

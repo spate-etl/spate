@@ -47,7 +47,8 @@ mod source;
 pub use backpressure::BackpressureMetrics;
 pub use checkpoint::CheckpointMetrics;
 pub use coordination::{
-    AcquireReason, CoordinationMetrics, ReplanOutcome, SplitLossReason, StoreOp, WriteOutcome,
+    AcquireReason, CoordinationMetrics, HandoffOutcome, ReplanOutcome, SplitLossReason, StoreOp,
+    WriteOutcome,
 };
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
@@ -394,8 +395,13 @@ mod tests {
             coord.set_leader(true);
             coord.set_idle(false);
             coord.acquired(AcquireReason::Expired);
+            coord.acquired(AcquireReason::Handoff);
             coord.lost(SplitLossReason::Fenced);
             coord.released(1);
+            coord.handoff(HandoffOutcome::Requested);
+            coord.handoff(HandoffOutcome::Granted);
+            coord.handoff(HandoffOutcome::Timeout);
+            coord.handoff(HandoffOutcome::Aborted);
             coord.planned(8);
             coord.replan(ReplanOutcome::Noop, Duration::from_millis(20));
             coord.failed();
@@ -423,6 +429,11 @@ mod tests {
             r#"etl_sink_shard_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3"} 0"#,
             r#"etl_checkpoint_commits_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 1"#,
             r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="expired"} 1"#,
+            r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="handoff"} 1"#,
+            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="requested"} 1"#,
+            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="granted"} 1"#,
+            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="timeout"} 1"#,
+            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="aborted"} 1"#,
             r#"etl_coordination_replans_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="noop"} 1"#,
             r#"etl_coordination_writes_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="conflict"} 1"#,
             r#"etl_coordination_leader{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,

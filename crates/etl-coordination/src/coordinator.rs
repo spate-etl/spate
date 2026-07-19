@@ -441,6 +441,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
         let result = self.command(|reply| Command::Release {
             splits: splits.to_vec(),
+            departure: true,
             reply,
         });
         match result {
@@ -487,6 +488,45 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                 Ok(())
             }
         }
+    }
+
+    fn release_handoff(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
+        // A cooperative grant, not a departure: the task keeps this worker
+        // in the fleet even when the last split is handed off. Unlike
+        // `release`, there is NO direct-store teardown fallback — the
+        // process is live, so a grant the task cannot land right now simply
+        // costs a rebalance opportunity (the requester's round budget falls
+        // back to a steal); an unreleased lease expires on its own.
+        let result = self.command(|reply| Command::Release {
+            splits: splits.to_vec(),
+            departure: false,
+            reply,
+        });
+        // Drop from the held set the same way `release` does: the split is
+        // no longer this worker's to hand back at teardown.
+        if let Some(running) = self.running.as_mut() {
+            for split in splits {
+                running.held.remove(split.as_str());
+            }
+        }
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "handoff release deferred; the lease expires if it never lands");
+        }
+        Ok(())
+    }
+
+    fn decline_handoff(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
+        // Best-effort: a decline the task never hears costs liveness only
+        // (its grant slot self-heals once the requester withdraws or the
+        // fallback fences it), never correctness.
+        let result = self.command(|reply| Command::DeclineHandoff {
+            split: split.clone(),
+            reply,
+        });
+        if let Err(e) = &result {
+            tracing::warn!(split = %split, error = %e, "handoff decline deferred; the grant slot self-heals");
+        }
+        Ok(())
     }
 }
 

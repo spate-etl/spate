@@ -182,33 +182,45 @@ global byte budget, not the queue, is the intended smoothing buffer.
 
 That "keep it small" is measured — see
 [Chunk sizing](../../benchmarks/chunk-sizing.mdx) — but it is a genuine trade,
-not a free default. The queue bounds the latency of whatever sits in it, so a
-deeper queue means a chunk waits longer before a shard worker ever sees it. The
-default holds the best flush p99 by an order of magnitude; a deep queue can be
-worth tens of percent of throughput on a saturated pipeline.
+not a free default, and **its price depends on whether your sink is the
+constraint.** Depth raised throughput in every regime measured, by 46% to 92%.
+What changes is what you pay for it:
 
-The curve is **not** smooth, so choose an end of it rather than a middle: the
-first step up from the default costs nearly all of the latency for almost none
-of the throughput, while the deepest settings recover the throughput for
-comparatively little more. Stay at the default for latency-sensitive pipelines;
-if throughput dominates, go well past the next step up rather than nudging.
+| Your sink | Throughput from depth | Flush p99 cost |
+|---|---|---|
+| **Saturated** — it is the bottleneck | +46% at capacity 1024 | ~10× |
+| **Has headroom** — something upstream limits you | +86% by capacity 64 | none measured |
 
-:::note[A full queue does not always mean the sink is slow]
-The queue-full trigger is **rate-driven as well as capacity-driven**. It fires
-whenever chunks arrive faster than a shard worker can service them — which can
-happen while the sink itself has plenty of headroom, purely because the chain
-is producing many small chunks. Measured against a null writer that completes
-instantly (no sink slowness by construction), a fast chain still drove hundreds
-of pause events at the default chunk target, and raising
-`ChunkConfig::target_bytes` removed them entirely.
+Against a saturated sink the curve is **not** smooth, so choose an end of it
+rather than a middle: the first step up costs nearly all of the latency for
+almost none of the throughput, while the deepest settings recover the throughput
+for comparatively little more. Where the sink has headroom there is no such
+trade — flush p99 held flat across the whole 8-to-512 range, because the queue
+never filled deeply enough to add any, and the shallow default was simply
+throttling a server with room to spare.
 
-The operational consequence: **a high `etl_backpressure_pause_events_total` is
-not by itself a misconfiguration.** In the measurements behind
-[Chunk sizing](../../benchmarks/chunk-sizing.mdx) the *best-latency*
-configuration also had the *most* pauses. Read pause counts together with
-`etl_sink_flush_duration_seconds` and sink throughput before tuning against
-them — and if pauses are high while the sink is demonstrably idle, reach for
-chunk size, not queue capacity.
+The default stays at 8 because a shallow queue fails in the direction that is
+easier to diagnose — under-using a fast sink, rather than hiding a slow one
+behind a buffer. That is a defensive choice, not a free one.
+
+:::note[Which regime am I in?]
+Read `etl_backpressure_pause_events_total` **together with**
+`etl_sink_flush_duration_seconds`:
+
+- **Pauses high, flush p99 flat and low** → the queue is throttling a sink that
+  has headroom. Raise `queue_capacity` and watch the pauses reach zero.
+- **Pauses high, flush p99 high** → the sink is genuinely behind. Depth will buy
+  throughput but cost latency; add shards or `inflight.max_per_shard` instead.
+
+**A high pause count is not by itself a misconfiguration.** Against a saturated
+sink the *best-latency* configuration also had the *most* pauses.
+
+Earlier revisions of this page described the trigger as *rate-driven as well as
+capacity-driven*, and told you to reach for chunk size when pauses were high
+while the sink was idle. Both were wrong. An iso-buffer re-run — same queued
+bytes, different seal size — put the pause count at zero for the small-chunk
+arm, so the trigger tracks **queued bytes**, and `queue_capacity` is the lever,
+not `ChunkConfig::target_bytes`.
 :::
 
 ## Checkpointing: `checkpoint.*`

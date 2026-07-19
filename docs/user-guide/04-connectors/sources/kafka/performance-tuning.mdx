@@ -216,24 +216,60 @@ partition queues the pipeline polls, so you cannot change it either way.
 Advice to disable both for throughput is written for the Java client, where
 `check.crcs` defaults to true. There is nothing to win.
 
-## Threads: do not add them for the source
+## Threads: size them for the chain, not the source
 
 Partitions map onto pipeline threads as lanes
 ([Lanes](./README.mdx#lanes-partitions-on-pipeline-threads)), so raising
-`pipeline.threads` looks like it should speed up consumption. For a single
-consumer instance it does the opposite — draining one client's partition queues
-from several threads contends inside librdkafka, and the
+`pipeline.threads` looks like it should speed up consumption. **For the fetch
+path alone it does the opposite** — draining one client's partition queues from
+several threads contends inside librdkafka, and the
 [measured curve](../../../../benchmarks/kafka-topology.mdx#source-ceiling-what-actually-sets-it-2026-07)
 falls monotonically from one thread to eight at both message sizes: 5.15M to
 2.06M msg/s at 64 B, 5.18M to 2.71M at 256 B.
+
+That curve was measured with **no chain work at all** — threads spinning on
+`poll()` and discarding, which is maximal contention and the one regime where
+threads cannot pay. Real pipelines decode, transform and encode between polls,
+and the picture inverts as soon as they do. Sweeping per-record work at 1 KiB
+messages, 1→8 thread scaling:
+
+| Per-record work | 1→8 threads |
+|---|---|
+| 0 µs (fetch path alone) | **0.83×** |
+| 2 µs | 2.57× |
+| 5 µs | 5.02× |
+| 20 µs | **7.16×** — 89% of linear |
+
+The transferable number is the contention itself: draining one client from eight
+threads costs a roughly **constant 2.4–3 µs per record per thread**, converging
+as work rises. So thread efficiency is approximately:
+
+```text
+efficiency ≈ work / (work + ~2.8 µs)
+```
+
+Worked example: simd-json on ~900 B records is roughly 1–3 µs including encode,
+which predicts 26–52% efficiency — eight threads buying about 2–4× of one, with
+the knee near **four threads**. The measured 2 µs arm agrees at 2.57×. The knee
+moves right as per-record work grows; at 20 µs it is past eight.
 
 While prefetch is shallow, thread count barely moves at all: a starved source
 is waiting on the broker, not on CPU. That flatness is itself a useful
 diagnostic — **if adding threads changes nothing, you are fetch-bound, not
 CPU-bound.**
 
-Size `pipeline.threads` for what your **chain and sink** need — deserialization,
-transforms, and encoding are what genuinely parallelize.
+So size `pipeline.threads` for what your **chain and sink** need —
+deserialization, transforms and encoding are what genuinely parallelize — and
+expect diminishing returns from the fetch path, not a cliff.
+
+:::note[More clients in one process is not the answer]
+`MODE=perthread` — several `BaseConsumer`s in one process instead of one client
+with several drain threads — wins only while fetch-bound (+108% at four threads
+with no work) and loses heavily once work is present (−56% at 5 µs). This says
+nothing about **replicas**: separate pods do not share a NIC, a page cache or a
+CPU, and a single-box rig cannot measure that. See
+[More replicas](#when-you-have-run-out-of-vertical-headroom).
+:::
 
 ## When you have run out of vertical headroom
 

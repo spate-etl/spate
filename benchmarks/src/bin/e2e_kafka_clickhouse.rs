@@ -31,6 +31,25 @@
 //! which is now derived per arm from the DESIGN.md sizing rule rather than left
 //! at the default.
 //!
+//! CHUNK_KIB (64) is the terminal stage's seal size — `ChunkConfig::target_bytes`.
+//! The default mirrors `ChunkConfig::default()`, so an unqualified arm measures
+//! the shipped path; the knob exists so the size can be swept against a real
+//! deserializer and a real sink, which is what judging that default needs. It
+//! feeds the in-flight budget derivation too (the queued term is `QUEUE_CAP x
+//! chunk_target`), so a larger arm is provisioned rather than being charged for
+//! backpressure the sizing rule was meant to prevent. It rides in the variant
+//! map **only when swept off the default** — the published charts select on
+//! `deser`/`format` alone, so an unconditional key would split default-chunk
+//! arms from the committed records into duplicate bars.
+//!
+//! One consequence to know before charting: because the default arm omits the
+//! key, `chunk_kib` cannot be used as a `BenchBars` **category** for this rig —
+//! the 64 KiB arm has nothing to group on and renders as an `undefined` bar.
+//! Sweeps that need a chunk axis should either chart the paired `queue_cap`
+//! (bijective under the iso-buffer construction) or tabulate the result. The
+//! synthetic rig records `chunk_kib` unconditionally and has no such
+//! restriction.
+//!
 //! Source-bound arm — the shape in which this rig can say something about the
 //! Kafka source rather than the sink. ENGINE (MergeTree|Null) takes the sink
 //! out of the way; LOAD (concurrent|prefill) fills the topic up front and runs
@@ -136,6 +155,11 @@ struct Meta {
     shards: usize,
     io_threads: usize,
     queue_cap: usize,
+    /// Terminal-stage chunk seal size, in KiB. The framework default is 64
+    /// (`ChunkConfig::default`); this rig exposes it so the size can be swept
+    /// against a real deserializer and a real sink, which is what deciding the
+    /// default needs — the synthetic rig has neither.
+    chunk_kib: u64,
     queued_min_messages: u64,
     /// Messages the topic must hold before a `prefill` run starts.
     prefill: u64,
@@ -151,6 +175,18 @@ struct Meta {
     /// Which broker implementation served the run — identity-defining for a
     /// source measurement, so it rides in the variant map.
     broker: String,
+}
+
+impl Meta {
+    /// The terminal stage's chunk tuning for this arm. `ChunkConfig` is `Copy`,
+    /// so the returned value can be bound once and moved into each per-thread
+    /// chain closure.
+    fn chunk_config(&self) -> ChunkConfig {
+        ChunkConfig {
+            target_bytes: (self.chunk_kib * 1024) as usize,
+            ..ChunkConfig::default()
+        }
+    }
 }
 
 fn producer(brokers: &str) -> BaseProducer {
@@ -331,15 +367,25 @@ fn derive_egress(egress: &str, threads: usize) -> (usize, usize) {
 /// how large a batch gets.
 const BATCH_MAX_ROWS: u64 = 262_144;
 
+/// Mirrors `ChunkConfig::default().target_bytes`. An arm left at this value
+/// omits the `chunk_kib` variant key so it stays identity-compatible with the
+/// committed dataset; asserted against the framework at startup so a change to
+/// the shipped default cannot silently desync the two.
+const DEFAULT_CHUNK_KIB: u64 = 64;
+
 /// The DESIGN.md in-flight sizing rule, applied per arm rather than left at the
 /// framework default. At `EGRESS=fixed` this derives below the 256 MiB floor and
 /// clamps to it — i.e. the published arms keep exactly the budget they had.
-fn derive_budget_mib(shards: usize, queue_cap: usize, row_bytes: u64) -> u64 {
-    const CHUNK_TARGET: u64 = 64 * 1024;
+///
+/// `chunk_target` is the arm's actual seal size, not a constant: the queued
+/// term it feeds is `queue_cap x chunk_target`, so pinning it to 64 KiB while
+/// sweeping the seal size would under-provision every larger arm and charge the
+/// chunk size for backpressure the sizing rule was supposed to prevent.
+fn derive_budget_mib(shards: usize, queue_cap: usize, row_bytes: u64, chunk_target: u64) -> u64 {
     const INFLIGHT_PER_SHARD: u64 = 2;
     let batch_bytes = BATCH_MAX_ROWS * row_bytes;
     let pending =
-        shards as u64 * (INFLIGHT_PER_SHARD * batch_bytes + queue_cap as u64 * CHUNK_TARGET);
+        shards as u64 * (INFLIGHT_PER_SHARD * batch_bytes + queue_cap as u64 * chunk_target);
     // DESIGN.md: budget x low_ratio >= 2 x pending. At the default low_ratio
     // of 0.5 that is budget >= 4 x pending — the 2x headroom term and the
     // division by the ratio, not 2x on its own.
@@ -560,6 +606,17 @@ fn spawn_and_measure<MK>(
     } else {
         rep.variant("events", meta.records_per_input)
     };
+    // Recorded only when swept away from the shipped `ChunkConfig::default()`.
+    // The committed dataset predates this knob, and the published charts
+    // (`docs/benchmarks/avro-fast-pipeline.mdx`) select on `deser`/`format`
+    // alone — an unconditional key would give every new default-chunk arm a
+    // variant identity the committed records lack, and the site would render
+    // the two as duplicate bars in one category rather than aggregating them.
+    // Same reasoning as `queued_min_messages`: the unqualified arm must stay
+    // identity-compatible with what production actually ships.
+    if meta.chunk_kib != DEFAULT_CHUNK_KIB {
+        rep = rep.variant("chunk_kib", meta.chunk_kib);
+    }
     rep = rep
         .metric(
             "rows_per_s",
@@ -714,7 +771,12 @@ fn run_raw(conn: &Conn, topic: &str, partitions: i32, threads: usize, meta: Meta
     // `id` (u64) plus the RowBinary-encoded `body`: a varint length and the
     // payload bytes. `produce` emits ASCII, so a byte in is a byte out — the
     // earlier 0xAB payloads went through `from_utf8_lossy` and tripled.
-    let budget_mib = derive_budget_mib(meta.shards, meta.queue_cap, payload as u64 + 16);
+    let budget_mib = derive_budget_mib(
+        meta.shards,
+        meta.queue_cap,
+        payload as u64 + 16,
+        meta.chunk_kib * 1024,
+    );
     let config = pipeline_config(
         threads,
         meta.io_threads,
@@ -743,6 +805,7 @@ fn run_raw(conn: &Conn, topic: &str, partitions: i32, threads: usize, meta: Meta
             .parse::<u64>()
             .unwrap_or(0)
     };
+    let chunk_cfg = meta.chunk_config();
     spawn_and_measure(
         config,
         source,
@@ -753,7 +816,7 @@ fn run_raw(conn: &Conn, topic: &str, partitions: i32, threads: usize, meta: Meta
             chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics("bench-e2e", "main")
                 .map(parse_row)
-                .sink(enc.clone(), KeyHashRouter, ChunkConfig::default(), q, b)
+                .sink(enc.clone(), KeyHashRouter, chunk_cfg, q, b)
                 .build()
         },
         &meta,
@@ -815,7 +878,7 @@ fn run_avro(
         .enable_all()
         .build()
         .expect("io runtime");
-    let budget_mib = derive_budget_mib(meta.shards, meta.queue_cap, 48);
+    let budget_mib = derive_budget_mib(meta.shards, meta.queue_cap, 48, meta.chunk_kib * 1024);
     let config = pipeline_config(
         threads,
         meta.io_threads,
@@ -856,6 +919,7 @@ fn run_avro(
         ("fast_borrowed", "native") => {
             let d = builder.build_fast::<BatchFam>().expect("fast_borrowed");
             let e = NativeEncoder::<EventFam>::new(avro_batch::native_schema());
+            let chunk_cfg = meta.chunk_config();
             spawn_and_measure(
                 config,
                 source,
@@ -867,7 +931,7 @@ fn run_avro(
                         .with_metrics("bench-e2e", "main")
                         .flat_map::<EventFam, _>(explode_borrowed)
                         .filter(keep_borrowed)
-                        .sink(e.clone(), KeyHashRouter, ChunkConfig::default(), q, b)
+                        .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
                         .build()
                 },
                 &meta,
@@ -880,6 +944,7 @@ fn run_avro(
         ("fast_borrowed", _) => {
             let d = builder.build_fast::<BatchFam>().expect("fast_borrowed");
             let e = ClickHouseEncoder::<EventFam>::new();
+            let chunk_cfg = meta.chunk_config();
             spawn_and_measure(
                 config,
                 source,
@@ -891,7 +956,7 @@ fn run_avro(
                         .with_metrics("bench-e2e", "main")
                         .flat_map::<EventFam, _>(explode_borrowed)
                         .filter(keep_borrowed)
-                        .sink(e.clone(), KeyHashRouter, ChunkConfig::default(), q, b)
+                        .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
                         .build()
                 },
                 &meta,
@@ -998,6 +1063,7 @@ fn run_owned_native<D>(
     D: etl_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
 {
     let e = NativeEncoder::<Owned<SensorEventOwned>>::new(avro_batch::native_schema());
+    let chunk_cfg = meta.chunk_config();
     spawn_and_measure(
         config,
         source,
@@ -1009,7 +1075,7 @@ fn run_owned_native<D>(
                 .with_metrics("bench-e2e", "main")
                 .flat_map::<Owned<SensorEventOwned>, _>(explode_owned)
                 .filter(keep_owned)
-                .sink(e.clone(), KeyHashRouter, ChunkConfig::default(), q, b)
+                .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
                 .build()
         },
         meta,
@@ -1038,6 +1104,7 @@ fn run_owned_rowbinary<D>(
     D: etl_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
 {
     let e = ClickHouseEncoder::<Owned<SensorEventOwned>>::new();
+    let chunk_cfg = meta.chunk_config();
     spawn_and_measure(
         config,
         source,
@@ -1049,7 +1116,7 @@ fn run_owned_rowbinary<D>(
                 .with_metrics("bench-e2e", "main")
                 .flat_map::<Owned<SensorEventOwned>, _>(explode_owned)
                 .filter(keep_owned)
-                .sink(e.clone(), KeyHashRouter, ChunkConfig::default(), q, b)
+                .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
                 .build()
         },
         meta,
@@ -1078,6 +1145,14 @@ fn main() {
     let shards = env_u64("SHARDS", derived_shards as u64) as usize;
     let io_threads = env_u64("IO_THREADS", derived_io as u64) as usize;
     let queue_cap = env_u64("QUEUE_CAP", 8) as usize;
+    // An unqualified arm measures exactly what the framework ships.
+    assert_eq!(
+        ChunkConfig::default().target_bytes,
+        (DEFAULT_CHUNK_KIB * 1024) as usize,
+        "DEFAULT_CHUNK_KIB no longer mirrors ChunkConfig::default(); the \
+         conditional chunk_kib variant would mislabel arms"
+    );
+    let chunk_kib = env_u64("CHUNK_KIB", DEFAULT_CHUNK_KIB);
     // 0 = set nothing, which is what the connector ships: `etl-kafka` pins no
     // prefetch depth, so librdkafka's default applies. Defaulting to a number
     // would make every unqualified arm measure a depth production never uses.
@@ -1135,6 +1210,7 @@ fn main() {
             shards,
             io_threads,
             queue_cap,
+            chunk_kib,
             queued_min_messages,
             prefill,
             prefill_backlog: 0,
@@ -1159,6 +1235,7 @@ fn main() {
             shards,
             io_threads,
             queue_cap,
+            chunk_kib,
             queued_min_messages,
             prefill,
             prefill_backlog: 0,

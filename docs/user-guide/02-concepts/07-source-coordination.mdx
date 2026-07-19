@@ -38,7 +38,12 @@ its leases expire one TTL later and peers claim them, resuming each split
 from its last committed progress. A worker that is alive but over-loaded
 gets balanced instead: a peer below its share with nothing unclaimed
 steals one split from the most-loaded owner — pairwise, at most one per
-cycle, so ownership converges to ±1 balance and never oscillates.
+cycle, so ownership converges to ±1 balance at stable load. (As a
+bounded job drains, completions re-arm the rule and a nearly-done split
+can move again; each move re-reads at most one commit interval.) Only a
+split that has committed at least once is stolen: without a resume point
+the new owner would re-read it from the beginning instead of from the
+uncommitted tail, so balancing waits for the first checkpoint.
 
 **Commits are fenced.** Every split's durable record carries a
 monotonically increasing epoch, bumped on every ownership change, and a

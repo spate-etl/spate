@@ -504,6 +504,19 @@ impl CoordinationDriver {
                 }
             }
             CoordinationEvent::AllComplete => {
+                // A worker can watch a whole bounded job complete without
+                // ever holding a split: the job finished before this
+                // instance's first rebalance window (short bounded job),
+                // or the fleet simply has more replicas than splits.
+                // Normal either way — but without a line here it reads as
+                // a silent no-op instance, so say what happened.
+                if self.next_partition == 0 {
+                    tracing::info!(
+                        "coordinated job completed without this instance holding any split — \
+                         the job finished before this instance's first rebalance window, or \
+                         the fleet has more replicas than splits (see the scaling-out guide)"
+                    );
+                }
                 self.all_complete = true;
             }
             CoordinationEvent::Stalled {

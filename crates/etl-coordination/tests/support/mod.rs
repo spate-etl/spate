@@ -215,6 +215,24 @@ pub fn drive(
     }
 }
 
+/// Commit a first watermark for everything a worker holds — what a
+/// running data plane does at its first checkpoint.
+///
+/// Tests that expect a **steal** must call this: a split with no
+/// committed progress has no resume point, so the protocol refuses to
+/// move it (taking it would replay the split in full rather than the one
+/// commit interval a steal is meant to cost). A `Fenced` commit is normal
+/// here — the lease may legitimately have moved — and is ignored.
+pub fn commit_held(coordinator: &mut impl SplitCoordinator, held: &Held) {
+    for id in held.splits.keys() {
+        match coordinator.commit(&split_id(id), &SplitProgress::new(1, vec![])) {
+            Ok(()) => {}
+            Err(e) if e.kind == etl_coordination::CoordinationErrorKind::Fenced => {}
+            Err(e) => panic!("commit failed: {e}"),
+        }
+    }
+}
+
 /// Drive two workers together until `done`. Panics on the deadline.
 pub fn drive_pair<C: SplitCoordinator>(
     a: (&mut C, &mut Held),

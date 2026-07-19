@@ -170,20 +170,36 @@ fn kind_of(entry: &(String, ClaimAction, u64, u64)) -> ClaimKind {
 /// Pick one split to steal when below target with nothing claimable: a
 /// hash-picked split of the most-loaded live owner holding **at least two
 /// more than this worker** (pairwise improvement — the transfer strictly
-/// narrows the gap, so ownership converges to ±1 balance and can never
-/// oscillate). The rule is deliberately *not* `victim > fair share`: fair
+/// narrows the gap, so at stable load ownership converges to ±1 balance
+/// without oscillating; as a bounded job drains, each completion shrinks
+/// an owner's count and can re-license a move of the same nearly-done
+/// split — bounded churn, total moves bounded by the number of
+/// completions, each hop costing at most one commit interval under the
+/// committed-watermark rule below). The rule is deliberately *not*
+/// `victim > fair share`: fair
 /// share is computed from visible lease holders, and a worker holding
 /// nothing is invisible in them — under a fair-share gate, workers joining
 /// an at-equilibrium fleet would starve. The steal is a CAS like any
-/// claim — the victim keeps working until its next write fences, so the
-/// duplicate window is bounded by one commit interval.
+/// claim — the victim keeps working until its next write fences.
+///
+/// Only splits that have **committed at least once** are movable. A split
+/// still at `watermark: None` has no resume point, so taking it would
+/// replay it from the start — the whole split, not the one commit interval
+/// this transfer is supposed to cost. Waiting for its first commit bounds
+/// every steal by that interval; the cost is that a freshly-claimed fleet
+/// rebalances one checkpoint tick later than it otherwise would. A split
+/// that never commits is never stolen, which is harmless: it is making no
+/// progress, and a thief resuming it from zero would make none either.
+/// Owner *death* is unaffected — that path is a claim (`ClaimKind::Expired`
+/// via lease expiry), not a steal.
 pub(crate) fn steal_candidate(
     splits: &BTreeMap<String, SplitState>,
     instance: &str,
     own: usize,
     seed: u64,
 ) -> Option<String> {
-    let mut held_by: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Per owner: total runnable load, and the subset cheap enough to move.
+    let mut held_by: HashMap<&str, (usize, Vec<&str>)> = HashMap::new();
     for (id, state) in splits {
         if state.progress.status != SplitStatus::Runnable || state.spec.is_none() {
             continue;
@@ -191,14 +207,24 @@ pub(crate) fn steal_candidate(
         if let Some((lease, _)) = &state.lease
             && lease.owner != instance
         {
-            held_by.entry(lease.owner.as_str()).or_default().push(id);
+            let held = held_by.entry(lease.owner.as_str()).or_default();
+            held.0 += 1;
+            if state.progress.watermark.is_some() {
+                held.1.push(id);
+            }
         }
     }
-    let (_, victims) = held_by
+    let (_, (_, victims)) = held_by
         .into_iter()
-        .filter(|(_, held)| held.len() > own + 1)
+        // Imbalance is measured on TOTAL load, never on the movable subset:
+        // undercounting a loaded owner would suppress a legitimate steal.
+        // An owner with nothing movable is skipped rather than ending the
+        // search, so a less-loaded owner can still give one up — the
+        // pairwise rule holds for any owner over `own + 1`, so convergence
+        // is unchanged.
+        .filter(|(_, (load, movable))| *load > own + 1 && !movable.is_empty())
         // Most-loaded victim; owner-name hash breaks ties deterministically.
-        .max_by_key(|(owner, held)| (held.len(), stable_hash_str(seed, owner)))?;
+        .max_by_key(|(owner, (load, _))| (*load, stable_hash_str(seed, owner)))?;
     victims
         .into_iter()
         .max_by_key(|id| stable_hash_str(seed, id))
@@ -232,6 +258,13 @@ mod tests {
             completed: false,
             written_at_ms: now_ms(),
         }
+    }
+
+    /// Mark a progress record as having committed once — the precondition
+    /// for a split to be stealable.
+    fn committed(mut progress: SplitProgressRecord) -> SplitProgressRecord {
+        progress.watermark = Some(0);
+        progress
     }
 
     fn spec_record(id: &str, weight: u64) -> SplitSpecRecord {
@@ -408,19 +441,19 @@ mod tests {
         let mut states = vec![];
         for i in 0..4 {
             states.push(state(
-                record(
+                committed(record(
                     &format!("rich-{i}"),
                     SplitStatus::Runnable,
                     Some("rich"),
                     1,
                     0,
-                ),
+                )),
                 1,
                 Some(lease("rich", "n", 1)),
             ));
         }
         states.push(state(
-            record("poor-0", SplitStatus::Runnable, Some("poor"), 1, 0),
+            committed(record("poor-0", SplitStatus::Runnable, Some("poor"), 1, 0)),
             1,
             Some(lease("poor", "n", 1)),
         ));
@@ -434,6 +467,105 @@ mod tests {
         assert_eq!(steal_candidate(&map, "me", 3, 7), None);
         // The pairwise rule, not fair share: holding 2, rich's 4 > 3.
         assert!(steal_candidate(&map, "me", 2, 7).is_some());
+    }
+
+    /// The cold-start shape: one worker claims the whole plan before its
+    /// peer announces presence. None of it has committed yet, so every
+    /// split would replay in full if taken — the newcomer waits instead.
+    #[test]
+    fn an_uncommitted_split_is_never_stolen() {
+        let states = (0..8)
+            .map(|i| {
+                state(
+                    record(
+                        &format!("s{i}"),
+                        SplitStatus::Runnable,
+                        Some("greedy"),
+                        1,
+                        0,
+                    ),
+                    1,
+                    Some(lease("greedy", "n", 1)),
+                )
+            })
+            .collect();
+        let map = splits(states);
+        assert_eq!(
+            steal_candidate(&map, "me", 0, 7),
+            None,
+            "a split with no resume point must not move"
+        );
+    }
+
+    /// Imbalance is measured on the owner's TOTAL load, but only a
+    /// committed split is handed over.
+    #[test]
+    fn imbalance_counts_every_split_but_only_committed_ones_move() {
+        let mut states = vec![];
+        for i in 0..7 {
+            states.push(state(
+                record(
+                    &format!("raw-{i}"),
+                    SplitStatus::Runnable,
+                    Some("big"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("big", "n", 1)),
+            ));
+        }
+        states.push(state(
+            committed(record("ripe", SplitStatus::Runnable, Some("big"), 1, 0)),
+            1,
+            Some(lease("big", "n", 1)),
+        ));
+        let map = splits(states);
+
+        // Load is 8 (not 1): holding 3, 8 > 4 — the steal is legitimate,
+        // and the one committed split is the only thing that can move.
+        assert_eq!(steal_candidate(&map, "me", 3, 7).as_deref(), Some("ripe"));
+        // The pairwise rule still gates on that full load of 8.
+        assert_eq!(steal_candidate(&map, "me", 7, 7), None);
+    }
+
+    /// An owner with nothing movable does not end the search — a less
+    /// loaded owner that has committed can still give one up.
+    #[test]
+    fn a_victim_with_nothing_movable_falls_through_to_the_next() {
+        let mut states = vec![];
+        for i in 0..5 {
+            states.push(state(
+                record(
+                    &format!("raw-{i}"),
+                    SplitStatus::Runnable,
+                    Some("fresh"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("fresh", "n", 1)),
+            ));
+        }
+        for i in 0..3 {
+            states.push(state(
+                committed(record(
+                    &format!("ripe-{i}"),
+                    SplitStatus::Runnable,
+                    Some("settled"),
+                    1,
+                    0,
+                )),
+                1,
+                Some(lease("settled", "n", 1)),
+            ));
+        }
+        let map = splits(states);
+
+        // "fresh" is the most loaded (5 > 3) but has nothing committed;
+        // the steal falls through to "settled".
+        let victim = steal_candidate(&map, "me", 0, 7).expect("steal");
+        assert!(victim.starts_with("ripe-"), "{victim}");
     }
 
     #[test]
@@ -547,10 +679,13 @@ mod tests {
             own in 0usize..12,
             seed in any::<u64>(),
         ) {
+            // Committed throughout: this property is about the pairwise
+            // convergence rule, not the commit gate that decides whether a
+            // split is movable at all (covered by the unit tests above).
             let states: Vec<SplitState> = (0..victim_count)
                 .map(|i| {
                     state(
-                        record(&format!("s{i}"), SplitStatus::Runnable, Some("victim"), 1, 0),
+                        committed(record(&format!("s{i}"), SplitStatus::Runnable, Some("victim"), 1, 0)),
                         1,
                         Some(lease("victim", "n", 1)),
                     )

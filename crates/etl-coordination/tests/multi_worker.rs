@@ -28,16 +28,28 @@ fn racing_workers_partition_the_splits_and_complete_collectively() {
     let (mut held_a, mut held_b) = (Held::default(), Held::default());
 
     // Converge to a full, disjoint 4/4 partition (target = ceil(8/2)).
-    drive_pair(
-        (&mut a, &mut held_a),
-        (&mut b, &mut held_b),
-        "waiting for a full disjoint partition",
-        |ha, hb| {
-            ha.splits.len() + hb.splits.len() == ids.len()
-                && ha.splits.keys().all(|k| !hb.splits.contains_key(k))
-                && ha.splits.len() == 4
-        },
-    );
+    //
+    // Each round also checkpoints whatever each worker holds, standing in
+    // for a running data plane. That is load-bearing, not decoration: a
+    // split with no committed progress has no resume point and is
+    // deliberately not stealable, so if one worker wins the whole plan
+    // before its peer announces presence, only a commit makes the
+    // rebalance possible.
+    let deadline = Instant::now() + support::DEADLINE;
+    while !(held_a.splits.len() + held_b.splits.len() == ids.len()
+        && held_a.splits.keys().all(|k| !held_b.splits.contains_key(k))
+        && held_a.splits.len() == 4)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "timed out: waiting for a full disjoint partition"
+        );
+        for (coordinator, held) in [(&mut a, &mut held_a), (&mut b, &mut held_b)] {
+            held.fold(coordinator.poll().unwrap());
+            support::commit_held(coordinator, held);
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
     // Settle: drain any steal still in flight from the pre-balance era,
     // then re-check — a balanced fleet must hold its assignment.
     let settle_until = Instant::now() + LEASE * 2;
@@ -53,9 +65,19 @@ fn racing_workers_partition_the_splits_and_complete_collectively() {
     // Commits tolerate `Fenced`: a lease can legally move between the
     // snapshot and the write (e.g. a takeover after a scheduling stall) —
     // at-least-once means the NEW owner completes it instead, and the
-    // fleet still converges. Every fresh split carries no prior progress.
-    assert!(held_a.splits.values().all(|(_, p)| p.is_none()));
-    assert!(held_b.splits.values().all(|(_, p)| p.is_none()));
+    // fleet still converges.
+    //
+    // A split gained fresh carries no progress; one that moved during
+    // convergence carries the checkpoint its previous owner committed —
+    // that resume point is precisely what bounds a steal's replay, so
+    // seeing it here is the fix working, not a leak.
+    for held in [&held_a, &held_b] {
+        for (_, progress) in held.splits.values() {
+            if let Some(progress) = progress {
+                assert_eq!(progress.watermark, 1, "carried progress is the checkpoint");
+            }
+        }
+    }
     let deadline = Instant::now() + support::DEADLINE;
     while !(held_a.all_complete && held_b.all_complete) {
         assert!(Instant::now() < deadline, "collective completion timed out");
@@ -438,6 +460,11 @@ fn a_newcomer_steals_from_a_loaded_worker() {
     drive(&mut a, &mut held_a, "A claiming everything", |h| {
         h.splits.len() == 4
     });
+
+    // The data plane checkpoints: only now is the work resumable, and so
+    // only now is it cheap enough to move. Before this, a steal would
+    // replay each split from the start.
+    support::commit_held(&mut a, &held_a);
 
     // A newcomer with nothing claimable must steal toward balance: the
     // pairwise rule converges to a 2/2 split.

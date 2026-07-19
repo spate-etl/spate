@@ -114,6 +114,47 @@ replica claims unowned splits first, then steals — one split at a time,
 from the most-loaded worker — until balanced. A scaled-down replica's
 released splits are claimed within milliseconds.
 
+### What a rebalance costs {#what-a-rebalance-costs}
+
+A steal moves a split whose owner is still working on it, so the new
+owner resumes from the last **committed** watermark and re-reads whatever
+came after it. That is why only a split that has committed at least once
+is ever stolen: one that has not has no resume point, and moving it would
+re-read the split from the beginning rather than the tail.
+
+So the cost of one steal is bounded by one commit interval
+(`checkpoint.interval`), and the cost of a rebalance is that times the
+number of splits that move — up to the joining replica's fair share.
+Lower `checkpoint.interval` to shrink it.
+
+The trade is that a freshly-claimed fleet rebalances one commit interval
+later than it otherwise would: until the first checkpoint lands there is
+nothing cheap to move. This only delays *stealing*, never claiming — a
+replica always takes unowned splits immediately — so it is visible only
+when one worker already holds the entire plan, which means the plan is
+smaller than a single worker's `max_in_flight`.
+
+### When a rebalance happens {#when-a-rebalance-happens}
+
+A replica that joins with nothing claimable rebalances only once three
+things line up: it has observed the fleet, it wins a steal opportunity
+(workers deliberately skip about half their steal rounds to avoid
+herding, and a round is roughly a third of `lease_duration`, jittered),
+and a committed
+watermark exists to resume from (the first checkpoint). A bounded job
+that completes inside that window finishes on the instance that claimed
+it — with zero replay, which for a short job is the cheapest outcome
+available, not a scheduling failure. Instances only genuinely share a
+job whose runtime spans several lease-and-checkpoint cycles; if sharing
+short jobs matters more than replay, shrink `lease_duration` and
+`checkpoint.interval` rather than adding replicas.
+
+Near the end of a bounded job the balance re-arms as splits complete, so
+a nearly-done split can move more than once before it finishes, each
+move re-reading at most one commit interval. Duplicate totals over a
+whole job are therefore a few commit intervals of rows, not necessarily
+one.
+
 ## Tuning
 
 | Knob | Default | Meaning |
@@ -141,7 +182,7 @@ because object sizes vary wildly between prefixes.
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. |
 | NATS unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
 | Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `etl_coordination_splits_quarantined`. |
-| Scale-up | New replicas claim unowned work, then steal pairwise toward ±1 balance. Stolen splits replay at most one commit interval. |
+| Scale-up | New replicas claim unowned work, then steal pairwise toward ±1 balance. Only a split that has already committed is stolen, so a stolen split replays at most one commit interval — see [rebalance cost](#what-a-rebalance-costs). |
 | Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
 | Duplicate `instance_id` | Two live twins would ping-pong reclaims forever; the protocol detects the foreign process on the shared id and stops with a fatal, actionable error. |
 

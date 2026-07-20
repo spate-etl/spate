@@ -29,6 +29,9 @@ pub const L_REASON: &str = "reason";
 pub const L_OUTCOME: &str = "outcome";
 /// Store-primitive label on coordination store-op timings.
 pub const L_OP: &str = "op";
+/// Cooperative-handoff phase label (`request`, `drain`) — the two terms
+/// time-to-balance decomposes into.
+pub const L_PHASE: &str = "phase";
 /// Rebalance event label (`assign`, `revoke`).
 pub const L_EVENT: &str = "event";
 /// Error taxonomy class label (`retryable`, `record_level`, `fatal`).
@@ -178,6 +181,13 @@ pub const COORDINATION_RELEASES_TOTAL: &str = "etl_coordination_releases_total";
 /// `timeout`, `aborted`) — the consent-first live-owner transfer that a
 /// granted move completes replay-free.
 pub const COORDINATION_HANDOFFS_TOTAL: &str = "etl_coordination_handoffs_total";
+/// Cooperative-handoff latency, by [`L_PHASE`] (`request`, `drain`) — the
+/// two terms of time-to-balance. `request` is measured on the requester and
+/// spans every unanswered round; `drain` is measured on the victim.
+pub const COORDINATION_HANDOFF_DURATION_SECONDS: &str = "etl_coordination_handoff_duration_seconds";
+/// Grants this worker is currently draining as a victim — in-flight
+/// cooperative moves, bounded by `handoff_max_grants`.
+pub const COORDINATION_HANDOFFS_IN_FLIGHT: &str = "etl_coordination_handoffs_in_flight";
 /// Splits written into the plan by this worker while leader (seeded
 /// create-if-absent; replayed ids that already exist are not counted).
 pub const COORDINATION_SPLITS_PLANNED_TOTAL: &str = "etl_coordination_splits_planned_total";
@@ -269,6 +279,7 @@ pub const GAUGES: &[&str] = &[
     COORDINATION_LIVE_WORKERS,
     COORDINATION_LEADER,
     COORDINATION_IDLE,
+    COORDINATION_HANDOFFS_IN_FLIGHT,
     PIPELINE_INFO,
     PIPELINE_STATE,
     PIPELINE_THREADS,
@@ -287,6 +298,7 @@ pub const HISTOGRAMS: &[&str] = &[
     COORDINATION_REPLAN_DURATION_SECONDS,
     COORDINATION_RECONCILE_DURATION_SECONDS,
     COORDINATION_STORE_OP_DURATION_SECONDS,
+    COORDINATION_HANDOFF_DURATION_SECONDS,
     E2E_LATENCY_SECONDS,
 ];
 

@@ -13,6 +13,10 @@ use std::time::Duration;
 /// tests as well as production — user-facing floors (e.g. "a lease below
 /// 15s churns takeovers under routine GC pauses") belong to the embedding
 /// connector's config layer, which knows its deployment story.
+///
+/// Construct it from [`Default`] and override the fields you care about
+/// (`..CoordinationConfig::default()`); new tuning knobs are added over
+/// time, and that form keeps picking up their defaults.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CoordinationConfig {
@@ -52,6 +56,19 @@ pub struct CoordinationConfig {
     /// same bound that governs dead-owner takeover; a live victim's drain
     /// normally finishes well inside one round. Default 3.
     pub handoff_rounds: u32,
+    /// How many cooperative handoffs this worker will drain away at once
+    /// as a victim. The drains are independent — each split has its own
+    /// lane, fetcher and tracker — so granting several together overlaps
+    /// their tails instead of paying for them one after another, which is
+    /// what makes a scaled-out replica reach its share in fewer rounds.
+    ///
+    /// This is a resource throttle, not a safety bound: the pairwise rule
+    /// still admits each move individually, so no setting can overshoot
+    /// balance. Raise it when a victim's drains are the bottleneck; leave
+    /// it low when the victim's sink is, since concurrent drains share
+    /// that sink and finishing them together does not make them finish
+    /// sooner. 1 restores strictly one-at-a-time handoffs. Default 2.
+    pub handoff_max_grants: u32,
 }
 
 impl Default for CoordinationConfig {
@@ -66,6 +83,7 @@ impl Default for CoordinationConfig {
             reconcile_interval: Duration::from_secs(30),
             startup_max_attempts: 8,
             handoff_rounds: 3,
+            handoff_max_grants: 2,
         }
     }
 }
@@ -124,6 +142,13 @@ impl CoordinationConfig {
                  boundaries, so the first counted round may be partially elapsed)",
             ));
         }
+        if self.handoff_max_grants == 0 {
+            return Err(fatal(
+                "handoff_max_grants must be >= 1: a victim that will drain nothing can \
+                 never consent, so every rebalance would wait out handoff_rounds and \
+                 fall back to a replaying steal",
+            ));
+        }
         Ok(())
     }
 
@@ -148,6 +173,11 @@ mod tests {
         assert_eq!(config.max_attempts, 4);
         assert_eq!(config.max_in_flight, 8);
         assert_eq!(config.handoff_rounds, 3, "≈ one lease at renew_interval");
+        assert_eq!(
+            config.handoff_max_grants, 2,
+            "enough to overlap drains, small enough not to starve the \
+             victim's own intake"
+        );
     }
 
     #[test]
@@ -210,6 +240,13 @@ mod tests {
                     ..Default::default()
                 },
                 "handoff_rounds",
+            ),
+            (
+                CoordinationConfig {
+                    handoff_max_grants: 0,
+                    ..Default::default()
+                },
+                "handoff_max_grants",
             ),
         ];
         for (config, needle) in cases {

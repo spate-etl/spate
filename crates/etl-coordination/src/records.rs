@@ -446,10 +446,19 @@ pub(crate) struct WorkerVal {
 
 /// The ephemeral cooperative-handoff request value at `handoff.{victim}`,
 /// written by an under-target requester asking the victim to drain and
-/// release one split. Liveness-only: losing or expiring it costs a
-/// rebalance opportunity, never correctness — the durable progress-record
-/// CAS stays the sole fence. Deliberately carries no round number: rounds
-/// are worker-local scalars and must never be compared across machines.
+/// release splits. Liveness-only: losing or expiring it costs a rebalance
+/// opportunity, never correctness — the durable progress-record CAS stays
+/// the sole fence. Deliberately carries no round number: rounds are
+/// worker-local scalars and must never be compared across machines.
+///
+/// A peer running an older build wrote `granted` as an `Option<String>`:
+/// `null` when it had granted nothing (the common case — the field had no
+/// `skip_serializing_if`), a bare string once it had. Neither parses as a
+/// list here. That is safe by construction: an unreadable handoff value is
+/// warned about and ignored, so a mixed-version fleet simply stops
+/// consenting and rebalances through the fallback steal — slower and with
+/// replay, but never wedged and never lossy. The same holds in reverse: an
+/// old peer cannot read the list this build writes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HandoffVal {
@@ -459,13 +468,16 @@ pub(crate) struct HandoffVal {
     /// The requester's per-process nonce (diagnostics; lets a restarted
     /// requester recognize — and overwrite — its predecessor's key).
     pub(crate) nonce: String,
-    /// The split the victim chose to drain, CAS-annotated by the victim
-    /// before the drain starts. This is the grant's *attribution*: the
-    /// requester marks exactly this split as incoming (never inferring a
-    /// grant from lease traffic), and a request whose key vanishes after
-    /// a grant was annotated is served, not blipped — so it must not be
-    /// re-created.
-    pub(crate) granted: Option<String>,
+    /// The splits the victim chose to drain, CAS-annotated by the victim
+    /// before each drain starts and removed again as each one is released.
+    /// This is the grant's *attribution*: the requester marks exactly these
+    /// splits as incoming (never inferring a grant from lease traffic), and
+    /// a request whose key vanishes after a grant was annotated is served,
+    /// not blipped — so it must not be re-created. Empty means no grant has
+    /// been made yet; the key is deleted rather than emptied once the last
+    /// granted split is released.
+    #[serde(default)]
+    pub(crate) granted: Vec<String>,
 }
 
 /// Encode any of the small lease values.
@@ -602,12 +614,13 @@ mod tests {
             schema: SCHEMA,
             requester: "worker-b".to_string(),
             nonce: "n-1".to_string(),
-            granted: None,
+            granted: Vec::new(),
         };
         let parsed: HandoffVal = parse_val(&handoff_key("worker-a"), &encode_val(&val)).unwrap();
         assert_eq!(parsed, val);
+        // A batch of grants survives the round trip in order.
         let annotated = HandoffVal {
-            granted: Some("split-7".to_string()),
+            granted: vec!["split-7".to_string(), "split-9".to_string()],
             ..val.clone()
         };
         let parsed: HandoffVal =
@@ -619,6 +632,28 @@ mod tests {
         let err =
             parse_val::<HandoffVal>("handoff.worker-a", br#"{"schema":2,"who":"x"}"#).unwrap_err();
         assert!(err.to_string().contains("unreadable"), "{err}");
+        // An older peer wrote `granted` as an `Option<String>`. BOTH of its
+        // encodings must fail to parse rather than silently read as no
+        // grant: the caller warns and ignores the key, so a mixed fleet
+        // falls back to steals instead of believing a grant it cannot see.
+        // `null` is the common one — an unannotated request — and would be
+        // the dangerous one to accept, since `#[serde(default)]` covers only
+        // an ABSENT field, not an explicit null.
+        for legacy in [
+            br#"{"schema":1,"requester":"b","nonce":"n","granted":null}"#.as_slice(),
+            br#"{"schema":1,"requester":"b","nonce":"n","granted":"split-7"}"#.as_slice(),
+        ] {
+            let err = parse_val::<HandoffVal>("handoff.worker-a", legacy).unwrap_err();
+            assert!(err.to_string().contains("unreadable"), "{err}");
+        }
+        // An absent `granted` reads as no grant, so a value written before
+        // the field existed still parses.
+        let parsed: HandoffVal = parse_val(
+            "handoff.worker-a",
+            br#"{"schema":1,"requester":"b","nonce":"n"}"#,
+        )
+        .unwrap();
+        assert!(parsed.granted.is_empty());
 
         assert_eq!(handoff_key("worker-a"), "handoff.worker-a");
         assert_eq!(parse_handoff_key("handoff.worker-a"), Some("worker-a"));

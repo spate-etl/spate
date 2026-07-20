@@ -1,23 +1,27 @@
 //! Coordinated S3 backfill: several pipeline instances share one bounded
 //! object-storage backfill over an in-process coordination store, so the run
-//! exercises work-stealing and (once the cooperative-handoff feature lands)
-//! split handoff. Local filesystem store, real listing, real per-lane fetchers
-//! and framing, throttled null sink. No network, no broker.
+//! exercises work-stealing and cooperative split handoff. Local filesystem
+//! store, real listing, real per-lane fetchers and framing, throttled null
+//! sink. No network, no broker.
 //!
 //! This is a **rebalancing** rig, not a throughput rig. The sink is paced
 //! ([`ThrottledNullWriter`]) so the backfill lasts tens of seconds and spans
 //! dozens of heartbeat rounds; `wall_s` is therefore pacing-dominated and is
-//! reported as a diagnostic, never a throughput. The headline numbers are the
-//! *cost* of rebalancing: `duplicate_rows` (rows re-read across a move) and
-//! `late_share` (how much of the job a late joiner took).
+//! reported as a diagnostic, never a throughput. The headline numbers split
+//! into the *cost* of rebalancing — `duplicate_rows` (rows re-read across a
+//! move) — and its *speed*: `late_share` (how much of the job a late joiner
+//! took) plus the two `handoff_*_p50_s` latencies, which decompose
+//! time-to-balance into waiting for a victim to answer (`request`) and waiting
+//! for its drain to finish (`drain`).
 //!
 //! Instance 0 starts alone and leases every split (`MAX_IN_FLIGHT` covers the
 //! whole job). Late joiners arrive after `JOIN_DELAY_S` and must take work off
-//! the leader — a move that costs replay today (a live-owner steal) and is
-//! meant to become replay-free once cooperative handoff ships. The rig reads
-//! the movement counters from the process's own Prometheus text, so it compiles
-//! and runs **unchanged on `main`** (where the handoffs family does not yet
-//! exist and reads as 0) — that is the A arm of the A/B.
+//! the leader — a replay-free move when the owner consents, a replaying steal
+//! when it cannot. The rig reads every movement counter and latency from the
+//! process's own Prometheus **text**, so the same bytes compile and run
+//! unchanged on older commits where a family does not yet exist and reads as 0
+//! (an absent histogram yields no quantile, reported as 0). That is what lets
+//! one rig serve every arm of an A/B.
 //!
 //! Usage:
 //!   s3_backfill_coordinated                      # defaults (see table)
@@ -48,6 +52,8 @@
 //!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,reps:length,wall_s:(map(.metrics.wall_s.value)|sort|.[(length-1)/2|floor]),dup_rows:(map(.metrics.duplicate_rows.value)|sort|.[(length-1)/2|floor]),late_share:(map(.metrics.late_share.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
 //!
 //!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,steals:(map(.metrics.steals_total.value)|sort|.[(length-1)/2|floor]),handoffs:(map(.metrics.handoffs_total.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
+//!
+//!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,request_p50:(map(.metrics.handoff_request_p50_s.value)|sort|.[(length-1)/2|floor]),drain_p50:(map(.metrics.handoff_drain_p50_s.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use benchmarks::report::{Metric, Report};
@@ -360,6 +366,26 @@ sink: {{ nullsink: {{}} }}
          did not exercise coordination; adjust the geometry so a late joiner must \
          take work"
     );
+    // Time-to-balance, decomposed. `request` spans from going under target to
+    // claiming a granted split — it absorbs every unanswered round, so it is
+    // where request-admission pacing shows up. `drain` is the victim's
+    // stop-commit-release, the term concurrent grants overlap. Reported as
+    // medians of the in-process histogram; an arm whose build lacks the family
+    // reports 0, exactly like the counters above.
+    let handoff_request_p50 = prom::histogram_quantile_labeled(
+        &text,
+        "etl_coordination_handoff_duration_seconds",
+        r#"phase="request""#,
+        0.5,
+    )
+    .unwrap_or(0.0);
+    let handoff_drain_p50 = prom::histogram_quantile_labeled(
+        &text,
+        "etl_coordination_handoff_duration_seconds",
+        r#"phase="drain""#,
+        0.5,
+    )
+    .unwrap_or(0.0);
 
     let duplicate_rows = rows_written - total_records;
     let duplicate_pct = if total_records > 0 {
@@ -401,6 +427,14 @@ sink: {{ nullsink: {{}} }}
         .metric(
             "handoffs_total",
             Metric::maximize(handoffs_total, "handoffs"),
+        )
+        .metric(
+            "handoff_request_p50_s",
+            Metric::minimize(handoff_request_p50, "s"),
+        )
+        .metric(
+            "handoff_drain_p50_s",
+            Metric::minimize(handoff_drain_p50, "s"),
         )
         .metric(
             "records_total",

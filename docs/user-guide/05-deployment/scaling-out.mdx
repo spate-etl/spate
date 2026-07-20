@@ -111,8 +111,8 @@ per-replica configuration:
 
 Scaling events behave like Kafka's *cooperative* rebalances: a new
 replica claims unowned splits first, then asks the most-loaded worker to
-hand one over — one split at a time — until balanced. A scaled-down
-replica's released splits are claimed within milliseconds.
+hand splits over — up to `handoff_max_grants` at a time — until balanced.
+A scaled-down replica's released splits are claimed within milliseconds.
 
 ### What a rebalance costs {#what-a-rebalance-costs}
 
@@ -142,16 +142,47 @@ wait for, so even a freshly-claimed fleet can rebalance cooperatively.
 
 ### When a rebalance happens {#when-a-rebalance-happens}
 
-A replica that joins with nothing claimable rebalances once two things
-line up: it has observed the fleet, and it wins a request opportunity
-(workers deliberately skip about half their rounds to avoid herding, and
-a round is roughly a third of `lease_duration`, jittered). A bounded job
-that completes inside that window finishes on the instance that claimed
-it — with zero replay, which for a short job is the cheapest outcome
-available, not a scheduling failure. Instances only genuinely share a
-job whose runtime spans several lease cycles; if sharing short jobs
-matters more than anything else, shrink `lease_duration` rather than
-adding replicas.
+A replica that joins with nothing claimable requests a handoff as soon as
+it has observed the fleet — requests are not rate-limited, because the
+request key admits exactly one requester per victim and the losers find
+out immediately. A bounded job that completes before the transfer lands
+finishes on the instance that claimed it — with zero replay, which for a
+short job is the cheapest outcome available, not a scheduling failure.
+Instances only genuinely share a job whose runtime spans several lease
+cycles; if sharing short jobs matters more than anything else, shrink
+`lease_duration` rather than adding replicas.
+
+#### Time to balance {#time-to-balance}
+
+A batch of moves costs about one victim drain, plus the store round trips
+to ask for it and to claim what comes back:
+
+```
+batches to balance ≈ ceil(moves needed / handoff_max_grants)
+one batch          ≈ the victim's drain + a few store round trips
+```
+
+Asking is not paced by the lease: a worker opens its request on the
+observation that put it under target, and the victim answers on the
+observation that carries the request, so the happy path runs at store
+latency. `lease_duration` sets only the *fallback* — how long an
+unanswered request waits before it degrades into a replaying steal, at
+`handoff_rounds` rounds of `lease_duration / 3` (jittered) each.
+
+The drain is usually the larger term, and it is set by how fast the
+victim's sink can absorb what it has already read — not by anything in
+the coordination layer. That is worth measuring before reaching for a
+knob: `etl_coordination_handoff_duration_seconds` splits the wait into
+`phase="request"` and `phase="drain"`. Note the two are **nested, not
+additive** — `request` is measured from going under target to claiming
+the split, so it already contains the `drain`. Their difference is what
+admission and the claim cost; if that difference is small, the drain is
+the whole story.
+
+Raising `handoff_max_grants` overlaps drains, so it helps when a victim
+has several splits to give and its sink has headroom. It will not help
+when that sink is the constraint: concurrent drains share it, and
+finishing them together does not make them finish sooner.
 
 Near the end of a bounded job the balance re-arms as splits complete, so
 a nearly-done split can move more than once before it finishes — but
@@ -170,6 +201,7 @@ at-least-once replay.
 | `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
 | `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
 | `handoff_rounds` | 3 | Heartbeat rounds a handoff request may stay unanswered before falling back to a lease steal (up to one lease at the default). Larger = more patience with slow-draining victims; smaller = faster escape from wedged ones. |
+| `handoff_max_grants` | 2 | Splits a victim drains away at once. Higher = fewer rounds to balance when a victim has several splits to give — but the drains share that victim's sink, so it buys nothing when the sink is the bottleneck, and a bigger intake dip while they run. 1 restores strictly one-at-a-time handoffs. See [time to balance](#time-to-balance). |
 
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
 ~128 MB range (or the row-count equivalent) — big enough that lease
@@ -204,5 +236,10 @@ fleet view, `leader` for who plans, `acquisitions_total` by reason
 steals are happening, so look at the victims' sink health),
 `revocations_total` (`fenced`/`starved`), `splits_quarantined` for
 poison, and store-op latency histograms for the NATS round-trips.
+`handoff_duration_seconds` by `phase` is the time-to-balance view —
+`request` on the asking side, `drain` on the giving side — and
+`handoffs_in_flight` shows whether a victim is sitting at
+`handoff_max_grants` (the cap is pacing rebalances) or at zero while the
+fleet is visibly uneven (requests are not arriving at all).
 `etl_coordination_writes_total{outcome="conflict"}` is fencing working as
 designed — alarming only in bulk.

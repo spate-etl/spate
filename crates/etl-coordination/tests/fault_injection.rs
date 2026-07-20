@@ -34,12 +34,18 @@ struct FaultStore {
     /// commits) are untouched, so it targets exactly the release CAS.
     drop_owner_clear: Arc<AtomicBool>,
     /// While armed: every victim grant-ANNOTATION write (an ephemeral
-    /// `handoff.` update carrying a non-null `granted`) is dropped, so a
+    /// `handoff.` update carrying a NON-EMPTY `granted`) is dropped, so a
     /// requester's key stays UNANNOTATED. Under grant attribution the
     /// re-arm-without-resetting-the-clock path applies only to an unannotated
     /// key (an annotated one that vanishes is read as served, not a blip), so
     /// dropping the annotation is what keeps that path under test.
     drop_grant_annotation: Arc<AtomicBool>,
+    /// Once: the next victim grant-ACK write (the ephemeral `handoff.`
+    /// update that SHRINKS `granted`, or the delete that retires the last
+    /// one) loses its CAS, as a concurrent requester refresh would make it.
+    /// Disarms afterward, so the queued retry is left a working store to
+    /// land against — which is the whole thing under test.
+    lose_grant_ack: Arc<AtomicBool>,
 }
 
 impl FaultStore {
@@ -50,6 +56,7 @@ impl FaultStore {
             lease_maybe_land: Arc::new(AtomicBool::new(false)),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_grant_annotation: Arc::new(AtomicBool::new(false)),
+            lose_grant_ack: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -104,7 +111,15 @@ impl CoordinationStore for FaultStore {
             && self.drop_grant_annotation.load(Ordering::Acquire)
             && serde_json::from_slice::<serde_json::Value>(&value)
                 .ok()
-                .and_then(|v| v.get("granted").map(|g| !g.is_null()))
+                // A non-EMPTY list: `granted: []` is an ordinary request
+                // create/refresh, not an annotation. (Under the old
+                // `Option<String>` shape this read `!g.is_null()`, which an
+                // empty array satisfies — so the knob would also have
+                // faulted plain requester refreshes.)
+                .and_then(|v| {
+                    v.get("granted")
+                        .map(|g| g.as_array().is_some_and(|ids| !ids.is_empty()))
+                })
                 .unwrap_or(false)
         {
             // The victim's grant annotation never lands: the requester's key
@@ -112,6 +127,35 @@ impl CoordinationStore for FaultStore {
             return Err(StoreError::Retryable(
                 "injected: grant annotation dropped".into(),
             ));
+        }
+        if ks == Keyspace::Ephemeral
+            && key.starts_with("handoff.")
+            && self.lose_grant_ack.load(Ordering::Acquire)
+        {
+            // The ack is the one `handoff.` update that SHRINKS `granted`.
+            // Compare against what is stored so the knob cannot catch an
+            // annotation (which grows it) or a requester refresh (which
+            // carries it through unchanged).
+            let listed = |bytes: &[u8]| {
+                serde_json::from_slice::<serde_json::Value>(bytes)
+                    .ok()
+                    .and_then(|v| v.get("granted").and_then(|g| g.as_array().map(Vec::len)))
+            };
+            let current = self
+                .inner
+                .get(ks, key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|e| listed(&e.value));
+            if let (Some(new), Some(old)) = (listed(&value), current)
+                && new < old
+            {
+                // Disarm: the queued retry needs a working store to land
+                // against, which is exactly what is being tested.
+                self.lose_grant_ack.store(false, Ordering::Release);
+                return Ok(CasOutcome::Lost);
+            }
         }
         if ks == Keyspace::Ephemeral
             && key.starts_with("split.")
@@ -338,6 +382,327 @@ fn a_dropped_handoff_release_degrades_to_the_fallback_takeover() {
         held_b.splits[&granted].1.as_ref().map(|p| p.watermark),
         Some(1),
         "the takeover carries the committed watermark — no data lost to the dropped release"
+    );
+}
+
+/// When a victim grants a batch and one split's release is lost, only that
+/// split may degrade. The ack is per split: the request key must keep the
+/// un-released split annotated (so the requester goes on expecting it, and
+/// the fallback can still fence it) rather than being deleted wholesale on
+/// the release that did land. Deleting it there would strand the dropped
+/// split — annotated to nobody, expected by nobody.
+#[test]
+fn a_dropped_release_inside_a_batch_degrades_only_that_split() {
+    let rt = runtime();
+    let store = FaultStore::new(MemoryStore::new(support::LEASE));
+    store.drop_owner_clear.store(true, Ordering::Release);
+
+    let ids = ["b0", "b1", "b2", "b3", "b4", "b5"];
+    let planner = || Box::new(PhasedPlanner::one_final("batch-drop:v1", &ids));
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive(&mut a, &mut held_a, "A claiming all six", |h| {
+        h.splits.len() == 6
+    });
+    for id in ids {
+        a.commit(&split_id(id), &SplitProgress::new(1, vec![]))
+            .unwrap();
+    }
+
+    let mut b = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-b")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+
+    let mut granted: Vec<String> = Vec::new();
+    let mut released = 0usize;
+    // Whether the key still named a grant after the first (dropped) release.
+    let mut key_kept_the_dropped_grant = false;
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "B never took both granted splits over (granted {granted:?}, holds {:?})",
+            held_b.splits.keys().collect::<Vec<_>>()
+        );
+        for event in a.poll().unwrap() {
+            if let CoordinationEvent::HandoffRequested { split } = &event {
+                let id = split.as_str().to_string();
+                if !granted.contains(&id) {
+                    granted.push(id);
+                }
+            }
+            held_a.fold(vec![event]);
+        }
+        if granted.len() >= 2 && released < 2 {
+            // The first of these has its owner-clear faulted away.
+            let _ = a.release_handoff(&[split_id(&granted[released])]);
+            released += 1;
+            // Read AFTER the second release, not the first. The first one
+            // fails its durable CAS, so it never reaches the ack at all —
+            // the key would still name it under any implementation, including
+            // one that wrongly deletes the whole request on first release.
+            // Only once the second release has landed and been acked does the
+            // key show the discriminating state: the dropped split still
+            // annotated, the delivered one struck off.
+            if released == 2
+                && let Some(entry) = rt
+                    .block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
+                    .unwrap()
+            {
+                let val: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+                let listed: Vec<&str> = val["granted"]
+                    .as_array()
+                    .map(|g| g.iter().filter_map(serde_json::Value::as_str).collect())
+                    .unwrap_or_default();
+                key_kept_the_dropped_grant =
+                    listed.contains(&granted[0].as_str()) && !listed.contains(&granted[1].as_str());
+            }
+        }
+        held_b.fold(b.poll().unwrap());
+        if granted.len() >= 2 && granted[..2].iter().all(|g| held_b.splits.contains_key(g)) {
+            break;
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+
+    assert!(
+        key_kept_the_dropped_grant,
+        "after the second release was acked the key must still name the split \
+         whose release was dropped, and no longer name the delivered one — \
+         the ack retires grants one at a time, not the whole request"
+    );
+    for g in &granted[..2] {
+        assert_eq!(
+            held_b.splits[g].1.as_ref().map(|p| p.watermark),
+            Some(1),
+            "{g} carries the committed watermark — nothing lost to the dropped release"
+        );
+    }
+}
+
+/// A grant ack that loses its CAS must be RETRIED, not dropped. Losing it
+/// leaves a delivered split still annotated, so the requester goes on
+/// waiting for work it already holds and burns its fallback budget on a
+/// victim that did everything right — a steal, and replay, for a completed
+/// cooperative move. The queue is what closes that, and nothing else
+/// exercises it: an ack only loses when a requester refresh races it.
+#[test]
+fn a_grant_ack_that_loses_its_cas_is_retried_until_it_lands() {
+    let rt = runtime();
+    let store = FaultStore::new(MemoryStore::new(support::LEASE));
+
+    let ids = ["a0", "a1", "a2", "a3", "a4", "a5"];
+    let planner = || Box::new(PhasedPlanner::one_final("ack-retry:v1", &ids));
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive(&mut a, &mut held_a, "A claiming all six", |h| {
+        h.splits.len() == 6
+    });
+    for id in ids {
+        a.commit(&split_id(id), &SplitProgress::new(1, vec![]))
+            .unwrap();
+    }
+
+    let mut b = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-b")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+
+    // `None` means the key is ABSENT, which is not the same as "lists
+    // nothing" — conflating the two is how this test would pass without
+    // the retry at all, since a withdrawn or TTL'd key contains no id.
+    let listed = |rt: &tokio::runtime::Runtime| -> Option<Vec<String>> {
+        rt.block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
+            .unwrap()
+            .map(|entry| {
+                let val: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+                val["granted"]
+                    .as_array()
+                    .map(|g| {
+                        g.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+    };
+
+    let mut granted: Vec<String> = Vec::new();
+    let mut released = false;
+    let mut ack_lost_during_the_release = false;
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the lost ack was never retried: key is {:?}",
+            listed(&rt)
+        );
+        for event in a.poll().unwrap() {
+            if let CoordinationEvent::HandoffRequested { split } = &event {
+                let id = split.as_str().to_string();
+                if !granted.contains(&id) {
+                    granted.push(id);
+                }
+            }
+            held_a.fold(vec![event]);
+        }
+        // Two grants, so retiring the first is a SHRINK the knob can catch
+        // (retiring the last is a delete instead).
+        if granted.len() >= 2 && !released {
+            store.lose_grant_ack.store(true, Ordering::Release);
+            a.release_handoff(&[split_id(&granted[0])]).unwrap();
+            released = true;
+            // The knob disarms itself on the write it fails, so an armed
+            // flag going false across this call is proof the ack CAS did
+            // lose. The *store* state right here is not observable: the
+            // task runs `step()` — and the queued retry with it — in the
+            // same turn as the command, so the annotation is often already
+            // struck by the time this thread could read it. That is the
+            // mechanism working, not a missed fault.
+            ack_lost_during_the_release = !store.lose_grant_ack.load(Ordering::Acquire);
+        }
+        held_b.fold(b.poll().unwrap());
+        // The retry has landed when the key is STILL THERE — the second
+        // grant is never released, so it must be — and names only that
+        // second grant. Requiring the key's presence is what stops a
+        // withdrawal or a TTL blip from passing for a successful ack.
+        if released
+            && let Some(ids) = listed(&rt)
+            && !ids.contains(&granted[0])
+            && ids.contains(&granted[1])
+        {
+            break;
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+
+    // Without the queue a lost ack is simply dropped: nothing else ever
+    // strikes that id (a top-up only appends, a refresh carries the list
+    // through), so the loop above would have run to its deadline.
+    assert!(
+        ack_lost_during_the_release,
+        "the injected CAS loss did not take effect, so the retry was never \
+         under test"
+    );
+}
+
+/// A grant the embedder DECLINES must be struck off the annotation. It is
+/// not coming, so leaving it listed tells the requester to keep expecting
+/// it, pins this victim's slot to that requester, and — since nothing ever
+/// removes the entry — lets the list grow by another id every time the
+/// cool-down lapses and a different split is offered in its place.
+///
+/// The victim is pinned to ONE grant at a time, so the annotation may never
+/// name more than one split. That bound is the observable: a lingering
+/// declined id plus the replacement offered next round puts two ids on a
+/// one-grant key. Asserting "the declined id is gone" instead would be
+/// satisfied by a legitimate re-grant once its cool-down lapses — and by an
+/// absent key, which names nothing at all.
+#[test]
+fn a_declined_grant_is_struck_off_the_annotation() {
+    let rt = runtime();
+    let store = FaultStore::new(MemoryStore::new(support::LEASE));
+
+    let ids = ["d0", "d1", "d2", "d3", "d4", "d5"];
+    let planner = || Box::new(PhasedPlanner::one_final("decline-strike:v1", &ids));
+    let mut a_config = config(Some("worker-a"));
+    a_config.handoff_max_grants = 1;
+    let mut a = StoreCoordinator::new(store.clone(), a_config, rt.handle().clone(), None)
+        .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive(&mut a, &mut held_a, "A claiming all six", |h| {
+        h.splits.len() == 6
+    });
+    for id in ids {
+        a.commit(&split_id(id), &SplitProgress::new(1, vec![]))
+            .unwrap();
+    }
+
+    let mut b = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-b")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+
+    // Refuse every split the victim ever offers, so the cool-down keeps
+    // lapsing and it keeps reaching for a replacement — the loop that grows
+    // an unswept annotation.
+    let mut declines = 0usize;
+    // Long enough to span several `handoff_rounds` cool-downs (rounds are
+    // LEASE/3, jittered) so the re-offer path runs repeatedly.
+    let until = Instant::now() + support::LEASE * 12;
+    while Instant::now() < until {
+        for event in a.poll().unwrap() {
+            if let CoordinationEvent::HandoffRequested { split } = &event {
+                a.decline_handoff(split).unwrap();
+                declines += 1;
+            }
+            held_a.fold(vec![event]);
+        }
+        held_b.fold(b.poll().unwrap());
+        if let Some(entry) = rt
+            .block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
+            .unwrap()
+        {
+            let val: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+            let listed: Vec<&str> = val["granted"]
+                .as_array()
+                .map(|g| g.iter().filter_map(serde_json::Value::as_str).collect())
+                .unwrap_or_default();
+            let unique: std::collections::BTreeSet<_> = listed.iter().collect();
+            assert_eq!(
+                unique.len(),
+                listed.len(),
+                "a split was annotated twice: {listed:?}"
+            );
+            assert!(
+                listed.len() <= 1,
+                "worker-a grants one split at a time, so its request key may \
+                 never name more than one — a declined split was left behind \
+                 and a replacement stacked on top of it: {listed:?}"
+            );
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+
+    // `HandoffRequested` is emitted only after the annotation CAS wins, so
+    // this also proves at least two grants were annotated — the samples
+    // above simply never catch one, because the strike closes the window
+    // in the same command turn as the decline.
+    assert!(
+        declines >= 2,
+        "the re-offer path never ran ({declines} declines), so a lingering \
+         annotation would have had nothing to stack against"
     );
 }
 

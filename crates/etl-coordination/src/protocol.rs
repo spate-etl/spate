@@ -290,19 +290,40 @@ pub(crate) fn handoff_justified(
         .is_some_and(|load| *load > own + 1)
 }
 
-/// The victim's grant decision: hash-pick one held runnable split (the
-/// same tie-break a steal uses), granted only while the pairwise rule
-/// still holds against the requester's *observed* load — a victim that
-/// has since drained down, or a requester that has since been fed, gets
-/// no grant. No committed-watermark gate (see [`handoff_victim`]).
-pub(crate) fn handoff_grant(
+/// The victim's grant decision: hash-pick up to `max` held runnable splits
+/// (the same tie-break a steal uses), granted only while the pairwise rule
+/// still holds against the requester's *observed* load — a victim that has
+/// since drained down, or a requester that has since been fed, gets
+/// nothing. No committed-watermark gate (see [`handoff_victim`]).
+///
+/// The rule is applied **incrementally**, once per split rather than once
+/// per batch: granting `k` splits leaves the victim at `held - k` and the
+/// requester at `requester_load + in_transit + k`, so step `i` is admitted
+/// only while `held - i > requester_load + in_transit + i + 1`. Every move
+/// in the batch therefore strictly narrows the gap on its own, exactly as a
+/// sequence of single grants would, and ownership converges to ±1 without
+/// oscillating. Checking the rule once up front instead would let a victim
+/// over-drain and flip the imbalance it was correcting.
+///
+/// `in_transit` is splits this victim has already promised the requester
+/// that are not yet visible under its lease — still draining here, or
+/// released and not yet claimed. They are counted on **neither** side
+/// otherwise: `owned` excludes a draining split, a released one is gone
+/// from the victim's map entirely, and [`owner_loads`] sees a lease held
+/// by the victim (or by nobody) rather than by the requester. Omitting
+/// them makes every top-up permissive by exactly that many splits, so a
+/// victim refilling a batch drains past balance — the split gets fully
+/// drained, released, sits unowned, and is re-claimed by the victim.
+pub(crate) fn handoff_grants(
     splits: &BTreeMap<String, SplitState>,
     owned: impl Fn(&str) -> bool,
     requester: &str,
     instance: &str,
     seed: u64,
-) -> Option<String> {
-    let held: Vec<&str> = splits
+    max: usize,
+    in_transit: usize,
+) -> Vec<String> {
+    let mut held: Vec<&str> = splits
         .iter()
         .filter(|(id, state)| state.progress.status == SplitStatus::Runnable && owned(id))
         .map(|(id, _)| id.as_str())
@@ -310,13 +331,21 @@ pub(crate) fn handoff_grant(
     let requester_load = owner_loads(splits, instance)
         .get(requester)
         .copied()
-        .unwrap_or(0);
-    if held.len() <= requester_load + 1 {
-        return None;
-    }
+        .unwrap_or(0)
+        + in_transit;
+    // Descending hash order, so a victim granting one split picks exactly
+    // the split it would have picked before this became a batch.
+    held.sort_by_key(|id| std::cmp::Reverse(stable_hash_str(seed, id)));
+    let total = held.len();
     held.into_iter()
-        .max_by_key(|id| stable_hash_str(seed, id))
-        .map(str::to_string)
+        .take(max)
+        .enumerate()
+        // Entering step `i` the victim holds `total - i` and the requester
+        // `requester_load + i` (already inclusive of what is in transit);
+        // the move is admitted on the same pairwise test a lone grant uses.
+        .take_while(|(i, _)| total - i > requester_load + i + 1)
+        .map(|(_, id)| id.to_string())
+        .collect()
 }
 
 /// Round-counted fallback trigger — the handoff's only "timer". Rounds
@@ -785,9 +814,14 @@ mod tests {
         let map = splits(states.clone());
 
         // Requester observed holding nothing: grant, deterministic by seed.
-        let picked = handoff_grant(&map, held, "asker", "me", 7).expect("grant");
-        assert!(picked.starts_with("mine-"), "{picked}");
-        assert_eq!(handoff_grant(&map, held, "asker", "me", 7), Some(picked));
+        let picked = handoff_grants(&map, held, "asker", "me", 7, 1, 0);
+        assert_eq!(picked.len(), 1);
+        assert!(picked[0].starts_with("mine-"), "{}", picked[0]);
+        assert_eq!(handoff_grants(&map, held, "asker", "me", 7, 1, 0), picked);
+        // Batching must not change which split a lone grant picks: the
+        // first of a batch is the split the single-grant rule would choose.
+        let batch = handoff_grants(&map, held, "asker", "me", 7, 2, 0);
+        assert_eq!(batch.first(), picked.first());
 
         // The requester has since been fed to within one of us: no grant.
         for i in 0..3 {
@@ -804,10 +838,67 @@ mod tests {
             ));
         }
         let map = splits(states);
-        assert_eq!(
-            handoff_grant(&map, held, "asker", "me", 7),
-            None,
+        assert!(
+            handoff_grants(&map, held, "asker", "me", 7, 2, 0).is_empty(),
             "4 > 3+1 is false: the imbalance evaporated before the grant"
+        );
+    }
+
+    #[test]
+    fn a_batched_grant_is_capped_and_stays_pairwise_at_every_step() {
+        // 12 held against a requester at 0. The pairwise rule admits step
+        // `i` while `12 - i > 0 + i + 1`, i.e. six moves — enough to reach
+        // 6/6 — but never a seventh, which would hand over the imbalance.
+        let mut states = vec![];
+        for i in 0..12 {
+            states.push(state(
+                record(
+                    &format!("mine-{i:02}"),
+                    SplitStatus::Runnable,
+                    Some("me"),
+                    1,
+                    0,
+                ),
+                1,
+                Some(lease("me", "n", 1)),
+            ));
+        }
+        let map = splits(states);
+        let held = |id: &str| id.starts_with("mine-");
+
+        assert_eq!(handoff_grants(&map, held, "asker", "me", 7, 2, 0).len(), 2);
+        assert_eq!(handoff_grants(&map, held, "asker", "me", 7, 6, 0).len(), 6);
+        assert_eq!(
+            handoff_grants(&map, held, "asker", "me", 7, 99, 0).len(),
+            6,
+            "the pairwise rule, not the cap, is the binding limit here"
+        );
+        // A batch is distinct splits, all of them ours.
+        let batch = handoff_grants(&map, held, "asker", "me", 7, 6, 0);
+        let unique: std::collections::BTreeSet<_> = batch.iter().collect();
+        assert_eq!(unique.len(), batch.len(), "no split granted twice");
+        assert!(batch.iter().all(|id| held(id)));
+
+        // A victim only one ahead has nothing to give: 2 > 0+1 grants one,
+        // and the second step (1 > 2) is refused.
+        let two: Vec<_> = (0..2)
+            .map(|i| {
+                state(
+                    record(
+                        &format!("mine-{i:02}"),
+                        SplitStatus::Runnable,
+                        Some("me"),
+                        1,
+                        0,
+                    ),
+                    1,
+                    Some(lease("me", "n", 1)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            handoff_grants(&splits(two), held, "asker", "me", 7, 4, 0).len(),
+            1
         );
     }
 
@@ -956,11 +1047,19 @@ mod tests {
         }
 
         /// A grant only picks from the victim's own held runnable set, and
-        /// only while handing one over still narrows the gap.
+        /// only while handing each split over still narrows the gap.
+        ///
+        /// `in_transit` models splits already promised to the requester but
+        /// not yet under its lease — draining here, or released and
+        /// unclaimed. They are invisible to both `held` and the lease-derived
+        /// requester load, so the rule has to be told about them explicitly;
+        /// without that a topping-up victim drains past balance.
         #[test]
         fn handoff_grant_picks_only_held_splits_under_the_pairwise_rule(
             held_count in 0usize..12,
             requester_count in 0usize..12,
+            max in 1usize..6,
+            in_transit in 0usize..4,
             seed in any::<u64>(),
         ) {
             let mut states: Vec<SplitState> = (0..held_count)
@@ -980,12 +1079,37 @@ mod tests {
                 ));
             }
             let map = splits(states);
-            match handoff_grant(&map, |id| id.starts_with("mine-"), "asker", "me", seed) {
-                Some(granted) => {
-                    prop_assert!(granted.starts_with("mine-"));
-                    prop_assert!(held_count > requester_count + 1);
-                }
-                None => prop_assert!(held_count <= requester_count + 1),
+            let granted = handoff_grants(
+                &map, |id| id.starts_with("mine-"), "asker", "me", seed, max, in_transit,
+            );
+            // What the requester will hold once everything promised lands.
+            let effective = requester_count + in_transit;
+            prop_assert!(granted.len() <= max, "never exceeds the cap");
+            let unique: std::collections::BTreeSet<_> = granted.iter().collect();
+            prop_assert_eq!(unique.len(), granted.len(), "no split granted twice");
+            for (i, id) in granted.iter().enumerate() {
+                prop_assert!(id.starts_with("mine-"), "only the victim's own splits");
+                // Every step of the batch is individually pairwise-improving:
+                // entering step `i` the two sides hold these counts.
+                prop_assert!(held_count - i > effective + i + 1);
+            }
+            // Nothing granted exactly when even the first move would not help.
+            if granted.is_empty() {
+                prop_assert!(held_count <= effective + 1);
+            }
+            // Maximal: one more would have broken the rule or the cap.
+            let k = granted.len();
+            if k < max {
+                prop_assert!(held_count - k <= effective + k + 1);
+            }
+            // The batch never drives the fleet past balance: the victim ends
+            // at `held_count - k` and the requester at `effective + k`, and
+            // a move is only made while that strictly narrows the gap.
+            if k > 0 {
+                prop_assert!(
+                    held_count - k >= effective + k || held_count - k + 1 == effective + k,
+                    "over-drained: {held_count} - {k} vs {effective} + {k}"
+                );
             }
         }
 

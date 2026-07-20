@@ -52,6 +52,29 @@ pub enum HandoffOutcome {
     Aborted,
 }
 
+/// Which term of time-to-balance a handoff duration measures (the `phase`
+/// label on `etl_coordination_handoff_duration_seconds`).
+///
+/// They are observed on opposite sides of a move and **must not be added**:
+/// `Request` starts before the victim has even been asked and stops when
+/// the split is claimed, so it strictly *contains* the `Drain` it was
+/// waiting on. Time-to-balance for one move is the `Request` alone;
+/// `Request - Drain` is roughly what admission and the claim cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HandoffPhase {
+    /// Requester-side: from going under target with a victim worth asking,
+    /// to claiming a granted split. Deliberately spans withdrawn,
+    /// superseded and re-targeted requests rather than restarting per
+    /// request — it answers "how long was this worker short of its share?",
+    /// so request-admission pacing cannot hide in the gaps between attempts.
+    Request,
+    /// Victim-side: from annotating the grant to the release landing —
+    /// stopping intake at a safe boundary, committing the drained tail, and
+    /// giving the split up. This is the term concurrent grants overlap.
+    Drain,
+}
+
 /// Why a split lease was lost involuntarily (the `reason` label on
 /// `etl_coordination_revocations_total`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +140,7 @@ pub struct CoordinationMetrics {
     live_workers: Gauge,
     leader: Gauge,
     idle: Gauge,
+    handoffs_in_flight: Gauge,
     acquired_create: Counter,
     acquired_released: Counter,
     acquired_reclaimed: Counter,
@@ -147,6 +171,8 @@ pub struct CoordinationMetrics {
     store_op_delete: Histogram,
     store_op_list: Histogram,
     store_op_watch: Histogram,
+    handoff_request_duration: Histogram,
+    handoff_drain_duration: Histogram,
 }
 
 impl CoordinationMetrics {
@@ -184,6 +210,13 @@ impl CoordinationMetrics {
                 op,
             )
         };
+        let handoff_phase = |phase| {
+            labels.histogram1(
+                names::COORDINATION_HANDOFF_DURATION_SECONDS,
+                names::L_PHASE,
+                phase,
+            )
+        };
         CoordinationMetrics {
             splits_owned: labels.gauge(names::COORDINATION_SPLITS_OWNED),
             splits_completed: labels.gauge(names::COORDINATION_SPLITS_COMPLETED),
@@ -191,6 +224,7 @@ impl CoordinationMetrics {
             live_workers: labels.gauge(names::COORDINATION_LIVE_WORKERS),
             leader: labels.gauge(names::COORDINATION_LEADER),
             idle: labels.gauge(names::COORDINATION_IDLE),
+            handoffs_in_flight: labels.gauge(names::COORDINATION_HANDOFFS_IN_FLIGHT),
             acquired_create: acquired("create"),
             acquired_released: acquired("released"),
             acquired_reclaimed: acquired("reclaimed"),
@@ -221,6 +255,8 @@ impl CoordinationMetrics {
             store_op_delete: store_op("delete"),
             store_op_list: store_op("list"),
             store_op_watch: store_op("watch"),
+            handoff_request_duration: handoff_phase("request"),
+            handoff_drain_duration: handoff_phase("drain"),
         }
     }
 
@@ -274,6 +310,19 @@ impl CoordinationMetrics {
             HandoffOutcome::Timeout => self.handoffs_timeout.increment(1),
             HandoffOutcome::Aborted => self.handoffs_aborted.increment(1),
         }
+    }
+
+    /// Record one cooperative-handoff phase duration.
+    pub fn handoff_duration(&self, phase: HandoffPhase, d: Duration) {
+        match phase {
+            HandoffPhase::Request => self.handoff_request_duration.record(d.as_secs_f64()),
+            HandoffPhase::Drain => self.handoff_drain_duration.record(d.as_secs_f64()),
+        }
+    }
+
+    /// Set the number of grants this worker is currently draining away.
+    pub fn set_handoffs_in_flight(&self, in_flight: usize) {
+        self.handoffs_in_flight.set(in_flight as f64);
     }
 
     /// Record one involuntary split loss.

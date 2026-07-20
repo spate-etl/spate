@@ -225,6 +225,10 @@ fn launch_handoff_instance(
         // reintroduce exactly the duplicates this test refutes. The
         // fallback path is covered by the coordination-level tests.
         handoff_rounds: 1000,
+        // Pinned rather than defaulted: the zero-duplicate claim below has
+        // to hold while several drains overlap, which is the interesting
+        // case. If the default ever moves, this test must keep testing it.
+        handoff_max_grants: 2,
         ..test_tuning()
     };
     launch_tuned(yaml, test_options(), store, tuning, pre)

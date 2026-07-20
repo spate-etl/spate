@@ -153,7 +153,7 @@ watermark. Distinct from a [lane](#lane) (local execution) and a
 
 How a coordinated fleet stays balanced without a central assigner: a
 worker below its share with nothing unclaimed first asks the most-loaded
-owner to hand one split over (a [cooperative
+owner to hand splits over (a [cooperative
 handoff](#cooperative-handoff)) — and, if the request goes unanswered
 for `handoff_rounds` rounds, takes it by force. The forced move (the
 steal proper) is allowed only when the victim holds at least two more
@@ -165,12 +165,13 @@ commit interval.
 
 ### Cooperative handoff
 
-The consent-first way a split moves between live workers: the requester
-writes an ephemeral request key naming the victim; the victim stops that
-split's intake, lets everything it emitted reach the sink and
-acknowledge, commits the final watermark, and releases the split; the
-requester then claims it with a resume point covering everything the
-victim emitted — zero replay. The [steal](#work-stealing) is the timeout
+The consent-first way splits move between live workers: the requester
+writes an ephemeral request key naming the victim; the victim answers
+with up to `handoff_max_grants` splits at once, stopping each one's
+intake, letting everything it emitted reach the sink and acknowledge,
+committing the final watermark, and releasing it; the requester then
+claims each with a resume point covering everything the victim emitted —
+zero replay. The [steal](#work-stealing) is the timeout
 fallback for victims that cannot answer. Modeled on Kafka's incremental
 cooperative rebalancing (KIP-429) and Flink's stop-with-savepoint.
 

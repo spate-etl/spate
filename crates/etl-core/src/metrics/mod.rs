@@ -47,8 +47,8 @@ mod source;
 pub use backpressure::BackpressureMetrics;
 pub use checkpoint::CheckpointMetrics;
 pub use coordination::{
-    AcquireReason, CoordinationMetrics, HandoffOutcome, ReplanOutcome, SplitLossReason, StoreOp,
-    WriteOutcome,
+    AcquireReason, CoordinationMetrics, HandoffOutcome, HandoffPhase, ReplanOutcome,
+    SplitLossReason, StoreOp, WriteOutcome,
 };
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
@@ -402,6 +402,9 @@ mod tests {
             coord.handoff(HandoffOutcome::Granted);
             coord.handoff(HandoffOutcome::Timeout);
             coord.handoff(HandoffOutcome::Aborted);
+            coord.handoff_duration(HandoffPhase::Request, Duration::from_millis(900));
+            coord.handoff_duration(HandoffPhase::Drain, Duration::from_millis(120));
+            coord.set_handoffs_in_flight(2);
             coord.planned(8);
             coord.replan(ReplanOutcome::Noop, Duration::from_millis(20));
             coord.failed();

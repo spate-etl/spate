@@ -111,6 +111,23 @@ pub fn worker_handoff_rounds(
     StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
 }
 
+/// A worker with both handoff knobs pinned. `handoff_max_grants` of 1 makes
+/// a victim drain strictly one split at a time — the shape a test needs
+/// when it hand-plays the embedder and can only service one drain at once,
+/// or when it is asserting the one-at-a-time behaviour itself.
+pub fn worker_handoff_tuned(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+    handoff_rounds: u32,
+    handoff_max_grants: u32,
+) -> MemoryCoordinator {
+    let mut config = config(instance_id);
+    config.handoff_rounds = handoff_rounds;
+    config.handoff_max_grants = handoff_max_grants;
+    StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+}
+
 /// A deterministic, cursor-driven planner: phase `n` returns
 /// `phases[n]` and persists cursor `n + 1`; past the end it returns an
 /// empty plan with the last phase's finality. Cursor-keyed, so replans

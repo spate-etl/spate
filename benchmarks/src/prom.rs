@@ -25,13 +25,14 @@ pub fn value(text: &str, name: &str, filter: &str) -> Option<f64> {
 }
 
 /// Parse the cumulative `_bucket` series of `name` into `(le, cumulative)`
-/// pairs, merging the same `le` boundary across labeled series. Malformed
+/// pairs, merging the same `le` boundary across the labeled series whose
+/// label block contains `filter` (pass `""` to merge all of them). Malformed
 /// bucket lines are skipped rather than aborting the parse.
-fn buckets(text: &str, name: &str) -> Vec<(f64, f64)> {
+fn buckets(text: &str, name: &str, filter: &str) -> Vec<(f64, f64)> {
     let bucket_prefix = format!("{name}_bucket");
     let mut buckets: Vec<(f64, f64)> = Vec::new();
     for line in text.lines() {
-        if !line.starts_with(&bucket_prefix) {
+        if !line.starts_with(&bucket_prefix) || !line.contains(filter) {
             continue;
         }
         let Some(le) = line.split("le=\"").nth(1).and_then(|s| s.split('"').next()) else {
@@ -93,7 +94,14 @@ fn quantile_from_buckets(mut buckets: Vec<(f64, f64)>, q: f64) -> Option<f64> {
 /// from its cumulative `_bucket` series, with linear interpolation inside
 /// the winning bucket. Buckets across labeled series are merged.
 pub fn histogram_quantile(text: &str, name: &str, q: f64) -> Option<f64> {
-    quantile_from_buckets(buckets(text, name), q)
+    quantile_from_buckets(buckets(text, name, ""), q)
+}
+
+/// Like [`histogram_quantile`] but over only the series whose label block
+/// contains `filter` — for a histogram whose labels partition it into
+/// distinct populations that must not be merged into one distribution.
+pub fn histogram_quantile_labeled(text: &str, name: &str, filter: &str, q: f64) -> Option<f64> {
+    quantile_from_buckets(buckets(text, name, filter), q)
 }
 
 /// Like [`histogram_quantile`] but over the change in each cumulative `le`
@@ -101,8 +109,8 @@ pub fn histogram_quantile(text: &str, name: &str, q: f64) -> Option<f64> {
 /// only the observations inside the window. An `le` missing from `before`
 /// counts as 0; a negative delta (counter reset) clamps to 0.
 pub fn histogram_quantile_delta(before: &str, after: &str, name: &str, q: f64) -> Option<f64> {
-    let base = buckets(before, name);
-    let mut delta = buckets(after, name);
+    let base = buckets(before, name, "");
+    let mut delta = buckets(after, name, "");
     for (le, count) in &mut delta {
         let before_count = base.iter().find(|(b, _)| b == le).map_or(0.0, |(_, c)| *c);
         *count = (*count - before_count).max(0.0);
@@ -143,6 +151,29 @@ lat_count 10\n";
         // The +Inf bucket clamps to the last finite boundary.
         let p999 = histogram_quantile(SAMPLE, "lat", 0.999).unwrap();
         assert!(p999 <= 1.0);
+    }
+
+    #[test]
+    fn histogram_quantile_labeled_keeps_populations_apart() {
+        // Two phases of one family: `fast` observations all land in the first
+        // bucket, `slow` ones all in the second. Merging them would put the
+        // median of either population in the wrong bucket.
+        let text = "\
+h_bucket{phase=\"fast\",le=\"0.1\"} 10\n\
+h_bucket{phase=\"fast\",le=\"1\"} 10\n\
+h_bucket{phase=\"fast\",le=\"+Inf\"} 10\n\
+h_bucket{phase=\"slow\",le=\"0.1\"} 0\n\
+h_bucket{phase=\"slow\",le=\"1\"} 10\n\
+h_bucket{phase=\"slow\",le=\"+Inf\"} 10\n";
+        let fast = histogram_quantile_labeled(text, "h", "phase=\"fast\"", 0.5).unwrap();
+        assert!(fast <= 0.1, "fast median in the first bucket: {fast}");
+        let slow = histogram_quantile_labeled(text, "h", "phase=\"slow\"", 0.5).unwrap();
+        assert!((0.1..=1.0).contains(&slow), "slow median second: {slow}");
+        // Unmatched filter behaves like an absent family, not a panic.
+        assert_eq!(
+            histogram_quantile_labeled(text, "h", "phase=\"none\"", 0.5),
+            None
+        );
     }
 
     #[test]

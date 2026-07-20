@@ -39,9 +39,11 @@ from its last committed progress. A worker that is alive but over-loaded
 gets balanced by consent instead: a peer below its share with nothing
 unclaimed writes a **handoff request** — pairwise, against the
 most-loaded owner, at most one outstanding per victim — and the owner
-answers by draining one split (intake stopped, the emitted tail
-acknowledged, the final watermark committed) and releasing it, so the
-transfer replays nothing. Ownership converges to ±1 balance at stable
+answers by draining up to `handoff_max_grants` splits (intake stopped,
+the emitted tail acknowledged, the final watermark committed) and
+releasing them, so the transfer replays nothing. Each split in a batch
+must still narrow the gap on its own, so a larger batch can move faster
+without overshooting balance. Ownership converges to ±1 balance at stable
 load; as a bounded job drains, completions re-arm the rule and a
 nearly-done split can move again, draining first each time, so churn
 costs latency, not rows. A victim that cannot answer — dead, wedged,

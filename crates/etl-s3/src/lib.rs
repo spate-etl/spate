@@ -27,7 +27,7 @@
 //!   descriptor's ETag pins. The coordinator is **assembly wiring**: hand
 //!   one in via [`S3Source::with_coordinator`] (e.g. `etl-coordination`'s
 //!   `StoreCoordinator` over its NATS JetStream store) and every replica
-//!   of the pipeline shares the backfill, steals from stragglers, and
+//!   of the pipeline shares the backfill, takes a leader-assigned share, and
 //!   takes over from the dead. Without one the source runs solo over an
 //!   in-process store: correct, but a restart replays the prefix (a
 //!   startup WARN says so). This crate names no concrete backend — which

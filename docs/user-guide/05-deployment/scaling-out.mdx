@@ -8,7 +8,8 @@ depends on the source:
 | Source | Scale-out story |
 |---|---|
 | Kafka | Native: run N replicas in one consumer group; the broker assigns partitions. Nothing extra to deploy. |
-| S3 backfill | Native via the coordination seam: the elected leader lists the prefix once and packs it into splits; replicas lease, steal, and take over splits with fenced per-split commits. Wire a coordinator into the source (below) and run N replicas. |
+| S3 backfill | Native via the coordination seam: the elected leader lists the prefix once and packs it into splits; replicas lease the splits the leader assigns them, hand them back on
+reassignment, and take over dead workers' splits, all with fenced per-split commits. Wire a coordinator into the source (below) and run N replicas. |
 | Custom broker-less sources | The [coordination seam](../02-concepts/07-source-coordination.mdx): a planner, the `CoordinationDriver`, and a coordinator backend. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
 
 The rest of this page covers deploying the coordination backend that
@@ -109,87 +110,106 @@ per-replica configuration:
   expiry instead.
 - Readiness/liveness probes are unchanged (the admin server's endpoints).
 
-Scaling events behave like Kafka's *cooperative* rebalances: a new
-replica claims unowned splits first, then asks the most-loaded worker to
-hand splits over — up to `handoff_max_grants` at a time — until balanced.
-A scaled-down replica's released splits are claimed within milliseconds.
+Scaling events behave like Kafka's *cooperative* rebalances, but the
+decision is central rather than pairwise. The elected leader computes a
+desired assignment for the whole fleet — balanced on split **weight**, not
+split count, since one large object can outweigh several small ones — and
+publishes it as one `assign.{instance}` record per live worker. Every
+worker then reconciles toward its own record: claim what is named and not
+yet held, revoke what is held and no longer named. Workers never choose
+for themselves, so there is nothing to negotiate and no one to out-race.
+
+The assignment is deliberately sticky. A move costs a drain, so the leader
+keeps every split whose owner is still alive where it is, fills unassigned
+work to the least-loaded worker heaviest-first, and only then moves splits
+that strictly reduce imbalance. Feeding the result back in reproduces it,
+which is why a steady fleet republishes nothing and therefore drains
+nothing.
 
 ### What a rebalance costs {#what-a-rebalance-costs}
 
-A rebalance move is a **cooperative handoff**: the under-target replica
-writes a request naming the most-loaded worker, and that victim stops
-intake for one split (at an object boundary, for S3), lets everything it
-already emitted reach the sink and acknowledge, commits the final
-watermark, and releases the split. The new owner resumes from exactly
-that commit — **a granted handoff replays nothing**. Its cost is
-latency, not rows: the drain is bounded by the split's in-flight depth
-(the remainder of the object being read plus queued-but-unacked
-records).
+A rebalance move is a **cooperative revocation**. The split leaves one
+worker's assignment, and that worker stops intake for it (at an object
+boundary, for S3), lets everything it already emitted reach the sink and
+acknowledge, commits the final watermark, and releases the split. The new
+owner resumes from exactly that commit — **a cooperative revocation
+replays nothing**. Its cost is latency, not rows: the drain is bounded by
+the split's in-flight depth (the remainder of the object being read plus
+queued-but-unacked records).
 
-The lease steal remains as the fallback for a victim that cannot answer
-— dead, wedged, or paused. A request unanswered for `handoff_rounds`
-heartbeat rounds (up to one `lease_duration` at the default of 3) falls back
-to stealing the lease out from under the owner. A stolen split's new
-owner resumes from the last **committed** watermark and re-reads what
-came after it, so a fallback steal costs up to one commit interval
-(`checkpoint.interval`) of duplicates — and only a split that has
-committed at least once can be stolen, because one that has not would
-replay in full.
+`drain_deadline` (default 10s) is what stops one wedged drain from pinning
+a rebalance open. A source that declines to stop at a safe boundary, or a
+drain still running when the deadline elapses, has its release **forced**:
+the split goes back the replaying way instead of the clean one. Its next
+owner resumes from the last *committed* watermark and re-reads what came
+after, so a forced revocation costs up to one commit interval
+(`checkpoint.interval`) of duplicates. A decline is forced immediately
+rather than after the deadline — the source has already said the answer
+will not change.
 
-Handoff requests do not wait for that first checkpoint: the grant's
-drain-and-commit manufactures the resume point a steal would have to
-wait for, so even a freshly-claimed fleet can rebalance cooperatively.
+Unlike the peer-to-peer protocol this replaced, a revocation does not
+require the split to have committed once already: the drain manufactures
+the resume point, so even a freshly-claimed fleet rebalances cleanly.
 
 ### When a rebalance happens {#when-a-rebalance-happens}
 
-A replica that joins with nothing claimable requests a handoff as soon as
-it has observed the fleet — requests are not rate-limited, because the
-request key admits exactly one requester per victim and the losers find
-out immediately. A bounded job that completes before the transfer lands
-finishes on the instance that claimed it — with zero replay, which for a
-short job is the cheapest outcome available, not a scheduling failure.
-Instances only genuinely share a job whose runtime spans several lease
-cycles; if sharing short jobs matters more than anything else, shrink
-`lease_duration` rather than adding replicas.
+Whenever the leader observes a fleet or plan change that its assignment
+pass can improve on: a replica joining or leaving, splits completing, a
+new plan generation. A replica that joins with nothing claimable is given
+work by the next assignment, not by asking for it.
+
+A departing worker's splits are withheld from reassignment for
+`rebalance_delay` (default 20s) so a pod bounce reclaims its own work
+instead of the fleet churning around it; the window is cancelled the
+moment the instance reappears, so a fast restart costs nothing. Setting it
+to zero reassigns immediately — supported, not a disabled feature.
+
+A bounded job that completes before a transfer lands finishes on the
+instance that claimed it — zero replay, which for a short job is the
+cheapest outcome available, not a scheduling failure. Instances only
+genuinely share a job whose runtime spans several assignment cycles.
 
 #### Time to balance {#time-to-balance}
 
-A batch of moves costs about one victim drain, plus the store round trips
-to ask for it and to claim what comes back:
+One move costs a drain plus the store round trips to publish the
+assignment, release the split, and claim it on the other side:
 
 ```
-batches to balance ≈ ceil(moves needed / handoff_max_grants)
-one batch          ≈ the victim's drain + a few store round trips
+one move ≈ the losing worker's drain + a few store round trips
 ```
 
-Asking is not paced by the lease: a worker opens its request on the
-observation that put it under target, and the victim answers on the
-observation that carries the request, so the happy path runs at store
-latency. `lease_duration` sets only the *fallback* — how long an
-unanswered request waits before it degrades into a replaying steal, at
-`handoff_rounds` rounds of `lease_duration / 3` (jittered) each.
+Nothing paces the moves against each other: the leader publishes the whole
+assignment at once, and every affected worker starts its drain on the
+observation that carries its own record, so moves that involve different
+workers run concurrently at store latency. `lease_duration` does not gate
+this path at all — it is the failover timer, not the rebalance timer.
 
-The drain is usually the larger term, and it is set by how fast the
-victim's sink can absorb what it has already read — not by anything in
-the coordination layer. That is worth measuring before reaching for a
-knob: `etl_coordination_handoff_duration_seconds` splits the wait into
-`phase="request"` and `phase="drain"`. Note the two are **nested, not
-additive** — `request` is measured from going under target to claiming
-the split, so it already contains the `drain`. Their difference is what
-admission and the claim cost; if that difference is small, the drain is
-the whole story.
+The drain is usually the larger term, and it is set by how fast the losing
+worker's sink can absorb what it has already read, not by anything in the
+coordination layer. Measure before reaching for a knob:
+`etl_coordination_drain_duration_seconds` on the losing side and
+`etl_coordination_assignment_latency_seconds` on the gaining side. Those
+are **two families on purpose** — they are recorded in different processes
+against separately-observed assignment records, so they neither nest nor
+add; read each on the worker that reports it. A drain p99 approaching
+`drain_deadline` is the signal that forced (replaying) revocations are
+about to start.
 
-Raising `handoff_max_grants` overlaps drains, so it helps when a victim
-has several splits to give and its sink has headroom. It will not help
-when that sink is the constraint: concurrent drains share it, and
-finishing them together does not make them finish sooner.
+If drains are the constraint, the lever is the sink, not the coordinator:
+give it headroom, or raise `drain_deadline` so slow drains finish cleanly
+instead of being forced. Raising the deadline trades a longer rebalance
+for fewer duplicates. It may exceed `lease_duration` — a draining split is
+still owned and still heartbeated, so a long drain does not race its own
+lease. The one floor startup enforces is `op_timeout`: a deadline shorter
+than a single store round-trip would force every revocation before its
+final commit could land.
 
-Near the end of a bounded job the balance re-arms as splits complete, so
-a nearly-done split can move more than once before it finishes — but
-each hop drains before handover, so endgame ping-pong costs latency,
-never rows. Replayed duplicates among live workers come only from
-fallback steals; crash takeover (lease expiry) remains the irreducible
-at-least-once replay.
+Near the end of a bounded job the assignment re-arms as splits complete,
+so a nearly-done split can move more than once before it finishes — but
+each hop drains first, so endgame churn costs latency, never rows.
+Stickiness keeps this rare. Replayed duplicates among live workers come
+only from forced revocations; crash takeover (lease expiry) remains the
+irreducible at-least-once replay.
 
 ## Tuning
 
@@ -200,14 +220,14 @@ at-least-once replay.
 | `max_attempts` | 4 | Failing tenancies before a split is quarantined. |
 | `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
 | `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
-| `handoff_rounds` | 3 | Heartbeat rounds a handoff request may stay unanswered before falling back to a lease steal (up to one lease at the default). Larger = more patience with slow-draining victims; smaller = faster escape from wedged ones. |
-| `handoff_max_grants` | 2 | Splits a victim drains away at once. Higher = fewer rounds to balance when a victim has several splits to give — but the drains share that victim's sink, so it buys nothing when the sink is the bottleneck, and a bigger intake dip while they run. 1 restores strictly one-at-a-time handoffs. See [time to balance](#time-to-balance). |
+| `rebalance_delay` | 20s | How long the leader withholds a departed instance's splits before reassigning them, so a pod bounce reclaims its own work instead of the fleet churning around it. Cancelled early when the instance returns. 0 reassigns immediately. |
+| `drain_deadline` | 10s | How long a revoked split may keep draining before the release is forced (and its uncommitted tail replays). Larger = more patience with slow-draining sinks, slower rebalances; smaller = faster rebalances, more duplicates. May exceed `lease_duration` — a draining split is still heartbeated, so a long drain does not race its own lease; size it against how long the sink takes to flush a split's tail. See [time to balance](#time-to-balance). |
 
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
 ~128 MB range (or the row-count equivalent) — big enough that lease
-traffic is noise, small enough that takeovers and steals move useful
-quanta of work. For most sources that is the planner's design, not a
-knob; the S3 source exposes it as `split_target_bytes` (default 64 MiB)
+traffic is noise, small enough that takeovers and reassignments move
+useful quanta of work. For most sources that is the planner's design, not
+a knob; the S3 source exposes it as `split_target_bytes` (default 64 MiB)
 because object sizes vary wildly between prefixes.
 
 ## Failure modes
@@ -220,7 +240,7 @@ because object sizes vary wildly between prefixes.
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. |
 | NATS unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
 | Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `etl_coordination_splits_quarantined`. |
-| Scale-up | New replicas claim unowned work, then request cooperative handoffs from loaded peers toward ±1 balance. A granted handoff drains and commits before the transfer, so it replays nothing; a victim that cannot answer within `handoff_rounds` loses a committed split to the fallback steal at a cost of up to one commit interval — see [rebalance cost](#what-a-rebalance-costs). |
+| Scale-up | The leader folds the new replicas into the next assignment and moves splits toward weight balance. Each move is a cooperative revocation — the losing worker drains and commits before releasing, so it replays nothing; a drain that is declined or outruns `drain_deadline` is forced instead, at a cost of up to one commit interval of duplicates. See [rebalance cost](#what-a-rebalance-costs). |
 | Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
 | Duplicate `instance_id` | Two live twins would ping-pong reclaims forever; the protocol detects the foreign process on the shared id and stops with a fatal, actionable error. |
 
@@ -230,16 +250,93 @@ The `etl_coordination_*` families (see
 [METRICS.md](https://github.com/marcuskainth/etl-rs/blob/main/docs/METRICS.md))
 carry the whole story: `splits_owned` per worker, `live_workers` for the
 fleet view, `leader` for who plans, `acquisitions_total` by reason
-(`create`/`released`/`reclaimed`/`expired`/`stolen`/`handoff`),
-`handoffs_total` by outcome (`requested`/`granted`/`timeout`/`aborted` —
-`granted` moves are replay-free; a rising `timeout` means fallback
-steals are happening, so look at the victims' sink health),
-`revocations_total` (`fenced`/`starved`), `splits_quarantined` for
-poison, and store-op latency histograms for the NATS round-trips.
-`handoff_duration_seconds` by `phase` is the time-to-balance view —
-`request` on the asking side, `drain` on the giving side — and
-`handoffs_in_flight` shows whether a victim is sitting at
-`handoff_max_grants` (the cap is pacing rebalances) or at zero while the
-fleet is visibly uneven (requests are not arriving at all).
-`etl_coordination_writes_total{outcome="conflict"}` is fencing working as
-designed — alarming only in bulk.
+(`create`/`released`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
+the healthy rebalance path, `expired` means a worker died),
+`revocations_total` by outcome (`requested`/`drained`/`forced`, all on the
+worker giving the split up — `drained` is replay-free, and a rising
+`forced` means drains are being cut short, so look at that worker's sink
+health and `drain_deadline`), `split_losses_total`
+(`fenced`/`starved`/`revoked`), `splits_quarantined` for poison, and
+store-op latency histograms for the NATS round-trips.
+
+Time to balance reads from two separate families, one per side:
+`drain_duration_seconds` on the worker losing a split and
+`assignment_latency_seconds` on the worker gaining one. They are recorded
+in different processes and do not compose — do not add or subtract them.
+`splits_draining` shows whether a worker is stuck mid-drain while the
+fleet is visibly uneven. `etl_coordination_writes_total{outcome="conflict"}`
+is fencing working as designed — alarming only in bulk.
+
+Two families were renamed when coordination moved to leader-assigned
+balancing: `handoffs_total` → `revocations_total` (new label set), and the
+old `revocations_total` → `split_losses_total`. Dashboards carrying the old
+names need updating; `handoff_duration_seconds` and `handoffs_in_flight`
+are gone entirely.
+
+## Upgrading from the work-stealing balancer
+
+Leader-assigned coordination replaced a peer-to-peer work-stealing
+balancer. The [design log](../../DESIGN.md) records why; this section is
+what an upgrade actually requires.
+
+### The store must be empty (or new)
+
+The on-store record schema went from 2 to 3. **The versions do not
+interoperate, and a schema-3 worker will not read a schema-2 store at
+all** — it reads the plan record during startup, finds the wrong schema
+version, and exits fatally with `upgrade or isolate the store prefix`. The
+same pin covers every `spec.` and `split.` record.
+
+So "stop the fleet, restart it on the new build" is *not* sufficient: point
+the new fleet at a fresh bucket or a fresh key prefix. That discards
+committed per-split progress, so an in-flight bounded backfill restarts
+from the beginning. Delivery is at-least-once either way — the re-run
+duplicates, it does not lose — but drain a job to completion before
+upgrading if you would rather not pay for it.
+
+### Configuration
+
+`handoff_rounds` and `handoff_max_grants` are gone; `rebalance_delay`
+(default 20s) and `drain_deadline` (default 10s) replace them. Because
+`CoordinationConfig` is `deny_unknown_fields`, a YAML file still carrying
+the old keys fails to parse rather than silently ignoring them.
+
+One new floor can reject a config you did not change: `drain_deadline` must
+be at least `op_timeout`, and both default to 10s. If you raised
+`op_timeout` for a slow store, raise `drain_deadline` to match.
+
+### Metrics
+
+| Was | Now |
+|---|---|
+| `etl_coordination_handoffs_total{outcome}` | `etl_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`) |
+| `etl_coordination_revocations_total{reason}` | `etl_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
+| `etl_coordination_handoff_duration_seconds{phase}` | `etl_coordination_drain_duration_seconds` and `etl_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-two-coordination-latencies-do-not-compose) |
+| `etl_coordination_handoffs_in_flight` | `etl_coordination_splits_draining` |
+| `acquisitions_total{reason="stolen"}` | gone — there is no steal path |
+| `acquisitions_total{reason="handoff"}` | `acquisitions_total{reason="reassigned"}` |
+| `acquisitions_total{reason="released"}` | folded into `reassigned` — a claiming worker cannot tell a drained revocation from a shutdown hand-back, and a label it cannot populate is a series that reads zero |
+
+### Rust API
+
+Only relevant if you implement the seam yourself or read the metric
+handles directly:
+
+- `CoordinationEvent::HandoffRequested` → `RevokeRequested`.
+- `SplitSource::begin_handoff`/`handoff_ready` → `begin_revoke`/`drain_ready`,
+  and `SplitCoordinator::release_handoff`/`decline_handoff` →
+  `release_drained`/`decline_revoke`. Renamed methods that you *overrode*
+  fail to compile; ones you left defaulted do not — and the default
+  `begin_revoke` declines, which now costs a forced revocation and a
+  replayed tail on every rebalance rather than merely declining an offer.
+- `HandoffOutcome` and `HandoffPhase` are deleted, along with the
+  `L_PHASE` label constant and `AcquireReason::{Stolen, Released}`.
+  `AcquireReason::Handoff` is now `Reassigned`.
+- `CoordinationMetrics::handoff` → `revocation`;
+  `handoff_duration(phase, d)` splits into `drain_duration(d)` and
+  `assignment_latency(d)`; `set_handoffs_in_flight` → `set_splits_draining`.
+- `SplitSpec::weight` kept its name, type and default but changed meaning:
+  it was an ordering hint over count-based balancing, and it is now the
+  balance objective itself. A planner that populated it as a ranking key
+  rather than a cost will skew the leader's distribution — with no compile
+  error to warn you.

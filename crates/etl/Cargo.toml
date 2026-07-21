@@ -123,7 +123,7 @@ json-raw-value = ["json", "etl-json/raw-value"]
 json-simd = ["json", "etl-json/simd"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
-# Multi-instance work-stealing coordination for broker-less sources: the
+# Multi-instance leader-assigned coordination for broker-less sources: the
 # protocol, StoreCoordinator, and the in-memory store — enough for tests
 # and single-process embedding with zero infrastructure. The seam types
 # (`etl::coordination`) and the CoordinationDriver need no feature.

@@ -21,10 +21,10 @@
 //! | Durable   | `plan`              | [`PlanRecord`]          — fingerprint, generation, finality, planner cursor |
 //! | Durable   | `spec.{id}`         | [`SplitSpecRecord`]     — descriptor, weight (immutable) |
 //! | Durable   | `split.{id}`        | [`SplitProgressRecord`] — epoch, status, attempts, progress (the fence) |
+//! | Durable   | `assign.{instance}` | [`AssignmentVal`]       — the leader's desired assignment |
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
-//! | Ephemeral | `handoff.{victim}`  | [`HandoffVal`]          — cooperative handoff request |
 
 use crate::error::fatal;
 use base64::Engine as _;
@@ -33,7 +33,26 @@ use serde::{Deserialize, Serialize};
 use std::hash::BuildHasher as _;
 
 /// Schema version stamped into every record.
-pub(crate) const SCHEMA: u32 = 2;
+///
+/// 3 replaced the peer-to-peer revocation-request key with the leader's
+/// `assign.{instance}` records.
+///
+/// The versions do not interoperate, and they do not *try* to: this pin is
+/// checked on the plan record during startup and on every split and spec
+/// record afterwards, and a mismatch is [`Fatal`] on both sides. So a
+/// schema-3 worker cannot join a store a schema-2 fleet wrote, and vice
+/// versa — an upgrade needs a fresh store prefix, not merely a full-fleet
+/// restart, and an in-flight bounded job restarts from the beginning.
+/// (At-least-once holds through that: the re-run duplicates, it does not
+/// lose.) See the "Upgrading" section of the scaling-out guide.
+///
+/// Failing closed is the point. Ownership transfers on the durable
+/// progress-record CAS regardless of vintage, so a mixed fleet could not
+/// corrupt anything — but it would rebalance against two different models
+/// at once, and diagnosing that is far worse than refusing to start.
+///
+/// [`Fatal`]: etl_core::coordination::CoordinationErrorKind::Fatal
+pub(crate) const SCHEMA: u32 = 3;
 
 /// Key of the plan record in the durable keyspace.
 pub(crate) const PLAN_KEY: &str = "plan";
@@ -47,8 +66,11 @@ pub(crate) const SPLIT_PREFIX: &str = "split.";
 pub(crate) const SPEC_PREFIX: &str = "spec.";
 /// Prefix of worker presence keys in the ephemeral keyspace.
 pub(crate) const WORKER_PREFIX: &str = "worker.";
-/// Prefix of cooperative handoff-request keys in the ephemeral keyspace.
-pub(crate) const HANDOFF_PREFIX: &str = "handoff.";
+/// Prefix of the leader's assignment records in the **durable** keyspace.
+/// Durable and not ephemeral on purpose: an assignment must outlive the
+/// leadership that wrote it, or every leader gap would blank the fleet's
+/// instructions and stall reconciliation until a new leader had planned.
+pub(crate) const ASSIGN_PREFIX: &str = "assign.";
 
 /// `split.{id}` key (durable progress record / ephemeral lease).
 pub(crate) fn split_key(id: &SplitId) -> String {
@@ -85,14 +107,14 @@ pub(crate) fn parse_worker_key(key: &str) -> Option<&str> {
     key.strip_prefix(WORKER_PREFIX)
 }
 
-/// `handoff.{victim}` cooperative handoff-request key.
-pub(crate) fn handoff_key(victim: &str) -> String {
-    format!("{HANDOFF_PREFIX}{victim}")
+/// `assign.{instance}` assignment key.
+pub(crate) fn assign_key(instance: &str) -> String {
+    format!("{ASSIGN_PREFIX}{instance}")
 }
 
-/// The victim instance encoded in a `handoff.{victim}` key, if it is one.
-pub(crate) fn parse_handoff_key(key: &str) -> Option<&str> {
-    key.strip_prefix(HANDOFF_PREFIX)
+/// The instance encoded in an `assign.{instance}` key, if it is one.
+pub(crate) fn parse_assign_key(key: &str) -> Option<&str> {
+    key.strip_prefix(ASSIGN_PREFIX)
 }
 
 /// Stable 64-bit digest of the job fingerprint, stamped into every split
@@ -442,42 +464,47 @@ pub(crate) struct LeaderVal {
 pub(crate) struct WorkerVal {
     pub(crate) schema: u32,
     pub(crate) nonce: String,
+    /// This worker's own lane budget (`max_in_flight`). The leader must
+    /// balance against each member's budget rather than its own: nothing
+    /// forces the fleet to be homogeneous (the job fingerprint covers
+    /// *source* configuration, not coordination tuning), and a leader that
+    /// assumed its own value would hand splits to a smaller worker that
+    /// then refuses to claim them — permanently, because that worker keeps
+    /// looking like the least loaded one.
+    ///
+    /// `#[serde(default)]` so a presence value written before the field
+    /// existed still parses; the leader reads a missing budget as its own.
+    #[serde(default)]
+    pub(crate) max_in_flight: u32,
 }
 
-/// The ephemeral cooperative-handoff request value at `handoff.{victim}`,
-/// written by an under-target requester asking the victim to drain and
-/// release splits. Liveness-only: losing or expiring it costs a rebalance
-/// opportunity, never correctness — the durable progress-record CAS stays
-/// the sole fence. Deliberately carries no round number: rounds are
-/// worker-local scalars and must never be compared across machines.
+/// The leader's desired assignment for one instance, at
+/// `assign.{instance}` in the durable keyspace.
 ///
-/// A peer running an older build wrote `granted` as an `Option<String>`:
-/// `null` when it had granted nothing (the common case — the field had no
-/// `skip_serializing_if`), a bare string once it had. Neither parses as a
-/// list here. That is safe by construction: an unreadable handoff value is
-/// warned about and ignored, so a mixed-version fleet simply stops
-/// consenting and rebalances through the fallback steal — slower and with
-/// replay, but never wedged and never lossy. The same holds in reverse: an
-/// old peer cannot read the list this build writes.
+/// **This is an instruction, not a grant of ownership.** A worker named
+/// here may claim these splits; it is not thereby the owner, and reading
+/// its own name here confers nothing until the durable progress-record CAS
+/// succeeds. That separation is the whole reason a stale or split-brained
+/// leader is harmless: two leaders can publish contradictory assignments
+/// and still not produce two owners, because neither assignment is a
+/// fence. Losing, delaying, or duplicating this record costs balance
+/// latency only.
+///
+/// The converse instruction is implicit: a split this instance holds and
+/// which is *absent* here must be released. Absence is meaningful, so a
+/// worker must distinguish "no record yet" (nothing has been decided —
+/// hold what you have) from "a record that omits this split" (give it up).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HandoffVal {
+pub(crate) struct AssignmentVal {
     pub(crate) schema: u32,
-    /// The under-target worker asking for a split.
-    pub(crate) requester: String,
-    /// The requester's per-process nonce (diagnostics; lets a restarted
-    /// requester recognize — and overwrite — its predecessor's key).
-    pub(crate) nonce: String,
-    /// The splits the victim chose to drain, CAS-annotated by the victim
-    /// before each drain starts and removed again as each one is released.
-    /// This is the grant's *attribution*: the requester marks exactly these
-    /// splits as incoming (never inferring a grant from lease traffic), and
-    /// a request whose key vanishes after a grant was annotated is served,
-    /// not blipped — so it must not be re-created. Empty means no grant has
-    /// been made yet; the key is deleted rather than emptied once the last
-    /// granted split is released.
-    #[serde(default)]
-    pub(crate) granted: Vec<String>,
+    /// The leadership generation that computed this assignment. A worker
+    /// ignores a record older than the newest generation it has seen, so a
+    /// deposed leader's late write cannot walk the fleet backwards.
+    pub(crate) generation: u64,
+    /// The splits this instance should hold. Sorted, so an unchanged
+    /// assignment is byte-identical and the leader can skip the write.
+    pub(crate) splits: Vec<String>,
 }
 
 /// Encode any of the small lease values.
@@ -609,55 +636,37 @@ mod tests {
     }
 
     #[test]
-    fn handoff_values_round_trip_and_reject_alien_shapes() {
-        let val = HandoffVal {
+    fn assignment_values_round_trip_and_reject_alien_shapes() {
+        let val = AssignmentVal {
             schema: SCHEMA,
-            requester: "worker-b".to_string(),
-            nonce: "n-1".to_string(),
-            granted: Vec::new(),
+            generation: 4,
+            splits: vec!["split-7".to_string(), "split-9".to_string()],
         };
-        let parsed: HandoffVal = parse_val(&handoff_key("worker-a"), &encode_val(&val)).unwrap();
+        let parsed: AssignmentVal = parse_val(&assign_key("worker-a"), &encode_val(&val)).unwrap();
         assert_eq!(parsed, val);
-        // A batch of grants survives the round trip in order.
-        let annotated = HandoffVal {
-            granted: vec!["split-7".to_string(), "split-9".to_string()],
-            ..val.clone()
-        };
-        let parsed: HandoffVal =
-            parse_val(&handoff_key("worker-a"), &encode_val(&annotated)).unwrap();
-        assert_eq!(parsed, annotated);
 
-        let err = parse_val::<HandoffVal>("handoff.worker-a", b"not json").unwrap_err();
+        let err = parse_val::<AssignmentVal>("assign.worker-a", b"not json").unwrap_err();
         assert!(err.to_string().contains("another system"), "{err}");
-        let err =
-            parse_val::<HandoffVal>("handoff.worker-a", br#"{"schema":2,"who":"x"}"#).unwrap_err();
+        let err = parse_val::<AssignmentVal>("assign.worker-a", br#"{"schema":3,"who":"x"}"#)
+            .unwrap_err();
         assert!(err.to_string().contains("unreadable"), "{err}");
-        // An older peer wrote `granted` as an `Option<String>`. BOTH of its
-        // encodings must fail to parse rather than silently read as no
-        // grant: the caller warns and ignores the key, so a mixed fleet
-        // falls back to steals instead of believing a grant it cannot see.
-        // `null` is the common one — an unannotated request — and would be
-        // the dangerous one to accept, since `#[serde(default)]` covers only
-        // an ABSENT field, not an explicit null.
-        for legacy in [
-            br#"{"schema":1,"requester":"b","nonce":"n","granted":null}"#.as_slice(),
-            br#"{"schema":1,"requester":"b","nonce":"n","granted":"split-7"}"#.as_slice(),
-        ] {
-            let err = parse_val::<HandoffVal>("handoff.worker-a", legacy).unwrap_err();
-            assert!(err.to_string().contains("unreadable"), "{err}");
-        }
-        // An absent `granted` reads as no grant, so a value written before
-        // the field existed still parses.
-        let parsed: HandoffVal = parse_val(
-            "handoff.worker-a",
-            br#"{"schema":1,"requester":"b","nonce":"n"}"#,
+        // A schema-2 peer wrote `revocation.{victim}` values here instead;
+        // they must fail to parse rather than read as an empty assignment,
+        // which the caller would act on by releasing everything.
+        let err = parse_val::<AssignmentVal>(
+            "assign.worker-a",
+            br#"{"schema":2,"requester":"b","nonce":"n","granted":[]}"#,
         )
-        .unwrap();
-        assert!(parsed.granted.is_empty());
+        .unwrap_err();
+        assert!(err.to_string().contains("unreadable"), "{err}");
 
-        assert_eq!(handoff_key("worker-a"), "handoff.worker-a");
-        assert_eq!(parse_handoff_key("handoff.worker-a"), Some("worker-a"));
-        assert_eq!(parse_handoff_key("worker.worker-a"), None);
+        assert_eq!(assign_key("worker-a"), "assign.worker-a");
+        assert_eq!(parse_assign_key("assign.worker-a"), Some("worker-a"));
+        assert_eq!(parse_assign_key("worker.worker-a"), None);
+        // The two prefixes must not shadow each other in a durable-keyspace
+        // watch: `assign.` and `split.`/`spec.` share no prefix.
+        assert_eq!(parse_assign_key("split.abc"), None);
+        assert_eq!(parse_split_key("assign.worker-a"), None);
     }
 
     #[test]

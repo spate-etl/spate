@@ -490,13 +490,13 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         }
     }
 
-    fn release_handoff(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
-        // A cooperative grant, not a departure: the task keeps this worker
-        // in the fleet even when the last split is handed off. Unlike
-        // `release`, there is NO direct-store teardown fallback — the
-        // process is live, so a grant the task cannot land right now simply
-        // costs a rebalance opportunity (the requester's round budget falls
-        // back to a steal); an unreleased lease expires on its own.
+    fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
+        // A drained revocation, not a departure: the task keeps this
+        // worker in the fleet even when the last split is handed back.
+        // Unlike `release`, there is NO direct-store teardown fallback —
+        // the process is live, so a release the task cannot land right now
+        // simply makes the rebalance slower (the leader forces it at
+        // `drain_deadline`); an unreleased lease expires on its own.
         let result = self.command(|reply| Command::Release {
             splits: splits.to_vec(),
             departure: false,
@@ -510,21 +510,25 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             }
         }
         if let Err(e) = &result {
-            tracing::warn!(error = %e, "handoff release deferred; the lease expires if it never lands");
+            tracing::warn!(error = %e, "revocation release deferred; the lease expires if it never lands");
         }
         Ok(())
     }
 
-    fn decline_handoff(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
+    fn decline_revoke(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
         // Best-effort: a decline the task never hears costs liveness only
-        // (its grant slot self-heals once the requester withdraws or the
-        // fallback fences it), never correctness.
-        let result = self.command(|reply| Command::DeclineHandoff {
+        // — the revocation is still forced at `drain_deadline`, just later
+        // than it needed to be — never correctness.
+        let result = self.command(|reply| Command::DeclineRevoke {
             split: split.clone(),
             reply,
         });
         if let Err(e) = &result {
-            tracing::warn!(split = %split, error = %e, "handoff decline deferred; the grant slot self-heals");
+            tracing::warn!(
+                split = %split,
+                error = %e,
+                "revocation decline deferred; the drain deadline forces it anyway"
+            );
         }
         Ok(())
     }

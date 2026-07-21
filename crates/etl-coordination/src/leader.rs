@@ -59,6 +59,9 @@ impl<S: CoordinationStore> Task<S> {
                 tracing::info!(generation, "elected planner leader");
                 self.leadership = Some(rev);
                 self.metrics(|m| m.set_leader(true));
+                // A fresh leader has published nothing yet, whatever this
+                // process's assignment bookkeeping happens to say.
+                self.mark_assignment_dirty();
                 self.bump_generation(generation).await?;
                 Ok(())
             }

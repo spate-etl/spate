@@ -8,15 +8,11 @@ mod support;
 
 use etl_coordination::store::memory::MemoryStore;
 use etl_coordination::store::{CasOutcome, CoordinationStore as _, Keyspace};
-use etl_coordination::{
-    Clock, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitProgress,
-    StoreCoordinator,
-};
-use std::sync::Arc;
+use etl_coordination::{CoordinationErrorKind, SplitCoordinator, SplitProgress};
 use std::time::Instant;
 use support::{
-    Held, LEASE, PhasedPlanner, TestClock, config, crash, drive, drive_pair, runtime, split_id,
-    store, worker, worker_handoff_rounds,
+    Held, LEASE, PhasedPlanner, crash, drive, drive_pair, runtime, split_id, store, worker,
+    worker_drain_deadline, worker_max_in_flight, worker_rebalance_delay,
 };
 
 #[test]
@@ -35,11 +31,11 @@ fn racing_workers_partition_the_splits_and_complete_collectively() {
     // Converge to a full, disjoint 4/4 partition (target = ceil(8/2)).
     //
     // Each round also checkpoints whatever each worker holds, standing in
-    // for a running data plane. That is load-bearing, not decoration: a
-    // split with no committed progress has no resume point and is
-    // deliberately not stealable, so if one worker wins the whole plan
-    // before its peer announces presence, only a commit makes the
-    // rebalance possible.
+    // for a running data plane — so that when the leader does move a split,
+    // its new owner resumes from a real watermark instead of re-reading
+    // from the start. The balancer itself does not consult the watermark;
+    // this is here because the assertions below are about a partition that
+    // a running pipeline could actually have reached.
     let deadline = Instant::now() + support::DEADLINE;
     while !(held_a.splits.len() + held_b.splits.len() == ids.len()
         && held_a.splits.keys().all(|k| !held_b.splits.contains_key(k))
@@ -451,948 +447,450 @@ fn all_complete_reaches_a_late_standby_that_never_owned_anything() {
     assert!(held_s.splits.is_empty(), "the standby never owned work");
 }
 
+// ----------------------------------------------------------------------
+// Leader-computed assignment.
+
+/// The scale-out case: one worker holds everything, a second joins, and
+/// the leader moves it a share. The transfer must be cooperative — the
+/// victim drains and commits before releasing — so the newcomer resumes
+/// from a watermark rather than replaying.
 #[test]
-fn a_newcomer_steals_from_a_loaded_worker() {
+fn a_newcomer_is_assigned_a_share_of_a_loaded_fleet() {
     let rt = runtime();
     let store = store();
-    // 4 splits, one worker: it holds all 4 (target = min(8, 4)).
-    let ids = ["b0", "b1", "b2", "b3"];
-    let planner = || Box::new(PhasedPlanner::one_final("balance:v1", &ids));
+    let ids = ["s0", "s1", "s2", "s3"];
+    let planner = || Box::new(PhasedPlanner::one_final("scaleout:v1", &ids));
 
     let mut a = worker(&store, rt.handle(), Some("worker-a"));
     a.start(planner()).unwrap();
     let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 4
+    drive(&mut a, &mut held_a, "worker-a takes the whole plan", |h| {
+        h.splits.len() == ids.len()
     });
-
-    // The data plane checkpoints: only now is the work resumable, and so
-    // only now is it cheap enough to move. Before this, a steal would
-    // replay each split from the start.
     support::commit_held(&mut a, &held_a);
 
-    // A newcomer with nothing claimable must steal toward balance: the
-    // pairwise rule converges to a 2/2 split.
+    // B joins. The leader must take splits off A and give them to B.
+    let mut b = worker(&store, rt.handle(), Some("worker-b"));
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+
+    let deadline = Instant::now() + support::DEADLINE;
+    while !(held_a.splits.len() == 2 && held_b.splits.len() == 2) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out balancing: a={:?} b={:?}",
+            held_a.splits.keys().collect::<Vec<_>>(),
+            held_b.splits.keys().collect::<Vec<_>>()
+        );
+        held_a.fold(a.poll().unwrap());
+        held_b.fold(b.poll().unwrap());
+        support::commit_held(&mut a, &held_a);
+        // A consents to whatever the leader revoked; B just claims.
+        support::consent_to_revocations(&mut a, &mut held_a);
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    assert!(
+        held_a.splits.keys().all(|k| !held_b.splits.contains_key(k)),
+        "the two halves must be disjoint"
+    );
+    // Every split B holds carries the progress A committed before
+    // releasing: a cooperative move replays nothing.
+    for (id, (_, progress)) in &held_b.splits {
+        let watermark = progress
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} arrived without a resume point, so it will replay"))
+            .watermark;
+        assert_eq!(
+            watermark,
+            support::DRAINED_WATERMARK,
+            "{id} resumed from the pre-rebalance watermark ({}), not the drained tail — \
+             the move was forced, not cooperative",
+            support::BASE_WATERMARK
+        );
+    }
+}
+
+/// KAFKA-12495 analogue. Kafka Connect's assignor assumed the member count
+/// would not change between the revoking round and the assigning round; a
+/// worker joining in between left work permanently stranded and the fleet
+/// in a skew that never self-corrected (unfixed until 3.4.0). Continuous
+/// reconciliation has no rounds to fall between, so a third worker
+/// arriving mid-revocation must still converge.
+#[test]
+fn a_worker_joining_during_a_revocation_still_converges() {
+    let rt = runtime();
+    let store = store();
+    let ids = ["s0", "s1", "s2", "s3", "s4", "s5"];
+    let planner = || Box::new(PhasedPlanner::one_final("midjoin:v1", &ids));
+
+    let mut a = worker(&store, rt.handle(), Some("worker-a"));
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "worker-a takes the whole plan", |h| {
+        h.splits.len() == ids.len()
+    });
+    support::commit_held(&mut a, &held_a);
+
+    // B joins and the leader starts revoking — but B does NOT consent or
+    // claim yet; we hold the transfer open deliberately.
+    let mut b = worker(&store, rt.handle(), Some("worker-b"));
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    drive(&mut a, &mut held_a, "a revocation is requested", |h| {
+        !h.revoke_requests.is_empty()
+    });
+
+    // C arrives in exactly that window.
+    let mut c = worker(&store, rt.handle(), Some("worker-c"));
+    c.start(planner()).unwrap();
+    let mut held_c = Held::default();
+
+    // All three must reach a balanced, disjoint partition: 6 splits, 3
+    // workers, 2 each. A stranded split or a permanent skew fails here.
+    let deadline = Instant::now() + support::DEADLINE;
+    loop {
+        let counts = (
+            held_a.splits.len(),
+            held_b.splits.len(),
+            held_c.splits.len(),
+        );
+        if counts == (2, 2, 2) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out converging: a/b/c = {counts:?}"
+        );
+        for (co, held) in [
+            (&mut a, &mut held_a),
+            (&mut b, &mut held_b),
+            (&mut c, &mut held_c),
+        ] {
+            held.fold(co.poll().unwrap());
+            support::commit_held(co, held);
+            support::consent_to_revocations(co, held);
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    let total: usize = held_a.splits.len() + held_b.splits.len() + held_c.splits.len();
+    assert_eq!(
+        total,
+        ids.len(),
+        "every split must still be held by someone"
+    );
+}
+
+/// KAFKA-15693 analogue, arm 1 of 2. Connect's
+/// `scheduled.rebalance.max.delay.ms=0` withheld a departed worker's
+/// assignments *indefinitely* rather than reassigning them at once —
+/// shipped broken from 2.3.0 through 3.7.0, because zero was a value
+/// flowing through the general delay path instead of a case in its own
+/// right. Zero here must mean immediately.
+///
+/// Note `rebalance_delay` governs the **leader**, so every worker carries
+/// the same setting: configuring only the joiner would assert nothing,
+/// since the surviving leader's own value is what decides. Paired with
+/// [`a_departed_workers_splits_are_withheld_for_the_grace_window`] — one
+/// arm alone cannot tell "prompt" from "no window at all".
+#[test]
+fn a_zero_rebalance_delay_reassigns_immediately() {
+    assert!(
+        reassignment_delay(std::time::Duration::ZERO) < LEASE * 3,
+        "zero delay must not withhold the split"
+    );
+}
+
+/// Arm 2: a non-zero window really does hold the work back, so arm 1 is
+/// measuring the window rather than the lease expiry it sits on top of.
+#[test]
+fn a_departed_workers_splits_are_withheld_for_the_grace_window() {
+    let withheld = reassignment_delay(LEASE * 5);
+    assert!(
+        withheld >= LEASE * 3,
+        "a grace window must actually delay reassignment, took {withheld:?}"
+    );
+}
+
+/// Crash one of two workers and return how long the survivor took to pick
+/// up its split. Both workers share `delay`, because the leader's copy is
+/// the one that governs.
+fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
+    let rt = runtime();
+    let store = store();
+    let ids = ["s0", "s1"];
+    let planner = || Box::new(PhasedPlanner::one_final("delay:v1", &ids));
+
+    let mut a = worker_rebalance_delay(&store, rt.handle(), Some("worker-a"), delay);
+    // B gets its own runtime so it can be killed outright rather than shut
+    // down cleanly — a clean stop releases its split and would prove
+    // nothing about reassignment.
+    let rt_b = runtime();
+    let mut b = worker_rebalance_delay(&store, rt_b.handle(), Some("worker-b"), delay);
+    a.start(planner()).unwrap();
+    b.start(planner()).unwrap();
+    let (mut held_a, mut held_b) = (Held::default(), Held::default());
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "both workers hold a split",
+        |x, y| x.splits.len() == 1 && y.splits.len() == 1,
+    );
+    support::commit_held(&mut a, &held_a);
+
+    crash(rt_b, b);
+    let died_at = Instant::now();
+    drive(
+        &mut a,
+        &mut held_a,
+        "the survivor picks up the departed worker's split",
+        |h| h.splits.len() == 2,
+    );
+    died_at.elapsed()
+}
+
+/// A source that will not stop cleanly still has to give the split up —
+/// a leader's revocation is a decision, not a request. The expensive path
+/// (replay) is the price of declining, not an escape from it.
+#[test]
+fn a_drain_that_never_completes_is_forced_out() {
+    let rt = runtime();
+    let store = store();
+    let ids = ["s0", "s1", "s2", "s3"];
+    let planner = || Box::new(PhasedPlanner::one_final("forced:v1", &ids));
+
+    // A short deadline so the force fires inside the test window.
+    let mut a = worker_drain_deadline(&store, rt.handle(), Some("worker-a"), LEASE / 4);
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "worker-a takes the whole plan", |h| {
+        h.splits.len() == ids.len()
+    });
+    support::commit_held(&mut a, &held_a);
+
+    let mut b = worker_drain_deadline(&store, rt.handle(), Some("worker-b"), LEASE / 4);
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let started = Instant::now();
+
+    // A never consents: `Held::fold` records the request and does nothing,
+    // which is exactly a declining source.
+    let deadline = Instant::now() + support::DEADLINE;
+    while held_b.splits.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "a declining source blocked the rebalance forever"
+        );
+        held_a.fold(a.poll().unwrap());
+        held_b.fold(b.poll().unwrap());
+        support::commit_held(&mut a, &held_a);
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    assert!(
+        !held_a.revoke_requests.is_empty(),
+        "the split should have been asked for before it was taken"
+    );
+    assert!(
+        held_a.splits.len() < ids.len(),
+        "the forced split must have left worker-a"
+    );
+    // The split has to leave because the DEADLINE fired, not because the
+    // lease ran out — otherwise this test would still pass with the whole
+    // forcing path deleted. `drain_deadline` is a quarter of the lease, so
+    // nothing but a forced revocation can have moved a split this soon.
+    assert!(
+        started.elapsed() < LEASE,
+        "a split moved only after a full lease ({:?}) — that is an expiry takeover, \
+         not a forced revocation",
+        started.elapsed()
+    );
+    // And what B holds must be something A was actually asked for.
+    let moved: Vec<&String> = held_b.splits.keys().collect();
+    assert!(
+        moved.iter().all(|id| held_a.revoke_requests.contains(id)),
+        "worker-b holds {moved:?} but the revocations asked for {:?}",
+        held_a.revoke_requests
+    );
+}
+
+/// **Absence of an assignment is not an instruction to hold nothing.**
+///
+/// A worker whose `assign.{instance}` record disappears — a leader gap, a
+/// withdrawn assignment, a reconcile that finds the key gone — must keep
+/// what it holds and wait to be told again. If that ever inverted, a
+/// single leaderless moment would drain the entire fleet at once, and the
+/// job would stall behind a rebalance nobody asked for. This is the most
+/// dangerous inversion in the design, so it is asserted directly rather
+/// than left to fall out of the happy path.
+#[test]
+fn a_withdrawn_assignment_record_does_not_release_anything() {
+    let rt = runtime();
+    let store = store();
+    let ids = ["w0", "w1", "w2", "w3"];
+    let planner = || Box::new(PhasedPlanner::one_final("withdrawn:v1", &ids));
+
+    let mut a = worker(&store, rt.handle(), Some("worker-a"));
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
     let mut b = worker(&store, rt.handle(), Some("worker-b"));
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
     drive_pair(
         (&mut a, &mut held_a),
         (&mut b, &mut held_b),
-        "stealing toward balance",
-        |ha, hb| ha.splits.len() == 2 && hb.splits.len() == 2,
+        "both workers settle on a share",
+        |x, y| !x.splits.is_empty() && !y.splits.is_empty(),
     );
-    // Steady state: balanced fleets do not oscillate.
-    let before: Vec<String> = held_b.splits.keys().cloned().collect();
-    std::thread::sleep(LEASE * 2);
-    held_a.fold(a.poll().unwrap());
-    held_b.fold(b.poll().unwrap());
-    let after: Vec<String> = held_b.splits.keys().cloned().collect();
-    assert_eq!(before, after, "balance must not oscillate");
-    assert_eq!(held_a.splits.len(), 2);
-}
-
-/// The cooperative path: an under-target newcomer asks a loaded owner to
-/// hand a split over rather than stealing it. The owner drains it, commits
-/// the tail, and releases — the newcomer resumes from that final watermark,
-/// so nothing is replayed (unlike a steal, which re-reads the uncommitted
-/// tail). The owner keeps the rest of its work and stays in the fleet.
-#[test]
-fn a_newcomer_requests_a_handoff_and_claims_it_with_carried_progress() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["h0", "h1", "h2", "h3"];
-    let planner = || Box::new(PhasedPlanner::one_final("handoff:v1", &ids));
-
-    // A claims all four and checkpoints them (a running data plane's first
-    // commit).
-    // The loop below hand-plays A's embedder and can service only one
-    // drain at a time, so pin the victim to one grant: a batch would
-    // strand its second split and time out into a steal.
-    let mut a = support::worker_handoff_tuned(&store, rt.handle(), Some("worker-a"), 3, 1);
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 4
-    });
     support::commit_held(&mut a, &held_a);
+    support::commit_held(&mut b, &held_b);
+    let before: Vec<String> = held_b.splits.keys().cloned().collect();
 
-    // B is patient: its fallback steal cannot fire inside the test window,
-    // so the move below can only be a consented handoff.
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 1_000);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
+    // Delete B's assignment record out from under it. Whichever worker is
+    // leader will republish eventually; the invariant is that B does not
+    // give anything up in the meantime.
+    rt.block_on(async {
+        let outcome = store
+            .delete(Keyspace::Durable, "assign.worker-b", None)
+            .await
+            .expect("delete");
+        assert!(
+            matches!(outcome, CasOutcome::Won(_)),
+            "the record has to have existed, or this tests nothing"
+        );
+    });
 
-    // Drive both. A plays its own embedder by hand: on `HandoffRequested`
-    // it commits a fresh tail watermark W' (what a drained data plane would
-    // commit) and releases the split cooperatively.
-    const TAIL: i64 = 100;
-    let mut handed: Option<String> = None;
-    let mut a_lost_handed = false;
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(Instant::now() < deadline, "handoff did not complete");
-        for event in a.poll().unwrap() {
-            match &event {
-                CoordinationEvent::HandoffRequested { split } if handed.is_none() => {
-                    let id = split.as_str().to_string();
-                    a.commit(&split_id(&id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                        .unwrap();
-                    a.release_handoff(&[split_id(&id)]).unwrap();
-                    handed = Some(id);
-                }
-                CoordinationEvent::Lost { split } if handed.as_deref() == Some(split.as_str()) => {
-                    a_lost_handed = true;
-                }
-                _ => {}
-            }
+    let until = Instant::now() + LEASE;
+    while Instant::now() < until {
+        for event in a.poll().expect("poll a") {
             held_a.fold(vec![event]);
         }
-        held_b.fold(b.poll().unwrap());
-        if let Some(handed) = &handed
-            && held_b.splits.contains_key(handed)
-        {
-            break;
+        for event in b.poll().expect("poll b") {
+            assert!(
+                !matches!(event, etl_coordination::CoordinationEvent::Lost { .. }),
+                "worker-b released a split because its assignment record vanished: {event:?}"
+            );
+            held_b.fold(vec![event]);
         }
+        assert!(
+            held_b.revoke_requests.is_empty(),
+            "an absent assignment record was read as an instruction to hold nothing: {:?}",
+            held_b.revoke_requests
+        );
+        support::commit_held(&mut a, &held_a);
+        support::commit_held(&mut b, &held_b);
         std::thread::sleep(support::POLL_INTERVAL);
     }
-    let handed = handed.expect("A was asked to hand a split over");
-
-    assert!(
-        !a_lost_handed,
-        "a graceful grant must never surface as a Lost on the victim"
-    );
-    let (_, progress) = &held_b.splits[&handed];
+    let after: Vec<String> = held_b.splits.keys().cloned().collect();
     assert_eq!(
-        progress.as_ref().map(|p| p.watermark),
-        Some(TAIL),
-        "the handed split resumes from the victim's final commit: zero replay"
-    );
-
-    // A handed off one split of four, so it is NOT parting: its presence key
-    // survives (a departure would have deleted it).
-    let present = rt
-        .block_on(store.get(Keyspace::Ephemeral, "worker.worker-a"))
-        .unwrap();
-    assert!(
-        present.is_some(),
-        "A gave up one split of four; it must remain in the fleet"
+        before, after,
+        "worker-b's working set changed while it had no assignment record"
     );
 }
 
-/// A victim answers one request with several splits at once, bounded by
-/// `handoff_max_grants`. Both moves must be consented and replay-free, and
-/// — the part a single-grant implementation gets wrong — the request key
-/// must survive the FIRST release: acking the whole request there would
-/// tell the requester it had been served while the second drain was still
-/// running, so that split would arrive as ordinary released work (or not at
-/// all, once the requester stopped expecting it).
+/// Giving up the last split under a revocation is **not** a departure.
+///
+/// `release` doubles as the shutdown path: a worker that releases its last
+/// split stops claiming, hands leadership back, and drops its presence
+/// key. A revocation's hand-back must not trip that — otherwise revoking a
+/// single-split worker's only split retires it from the fleet, and its
+/// lane budget is lost for the rest of the job.
 #[test]
-fn one_request_is_answered_with_a_bounded_batch_of_grants() {
+fn a_revocation_of_the_last_split_is_not_a_departure() {
     let rt = runtime();
     let store = store();
-    let ids = ["c0", "c1", "c2", "c3", "c4", "c5"];
-    let planner = || Box::new(PhasedPlanner::one_final("batch:v1", &ids));
+    // Two splits, two workers, one lane each: A takes both, then must give
+    // exactly one back — which is its last split only from B's arrival
+    // onward, so the release path runs with `owned` about to empty.
+    let ids = ["r0", "r1"];
+    let planner = || Box::new(PhasedPlanner::one_final("lastsplit:v1", &ids));
 
-    // The victim keeps the default two-grant cap — this test is about it.
-    let mut a = worker(&store, rt.handle(), Some("worker-a"));
+    let mut a = worker_max_in_flight(&store, rt.handle(), Some("worker-a"), 1);
     a.start(planner()).unwrap();
     let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 6
+    drive(&mut a, &mut held_a, "worker-a takes its one lane", |h| {
+        h.splits.len() == 1
     });
     support::commit_held(&mut a, &held_a);
 
-    // Patient budget: nothing here may degrade into a steal. Two grants at
-    // a time — 6 against 0 would admit more under the pairwise rule, so the
-    // cap is what is being tested, not the rule.
-    let mut b = support::worker_handoff_tuned(&store, rt.handle(), Some("worker-b"), 1_000, 2);
+    let mut b = worker_max_in_flight(&store, rt.handle(), Some("worker-b"), 1);
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
 
-    const TAIL: i64 = 250;
-    // Grants arrive as separate events; collect them and drain each. The
-    // first release is deliberately delayed relative to the second grant's
-    // arrival so the key-survival assertion below is meaningful.
-    let mut granted: Vec<String> = Vec::new();
-    let mut released: Vec<String> = Vec::new();
-    let mut a_lost: Vec<String> = Vec::new();
-    let mut key_after_first_release: Option<bool> = None;
-    // The cap bounds grants *in flight*, not grants over the run: once the
-    // first pair lands B is still under its share of six, so the victim
-    // legitimately tops the batch back up.
-    let mut peak_in_flight = 0usize;
+    // Drive until both hold one split each. A's hand-back empties its
+    // working set momentarily; if that had been read as a departure it
+    // would have dropped its presence key and never claimed again, so this
+    // loop would time out.
     let deadline = Instant::now() + support::DEADLINE;
-    loop {
+    while !(held_a.splits.len() == 1 && held_b.splits.len() == 1) {
         assert!(
             Instant::now() < deadline,
-            "batched grants did not complete (granted {granted:?}, B holds {:?})",
+            "the fleet never reached one split each: a={:?} b={:?}",
+            held_a.splits.keys().collect::<Vec<_>>(),
             held_b.splits.keys().collect::<Vec<_>>()
         );
-        for event in a.poll().unwrap() {
-            match &event {
-                CoordinationEvent::HandoffRequested { split } => {
-                    let id = split.as_str().to_string();
-                    if !granted.contains(&id) {
-                        granted.push(id);
-                    }
-                }
-                CoordinationEvent::Lost { split } => a_lost.push(split.as_str().to_string()),
-                _ => {}
-            }
-            held_a.fold(vec![event]);
-        }
-        let in_flight = granted.len() - released.len();
-        peak_in_flight = peak_in_flight.max(in_flight);
-        assert!(
-            in_flight <= 2,
-            "handoff_max_grants must bound concurrent drains: {in_flight} in flight"
-        );
-        // Only start releasing once BOTH grants are in flight, so the two
-        // drains genuinely overlap.
-        if granted.len() >= 2 && released.len() < 2 {
-            let id = granted[released.len()].clone();
-            a.commit(&split_id(&id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                .unwrap();
-            a.release_handoff(&[split_id(&id)]).unwrap();
-            released.push(id);
-            if released.len() == 1 {
-                // The ack must still be outstanding: one split of the batch
-                // has landed, the other has not.
-                key_after_first_release = Some(
-                    rt.block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
-                        .unwrap()
-                        .is_some(),
-                );
-            }
-        }
-        held_b.fold(b.poll().unwrap());
-        if released.len() == 2 && released.iter().all(|id| held_b.splits.contains_key(id)) {
-            break;
-        }
+        held_a.fold(a.poll().expect("poll a"));
+        held_b.fold(b.poll().expect("poll b"));
+        support::commit_held(&mut a, &held_a);
+        support::commit_held(&mut b, &held_b);
+        support::consent_to_revocations(&mut a, &mut held_a);
         std::thread::sleep(support::POLL_INTERVAL);
     }
-
-    assert_eq!(
-        peak_in_flight, 2,
-        "two drains must genuinely overlap — that is the whole point of the \
-         batch; one at a time would be the old behaviour"
-    );
+    // Still a member: a departure deletes this key.
+    let presence = rt.block_on(async {
+        store
+            .get(Keyspace::Ephemeral, "worker.worker-a")
+            .await
+            .expect("get")
+    });
     assert!(
-        a_lost.is_empty(),
-        "every move must be consented, never a fenced steal: {a_lost:?}"
+        presence.is_some(),
+        "worker-a left the fleet after a revocation took its last split"
     );
-    assert_eq!(
-        key_after_first_release,
-        Some(true),
-        "the request key must outlive the first release — the ack retires it \
-         only when the last granted split is gone"
-    );
-    for id in &released {
-        let (_, progress) = &held_b.splits[id];
-        assert_eq!(
-            progress.as_ref().map(|p| p.watermark),
-            Some(TAIL),
-            "{id} must resume from the victim's final commit: zero replay"
-        );
-    }
 }
 
-/// A batch outlives a single request's patience, so delivering part of one
-/// must re-arm it. The fallback exists to escape an *unresponsive* victim;
-/// a victim that has just drained, committed and released a split is the
-/// opposite, and stealing the rest of its batch out from under it would
-/// charge replay for a cooperative move that was working. Here the second
-/// drain deliberately takes longer than the whole round budget, and still
-/// no split may be stolen.
+/// The lane budget is a per-worker materialization limit, and the leader
+/// honours each worker's own. Splits beyond the fleet's summed budget are
+/// the queue: not assigned, not quarantined, not lost.
 #[test]
-fn delivering_part_of_a_batch_re_arms_the_fallback() {
+fn splits_beyond_the_fleets_lane_budget_wait_in_the_queue() {
     let rt = runtime();
     let store = store();
-    let ids = ["r0", "r1", "r2", "r3", "r4", "r5"];
-    let planner = || Box::new(PhasedPlanner::one_final("re-arm:v1", &ids));
+    let ids = ["q0", "q1", "q2", "q3", "q4"];
+    let planner = || Box::new(PhasedPlanner::one_final("queue:v1", &ids));
 
-    let mut a = worker(&store, rt.handle(), Some("worker-a"));
+    let mut a = worker_max_in_flight(&store, rt.handle(), Some("worker-a"), 1);
     a.start(planner()).unwrap();
     let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 6
+    drive(&mut a, &mut held_a, "worker-a takes its single lane", |h| {
+        h.splits.len() == 1
     });
-    support::commit_held(&mut a, &held_a);
 
-    // Rounds are LEASE/3, jittered into [0.8, 1.2), and the budget's first
-    // counted round may already be partly spent — so a twelve-round budget
-    // is worth at least ~8.8 rounds and at most ~14.4. Each drain below
-    // takes 8, which fits inside a re-armed budget; the two together take
-    // 16, past the longest budget measured from the original request. So
-    // this completes only if delivering the first split re-arms the
-    // second's patience. Anchored at the request, the batch is stolen
-    // mid-flight — which is what the counterfactual run shows.
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 12);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-
-    const TAIL: i64 = 700;
-    let slow_drain = LEASE * 8 / 3; // 8 rounds
-    let mut granted: Vec<String> = Vec::new();
-    let mut released: Vec<String> = Vec::new();
-    let mut first_due: Option<Instant> = None;
-    let mut second_due: Option<Instant> = None;
-    let mut a_lost: Vec<String> = Vec::new();
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "the slow second drain never completed (granted {granted:?}, released {released:?}, \
-             A lost {a_lost:?})"
+    // Hold there: one lane means one split, however much work is queued.
+    let until = Instant::now() + LEASE;
+    while Instant::now() < until {
+        held_a.fold(a.poll().expect("poll a"));
+        assert_eq!(
+            held_a.splits.len(),
+            1,
+            "a one-lane worker took {} splits",
+            held_a.splits.len()
         );
-        for event in a.poll().unwrap() {
-            match &event {
-                CoordinationEvent::HandoffRequested { split } => {
-                    let id = split.as_str().to_string();
-                    if !granted.contains(&id) {
-                        granted.push(id);
-                    }
-                }
-                CoordinationEvent::Lost { split } => a_lost.push(split.as_str().to_string()),
-                _ => {}
-            }
-            held_a.fold(vec![event]);
-        }
-        // Both drains are slow. The first alone fits the original budget;
-        // the pair only fits if delivering it buys the second a fresh one.
-        if granted.len() >= 2 && first_due.is_none() {
-            first_due = Some(Instant::now() + slow_drain);
-        }
-        if let Some(due) = first_due
-            && released.is_empty()
-            && Instant::now() >= due
-        {
-            let id = granted[0].clone();
-            a.commit(&split_id(&id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                .unwrap();
-            a.release_handoff(&[split_id(&id)]).unwrap();
-            released.push(id);
-            second_due = Some(Instant::now() + slow_drain);
-        }
-        if let Some(due) = second_due
-            && released.len() == 1
-            && Instant::now() >= due
-        {
-            let id = granted[1].clone();
-            // A `Fenced` here IS the regression: it means the requester gave
-            // up on a victim that was still delivering and stole the split.
-            assert!(
-                a.commit(&split_id(&id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                    .is_ok(),
-                "{id} was fenced mid-drain: the fallback fired at a victim \
-                 that had just delivered {:?}",
-                released[0]
-            );
-            a.release_handoff(&[split_id(&id)]).unwrap();
-            released.push(id);
-        }
-        held_b.fold(b.poll().unwrap());
-        if released.len() == 2 && released.iter().all(|id| held_b.splits.contains_key(id)) {
-            break;
-        }
+        support::commit_held(&mut a, &held_a);
         std::thread::sleep(support::POLL_INTERVAL);
     }
-
     assert!(
-        a_lost.is_empty(),
-        "a victim that keeps delivering must never be stolen from: {a_lost:?}"
+        held_a.quarantined.is_empty(),
+        "queued splits were parked instead of waiting: {:?}",
+        held_a.quarantined
     );
-    for id in &released {
-        assert_eq!(
-            held_b.splits[id].1.as_ref().map(|p| p.watermark),
-            Some(TAIL),
-            "{id} must resume from the victim's final commit: zero replay"
-        );
-    }
-}
 
-/// A served request starts the next one on a fresh fallback clock. The
-/// victim's grant-ack deletes the request key, which the requester cannot
-/// tell apart from a TTL blip — and the blip rule preserves `since_round`
-/// across recreates. Without closing the cycle on the granted claim, the
-/// second request would be born already past due and every move after the
-/// first would degrade to a fenced steal (surfacing as `Lost` on the
-/// victim). Here a prompt victim grants three sequential moves under a
-/// tight round budget, and none of them may be a steal.
-#[test]
-fn sequential_grants_each_get_a_fresh_fallback_clock() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["f0", "f1", "f2", "f3", "f4", "f5"];
-    let planner = || Box::new(PhasedPlanner::one_final("fresh-clock:v1", &ids));
-
-    // The loop below hand-plays A's embedder and can service only one drain
-    // at a time, so pin the victim to one grant: a batch would strand its
-    // second split and time out into exactly the steal this test refutes.
-    // Batching has its own test.
-    let mut a = support::worker_handoff_tuned(&store, rt.handle(), Some("worker-a"), 3, 1);
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 6
-    });
-    support::commit_held(&mut a, &held_a);
-
-    // Four-round budget, and every grant below is answered only after a
-    // deliberate ~two-round drain delay. A per-request clock absorbs the
-    // delay with margin; only a clock carried over from the previous,
-    // already-served request can expire mid-drain and turn a later move
-    // into a steal (observable as a Lost on A, and as the stolen split
-    // resuming from the old commit instead of the drained tail).
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 4);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-
-    const TAIL: i64 = 500;
-    let drain = support::LEASE * 2 / 3; // ~two heartbeat rounds
-    let mut a_lost: Vec<String> = Vec::new();
-    let mut pending: Option<(String, Instant)> = None;
-    let deadline = Instant::now() + support::DEADLINE;
-    // Fair share of six over two workers is three; the pairwise rule
-    // stops granting at 3/3.
-    while held_b.splits.len() < 3 {
-        assert!(
-            Instant::now() < deadline,
-            "three sequential grants did not complete (B holds {}, A lost {:?})",
-            held_b.splits.len(),
-            a_lost,
-        );
-        for event in a.poll().unwrap() {
-            match &event {
-                CoordinationEvent::HandoffRequested { split } if pending.is_none() => {
-                    pending = Some((split.as_str().to_string(), Instant::now() + drain));
-                }
-                CoordinationEvent::Lost { split } => {
-                    a_lost.push(split.as_str().to_string());
-                }
-                _ => {}
-            }
-            held_a.fold(vec![event]);
-        }
-        if let Some((id, due)) = &pending
-            && Instant::now() >= *due
-        {
-            a.commit(&split_id(id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                .unwrap();
-            a.release_handoff(&[split_id(id)]).unwrap();
-            pending = None;
-        }
-        held_b.fold(b.poll().unwrap());
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-
-    assert!(
-        a_lost.is_empty(),
-        "every move must be a consented grant, never a fenced steal: {a_lost:?}"
-    );
-    for (id, (_, progress)) in &held_b.splits {
-        assert_eq!(
-            progress.as_ref().map(|p| p.watermark),
-            Some(TAIL),
-            "{id} must resume from the victim's final commit"
-        );
-    }
-}
-
-/// A request the victim never answers must not wedge: after the round
-/// budget elapses the requester falls back to today's fenced steal, which
-/// bounds replay to the victim's last committed watermark.
-#[test]
-fn an_unanswered_request_falls_back_to_a_steal_after_n_rounds() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["u0", "u1", "u2", "u3"];
-    let planner = || Box::new(PhasedPlanner::one_final("unanswered:v1", &ids));
-
-    // A holds everything and commits (so the fallback steal has a resume
-    // point). A's embedder never acts on `HandoffRequested`: an unresponsive
-    // victim.
-    let mut a = worker_handoff_rounds(&store, rt.handle(), Some("worker-a"), 1);
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 4
-    });
-    support::commit_held(&mut a, &held_a);
-
-    // B: one unanswered round, then the fenced fallback steal. Both converge
-    // to a 2/2 balance and A observes the fenced splits as Lost.
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 1);
+    // A second one-lane worker widens the fleet's budget by exactly one.
+    let mut b = worker_max_in_flight(&store, rt.handle(), Some("worker-b"), 1);
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
     drive_pair(
         (&mut a, &mut held_a),
         (&mut b, &mut held_b),
-        "B falling back to a steal after an unanswered request",
-        |ha, hb| hb.splits.len() == 2 && ha.splits.len() == 2,
-    );
-    for (_, progress) in held_b.splits.values() {
-        assert_eq!(
-            progress.as_ref().map(|p| p.watermark),
-            Some(1),
-            "the fallback steal resumes from A's last committed watermark"
-        );
-    }
-}
-
-/// G5: a handoff release that empties the working set is a grant, not a
-/// departure. In production the split being drained can turn out to be the
-/// last one held (a peer took the others mid-drain); the embedder then
-/// grants its last split through `release_handoff`, which — unlike
-/// `release` — must NOT retire the worker. Proven with a solo worker: it
-/// re-claims its own still-unowned hand-back (a *parted* worker sits idle
-/// forever and the split would strand).
-#[test]
-fn a_handoff_of_the_only_split_is_not_a_departure() {
-    let rt = runtime();
-    let store = store();
-    let planner = || Box::new(PhasedPlanner::one_final("solo-handoff:v1", &["only"]));
-
-    let mut a = worker(&store, rt.handle(), Some("worker-a"));
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming its only split", |h| {
-        h.splits.len() == 1
-    });
-    a.commit(&split_id("only"), &SplitProgress::new(5, vec![]))
-        .unwrap();
-    let epoch_before = held_a.splits["only"].0;
-
-    // A grants its LAST held split through the handoff path — working set
-    // empties. `release` would retire A here; `release_handoff` must not.
-    a.release_handoff(&[split_id("only")]).unwrap();
-    drive(
-        &mut a,
-        &mut held_a,
-        "A re-claiming its own hand-back (a handoff grant is not a departure)",
-        |h| {
-            h.splits
-                .get("only")
-                .is_some_and(|(epoch, _)| *epoch > epoch_before)
-        },
-    );
-
-    // Belt and suspenders: a departure deletes the presence key; a grant
-    // must leave it standing.
-    let present = rt
-        .block_on(store.get(Keyspace::Ephemeral, "worker.worker-a"))
-        .unwrap();
-    assert!(
-        present.is_some(),
-        "a handoff grant must not retire the worker"
-    );
-}
-
-/// The per-victim request key is the fairness arbiter: two under-target
-/// workers eyeing one loaded victim can never both hold an open request —
-/// at most one `handoff.{victim}` key ever exists (create-if-absent).
-#[test]
-fn handoff_requests_are_serialized_per_victim() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["z0", "z1", "z2", "z3", "z4", "z5"];
-    let planner = || Box::new(PhasedPlanner::one_final("serialize:v1", &ids));
-
-    let mut a = worker(&store, rt.handle(), Some("worker-a"));
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming all six", |h| {
-        h.splits.len() == 6
-    });
-    support::commit_held(&mut a, &held_a);
-
-    // Two under-target newcomers both eye the single loaded victim. A never
-    // grants (its embedder ignores the requests) and the requesters are
-    // patient, so requests stay outstanding — yet the store must show at
-    // most one at a time.
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 1_000);
-    let mut c = worker_handoff_rounds(&store, rt.handle(), Some("worker-c"), 1_000);
-    b.start(planner()).unwrap();
-    c.start(planner()).unwrap();
-    let (mut held_b, mut held_c) = (Held::default(), Held::default());
-
-    let deadline = Instant::now() + LEASE * 4;
-    let mut saw_request = false;
-    while Instant::now() < deadline {
-        held_a.fold(a.poll().unwrap());
-        held_b.fold(b.poll().unwrap());
-        held_c.fold(c.poll().unwrap());
-        let keys = rt
-            .block_on(store.list(Keyspace::Ephemeral, "handoff."))
-            .unwrap();
-        assert!(
-            keys.len() <= 1,
-            "at most one handoff request key may exist at once: {:?}",
-            keys.iter().map(|e| e.key.clone()).collect::<Vec<_>>()
-        );
-        if let Some(entry) = keys.first() {
-            saw_request = true;
-            assert_eq!(entry.key, "handoff.worker-a", "A is the only viable victim");
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-    assert!(
-        saw_request,
-        "at least one handoff request should have formed"
-    );
-}
-
-/// H1: a victim's UNRELATED lease traffic must never be read as the grant.
-/// A requester marks a split incoming ONLY from the victim's `granted`
-/// annotation on its request key — so when the victim `fail`s a *different*
-/// split (its lease vanishing for a reason that is not a grant), the
-/// requester takes that split over WITHOUT closing its handoff cycle, and the
-/// real grant still resolves afterwards. Pre-fix, the failed split's lease
-/// delete looked like the grant: the request retired early and the annotated
-/// split stranded.
-#[test]
-fn a_victims_unrelated_lease_traffic_is_not_a_grant() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["x0", "x1", "x2", "x3"];
-    let planner = || Box::new(PhasedPlanner::one_final("unrelated-traffic:v1", &ids));
-
-    // A claims all four and checkpoints them.
-    // The loop below hand-plays A's embedder and can service only one
-    // drain at a time, so pin the victim to one grant: a batch would
-    // strand its second split and time out into a steal.
-    let mut a = support::worker_handoff_tuned(&store, rt.handle(), Some("worker-a"), 3, 1);
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 4
-    });
-    support::commit_held(&mut a, &held_a);
-
-    // B is patient: its fallback steal cannot fire inside the test window.
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 1_000);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-
-    const TAIL: i64 = 100;
-    let mut granted: Option<String> = None; // the annotated grant G
-    let mut failed: Option<String> = None; // the unrelated split X we fail
-    let mut request_survived = false;
-    let mut released = false;
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "handoff never completed (granted={granted:?}, failed={failed:?})"
-        );
-        for event in a.poll().unwrap() {
-            if let CoordinationEvent::HandoffRequested { split } = &event
-                && granted.is_none()
-            {
-                let g = split.as_str().to_string();
-                // Fail a DIFFERENT owned split: unrelated lease traffic. Its
-                // lease delete must NOT be mistaken for the grant of G.
-                let x = held_a
-                    .splits
-                    .keys()
-                    .find(|id| **id != g)
-                    .cloned()
-                    .expect("A holds more than one split");
-                a.fail(&split_id(&x), "unrelated poison").unwrap();
-                granted = Some(g);
-                failed = Some(x);
-            }
-            held_a.fold(vec![event]);
-        }
-        held_b.fold(b.poll().unwrap());
-
-        // Once B has taken the failed split X over, the request key must
-        // still exist — the unrelated fail did not close the cycle. Only then
-        // grant G for real.
-        if let (Some(g), Some(x)) = (granted.as_ref(), failed.as_ref())
-            && !released
-            && held_b.splits.contains_key(x)
-        {
-            let keys = rt
-                .block_on(store.list(Keyspace::Ephemeral, "handoff."))
-                .unwrap();
-            assert!(
-                keys.iter().any(|e| e.key == "handoff.worker-a"),
-                "the request must survive an unrelated fail, not be retired by it: {:?}",
-                keys.iter().map(|e| e.key.clone()).collect::<Vec<_>>()
-            );
-            request_survived = true;
-            a.commit(&split_id(g), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                .unwrap();
-            a.release_handoff(&[split_id(g)]).unwrap();
-            released = true;
-        }
-
-        if let Some(g) = granted.as_ref()
-            && held_b.splits.contains_key(g)
-        {
-            break;
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-    assert!(
-        request_survived,
-        "B never took the unrelated failed split over"
-    );
-    let g = granted.unwrap();
-    let x = failed.unwrap();
-    assert_ne!(g, x);
-    assert_eq!(
-        held_b.splits[&g].1.as_ref().map(|p| p.watermark),
-        Some(TAIL),
-        "the real grant still resolves: G resumes from the victim's drained tail"
-    );
-}
-
-/// A declined grant must free the victim's one-grant-at-a-time slot so it can
-/// offer a DIFFERENT split. On a refusal the victim cools the declined split
-/// down for one round budget and re-picks; the requester ends up holding the
-/// second split, never the first. Pre-fix, a silent decline pinned the slot
-/// and rebalancing against that victim froze.
-#[test]
-fn a_declined_grant_frees_the_slot_for_another_split() {
-    let rt = runtime();
-    let store = store();
-    let ids = ["c0", "c1", "c2", "c3"];
-    let planner = || Box::new(PhasedPlanner::one_final("declined:v1", &ids));
-
-    // The loop below hand-plays A's embedder and can service only one
-    // drain at a time, so pin the victim to one grant: a batch would
-    // strand its second split and time out into a steal.
-    let mut a = support::worker_handoff_tuned(&store, rt.handle(), Some("worker-a"), 3, 1);
-    a.start(planner()).unwrap();
-    let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "A claiming everything", |h| {
-        h.splits.len() == 4
-    });
-    support::commit_held(&mut a, &held_a);
-
-    let mut b = worker_handoff_rounds(&store, rt.handle(), Some("worker-b"), 1_000);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-
-    const TAIL: i64 = 200;
-    let mut declined: Option<String> = None; // S1 — refused
-    let mut granted: Option<String> = None; // S2 — the different split, granted
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "the declined slot never freed for another split (declined={declined:?}, \
-             granted={granted:?})"
-        );
-        for event in a.poll().unwrap() {
-            if let CoordinationEvent::HandoffRequested { split } = &event {
-                let id = split.as_str().to_string();
-                if declined.is_none() {
-                    // The first offer: refuse it (the source cannot serve it).
-                    a.decline_handoff(&split_id(&id)).unwrap();
-                    declined = Some(id);
-                } else if granted.is_none() && declined.as_deref() != Some(id.as_str()) {
-                    // A DIFFERENT split was offered: the slot freed. Grant it.
-                    a.commit(&split_id(&id), &SplitProgress::new(TAIL, b"tail".to_vec()))
-                        .unwrap();
-                    a.release_handoff(&[split_id(&id)]).unwrap();
-                    granted = Some(id);
-                }
-            }
-            held_a.fold(vec![event]);
-        }
-        held_b.fold(b.poll().unwrap());
-        if let Some(s2) = granted.as_ref()
-            && held_b.splits.contains_key(s2)
-        {
-            break;
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-    let s1 = declined.unwrap();
-    let s2 = granted.unwrap();
-    assert_ne!(
-        s1, s2,
-        "the victim must offer a different split after the decline"
-    );
-    assert_eq!(
-        held_b.splits[&s2].1.as_ref().map(|p| p.watermark),
-        Some(TAIL),
-        "B resumes the second split from the victim's drained tail"
-    );
-    assert!(
-        !held_b.splits.contains_key(&s1),
-        "B must never receive the declined split"
-    );
-}
-
-/// H2: a served grant that a peer wins must close the requester's cycle, not
-/// resurrect the request. Once the victim has annotated the grant on the
-/// request key (attribution), a vanished key is SERVED, and a foreign owner
-/// appearing on the granted split closes the cycle — the requester never
-/// re-creates the request for a move that already happened. Pre-fix, the
-/// ack-deleted key looked like a TTL blip and the request was recreated
-/// within a round, making the victim drain a second split for nothing.
-///
-/// The victim here is fully hand-driven (no live worker A). A throwaway
-/// worker with instance id `worker-a` seeds the split records — so their
-/// fingerprint pins are correct, the same shape `steal_as_thief` relies on —
-/// then is crashed; a frozen clock keeps its seeded leases alive with no live
-/// worker renewing them, so the scenario is deterministic and the annotate /
-/// steal / ack are all applied by hand.
-#[test]
-fn a_served_grant_lost_to_a_peer_does_not_resurrect_the_request() {
-    let rt = runtime();
-    let rt_seed = runtime();
-    // Frozen clock shared by the store and both coordinators: the hand-written
-    // `worker-a` leases never expire with no worker renewing them, so B can
-    // never take a split over through plain expiry and the only thing under
-    // test is the served-grant bookkeeping.
-    let clock: Arc<dyn Clock> = TestClock::frozen();
-    let store = MemoryStore::with_clock(support::LEASE, clock.clone());
-    let planner = || Box::new(PhasedPlanner::one_final("served-lost:v1", &["g0", "u0"]));
-
-    // Seed: a throwaway `worker-a` claims both splits and commits ONLY g0
-    // (u0 stays uncommitted), then crashes WITHOUT releasing — so g0/u0 stay
-    // owned by `worker-a` with valid, fingerprint-pinned records.
-    let mut seed = StoreCoordinator::with_clock(
-        store.clone(),
-        config(Some("worker-a")),
-        rt_seed.handle().clone(),
-        None,
-        clock.clone(),
-    )
-    .expect("seed coordinator");
-    seed.start(planner()).unwrap();
-    let mut held_seed = Held::default();
-    drive(&mut seed, &mut held_seed, "worker-a claiming both", |h| {
-        h.splits.len() == 2
-    });
-    seed.commit(&split_id("g0"), &SplitProgress::new(5, b"g0-tail".to_vec()))
-        .unwrap();
-    crash(rt_seed, seed);
-
-    // Real worker B is patient: it opens a request against worker-a and never
-    // falls back to a steal inside the window.
-    let mut cfg_b = config(Some("worker-b"));
-    cfg_b.handoff_rounds = 1_000;
-    let mut b = StoreCoordinator::with_clock(
-        store.clone(),
-        cfg_b,
-        rt.handle().clone(),
-        None,
-        clock.clone(),
-    )
-    .expect("coordinator B");
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-
-    // B opens the request (worker-a holds 2, B holds 0 — the pairwise rule
-    // justifies it).
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "B never opened a handoff request"
-        );
-        held_b.fold(b.poll().unwrap());
-        if rt
-            .block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
-            .unwrap()
-            .is_some()
-        {
-            break;
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-
-    // Hand-annotate the request key with the grant attribution (granted=[g0]),
-    // retrying against B's per-round refreshes. HandoffVal serializes
-    // `granted` as the array of granted split ids, empty when none.
-    let annotate_rev = loop {
-        let entry = rt
-            .block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
-            .unwrap()
-            .expect("B's request key");
-        let mut val: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
-        val["granted"] = serde_json::json!(["g0"]);
-        match rt
-            .block_on(store.update(
-                Keyspace::Ephemeral,
-                "handoff.worker-a",
-                serde_json::to_vec(&val).unwrap(),
-                entry.revision,
-            ))
-            .unwrap()
-        {
-            CasOutcome::Won(rev) => break rev,
-            CasOutcome::Lost => std::thread::sleep(support::POLL_INTERVAL),
-        }
-    };
-
-    // Drive B until it has re-written the key while PRESERVING the grant — the
-    // observable proof that it adopted the attribution (handoff_incoming={g0}).
-    let deadline = Instant::now() + support::DEADLINE;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "B never adopted the grant annotation"
-        );
-        held_b.fold(b.poll().unwrap());
-        if let Some(entry) = rt
-            .block_on(store.get(Keyspace::Ephemeral, "handoff.worker-a"))
-            .unwrap()
-        {
-            let val: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
-            if entry.revision > annotate_rev && val["granted"] == serde_json::json!(["g0"]) {
-                break;
-            }
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-
-    // A peer (worker-c) wins the granted split, then the request key is
-    // ack-deleted — exactly the served-grant-lost-to-a-peer shape.
-    let _ = steal_as_thief(&rt, &store, "g0", "worker-c");
-    let _ = rt
-        .block_on(store.delete(Keyspace::Ephemeral, "handoff.worker-a", None))
-        .expect("delete the request key");
-
-    // Over the next several rounds B must NOT resurrect the request (the cycle
-    // is closed), and must NOT claim or steal the split worker-c already won.
-    // worker-a now holds only u0 and worker-c holds g0 — each ≤ B's own+1 — so
-    // no victim justifies a fresh request, making the empty-prefix assertion
-    // deterministic.
-    let observe_until = Instant::now() + support::LEASE * 2;
-    while Instant::now() < observe_until {
-        held_b.fold(b.poll().unwrap());
-        let handoff_keys = rt
-            .block_on(store.list(Keyspace::Ephemeral, "handoff."))
-            .unwrap();
-        assert!(
-            handoff_keys.is_empty(),
-            "a served grant lost to a peer must not resurrect the request: {:?}",
-            handoff_keys
-                .iter()
-                .map(|e| e.key.clone())
-                .collect::<Vec<_>>()
-        );
-        let g_record = rt
-            .block_on(store.get(Keyspace::Durable, "split.g0"))
-            .unwrap()
-            .expect("g0 record");
-        let g_val: serde_json::Value = serde_json::from_slice(&g_record.value).unwrap();
-        assert_eq!(
-            g_val["owner"], "worker-c",
-            "B must not claim or steal the split a peer already won"
-        );
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-    assert!(
-        held_b.splits.is_empty(),
-        "B took nothing over: the served grant went to worker-c"
+        "the second lane picks up queued work",
+        |_, y| y.splits.len() == 1,
     );
 }

@@ -5,17 +5,18 @@
 //! assigns partitions across processes). Broker-less sources — object-store
 //! backfills, database range scans, file tails — have no group protocol:
 //! two processes pointed at the same input each see all of it. This module
-//! closes that gap with a dynamic work-stealing model:
+//! closes that gap with a leader-assigned model:
 //!
 //! - A source-provided [`SplitPlanner`] enumerates the work as weighted
 //!   **splits** (an object-store backfill: object lists bin-packed by
 //!   bytes; a database source: balanced id ranges). The planner runs only
 //!   on the fleet's elected leader — workers receive split descriptors and
 //!   never re-enumerate.
-//! - Every worker holds a [`SplitCoordinator`] that leases splits toward a
-//!   bounded working set, heartbeats them in the background, and steals
-//!   from over-loaded peers when nothing unclaimed remains. A dead owner's
-//!   leases expire and flow back to the fleet.
+//! - The leader also computes a **desired assignment** and publishes it
+//!   per instance. Every worker holds a [`SplitCoordinator`] that leases
+//!   the splits it was assigned, heartbeats them in the background, and
+//!   cooperatively drains any it is no longer assigned. A dead owner's
+//!   leases expire and its work is reassigned.
 //! - Progress commits are **fenced**: a commit from an instance that no
 //!   longer owns the split is rejected and writes nothing, so committed
 //!   progress can only replay, never regress.
@@ -31,7 +32,7 @@
 //! # Delivery contract
 //!
 //! Coordination preserves at-least-once, nothing stronger. Ownership
-//! handoffs may briefly overlap — a taken-over split's uncommitted tail is
+//! revocations and takeovers may briefly overlap — a taken-over split's uncommitted tail is
 //! replayed by the new owner, and a zombie may emit records after its
 //! lease was seized. Both produce **duplicates, never loss**: the
 //! correctness boundary is [`SplitCoordinator::commit`], a fenced durable
@@ -146,10 +147,20 @@ pub struct SplitSpec {
     /// split (an object-store source: member keys with etags and sizes; a
     /// database source: an id range).
     pub descriptor: Vec<u8>,
-    /// Relative cost hint (bytes, rows). Backends use it to order claims
-    /// (heaviest first near the tail); balancing itself is count-based on
-    /// the assumption that the planner emits roughly uniform-cost splits.
-    /// `0` is treated as `1`.
+    /// Relative cost hint (bytes, rows) — **the balance objective**.
+    ///
+    /// This is load, not sort order. Under the work-stealing balancer this
+    /// field only ordered claims and balance was on split *count*; a
+    /// planner that populated it as a ranking key rather than a cost will
+    /// now skew the leader's distribution.
+    ///
+    /// The
+    /// leader distributes summed weight, not split count, so a planner
+    /// that emits wildly uneven splits (an object-store planner gives any
+    /// object at or above its packing target a split to itself) still
+    /// balances correctly. A planner that leaves every weight at the
+    /// default degrades to count-balancing, which is the right behaviour
+    /// when splits really are uniform. `0` is treated as `1`.
     pub weight: u64,
 }
 
@@ -345,25 +356,26 @@ pub enum CoordinationEvent {
         /// The split no longer owned.
         split: SplitId,
     },
-    /// A peer has requested this split cooperatively: it is over-loaded
-    /// with nothing unclaimed to take, so instead of stealing it asks the
-    /// owner to give the split up gracefully. The owner may stop intake at
-    /// a safe boundary, chase the split's tail to a final fenced commit,
-    /// and release it — the requester then resumes from a resume point
-    /// covering everything the owner emitted, so the transfer replays
-    /// nothing.
+    /// The leader has stopped assigning this split to this instance, and
+    /// wants it back. The owner should stop intake at a safe boundary,
+    /// chase the split's tail to a final fenced commit, and release it —
+    /// the next owner then resumes from a point covering everything this
+    /// one emitted, so the transfer replays nothing.
     ///
-    /// Honouring the request is optional and ignoring it is always safe:
-    /// the requester falls back to a replaying steal once its round budget
-    /// elapses, so an owner that cannot stop intake cleanly simply
-    /// declines — through the driver's
-    /// [`SplitSource::begin_handoff`](driver::SplitSource::begin_handoff),
-    /// which defaults to declining — and the move degrades to today's
-    /// bounded-replay steal. The event is idempotent: a requester may
-    /// re-emit it every round its request stays outstanding.
-    HandoffRequested {
-        /// The split a peer wants handed over. It may be one this instance
-        /// does not (or no longer) hold; such a request is a silent no-op.
+    /// **The split is leaving either way.** Unlike the peer request this
+    /// replaced, a revocation is a decision rather than a proposal: a
+    /// source that declines — through the driver's
+    /// [`SplitSource::begin_revoke`](driver::SplitSource::begin_revoke),
+    /// which defaults to declining — or that does not finish inside
+    /// `drain_deadline` has the release forced instead, and its
+    /// uncommitted tail replays under the next owner. Declining is
+    /// therefore still *safe*; it is just the expensive way to comply.
+    ///
+    /// Idempotent: the event may be re-emitted for a split already
+    /// draining, and a revocation for a split this instance does not hold
+    /// is a silent no-op.
+    RevokeRequested {
+        /// The split to give up.
         split: SplitId,
     },
     /// The split exhausted its delivery attempts (repeated owner deaths or
@@ -635,33 +647,43 @@ pub trait SplitCoordinator: Send {
     /// expire.
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
 
-    /// Release splits handed over through a cooperative handoff — the owner
-    /// has drained each split, committed its tail, and now grants it to the
-    /// requester. Semantically a [`release`](SplitCoordinator::release)
+    /// Release splits given up through a cooperative revocation — the owner
+    /// has drained each split, committed its tail, and is now handing it
+    /// back. Semantically a [`release`](SplitCoordinator::release)
     /// (attempt-free, best-effort, idempotent), but distinguished so a
-    /// handoff-aware backend can record the grant and never mistake a
-    /// single-split handoff for a departure from the fleet.
+    /// revocation-aware backend can record the drain as having completed
+    /// and never mistake a single-split revocation for a departure from the
+    /// fleet.
     ///
     /// Defaulted to [`release`](SplitCoordinator::release) so existing
-    /// backends keep working — a grant then reads as an ordinary hand-back
+    /// backends keep working — the hand-back then reads as an ordinary one
     /// — and so the trait stays dyn-compatible. A backend that implements
-    /// the handoff protocol overrides it.
-    fn release_handoff(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
+    /// the revocation protocol overrides it.
+    fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
         self.release(splits)
     }
 
-    /// Decline a [`HandoffRequested`](CoordinationEvent::HandoffRequested)
+    /// Decline a [`RevokeRequested`](CoordinationEvent::RevokeRequested)
     /// the embedder cannot serve — the source refused to stop the split's
-    /// intake, or the split is not in a drainable state. Without this
-    /// feedback a handoff-aware backend would hold its one-grant-at-a-time
-    /// slot until the requester gives up, freezing rebalancing against
-    /// this worker; a decline lets it re-pick a different split
-    /// immediately. Best-effort and idempotent; declining a split that
-    /// was never offered is a no-op.
+    /// intake, or the split is not in a drainable state.
+    ///
+    /// **A decline does not keep the split.** It reports that the *clean*
+    /// path is unavailable, so the backend stops waiting and takes the
+    /// expensive one immediately instead of holding the rebalance open
+    /// until its deadline; the split still leaves, and its uncommitted tail
+    /// replays under the next owner. Best-effort and idempotent; declining
+    /// a split that was never revoked is a no-op.
+    ///
+    /// **Backend obligation.** A backend that emits `RevokeRequested` must
+    /// guarantee the split leaves whatever the source does: force the
+    /// release on a decline, and bound a drain that never finishes with a
+    /// deadline of its own. Without that, one uncooperative source pins the
+    /// fleet's rebalancing open forever. (`etl-coordination` spells this
+    /// deadline `drain_deadline`.)
     ///
     /// Defaulted to a no-op so existing backends keep working and the
     /// trait stays dyn-compatible.
-    fn decline_handoff(&mut self, _split: &SplitId) -> Result<(), CoordinationError> {
+    fn decline_revoke(&mut self, _split: &SplitId) -> Result<(), CoordinationError> {
         Ok(())
     }
 }
@@ -762,9 +784,9 @@ mod tests {
         c.start(Box::new(NoopPlanner)).unwrap();
         assert!(c.poll().unwrap().is_empty());
         c.release(&[SplitId::new("s-0").unwrap()]).unwrap();
-        // The defaulted handoff release delegates to `release`, staying
+        // The defaulted revocation release delegates to `release`, staying
         // dyn-compatible and callable through the trait object.
-        c.release_handoff(&[SplitId::new("s-0").unwrap()]).unwrap();
+        c.release_drained(&[SplitId::new("s-0").unwrap()]).unwrap();
     }
 
     #[test]

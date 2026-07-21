@@ -1,6 +1,6 @@
 [package]
 name = "etl-coordination"
-description = "Distributed work-stealing coordination backend for the etl-rs pipeline framework: a leader-elected planner enumerates weighted splits into a shared low-latency store (NATS JetStream KV); workers lease, heartbeat, and steal them with epoch-fenced resumable commits. Applications should depend on the `etl` facade crate with the `coordination` feature (in-memory store) or `coordination-nats` (the NATS backend)."
+description = "Distributed work coordination backend for the etl-rs pipeline framework: a leader-elected planner enumerates weighted splits into a shared low-latency store (NATS JetStream KV) and publishes a desired assignment per instance; workers lease and heartbeat what they are assigned, cooperatively drain what they are not, and commit progress through epoch-fenced compare-and-swap. Applications should depend on the `etl` facade crate with the `coordination` feature (in-memory store) or `coordination-nats` (the NATS backend)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

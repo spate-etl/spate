@@ -479,7 +479,7 @@ impl Source for MySource {
 
 impl Drop for MySource {
     fn drop(&mut self) {
-        self.driver.release(); // graceful handoff: peers claim instantly
+        self.driver.release(); // graceful release: peers claim instantly
     }
 }
 ```

@@ -1,10 +1,11 @@
-//! Distributed work-stealing coordination for etl-rs sources.
+//! Distributed work coordination for etl-rs sources.
 //!
 //! A leader-elected worker runs the source's
 //! [`SplitPlanner`](etl_core::coordination::SplitPlanner) to enumerate
-//! weighted work *splits* into a shared low-latency store; every worker
-//! leases splits toward a bounded working set, heartbeats them, and steals
-//! from over-loaded peers when nothing unclaimed remains. Progress commits
+//! weighted work *splits* into a shared low-latency store, and publishes a
+//! desired assignment per instance; every worker leases the splits it was
+//! named for, heartbeats them, and cooperatively drains the ones it was
+//! not. Progress commits
 //! are epoch-fenced compare-and-swap writes on the durable split record: a
 //! fenced commit writes **nothing**, and committed progress can only
 //! replay, never regress (at-least-once — duplicates possible, loss never).
@@ -18,7 +19,7 @@
 //!   the production backend.
 //!
 //! Custom backends (Redis, etcd) implement the store trait; the protocol,
-//! fencing, election, and stealing live above it and are shared.
+//! fencing, election, and work assignment live above it and are shared.
 
 pub use etl_core::coordination::*;
 

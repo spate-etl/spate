@@ -1,18 +1,20 @@
 //! Coordinated S3 backfill: several pipeline instances share one bounded
 //! object-storage backfill over an in-process coordination store, so the run
-//! exercises work-stealing and cooperative split handoff. Local filesystem
-//! store, real listing, real per-lane fetchers and framing, throttled null
-//! sink. No network, no broker.
+//! exercises leader-assigned rebalancing and cooperative revocation. Local
+//! filesystem store, real listing, real per-lane fetchers and framing,
+//! throttled null sink. No network, no broker.
 //!
 //! This is a **rebalancing** rig, not a throughput rig. The sink is paced
 //! ([`ThrottledNullWriter`]) so the backfill lasts tens of seconds and spans
 //! dozens of heartbeat rounds; `wall_s` is therefore pacing-dominated and is
 //! reported as a diagnostic, never a throughput. The headline numbers split
 //! into the *cost* of rebalancing — `duplicate_rows` (rows re-read across a
-//! move) — and its *speed*: `late_share` (how much of the job a late joiner
-//! took) plus the two `handoff_*_p50_s` latencies, which decompose
-//! time-to-balance into waiting for a victim to answer (`request`) and waiting
-//! for its drain to finish (`drain`).
+//! move), with `forced_total` saying whether any move had to take the
+//! replaying path — and its *speed*: `late_share` (how much of the job a
+//! late joiner took), plus `drain_p50_s` on the instance giving a split up
+//! and `assignment_latency_p50_s` on the one taking it. Those two are
+//! recorded in different processes and **do not compose**; see
+//! `docs/METRICS.md`.
 //!
 //! Instance 0 starts alone and leases every split (`MAX_IN_FLIGHT` covers the
 //! whole job). Late joiners arrive after `JOIN_DELAY_S` and must take work off
@@ -51,9 +53,9 @@
 //!
 //!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,reps:length,wall_s:(map(.metrics.wall_s.value)|sort|.[(length-1)/2|floor]),dup_rows:(map(.metrics.duplicate_rows.value)|sort|.[(length-1)/2|floor]),late_share:(map(.metrics.late_share.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
 //!
-//!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,steals:(map(.metrics.steals_total.value)|sort|.[(length-1)/2|floor]),handoffs:(map(.metrics.handoffs_total.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
+//!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,forced:(map(.metrics.forced_total.value)|sort|.[(length-1)/2|floor]),drained:(map(.metrics.drained_total.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
 //!
-//!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,request_p50:(map(.metrics.handoff_request_p50_s.value)|sort|.[(length-1)/2|floor]),drain_p50:(map(.metrics.handoff_drain_p50_s.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
+//!   jq -s 'map(select(.bench=="s3_backfill_coordinated"))|group_by(.run.commit)|map({commit:.[0].run.commit,assign_p50:(map(.metrics.assignment_latency_p50_s.value)|sort|.[(length-1)/2|floor]),drain_p50:(map(.metrics.drain_p50_s.value)|sort|.[(length-1)/2|floor])})' RESULTS.jsonl
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use benchmarks::report::{Metric, Report};
@@ -101,6 +103,7 @@ struct Tuning {
     op_timeout: Duration,
     replan: Duration,
     max_in_flight: u32,
+    drain_deadline: Duration,
     throttle_rows_per_s: f64,
 }
 
@@ -142,6 +145,11 @@ fn run_instance(i: usize, yaml: &str, store: MemoryStore, t: Tuning) -> Instance
             replan_interval: t.replan,
             instance_id: Some(instance_id.clone()),
             max_in_flight: t.max_in_flight,
+            // Pinned, not defaulted: this is the knob that decides whether
+            // a move drains cleanly or is forced into a replay, so it has
+            // to be part of the recorded variant rather than whatever the
+            // default happens to be on the day.
+            drain_deadline: t.drain_deadline,
             ..CoordinationConfig::default()
         },
         io.handle().clone(),
@@ -239,6 +247,11 @@ fn main() {
     let op_timeout_ms = env_u64("OP_TIMEOUT_MS", 250);
     let replan_ms = env_u64("REPLAN_MS", 1000);
     let max_in_flight = env_u64("MAX_IN_FLIGHT", 16) as u32;
+    // Generous by default: this rig throttles the sink hard, so a drain
+    // legitimately takes seconds, and a forced revocation would replay a
+    // tail and make `duplicate_rows` measure the deadline rather than the
+    // protocol. `forced_total` records whether any run hit it anyway.
+    let drain_deadline_ms = env_u64("DRAIN_DEADLINE_MS", 60_000);
     let threads = env_u64("THREADS", 2) as usize;
     let hard_timeout = Duration::from_secs(env_u64("HARD_TIMEOUT_S", 300));
     let codec = env_str("CODEC", "none");
@@ -274,6 +287,7 @@ sink: {{ nullsink: {{}} }}
         op_timeout: Duration::from_millis(op_timeout_ms),
         replan: Duration::from_millis(replan_ms),
         max_in_flight,
+        drain_deadline: Duration::from_millis(drain_deadline_ms),
         throttle_rows_per_s,
     };
 
@@ -340,51 +354,89 @@ sink: {{ nullsink: {{}} }}
     }
     let late_rows: u64 = outcomes[1..].iter().map(|o| o.rows).sum();
 
-    // Movement counters from the process's own Prometheus text. Text parsing
-    // only: this rig references no feature-branch Rust API, so the same bytes
-    // compile and run on `main`, where the handoffs family is absent and reads 0.
+    // Movement counters from the process's own Prometheus text. Text
+    // parsing only: this rig references no feature-branch Rust API, so the
+    // same bytes compile and run on every arm, and a family a given build
+    // does not register simply reads 0.
+    //
+    // Both vocabularies are read on purpose. `main` at the time of writing
+    // emits the work-stealing families (`acquisitions_total{reason=stolen}`,
+    // `handoffs_total{outcome=granted}`, `handoff_duration_seconds{phase}`);
+    // the leader-assigned build emits `revocations_total{outcome=drained}`,
+    // `drain_duration_seconds` and `assignment_latency_seconds`. Summing the
+    // pair keeps one rig honest across both, which is the whole reason this
+    // file scrapes text instead of calling the metrics API.
     let text = metrics.render();
-    // `reason="stolen"` on the acquisitions family, summed across label sets.
+
+    // A replaying move: a split taken from a live owner without its consent
+    // (old model) — there is no equivalent in the new one, where a live
+    // owner's split only moves through a revocation.
     let steals_total = prom::value(
         &text,
         "etl_coordination_acquisitions_total",
         r#"reason="stolen""#,
     )
     .unwrap_or(0.0);
-    // A cooperative handoff completes as `outcome="granted"`; read that outcome
-    // only (one granted move) so the count is comparable across arms and never
-    // double-counts a request that later aborted into a fallback steal.
+
+    // A replay-free move. Old model: a granted cooperative handoff. New
+    // model: a revocation that drained rather than being forced. Read the
+    // terminal success outcome only, so a move that later degraded is not
+    // counted as a clean one.
     let handoffs_total = prom::value(
         &text,
         "etl_coordination_handoffs_total",
         r#"outcome="granted""#,
     )
+    .unwrap_or(0.0)
+        + prom::value(
+            &text,
+            "etl_coordination_revocations_total",
+            r#"outcome="drained""#,
+        )
+        .unwrap_or(0.0);
+
+    // A move that replayed because the clean path did not complete. Only
+    // the new model reports this; on `main` the same situation surfaced as
+    // a steal, which is counted above.
+    let forced_total = prom::value(
+        &text,
+        "etl_coordination_revocations_total",
+        r#"outcome="forced""#,
+    )
     .unwrap_or(0.0);
+
     assert!(
-        steals_total + handoffs_total >= 1.0,
-        "no split moved (steals={steals_total}, handoffs={handoffs_total}) — the run \
-         did not exercise coordination; adjust the geometry so a late joiner must \
-         take work"
+        steals_total + handoffs_total + forced_total >= 1.0,
+        "no split moved (steals={steals_total}, handoffs={handoffs_total}, \
+         forced={forced_total}) — the run did not exercise coordination; adjust the \
+         geometry so a late joiner must take work"
     );
-    // Time-to-balance, decomposed. `request` spans from going under target to
-    // claiming a granted split — it absorbs every unanswered round, so it is
-    // where request-admission pacing shows up. `drain` is the victim's
-    // stop-commit-release, the term concurrent grants overlap. Reported as
-    // medians of the in-process histogram; an arm whose build lacks the family
-    // reports 0, exactly like the counters above.
+
+    // Time-to-balance, decomposed. These two do NOT compose into a single
+    // move's latency and must never be summed: they are measured on
+    // opposite workers off different clocks, and their populations differ
+    // (every assigned split is waited for, including fresh work no
+    // revocation touched).
+    //
+    // `handoff_request_p50_s` keeps its schema-1 key so older datasets stay
+    // comparable, but on the new model it carries assignment-to-acquisition
+    // latency on the GAINING worker rather than a negotiation round trip.
     let handoff_request_p50 = prom::histogram_quantile_labeled(
         &text,
         "etl_coordination_handoff_duration_seconds",
         r#"phase="request""#,
         0.5,
     )
+    .or_else(|| prom::histogram_quantile(&text, "etl_coordination_assignment_latency_seconds", 0.5))
     .unwrap_or(0.0);
+    // The releasing worker's stop-commit-release, in both models.
     let handoff_drain_p50 = prom::histogram_quantile_labeled(
         &text,
         "etl_coordination_handoff_duration_seconds",
         r#"phase="drain""#,
         0.5,
     )
+    .or_else(|| prom::histogram_quantile(&text, "etl_coordination_drain_duration_seconds", 0.5))
     .unwrap_or(0.0);
 
     let duplicate_rows = rows_written - total_records;
@@ -413,6 +465,9 @@ sink: {{ nullsink: {{}} }}
         .variant("join_delay_s", join_delay.as_secs())
         .variant("checkpoint_ms", checkpoint_ms)
         .variant("lease_ms", lease_ms)
+        .variant("op_timeout_ms", op_timeout_ms)
+        .variant("replan_ms", replan_ms)
+        .variant("drain_deadline_ms", drain_deadline_ms)
         .metric("wall_s", Metric::minimize(wall, "s"))
         .metric(
             "duplicate_rows",
@@ -421,21 +476,18 @@ sink: {{ nullsink: {{}} }}
         .metric("duplicate_pct", Metric::minimize(duplicate_pct, "%"))
         .metric("late_share", Metric::maximize(late_share, "ratio"))
         .metric(
-            "steals_total",
-            Metric::minimize(steals_total, "acquisitions"),
+            "forced_total",
+            Metric::minimize(forced_total, "revocations"),
         )
         .metric(
-            "handoffs_total",
-            Metric::maximize(handoffs_total, "handoffs"),
+            "drained_total",
+            Metric::maximize(handoffs_total, "revocations"),
         )
         .metric(
-            "handoff_request_p50_s",
+            "assignment_latency_p50_s",
             Metric::minimize(handoff_request_p50, "s"),
         )
-        .metric(
-            "handoff_drain_p50_s",
-            Metric::minimize(handoff_drain_p50, "s"),
-        )
+        .metric("drain_p50_s", Metric::minimize(handoff_drain_p50, "s"))
         .metric(
             "records_total",
             Metric::maximize(total_records as f64, "records"),

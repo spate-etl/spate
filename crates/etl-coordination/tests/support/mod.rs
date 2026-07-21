@@ -35,6 +35,15 @@ pub fn config(instance_id: Option<&str>) -> CoordinationConfig {
         instance_id: instance_id.map(str::to_string),
         replan_interval: LEASE,
         reconcile_interval: Duration::from_millis(300),
+        // Both defaults are sized against the 30s production lease and
+        // would swamp a 1.5s test one — `drain_deadline` would not even
+        // validate. Scaled here rather than in `Default` so production
+        // keeps the documented values.
+        drain_deadline: LEASE / 2,
+        // Zero by default: most tests assert that a dead worker's splits
+        // flow back promptly, and a grace window would just add latency to
+        // every one of them. The tests that care about the window set it.
+        rebalance_delay: Duration::ZERO,
         ..CoordinationConfig::default()
     }
 }
@@ -96,35 +105,45 @@ pub fn worker(
         .expect("coordinator")
 }
 
-/// A worker with a non-default cooperative-handoff round budget. A large
-/// budget makes the fallback steal effectively never fire inside a test
-/// window (every move must be a consented handoff); a budget of 1 forces
-/// the fallback after a single unanswered round.
-pub fn worker_handoff_rounds(
+/// A worker with a non-default drain deadline. A long deadline makes the
+/// forced revocation effectively never fire inside a test window (every
+/// move must complete cooperatively); a very short one forces it, which is
+/// how the replaying path is exercised on purpose.
+pub fn worker_drain_deadline(
     store: &MemoryStore,
     io: &tokio::runtime::Handle,
     instance_id: Option<&str>,
-    handoff_rounds: u32,
+    drain_deadline: Duration,
 ) -> MemoryCoordinator {
     let mut config = config(instance_id);
-    config.handoff_rounds = handoff_rounds;
+    config.drain_deadline = drain_deadline;
     StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
 }
 
-/// A worker with both handoff knobs pinned. `handoff_max_grants` of 1 makes
-/// a victim drain strictly one split at a time — the shape a test needs
-/// when it hand-plays the embedder and can only service one drain at once,
-/// or when it is asserting the one-at-a-time behaviour itself.
-pub fn worker_handoff_tuned(
+/// A worker with a non-default rebalance delay. Tests that assert a
+/// restart keeps its own work need a delay longer than the restart takes;
+/// tests that assert prompt reassignment set it to zero.
+pub fn worker_rebalance_delay(
     store: &MemoryStore,
     io: &tokio::runtime::Handle,
     instance_id: Option<&str>,
-    handoff_rounds: u32,
-    handoff_max_grants: u32,
+    rebalance_delay: Duration,
 ) -> MemoryCoordinator {
     let mut config = config(instance_id);
-    config.handoff_rounds = handoff_rounds;
-    config.handoff_max_grants = handoff_max_grants;
+    config.rebalance_delay = rebalance_delay;
+    StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+}
+
+/// A worker with a pinned lane budget, so a test can force the leader to
+/// leave work queued or to spread it across members.
+pub fn worker_max_in_flight(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+    max_in_flight: u32,
+) -> MemoryCoordinator {
+    let mut config = config(instance_id);
+    config.max_in_flight = max_in_flight;
     StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
 }
 
@@ -190,6 +209,12 @@ pub struct Held {
     pub all_complete: bool,
     pub stalled: Option<(u64, u64)>,
     pub quarantined: Vec<(String, u32)>,
+    /// Revocations the leader has asked for and this worker has not yet
+    /// answered. Recorded rather than acted on, because whether a source
+    /// consents is exactly what several tests are varying: ignoring the
+    /// request is the declining source, and `consent_to_revocations` is
+    /// the cooperating one.
+    pub revoke_requests: Vec<String>,
 }
 
 impl Held {
@@ -211,6 +236,12 @@ impl Held {
                     self.splits.remove(split.as_str());
                     self.quarantined
                         .push((split.as_str().to_string(), attempts));
+                }
+                CoordinationEvent::RevokeRequested { split } => {
+                    let id = split.as_str().to_string();
+                    if !self.revoke_requests.contains(&id) {
+                        self.revoke_requests.push(id);
+                    }
                 }
                 CoordinationEvent::AllComplete => self.all_complete = true,
                 CoordinationEvent::Stalled {
@@ -247,17 +278,55 @@ pub fn drive(
     }
 }
 
-/// Commit a first watermark for everything a worker holds — what a
-/// running data plane does at its first checkpoint.
+/// The watermark [`commit_held`] writes: what a running data plane has
+/// durably committed before a rebalance starts.
+pub const BASE_WATERMARK: i64 = 1;
+
+/// The watermark [`consent_to_revocations`] commits as the drained tail.
+/// Deliberately distinct from [`BASE_WATERMARK`] so a test can tell a
+/// cooperative move from a forced one: a forced revocation hands the next
+/// owner the base watermark, a drained one hands it this.
+pub const DRAINED_WATERMARK: i64 = 42;
+
+/// Answer every outstanding revocation the way a cooperating source does:
+/// commit the split's drained tail to manufacture a resume point, then
+/// release it. The release is what makes the transfer replay-free — the
+/// next owner starts from a watermark covering everything this one
+/// emitted, which is exactly what [`DRAINED_WATERMARK`] lets a test see.
+pub fn consent_to_revocations(coordinator: &mut impl SplitCoordinator, held: &mut Held) {
+    for id in std::mem::take(&mut held.revoke_requests) {
+        if !held.splits.contains_key(&id) {
+            continue; // already gone: forced, completed, or fenced
+        }
+        // A `Fenced` commit is normal — the lease may legitimately have
+        // moved — and leaves the release below a no-op. Clamped upward for
+        // the same reason `commit_held` is: a split can be drained more
+        // than once, and watermarks never move backwards.
+        let watermark = held.splits[&id]
+            .1
+            .as_ref()
+            .map_or(DRAINED_WATERMARK, |p| p.watermark.max(DRAINED_WATERMARK));
+        let _ = coordinator.commit(&split_id(&id), &SplitProgress::new(watermark, vec![]));
+        let _ = coordinator.release_drained(&[split_id(&id)]);
+        held.splits.remove(&id);
+    }
+}
+
+/// Commit a first watermark ([`BASE_WATERMARK`]) for everything a worker
+/// holds — what a running data plane does at its first checkpoint. A
+/// `Fenced` commit is normal here (the lease may legitimately have moved)
+/// and is ignored.
 ///
-/// Tests that expect a **steal** must call this: a split with no
-/// committed progress has no resume point, so the protocol refuses to
-/// move it (taking it would replay the split in full rather than the one
-/// commit interval a steal is meant to cost). A `Fenced` commit is normal
-/// here — the lease may legitimately have moved — and is ignored.
+/// Never regresses: a split that arrived carrying a drained tail is
+/// already past [`BASE_WATERMARK`], and the backend rejects a regressing
+/// watermark as a source bug — correctly, so the helper must behave like a
+/// real data plane and not walk backwards.
 pub fn commit_held(coordinator: &mut impl SplitCoordinator, held: &Held) {
-    for id in held.splits.keys() {
-        match coordinator.commit(&split_id(id), &SplitProgress::new(1, vec![])) {
+    for (id, (_, carried)) in &held.splits {
+        let watermark = carried
+            .as_ref()
+            .map_or(BASE_WATERMARK, |p| p.watermark.max(BASE_WATERMARK));
+        match coordinator.commit(&split_id(id), &SplitProgress::new(watermark, vec![])) {
             Ok(()) => {}
             Err(e) if e.kind == etl_coordination::CoordinationErrorKind::Fenced => {}
             Err(e) => panic!("commit failed: {e}"),

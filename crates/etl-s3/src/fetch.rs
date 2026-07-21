@@ -145,7 +145,7 @@ pub(crate) struct FetcherParams {
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
-    /// Cooperative-handoff stop (set by `SplitCtx::begin_handoff`): checked
+    /// Cooperative-revocation stop (set by `SplitCtx::begin_revoke`): checked
     /// only at object boundaries — including the *between-objects* pause
     /// wait; the mid-object pause waits deliberately ignore it — **never
     /// mid-object**. On stop the fetcher returns, dropping `tx` at a boundary —
@@ -186,7 +186,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
-        // Cooperative handoff: stop only ever takes effect here, at an object
+        // Cooperative revocation: stop only ever takes effect here, at an object
         // boundary, before any `ObjectStart` for this object. Dropping `tx`
         // now closes the channel exactly as a natural end of slice would, so
         // the lane's end-of-input decision (`set_terminal` + waker) fires
@@ -251,7 +251,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
 /// paused fetcher still exits promptly on shutdown.
 ///
 /// `stop` is passed `Some` only by the **between-objects** caller: a
-/// cooperative handoff that lands while the fetcher is back-pressured must be
+/// cooperative revocation that lands while the fetcher is back-pressured must be
 /// noticed promptly, and returning here is safe because no object is open. The
 /// mid-object callers pass `None` — a stop must never end the wait between an
 /// `ObjectStart` and its `ObjectEnd` (that would close the channel with the
@@ -1265,14 +1265,14 @@ mod tests {
         );
     }
 
-    // ----------------------------------------- cooperative-handoff stop --
+    // ----------------------------------------- cooperative-revocation stop --
 
     #[tokio::test]
     async fn a_preset_stop_ends_the_fetcher_before_reading_anything() {
         // Stop set before the fetcher starts: the boundary check at the top
         // of the loop fires before any `ObjectStart`, so `tx` is dropped with
         // no object open. The lane reads a closed channel and takes its clean
-        // end-of-input path — a handoff at a boundary is indistinguishable
+        // end-of-input path — a revocation at a boundary is indistinguishable
         // from a natural end of slice.
         let store: Arc<dyn ObjectStore> =
             Arc::new(seeded(&[("p/a", b"aaaa"), ("p/b", b"bbbb")]).await);
@@ -1307,7 +1307,7 @@ mod tests {
     #[tokio::test]
     async fn a_paused_fetcher_notices_the_stop_and_closes_cleanly() {
         // A back-pressured fetcher parked in the pause wait must give up its
-        // split promptly when a handoff sets `stop`, closing the channel at
+        // split promptly when a revocation sets `stop`, closing the channel at
         // the (pre-first-object) boundary rather than waiting out the pause.
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"aaaa")]).await);
         let slice = listed(&store).await;

@@ -29,9 +29,6 @@ pub const L_REASON: &str = "reason";
 pub const L_OUTCOME: &str = "outcome";
 /// Store-primitive label on coordination store-op timings.
 pub const L_OP: &str = "op";
-/// Cooperative-handoff phase label (`request`, `drain`) — the two terms
-/// time-to-balance decomposes into.
-pub const L_PHASE: &str = "phase";
 /// Rebalance event label (`assign`, `revoke`).
 pub const L_EVENT: &str = "event";
 /// Error taxonomy class label (`retryable`, `record_level`, `fatal`).
@@ -170,24 +167,28 @@ pub const COORDINATION_LIVE_WORKERS: &str = "etl_coordination_live_workers";
 pub const COORDINATION_LEADER: &str = "etl_coordination_leader";
 /// 1 while this worker owns no splits and observes as a standby.
 pub const COORDINATION_IDLE: &str = "etl_coordination_idle";
-/// Split acquisitions, by [`L_REASON`] (`create`, `released`, `reclaimed`,
-/// `expired`, `stolen`, `handoff`).
+/// Split acquisitions, by [`L_REASON`] (`create`, `reclaimed`, `expired`,
+/// `reassigned`).
 pub const COORDINATION_ACQUISITIONS_TOTAL: &str = "etl_coordination_acquisitions_total";
-/// Splits lost involuntarily, by [`L_REASON`] (`fenced`, `starved`).
-pub const COORDINATION_REVOCATIONS_TOTAL: &str = "etl_coordination_revocations_total";
+/// Splits lost involuntarily, by [`L_REASON`] (`fenced`, `starved`,
+/// `revoked`).
+pub const COORDINATION_SPLIT_LOSSES_TOTAL: &str = "etl_coordination_split_losses_total";
 /// Voluntary split releases (graceful shutdown or scale-down).
 pub const COORDINATION_RELEASES_TOTAL: &str = "etl_coordination_releases_total";
-/// Cooperative split handoffs, by outcome (`requested`, `granted`,
-/// `timeout`, `aborted`) — the consent-first live-owner transfer that a
-/// granted move completes replay-free.
-pub const COORDINATION_HANDOFFS_TOTAL: &str = "etl_coordination_handoffs_total";
-/// Cooperative-handoff latency, by [`L_PHASE`] (`request`, `drain`) — the
-/// two terms of time-to-balance. `request` is measured on the requester and
-/// spans every unanswered round; `drain` is measured on the victim.
-pub const COORDINATION_HANDOFF_DURATION_SECONDS: &str = "etl_coordination_handoff_duration_seconds";
-/// Grants this worker is currently draining as a victim — in-flight
-/// cooperative moves, bounded by `handoff_max_grants`.
-pub const COORDINATION_HANDOFFS_IN_FLIGHT: &str = "etl_coordination_handoffs_in_flight";
+/// Split revocations, by [`L_OUTCOME`] (`requested`, `drained`, `forced`)
+/// — the leader moving a split away from a live owner. All three count on
+/// the releasing worker; `drained` is the replay-free outcome.
+pub const COORDINATION_REVOCATIONS_TOTAL: &str = "etl_coordination_revocations_total";
+/// Cooperative drain time on the **releasing** worker: revocation
+/// requested to the release landing. Only drains that finish cooperatively
+/// are observed — a forced release is a `forced` revocation, not a drain.
+pub const COORDINATION_DRAIN_DURATION_SECONDS: &str = "etl_coordination_drain_duration_seconds";
+/// Assignment convergence on the **gaining** worker: a split appearing in
+/// this worker's assignment to this worker holding its lease.
+pub const COORDINATION_ASSIGNMENT_LATENCY_SECONDS: &str =
+    "etl_coordination_assignment_latency_seconds";
+/// Splits this worker is currently draining away under revocation.
+pub const COORDINATION_SPLITS_DRAINING: &str = "etl_coordination_splits_draining";
 /// Splits written into the plan by this worker while leader (seeded
 /// create-if-absent; replayed ids that already exist are not counted).
 pub const COORDINATION_SPLITS_PLANNED_TOTAL: &str = "etl_coordination_splits_planned_total";
@@ -249,9 +250,9 @@ pub const COUNTERS: &[&str] = &[
     SINK_ABANDONED_BATCHES_TOTAL,
     CHECKPOINT_COMMITS_TOTAL,
     COORDINATION_ACQUISITIONS_TOTAL,
-    COORDINATION_REVOCATIONS_TOTAL,
+    COORDINATION_SPLIT_LOSSES_TOTAL,
     COORDINATION_RELEASES_TOTAL,
-    COORDINATION_HANDOFFS_TOTAL,
+    COORDINATION_REVOCATIONS_TOTAL,
     COORDINATION_SPLITS_PLANNED_TOTAL,
     COORDINATION_REPLANS_TOTAL,
     COORDINATION_SPLIT_FAILURES_TOTAL,
@@ -279,7 +280,7 @@ pub const GAUGES: &[&str] = &[
     COORDINATION_LIVE_WORKERS,
     COORDINATION_LEADER,
     COORDINATION_IDLE,
-    COORDINATION_HANDOFFS_IN_FLIGHT,
+    COORDINATION_SPLITS_DRAINING,
     PIPELINE_INFO,
     PIPELINE_STATE,
     PIPELINE_THREADS,
@@ -298,7 +299,8 @@ pub const HISTOGRAMS: &[&str] = &[
     COORDINATION_REPLAN_DURATION_SECONDS,
     COORDINATION_RECONCILE_DURATION_SECONDS,
     COORDINATION_STORE_OP_DURATION_SECONDS,
-    COORDINATION_HANDOFF_DURATION_SECONDS,
+    COORDINATION_DRAIN_DURATION_SECONDS,
+    COORDINATION_ASSIGNMENT_LATENCY_SECONDS,
     E2E_LATENCY_SECONDS,
 ];
 

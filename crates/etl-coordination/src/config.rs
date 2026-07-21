@@ -48,27 +48,39 @@ pub struct CoordinationConfig {
     /// up; steady-state operations are not budgeted — they retry on the
     /// next tick and escalate through lease expiry. Default 8.
     pub startup_max_attempts: u32,
-    /// Heartbeat rounds a cooperative handoff request may stay unanswered
-    /// before this worker falls back to a fenced CAS steal of the
-    /// victim's lease. Rounds advance on heartbeats (a third of the
-    /// lease, jittered) and the first counted round may be partially
-    /// elapsed, so three rounds is *up to* one `lease_duration` — the
-    /// same bound that governs dead-owner takeover; a live victim's drain
-    /// normally finishes well inside one round. Default 3.
-    pub handoff_rounds: u32,
-    /// How many cooperative handoffs this worker will drain away at once
-    /// as a victim. The drains are independent — each split has its own
-    /// lane, fetcher and tracker — so granting several together overlaps
-    /// their tails instead of paying for them one after another, which is
-    /// what makes a scaled-out replica reach its share in fewer rounds.
+    /// How long the leader withholds a departed instance's splits before
+    /// reassigning them, so a restarting worker reclaims its own work
+    /// instead of the fleet churning around a bounce. Default 20s.
     ///
-    /// This is a resource throttle, not a safety bound: the pairwise rule
-    /// still admits each move individually, so no setting can overshoot
-    /// balance. Raise it when a victim's drains are the bottleneck; leave
-    /// it low when the victim's sink is, since concurrent drains share
-    /// that sink and finishing them together does not make them finish
-    /// sooner. 1 restores strictly one-at-a-time handoffs. Default 2.
-    pub handoff_max_grants: u32,
+    /// The window is cancelled early when the instance comes back, so a
+    /// fast restart costs nothing at all. Setting it to zero reassigns
+    /// immediately — a supported configuration, not a disabled feature.
+    ///
+    /// Deliberately far below Kafka Connect's 5-minute equivalent
+    /// (`scheduled.rebalance.max.delay.ms`): Connect's default is sized for
+    /// connectors whose tasks are expensive to start, whereas a split
+    /// starts by reading a descriptor and spawning a fetcher. When starting
+    /// is cheap, idle work costs more than movement does.
+    #[serde(with = "humantime_serde")]
+    pub rebalance_delay: Duration,
+    /// How long a revoked split may keep draining before the release is
+    /// forced. Default 10s.
+    ///
+    /// Revocation is cooperative first: the owner stops intake at a safe
+    /// boundary, chases its tail to a final fenced commit, and releases —
+    /// which replays nothing. A source that declines, or one whose drain
+    /// outruns this deadline, is revoked outright instead and its
+    /// uncommitted tail replays under the new owner. The deadline exists
+    /// because a leader's revocation is a decision rather than a request:
+    /// without it, one wedged drain would pin a rebalance open forever.
+    ///
+    /// It may exceed `lease_duration`. A draining split is still owned and
+    /// still heartbeated, so a long drain does not race its own lease — it
+    /// just makes the rebalance slow. Size it against how long the source
+    /// needs to flush a split's tail through its sink, which for a paced
+    /// sink can be minutes.
+    #[serde(with = "humantime_serde")]
+    pub drain_deadline: Duration,
 }
 
 impl Default for CoordinationConfig {
@@ -82,8 +94,8 @@ impl Default for CoordinationConfig {
             replan_interval: Duration::from_secs(60),
             reconcile_interval: Duration::from_secs(30),
             startup_max_attempts: 8,
-            handoff_rounds: 3,
-            handoff_max_grants: 2,
+            rebalance_delay: Duration::from_secs(20),
+            drain_deadline: Duration::from_secs(10),
         }
     }
 }
@@ -135,19 +147,22 @@ impl CoordinationConfig {
         if self.startup_max_attempts == 0 {
             return Err(fatal("startup_max_attempts must be >= 1"));
         }
-        if self.handoff_rounds == 0 {
-            return Err(fatal(
-                "handoff_rounds must be >= 1: the fallback steal must give a live victim \
-                 at least one round boundary to answer (the budget spans round \
-                 boundaries, so the first counted round may be partially elapsed)",
-            ));
-        }
-        if self.handoff_max_grants == 0 {
-            return Err(fatal(
-                "handoff_max_grants must be >= 1: a victim that will drain nothing can \
-                 never consent, so every rebalance would wait out handoff_rounds and \
-                 fall back to a replaying steal",
-            ));
+        // Zero is legal and means "reassign immediately" — see the field
+        // docs. There is deliberately no floor here: the only unsafe value
+        // would be one long enough to strand work indefinitely, and that is
+        // bounded by the operator's own patience, not by the protocol.
+        // Deliberately NO upper bound against `lease_duration`. A draining
+        // split is still owned and still renewed, so a drain does not race
+        // its own lease however long it takes — a slow drain is a slow
+        // rebalance, not a correctness problem. Sources with paced sinks
+        // legitimately want deadlines far above the lease.
+        if self.drain_deadline < self.op_timeout {
+            return Err(fatal(format!(
+                "drain_deadline ({:?}) must be >= op_timeout ({:?}): a deadline shorter \
+                 than one store round-trip forces every revocation before its final \
+                 commit can land, so no drain could ever finish cooperatively",
+                self.drain_deadline, self.op_timeout
+            )));
         }
         Ok(())
     }
@@ -172,12 +187,28 @@ mod tests {
         assert_eq!(config.renew_interval(), Duration::from_secs(10));
         assert_eq!(config.max_attempts, 4);
         assert_eq!(config.max_in_flight, 8);
-        assert_eq!(config.handoff_rounds, 3, "≈ one lease at renew_interval");
         assert_eq!(
-            config.handoff_max_grants, 2,
-            "enough to overlap drains, small enough not to starve the \
-             victim's own intake"
+            config.rebalance_delay,
+            Duration::from_secs(20),
+            "sized for a pod bounce, not for expensive task startup"
         );
+        assert!(
+            config.drain_deadline >= config.op_timeout,
+            "a drain deadline below one store round-trip forces every revocation"
+        );
+    }
+
+    #[test]
+    fn a_zero_rebalance_delay_is_legal() {
+        // Connect's equivalent knob treated 0 as "withhold forever"
+        // (KAFKA-15693, broken 2.3.0 through 3.7.0). Here it means what it
+        // says: reassign immediately.
+        CoordinationConfig {
+            rebalance_delay: Duration::ZERO,
+            ..Default::default()
+        }
+        .validate()
+        .expect("zero delay is a supported configuration");
     }
 
     #[test]
@@ -236,17 +267,10 @@ mod tests {
             ),
             (
                 CoordinationConfig {
-                    handoff_rounds: 0,
+                    drain_deadline: Duration::from_millis(1),
                     ..Default::default()
                 },
-                "handoff_rounds",
-            ),
-            (
-                CoordinationConfig {
-                    handoff_max_grants: 0,
-                    ..Default::default()
-                },
-                "handoff_max_grants",
+                "drain_deadline",
             ),
         ];
         for (config, needle) in cases {

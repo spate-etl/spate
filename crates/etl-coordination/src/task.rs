@@ -2,7 +2,7 @@
 //! I/O, so every local decision is serialized against every local write.
 //!
 //! The loop is watch-driven — lease deletions and record changes arrive as
-//! push events, claims and steals run immediately on the deltas — with a
+//! push events, claims and revocations run immediately on the deltas — with a
 //! periodic reconcile listing as the missed-event backstop and a jittered
 //! heartbeat tick renewing every owned lease at a third of the TTL. The
 //! planner runs on the blocking pool and is awaited as a **select arm**,
@@ -20,7 +20,7 @@ use crate::error::{fatal, store_error};
 use crate::leader::PlanRun;
 use crate::protocol::{self, ClaimAction, ClaimKind, SplitState};
 use crate::records::{
-    self, HandoffVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
+    self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
     SplitStatus, WorkerVal,
 };
 use crate::store::{
@@ -32,7 +32,7 @@ use etl_core::coordination::{
     SplitProgress,
 };
 use etl_core::metrics::{
-    AcquireReason, CoordinationMetrics, HandoffOutcome, HandoffPhase, SplitLossReason, WriteOutcome,
+    AcquireReason, CoordinationMetrics, RevocationOutcome, SplitLossReason, WriteOutcome,
 };
 use futures_util::StreamExt as _;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,16 +59,16 @@ pub(crate) enum Command {
     Release {
         splits: Vec<SplitId>,
         /// Whether this release is a departure from the fleet (shutdown,
-        /// scale-down) rather than a cooperative handoff grant. Only a
+        /// scale-down) rather than a revocation hand-back. Only a
         /// departure that empties the working set retires this worker; a
-        /// handoff grant of the last split keeps it in the fleet.
+        /// revocation of the last split keeps it in the fleet.
         departure: bool,
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },
-    /// The embedder cannot serve a `HandoffRequested` it was offered:
-    /// free the grant slot and exclude the split from re-offer for a
-    /// round budget, so the victim can offer a different one.
-    DeclineHandoff {
+    /// The source cannot stop this split at a safe boundary. The split
+    /// still goes back — a revocation is a decision, not a request — but
+    /// by the forced, replaying route rather than the clean one.
+    DeclineRevoke {
         split: SplitId,
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },
@@ -80,7 +80,7 @@ impl Command {
             Command::Commit { reply, .. }
             | Command::Fail { reply, .. }
             | Command::Release { reply, .. }
-            | Command::DeclineHandoff { reply, .. } => reply,
+            | Command::DeclineRevoke { reply, .. } => reply,
         }
     }
 }
@@ -102,33 +102,31 @@ struct OwnedSplit {
     last_ok_write: Instant,
 }
 
-/// This worker's one outstanding cooperative-handoff request. A worker
-/// under its working-set target with nothing claimable writes a
-/// `handoff.{victim}` key asking the victim to drain and release splits,
-/// instead of stealing them (which replays the uncommitted tail). One
-/// request at a time — it may be answered with several splits; the round
-/// counter is the sole timeout.
-struct HandoffOut {
-    /// Instance this worker is requesting a split from.
-    victim: String,
-    /// Round the request was FIRST opened. Preserved across key
-    /// recreations (a TTL blip must not reset the fallback clock).
-    since_round: u64,
-    /// Round the key was last refreshed — the once-per-round gate.
-    refreshed_round: u64,
-    /// Whether the fallback [`HandoffOutcome::Timeout`] has been counted
-    /// (once) for this request.
-    timed_out: bool,
+/// How one release attempt ended. The caller needs the distinction to
+/// avoid reporting a tenancy end twice: a fenced release has already been
+/// announced by [`Task::drop_owned`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseOutcome {
+    /// The owner-clear landed; this worker gave the split up.
+    Released,
+    /// The CAS lost: a peer had already taken the split.
+    Fenced,
+    /// The write failed; the lease key was dropped best-effort.
+    WriteFailed,
+    /// Not held (already released, lost, or completed).
+    Missing,
 }
 
-/// Victim side: one grant this worker is draining away.
-struct HandoffGrant {
-    /// Round the grant began — the self-heal budget's anchor. Per grant,
-    /// not per worker: concurrent grants start on different rounds and
-    /// must each be given their own full budget.
-    since_round: u64,
-    /// When the grant was annotated, for the `drain` phase of
-    /// `etl_coordination_handoff_duration_seconds`.
+/// One split this worker is draining away because the leader stopped
+/// assigning it. The drain is cooperative — stop intake at a safe
+/// boundary, chase the tail to a final fenced commit, release — so it
+/// replays nothing; the deadline is what stops a wedged drain from
+/// pinning a rebalance open forever.
+struct Revoking {
+    /// When the revocation was requested: the drain deadline's anchor and
+    /// the `drain` phase of
+    /// `etl_coordination_drain_duration_seconds`. Real time, not the
+    /// injected `Clock` — that seam is scoped to the two expiry surfaces.
     started: Instant,
 }
 
@@ -158,11 +156,16 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// Live workers by presence key, with the revision last seen — the
     /// revision orders deletes against puts (stale echoes are ignored).
     pub(crate) presence: BTreeMap<String, Revision>,
-    /// Observed cooperative-handoff request keys, by victim instance (the
-    /// `{victim}` in `handoff.{victim}`), with the revision last seen. A
-    /// requester CASes its own key against this revision to refresh it; a
-    /// victim reads `handoff_requests[self.instance]` to see who is asking.
-    handoff_requests: BTreeMap<String, (HandoffVal, Revision)>,
+    /// Each live member's own lane budget, as it advertised on its presence
+    /// key. Kept beside `presence` rather than inside it because only the
+    /// leader reads it, and only to feed `desired_assignment`.
+    member_caps: BTreeMap<String, u32>,
+    /// Every observed `assign.{instance}` record with the revision last
+    /// seen. The leader CASes against these revisions to publish, and skips
+    /// the write entirely when the desired assignment already matches what
+    /// is stored — a steady-state fleet therefore writes nothing at all.
+    /// Workers only ever read their own entry.
+    assignments: BTreeMap<String, (AssignmentVal, Revision)>,
     pub(crate) plan: Option<(PlanRecord, Revision)>,
     pub(crate) plan_rev_seen: u64,
     leader_observed: Option<(LeaderVal, Revision)>,
@@ -185,47 +188,49 @@ pub(crate) struct Task<S: CoordinationStore> {
     pending_specs: BTreeMap<String, SplitSpecRecord>,
     pub(crate) leadership: Option<Revision>,
     pub(crate) plan_now: bool,
-    /// A split may need parking while this worker sits at its working-set
-    /// target; this flag lets the next claim pass run the quarantine
-    /// decisions even with no claim slot open.
+    /// A split may need parking while this worker sits at its lane budget.
+    /// `reconcile_assignment` skips its whole-map scan once there is no
+    /// claim slot open, so this flag is what still lets a quarantine
+    /// decision through — without it a bounded job with a poison split
+    /// would idle instead of reaching `Stalled`.
     quarantine_scan: bool,
     /// Set when this worker released its last split: it is leaving the
-    /// fleet, so it must not claim, steal, or lead again — otherwise the
-    /// releaser instantly re-claims its own hand-backs.
+    /// fleet, so it must not claim or lead again — otherwise the releaser
+    /// instantly re-claims its own hand-backs.
     parting: bool,
     terminal_reported: bool,
     round: u64,
-    /// This worker's one outstanding handoff request (requester side).
-    handoff_out: Option<HandoffOut>,
-    /// Splits this worker is currently draining to grant away (victim
-    /// side), keyed by split id. Bounded by `handoff_max_grants`: the
-    /// drains are independent per lane, so overlapping them is what lets a
-    /// victim shed several splits in the time one used to take.
-    handoff_granting: BTreeMap<String, HandoffGrant>,
-    /// Splits about to be released to us by the victim we requested —
-    /// marked from the victim's explicit `granted` annotation on our
-    /// request key (never inferred from lease traffic) so the ensuing
-    /// claim is labelled [`AcquireReason::Handoff`] rather than a plain
-    /// `Released`, and so a vanished request key can be told apart from a
-    /// TTL blip (granted ⇒ served ⇒ never re-created).
-    handoff_incoming: BTreeSet<String>,
-    /// Victim side: splits the embedder declined to drain, with the round
-    /// of the decline. Excluded from grants for one `handoff_rounds`
-    /// budget — most declines are transient (a lane not yet open), so the
-    /// victim offers its other splits first and retries later.
-    handoff_declined: BTreeMap<String, u64>,
-    /// Requester side: when this worker first went under target with a
-    /// victim worth asking, for the `request` phase of
-    /// `etl_coordination_handoff_duration_seconds`. Deliberately survives
-    /// withdrawals and re-targets — it measures how long this worker was
-    /// short of its share, not how long one request key lived — and is
-    /// disarmed without an observation when the shortfall ends any other
-    /// way (claimable work reappears, or the fleet shrinks to target).
-    handoff_seeking_since: Option<Instant>,
-    /// Victim side: splits released for a grant whose ack has not yet
-    /// landed on the request key. Retried every step — an ack dropped on a
-    /// lost CAS would leave the requester waiting for work it already has.
-    pending_ack: BTreeSet<String>,
+    /// The splits this worker has been told to hold. Empty and
+    /// `assignment_seen == false` means the leader has not spoken yet,
+    /// which is *not* the same as "hold nothing" — see
+    /// [`Task::reconcile_assignment`].
+    assigned: BTreeSet<String>,
+    /// Whether any assignment record for this instance has ever been
+    /// observed. Absence of an instruction and an instruction to hold
+    /// nothing are different states, and conflating them would make a
+    /// worker release everything during a leader gap.
+    assignment_seen: bool,
+    /// Highest assignment generation observed for this instance. A record
+    /// stamped below it is a deposed leader's late write and is ignored.
+    assign_generation: u64,
+    /// Splits currently draining away because the leader stopped assigning
+    /// them, keyed by split id.
+    revoking: BTreeMap<String, Revoking>,
+    /// Splits whose acquisition this worker is still waiting on, with when
+    /// they were assigned — the input to
+    /// `etl_coordination_assignment_latency_seconds`.
+    awaiting: BTreeMap<String, Instant>,
+    /// Set when the leader's assignment inputs moved (membership, split
+    /// status, specs, or a grace window elapsing). `desired_assignment` is
+    /// a full recompute over every split, and `step` runs on every watch
+    /// event, so recomputing unconditionally made a commit-heavy fleet pay
+    /// an O(members x splits) scan per commit. Cleared by the publish.
+    assign_dirty: bool,
+    /// Leader side only: instances whose presence key vanished, and when.
+    /// Their splits are withheld from assignment until `rebalance_delay`
+    /// elapses, so a pod bounce reclaims its own work instead of the fleet
+    /// churning around it. Cleared the moment the instance reappears.
+    departed: BTreeMap<String, Instant>,
 }
 
 impl<S: CoordinationStore> Task<S> {
@@ -261,7 +266,8 @@ impl<S: CoordinationStore> Task<S> {
             events,
             splits: BTreeMap::new(),
             presence: BTreeMap::new(),
-            handoff_requests: BTreeMap::new(),
+            member_caps: BTreeMap::new(),
+            assignments: BTreeMap::new(),
             plan: None,
             plan_rev_seen: 0,
             leader_observed: None,
@@ -277,12 +283,13 @@ impl<S: CoordinationStore> Task<S> {
             parting: false,
             terminal_reported: false,
             round: 0,
-            handoff_out: None,
-            handoff_granting: BTreeMap::new(),
-            handoff_incoming: BTreeSet::new(),
-            handoff_declined: BTreeMap::new(),
-            handoff_seeking_since: None,
-            pending_ack: BTreeSet::new(),
+            assigned: BTreeSet::new(),
+            assignment_seen: false,
+            assign_generation: 0,
+            revoking: BTreeMap::new(),
+            awaiting: BTreeMap::new(),
+            assign_dirty: true,
+            departed: BTreeMap::new(),
         }
     }
 
@@ -550,13 +557,21 @@ impl<S: CoordinationStore> Task<S> {
         }
     }
 
+    /// This worker's presence value. It advertises the lane budget so the
+    /// leader balances against each member's own `max_in_flight` rather
+    /// than assuming the fleet is homogeneous.
+    fn worker_val(&self) -> WorkerVal {
+        WorkerVal {
+            schema: records::SCHEMA,
+            nonce: self.nonce.clone(),
+            max_in_flight: self.config.max_in_flight,
+        }
+    }
+
     /// Write the worker presence key (taking over a dead predecessor's).
     async fn announce(&mut self) -> Result<(), CoordinationError> {
         let key = records::worker_key(&self.instance);
-        let val = records::encode_val(&WorkerVal {
-            schema: records::SCHEMA,
-            nonce: self.nonce.clone(),
-        });
+        let val = records::encode_val(&self.worker_val());
         let ctx = "announcing presence";
         match self
             .store
@@ -650,7 +665,8 @@ impl<S: CoordinationStore> Task<S> {
         match ks {
             Keyspace::Ephemeral => {
                 self.presence.clear();
-                self.handoff_requests.clear();
+                self.member_caps.clear();
+                self.assign_dirty = true;
                 self.leader_observed = None;
                 self.pending_leases.clear();
                 for state in self.splits.values_mut() {
@@ -695,54 +711,31 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         if let Some(instance) = records::parse_worker_key(&entry.key) {
-            self.presence.insert(instance.to_string(), entry.revision);
-            return Ok(());
-        }
-        if let Some(victim) = records::parse_handoff_key(&entry.key) {
-            // Same stale-echo guard as the worker branch: a put at or below
-            // the revision the view already holds is a delayed broadcast.
             if self
-                .handoff_requests
-                .get(victim)
-                .is_some_and(|(_, rev)| *rev >= entry.revision)
+                .presence
+                .insert(instance.to_string(), entry.revision)
+                .is_none()
             {
-                return Ok(());
+                self.assign_dirty = true; // membership grew
             }
-            // Unlike lease values, a corrupt request is not worth killing
-            // the fleet over: this key is liveness-only (its own contract —
-            // losing it costs a rebalance opportunity, never correctness),
-            // so ignore it and let it expire. A key naming US as requester
-            // under a foreign nonce is a restarted predecessor's leftover,
-            // not a live twin: also non-fatal, swept by the next pursue
-            // pass.
-            let val: HandoffVal = match records::parse_val(&entry.key, &entry.value) {
-                Ok(val) => val,
-                Err(e) => {
-                    tracing::warn!(key = %entry.key, error = %e, "unreadable handoff request ignored");
-                    return Ok(());
+            // An unreadable presence value costs balance, never safety, so
+            // it is warned about and the member keeps the leader's own
+            // budget rather than being dropped from the fleet.
+            match records::parse_val::<WorkerVal>(&entry.key, &entry.value) {
+                Ok(worker) if worker.max_in_flight > 0 => {
+                    if self
+                        .member_caps
+                        .insert(instance.to_string(), worker.max_in_flight)
+                        != Some(worker.max_in_flight)
+                    {
+                        self.assign_dirty = true;
+                    }
                 }
-            };
-            // The victim's grant annotation on OUR live request is the
-            // grant's attribution: exactly this split is incoming. Never
-            // inferred from lease traffic — the victim's unrelated lease
-            // deletes (fail, completion, departure) must not be mistaken
-            // for a grant.
-            if val.requester == self.instance
-                && val.nonce == self.nonce
-                && self
-                    .handoff_out
-                    .as_ref()
-                    .is_some_and(|out| out.victim == victim)
-                && !val.granted.is_empty()
-            {
-                // Mirror the whole annotated batch: the victim may add to
-                // it across rounds, and it shrinks again as each split is
-                // released, so the annotation — not our own history — is
-                // the authority on what is still coming.
-                self.handoff_incoming = val.granted.iter().cloned().collect();
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(key = %entry.key, error = %e, "unreadable presence value");
+                }
             }
-            self.handoff_requests
-                .insert(victim.to_string(), (val, entry.revision));
             return Ok(());
         }
         if let Some(id) = records::parse_split_key(&entry.key) {
@@ -784,6 +777,13 @@ impl<S: CoordinationStore> Task<S> {
             }
             match self.splits.get_mut(id) {
                 Some(state) => {
+                    if state
+                        .lease
+                        .as_ref()
+                        .is_none_or(|(l, _)| l.owner != lease.owner)
+                    {
+                        self.assign_dirty = true;
+                    }
                     state.lease = Some((lease, entry.revision));
                 }
                 // The record has not arrived yet (snapshot ordering):
@@ -826,21 +826,20 @@ impl<S: CoordinationStore> Task<S> {
         if let Some(instance) = records::parse_worker_key(key) {
             if self.presence.get(instance).copied().is_none_or(newer_than) {
                 self.presence.remove(instance);
-            }
-            return;
-        }
-        if let Some(victim) = records::parse_handoff_key(key) {
-            // A handoff request key vanished (victim granted, requester
-            // withdrew, or TTL expiry). Drop the observation; the requester
-            // side self-heals through the round counter. Deliberately does
-            // NOT clear `handoff_granting` — a victim mid-drain keeps
-            // draining, and its own release bookkeeping closes the grant.
-            if self
-                .handoff_requests
-                .get(victim)
-                .is_none_or(|(_, rev)| newer_than(*rev))
-            {
-                self.handoff_requests.remove(victim);
+                self.member_caps.remove(instance);
+                self.assign_dirty = true;
+                // Start this instance's grace window. Every worker tracks
+                // it, not just the leader: leadership can move between the
+                // departure and the next publish, and a successor that
+                // learned nothing of the departure would reassign the work
+                // immediately — turning the window off exactly when a
+                // leader bounce made it most useful. `reserved_splits`
+                // clears the entry the moment the instance reappears.
+                if instance != self.instance {
+                    self.departed
+                        .entry(instance.to_string())
+                        .or_insert_with(Instant::now);
+                }
             }
             return;
         }
@@ -853,14 +852,17 @@ impl<S: CoordinationStore> Task<S> {
                 // heartbeats have been failing for a full TTL.
                 self.drop_owned(id, SplitLossReason::Starved);
             }
-            // Deliberately no handoff bookkeeping here: a victim's lease
+            // Deliberately no revocation bookkeeping here: a peer's lease
             // deletes also happen for fails, completions, departures, and
-            // expiry, so a grant is never inferred from lease traffic — it
-            // arrives as the explicit `granted` annotation on our request
-            // key instead.
+            // expiry, so a revocation is never inferred from lease traffic
+            // — the leader's `assign.{instance}` record is the only thing
+            // that starts or ends one.
             if let Some(state) = self.splits.get_mut(id)
                 && state.lease.as_ref().is_none_or(|(_, rev)| newer_than(*rev))
             {
+                if state.lease.is_some() {
+                    self.assign_dirty = true;
+                }
                 state.lease = None;
                 // An expired owner may sit at the attempts cap: give the
                 // next pass a chance to park it even at target.
@@ -883,11 +885,26 @@ impl<S: CoordinationStore> Task<S> {
     fn apply_state_event(&mut self, event: WatchEvent) -> Result<(), CoordinationError> {
         match event {
             WatchEvent::Put(entry) => self.apply_state_put(&entry),
-            // Durable keys are never deleted by this protocol; a delete
-            // means external interference and the reconcile pass treats
-            // missing records the same way.
             WatchEvent::Delete { key, .. } => {
-                tracing::warn!(key = %key, "durable record deleted externally");
+                // Assignment records are the one durable key this protocol
+                // deletes: the leader drops them for instances that have
+                // left. Everything else being deleted is external
+                // interference, and the reconcile pass treats missing
+                // records the same way.
+                if let Some(instance) = records::parse_assign_key(&key) {
+                    self.assignments.remove(instance);
+                    if instance == self.instance {
+                        // Our own assignment was withdrawn. Keep holding
+                        // what we hold — an absent record is "nothing has
+                        // been decided", never "release everything" — and
+                        // wait to be told again.
+                        self.assignment_seen = false;
+                        self.assigned.clear();
+                        self.awaiting.clear();
+                    }
+                } else {
+                    tracing::warn!(key = %key, "durable record deleted externally");
+                }
                 Ok(())
             }
             WatchEvent::SnapshotDone => Ok(()),
@@ -895,6 +912,29 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     pub(crate) fn apply_state_put(&mut self, entry: &Entry) -> Result<(), CoordinationError> {
+        if let Some(instance) = records::parse_assign_key(&entry.key) {
+            // Stale-echo guard, as on every other watched key.
+            if self
+                .assignments
+                .get(instance)
+                .is_some_and(|(_, rev)| *rev >= entry.revision)
+            {
+                return Ok(());
+            }
+            // An unreadable assignment is not worth killing the fleet
+            // over: it carries no ownership, so ignoring it costs balance
+            // and nothing else. A worker of another schema wrote it, and
+            // the right outcome is that this one keeps what it holds.
+            let val: AssignmentVal = match records::parse_val(&entry.key, &entry.value) {
+                Ok(val) => val,
+                Err(e) => {
+                    tracing::warn!(key = %entry.key, error = %e, "unreadable assignment ignored");
+                    return Ok(());
+                }
+            };
+            self.apply_assignment(instance, val, entry.revision);
+            return Ok(());
+        }
         if entry.key == records::PLAN_KEY {
             if entry.revision.0 <= self.plan_rev_seen {
                 return Ok(());
@@ -935,6 +975,9 @@ impl<S: CoordinationStore> Task<S> {
             Some(state) => {
                 if state.spec.is_none() {
                     state.spec = Some(record);
+                    // A split becomes assignable only once its spec is
+                    // observed: its weight is the balance input.
+                    self.assign_dirty = true;
                 }
             }
             None => {
@@ -959,38 +1002,23 @@ impl<S: CoordinationStore> Task<S> {
                 if state.progress_rev >= rev {
                     return Ok(()); // stale, or our own echoed write
                 }
+                if state.progress.owner != record.owner {
+                    // `current_owner` falls back to this when no lease is
+                    // live, so an owner-clear moves the sticky pass.
+                    self.assign_dirty = true;
+                }
                 (Some(state.progress.status), Some(state.progress.epoch))
             }
             None => (None, None),
         };
-        // A granted split observed under an owner that is neither us nor
-        // the draining victim means a peer won the claim race for it: the
-        // request was served all the same, so close the cycle — recreating
-        // the request would make the victim drain a second split for a
-        // move that already happened. (The victim as owner is the drain's
-        // own mid-flight commits; with the cycle already closed, any
-        // foreign owner — the victim re-claiming its hand-back included —
-        // just retires the stale marker.)
-        if self.handoff_incoming.contains(id)
-            && let Some(owner) = record.owner.as_deref()
-            && owner != self.instance
-        {
-            let in_drain = self
-                .handoff_out
-                .as_ref()
-                .is_some_and(|out| out.victim == owner);
-            if !in_drain {
-                // Retire this split's marker only. With a batch in flight
-                // the others may still be draining toward us, and closing
-                // the whole cycle here would abandon them: they would land
-                // as ordinary released work and the victim would keep
-                // draining against a request nobody is waiting on.
-                self.handoff_incoming.remove(id);
-                if self.handoff_incoming.is_empty() {
-                    self.handoff_out = None;
-                }
-            }
-        }
+        // NB: a foreign `owner` on a split we are awaiting is the *normal*
+        // mid-revocation state — the previous owner is draining it, and
+        // waiting that out is exactly what `awaiting` times. So this must
+        // NOT clear the timer on seeing a foreign owner; the timer is
+        // retired only when we claim the split (success) or the leader
+        // stops assigning it to us (`apply_assignment`'s retain, or the
+        // assignment-withdrawn delete). Clearing it here read every
+        // assignment latency as ~0.
         if let Some(current_epoch) = current_epoch
             && self.owned.contains_key(id)
             && record.epoch > current_epoch
@@ -1024,6 +1052,9 @@ impl<S: CoordinationStore> Task<S> {
         if record.status == SplitStatus::Runnable && record.attempts + 1 >= self.config.max_attempts
         {
             self.quarantine_scan = true;
+        }
+        if previous_status != Some(record.status) || previous_status.is_none() {
+            self.assign_dirty = true; // the assignable pool moved
         }
         match self.splits.get_mut(id) {
             Some(state) => {
@@ -1078,15 +1109,6 @@ impl<S: CoordinationStore> Task<S> {
         for instance in gone_workers {
             self.apply_lease_delete(&records::worker_key(&instance), None);
         }
-        let gone_handoffs: Vec<String> = self
-            .handoff_requests
-            .keys()
-            .filter(|v| !live.contains(records::handoff_key(v).as_str()))
-            .cloned()
-            .collect();
-        for victim in gone_handoffs {
-            self.apply_lease_delete(&records::handoff_key(&victim), None);
-        }
         let gone_leases: Vec<String> = self
             .splits
             .iter()
@@ -1103,6 +1125,34 @@ impl<S: CoordinationStore> Task<S> {
         }
         match self.store.list(Keyspace::Durable, "").await {
             Ok(entries) => {
+                // Assignment records are the one durable key this protocol
+                // deletes, so they are the one durable key a listing has to
+                // be authoritative about. Watch snapshots drop their delete
+                // markers (`try_rewatch` ignores deletes), so without this
+                // a missed deletion leaves a cached revision that every
+                // later publish CASes against forever: the update loses,
+                // the create is never attempted, and that instance never
+                // receives another assignment.
+                let live: std::collections::BTreeSet<&str> =
+                    entries.iter().map(|e| e.key.as_str()).collect();
+                let gone: Vec<String> = self
+                    .assignments
+                    .keys()
+                    .filter(|i| !live.contains(records::assign_key(i).as_str()))
+                    .cloned()
+                    .collect();
+                for instance in gone {
+                    self.assignments.remove(&instance);
+                    self.assign_dirty = true;
+                    if instance == self.instance {
+                        // Same rule as the watch delete: an absent record
+                        // means "nothing has been decided", never "release
+                        // everything".
+                        self.assignment_seen = false;
+                        self.assigned.clear();
+                        self.awaiting.clear();
+                    }
+                }
                 for entry in &entries {
                     self.apply_state_put(entry)?;
                 }
@@ -1111,21 +1161,30 @@ impl<S: CoordinationStore> Task<S> {
                 tracing::warn!(error = %e, "durable reconcile listing failed; next tick retries");
             }
         }
+        // A departed instance's grace window is time-based, so the leader
+        // has to re-decide when one elapses even if no event arrived.
+        self.assign_dirty = true;
         self.metrics(|m| m.reconcile(started.elapsed()));
         Ok(())
     }
 
     // ------------------------------------------------------------------
-    // The engine step: election → planning → claims → steal → terminal.
+    // The engine step: election → planning → claims → revocations →
+    // terminal.
 
     async fn step(&mut self) -> Result<(), CoordinationError> {
+        // Every worker tracks departures (leadership can move between a
+        // departure and the next publish), so every worker must expire that
+        // bookkeeping too — pruning only on the leader path leaked one
+        // entry per historical peer on any worker never elected.
+        self.prune_departed();
         if self.terminal_reported {
             self.update_gauges();
             return Ok(());
         }
         if self.parting {
-            // Leaving the fleet: observe only. No claims, no steals, no
-            // leadership — the released work belongs to the others now.
+            // Leaving the fleet: observe only. No claims, no revocations,
+            // no leadership — the released work belongs to the others now.
             self.check_terminal().await?;
             self.update_gauges();
             return Ok(());
@@ -1133,14 +1192,14 @@ impl<S: CoordinationStore> Task<S> {
         if self.leader_observed.is_none() && self.leadership.is_none() {
             self.try_elect().await?;
         }
-        self.claim_pass().await?;
-        // Retry any grant ack that lost its CAS to a concurrent refresh.
-        if !self.pending_ack.is_empty() {
-            self.retire_grants(&[]).await;
+        // Decide before reconciling: publishing first means this worker
+        // acts on its own fresh assignment in the same step rather than
+        // waiting a round to see its own write come back.
+        if self.leadership.is_some() {
+            self.publish_assignments().await?;
         }
-        // Victim side of the cooperative handoff: gated, like the claim
-        // pass, on not leaving and not already terminal.
-        self.service_handoff().await;
+        self.reconcile_assignment().await?;
+        self.service_revocations().await?;
         self.check_terminal().await?;
         self.update_gauges();
         Ok(())
@@ -1154,7 +1213,7 @@ impl<S: CoordinationStore> Task<S> {
             m.set_live_workers(protocol::live_workers(&self.presence, &self.instance));
             m.set_leader(self.leadership.is_some());
             m.set_idle(self.owned.is_empty());
-            m.set_handoffs_in_flight(self.handoff_granting.len());
+            m.set_splits_draining(self.revoking.len());
         });
     }
 
@@ -1164,610 +1223,375 @@ impl<S: CoordinationStore> Task<S> {
         }
     }
 
-    async fn claim_pass(&mut self) -> Result<(), CoordinationError> {
-        let workers = protocol::live_workers(&self.presence, &self.instance);
-        let incomplete = usize::try_from(self.runnable_count).unwrap_or(usize::MAX);
-        let target = protocol::target(incomplete, workers, self.config.max_in_flight);
+    /// Move this worker toward the assignment it was given: claim what is
+    /// named and not held, drain away what is held and not named.
+    ///
+    /// **Absence of an assignment is not an instruction to hold nothing.**
+    /// Until a record for this instance has been observed the worker keeps
+    /// what it has and claims nothing new, so a leader gap costs
+    /// rebalancing but never work. Once a record exists its omissions are
+    /// meaningful, and a split missing from it is one to give up.
+    ///
+    /// Quarantine decisions run regardless of any of that: a fleet that has
+    /// been told to hold nothing must still be able to reach the `Stalled`
+    /// verdict, or a bounded job with a poison split would idle instead of
+    /// finishing.
+    async fn reconcile_assignment(&mut self) -> Result<(), CoordinationError> {
         let quarantine_scan = std::mem::take(&mut self.quarantine_scan);
-        if self.owned.len() >= target && !quarantine_scan {
-            // At the working-set target: any request we were pursuing is no
-            // longer wanted — drop it so a victim slot frees for a worker
-            // that still needs work.
-            self.withdraw_handoff().await;
-            // No longer short, so the shortfall clock stops without an
-            // observation: this worker reached its share some other way.
-            self.handoff_seeking_since = None;
-            return Ok(());
-        }
-        let candidates = protocol::claim_candidates(
-            &self.splits,
-            |id| self.owned.contains_key(id),
-            &self.instance,
-            self.config.max_attempts,
-            incomplete,
-            workers,
-            self.seed,
-        );
-        let mut had_claim_candidates = false;
-        for (id, action) in candidates {
-            match action {
-                // Parking an out-of-attempts split is never gated on the
-                // working-set target: a fleet of full workers must still
-                // reach the Stalled verdict.
-                ClaimAction::Quarantine(kind) => self.try_quarantine(&id, kind).await?,
-                ClaimAction::Claim(kind) => {
-                    if self.owned.len() >= target {
-                        continue;
-                    }
-                    had_claim_candidates = true;
-                    self.try_claim(&id, kind).await?;
-                }
-            }
-        }
-        if !had_claim_candidates && self.owned.len() < target {
-            // Nothing unclaimed remains: pursue a cooperative handoff (or
-            // fall back to a steal) rather than replaying an owner's tail.
-            self.pursue_handoff_or_steal().await?;
-        } else if had_claim_candidates && self.handoff_incoming.is_empty() {
-            // Claimable work exists again, and no grant is in flight for
-            // us: the request's "nothing claimable" precondition lapsed,
-            // so withdraw rather than letting the key silently TTL out
-            // while this branch skips its refresh. (With a grant in
-            // flight the request is being served — its ack cleans up.)
-            self.withdraw_handoff().await;
-            // Fed by ordinary claims rather than by consent: stop the
-            // shortfall clock unobserved, so the next handoff is timed
-            // from its own shortfall and not from this one.
-            self.handoff_seeking_since = None;
-        }
-        Ok(())
-    }
-
-    /// Requester side of the cooperative handoff, reached only under the
-    /// working-set target with nothing claimable. Either advance the one
-    /// outstanding request — refresh it, retire it as unjustified, or fall
-    /// back to a fenced steal once the round budget elapses — or open a
-    /// fresh request against the most-loaded peer. Unlike the fallback
-    /// steal, opening a request is not coin-gated: create-if-absent on
-    /// `handoff.{victim}` is already the arbiter (see below).
-    async fn pursue_handoff_or_steal(&mut self) -> Result<(), CoordinationError> {
-        let own = self.owned.len();
-        let Some(out) = &self.handoff_out else {
-            // A restarted predecessor's request keys (our stable id, a
-            // foreign nonce) would otherwise sit until TTL, blocking the
-            // victims they name and inviting ghost grants nobody claims.
-            let stale: Vec<(String, Revision)> = self
-                .handoff_requests
-                .iter()
-                .filter(|(_, (val, _))| val.requester == self.instance && val.nonce != self.nonce)
-                .map(|(victim, (_, rev))| (victim.clone(), *rev))
-                .collect();
-            for (victim, rev) in stale {
-                let key = records::handoff_key(&victim);
-                let _ = self
-                    .store
-                    .delete(Keyspace::Ephemeral, &key, Some(rev))
-                    .await;
-                self.handoff_requests.remove(&victim);
-            }
-            // No request outstanding: open one on this very observation.
-            // Requests are deliberately *not* coin-gated the way the
-            // fallback steal is. Create-if-absent on `handoff.{victim}` is
-            // already the arbiter — one requester per victim wins and the
-            // losers learn immediately at no cost — and `handoff_victim`
-            // skips victims that are already spoken for, so contenders
-            // spread across the fleet rather than piling onto one owner.
-            // A probabilistic gate on top of an atomic one buys no
-            // contention resolution and costs real latency: the coin is
-            // fixed for the whole round, so losing it idles this worker
-            // until the next heartbeat (a third of the lease, jittered)
-            // however many observations arrive in between.
-            if let Some(victim) = protocol::handoff_victim(
+        let cap = self.config.max_in_flight as usize;
+        // Scanning every split is the expensive half of a step, and `step`
+        // runs on every watch event. At the lane budget there is no claim to
+        // make, so the only reason to scan is a pending quarantine decision
+        // — which `quarantine_scan` records precisely. The revoke pass below
+        // is over `owned` and stays unconditional.
+        if self.owned.len() < cap || quarantine_scan {
+            let candidates = protocol::claim_candidates(
                 &self.splits,
-                |v| self.handoff_requests.contains_key(v),
+                |id| self.owned.contains_key(id),
                 &self.instance,
-                own,
-                self.seed,
-            ) {
-                // Under target with someone worth asking: the shortfall
-                // clock starts here, not at the request that happens to
-                // succeed.
-                self.handoff_seeking_since.get_or_insert_with(Instant::now);
-                self.open_handoff(&victim).await;
+                self.config.max_attempts,
+            );
+            for (id, action) in candidates {
+                match action {
+                    // Parking an out-of-attempts split is never gated on the
+                    // lane budget: a fleet of full workers must still reach
+                    // the `Stalled` verdict.
+                    ClaimAction::Quarantine(kind) => self.try_quarantine(&id, kind).await?,
+                    ClaimAction::Claim(kind) => {
+                        // The assignment is the only thing that picks work. A
+                        // claimable split nobody assigned us is another
+                        // worker's, or the queue's.
+                        if !self.assigned.contains(&id) || self.owned.len() >= cap {
+                            continue;
+                        }
+                        self.try_claim(&id, kind).await?;
+                    }
+                }
             }
+        }
+        if !self.assignment_seen {
             return Ok(());
+        }
+        let stale: Vec<String> = self
+            .owned
+            .keys()
+            .filter(|id| !self.assigned.contains(*id) && !self.revoking.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in stale {
+            self.begin_revoke(&id);
+        }
+        Ok(())
+    }
+
+    /// Leader side: compute the desired assignment and publish the records
+    /// that changed.
+    ///
+    /// Gated on `assign_dirty`, which every input to the decision sets:
+    /// membership, split status, ownership, spec arrival, and — because a
+    /// grace window elapsing is time-based rather than event-driven — the
+    /// reconcile tick. [`protocol::desired_assignment`] is a fixpoint, so
+    /// recomputing on a clean fleet would publish nothing; it is skipped
+    /// anyway because the recompute itself is an O(members x splits) scan
+    /// and `step` runs on every watch event, which on a commit-heavy fleet
+    /// is every commit.
+    ///
+    /// Publishing is best-effort per instance. A failed or lost write
+    /// leaves that instance on its previous assignment, which is stale but
+    /// never unsafe, and the next step retries. There is deliberately no
+    /// barrier and no acknowledgement protocol: the leader learns that a
+    /// revocation completed by watching the split's lease disappear, which
+    /// is the same fact an ack would have carried and one the store already
+    /// tells it.
+    async fn publish_assignments(&mut self) -> Result<(), CoordinationError> {
+        if !std::mem::take(&mut self.assign_dirty) {
+            return Ok(());
+        }
+        let generation = match &self.plan {
+            Some((plan, _)) => plan.generation,
+            None => return Ok(()), // nothing planned yet: nothing to assign
         };
-        let victim = out.victim.clone();
-        let since_round = out.since_round;
-        let refreshed_round = out.refreshed_round;
-        let timed_out = out.timed_out;
-        // The imbalance that justified the request may have evaporated.
-        if !protocol::handoff_justified(&self.splits, &victim, &self.instance, own) {
-            self.withdraw_handoff().await;
+        let members: BTreeSet<String> = self.presence.keys().cloned().collect();
+        if members.is_empty() {
             return Ok(());
         }
-        // Refresh the key once per round whether or not the budget has
-        // elapsed: the fallback deliberately keeps the request up while
-        // steals lose, so a revived victim can still grant first — but a
-        // key left to TTL out mid-fallback would silently withdraw the
-        // request instead.
-        if refreshed_round < self.round {
-            self.refresh_handoff(&victim).await;
-            if self.handoff_out.is_none() {
-                return Ok(()); // superseded by a foreign requester
+        let reserved = self.reserved_splits();
+        // The tie-break seed is the job fingerprint, NOT this worker's:
+        // `self.seed` mixes in a per-run nonce (it also keys heartbeat
+        // jitter, where per-worker uniqueness is the point), and a
+        // leader-specific seed would make every failover re-break every tie
+        // and churn the fleet for no gain.
+        let desired = protocol::desired_assignment(
+            &members,
+            &self.splits,
+            &reserved,
+            &self.member_caps,
+            self.config.max_in_flight,
+            self.fp,
+        );
+        for (instance, splits) in desired {
+            let current = self.assignments.get(&instance);
+            if current.is_some_and(|(val, _)| val.splits == splits && val.generation == generation)
+            {
+                continue; // unchanged: the common case, and free
+            }
+            let val = AssignmentVal {
+                schema: records::SCHEMA,
+                generation,
+                splits,
+            };
+            let key = records::assign_key(&instance);
+            let bytes = records::encode_val(&val);
+            let outcome = match current {
+                Some((_, rev)) => {
+                    self.store
+                        .update(Keyspace::Durable, &key, bytes, *rev)
+                        .await
+                }
+                None => self.store.create(Keyspace::Durable, &key, bytes).await,
+            };
+            match outcome {
+                // Adopt our own write rather than just recording it. The
+                // leader is a worker too, and its own watch echo arrives at
+                // the revision it just stored — which the stale-echo guard
+                // correctly drops — so waiting for the echo would leave the
+                // leader the one instance that never learns its own
+                // assignment.
+                Ok(CasOutcome::Won(rev)) => self.apply_assignment(&instance, val, rev),
+                // Someone else wrote it — or the key is gone and our
+                // cached revision is a ghost, which a CAS-update can never
+                // recover from on its own. Drop the entry: the next attempt
+                // creates, and a genuinely concurrent leader's write comes
+                // back on the watch.
+                Ok(CasOutcome::Lost) => {
+                    self.assignments.remove(&instance);
+                    self.assign_dirty = true;
+                }
+                Err(e) => {
+                    tracing::debug!(%instance, error = %e, "assignment publish failed; retrying");
+                }
             }
         }
-        if protocol::handoff_fallback_due(since_round, self.round, self.config.handoff_rounds) {
-            // The victim is dead or stuck: fall back to today's replaying
-            // steal.
-            if !timed_out {
-                if let Some(out) = &mut self.handoff_out {
-                    out.timed_out = true;
-                }
-                self.metrics(|m| m.handoff(HandoffOutcome::Timeout));
-            }
-            if protocol::stable_hash(self.seed, self.round) & 1 == 0 {
-                // Prefer a split the victim already annotated as granted:
-                // its drain is partly done, and stealing a *different* one
-                // would take two splits off the victim for one imbalance
-                // unit. Scan the whole batch for one that is steal-eligible
-                // rather than testing only the first — with several grants
-                // in flight the lowest-sorting one is often the least ready,
-                // and giving up on it would steal an unrelated split.
-                // Falls through to the normal pick when none qualifies.
-                let granted = self.handoff_incoming.iter().find_map(|g| {
-                    let state = self.splits.get(g)?;
-                    let lease_foreign = state
-                        .lease
-                        .as_ref()
-                        .is_some_and(|(lease, _)| lease.owner != self.instance);
-                    (state.progress.status == SplitStatus::Runnable
-                        && state.spec.is_some()
-                        && state.progress.watermark.is_some()
-                        && lease_foreign)
-                        .then(|| g.clone())
-                });
-                if let Some(victim_split) = granted.or_else(|| {
-                    protocol::steal_candidate(&self.splits, &self.instance, own, self.seed)
-                }) {
-                    self.try_steal(&victim_split).await?;
-                }
+        // Assignments for instances that are gone are dead weight; drop
+        // them once their grace window has passed, so the keyspace tracks
+        // the fleet rather than its history.
+        let stale: Vec<String> = self
+            .assignments
+            .keys()
+            .filter(|i| !self.presence.contains_key(*i) && !self.departed.contains_key(*i))
+            .cloned()
+            .collect();
+        for instance in stale {
+            let key = records::assign_key(&instance);
+            if let Some((_, rev)) = self.assignments.get(&instance)
+                && matches!(
+                    self.store.delete(Keyspace::Durable, &key, Some(*rev)).await,
+                    Ok(CasOutcome::Won(_))
+                )
+            {
+                self.assignments.remove(&instance);
             }
         }
         Ok(())
     }
 
-    /// Open a new handoff request: create-if-absent of `handoff.{victim}`.
-    /// The create is the fairness arbiter — only one requester per victim
-    /// wins, so a victim only ever drains on behalf of one peer at a time
-    /// (it may drain up to `handoff_max_grants` splits for that peer).
-    async fn open_handoff(&mut self, victim: &str) {
-        let key = records::handoff_key(victim);
-        let val = HandoffVal {
-            schema: records::SCHEMA,
-            requester: self.instance.clone(),
-            nonce: self.nonce.clone(),
-            granted: Vec::new(),
-        };
-        match self
-            .store
-            .create(Keyspace::Ephemeral, &key, records::encode_val(&val))
-            .await
-        {
-            Ok(CasOutcome::Won(rev)) => {
-                self.handoff_requests.insert(victim.to_string(), (val, rev));
-                self.handoff_out = Some(HandoffOut {
-                    victim: victim.to_string(),
-                    since_round: self.round,
-                    refreshed_round: self.round,
-                    timed_out: false,
-                });
-                self.metrics(|m| m.handoff(HandoffOutcome::Requested));
-            }
-            // Another requester already holds this victim's slot: leave it.
-            Ok(CasOutcome::Lost) => {}
-            Err(e) => {
-                tracing::warn!(victim = %victim, error = %e, "handoff request write failed");
-            }
-        }
+    /// Force the next leader step to recompute and republish.
+    pub(crate) fn mark_assignment_dirty(&mut self) {
+        self.assign_dirty = true;
     }
 
-    /// Refresh the outstanding request's key: CAS-update it against the
-    /// revision we observed, carrying the victim's `granted` annotation
-    /// through unchanged (a refresh must never un-grant a grant). A key
-    /// absent from the view splits two ways: with NO grant annotated it
-    /// is a TTL blip — recreate it, `since_round` preserved by the caller
-    /// so the fallback clock never resets; with a grant annotated the
-    /// request was SERVED and ack-deleted — close the cycle instead of
-    /// resurrecting it, or the victim drains a second split for a move
-    /// that already happened. A foreign requester in the view means the
-    /// per-victim slot was taken over: stand down WITHOUT deleting their
-    /// key.
-    async fn refresh_handoff(&mut self, victim: &str) {
-        let key = records::handoff_key(victim);
-        let observed = self.handoff_requests.get(victim).cloned();
-        let val = HandoffVal {
-            schema: records::SCHEMA,
-            requester: self.instance.clone(),
-            nonce: self.nonce.clone(),
-            granted: observed
-                .as_ref()
-                .map(|(existing, _)| existing.granted.clone())
-                .unwrap_or_default(),
-        };
-        let bytes = records::encode_val(&val);
-        let outcome = match observed {
-            Some((existing, _)) if existing.requester != self.instance => {
-                // Superseded: the slot is a foreign requester's now.
-                self.handoff_out = None;
-                self.handoff_incoming.clear();
-                return;
-            }
-            Some((_, rev)) => {
-                self.store
-                    .update(Keyspace::Ephemeral, &key, bytes, rev)
-                    .await
-            }
-            None if !self.handoff_incoming.is_empty() => {
-                // Served: a grant was annotated and the key is gone — that
-                // is the victim's ack, not a blip. The marker stays until
-                // the granted split's claim resolves.
-                self.handoff_out = None;
-                return;
-            }
-            None => self.store.create(Keyspace::Ephemeral, &key, bytes).await,
-        };
-        match outcome {
-            Ok(CasOutcome::Won(rev)) => {
-                self.handoff_requests.insert(victim.to_string(), (val, rev));
-                if let Some(out) = &mut self.handoff_out {
-                    out.refreshed_round = self.round;
-                }
-            }
-            Ok(CasOutcome::Lost) => {
-                // The key moved (or vanished) without the watch having told
-                // us — e.g. the victim's annotation raced this refresh.
-                // Watch losses are legal and reconcile may be a full
-                // interval away, so re-sync from the store now: absent →
-                // served (grant annotated) or blip (recreate, fallback
-                // clock preserved); a foreign requester → stand down;
-                // ours → adopt the newer revision (grant annotation
-                // included, via the normal put path on the next watch
-                // echo or here directly).
-                match self.store.get(Keyspace::Ephemeral, &key).await {
-                    Ok(None) if !self.handoff_incoming.is_empty() => {
-                        self.handoff_out = None;
-                    }
-                    Ok(None) => {
-                        if let Ok(CasOutcome::Won(rev)) = self
-                            .store
-                            .create(Keyspace::Ephemeral, &key, records::encode_val(&val))
-                            .await
-                        {
-                            self.handoff_requests.insert(victim.to_string(), (val, rev));
-                            if let Some(out) = &mut self.handoff_out {
-                                out.refreshed_round = self.round;
-                            }
-                        }
-                    }
-                    Ok(Some(entry)) => {
-                        if let Ok(existing) = records::parse_val::<HandoffVal>(&key, &entry.value) {
-                            if existing.requester != self.instance {
-                                self.handoff_out = None;
-                                self.handoff_incoming.clear();
-                            } else {
-                                if existing.nonce == self.nonce
-                                    && self
-                                        .handoff_out
-                                        .as_ref()
-                                        .is_some_and(|out| out.victim == victim)
-                                    && !existing.granted.is_empty()
-                                {
-                                    self.handoff_incoming =
-                                        existing.granted.iter().cloned().collect();
-                                }
-                                if let Some(out) = &mut self.handoff_out {
-                                    out.refreshed_round = self.round;
-                                }
-                            }
-                            self.handoff_requests
-                                .insert(victim.to_string(), (existing, entry.revision));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(victim = %victim, error = %e, "handoff refresh re-sync failed; next round retries");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(victim = %victim, error = %e, "handoff refresh failed; it will expire");
-            }
-        }
-    }
-
-    /// Drop this worker's outstanding request (if any): guarded-delete the
-    /// key so a victim slot frees for another worker, and forget both the
-    /// local intent and any splits we were expecting from the victim.
-    async fn withdraw_handoff(&mut self) {
-        self.handoff_incoming.clear();
-        let Some(out) = self.handoff_out.take() else {
-            return;
-        };
-        // Only delete a key we still own (matching requester): a foreign
-        // takeover of the slot must survive our withdrawal.
-        if let Some((existing, rev)) = self.handoff_requests.get(&out.victim)
-            && existing.requester == self.instance
-        {
-            let rev = *rev;
-            let key = records::handoff_key(&out.victim);
-            if let Err(e) = self
-                .store
-                .delete(Keyspace::Ephemeral, &key, Some(rev))
-                .await
-            {
-                tracing::debug!(victim = %out.victim, error = %e, "handoff withdraw failed; it will expire");
-            }
-            self.handoff_requests.remove(&out.victim);
-        }
-    }
-
-    /// The grant's ack to the fleet: strike the splits we just released off
-    /// our request key's `granted` list, and delete the key once the last
-    /// one is gone — that deletion is what retires the requester's request
-    /// and frees the victim slot for a future drain.
+    /// Expire the grace windows of departed instances.
     ///
-    /// Deleting on the *first* release instead would tell a requester that
-    /// its whole batch was served while later drains were still running: it
-    /// would stop expecting them, and the splits would land as ordinary
-    /// released work rather than attributed handoffs.
+    /// Runs on **every** worker's step, not just the leader's: every worker
+    /// records departures (leadership can move between a departure and the
+    /// next publish), so every worker has to expire them too, or a process
+    /// that is never elected accumulates one entry per historical peer for
+    /// its whole life.
     ///
-    /// Guarded on the revision we observed and on having actually released
-    /// something annotated, so a late release for a split already fenced
-    /// away cannot destroy a fresh request — possibly another requester's —
-    /// that arrived since.
-    ///
-    /// The ack must not be best-effort. Losing it to a concurrent refresh
-    /// leaves the request annotated with a split that is already delivered,
-    /// so the requester goes on waiting for work it has, and burns its
-    /// fallback budget on a victim that did everything right — a steal, and
-    /// replay, for a completed cooperative move. Unacked splits therefore
-    /// stay queued and are retried every step until the write lands.
-    async fn retire_grants(&mut self, released: &[String]) {
-        self.pending_ack.extend(released.iter().cloned());
-        if self.pending_ack.is_empty() {
+    /// A zero delay short-circuits to "withhold nothing" rather than
+    /// falling through the same code path with a zero comparison. That is
+    /// deliberate and it is the point of this function's shape: Kafka
+    /// Connect's equivalent knob read zero as "withhold indefinitely" and
+    /// shipped that way from 2.3.0 through 3.7.0 (KAFKA-15693). The bug was
+    /// possible only because zero was a value in a general path rather than
+    /// a case in its own right.
+    fn prune_departed(&mut self) {
+        // A returning instance cancels its own grace window immediately.
+        self.departed.retain(|i, _| !self.presence.contains_key(i));
+        if self.config.rebalance_delay.is_zero() {
+            self.departed.clear();
             return;
         }
-        let released: Vec<String> = self.pending_ack.iter().cloned().collect();
-        let Some((val, rev)) = self.handoff_requests.get(&self.instance).cloned() else {
-            // No request in view: nothing to ack against. Drop the queue —
-            // the key is already gone, which is the state the ack wanted.
-            self.pending_ack.clear();
-            return;
-        };
-        let mut remaining = val.granted.clone();
-        remaining.retain(|g| !released.contains(g));
-        if remaining.len() == val.granted.len() {
-            // None of these are annotated on the current key: it is a newer
-            // request than the one they were granted against, so there is
-            // nothing to ack and nothing to retry.
-            self.pending_ack.clear();
-            return;
-        }
-        let key = records::handoff_key(&self.instance);
-        if remaining.is_empty() {
-            match self
-                .store
-                .delete(Keyspace::Ephemeral, &key, Some(rev))
-                .await
-            {
-                Ok(CasOutcome::Won(_)) => {
-                    self.handoff_requests.remove(&self.instance);
-                    self.pending_ack.clear();
-                }
-                Ok(CasOutcome::Lost) => self.resync_own_request(&key).await,
-                Err(e) => {
-                    tracing::debug!(error = %e, "grant ack delete failed; next step retries");
-                }
-            }
-            return;
-        }
-        let reduced = HandoffVal {
-            granted: remaining,
-            ..val
-        };
-        match self
-            .store
-            .update(
-                Keyspace::Ephemeral,
-                &key,
-                records::encode_val(&reduced),
-                rev,
-            )
-            .await
-        {
-            Ok(CasOutcome::Won(new_rev)) => {
-                self.handoff_requests
-                    .insert(self.instance.clone(), (reduced, new_rev));
-                self.pending_ack.clear();
-            }
-            // A lost CAS leaves the queue intact for the next step — but it
-            // must not spin against the revision we just lost on.
-            Ok(CasOutcome::Lost) => self.resync_own_request(&key).await,
-            Err(e) => {
-                tracing::debug!(error = %e, "grant ack failed; next step retries");
-            }
-        }
+        let delay = self.config.rebalance_delay;
+        self.departed.retain(|_, since| since.elapsed() < delay);
     }
 
-    /// Re-read our own request key after a lost ack CAS, so the queued
-    /// retry runs against the revision that actually exists.
-    ///
-    /// Without this the retry re-CASes the same stale revision every step
-    /// and loses every time. The view only advances on a watch put, watch
-    /// losses are legal, and `reconcile` is a full interval away — so a
-    /// dropped echo would leave a delivered split annotated as still
-    /// incoming for up to `reconcile_interval`, which is the very "requester
-    /// waits for work it already holds, then steals" mode the queue exists
-    /// to close. [`Self::refresh_handoff`] re-syncs on the same outcome for
-    /// the same reason.
-    async fn resync_own_request(&mut self, key: &str) {
-        match self.store.get(Keyspace::Ephemeral, key).await {
-            Ok(Some(entry)) => {
-                if let Ok(val) = records::parse_val::<HandoffVal>(key, &entry.value) {
-                    self.handoff_requests
-                        .insert(self.instance.clone(), (val, entry.revision));
-                }
-            }
-            // Already gone — the state the ack wanted.
-            Ok(None) => {
-                self.handoff_requests.remove(&self.instance);
-                self.pending_ack.clear();
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "grant ack re-sync failed; next step retries");
-            }
+    /// Splits withheld from assignment because their owner departed less
+    /// than `rebalance_delay` ago.
+    fn reserved_splits(&mut self) -> BTreeSet<String> {
+        self.prune_departed();
+        if self.config.rebalance_delay.is_zero() || self.departed.is_empty() {
+            return BTreeSet::new();
         }
-    }
-
-    /// Victim side of the cooperative handoff: honour a request naming this
-    /// worker by granting up to `handoff_max_grants` of its splits at once
-    /// and draining them. Pure-local plus an emit — the actual drain and
-    /// release run through the driver's
-    /// [`SplitCoordinator::release_handoff`](etl_core::coordination::SplitCoordinator::release_handoff).
-    async fn service_handoff(&mut self) {
-        // Retire grants the world moved on under, per entry: concurrent
-        // drains begin on different rounds and each owns its own budget.
-        let budget = u64::from(self.config.handoff_rounds);
-        let round = self.round;
-        let request_open = self.handoff_requests.contains_key(&self.instance);
-        let owned = &self.owned;
-        self.handoff_granting.retain(|split, grant| {
-            // Released, lost, or completed: the grant is done.
-            // Or: the request that prompted it is gone and the drain never
-            // completed (the source declined, say), so free the slot for a
-            // later request. A re-emitted `HandoffRequested` is
-            // driver-idempotent, so re-offering the split is safe.
-            owned.contains_key(split)
-                && (request_open || round.saturating_sub(grant.since_round) < budget)
-        });
-        let free =
-            (self.config.handoff_max_grants as usize).saturating_sub(self.handoff_granting.len());
-        if free == 0 {
-            return;
-        }
-        // Is a peer asking us? (A key naming us as requester would be our
-        // own predecessor's — never grant against that.)
-        let Some((val, request_rev)) = self.handoff_requests.get(&self.instance).cloned() else {
-            return;
-        };
-        if val.requester == self.instance {
-            return;
-        }
-        // Splits the embedder recently declined sit out one round budget;
-        // prune the cool-down as it lapses so the map cannot grow.
-        self.handoff_declined
-            .retain(|_, since| round.saturating_sub(*since) < budget);
-        let declined = std::mem::take(&mut self.handoff_declined);
-        // Splits already promised to this requester that are not yet
-        // visible under its lease: still draining here, or released and
-        // not yet claimed. The pairwise rule counts them on neither side,
-        // so a top-up over-grants by exactly this many without them.
-        let in_transit = val
-            .granted
+        self.splits
             .iter()
-            .filter(|id| {
-                !self.splits.get(id.as_str()).is_some_and(|state| {
-                    state
-                        .lease
-                        .as_ref()
-                        .is_some_and(|(lease, _)| lease.owner == val.requester)
-                })
+            .filter(|(_, state)| {
+                state
+                    .progress
+                    .owner
+                    .as_deref()
+                    .is_some_and(|o| self.departed.contains_key(o))
             })
-            .count();
-        let picked = protocol::handoff_grants(
-            &self.splits,
-            |id| {
-                self.owned.contains_key(id)
-                    && !declined.contains_key(id)
-                    // Already draining: never offer the same split twice.
-                    && !self.handoff_granting.contains_key(id)
-                    // Already annotated — a declined split keeps its entry
-                    // until the withdrawal CAS lands, and re-offering it
-                    // would append a duplicate id that nothing ever
-                    // removes.
-                    && !val.granted.iter().any(|g| g == id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Adopt an `assign.{instance}` record seen on the durable watch.
+    fn apply_assignment(&mut self, instance: &str, val: AssignmentVal, rev: Revision) {
+        if instance == self.instance {
+            // A deposed leader's late write must not walk us backwards.
+            if val.generation < self.assign_generation {
+                tracing::debug!(
+                    generation = val.generation,
+                    seen = self.assign_generation,
+                    "ignoring an assignment from a superseded generation"
+                );
+                return;
+            }
+            self.assign_generation = val.generation;
+            let now: BTreeSet<String> = val.splits.iter().cloned().collect();
+            // Start the acquisition clock for newly-named splits, and stop
+            // it for anything no longer expected.
+            for id in now.difference(&self.assigned) {
+                self.awaiting.insert(id.clone(), Instant::now());
+            }
+            self.awaiting.retain(|id, _| now.contains(id));
+            self.assigned = now;
+            self.assignment_seen = true;
+        }
+        self.assignments.insert(instance.to_string(), (val, rev));
+    }
+
+    /// Ask the source to give a split up gracefully. Idempotent: the
+    /// driver treats a repeated request for a split it is already draining
+    /// as a no-op, so re-emitting on a later step is harmless.
+    fn begin_revoke(&mut self, id: &str) {
+        let Ok(split) = SplitId::new(id.to_string()) else {
+            return;
+        };
+        self.revoking.insert(
+            id.to_string(),
+            Revoking {
+                started: Instant::now(),
             },
-            &val.requester,
-            &self.instance,
-            self.seed,
-            free,
-            in_transit,
         );
-        self.handoff_declined = declined;
-        if picked.is_empty() {
-            return;
-        }
-        let ids: Vec<(String, SplitId)> = picked
-            .into_iter()
-            .filter_map(|s| SplitId::new(s.clone()).ok().map(|id| (s, id)))
+        // The denominator of the revocation lifecycle, counted exactly
+        // once per revocation: the only caller filters on `revoking` not
+        // already holding the split. Every revocation counted here later
+        // terminates in exactly one `Drained` or `Forced`, which is what
+        // makes `requested - drained - forced` the in-flight drain count.
+        self.metrics(|m| m.revocation(RevocationOutcome::Requested));
+        self.emit(CoordinationEvent::RevokeRequested { split });
+    }
+
+    /// Enforce the drain deadline. A cooperative revocation that completes
+    /// releases through [`Task::release_splits`] and clears itself from
+    /// `revoking`; what is left here after `drain_deadline` is a drain that
+    /// declined or wedged, and it is forced.
+    ///
+    /// Forcing is a *release*, not an abandonment: the owner field is
+    /// cleared so the next claimant sees `Released` rather than `Expired`
+    /// and spends no delivery attempt. Being revoked is not poison
+    /// evidence — the split did nothing wrong.
+    async fn service_revocations(&mut self) -> Result<(), CoordinationError> {
+        // An entry whose split left `owned` by a route that did not settle
+        // it — a terminal commit, or an explicit `fail` — is still a
+        // revocation that ended. Count it, or `requested - drained -
+        // forced` stops being the in-flight drain count the metric docs
+        // promise it is.
+        let orphans: Vec<String> = self
+            .revoking
+            .keys()
+            .filter(|id| !self.owned.contains_key(*id))
+            .cloned()
             .collect();
-        if ids.is_empty() {
+        for id in orphans {
+            self.settle_revocation(&id, RevocationOutcome::Forced);
+        }
+        let deadline = self.config.drain_deadline;
+        let overdue: Vec<String> = self
+            .revoking
+            .iter()
+            .filter(|(_, r)| r.started.elapsed() >= deadline)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in overdue {
+            tracing::warn!(
+                split = %id,
+                ?deadline,
+                "drain deadline exceeded; forcing the revocation (its uncommitted tail replays)"
+            );
+            self.force_revocation(&id).await?;
+        }
+        Ok(())
+    }
+
+    /// Retire one `revoking` entry under a terminal outcome, exactly once.
+    /// A no-op for a split that is not being revoked, which is what lets
+    /// every path that can end a tenancy call it unconditionally.
+    fn settle_revocation(&mut self, id: &str, outcome: RevocationOutcome) {
+        let Some(entry) = self.revoking.remove(id) else {
             return;
-        }
-        // Annotate the grants on the request key BEFORE draining: the
-        // annotation is the grant's attribution — the requester marks
-        // exactly these splits incoming, and can tell a served request's
-        // deleted key apart from a TTL blip. A lost CAS means the view is
-        // stale (the requester refreshed under us); the next step retries
-        // against the fresh revision. One CAS covers the whole batch, so a
-        // partial annotation can never be observed.
-        let mut granted = val.granted.clone();
-        granted.extend(ids.iter().map(|(s, _)| s.clone()));
-        let annotated = HandoffVal { granted, ..val };
-        let key = records::handoff_key(&self.instance);
-        match self
-            .store
-            .update(
-                Keyspace::Ephemeral,
-                &key,
-                records::encode_val(&annotated),
-                request_rev,
-            )
-            .await
-        {
-            Ok(CasOutcome::Won(rev)) => {
-                self.handoff_requests
-                    .insert(self.instance.clone(), (annotated, rev));
-                for (split, split_id) in ids {
-                    self.handoff_granting.insert(
-                        split,
-                        HandoffGrant {
-                            since_round: self.round,
-                            started: Instant::now(),
-                        },
-                    );
-                    self.emit(CoordinationEvent::HandoffRequested { split: split_id });
-                }
+        };
+        self.metrics(|m| {
+            m.revocation(outcome);
+            // Only a cooperative drain is timed: a forced release measures
+            // `drain_deadline`, not how long draining takes.
+            if outcome == RevocationOutcome::Drained {
+                m.drain_duration(entry.started.elapsed());
             }
-            Ok(CasOutcome::Lost) => {}
-            Err(e) => {
-                tracing::debug!(error = %e, "grant annotation failed; next step retries");
-            }
+        });
+    }
+
+    /// End a revocation the expensive way: give the split back without
+    /// waiting for the drain, so its uncommitted tail replays under the
+    /// next owner.
+    ///
+    /// Releasing first is deliberate — the release CAS needs the lease
+    /// revision, which lives in `owned`, and a fence would take it away.
+    /// The loss is reported exactly once: if the release lost its CAS a
+    /// peer ended this tenancy, `drop_owned` already counted `fenced` and
+    /// emitted `Lost`, and adding a `revoked` on top would count one
+    /// tenancy end twice under two different reasons.
+    async fn force_revocation(&mut self, id: &str) -> Result<(), CoordinationError> {
+        self.settle_revocation(id, RevocationOutcome::Forced);
+        let Ok(split) = SplitId::new(id.to_string()) else {
+            return Ok(());
+        };
+        if self.release_one(&split).await? == ReleaseOutcome::Fenced {
+            return Ok(()); // `drop_owned` already reported it
         }
+        self.metrics(|m| m.lost(SplitLossReason::Revoked));
+        self.emit(CoordinationEvent::Lost { split });
+        Ok(())
     }
 
     /// The two-key claim: lease first (create, or CAS-update for a fast
     /// reclaim), then the progress-record CAS that actually transfers
     /// ownership.
     async fn try_claim(&mut self, id: &str, mut kind: ClaimKind) -> Result<(), CoordinationError> {
-        // A graceful release is two writes on two watch streams — the
+        // A cooperative release is two writes on two watch streams — the
         // durable owner-clear, then the ephemeral lease delete — and a
         // fast claimant can see the lease vanish before the owner-clear
-        // arrives, misreading a consented grant as a death takeover (an
-        // attempt burned, and the handoff cycle left open). For a split
-        // our own handoff request marked incoming, one durable read
-        // settles it: an already-cleared owner means Released.
-        if kind == ClaimKind::Expired && self.handoff_incoming.contains(id) {
+        // arrives, misreading a completed revocation as a death takeover
+        // and burning a delivery attempt on it. Every cooperative
+        // revocation runs this race now that the leader orchestrates them,
+        // so the guard matters more than it did under peer negotiation.
+        // One durable read settles it: an already-cleared owner means
+        // Released. Deliberately unscoped — the only caller already
+        // requires the split to be assigned to us, so repeating that
+        // condition here would read as a narrowing that never narrows.
+        if kind == ClaimKind::Expired {
             let key = records::split_key_str(id);
             if let Ok(Some(entry)) = self.store.get(Keyspace::Durable, &key).await
                 && let Ok(record) = SplitProgressRecord::parse(&key, &entry.value, self.fp)
@@ -1822,59 +1646,29 @@ impl<S: CoordinationStore> Task<S> {
         };
         let reason = match kind {
             ClaimKind::Create => AcquireReason::Create,
-            // A released split our victim's grant annotation marked
-            // incoming is a consent-first, replay-free transfer, not a
-            // plain reclaim of abandoned work. (Expired never reaches
-            // this arm.) The marker is only consumed below, once the
-            // record CAS actually wins.
-            ClaimKind::Released if self.handoff_incoming.contains(id) => AcquireReason::Handoff,
-            ClaimKind::Released => AcquireReason::Released,
+            // A split whose previous owner cleared the owner field left
+            // cleanly — a drained revocation or a shutdown hand-back — so
+            // the resume point covers everything that owner emitted and
+            // this claim replays nothing. There is deliberately no second
+            // arm keyed on `assigned`: the only caller already requires it,
+            // so such an arm is unreachable and its metric would read zero
+            // forever. (Expired never reaches here — the guard above
+            // downgraded it.)
+            ClaimKind::Released => AcquireReason::Reassigned,
             ClaimKind::Reclaim => AcquireReason::Reclaimed,
             ClaimKind::Expired => AcquireReason::Expired,
         };
         self.record_claim(id, kind, reason, next_epoch, lease_rev, started)
             .await?;
-        if reason == AcquireReason::Handoff
-            && self.owned.contains_key(id)
-            && let Some(since) = self.handoff_seeking_since.take()
+        // Assignment-to-acquisition: how long this worker waited for work
+        // it had already been told to take. Observed on the write that
+        // actually transferred ownership, so a split that never arrives is
+        // never counted — a rising median therefore means slow handovers
+        // are now *succeeding*, not that they got slower.
+        if self.owned.contains_key(id)
+            && let Some(since) = self.awaiting.remove(id)
         {
-            // One observation per shortfall, on the first granted split to
-            // land: the worker stopped being short here. Later splits of
-            // the same batch find the clock already taken, so a batched
-            // grant reads as one wait rather than inflating the population
-            // with near-zero follow-ups.
-            self.metrics(|m| m.handoff_duration(HandoffPhase::Request, since.elapsed()));
-        }
-        if self.owned.contains_key(id) && self.handoff_incoming.remove(id) {
-            // The grant is served and won. Close the cycle once the LAST
-            // granted split has landed, so the next request starts a fresh
-            // fallback clock — the victim's ack deleted the request key,
-            // which this side cannot tell apart from a TTL blip, and the
-            // blip rule preserves `since_round` across recreates. Closing
-            // it on the first split of a batch would retire a request the
-            // victim is still draining against. A LOST record CAS leaves
-            // marker and cycle open instead: the winner's record arriving
-            // through `upsert_progress` settles it.
-            if self.handoff_incoming.is_empty() {
-                self.handoff_out = None;
-            } else if let Some(out) = &mut self.handoff_out {
-                // More of the batch is still draining. Re-anchor the
-                // fallback budget: it exists to escape an *unresponsive*
-                // victim, and one that just drained, committed and released
-                // a split has proved it is anything but. Left anchored at
-                // the first request, a multi-split grant would outlive its
-                // budget and get stolen out from under a victim doing
-                // exactly what was asked — replay, for a cooperative move.
-                // Each reset is paid for by a split actually delivered, so
-                // this cannot defer the fallback indefinitely.
-                //
-                // `timed_out` deliberately stays latched: it gates only the
-                // metric, not the steal (`handoff_fallback_due` does that),
-                // and `handoffs_total{outcome="timeout"}` is documented as
-                // one event per request. Clearing it would let a single
-                // request count a timeout once per split in its batch.
-                out.since_round = self.round;
-            }
+            self.metrics(|m| m.assignment_latency(since.elapsed()));
         }
         Ok(())
     }
@@ -1966,53 +1760,6 @@ impl<S: CoordinationStore> Task<S> {
         Ok(())
     }
 
-    /// Steal: CAS the victim's lease key (their next heartbeat loses →
-    /// they observe Lost), then the record CAS that transfers ownership.
-    async fn try_steal(&mut self, id: &str) -> Result<(), CoordinationError> {
-        let Some(state) = self.splits.get(id) else {
-            return Ok(());
-        };
-        let Some((_, lease_rev)) = state.lease else {
-            return Ok(()); // freed in the meantime: normal claim next step
-        };
-        let next_epoch = state.progress.epoch + 1;
-        let lease_val = records::encode_val(&LeaseVal {
-            schema: records::SCHEMA,
-            owner: self.instance.clone(),
-            nonce: self.nonce.clone(),
-            epoch: next_epoch,
-        });
-        let started = Instant::now();
-        let key = records::split_key_str(id);
-        match self
-            .store
-            .update(Keyspace::Ephemeral, &key, lease_val, lease_rev)
-            .await
-        {
-            // Steals bypass the attempt increment (a steal is not death
-            // evidence), so run the shared record-CAS with a kind that
-            // does not consume attempts — but count the acquisition as
-            // what it is. Nothing is counted until the record CAS wins:
-            // the lease write alone transfers nothing.
-            Ok(CasOutcome::Won(new_lease_rev)) => {
-                self.record_claim(
-                    id,
-                    ClaimKind::Released,
-                    AcquireReason::Stolen,
-                    next_epoch,
-                    new_lease_rev,
-                    started,
-                )
-                .await
-            }
-            Ok(CasOutcome::Lost) => Ok(()),
-            Err(e) => {
-                tracing::warn!(split = %id, error = %e, "steal lease write failed");
-                Ok(())
-            }
-        }
-    }
-
     /// Park an out-of-attempts split: the record CAS applies the same
     /// fence a claim would (epoch bump), so the dead owner's zombie can
     /// never write again.
@@ -2059,11 +1806,12 @@ impl<S: CoordinationStore> Task<S> {
                 tracing::warn!(split = %id, error = %e, "quarantine write failed; next tick retries");
                 self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
                 // Re-arm the scan, or "next tick retries" is a lie:
-                // `claim_pass` takes the flag before its target check, so a
-                // worker already at target never re-derives this candidate.
-                // The split would sit `Runnable` at the attempts cap
-                // forever, counting toward neither tally, and the bounded
-                // job would hang instead of stalling.
+                // `reconcile_assignment` takes the flag before deciding
+                // whether to scan at all, so a worker already at its lane
+                // budget would never re-derive this candidate. The split
+                // would sit `Runnable` at the attempts cap forever,
+                // counting toward neither tally, and the bounded job would
+                // hang instead of stalling.
                 self.quarantine_scan = true;
                 Ok(())
             }
@@ -2128,14 +1876,10 @@ impl<S: CoordinationStore> Task<S> {
         if self.owned.remove(id).is_none() {
             return;
         }
-        // A split fenced or starved out from under us while we were draining
-        // it for a grant aborts that handoff (the fallback steal fencing the
-        // victim mid-drain lands here). The victim-side release bookkeeping
-        // owns the Granted/Aborted count on the graceful path, so this is
-        // the only place a lost drain is counted.
-        if self.handoff_granting.remove(id).is_some() {
-            self.metrics(|m| m.handoff(HandoffOutcome::Aborted));
-        }
+        // A split fenced or starved out from under us mid-drain ends that
+        // revocation the expensive way: whatever was uncommitted replays
+        // under whoever took it.
+        self.settle_revocation(id, RevocationOutcome::Forced);
         self.metrics(|m| m.lost(reason));
         if let Ok(split) = SplitId::new(id.to_string()) {
             self.emit(CoordinationEvent::Lost { split });
@@ -2177,10 +1921,7 @@ impl<S: CoordinationStore> Task<S> {
 
     async fn renew_presence(&mut self) {
         let key = records::worker_key(&self.instance);
-        let val = records::encode_val(&WorkerVal {
-            schema: records::SCHEMA,
-            nonce: self.nonce.clone(),
-        });
+        let val = records::encode_val(&self.worker_val());
         // Presence renewal is contention-free in steady state: read the
         // current revision and CAS. Failures are tolerated — presence
         // only tunes fair-share; correctness never depends on it.
@@ -2367,22 +2108,21 @@ impl<S: CoordinationStore> Task<S> {
                 let _ = reply.try_send(result);
                 Ok(())
             }
-            Command::DeclineHandoff { split, reply } => {
-                let id = split.as_str();
-                self.handoff_granting.remove(id);
-                // Exclude the split from re-offer for one round budget:
-                // most declines are transient (a lane not yet open), so a
-                // brief cool-down lets the victim offer its other splits
-                // first and retry this one later.
-                self.handoff_declined.insert(id.to_string(), self.round);
-                // Strike it off the annotation too. A grant the embedder
-                // refused is not coming, so leaving it listed would tell
-                // the requester to keep expecting it, pin this victim's
-                // slot to that requester, and — since the entry is never
-                // removed — let the list grow by another id every time the
-                // cool-down lapses and the split is re-offered.
-                self.retire_grants(&[id.to_string()]).await;
-                let _ = reply.try_send(Ok(()));
+            Command::DeclineRevoke { split, reply } => {
+                // The source cannot stop this split at a safe boundary.
+                // Under peer negotiation a decline simply ended the offer;
+                // a leader's revocation is a decision, so the split goes
+                // back regardless — just the replaying way rather than the
+                // clean one. Forcing here instead of waiting out
+                // `drain_deadline` costs a rebalance nothing: the source
+                // has already said the answer will not change.
+                let id = split.as_str().to_string();
+                let result = if self.revoking.contains_key(&id) {
+                    self.force_revocation(&id).await
+                } else {
+                    Ok(()) // never offered, or already settled: a no-op
+                };
+                let _ = reply.try_send(result);
                 Ok(())
             }
         }
@@ -2478,6 +2218,10 @@ impl<S: CoordinationStore> Task<S> {
     async fn finish_completed(&mut self, id: &str) {
         let lease_rev = self.owned.get(id).map(|o| o.lease_rev);
         self.owned.remove(id);
+        // A split that finishes mid-revocation ends it: its tail is
+        // committed and nothing replays, which is the cooperative outcome
+        // even though nobody took the split over.
+        self.settle_revocation(id, RevocationOutcome::Drained);
         if let Some(lease_rev) = lease_rev {
             self.release_lease_key(id, lease_rev).await;
         }
@@ -2520,6 +2264,9 @@ impl<S: CoordinationStore> Task<S> {
                 // metric — remove from `owned` before folding the write so
                 // the epoch bump cannot read as a peer's fence.
                 self.owned.remove(id);
+                // A failure mid-revocation ends it without a clean drain:
+                // the split goes back with an uncommitted tail to replay.
+                self.settle_revocation(id, RevocationOutcome::Forced);
                 self.upsert_progress(id, record, rev)?;
                 self.release_lease_key(id, lease_rev).await;
                 Ok(())
@@ -2541,89 +2288,21 @@ impl<S: CoordinationStore> Task<S> {
     ///
     /// `departure` distinguishes a shutdown/scale-down release — which
     /// retires this worker once its working set empties — from a
-    /// cooperative-handoff grant, which never leaves the fleet even when it
-    /// hands off the last split. On the handoff path each granted split is
-    /// counted [`HandoffOutcome::Granted`] (or `Aborted` if its CAS lost),
-    /// and the request-slot key `handoff.{self}` is deleted afterward as
-    /// the grant's ack to the fleet.
+    /// revocation's hand-back, which never leaves the fleet even when it
+    /// gives up the last split.
     async fn release_splits(
         &mut self,
         splits: &[SplitId],
         departure: bool,
     ) -> Result<(), CoordinationError> {
         let mut released = 0u64;
-        let mut granted_released: Vec<String> = Vec::new();
         for split in splits {
-            let id = split.as_str();
-            let Some(owned) = self.owned.get(id) else {
-                continue; // already gone: released/lost/completed
-            };
-            let lease_rev = owned.lease_rev;
-            let Some(state) = self.splits.get(id) else {
-                continue;
-            };
-            let mut record = state.progress.clone();
-            record.owner = None;
-            record.written_at_ms = records::now_ms();
-            let expected = state.progress_rev;
-            let key = records::split_key_str(id);
-            match self
-                .store
-                .update(Keyspace::Durable, &key, record.encode(), expected)
-                .await
-            {
-                Ok(CasOutcome::Won(rev)) => {
-                    self.owned.remove(id);
-                    self.upsert_progress(id, record, rev)?;
-                    self.release_lease_key(id, lease_rev).await;
-                    released += 1;
-                    // `Granted` counts one per split actually moved by
-                    // consent. A departure's bulk hand-back is not a grant,
-                    // and a drain finishing for a request that no longer
-                    // exists still moved a split, so it still counts.
-                    if !departure && let Some(grant) = self.handoff_granting.remove(id) {
-                        self.metrics(|m| {
-                            m.handoff(HandoffOutcome::Granted);
-                            m.handoff_duration(HandoffPhase::Drain, grant.started.elapsed());
-                        });
-                    }
-                    // Retire the annotation only for a split this request
-                    // actually granted. Keyed on the annotation rather than
-                    // on `handoff_granting`, so a drain that outlived the
-                    // local grant record (self-healed away) is still acked —
-                    // while an ordinary release never seeds the ack queue
-                    // with an id the key has never heard of.
-                    if !departure
-                        && self
-                            .handoff_requests
-                            .get(&self.instance)
-                            .is_some_and(|(val, _)| val.granted.iter().any(|g| g == id))
-                    {
-                        granted_released.push(id.to_string());
-                    }
-                }
-                Ok(CasOutcome::Lost) => {
-                    // Fenced during shutdown: the split is someone else's
-                    // problem now, which is exactly what release wanted. On
-                    // the handoff path `drop_owned` counts the Aborted and
-                    // clears the grant, so nothing more to do here.
-                    self.drop_owned(id, SplitLossReason::Fenced);
-                }
-                Err(e) => {
-                    tracing::warn!(split = %id, error = %e, "release write failed; lease will expire");
-                    // Still drop the lease key best-effort: the attempt
-                    // accounting is conservative (counts as non-graceful).
-                    self.owned.remove(id);
-                    self.release_lease_key(id, lease_rev).await;
-                    if !departure && self.handoff_granting.remove(id).is_some() {
-                        self.metrics(|m| m.handoff(HandoffOutcome::Aborted));
-                    }
-                }
+            if self.release_one(split).await? == ReleaseOutcome::Released {
+                released += 1;
             }
         }
         self.metrics(|m| m.released(released));
         if !departure {
-            self.retire_grants(&granted_released).await;
             return Ok(());
         }
         // Releasing the last held split is how a worker leaves the fleet
@@ -2632,7 +2311,7 @@ impl<S: CoordinationStore> Task<S> {
         // leadership back, and drop the presence key so the remaining
         // workers' fair share widens now instead of after the TTL. The
         // gate is on what was ASKED, not on what the store acknowledged —
-        // a release whose last split was concurrently stolen (or whose
+        // a release whose last split was concurrently fenced away (or whose
         // write failed) is still a departure, and a departing worker that
         // keeps claiming strands splits when the process exits.
         if self.owned.is_empty() && !splits.is_empty() {
@@ -2641,10 +2320,65 @@ impl<S: CoordinationStore> Task<S> {
             let key = records::worker_key(&self.instance);
             let _ = self.store.delete(Keyspace::Ephemeral, &key, None).await;
             self.presence.remove(&self.instance);
-            // A departing worker abandons any request it was pursuing.
-            self.withdraw_handoff().await;
         }
         Ok(())
+    }
+
+    /// Release one held split, reporting how the tenancy actually ended so
+    /// the caller can decide whether it still owes the source a `Lost`.
+    ///
+    /// A split under revocation settles here whichever command drove the
+    /// release — a shutdown that happens to release a draining split still
+    /// ended that revocation. Scoping the count to `revoking` is what keeps
+    /// a bulk hand-back from reading as a fleet of revocations, so no
+    /// `departure` flag is needed to tell them apart.
+    async fn release_one(&mut self, split: &SplitId) -> Result<ReleaseOutcome, CoordinationError> {
+        let id = split.as_str();
+        let Some(owned) = self.owned.get(id) else {
+            return Ok(ReleaseOutcome::Missing); // released/lost/completed
+        };
+        let lease_rev = owned.lease_rev;
+        let Some(state) = self.splits.get(id) else {
+            return Ok(ReleaseOutcome::Missing);
+        };
+        let mut record = state.progress.clone();
+        record.owner = None;
+        record.written_at_ms = records::now_ms();
+        let expected = state.progress_rev;
+        let key = records::split_key_str(id);
+        match self
+            .store
+            .update(Keyspace::Durable, &key, record.encode(), expected)
+            .await
+        {
+            Ok(CasOutcome::Won(rev)) => {
+                self.owned.remove(id);
+                self.upsert_progress(id, record, rev)?;
+                self.release_lease_key(id, lease_rev).await;
+                // The cooperative outcome: the tail is committed and the
+                // owner cleared, so the next owner replays nothing. A
+                // departure that happens to release a draining split still
+                // drained it.
+                self.settle_revocation(id, RevocationOutcome::Drained);
+                Ok(ReleaseOutcome::Released)
+            }
+            Ok(CasOutcome::Lost) => {
+                // Fenced: the split is someone else's problem now, which is
+                // exactly what a release wanted. `drop_owned` settles the
+                // revocation and reports the loss.
+                self.drop_owned(id, SplitLossReason::Fenced);
+                Ok(ReleaseOutcome::Fenced)
+            }
+            Err(e) => {
+                tracing::warn!(split = %id, error = %e, "release write failed; lease will expire");
+                // Still drop the lease key best-effort: the attempt
+                // accounting is conservative (counts as non-graceful).
+                self.owned.remove(id);
+                self.release_lease_key(id, lease_rev).await;
+                self.settle_revocation(id, RevocationOutcome::Forced);
+                Ok(ReleaseOutcome::WriteFailed)
+            }
+        }
     }
 
     // ------------------------------------------------------------------

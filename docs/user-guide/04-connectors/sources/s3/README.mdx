@@ -37,9 +37,9 @@ let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
 
 The coordinator is **assembly wiring** ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
 build one over a durable store and inject it, and every replica of the
-same pipeline shares the backfill — splits are leased, stolen from
-stragglers, and taken over from dead instances, with per-split fenced
-commits making the handoffs replay-safe. (The NATS store below needs the
+same pipeline shares the backfill — splits are leased, moved between live
+instances by the elected leader, and taken over from dead ones, with
+per-split fenced commits making revocations replay-safe. (The NATS store below needs the
 `etl` facade's `coordination-nats` feature; `etl-s3` itself carries no
 backend feature at all — see [Scaling out](../../../05-deployment/scaling-out.mdx).)
 
@@ -119,7 +119,7 @@ source:
 |---|---|---|---|
 | `url` | string | required | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. Part of the job fingerprint — byte-identical across every instance of a coordinated job. |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution and stealing. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
@@ -220,7 +220,7 @@ against the split's descriptor (key and ETag at the watermark's ordinal;
 a mid-object resume with no pin anywhere is refused), replays the
 in-progress object from its start discarding exactly the committed record
 count, and continues. Delivery is **at-least-once**: everything after the
-last committed watermark replays after a crash or handoff; duplicates are
+last committed watermark replays after a crash or forced revocation; duplicates are
 possible, loss is not.
 
 Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that

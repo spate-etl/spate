@@ -59,6 +59,12 @@ fn worker(port: u16, job: &str, io: &tokio::runtime::Handle, instance_id: &str) 
             instance_id: Some(instance_id.to_string()),
             replan_interval: LEASE,
             reconcile_interval: Duration::from_secs(1),
+            // A dead worker's splits flow back on lease expiry alone; the
+            // grace window is for absorbing a restart, which this suite
+            // does not exercise. Left at its 20s default it would delay
+            // takeover past the test deadline.
+            rebalance_delay: Duration::ZERO,
+            drain_deadline: LEASE / 2,
             ..CoordinationConfig::default()
         },
         io.clone(),

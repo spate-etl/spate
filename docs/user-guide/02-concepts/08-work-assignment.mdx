@@ -1,0 +1,259 @@
+# Work assignment
+
+This page is the **source of truth for how coordinated work is
+distributed**. [Source coordination](./07-source-coordination.mdx) covers
+the substrate — splits, leases, fencing, quarantine, completion — and is
+deliberately separate: that substrate has outlived three different
+assignment algorithms, and mixing a stable contract with a changing one is
+how contracts drift.
+
+If the code and this page disagree, one of them is a bug. The
+[invariants](#invariants) below name the tests that enforce them.
+
+## The model
+
+**One worker decides; every worker reconciles.**
+
+The fleet elects a leader (a lease on a well-known key). The leader already
+runs the source's planner; it also computes a **desired assignment** — a
+map from instance to the splits that instance should hold — and publishes
+one small record per instance at `assign.{instance}`. Every worker watches
+its own record and moves toward it:
+
+| Worker sees | Worker does |
+|---|---|
+| assigned, not held | claim it (lease write, then the record CAS) |
+| held, still assigned | nothing — stickiness is free |
+| held, no longer assigned | drain it cooperatively, then release |
+| no record at all | hold what it has, claim nothing |
+
+That last row is load-bearing. **Absence of an instruction is not an
+instruction to hold nothing.** A worker that has never seen a record — a
+cold start, a leader gap, a withdrawn assignment — keeps what it holds and
+waits. Only a record that *exists and omits a split* means give it up.
+
+### The store is the acknowledgement
+
+There is no ack protocol between leader and worker, and no barrier. The
+leader publishes the new assignment immediately — it does not wait for the
+previous owner to let go. What waits is the **claim**: the new owner cannot
+take the split until the previous owner's lease key has disappeared, which
+it observes directly through its watch. An assignment is permission to try,
+not a promise the split is free yet.
+
+Kafka's KIP-848 resolves the same dependency inside the group coordinator
+("a partition is only assigned to its new owner after the old owner
+acknowledges the revocation"). We do not need that acknowledgement, because
+the store already publishes the fact one would have carried: the lease key
+is either there or it is not. That is the single property that removes the
+entire class of state which is visible to neither side of a negotiation —
+and it is why the leader can be careless about ordering here at all.
+
+### Reconciliation is continuous, not rounded
+
+Workers converge independently and at their own pace. There are no
+rebalance rounds and no global pause; a worker whose assignment did not
+change never stops processing.
+
+This follows KIP-848 rather than Kafka Connect's round-based KIP-415
+deliberately. Connect's assignor assumed the member count would not change
+between its revoking round and its assigning round, and a worker that
+joined in between left work stranded in a skew that never self-corrected
+(KAFKA-12495, unfixed until Kafka 3.4.0). Having no rounds means there is
+nothing to fall between.
+
+## Contract
+
+**A worker may assume:**
+
+- Its assignment names only splits it is permitted to claim.
+- A split absent from its assignment should be released, once a record
+  exists at all.
+- Nothing else. In particular an assignment is **not** a lease, **not** a
+  fence, and **not** a promise the split is available yet — the previous
+  owner may still be draining it.
+
+**The leader guarantees:**
+
+- The assignment is total over the claimable pool, up to the fleet's total
+  lane budget (`members × max_in_flight`). Splits above that budget are
+  the queue, exactly as unleased splits were.
+- No split is named in two instances' assignments.
+- The computation is deterministic and idempotent in its inputs.
+
+**Nobody guarantees:**
+
+- That the assignment is current. It is a decision published at a moment;
+  membership may have changed since.
+- That two workers cannot briefly both believe they hold a split. They can
+  — and it does not matter, because **assignment is not the fence**. The
+  durable progress record's compare-and-swap is, and it is unchanged from
+  the substrate page. A stale, split-brained, or simply wrong leader
+  cannot produce two owners; it can only produce bad balance.
+
+That last point is why this design needs no consensus algorithm. Raft was
+rejected for this system on the grounds that the problem needs
+linearizability only at the per-split commit; centralising the *assignment*
+does not weaken that argument, because the assignment carries no
+correctness.
+
+## Invariants
+
+Each is enforced by a property test in
+`crates/etl-coordination/src/protocol.rs`, named here so a deleted or
+weakened test is visible as a divergence from this page.
+
+1. **Deterministic.** The same `(members, splits, ownership, reserved,
+   lane budgets, seed)` always yields the same assignment. The seed keys
+   the tie-breaks and is the *job* fingerprint, never the leader's identity
+   — a leader-specific seed would re-break every tie on failover and churn
+   the fleet for nothing. — `assignment_is_deterministic`
+2. **No split assigned twice.** No split appears in two instances'
+   assignments. — `no_split_is_assigned_twice`
+3. **Stable under unchanged input.** Feeding the function's own output back
+   as current ownership reproduces it exactly; the assignment is a
+   fixpoint. This is what makes a steady-state fleet publish nothing and
+   therefore drain nothing. — `assignment_is_stable_under_unchanged_input`
+4. **Locally optimal.** No single split can move to a member with lane
+   budget and reduce imbalance. — `assignment_admits_no_improving_move`
+5. **Total over the claimable pool.** Every assignable split is assigned
+   unless every lane in the fleet is full. —
+   `assignment_is_total_over_the_claimable_pool`
+
+Invariant 4 is the one to watch. The improving-move pass is bounded by
+`MAX_IMPROVING_MOVES` as a termination backstop; if that bound ever binds,
+the assignment stops being locally optimal and this test is what says so.
+
+## Balance objective
+
+**Weight, not split count.**
+
+Split count is a proxy for load, and a poor one for the sources this
+framework coordinates: an object-store planner gives any object at or above
+its packing target a split to itself, so two workers holding the same
+number of splits can be holding wildly different numbers of bytes. The
+planner already reports a weight per split; balancing uses it.
+
+`max_in_flight` still caps the split *count* per worker. It is a lane
+budget — a materialisation limit — not a fairness knob.
+
+Each worker advertises its **own** budget on its presence key and the
+leader balances against that, so a fleet of unequally-sized pods works. The
+alternative — a leader assuming its own value — strands work permanently: a
+smaller worker looks least-loaded, keeps being assigned splits, and keeps
+refusing to claim them.
+
+This is the lesson AWS drew when replacing the Kinesis Client Library's
+decentralised lease-stealing with a leader in KCL 3.0: balancing lease
+*counts* forced the whole fleet to be provisioned for its worst-loaded
+member. We use bytes rather than measured CPU because bytes are already
+known at planning time and cost nothing to collect.
+
+The three passes:
+
+1. **Sticky** — every split whose current owner is still a live member
+   stays put, within the lane cap. A move costs a drain, so an assignment
+   that churns for a marginally better balance is worse than one that does
+   not.
+2. **Fill** — unassigned splits go to the least-loaded member with lane
+   budget, heaviest split first (longest-processing-time greedy).
+3. **Improve** — while a split can move from a heavier member to a lighter
+   one and strictly reduce imbalance, move it.
+
+Pass 3 admits a move exactly when `load(from) > load(to) + weight`, which
+is the condition under which the move reduces the sum of squared loads.
+Every accepted move strictly improves that potential, so the pass converges
+and cannot oscillate.
+
+## Rebalance delay
+
+When an instance's presence key expires, its splits are **withheld** rather
+than reassigned, for `rebalance_delay` (default 20s). A pod that comes back
+inside the window reclaims its own work and nothing moves. The window is
+cancelled the moment the instance reappears, so a fast restart pays
+nothing at all.
+
+The default is far below Kafka Connect's equivalent
+(`scheduled.rebalance.max.delay.ms`, 5 minutes) on purpose. Connect's is
+sized for connectors whose tasks are expensive to start; a split here
+starts by reading a descriptor and spawning a fetcher. When starting is
+cheap, idle work costs more than movement does.
+
+**`rebalance_delay: 0` means reassign immediately.** It is a supported
+configuration, not a disabled feature, and it takes a distinct code path
+rather than flowing through the delay logic with a zero comparison.
+Connect's knob read zero as "withhold indefinitely" and shipped that way
+from 2.3.0 through 3.7.0 (KAFKA-15693); the shape of the code here is
+chosen so that bug is not expressible. Enforced by
+`a_zero_rebalance_delay_reassigns_immediately`.
+
+## Revocation
+
+A revocation is **cooperative first, forced second**.
+
+The owner is asked to give the split up. A cooperating source stops intake
+at a safe boundary, chases the split's tail to a final fenced commit, and
+releases — the next owner then resumes from a watermark covering
+everything the previous one emitted, so the transfer **replays nothing**.
+
+A source that declines, or whose drain outruns `drain_deadline` (default
+10s), has the release forced instead. The split still leaves; its
+uncommitted tail simply replays under the next owner, bounded by one commit
+interval. Declining is safe, but it is the expensive way to comply.
+
+This is the distinction Kafka draws between `onPartitionsRevoked` (clean —
+flush and commit) and `onPartitionsLost` (fenced — discard), and the same
+shape as KCL 3.x's graceful lease handoff with its timeout.
+
+**A revocation, once begun, always finishes.** There is no cancel. If
+membership changes again mid-drain and the leader decides the split should
+stay where it is after all, the drain still completes, the split is
+released, and its original owner claims it back on the next pass. That
+costs a lane teardown and re-open — and, if the drain had to be forced, one
+commit interval of replay. It is bounded and it never loses rows, but it is
+real: cancelling would mean asking a source to *resume* intake it has
+already stopped at a safe boundary, and that is a seam
+[`SplitSource`](../06-extending/custom-source.mdx) deliberately does not
+have.
+
+`drain_deadline` may exceed `lease_duration`. A draining split is still
+owned and still heartbeated, so a long drain does not race its own lease —
+it only makes the rebalance slow. Size it against how long the source needs
+to flush a split's tail through its sink, which for a paced sink can be
+minutes. The only floor is `op_timeout`: a deadline below one store
+round-trip would force every revocation before its final commit could
+land.
+
+## Failure behaviour
+
+| Failure | Consequence |
+|---|---|
+| Leader dies | No rebalancing until re-election (one lease). Held work continues; assignments are durable and survive the gap. There is **no leaderless balancing fallback** — one mechanism, not two. |
+| Worker dies | Presence key expires; after `rebalance_delay` the leader reassigns. Split leases expire independently, so the work is claimable. |
+| Worker wedged but alive | Its lease stops being renewed and expires, and its presence key with it; the leader withholds its splits for `rebalance_delay` and then assigns them elsewhere. The expiry makes the split *claimable*; the assignment is still what makes someone claim it. |
+| Assignment write lost | The worker keeps its previous assignment. The leader republishes on its next step. |
+| Source refuses to drain | Forced revocation after `drain_deadline`; bounded replay. |
+
+## What this is not
+
+- **Not consensus.** The leader is cheap and may be wrong. Correctness
+  lives in the record CAS.
+- **Not a fence.** See the contract above. This is the single most
+  important thing to keep true about this page.
+- **Not exactly-once.** Forced revocations and takeovers duplicate; they
+  never lose.
+- **Not work stealing.** Workers do not select work for themselves and
+  cannot take a split from a peer. An earlier design did; the record of
+  why it was replaced is in the design log (`docs/DESIGN.md`).
+
+## Where this lives in the code
+
+| Concern | Location |
+|---|---|
+| The assignment function and its property tests | `crates/etl-coordination/src/protocol.rs` (`desired_assignment`) |
+| Publishing, and the delay window | `crates/etl-coordination/src/task.rs` (`publish_assignments`, `reserved_splits`) |
+| Worker reconciliation and revocation | `crates/etl-coordination/src/task.rs` (`reconcile_assignment`, `service_revocations`) |
+| The record on the store | `crates/etl-coordination/src/records.rs` (`AssignmentVal`) |
+| Tuning knobs | `crates/etl-coordination/src/config.rs` |
+
+See [Scaling out](../05-deployment/scaling-out.mdx) for operational tuning.

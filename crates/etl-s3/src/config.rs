@@ -97,8 +97,9 @@ pub struct S3SourceConfig {
     /// Compression codec of the objects.
     #[serde(default)]
     pub compression: Compression,
-    /// Target size of one split — the unit of work distribution and
-    /// stealing. Objects are packed toward it in listing order with a
+    /// Target size of one split — the unit of work distribution, and the
+    /// unit the leader balances. Objects are packed toward it in listing
+    /// order with a
     /// per-object cost floor of a sixteenth of the target, so a split
     /// holds at most ~16 objects; an object at or above the target gets a
     /// split of its own. Part of the job fingerprint: every instance of a

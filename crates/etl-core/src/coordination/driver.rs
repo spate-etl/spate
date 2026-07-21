@@ -35,9 +35,9 @@
 //!    are untouched.
 //! 3. Otherwise poll the coordinator (the idle wait delegates there),
 //!    fold its events into the tenancy table, sweep for completions, and
-//!    advance any in-flight cooperative handoffs (a requested split, once
+//!    advance any in-flight cooperative revocations (a revoked split, once
 //!    its intake is stopped and its tail acked, takes a final fenced
-//!    commit and is released barrier-less to the peer).
+//!    commit and is handed back barrier-less).
 //! 4. [`CoordinationEvent::AllComplete`] → [`SourceEvent::Drained`];
 //!    [`CoordinationEvent::Stalled`] → a fatal error by default
 //!    (see [`stall_drains`](CoordinationDriver::stall_drains)).
@@ -148,31 +148,35 @@ pub trait SplitSource {
         Vec::new()
     }
 
-    /// Begin a cooperative handoff of an owned split: stop its intake at a
+    /// Begin a cooperative revocation of an owned split: stop its intake at a
     /// safe boundary while **keeping** its commit state, so the tail can
     /// still be chased to a final fenced commit. Unlike
     /// [`close_split`](SplitSource::close_split) (which ends the tenancy and
     /// lets the source drop the split's state), the split stays commit- and
     /// sweep-adjacent here — the driver keeps committing its acked
-    /// watermarks and then calls [`handoff_ready`](SplitSource::handoff_ready)
+    /// watermarks and then calls [`drain_ready`](SplitSource::drain_ready)
     /// until the drain finishes.
     ///
-    /// Return `true` to accept the handoff, `false` to decline it (the
+    /// Return `true` to accept the revocation, `false` to decline it (the
     /// default). **Contract: return `false` for any split this source has
     /// not opened or has already closed or completed** — the driver also
     /// guards this (it declines tenancies without an open lane and feeds
     /// the decline back to the backend), but the source must not rely on
-    /// that alone. Declining is always safe: the backend re-offers a
-    /// different split, and the requesting peer's fallback covers the
-    /// rest, so a source that cannot cleanly stop intake for a split just
-    /// returns `false` and the driver leaves the tenancy `Live`.
+    /// that alone.
+    ///
+    /// Declining is safe but not free. The split still leaves — a
+    /// revocation is the leader's decision, not a proposal — so the backend
+    /// forces the release instead and this split's uncommitted tail replays
+    /// under its next owner. A source that *can* stop intake at a safe
+    /// boundary should, because that is the difference between a
+    /// replay-free move and a bounded-duplicate one.
     ///
     /// While a split is handing off, [`encode_commit`](SplitSource::encode_commit)
     /// must never report it `completed` — a drain cut can look terminal to
     /// the source (everything emitted is acked) but the split is
     /// half-read; the driver strips a `completed` flag it sees here and
     /// logs an error, so a conforming source should never trigger it.
-    fn begin_handoff(&mut self, split: &SplitId) -> bool {
+    fn begin_revoke(&mut self, split: &SplitId) -> bool {
         let _ = split;
         false
     }
@@ -182,16 +186,21 @@ pub trait SplitSource {
     /// that watermark is committed, so the resume point handed to the next
     /// owner covers everything this instance produced (a replay-free
     /// transfer); `None` while any of that tail is still in flight, to be
-    /// retried on the next poll. Never reports `completed` — a handoff gives
+    /// retried on the next poll. Never reports `completed` — a revocation gives
     /// the split away, it does not finish it. The default reports `None`.
     ///
     /// **Level-triggered, unlike [`take_finishing`](SplitSource::take_finishing):**
     /// keep returning `Some` on every poll until the driver retires the
     /// split — the final store commit can defer on a store hiccup and is
-    /// re-attempted from a fresh `handoff_ready` answer, so an
-    /// edge-triggered implementation would strand the drain until the
-    /// requester's fallback steal.
-    fn handoff_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
+    /// re-attempted from a fresh `drain_ready` answer, so an
+    /// edge-triggered implementation would stall the drain until the
+    /// backend forced it.
+    ///
+    /// A source that accepts a revocation in
+    /// [`begin_revoke`](SplitSource::begin_revoke) **must** eventually
+    /// answer `Some` here. The default `None` never finishes a drain; it
+    /// pairs with the default `begin_revoke`, which declines.
+    fn drain_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
         let _ = split;
         Ok(None)
     }
@@ -202,13 +211,13 @@ enum TenancyState {
     /// Owned; lane live or staged to open.
     Live,
     /// Owned, but intake has stopped at a safe boundary for a cooperative
-    /// handoff: the lane is draining toward one final fenced commit. Still
+    /// revocation: the lane is draining toward one final fenced commit. Still
     /// commit-eligible (tick commits keep folding its acked watermarks) and
-    /// never swept — a handoff gives the split away rather than completing
-    /// it. Becomes `Retired` (handed off, so barrier-less) once that final
-    /// commit lands, or fenced-`Retired` (the loss path) if a fallback
-    /// steal fences it mid-drain.
-    HandingOff,
+    /// never swept — a revocation gives the split away rather than completing
+    /// it. Becomes `Retired` (drained, so barrier-less) once that final
+    /// commit lands, or fenced-`Retired` (the loss path) if a peer fences
+    /// it mid-drain.
+    Draining,
     /// Ownership over (lost, fenced, failed, completed, handed off); entry
     /// retained only to absorb late watermarks until its revocation is
     /// delivered.
@@ -230,10 +239,10 @@ struct Tenancy {
     progress: Option<SplitProgress>,
     /// Terminal progress reached the store; nothing further to commit.
     completed: bool,
-    /// This tenancy released its split through a cooperative handoff: its
+    /// This tenancy released its split through a cooperative revocation: its
     /// final commit is durable, so the peer resumes replay-free. Routes the
     /// lane out through the barrier-less retired path, exactly like
-    /// `completed` (nothing is in flight behind a drained handoff).
+    /// `completed` (nothing is in flight behind a drained revocation).
     handed_off: bool,
 }
 
@@ -362,7 +371,7 @@ impl CoordinationDriver {
             // and the controller has drained + committed those lanes (its
             // revoke choreography is synchronous), so retired tenancies have
             // absorbed every late watermark they can ever see. Prune them —
-            // and only them: `Live` tenancies are owned, and `HandingOff`
+            // and only them: `Live` tenancies are owned, and `Draining`
             // ones are still draining toward their final commit and must
             // survive to be advanced.
             self.tenancies
@@ -411,11 +420,11 @@ impl CoordinationDriver {
             // 5. Completion sweep over live, uncommitted-terminal tenancies.
             self.sweep(source)?;
 
-            // 5b. Advance in-flight cooperative handoffs: chase each
+            // 5b. Advance in-flight cooperative revocations: chase each
             // draining split's tail and, once acked and committed, release
             // it barrier-less to the requesting peer (or, if fenced
             // mid-drain, abort it through the loss path).
-            self.advance_handoffs(source)?;
+            self.advance_drains(source)?;
 
             if !self.pending_lost.is_empty()
                 || !self.pending_retired.is_empty()
@@ -567,17 +576,16 @@ impl CoordinationDriver {
                 );
                 self.pending_open.push(partition);
             }
-            CoordinationEvent::HandoffRequested { split } => {
-                // A peer asked for this split cooperatively. Accept only a
-                // split we hold live with an OPEN lane, un-fenced and not
-                // yet completed — a tenancy gained but not yet opened has
-                // no intake to stop and no drain to finish, and accepting
-                // it would strand it in `HandingOff` forever — and only if
-                // the source can stop its intake at a safe boundary. A
-                // refused request is declined back to the backend so its
-                // one-grant-at-a-time slot frees and it can offer another
-                // split; without that feedback the slot pins until the
-                // requester gives up.
+            CoordinationEvent::RevokeRequested { split } => {
+                // The leader wants this split back. Accept only a split we
+                // hold live with an OPEN lane, un-fenced and not yet
+                // completed — a tenancy gained but not yet opened has no
+                // intake to stop and no drain to finish, and accepting it
+                // would strand it in `Draining` forever — and only if the
+                // source can stop its intake at a safe boundary. A refusal
+                // is declined back to the backend so it forces the release
+                // now instead of waiting out its drain deadline; the split
+                // leaves either way.
                 let accepted = match self.by_split.get(&split) {
                     Some(&partition) => {
                         let eligible = self.tenancies.get(&partition).is_some_and(|t| {
@@ -586,11 +594,11 @@ impl CoordinationDriver {
                                 && !t.fenced
                                 && !t.completed
                         });
-                        if eligible && source.begin_handoff(&split) {
-                            // Re-borrow after `begin_handoff`; the guard
+                        if eligible && source.begin_revoke(&split) {
+                            // Re-borrow after `begin_revoke`; the guard
                             // reads above kept no mutable borrow across it.
                             if let Some(t) = self.tenancies.get_mut(&partition) {
-                                t.state = TenancyState::HandingOff;
+                                t.state = TenancyState::Draining;
                             }
                             true
                         } else {
@@ -599,10 +607,10 @@ impl CoordinationDriver {
                     }
                     None => false,
                 };
-                if !accepted && let Err(e) = self.coordinator.decline_handoff(&split) {
-                    // Liveness cost only: the backend's slot self-heals
-                    // once the requester withdraws or times out.
-                    tracing::warn!(split = %split, error = %e, "handoff decline failed");
+                if !accepted && let Err(e) = self.coordinator.decline_revoke(&split) {
+                    // Liveness cost only: the backend forces the release at
+                    // its own deadline regardless.
+                    tracing::warn!(split = %split, error = %e, "revocation decline failed");
                 }
             }
             CoordinationEvent::Lost { split } => {
@@ -752,42 +760,41 @@ impl CoordinationDriver {
         Ok(())
     }
 
-    /// Advance every in-flight cooperative handoff. For each `HandingOff`
-    /// tenancy whose drain has finished — [`SplitSource::handoff_ready`]
+    /// Advance every in-flight cooperative revocation. For each `Draining`
+    /// tenancy whose drain has finished — [`SplitSource::drain_ready`]
     /// returns the final progress once its tail is acked and committed —
-    /// take one last fenced commit (never `completed`; a handoff gives the
+    /// take one last fenced commit (never `completed`; a revocation gives the
     /// split away rather than finishing it) and dispose of it:
     ///
-    /// - durable → mark handed off, release the split to the requester
-    ///   ([`SplitCoordinator::release_handoff`]), and retire it barrier-less;
-    /// - fenced → a fallback steal fenced the victim mid-drain; retire it
-    ///   through the loss path (its bounded tail replays under the new
-    ///   owner), exactly today's steal behaviour;
-    /// - deferred → the store lagged; stay `HandingOff` and re-attempt on
+    /// - durable → mark drained, hand the split back
+    ///   ([`SplitCoordinator::release_drained`]), and retire it barrier-less;
+    /// - fenced → a peer fenced this tenancy mid-drain; retire it through
+    ///   the loss path (its bounded tail replays under the new owner);
+    /// - deferred → the store lagged; stay `Draining` and re-attempt on
     ///   the next poll.
-    fn advance_handoffs<S: SplitSource>(&mut self, source: &mut S) -> Result<(), SourceError> {
+    fn advance_drains<S: SplitSource>(&mut self, source: &mut S) -> Result<(), SourceError> {
         let draining: Vec<PartitionId> = self
             .tenancies
             .iter()
-            .filter(|(_, t)| t.state == TenancyState::HandingOff && !t.fenced)
+            .filter(|(_, t)| t.state == TenancyState::Draining && !t.fenced)
             .map(|(&p, _)| p)
             .collect();
         for partition in draining {
             let split = self.tenancies[&partition].split.id.clone();
-            let Some(progress) = source.handoff_ready(&split)? else {
+            let Some(progress) = source.drain_ready(&split)? else {
                 continue; // tail still in flight — retry next poll
             };
             debug_assert!(
                 !progress.completed,
-                "a handoff commit hands the split off, it must not complete it"
+                "a revocation commit hands the split off, it must not complete it"
             );
-            self.commit_handoff(source, partition, &split, progress)?;
+            self.commit_drained(source, partition, &split, progress)?;
         }
         Ok(())
     }
 
     /// The disposition of one fenced commit attempt. Tick, sweep, and
-    /// handoff commits triage the backend's three answers identically; only
+    /// drain commits triage the backend's three answers identically; only
     /// what a durable `Ok` *means* differs, so each caller owns just that
     /// arm and shares the fence/retry handling here.
     fn try_commit<S: SplitSource>(
@@ -829,14 +836,14 @@ impl CoordinationDriver {
         // A handing-off split's drain cut can look terminal to the source
         // (every record it emitted is acked), but committing it
         // `completed: true` would mark a half-read split permanently done
-        // and the requester would never resume it — silent data loss. The
+        // and its next owner would never resume it — silent data loss. The
         // etl-s3 source guards this itself; enforce it centrally so a
         // conforming third-party source cannot fall into the trap.
         let progress = if progress.completed
             && self
                 .tenancies
                 .get(&partition)
-                .is_some_and(|t| t.state == TenancyState::HandingOff)
+                .is_some_and(|t| t.state == TenancyState::Draining)
         {
             tracing::error!(
                 split = %split,
@@ -870,11 +877,11 @@ impl CoordinationDriver {
         Ok(())
     }
 
-    /// Final fenced commit that ends a cooperative handoff. Same triage as
+    /// Final fenced commit that ends a cooperative revocation. Same triage as
     /// [`commit_progress`](CoordinationDriver::commit_progress), but a
-    /// durable commit releases the split to the requester and retires it
-    /// barrier-less instead of folding progress into a still-live tenancy.
-    fn commit_handoff<S: SplitSource>(
+    /// durable commit hands the split back and retires it barrier-less
+    /// instead of folding progress into a still-live tenancy.
+    fn commit_drained<S: SplitSource>(
         &mut self,
         source: &mut S,
         partition: PartitionId,
@@ -882,11 +889,11 @@ impl CoordinationDriver {
         progress: SplitProgress,
     ) -> Result<(), SourceError> {
         // Same central guard as `commit_progress`: the handover progress is
-        // never terminal, whatever the source's `handoff_ready` claims.
+        // never terminal, whatever the source's `drain_ready` claims.
         let progress = if progress.completed {
             tracing::error!(
                 split = %split,
-                "handoff_ready returned completed=true; forcing completed=false — \
+                "drain_ready returned completed=true; forcing completed=false — \
                  a drain cut is never terminal"
             );
             SplitProgress::new(progress.watermark, progress.state)
@@ -897,8 +904,8 @@ impl CoordinationDriver {
             CommitDisposition::Durable => {
                 // The tail is durable and the resume point now covers every
                 // record this instance emitted. Mark it handed off (so the
-                // lane retires barrier-less) and grant the split to the
-                // requester so it claims replay-free.
+                // lane retires barrier-less) and hand the split back so its
+                // next owner claims replay-free.
                 let tenancy = self
                     .tenancies
                     .get_mut(&partition)
@@ -907,7 +914,7 @@ impl CoordinationDriver {
                 tenancy.handed_off = true;
                 if let Err(e) = self
                     .coordinator
-                    .release_handoff(std::slice::from_ref(split))
+                    .release_drained(std::slice::from_ref(split))
                 {
                     // Liveness cost only: the lease expires on its own and a
                     // peer takes over — no data is at risk. Retire anyway so
@@ -915,17 +922,17 @@ impl CoordinationDriver {
                     tracing::warn!(
                         split = %split,
                         error = %e,
-                        "handoff release failed; lease will expire and a peer will take over"
+                        "drain release failed; lease will expire and a peer will take over"
                     );
                 }
                 self.retire(source, partition, false);
             }
-            // Fenced mid-drain (a fallback steal fenced this victim): already
-            // retired through the loss path inside `try_commit`. Its bounded
-            // tail replays under the new owner — today's steal behaviour.
+            // Fenced mid-drain (a peer took this tenancy): already retired
+            // through the loss path inside `try_commit`. Its bounded tail
+            // replays under the new owner.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
-                // Store lagged: stay `HandingOff` and re-attempt the final
+                // Store lagged: stay `Draining` and re-attempt the final
                 // commit next poll. The cached progress advances the resume
                 // point (the watermark is acked, sink-durable).
                 let tenancy = self
@@ -983,10 +990,10 @@ mod tests {
         fails: Vec<(SplitId, String)>,
         released: Vec<SplitId>,
         /// Captured separately from `released` so a test can prove the
-        /// driver takes the handoff-release path, not a plain hand-back.
-        released_handoff: Vec<SplitId>,
-        /// Every `decline_handoff` call, so a test can prove the driver feeds
-        /// a refusal back to the backend (freeing its one-grant slot).
+        /// driver takes the revocation-release path, not a plain hand-back.
+        released_drained: Vec<SplitId>,
+        /// Every `decline_revoke` call, so a test can prove the driver feeds
+        /// a refusal back to the backend, which then forces the release.
         declined: Vec<SplitId>,
         started: bool,
         waker: Option<ControlWaker>,
@@ -1022,8 +1029,8 @@ mod tests {
             self.0.lock().unwrap().released.clone()
         }
 
-        fn released_handoff(&self) -> Vec<SplitId> {
-            self.0.lock().unwrap().released_handoff.clone()
+        fn released_drained(&self) -> Vec<SplitId> {
+            self.0.lock().unwrap().released_drained.clone()
         }
 
         fn declined(&self) -> Vec<SplitId> {
@@ -1093,17 +1100,17 @@ mod tests {
             Ok(())
         }
 
-        fn release_handoff(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
+        fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
             self.0
                 .0
                 .lock()
                 .unwrap()
-                .released_handoff
+                .released_drained
                 .extend(splits.iter().cloned());
             Ok(())
         }
 
-        fn decline_handoff(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
+        fn decline_revoke(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
             self.0.0.lock().unwrap().declined.push(split.clone());
             Ok(())
         }
@@ -1176,15 +1183,15 @@ mod tests {
         /// Split ids whose `open_split` fails. Consumed per attempt, so a
         /// retry of the same split succeeds.
         fail_open: Vec<String>,
-        /// Split ids for which `begin_handoff` accepts (returns true). Empty
+        /// Split ids for which `begin_revoke` accepts (returns true). Empty
         /// by default, so the double declines like the trait default.
-        accept_handoff: HashSet<String>,
-        /// Every `begin_handoff` call, in order (accepted or declined).
-        begin_handoff_calls: Vec<String>,
-        /// Every `handoff_ready` call, in order — proves a split did (or did
-        /// not) transition to `HandingOff`.
-        handoff_ready_calls: Vec<String>,
-        /// Scripted `handoff_ready` results, sticky per split (returned on
+        accept_revoke: HashSet<String>,
+        /// Every `begin_revoke` call, in order (accepted or declined).
+        begin_revoke_calls: Vec<String>,
+        /// Every `drain_ready` call, in order — proves a split did (or did
+        /// not) transition to `Draining`.
+        drain_ready_calls: Vec<String>,
+        /// Scripted `drain_ready` results, sticky per split (returned on
         /// every poll until the tenancy retires), so a retryable final
         /// commit can be re-offered the same tail next poll.
         ready_progress: Rc<RefCell<HashMap<String, SplitProgress>>>,
@@ -1258,13 +1265,13 @@ mod tests {
                 .collect()
         }
 
-        fn begin_handoff(&mut self, split: &SplitId) -> bool {
-            self.begin_handoff_calls.push(split.as_str().to_string());
-            self.accept_handoff.contains(split.as_str())
+        fn begin_revoke(&mut self, split: &SplitId) -> bool {
+            self.begin_revoke_calls.push(split.as_str().to_string());
+            self.accept_revoke.contains(split.as_str())
         }
 
-        fn handoff_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
-            self.handoff_ready_calls.push(split.as_str().to_string());
+        fn drain_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
+            self.drain_ready_calls.push(split.as_str().to_string());
             Ok(self.ready_progress.borrow().get(split.as_str()).cloned())
         }
     }
@@ -1716,18 +1723,18 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Cooperative handoff (issue #58): request → drain → commit → release,
+    // Cooperative revocation: request → drain → commit → release,
     // barrier-less; a fence mid-drain aborts through the existing loss path.
 
     #[test]
-    fn a_handoff_keeps_the_tenancy_commit_eligible_until_the_final_commit() {
+    fn a_drain_keeps_the_tenancy_commit_eligible_until_the_final_commit() {
         // The inverse of `late_drain_commit_after_loss_is_skipped`: a lane
-        // put into `HandingOff` is *still* commit-eligible, so its acked
+        // put into `Draining` is *still* commit-eligible, so its acked
         // watermarks keep folding to the store right up to the final commit.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None)]);
@@ -1735,13 +1742,13 @@ mod tests {
         let partition = s.opened[0].3;
 
         // The request lands and the source accepts, but the drain is not
-        // finished (`handoff_ready` returns None), so the tenancy stays.
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        // finished (`drain_ready` returns None), so the tenancy stays.
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
         assert_eq!(
-            s.begin_handoff_calls,
+            s.begin_revoke_calls,
             ["a"],
             "the source was asked to stop intake"
         );
@@ -1753,31 +1760,31 @@ mod tests {
         assert_eq!(script.commits()[0].0.as_str(), "a");
         assert!(
             !script.commits()[0].1.completed,
-            "a handoff never completes the split"
+            "a revocation never completes the split"
         );
         assert!(
-            script.released_handoff().is_empty(),
+            script.released_drained().is_empty(),
             "not released while the drain is still in flight"
         );
     }
 
     #[test]
-    fn a_completed_handoff_releases_exactly_one_split_and_retires_barrierless() {
+    fn a_completed_drain_releases_exactly_one_split_and_retires_barrierless() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
         poll(&mut d, &mut s);
 
         // a's drain has finished — tail acked and committed — so
-        // `handoff_ready` offers the final (non-terminal) progress.
+        // `drain_ready` offers the final (non-terminal) progress.
         s.ready_progress
             .borrow_mut()
             .insert("a".into(), SplitProgress::new(50, vec![]));
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
 
@@ -1785,26 +1792,23 @@ mod tests {
         // commit, release, and the lane leaves barrier-less.
         let event = poll(&mut d, &mut s);
         let SourceEvent::LanesRetired { lanes } = event else {
-            panic!("a granted handoff must retire barrier-less, got {event:?}");
+            panic!("a cooperative revocation must retire barrier-less, got {event:?}");
         };
         assert_eq!(lanes, vec![LaneId(0)], "only a's lane leaves");
 
-        // Exactly the handed-off split, released once, through the handoff
+        // Exactly the handed-off split, released once, through the revocation
         // path (never the plain-release path).
         assert_eq!(
-            script.released_handoff(),
+            script.released_drained(),
             vec![SplitId::new("a").unwrap()],
-            "exactly one split, released via the handoff path"
+            "exactly one split, released via the revocation path"
         );
         assert!(script.released().is_empty(), "not a plain hand-back");
         // Its final commit is not a completion.
         let last = script.commits().last().cloned().unwrap();
         assert_eq!(last.0.as_str(), "a");
         assert_eq!(last.1.watermark, 50);
-        assert!(
-            !last.1.completed,
-            "handoff commits never complete the split"
-        );
+        assert!(!last.1.completed, "drain commits never complete the split");
 
         // b's live lane is untouched, and no revoke ever follows.
         assert_eq!(s.closed, vec!["a"], "b's fetcher stays attached");
@@ -1816,24 +1820,24 @@ mod tests {
     }
 
     #[test]
-    fn a_fenced_final_commit_aborts_the_handoff_into_a_revoke() {
+    fn a_fenced_final_commit_aborts_the_drain_into_a_revoke() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         let partition = s.opened[0].3;
 
-        // The drain is ready, but a fallback steal fenced this victim first,
+        // The drain is ready, but a peer fenced this tenancy first,
         // so its final commit is rejected.
         s.ready_progress
             .borrow_mut()
             .insert("a".into(), SplitProgress::new(50, vec![]));
         script.fail_next_commit("a", CoordinationErrorKind::Fenced);
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
 
@@ -1842,13 +1846,13 @@ mod tests {
         // release.
         let event = poll(&mut d, &mut s);
         let SourceEvent::LanesRevoked { lanes, barrier } = event else {
-            panic!("a fenced handoff must abort into a revoke, got {event:?}");
+            panic!("a fenced drain must abort into a revoke, got {event:?}");
         };
         assert_eq!(lanes, vec![LaneId(0)]);
         assert_eq!(barrier.remaining(), 1, "one party per revoked lane");
         assert!(
-            script.released_handoff().is_empty(),
-            "a fenced handoff never releases"
+            script.released_drained().is_empty(),
+            "a fenced drain never releases"
         );
         assert!(
             script.commits().is_empty(),
@@ -1865,11 +1869,11 @@ mod tests {
     }
 
     #[test]
-    fn a_retryable_final_commit_keeps_the_handoff_pending() {
+    fn a_retryable_final_commit_keeps_the_drain_pending() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None)]);
@@ -1880,7 +1884,7 @@ mod tests {
             .borrow_mut()
             .insert("a".into(), SplitProgress::new(50, vec![]));
         script.fail_next_commit("a", CoordinationErrorKind::Retryable);
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
 
@@ -1888,7 +1892,7 @@ mod tests {
         // and handing off.
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
         assert!(script.commits().is_empty(), "deferred, not written");
-        assert!(script.released_handoff().is_empty());
+        assert!(script.released_drained().is_empty());
         assert!(
             d.assignments().iter().any(|(id, _)| id.as_str() == "a"),
             "still owned while the final commit retries"
@@ -1898,37 +1902,37 @@ mod tests {
         // released and retired barrier-less.
         let event = poll(&mut d, &mut s);
         let SourceEvent::LanesRetired { lanes } = event else {
-            panic!("the retried handoff must finally retire, got {event:?}");
+            panic!("the retried drain must finally retire, got {event:?}");
         };
         assert_eq!(lanes, vec![LaneId(0)]);
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].1.watermark, 50);
-        assert_eq!(script.released_handoff(), vec![SplitId::new("a").unwrap()]);
+        assert_eq!(script.released_drained(), vec![SplitId::new("a").unwrap()]);
     }
 
     #[test]
-    fn a_source_that_cannot_stop_intake_declines_the_handoff() {
+    fn a_source_that_cannot_stop_intake_declines_the_revoke() {
         let script = Script::default();
         let mut d = driver(&script);
-        // Default `accept_handoff` is empty, so `begin_handoff` declines.
+        // Default `accept_revoke` is empty, so `begin_revoke` declines.
         let mut s = TestSource::default();
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         let partition = s.opened[0].3;
 
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
 
         // Asked and declined: the tenancy never enters the drain (no
-        // `handoff_ready` poll) and stays fully live.
-        assert_eq!(s.begin_handoff_calls, ["a"]);
+        // `drain_ready` poll) and stays fully live.
+        assert_eq!(s.begin_revoke_calls, ["a"]);
         assert!(
-            s.handoff_ready_calls.is_empty(),
+            s.drain_ready_calls.is_empty(),
             "a declined split never drains"
         );
-        assert!(script.released_handoff().is_empty());
+        assert!(script.released_drained().is_empty());
 
         // A live tenancy keeps committing as normal.
         d.commit(&mut s, &[(partition, 30)]).unwrap();
@@ -1937,24 +1941,24 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_request_for_an_unheld_split_is_ignored() {
+    fn a_revoke_request_for_an_unheld_split_is_ignored() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
             // Even a source that *would* accept is never consulted for a
             // split this instance does not hold.
-            accept_handoff: HashSet::from(["a".to_string(), "ghost".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string(), "ghost".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
 
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("ghost").unwrap(),
         }]);
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
         assert!(
-            s.begin_handoff_calls.is_empty(),
+            s.begin_revoke_calls.is_empty(),
             "an unheld split must not consult the source"
         );
         assert!(
@@ -1965,26 +1969,26 @@ mod tests {
 
     #[test]
     fn a_source_that_declines_feeds_the_decline_back() {
-        // `a_source_that_cannot_stop_intake_declines_the_handoff` proves the
+        // `a_source_that_cannot_stop_intake_declines_the_revoke` proves the
         // tenancy stays live; this one proves the refusal is fed BACK to the
-        // backend so its one-grant-at-a-time slot frees — without it the slot
-        // pins until the requester gives up, freezing rebalancing.
+        // backend, which forces the release immediately instead of waiting
+        // out its drain deadline.
         let script = Script::default();
         let mut d = driver(&script);
-        // Default `accept_handoff` is empty, so `begin_handoff` declines.
+        // Default `accept_revoke` is empty, so `begin_revoke` declines.
         let mut s = TestSource::default();
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         let partition = s.opened[0].3;
 
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
 
         // Asked, refused, and the refusal handed back to the backend exactly
         // once — naming the split, so the backend cools down that split only.
-        assert_eq!(s.begin_handoff_calls, ["a"]);
+        assert_eq!(s.begin_revoke_calls, ["a"]);
         assert_eq!(
             script.declined(),
             vec![SplitId::new("a").unwrap()],
@@ -2000,9 +2004,9 @@ mod tests {
 
     #[test]
     fn an_unopened_tenancy_declines_without_asking_the_source() {
-        // A gain and a handoff request for the same split arrive in one event
+        // A gain and a revocation request for the same split arrive in one event
         // batch: the tenancy exists but its lane has not opened yet. Accepting
-        // it would strand it in `HandingOff` forever (no intake to stop, no
+        // it would strand it in `Draining` forever (no intake to stop, no
         // drain to finish), so the driver declines WITHOUT consulting the
         // source, and the split still opens normally afterwards.
         let script = Script::default();
@@ -2010,13 +2014,13 @@ mod tests {
         // Even a source that WOULD accept must not be consulted before the
         // lane exists.
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
 
         script.push(vec![
             gained("a", 1, None),
-            CoordinationEvent::HandoffRequested {
+            CoordinationEvent::RevokeRequested {
                 split: SplitId::new("a").unwrap(),
             },
         ]);
@@ -2029,7 +2033,7 @@ mod tests {
         assert_eq!(lanes.len(), 1);
 
         assert!(
-            s.begin_handoff_calls.is_empty(),
+            s.begin_revoke_calls.is_empty(),
             "a not-yet-opened tenancy must never be asked to stop intake"
         );
         assert_eq!(
@@ -2044,33 +2048,33 @@ mod tests {
         assert_eq!(s.encoded, vec![("a".to_string(), 25)]);
         assert_eq!(script.commits().len(), 1);
         // And it was never actually handed off.
-        assert!(script.released_handoff().is_empty());
+        assert!(script.released_drained().is_empty());
     }
 
     #[test]
-    fn a_completed_progress_during_handoff_is_never_terminal() {
+    fn a_completed_progress_during_a_drain_is_never_terminal() {
         // A handing-off split's drain cut can look terminal to the source
         // (every record it emitted is acked), but committing it
         // `completed: true` would mark a half-read split permanently done and
-        // the requester would never resume it. The central guard must strip
+        // its next owner would never resume it. The central guard must strip
         // the flag — while still landing the commit (the watermark is acked).
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
-            accept_handoff: HashSet::from(["a".to_string()]),
+            accept_revoke: HashSet::from(["a".to_string()]),
             ..TestSource::default()
         };
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         let partition = s.opened[0].3;
 
-        // Drive "a" into `HandingOff` (the drain is not finished yet:
-        // `handoff_ready` returns None).
-        script.push(vec![CoordinationEvent::HandoffRequested {
+        // Drive "a" into `Draining` (the drain is not finished yet:
+        // `drain_ready` returns None).
+        script.push(vec![CoordinationEvent::RevokeRequested {
             split: SplitId::new("a").unwrap(),
         }]);
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
-        assert_eq!(s.begin_handoff_calls, ["a"]);
+        assert_eq!(s.begin_revoke_calls, ["a"]);
 
         // A tick commit whose `encode_commit` reports the split COMPLETE at
         // this watermark.
@@ -2097,19 +2101,19 @@ mod tests {
         );
         assert!(s.closed.is_empty(), "not retired");
 
-        // The handoff then finishes normally once the drain completes.
+        // The revocation then finishes normally once the drain completes.
         s.ready_progress
             .borrow_mut()
             .insert("a".into(), SplitProgress::new(50, vec![]));
         let event = poll(&mut d, &mut s);
         let SourceEvent::LanesRetired { lanes } = event else {
-            panic!("the drained handoff must finally retire, got {event:?}");
+            panic!("the drained revocation must finally retire, got {event:?}");
         };
         assert_eq!(lanes, vec![LaneId(0)]);
-        assert_eq!(script.released_handoff(), vec![SplitId::new("a").unwrap()]);
+        assert_eq!(script.released_drained(), vec![SplitId::new("a").unwrap()]);
         assert!(
             !script.commits().last().unwrap().1.completed,
-            "the final handoff commit is not terminal either"
+            "the final revocation commit is not terminal either"
         );
     }
 }

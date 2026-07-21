@@ -47,8 +47,8 @@ mod source;
 pub use backpressure::BackpressureMetrics;
 pub use checkpoint::CheckpointMetrics;
 pub use coordination::{
-    AcquireReason, CoordinationMetrics, HandoffOutcome, HandoffPhase, ReplanOutcome,
-    SplitLossReason, StoreOp, WriteOutcome,
+    AcquireReason, CoordinationMetrics, ReplanOutcome, RevocationOutcome, SplitLossReason, StoreOp,
+    WriteOutcome,
 };
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
@@ -235,6 +235,14 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
             Matcher::Full(names::E2E_LATENCY_SECONDS.into()),
             DURATION_SECONDS_BUCKETS,
         )?
+        // Ends in `_latency_seconds`, not `_duration_seconds`, so the
+        // suffix matcher misses it — matched by name like the E2E latency
+        // above, so it gets the same second-scale buckets as every other
+        // coordination timing rather than the library defaults.
+        .set_buckets_for_metric(
+            Matcher::Full(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS.into()),
+            DURATION_SECONDS_BUCKETS,
+        )?
         .set_buckets_for_metric(
             Matcher::Full(names::SINK_BATCH_ROWS.into()),
             BATCH_ROWS_BUCKETS,
@@ -395,16 +403,15 @@ mod tests {
             coord.set_leader(true);
             coord.set_idle(false);
             coord.acquired(AcquireReason::Expired);
-            coord.acquired(AcquireReason::Handoff);
+            coord.acquired(AcquireReason::Reassigned);
             coord.lost(SplitLossReason::Fenced);
             coord.released(1);
-            coord.handoff(HandoffOutcome::Requested);
-            coord.handoff(HandoffOutcome::Granted);
-            coord.handoff(HandoffOutcome::Timeout);
-            coord.handoff(HandoffOutcome::Aborted);
-            coord.handoff_duration(HandoffPhase::Request, Duration::from_millis(900));
-            coord.handoff_duration(HandoffPhase::Drain, Duration::from_millis(120));
-            coord.set_handoffs_in_flight(2);
+            coord.revocation(RevocationOutcome::Requested);
+            coord.revocation(RevocationOutcome::Drained);
+            coord.revocation(RevocationOutcome::Forced);
+            coord.assignment_latency(Duration::from_millis(900));
+            coord.drain_duration(Duration::from_millis(120));
+            coord.set_splits_draining(2);
             coord.planned(8);
             coord.replan(ReplanOutcome::Noop, Duration::from_millis(20));
             coord.failed();
@@ -432,11 +439,12 @@ mod tests {
             r#"etl_sink_shard_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3"} 0"#,
             r#"etl_checkpoint_commits_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 1"#,
             r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="expired"} 1"#,
-            r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="handoff"} 1"#,
-            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="requested"} 1"#,
-            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="granted"} 1"#,
-            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="timeout"} 1"#,
-            r#"etl_coordination_handoffs_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="aborted"} 1"#,
+            r#"etl_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="reassigned"} 1"#,
+            r#"etl_coordination_split_losses_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="fenced"} 1"#,
+            r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="requested"} 1"#,
+            r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="drained"} 1"#,
+            r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="forced"} 1"#,
+            r#"etl_coordination_splits_draining{pipeline="orders",component="orders_kafka",component_type="kafka"} 2"#,
             r#"etl_coordination_replans_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="noop"} 1"#,
             r#"etl_coordination_writes_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="conflict"} 1"#,
             r#"etl_coordination_leader{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,

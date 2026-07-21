@@ -39,7 +39,7 @@ sink: {{ capture: {{}} }}
 
 /// [`config_yaml`] with a small in-flight budget, so a paced sink (delay per
 /// write) actually throttles the owner rather than letting many batches
-/// overlap their delays — the handoff test needs the owner to hold its splits
+/// overlap their delays — the revocation test needs the owner to hold its splits
 /// open across several rebalance rounds.
 fn throttled_config_yaml(data: &std::path::Path) -> String {
     format!(
@@ -210,7 +210,7 @@ fn a_standby_instance_drains_when_the_job_completes() {
 
 /// Launch a coordinated instance with a chosen working-set bound, so one
 /// instance can over-claim (hold every split) before its peer joins.
-fn launch_handoff_instance(
+fn launch_revocable_instance(
     yaml: &str,
     store: &etl_coordination::store::memory::MemoryStore,
     instance: &str,
@@ -220,30 +220,26 @@ fn launch_handoff_instance(
     let tuning = CoordinationConfig {
         instance_id: Some(instance.to_string()),
         max_in_flight,
-        // A paced drain takes several heartbeat rounds; the default
-        // handoff_rounds would fall back to a mid-drain steal and
-        // reintroduce exactly the duplicates this test refutes. The
-        // fallback path is covered by the coordination-level tests.
-        handoff_rounds: 1000,
-        // Pinned rather than defaulted: the zero-duplicate claim below has
-        // to hold while several drains overlap, which is the interesting
-        // case. If the default ever moves, this test must keep testing it.
-        handoff_max_grants: 2,
+        // A paced drain takes far longer than the default deadline, and a
+        // forced revocation would reintroduce exactly the duplicates this
+        // test refutes. The forced path is covered by the
+        // coordination-level tests; this one is about the clean path.
+        drain_deadline: Duration::from_secs(600),
         ..test_tuning()
     };
     launch_tuned(yaml, test_options(), store, tuning, pre)
 }
 
 #[test]
-fn a_cooperative_handoff_moves_splits_with_zero_duplicates() {
+fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
     // The teeth of issue #58. When a *live* owner gives up a split, the
-    // cooperative handoff drains its intake at an object boundary, commits the
+    // cooperative revocation drains its intake at an object boundary, commits the
     // tail, and only then releases — so the peer resumes covering everything
     // the owner emitted, replay-free. The steal-era CAS transfer this replaces
     // moved ownership *before* the owner stopped reading, re-reading
     // `[committed watermark, fence]` and producing nonzero duplicates on every
     // move. The assertion that separates the two is `total == union`: exactly
-    // zero duplicates. This test is written to PASS with handoffs active and
+    // zero duplicates. This test is written to PASS with revocations active and
     // FAIL (duplicates > 0, or no movement) if transfers regress to steals.
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -274,7 +270,7 @@ fn a_cooperative_handoff_moves_splits_with_zero_duplicates() {
     // delayed write serializes into real throughput throttling, so the owner
     // holds its splits open across several rebalance rounds (lease 1s →
     // heartbeat ~330ms) and the drain window stays open long enough for the
-    // handoff to complete. Generous, for CI safety.
+    // revocation to complete. Generous, for CI safety.
     let pace = |script: &SinkScript| {
         for _ in 0..2000 {
             script.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(300)));
@@ -283,7 +279,7 @@ fn a_cooperative_handoff_moves_splits_with_zero_duplicates() {
 
     // Instance A starts alone with a working set large enough to claim every
     // split — it over-claims relative to a two-instance fleet.
-    let a = launch_handoff_instance(&yaml, &store, "instance-a", 6, pace);
+    let a = launch_revocable_instance(&yaml, &store, "instance-a", 6, pace);
     // Give A a real head start: wait until it has captured (and therefore is
     // committing) real progress — several checkpoint intervals (100ms) at the
     // 250ms poll cadence — so B joins against a live owner with committed
@@ -294,7 +290,7 @@ fn a_cooperative_handoff_moves_splits_with_zero_duplicates() {
         || captured_rows(&a.script).len() >= 40,
     );
 
-    let b = launch_handoff_instance(&yaml, &store, "instance-b", 6, pace);
+    let b = launch_revocable_instance(&yaml, &store, "instance-b", 6, pace);
 
     let ra = a.run.wait_exit(Duration::from_secs(120)).unwrap().unwrap();
     let rb = b.run.wait_exit(Duration::from_secs(120)).unwrap().unwrap();
@@ -330,7 +326,7 @@ fn a_cooperative_handoff_moves_splits_with_zero_duplicates() {
     assert_eq!(
         total,
         union.len(),
-        "a cooperative handoff moves splits with ZERO duplicates \
+        "a cooperative revocation moves splits with ZERO duplicates \
          (total={}, union={}, duplicates={})",
         total,
         union.len(),

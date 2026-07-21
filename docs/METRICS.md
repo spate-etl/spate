@@ -256,12 +256,11 @@ handed a `CoordinationMetrics`). They fire alongside the source's own
 | `etl_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. |
 | `etl_coordination_leader` | gauge | | 1 while this worker holds the planner leadership lease. |
 | `etl_coordination_idle` | gauge | | 1 while this worker owns no splits and observes as a standby. |
-| `etl_coordination_acquisitions_total` | counter | `reason` (`create`\|`released`\|`reclaimed`\|`expired`\|`stolen`\|`handoff`) | Split leases acquired, by how the split became claimable. `expired` spikes mean workers are dying; steady `stolen` means chronic imbalance; `handoff` is a cooperative live-owner transfer (replay-free). |
-| `etl_coordination_revocations_total` | counter | `reason` (`fenced`\|`starved`) | Splits lost involuntarily: fenced by a peer's higher epoch, or self-fenced after a full lease without a successful write (store unreachable). |
+| `etl_coordination_splits_draining` | gauge | | Splits this worker is currently draining away under revocation. Sitting non-zero on one worker while the fleet stays visibly unbalanced means drains are not finishing — look at that worker's sink health, then at `drain_deadline`. |
+| `etl_coordination_acquisitions_total` | counter | `reason` (`create`\|`reclaimed`\|`expired`\|`reassigned`) | Split leases acquired, by how the split became claimable. `reassigned` is the healthy rebalance path: the previous owner cleared the record before letting go — a drained revocation, or a shutdown/scale-down hand-back — so the claim replays nothing. (The two are one label because a claiming worker cannot tell them apart: both present as a cleared owner and a vanished lease. Use `revocations_total{outcome="drained"}` on the releasing side to count revocations specifically.) `expired` spikes mean workers are dying — a dead owner's uncommitted tail replays. |
+| `etl_coordination_split_losses_total` | counter | `reason` (`fenced`\|`starved`\|`revoked`) | Splits lost involuntarily: `fenced` by a peer's higher epoch, `starved` (self-fenced after a full lease with no successful write — store unreachable), or `revoked` — the leader un-assigned the split and this worker forced its own release because the drain was declined or outran `drain_deadline`, so the uncommitted tail replays. Renamed from `etl_coordination_revocations_total`, which now names a different family (next row but one). |
 | `etl_coordination_releases_total` | counter | | Voluntary hand-backs (graceful shutdown, scale-down). |
-| `etl_coordination_handoffs_total` | counter | `outcome` (`requested`\|`granted`\|`timeout`\|`aborted`) | Cooperative split handoffs: a requester asks an over-loaded owner to give up a split, which the owner drains, commits, and releases. `granted` moves are replay-free; `timeout` fell back to a replaying steal (dead/stuck owner); `aborted` is a victim-side drain that ended without its release. Outcomes are per-side events on different instances (`requested`/`timeout` count on the requester, `granted`/`aborted` on the victim) and do not sum to a request count: a withdrawn request has no terminal outcome, and a timed-out request may still be granted late. `granted` rising with `stolen` near zero is the healthy rebalance signature. |
-| `etl_coordination_handoffs_in_flight` | gauge | | Grants this worker is currently draining away as a victim, bounded by `handoff_max_grants`. Sitting at the bound means the cap — not the fleet's imbalance — is pacing rebalances; sitting at 0 during a visible imbalance means requests are not arriving. |
-| `etl_coordination_handoff_duration_seconds` | histogram | `phase` (`request`\|`drain`) | The two terms of time-to-balance. `request` is requester-side, from going under target with a victim worth asking to claiming a granted split; it deliberately spans withdrawn, superseded and re-targeted requests, so it answers "how long was this worker short of its share?" rather than flattering itself by timing only the attempt that succeeded. `drain` is victim-side, from annotating the grant to the release landing. They are observed on opposite instances and **must not be added**: `request` starts before the victim has been asked and stops when the split is claimed, so it strictly *contains* the `drain` it was waiting on. One move costs the `request` alone; `request - drain` is roughly what admission plus the claim cost. A `request` well above `drain` means victims answer quickly and the wait is in request admission; the two converging means drains dominate, and raising `handoff_max_grants` is the lever. |
+| `etl_coordination_revocations_total` | counter | `outcome` (`requested`\|`drained`\|`forced`) | Splits the leader moved away from this worker by dropping them from its assignment. All three count on the **releasing** worker — one lifecycle, not two sides of a negotiation. `requested` is the denominator and every revocation terminates in exactly one of the other two — including when the split completes or is `fail`ed mid-drain, or when the process shuts down while draining — so `requested - drained - forced` is the drains still in flight (`etl_coordination_splits_draining` reports the same number directly). `drained` completed cooperatively and replays nothing; the gaining worker counts the matching `acquisitions_total{reason="reassigned"}`. `forced` means the source declined, the drain outran `drain_deadline`, or the split was fenced away before the release landed — the uncommitted tail replays. Sustained `forced` is the alert: `drain_deadline` is too tight for the source's commit interval, or a lane is wedged. **This name changed meaning**: before leader-assigned coordination it carried a `reason` label and counted involuntary losses, now `etl_coordination_split_losses_total`. |
 | `etl_coordination_splits_planned_total` | counter | | Splits this worker wrote into the plan while leader. |
 | `etl_coordination_replans_total` | counter | `outcome` (`ok`\|`error`\|`noop`) | Planner runs while leader; `noop` = the enumeration produced nothing new (the normal steady state of an open plan). |
 | `etl_coordination_split_failures_total` | counter | | Explicit poison reports (`fail`) from the source. |
@@ -271,6 +270,36 @@ handed a `CoordinationMetrics`). They fire alongside the source's own
 | `etl_coordination_replan_duration_seconds` | histogram | | One planner run (enumeration included). |
 | `etl_coordination_reconcile_duration_seconds` | histogram | | One full reconcile listing (the missed-watch-event backstop). |
 | `etl_coordination_store_op_duration_seconds` | histogram | `op` (`get`\|`put`\|`delete`\|`list`\|`watch`) | Store primitive round-trips — the NATS latency view. |
+| `etl_coordination_drain_duration_seconds` | histogram | | One cooperative drain, on the **releasing** worker: revocation requested to the release landing — stopping intake at a safe boundary, committing the drained tail, giving the split up. Only drains that finish cooperatively are observed; a forced release is a *failed* drain and is counted as `revocations_total{outcome="forced"}` instead, so `drain_deadline` never shows up as a spike in this distribution. Read it against `drain_deadline`: a p99 creeping toward it means forced revocations are imminent. |
+| `etl_coordination_assignment_latency_seconds` | histogram | | One assignment wait, on the **gaining** worker: a split appearing in this worker's assignment to this worker holding its lease. This is time-to-balance as an operator experiences it — how long work the leader had already decided this worker should be doing sat undone. It spans whatever stood in the way, including the previous owner's drain, rather than flattering itself by timing only the final claim. |
+
+### The two coordination latencies do not compose
+
+`drain_duration_seconds` and `assignment_latency_seconds` were a single
+family split by a `phase` label until the balancer became leader-assigned,
+and that shape asserted a containment which no longer exists. Do not add,
+subtract, or otherwise combine them.
+
+They are measured in different processes. A drain is timed on the worker
+*losing* a split, anchored on that worker observing its own `assign` record
+shrink. An assignment wait is timed on the worker *gaining* a split,
+anchored on that worker observing its own `assign` record grow. The leader
+publishes those two records separately and each worker sees its own on its
+own clock, so even for a single split's move neither window reliably
+contains the other — a gaining worker that observes its assignment late can
+start its wait after the drain has already finished.
+
+Their populations differ too. Every assigned split is waited for, including
+brand-new splits nobody has held and a dead owner's work reclaimed after
+lease expiry; no revocation was involved in either, and no drain was timed.
+`assignment_latency_seconds` is therefore not a revocation measurement at
+all, which is the deeper reason it is not a `phase` of one.
+
+Two families rather than one label also makes the meaningless query
+unwritable instead of merely discouraged: with a shared family,
+`histogram_quantile` over `sum by (le)` — aggregating the `phase` away —
+looks like an ordinary panel expression while silently merging two
+populations recorded on two machines.
 
 Cardinality note: a coordinated source's checkpoint partitions are minted
 per split *tenancy* (monotonic), so per-partition series under

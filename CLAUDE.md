@@ -3,7 +3,11 @@
 High-performance, at-least-once ETL pipeline framework in Rust. Workspace of
 publishable crates under `crates/` plus an unpublished `benchmarks/` crate.
 The full architecture and its rationale live in `docs/DESIGN.md`; the metric
-taxonomy in `docs/METRICS.md`. Read those before changing engine behavior.
+taxonomy in `docs/METRICS.md`; the coordinated-work distribution algorithm in
+`docs/user-guide/02-concepts/08-work-assignment.mdx`, which is normative — its
+numbered invariants name the property tests that enforce them, so changing the
+balancer means changing that page in the same commit. Read those before
+changing engine behavior.
 
 ## Commands
 

@@ -205,8 +205,8 @@ struct SplitState {
     lane: LaneId,
     /// Backpressure pause flag the fetcher honors between sends.
     pause: Arc<AtomicBool>,
-    /// Cooperative-handoff stop flag shared with the fetcher: set once by
-    /// [`begin_handoff`](SplitCtx::begin_handoff), it makes the fetcher return
+    /// Cooperative-revocation stop flag shared with the fetcher: set once by
+    /// [`begin_revoke`](SplitCtx::begin_revoke), it makes the fetcher return
     /// at the next object boundary (never mid-object), closing its channel so
     /// the lane decides end-of-input and the tail can be chased to a final
     /// commit.
@@ -225,11 +225,11 @@ struct SplitState {
     /// `take_finishing` (the commit-ready hint fires once per tenancy).
     hinted: bool,
     /// This split is being cooperatively handed off (controller-thread only —
-    /// `begin_handoff`/`encode_commit`/`sweep`/`handoff_ready` all run there).
+    /// `begin_revoke`/`encode_commit`/`sweep`/`drain_ready` all run there).
     /// Its cut watermark must commit `completed: false` and the sweep must
-    /// never finish it: a handoff gives the split away, it does not complete
+    /// never finish it: a revocation gives the split away, it does not complete
     /// it (the next owner does).
-    handoff: bool,
+    revocation: bool,
 }
 
 /// The lane-assembly context (see the module docs).
@@ -369,7 +369,7 @@ impl SplitSource for SplitCtx {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(LANE_HANDOFF_CHUNKS);
         // Detached deliberately: the fetcher exits when the lane (its
-        // receiver) drops, or when `stop` is set for a cooperative handoff;
+        // receiver) drops, or when `stop` is set for a cooperative revocation;
         // `close_split` must never abort it mid-drain.
         drop(self.handle.spawn(run_fetcher(FetcherParams {
             split: split.clone(),
@@ -417,7 +417,7 @@ impl SplitSource for SplitCtx {
                 resume_watermark,
                 last_committed: None,
                 hinted: false,
-                handoff: false,
+                revocation: false,
             },
         );
         Ok(lane)
@@ -534,17 +534,17 @@ impl SplitSource for SplitCtx {
         // Complete iff the lane has decided end-of-input at exactly this
         // acked watermark: fully framed (T known) and fully acked (W == T).
         //
-        // The `!handoff` guard is correctness-critical. A handing-off split is
+        // The `!revocation` guard is correctness-critical. A handing-off split is
         // being given away, not finished, and its final tick commit lands on
         // the *cut* watermark — which, once the stopped fetcher's tail drains,
         // equals `tracker.terminal()`. Without this guard that cut would be
         // committed `completed: true` and the store would mark a half-read
         // split terminally complete, so the peer would never resume it.
-        // `handoff_ready` commits the same cut with `completed: false`, and the
-        // sweep is disabled for handoff splits, so completion can only ever
+        // `drain_ready` commits the same cut with `completed: false`, and the
+        // sweep is disabled for revocation splits, so completion can only ever
         // come from the split's next owner.
         Ok(
-            if state.tracker.terminal() == Some(watermark) && !state.handoff {
+            if state.tracker.terminal() == Some(watermark) && !state.revocation {
                 SplitProgress::completed(watermark, payload)
             } else {
                 SplitProgress::new(watermark, payload)
@@ -552,22 +552,22 @@ impl SplitSource for SplitCtx {
         )
     }
 
-    fn begin_handoff(&mut self, split: &SplitId) -> bool {
+    fn begin_revoke(&mut self, split: &SplitId) -> bool {
         // Decline unless we hold this split live. An unknown, already-closed,
         // or completed split is simply not in the table — `close_split`
         // removes it, and the driver retires (and `close_split`s) a tenancy
         // before it completes — and the driver relies on this `false` to never
-        // transition an unopened tenancy into `HandingOff`. Declining is
+        // transition an unopened tenancy into `Draining`. Declining is
         // always safe: the requesting peer falls back to a replaying steal.
         let Some(state) = self.splits.get_mut(split) else {
             return false;
         };
         // Order matters: mark the split handing off *before* releasing the
-        // fetcher. `handoff` guards the controller-thread commit/sweep logic
+        // fetcher. `revocation` guards the controller-thread commit/sweep logic
         // that runs on this same thread, so it must hold the instant intake
         // starts winding down; `stop` then lets the fetcher (its own task)
         // return at the next object boundary.
-        state.handoff = true;
+        state.revocation = true;
         state.stop.store(true, Ordering::Relaxed);
         true
     }
@@ -577,10 +577,10 @@ impl SplitSource for SplitCtx {
             return Ok(None);
         };
         // A handing-off split is given away with `completed: false` through
-        // `handoff_ready` and finished by its next owner — never completed by
+        // `drain_ready` and finished by its next owner — never completed by
         // this sweep. Defense in depth: the driver no longer sweeps
-        // `HandingOff` tenancies, but this guard must not depend on that.
-        if state.handoff {
+        // `Draining` tenancies, but this guard must not depend on that.
+        if state.revocation {
             return Ok(None);
         }
         let Some(terminal) = state.tracker.terminal() else {
@@ -600,7 +600,7 @@ impl SplitSource for SplitCtx {
         Ok(Some(SplitProgress::completed(terminal, payload)))
     }
 
-    fn handoff_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
+    fn drain_ready(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
         let Some(state) = self.splits.get(split) else {
             return Ok(None);
         };
@@ -622,7 +622,7 @@ impl SplitSource for SplitCtx {
             return Ok(None); // tail still in flight to the sink
         }
         let payload = ProgressState::at(&state.objects, cut).encode();
-        // Never `completed`: a handoff gives the split away, it does not finish
+        // Never `completed`: a revocation gives the split away, it does not finish
         // it. The next owner opens at `cut`, emits nothing, and its own sweep
         // completes the split — one extra hop, still zero replay. (Building the
         // progress state exactly as `sweep`/`encode_commit` do keeps the
@@ -853,7 +853,7 @@ mod tests {
                 resume_watermark: 0,
                 last_committed: None,
                 hinted: false,
-                handoff: false,
+                revocation: false,
             },
         );
 
@@ -936,7 +936,7 @@ mod tests {
                 resume_watermark: 0,
                 last_committed: None,
                 hinted: false,
-                handoff: false,
+                revocation: false,
             },
         );
         ctx.encode_commit(&empty_id, 0).unwrap();
@@ -959,7 +959,7 @@ mod tests {
         assert!(err.to_string().contains("outside"), "{err}");
     }
 
-    // -------------------------------------------- cooperative handoff --
+    // -------------------------------------------- cooperative revocation --
 
     /// Seed a held-split state directly (a [`SplitOpening`] is
     /// framework-built) and return its shared tracker so a test can drive
@@ -984,7 +984,7 @@ mod tests {
                 resume_watermark,
                 last_committed: None,
                 hinted: false,
-                handoff: false,
+                revocation: false,
             },
         );
         tracker
@@ -997,26 +997,26 @@ mod tests {
     }
 
     #[test]
-    fn begin_handoff_declines_an_unknown_split() {
+    fn begin_revoke_declines_an_unknown_split() {
         let (mut ctx, _rt) = test_ctx();
         let id = crate::split::split_id_for([("never-opened", None)]).unwrap();
         assert!(
-            !ctx.begin_handoff(&id),
-            "an unheld split must be declined so the driver never opens a phantom handoff"
+            !ctx.begin_revoke(&id),
+            "an unheld split must be declined so the driver never opens a phantom revocation"
         );
     }
 
     #[test]
-    fn a_handoff_commit_at_the_cut_is_never_completed() {
+    fn a_drain_commit_at_the_cut_is_never_completed() {
         let (mut ctx, _rt) = test_ctx();
         let spec = spec_of(&[("a", Some("e-a"))]);
         let id = spec.id.clone();
         let tracker = seed_split(&mut ctx, &id, objects_of(&spec), 0);
 
-        assert!(ctx.begin_handoff(&id), "a held split accepts the handoff");
+        assert!(ctx.begin_revoke(&id), "a held split accepts the revocation");
         assert!(
             ctx.splits[&id].stop.load(Ordering::Relaxed),
-            "begin_handoff releases the fetcher via the shared stop flag"
+            "begin_revoke releases the fetcher via the shared stop flag"
         );
 
         // The lane decides end-of-input exactly at this acked watermark...
@@ -1038,15 +1038,15 @@ mod tests {
     }
 
     #[test]
-    fn handoff_ready_waits_for_the_acked_tail_then_hands_over_uncompleted() {
+    fn drain_ready_waits_for_the_acked_tail_then_hands_over_uncompleted() {
         let (mut ctx, _rt) = test_ctx();
         let spec = spec_of(&[("a", Some("e-a"))]);
         let id = spec.id.clone();
         let tracker = seed_split(&mut ctx, &id, objects_of(&spec), 0);
-        assert!(ctx.begin_handoff(&id));
+        assert!(ctx.begin_revoke(&id));
 
         // Still draining: no terminal yet.
-        assert!(ctx.handoff_ready(&id).unwrap().is_none());
+        assert!(ctx.drain_ready(&id).unwrap().is_none());
 
         // Terminal known, but the tail is not yet acked and committed.
         let cut = Position {
@@ -1057,25 +1057,25 @@ mod tests {
         .unwrap();
         tracker.set_terminal(cut);
         assert!(
-            ctx.handoff_ready(&id).unwrap().is_none(),
-            "a handoff waits until every emitted record is acked and committed"
+            ctx.drain_ready(&id).unwrap().is_none(),
+            "a revocation waits until every emitted record is acked and committed"
         );
 
         // The drain's tick commit folds the cut watermark (last_committed = cut).
         let _ = ctx.encode_commit(&id, cut).unwrap();
         let progress = ctx
-            .handoff_ready(&id)
+            .drain_ready(&id)
             .unwrap()
             .expect("the acked tail is handed over");
         assert_eq!(progress.watermark, cut);
         assert!(
             !progress.completed,
-            "a handoff hands the split off with completed: false"
+            "a revocation hands the split off with completed: false"
         );
     }
 
     #[test]
-    fn sweep_declines_a_handing_off_split_that_would_otherwise_complete() {
+    fn sweep_declines_a_draining_split_that_would_otherwise_complete() {
         let (mut ctx, _rt) = test_ctx();
 
         // A tenancy that emitted nothing and resumed exactly at end-of-input
@@ -1085,15 +1085,15 @@ mod tests {
         let tracker = seed_split(&mut ctx, &id, objects_of(&spec), 0);
         tracker.set_terminal(0);
         assert!(
-            ctx.begin_handoff(&id),
-            "the split is held, so the handoff is accepted"
+            ctx.begin_revoke(&id),
+            "the split is held, so the revocation is accepted"
         );
         assert!(
             ctx.sweep(&id).unwrap().is_none(),
-            "a handing-off split is given away via handoff_ready, never completed by the sweep"
+            "a handing-off split is given away via drain_ready, never completed by the sweep"
         );
 
-        // Control: the identical shape without a handoff DOES complete via the
+        // Control: the identical shape without a revocation DOES complete via the
         // sweep, so the guard above is what makes the difference.
         let spec2 = spec_of(&[("b", Some("e-b"))]);
         let id2 = spec2.id.clone();
@@ -1101,7 +1101,7 @@ mod tests {
         tracker2.set_terminal(0);
         assert!(
             ctx.sweep(&id2).unwrap().is_some(),
-            "the same shape without a handoff completes via the sweep"
+            "the same shape without a revocation completes via the sweep"
         );
     }
 }

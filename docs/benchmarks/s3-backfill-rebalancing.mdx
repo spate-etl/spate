@@ -1,0 +1,103 @@
+---
+title: S3 backfill rebalancing
+sidebar_position: 10
+description: Time-to-balance and replay cost when a second instance joins a running coordinated backfill.
+---
+
+import BenchStat, { StatRow } from '@site/src/components/Bench/BenchStat';
+
+# S3 backfill rebalancing
+
+The [backfill baseline](./s3-backfill.mdx) measures one instance's decode
+ceiling. This rig measures the other thing coordination has to get right:
+when a **second instance joins a running job**, how fast does work move to
+it, and what does the move cost in re-read rows?
+
+It is a rebalancing rig, not a throughput rig. The sink is deliberately
+throttled, so wall time is pacing-dominated and reported only as a
+diagnostic — the figures that matter are how much of the job the late
+joiner ends up doing (`late_share`) and how many rows the handover replays
+(`duplicate_rows`).
+
+One instance starts the backfill; a second joins a few seconds in. The
+leader revokes a weight-balanced share of splits toward it — the previous
+owner stops intake at an object boundary, commits its drained tail, and
+releases, so the new owner resumes from a watermark rather than re-reading.
+
+<StatRow>
+  <BenchStat
+    emphasis
+    label="Rows replayed on handover"
+    bench="s3_backfill_coordinated"
+    metric="duplicate_rows"
+    where={{ instances: 2 }}
+    unit="rows"
+    sub="a cooperative revocation drains and commits before releasing"
+  />
+  <BenchStat
+    emphasis
+    label="Late joiner's share of the job"
+    bench="s3_backfill_coordinated"
+    metric="late_share"
+    where={{ instances: 2 }}
+    sub="fraction of rows taken by the instance that joined late"
+  />
+</StatRow>
+
+<StatRow>
+  <BenchStat
+    label="Splits moved"
+    bench="s3_backfill_coordinated"
+    metric="drained_total"
+    where={{ instances: 2 }}
+    unit="splits"
+    sub="cooperative revocations that drained cleanly"
+  />
+  <BenchStat
+    label="Drain latency (p50)"
+    bench="s3_backfill_coordinated"
+    metric="drain_p50_s"
+    where={{ instances: 2 }}
+    unit="s"
+    sub="stop intake → commit tail → release, on the losing instance"
+  />
+  <BenchStat
+    label="Forced revocations"
+    bench="s3_backfill_coordinated"
+    metric="forced_total"
+    where={{ instances: 2 }}
+    unit="revocations"
+    sub="moves that took the replaying path instead of draining cleanly"
+  />
+</StatRow>
+
+The move is **replay-free**: every split the late joiner picks up carries
+the resume point its previous owner committed, so `duplicate_rows` is zero
+across every repetition. That is not the rig being lucky — a cooperative
+revocation commits the drained tail *before* releasing, so there is nothing
+left for the next owner to re-read.
+
+`forced_total` is the control on that claim. A forced revocation is the one
+that *would* replay, and the rig pins `drain_deadline` well above the
+measured drain (60s against a p50 of ~5s) precisely so a timeout does not
+quietly become what the run is measuring. Reps do occasionally record a
+forced revocation anyway — a split fenced mid-drain ends the same way —
+and `duplicate_rows` stays zero through those too, because the tail was
+already committed when the fence landed.
+
+:::note What this replaced
+These rows measure the leader-assigned model only. The peer-to-peer
+work-stealing balancer it replaced is not benchmarked here — the rig reads
+both metric vocabularies so an A/B *can* be run across the two builds, but
+no such comparison has been recorded, and the reversal was argued on
+design grounds rather than on throughput. See the
+[design log](../DESIGN.md) for that argument and
+[work assignment](../user-guide/02-concepts/08-work-assignment.mdx) for the
+algorithm. The structural difference is not a matter of degree: the
+leader-assigned model has no steal path at all, so a live owner's split can
+only ever move through a revocation.
+:::
+
+Rows are recorded to `benchmarks/results/s3-backfill-coordinated.jsonl` by
+`cargo run -p benchmarks --release --bin s3_backfill_coordinated`; see the
+[methodology](./methodology.mdx) for the harness and the A/B discipline.

@@ -43,7 +43,7 @@ shards are your data's shape, not the router's choice.
 
 How several pipeline replicas divide one broker-less source's work: a
 leader-elected planner enumerates splits, workers lease them with
-heartbeats and steal toward balance, and epoch-fenced commits make stale
+heartbeats and reconcile toward a leader-computed assignment, and epoch-fenced commits make stale
 writes impossible — at-least-once preserved, duplicates never loss.
 
 ## Related

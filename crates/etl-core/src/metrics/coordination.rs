@@ -12,71 +12,64 @@ use std::time::Duration;
 pub enum AcquireReason {
     /// First claim of a runnable split no one has held.
     Create,
-    /// Instant claim of a voluntarily released split.
-    Released,
     /// Fast reclaim of a split this worker (by stable id) still held.
     Reclaimed,
     /// Takeover of a split whose lease expired unrenewed.
     Expired,
-    /// Steal from an over-loaded live owner, for balance.
-    Stolen,
-    /// Cooperative handoff from a live owner that drained and released the
-    /// split first — the resume point covers everything it emitted, so the
-    /// claim is replay-free (unlike [`Stolen`](AcquireReason::Stolen)).
-    Handoff,
+    /// Claim of a split whose previous owner released it cleanly — a
+    /// drained revocation, or a shutdown/scale-down hand-back. Either way
+    /// the owner cleared the record before letting go, so the resume point
+    /// covers everything it emitted and the claim is replay-free; a drained
+    /// revocation additionally counts [`RevocationOutcome::Drained`] on the
+    /// releasing side. Contrast [`Expired`](AcquireReason::Expired), where
+    /// a dead owner's uncommitted tail replays.
+    ///
+    /// The two clean cases are one reason on purpose: a claiming worker
+    /// cannot tell them apart (both present as a cleared owner and a
+    /// vanished lease), and a label it cannot populate correctly is a
+    /// series that reads zero forever.
+    Reassigned,
 }
 
-/// Outcome of one cooperative split handoff (the `outcome` label on
-/// `etl_coordination_handoffs_total`), the consent-first live-owner
-/// transfer that replaces a replaying steal when the owner is responsive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HandoffOutcome {
-    /// A requester wrote a handoff request naming an over-loaded victim.
-    Requested,
-    /// A victim drained a split, committed its tail, and released it — a
-    /// replay-free transfer (the requester claims it as
-    /// [`AcquireReason::Handoff`]).
-    Granted,
-    /// A request went unanswered for the full round budget and fell back
-    /// to a replaying steal (the dead/stuck-owner path). Counted on the
-    /// requester; a late grant may still land afterwards, so one request
-    /// can count both `Timeout` and (on the victim) `Granted`.
-    Timeout,
-    /// A victim's granted drain ended without the full-commit release: it
-    /// was fenced mid-drain (a fallback steal or expiry took the split)
-    /// or the release write failed. Counted on the victim. A request the
-    /// *requester* abandons (withdrawn as unjustified, superseded, or
-    /// claimable work reappearing) ends with no terminal outcome at all —
-    /// the outcomes are per-side events, not a partition of requests.
-    Aborted,
-}
-
-/// Which term of time-to-balance a handoff duration measures (the `phase`
-/// label on `etl_coordination_handoff_duration_seconds`).
+/// Outcome of one split revocation (the `outcome` label on
+/// `etl_coordination_revocations_total`) — the leader moving a split away
+/// from a live owner by dropping it from that owner's assignment.
 ///
-/// They are observed on opposite sides of a move and **must not be added**:
-/// `Request` starts before the victim has even been asked and stops when
-/// the split is claimed, so it strictly *contains* the `Drain` it was
-/// waiting on. Time-to-balance for one move is the `Request` alone;
-/// `Request - Drain` is roughly what admission and the claim cost.
+/// All three count on the **releasing** worker, so they read as one
+/// lifecycle rather than as two sides of a negotiation: `Requested` is the
+/// denominator, and every revocation that leaves it terminates in exactly
+/// one of `Drained` or `Forced` — including the paths that do not look
+/// like a revocation ending at all, where the split completes or is
+/// `fail`ed mid-drain, or the process departs while draining.
+/// `requested - drained - forced` is therefore the drains still in flight,
+/// which `etl_coordination_splits_draining` reports directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum HandoffPhase {
-    /// Requester-side: from going under target with a victim worth asking,
-    /// to claiming a granted split. Deliberately spans withdrawn,
-    /// superseded and re-targeted requests rather than restarting per
-    /// request — it answers "how long was this worker short of its share?",
-    /// so request-admission pacing cannot hide in the gaps between attempts.
-    Request,
-    /// Victim-side: from annotating the grant to the release landing —
-    /// stopping intake at a safe boundary, committing the drained tail, and
-    /// giving the split up. This is the term concurrent grants overlap.
-    Drain,
+pub enum RevocationOutcome {
+    /// The leader stopped naming this split in the worker's assignment, so
+    /// the cooperative drain began: stop intake at a safe boundary, chase
+    /// the tail to a final fenced commit, release.
+    Requested,
+    /// The drain finished cooperatively: the tail committed and the release
+    /// landed, so the next owner resumes past everything this worker
+    /// emitted and replays nothing. The outcome the cooperative path exists
+    /// to produce; the gaining side counts
+    /// [`AcquireReason::Reassigned`]. A split that *completes* mid-drain
+    /// counts here too — its tail is committed and nothing replays, which
+    /// is the same outcome even though nobody took it over.
+    Drained,
+    /// The cooperative path did not finish, so the release was forced: the
+    /// source declined to stop at a safe boundary, the drain outran
+    /// `drain_deadline`, or the split was fenced away before the release
+    /// landed. The uncommitted tail replays under the next owner. A decline
+    /// and an elapsed deadline are one outcome on purpose — the leader's
+    /// revocation is a decision, not a request, so both end the same way
+    /// and differ only in how long the fleet waited to find out.
+    Forced,
 }
 
 /// Why a split lease was lost involuntarily (the `reason` label on
-/// `etl_coordination_revocations_total`).
+/// `etl_coordination_split_losses_total`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SplitLossReason {
@@ -84,6 +77,19 @@ pub enum SplitLossReason {
     Fenced,
     /// Self-fenced: no successful lease write for a full lease duration.
     Starved,
+    /// The leader stopped assigning the split and the cooperative drain
+    /// never completed — the source declined it, or it outran
+    /// `drain_deadline` — so this worker forced its own release. The
+    /// split's uncommitted tail replays under its next owner: the
+    /// bounded-replay outcome the cooperative path exists to avoid, and
+    /// therefore a signal that `drain_deadline` is too tight for this
+    /// source's commit interval, or that a lane is wedged.
+    ///
+    /// Narrower than [`RevocationOutcome::Forced`], which also covers a
+    /// revocation whose split was fenced away mid-drain; that one is lost
+    /// as [`Fenced`](SplitLossReason::Fenced), because a peer — not this
+    /// worker — ended the tenancy.
+    Revoked,
 }
 
 /// Outcome of one split-record write (the `outcome` label on
@@ -140,20 +146,18 @@ pub struct CoordinationMetrics {
     live_workers: Gauge,
     leader: Gauge,
     idle: Gauge,
-    handoffs_in_flight: Gauge,
+    splits_draining: Gauge,
     acquired_create: Counter,
-    acquired_released: Counter,
     acquired_reclaimed: Counter,
     acquired_expired: Counter,
-    acquired_stolen: Counter,
-    acquired_handoff: Counter,
+    acquired_reassigned: Counter,
     lost_fenced: Counter,
     lost_starved: Counter,
+    lost_revoked: Counter,
     releases: Counter,
-    handoffs_requested: Counter,
-    handoffs_granted: Counter,
-    handoffs_timeout: Counter,
-    handoffs_aborted: Counter,
+    revocations_requested: Counter,
+    revocations_drained: Counter,
+    revocations_forced: Counter,
     splits_planned: Counter,
     replans_ok: Counter,
     replans_error: Counter,
@@ -171,8 +175,8 @@ pub struct CoordinationMetrics {
     store_op_delete: Histogram,
     store_op_list: Histogram,
     store_op_watch: Histogram,
-    handoff_request_duration: Histogram,
-    handoff_drain_duration: Histogram,
+    drain_duration: Histogram,
+    assignment_latency: Histogram,
 }
 
 impl CoordinationMetrics {
@@ -187,16 +191,16 @@ impl CoordinationMetrics {
         };
         let lost = |reason| {
             labels.counter1(
-                names::COORDINATION_REVOCATIONS_TOTAL,
+                names::COORDINATION_SPLIT_LOSSES_TOTAL,
                 names::L_REASON,
                 reason,
             )
         };
         let replans =
             |outcome| labels.counter1(names::COORDINATION_REPLANS_TOTAL, names::L_OUTCOME, outcome);
-        let handoffs = |outcome| {
+        let revocations = |outcome| {
             labels.counter1(
-                names::COORDINATION_HANDOFFS_TOTAL,
+                names::COORDINATION_REVOCATIONS_TOTAL,
                 names::L_OUTCOME,
                 outcome,
             )
@@ -210,13 +214,6 @@ impl CoordinationMetrics {
                 op,
             )
         };
-        let handoff_phase = |phase| {
-            labels.histogram1(
-                names::COORDINATION_HANDOFF_DURATION_SECONDS,
-                names::L_PHASE,
-                phase,
-            )
-        };
         CoordinationMetrics {
             splits_owned: labels.gauge(names::COORDINATION_SPLITS_OWNED),
             splits_completed: labels.gauge(names::COORDINATION_SPLITS_COMPLETED),
@@ -224,20 +221,18 @@ impl CoordinationMetrics {
             live_workers: labels.gauge(names::COORDINATION_LIVE_WORKERS),
             leader: labels.gauge(names::COORDINATION_LEADER),
             idle: labels.gauge(names::COORDINATION_IDLE),
-            handoffs_in_flight: labels.gauge(names::COORDINATION_HANDOFFS_IN_FLIGHT),
+            splits_draining: labels.gauge(names::COORDINATION_SPLITS_DRAINING),
             acquired_create: acquired("create"),
-            acquired_released: acquired("released"),
             acquired_reclaimed: acquired("reclaimed"),
             acquired_expired: acquired("expired"),
-            acquired_stolen: acquired("stolen"),
-            acquired_handoff: acquired("handoff"),
+            acquired_reassigned: acquired("reassigned"),
             lost_fenced: lost("fenced"),
             lost_starved: lost("starved"),
+            lost_revoked: lost("revoked"),
             releases: labels.counter(names::COORDINATION_RELEASES_TOTAL),
-            handoffs_requested: handoffs("requested"),
-            handoffs_granted: handoffs("granted"),
-            handoffs_timeout: handoffs("timeout"),
-            handoffs_aborted: handoffs("aborted"),
+            revocations_requested: revocations("requested"),
+            revocations_drained: revocations("drained"),
+            revocations_forced: revocations("forced"),
             splits_planned: labels.counter(names::COORDINATION_SPLITS_PLANNED_TOTAL),
             replans_ok: replans("ok"),
             replans_error: replans("error"),
@@ -255,8 +250,8 @@ impl CoordinationMetrics {
             store_op_delete: store_op("delete"),
             store_op_list: store_op("list"),
             store_op_watch: store_op("watch"),
-            handoff_request_duration: handoff_phase("request"),
-            handoff_drain_duration: handoff_phase("drain"),
+            drain_duration: labels.histogram(names::COORDINATION_DRAIN_DURATION_SECONDS),
+            assignment_latency: labels.histogram(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS),
         }
     }
 
@@ -294,35 +289,70 @@ impl CoordinationMetrics {
     pub fn acquired(&self, reason: AcquireReason) {
         match reason {
             AcquireReason::Create => self.acquired_create.increment(1),
-            AcquireReason::Released => self.acquired_released.increment(1),
             AcquireReason::Reclaimed => self.acquired_reclaimed.increment(1),
             AcquireReason::Expired => self.acquired_expired.increment(1),
-            AcquireReason::Stolen => self.acquired_stolen.increment(1),
-            AcquireReason::Handoff => self.acquired_handoff.increment(1),
+            AcquireReason::Reassigned => self.acquired_reassigned.increment(1),
         }
     }
 
-    /// Record one cooperative-handoff outcome.
-    pub fn handoff(&self, outcome: HandoffOutcome) {
+    /// Record one revocation event.
+    pub fn revocation(&self, outcome: RevocationOutcome) {
         match outcome {
-            HandoffOutcome::Requested => self.handoffs_requested.increment(1),
-            HandoffOutcome::Granted => self.handoffs_granted.increment(1),
-            HandoffOutcome::Timeout => self.handoffs_timeout.increment(1),
-            HandoffOutcome::Aborted => self.handoffs_aborted.increment(1),
+            RevocationOutcome::Requested => self.revocations_requested.increment(1),
+            RevocationOutcome::Drained => self.revocations_drained.increment(1),
+            RevocationOutcome::Forced => self.revocations_forced.increment(1),
         }
     }
 
-    /// Record one cooperative-handoff phase duration.
-    pub fn handoff_duration(&self, phase: HandoffPhase, d: Duration) {
-        match phase {
-            HandoffPhase::Request => self.handoff_request_duration.record(d.as_secs_f64()),
-            HandoffPhase::Drain => self.handoff_drain_duration.record(d.as_secs_f64()),
-        }
+    // The two timings below were one `_duration_seconds` family split by a
+    // `phase` label back when a move was a negotiation: the requester's
+    // wait strictly *contained* the victim's drain, so the two were nested
+    // terms of a single time-to-balance figure and belonged on one family.
+    //
+    // Leader-assigned reconciliation destroyed that relationship. Nothing
+    // now spans both: a drain starts when the leader removes a split from
+    // one worker's assignment, an assignment wait starts when the leader
+    // adds a split to another's, and neither worker observes the other's
+    // clock. They also have different denominators — every assigned split
+    // is waited for, including brand-new splits and dead owners' work that
+    // no revocation ever touched, so the assignment wait is not a
+    // revocation measurement at all.
+    //
+    // Two families, therefore, not one with a label. A shared family would
+    // assert a composition that no longer exists, and it would leave
+    // `histogram_quantile` over `sum by (le)` — aggregating away `phase` —
+    // spelled exactly like a reasonable query while silently mixing two
+    // populations. Separate names make the meaningless aggregate
+    // unwritable rather than merely discouraged.
+
+    /// Record one cooperative drain: revocation requested to the release
+    /// landing, on the **releasing** worker.
+    ///
+    /// Observed only when the drain completes cooperatively
+    /// ([`RevocationOutcome::Drained`]) — a forced release is a failure of
+    /// the drain, and timing it would mix `drain_deadline` into the
+    /// distribution of how long draining actually takes.
+    pub fn drain_duration(&self, d: Duration) {
+        self.drain_duration.record(d.as_secs_f64());
     }
 
-    /// Set the number of grants this worker is currently draining away.
-    pub fn set_handoffs_in_flight(&self, in_flight: usize) {
-        self.handoffs_in_flight.set(in_flight as f64);
+    /// Record one assignment wait: a split appearing in this worker's
+    /// assignment to this worker holding its lease, on the **gaining**
+    /// worker.
+    ///
+    /// This is the fleet's time-to-balance as an operator experiences it —
+    /// how long work the leader has already decided this worker should be
+    /// doing sat undone. It spans whatever stood in the way, including the
+    /// previous owner's drain, so it never flatters itself by timing only
+    /// the final claim.
+    pub fn assignment_latency(&self, d: Duration) {
+        self.assignment_latency.record(d.as_secs_f64());
+    }
+
+    /// Set the number of splits this worker is currently draining away
+    /// under revocation.
+    pub fn set_splits_draining(&self, draining: usize) {
+        self.splits_draining.set(draining as f64);
     }
 
     /// Record one involuntary split loss.
@@ -330,6 +360,7 @@ impl CoordinationMetrics {
         match reason {
             SplitLossReason::Fenced => self.lost_fenced.increment(1),
             SplitLossReason::Starved => self.lost_starved.increment(1),
+            SplitLossReason::Revoked => self.lost_revoked.increment(1),
         }
     }
 

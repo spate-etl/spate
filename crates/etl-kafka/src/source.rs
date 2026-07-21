@@ -48,6 +48,7 @@ use etl_core::record::PartitionId;
 use etl_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
+use rdkafka::statistics::Statistics;
 use rdkafka::{Offset, TopicPartitionList};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -147,13 +148,28 @@ impl KafkaSource {
     }
 
     /// Partitions still owned (the current assignment), as `PartitionId`s.
-    /// Used to prune per-partition metric series when partitions are revoked
-    /// so a moved-away partition's lag gauge does not persist forever.
+    /// Partitions librdkafka reports outside this set belong to another
+    /// member now, so their lag is neither published nor left standing.
     fn retained_partition_ids(&self) -> Vec<PartitionId> {
         self.assignment
             .values()
-            .map(|p| PartitionId(u32::try_from(*p).unwrap_or(0)))
+            .filter_map(|p| u32::try_from(*p).ok().map(PartitionId))
             .collect()
+    }
+
+    /// Zero and drop the lag series for partitions this member lost in the
+    /// rebalance that just completed.
+    ///
+    /// Called on `Intent::Assign` — once the new assignment is known — and
+    /// never on `Intent::Revoke`. Under eager rebalancing a revoke covers
+    /// *every* partition, including the ones about to be handed straight
+    /// back, so pruning there would zero the whole family on every rebalance
+    /// and read as a phantom drain. It would also blank the partitions the
+    /// runtime is still draining and committing.
+    fn prune_lag_series(&self) {
+        if let Some(m) = &self.metrics {
+            m.retain_partitions(&self.retained_partition_ids());
+        }
     }
 
     /// Partitions whose offsets this member may still store: the live
@@ -224,32 +240,57 @@ impl KafkaSource {
             return;
         };
         if let Some(metrics) = self.metrics.as_ref() {
-            // librdkafka reports `consumer_lag = -1` while the lag is unknown
-            // — before the first commit, and for any partition whose leader
-            // has not answered yet. Publishing the running max unconditionally
-            // would render `0` there, which is indistinguishable from "caught
-            // up": a maximally backlogged consumer would report no lag at all
-            // and every alert keyed on it would stay green. Hold the previous
-            // value instead, and only publish once some partition has a
-            // number. The per-partition series is gated the same way.
-            let mut max_lag: Option<u64> = None;
-            if let Some(topic) = stats.topics.get(&self.config.topic) {
-                for (pid, p) in &topic.partitions {
-                    if p.consumer_lag >= 0
-                        && let Ok(part) = u32::try_from(*pid)
-                    {
-                        let lag = u64::try_from(p.consumer_lag).unwrap_or(0);
-                        max_lag = Some(max_lag.unwrap_or(0).max(lag));
-                        metrics.set_partition_lag(PartitionId(part), lag);
-                    }
-                }
-            }
-            if let Some(max_lag) = max_lag {
-                metrics.set_lag_max(max_lag);
-            }
+            publish_lag(
+                &stats,
+                &self.config.topic,
+                &self.retained_partition_ids(),
+                metrics,
+            );
         }
         if let Some(stats_metrics) = self.stats_metrics.as_mut() {
             stats_metrics.update(&stats, &self.config.topic);
+        }
+    }
+}
+
+/// Translate one statistics snapshot into the framework's per-partition
+/// consumer-lag series.
+///
+/// Free function rather than a method so it is reachable from a unit test:
+/// `publish_stats` needs a live consumer, which is why this translation went
+/// untested long enough to render a permanent zero.
+///
+/// librdkafka reports `consumer_lag = -1` while the lag is unknown — before
+/// the first commit, and for any partition whose leader has not answered yet
+/// (`consumer_lag` is `(hi_offset or ls_offset) - committed_offset`; see the
+/// librdkafka `STATISTICS.md`). Those partitions are skipped rather than
+/// published as `0`, which would be indistinguishable from "caught up": a
+/// maximally backlogged consumer would report no lag and every alert keyed on
+/// it would stay green. A partition that has never reported a number is
+/// therefore absent from the exposition, and one that reported before keeps
+/// its last value.
+///
+/// `owned` restricts publication to the live assignment. The snapshot carries
+/// every partition the client holds metadata for, so without this filter a
+/// partition that moved to another member would keep being refreshed here and
+/// a `sum` across the family would exceed *this member's* backlog. The filter
+/// is one half of that; the other is
+/// [`SourceMetrics::retain_partitions`](etl_core::metrics::SourceMetrics::retain_partitions),
+/// which zeroes what the member lost — the exporter cannot delete a series,
+/// so a partition left alone renders its last value forever.
+fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: &SourceMetrics) {
+    let Some(topic) = stats.topics.get(topic) else {
+        return;
+    };
+    for (pid, p) in &topic.partitions {
+        if p.consumer_lag >= 0
+            && let Ok(part) = u32::try_from(*pid)
+            && owned.contains(&PartitionId(part))
+        {
+            metrics.set_partition_lag(
+                PartitionId(part),
+                u64::try_from(p.consumer_lag).unwrap_or(0),
+            );
         }
     }
 }
@@ -294,6 +335,16 @@ impl Source for KafkaSource {
         // (see the `metrics` module docs).
         self.metrics = ctx.stage_metrics.clone();
         self.stats_metrics = if self.config.statistics_interval.is_zero() {
+            // Consumer lag is derived from the statistics snapshot and has no
+            // other source, so disabling statistics removes a golden signal
+            // outright. That is the honest outcome — the series is absent
+            // rather than frozen at a `0` that reads as "caught up" — but it
+            // must not be silent.
+            tracing::warn!(
+                topic = %self.config.topic,
+                "statistics disabled (statistics_interval: 0s): consumer lag \
+                 and the etl_kafka_source_* families will not be published"
+            );
             None
         } else {
             ctx.meter
@@ -397,10 +448,6 @@ impl Source for KafkaSource {
         if let Some(intent) = intent {
             match intent {
                 Intent::Assign(tpl) => {
-                    if let Some(m) = &self.metrics {
-                        m.rebalance_assigned();
-                        m.set_lanes_active(tpl.count());
-                    }
                     if tpl.count() == 0 {
                         // Empty assignment (no partitions for this member).
                         // The rebalance protocol still MUST be acknowledged:
@@ -411,15 +458,14 @@ impl Source for KafkaSource {
                         let consumer = Arc::clone(self.consumer()?);
                         consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
+                        self.prune_lag_series();
                         return Ok(SourceEvent::Idle);
                     }
                     let lanes = self.accept_assignment(&tpl)?;
+                    self.prune_lag_series();
                     return Ok(SourceEvent::LanesAssigned(lanes));
                 }
                 Intent::Revoke(tpl) => {
-                    if let Some(m) = &self.metrics {
-                        m.rebalance_revoked();
-                    }
                     // Map revoked partitions back to lane ids.
                     let revoked: Vec<i32> = tpl.elements().iter().map(|e| e.partition()).collect();
                     let lanes: Vec<LaneId> = self
@@ -439,12 +485,14 @@ impl Source for KafkaSource {
                             self.revoking.insert(*lane, p);
                         }
                     }
-                    // The revoked partitions have moved to another member;
-                    // drop their per-partition lag series so it does not
-                    // persist frozen at its last value.
-                    if let Some(m) = &self.metrics {
-                        m.retain_partitions(&self.retained_partition_ids());
-                    }
+                    // The lag series are deliberately NOT pruned here. These
+                    // partitions are still being drained and committed, and
+                    // an eager rebalance revokes everything before handing
+                    // most of it back — zeroing now would blank the whole
+                    // family for a rebalance that changed nothing. The prune
+                    // happens once the new assignment is known, in
+                    // `Intent::Assign`.
+                    //
                     // Complete with unassign on the next call, after the
                     // runtime drained and committed.
                     self.pending_unassign = true;
@@ -656,7 +704,7 @@ mod tests {
     }
 
     /// The retained set that prunes per-partition metric series must exclude
-    /// revoked partitions so their lag gauge does not persist after the move.
+    /// revoked partitions, so the prune can zero the lag they left behind.
     #[test]
     fn retained_partition_ids_drop_revoked_partitions() {
         let mut source = KafkaSource::new(test_config());
@@ -673,5 +721,218 @@ mod tests {
             .collect();
         kept.sort_unstable();
         assert_eq!(kept, vec![0, 1], "revoked partition 2 is not retained");
+    }
+
+    mod lag {
+        use super::*;
+        use etl_core::metrics::ComponentLabels;
+        use rdkafka::statistics::{Partition, Topic};
+        use std::collections::HashMap;
+
+        const STD: &str = r#"pipeline="orders",component="source",component_type="kafka""#;
+
+        /// Run `f` against a local Prometheus recorder and return the rendered
+        /// exposition. Handles must be resolved inside `f`.
+        fn render(f: impl FnOnce(&SourceMetrics)) -> String {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            metrics::with_local_recorder(&recorder, || {
+                let m = SourceMetrics::new(&ComponentLabels::new("orders", "source", "kafka"));
+                f(&m);
+            });
+            handle.run_upkeep();
+            handle.render()
+        }
+
+        /// `(partition, consumer_lag)` pairs into a snapshot for `orders`.
+        fn stats(parts: &[(i32, i64)]) -> Statistics {
+            Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    Topic {
+                        topic: "orders".to_owned(),
+                        partitions: parts
+                            .iter()
+                            .map(|&(pid, consumer_lag)| {
+                                (
+                                    pid,
+                                    Partition {
+                                        partition: pid,
+                                        consumer_lag,
+                                        ..Default::default()
+                                    },
+                                )
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }
+        }
+
+        /// The regression this pins: a maximally backlogged consumer must publish
+        /// its backlog, per partition, at full magnitude.
+        #[test]
+        fn a_large_backlog_publishes_per_partition_lag() {
+            let rendered = render(|m| {
+                publish_lag(
+                    &stats(&[(0, 150_000_000), (1, 90_000_000)]),
+                    "orders",
+                    &[PartitionId(0), PartitionId(1)],
+                    m,
+                );
+            });
+            assert!(
+                rendered.contains(&format!(
+                    r#"etl_source_lag_records{{{STD},partition="0"}} 150000000"#
+                )),
+                "backlogged partition must report its lag:\n{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!(
+                    r#"etl_source_lag_records{{{STD},partition="1"}} 90000000"#
+                )),
+                "every owned partition gets its own series:\n{rendered}"
+            );
+        }
+
+        /// There is no aggregate series: readers aggregate in the query layer.
+        /// An unlabelled series sharing this family name would make
+        /// `sum(etl_source_lag_records)` double-count.
+        #[test]
+        fn no_unlabelled_aggregate_series_is_published() {
+            let rendered = render(|m| {
+                publish_lag(
+                    &stats(&[(0, 17), (1, 4)]),
+                    "orders",
+                    &[PartitionId(0), PartitionId(1)],
+                    m,
+                );
+            });
+            let unlabelled = rendered
+                .lines()
+                .filter(|l| l.starts_with("etl_source_lag_records{"))
+                .any(|l| !l.contains("partition="));
+            assert!(
+                !unlabelled,
+                "every lag series must carry a partition label:\n{rendered}"
+            );
+        }
+
+        /// `consumer_lag = -1` means "not measured yet" — before the first
+        /// commit, or before the partition leader has answered. Publishing it
+        /// as `0` would read as "caught up" on exactly the consumer that is
+        /// most behind.
+        #[test]
+        fn unknown_lag_registers_no_series() {
+            let rendered = render(|m| {
+                publish_lag(
+                    &stats(&[(0, -1), (1, -1)]),
+                    "orders",
+                    &[PartitionId(0), PartitionId(1)],
+                    m,
+                );
+            });
+            assert!(
+                !rendered.contains("etl_source_lag_records"),
+                "an all-unknown snapshot must publish nothing:\n{rendered}"
+            );
+        }
+
+        /// A mixed snapshot publishes the partitions that have a number and
+        /// stays silent about the rest, rather than dragging the unknown ones
+        /// to zero.
+        #[test]
+        fn mixed_snapshot_publishes_only_known_partitions() {
+            let rendered = render(|m| {
+                publish_lag(
+                    &stats(&[(0, 4_200), (1, -1)]),
+                    "orders",
+                    &[PartitionId(0), PartitionId(1)],
+                    m,
+                );
+            });
+            assert!(rendered.contains(&format!(
+                r#"etl_source_lag_records{{{STD},partition="0"}} 4200"#
+            )));
+            assert!(
+                !rendered.contains(r#"partition="1""#),
+                "unknown partition must be absent:\n{rendered}"
+            );
+        }
+
+        /// Once measured, a partition holds its last value through snapshots
+        /// where librdkafka temporarily reports the lag as unknown (a leader
+        /// change, say) — dropping to `0` would look like a drain that never
+        /// happened.
+        #[test]
+        fn a_known_partition_holds_its_value_when_lag_goes_unknown() {
+            let rendered = render(|m| {
+                publish_lag(&stats(&[(0, 5_000)]), "orders", &[PartitionId(0)], m);
+                publish_lag(&stats(&[(0, -1)]), "orders", &[PartitionId(0)], m);
+            });
+            assert!(
+                rendered.contains(&format!(
+                    r#"etl_source_lag_records{{{STD},partition="0"}} 5000"#
+                )),
+                "last known value is held:\n{rendered}"
+            );
+        }
+
+        /// A snapshot for a different topic must not publish anything: the
+        /// source owns exactly one topic.
+        #[test]
+        fn a_snapshot_without_our_topic_publishes_nothing() {
+            let rendered = render(|m| {
+                publish_lag(&stats(&[(0, 900)]), "other-topic", &[PartitionId(0)], m);
+            });
+            assert!(
+                !rendered.contains("etl_source_lag_records"),
+                "wrong topic must publish nothing:\n{rendered}"
+            );
+        }
+
+        /// A partition that moved to another member must contribute nothing
+        /// to this member's total, or every reader that sums across
+        /// partitions double-counts it.
+        ///
+        /// The exporter has no deletion and no idle timeout is configured, so
+        /// "contribute nothing" cannot mean "disappear" — the series renders
+        /// for the life of the process whatever we do with the handle. It
+        /// means `0`, which is the truth for a partition this member no
+        /// longer owns. Both halves are asserted: the value is zeroed at the
+        /// prune, and the ownership filter keeps later snapshots from
+        /// reviving it.
+        #[test]
+        fn revoked_partitions_zero_out_and_stop_updating() {
+            let rendered = render(|m| {
+                // Both owned.
+                publish_lag(
+                    &stats(&[(0, 11), (1, 22)]),
+                    "orders",
+                    &[PartitionId(0), PartitionId(1)],
+                    m,
+                );
+                // Partition 1 is revoked: it leaves the owned set and the
+                // prune zeroes it. librdkafka keeps reporting it in the
+                // snapshot for a while, so the filter has to hold too.
+                m.retain_partitions(&[PartitionId(0)]);
+                publish_lag(&stats(&[(0, 33), (1, 44)]), "orders", &[PartitionId(0)], m);
+            });
+            assert!(rendered.contains(&format!(
+                r#"etl_source_lag_records{{{STD},partition="0"}} 33"#
+            )));
+            assert!(
+                rendered.contains(&format!(
+                    r#"etl_source_lag_records{{{STD},partition="1"}} 0"#
+                )),
+                "revoked partition must be zeroed, not left at its last lag:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains(r#"partition="1"} 44"#),
+                "revoked partition must not resume updating:\n{rendered}"
+            );
+        }
     }
 }

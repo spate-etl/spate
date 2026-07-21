@@ -155,11 +155,12 @@ pub struct SourceCtx {
     pub meter: Option<Meter>,
     /// The framework's own source-stage handles (`etl_source_*`), shared with
     /// the controller. A source that can observe its own consumer lag
-    /// publishes it here — [`SourceMetrics::set_lag_max`] and
-    /// [`SourceMetrics::set_partition_lag`] have no other caller, because the
-    /// framework cannot compute lag without the client's view of the log end.
-    /// `None` only when the source is driven outside a pipeline (tests, or a
-    /// direct `open` call), in which case lag simply goes unpublished.
+    /// publishes it here — [`SourceMetrics::set_partition_lag`] and
+    /// [`SourceMetrics::retain_partitions`] have no other caller, because the
+    /// framework cannot compute lag without the client's view of the log end,
+    /// nor tell which partitions the client still owns. `None` only when the
+    /// source is driven outside a pipeline (tests, or a direct `open` call),
+    /// in which case lag simply goes unpublished.
     ///
     /// Everything else on these handles — records, bytes, poll duration,
     /// rebalances, active lanes — is recorded by the runtime itself; a source
@@ -167,9 +168,10 @@ pub struct SourceCtx {
     pub stage_metrics: Option<Arc<SourceMetrics>>,
     /// Whether cardinality-sensitive per-partition series are enabled
     /// (`metrics.per_partition_detail`). Gates a connector's own per-partition
-    /// families the same way it gates the framework's `etl_source_lag_records`
-    /// partition series: when `false`, register and emit only aggregate
-    /// (per-component or per-broker) series.
+    /// families: when `false`, register and emit only aggregate
+    /// (per-component or per-broker) series. It does **not** gate
+    /// `etl_source_lag_records` — consumer lag has no aggregate series to fall
+    /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
 }
 

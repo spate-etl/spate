@@ -33,6 +33,10 @@ a metric you deliberately want *outside* the `etl_` namespace. See
   cardinality-sensitive: `partition` labels appear only when
   `metrics.per_partition_detail: true` (default `false`); `shard` and
   `replica` are bounded by cluster topology and always on.
+  **`etl_source_lag_records` is the one exception** — its `partition` label is
+  unmarked because consumer lag is always published. It is the family's only
+  representation, and a cardinality knob that could delete a golden signal is
+  how a maximally backlogged consumer ends up reporting nothing.
 - Hot-path discipline: all handles are pre-registered at pipeline build time;
   counters are incremented at **batch** boundaries; per-record duration
   histograms are observed per batch (duration ÷ n reported as batch means),
@@ -45,9 +49,61 @@ a metric you deliberately want *outside* the `etl_` namespace. See
 | `etl_source_records_total` | counter | | Records emitted by the source (post-poll, pre-deserialization). |
 | `etl_source_bytes_total` | counter | | Payload bytes emitted. |
 | `etl_source_poll_duration_seconds` | histogram | | Time spent inside `poll` per call. |
-| `etl_source_lag_records` | gauge | `partition` ⚠ | Consumer lag (log-end offset − committed), per partition when enabled; the unlabelled series reports the max across partitions. |
+| `etl_source_lag_records` | gauge | `partition` | Consumer lag (log-end offset − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
 | `etl_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Rebalance events observed. |
 | `etl_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
+
+### Alerting on consumer lag
+
+```promql
+# Total backlog for a pipeline — the figure to compare with the broker's
+# group lag. Every member's owned partitions sum into one number.
+sum by (pipeline) (etl_source_lag_records)
+
+# The worst single partition, which a total can hide.
+max by (pipeline) (etl_source_lag_records)
+
+# Lag was never measured: statistics are disabled, the consumer has not
+# committed yet, or the source is not publishing. Absence is deliberate — a
+# `0` here would be indistinguishable from "caught up", which is how this
+# family once read zero on a fully backlogged consumer.
+absent(etl_source_lag_records{pipeline="orders"})
+
+# Only *some* partitions have reported. The sum above silently omits the
+# rest, so it under-reports with no other signal. `lanes_active` is the
+# assignment size, so a shortfall here means the total is partial.
+count by (pipeline) (etl_source_lag_records)
+  < sum by (pipeline) (etl_source_lanes_active)
+```
+
+Alert on the total, on absence, **and** on the partial-measurement check.
+Rate-of-change matters more than level for a backfill: a large lag that is
+shrinking is a catch-up working as intended, while a small lag that is not
+shrinking is a stalled pipeline.
+
+Give the absence and partial-measurement alerts a `for:` window of a minute or
+so. Both are legitimately true at startup — a series appears only after the
+first commit *and* the following statistics tick (with the defaults, `5s +
+5s`, longer if the first assignment is slow) — so a bare `absent()` pages on
+every deploy.
+
+### Absent, zero, and stale
+
+The exporter has no way to delete a series, and no idle timeout is configured,
+so a series renders for the life of the process once registered. The three
+states are therefore distinguished by value, not by presence:
+
+- **absent** — never measured. No commit yet, statistics disabled, or the
+  source does not publish lag at all.
+- **`0`** — measured. Either the consumer is caught up, or the member no
+  longer owns that partition: on losing a partition a member zeroes it, so
+  that `sum` across members stays equal to the real backlog rather than
+  double-counting a partition that has moved.
+- **stale** — cannot happen for a partition a member lost, which is what the
+  zeroing buys. A frozen non-zero value means the member still owns the
+  partition and librdkafka has stopped measuring it (a leader change, say);
+  the last known value is held deliberately, because dropping it to `0` would
+  look like a drain that never happened.
 
 ## Kafka source (`etl_kafka_source_*`)
 
@@ -93,7 +149,7 @@ cross-series operator). Series backed by data librdkafka hasn't produced yet
 | `etl_kafka_source_group_assignment_size` | gauge | | Partitions in the current group assignment. |
 | `etl_kafka_source_group_healthy` | gauge | | 1 while the member is settled (`up` + `steady`); 0 during joins/rebalances (state detail goes to debug logs). |
 | `etl_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
-| `etl_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `etl_source_lag_records` is the committed-basis view. |
+| `etl_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `etl_source_lag_records` is the committed-basis view. Unlike that one, this series *is* gated by `per_partition_detail`. |
 
 ## S3 source (`etl_s3_source_*`)
 
@@ -304,7 +360,10 @@ populations recorded on two machines.
 Cardinality note: a coordinated source's checkpoint partitions are minted
 per split *tenancy* (monotonic), so per-partition series under
 `metrics.per_partition_detail: true` grow over a long, churny job; the
-default (off) is unaffected.
+default (off) is unaffected. `etl_source_lag_records` is ungated, so a source
+that both publishes lag and mints monotonic partition ids would grow without
+bound — no shipped source does (Kafka's partitions are bounded by the topic;
+the S3 source publishes no lag), but a new connector must not.
 
 ## End-to-end
 

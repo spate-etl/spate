@@ -878,14 +878,16 @@ mod tests {
     /// Regression: the runtime must hand the source the framework's
     /// source-stage handles at `open`.
     ///
-    /// `SourceMetrics::set_lag_max` has exactly one possible caller — the
-    /// source, because only the client can see the log end. Those handles
+    /// `SourceMetrics::set_partition_lag` has exactly one possible caller —
+    /// the source, because only the client can see the log end. Those handles
     /// used to be reachable only through a connector-side builder that
     /// nothing in the tree called, so `etl_source_lag_records` rendered a
     /// permanent `0` on every Kafka pipeline: a maximally backlogged consumer
     /// reported no lag, and any alert or autoscaler keyed on it read as
     /// caught up. Nothing failed; the series was simply always zero. Assert
-    /// the seam is connected.
+    /// the seam is connected — and see the Kafka crate's
+    /// `a_backlogged_consumer_publishes_its_lag` for the value actually
+    /// arriving, which this test deliberately does not cover.
     #[test]
     fn source_open_receives_the_stage_metrics() {
         let (source, shared, script) = FakeSource::new();

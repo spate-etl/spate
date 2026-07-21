@@ -42,7 +42,7 @@ source:
 | `group_id` | string | required | Consumer group id. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). |
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). |
-| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `etl_kafka_source_*` families (broker health, latency, queue saturation, group stability); `0s` disables statistics and those families with it. |
+| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `etl_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `etl_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal; turn statistics off only if you are certain you do not need it. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist

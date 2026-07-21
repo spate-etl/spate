@@ -335,12 +335,28 @@ impl PartitionGauges {
             .set(value);
     }
 
-    /// Drops handles for revoked partitions so they are no longer updated
-    /// and don't accumulate across rebalances. The exporter may keep
-    /// rendering the last value of a dropped series until its own idle
-    /// timeout; that staleness is harmless and expected.
+    /// Zeroes and then drops the handles for partitions this component no
+    /// longer owns.
+    ///
+    /// The zeroing is the load-bearing half. The `metrics` facade has no
+    /// deletion and no idle timeout is configured (see `configured_builder`),
+    /// so dropping a handle is invisible to the exporter: the series keeps
+    /// rendering its last value for the life of the process. A reader that
+    /// aggregates across members would then count a partition twice — once
+    /// frozen here, once live on the member that now owns it. Setting `0`
+    /// first makes this component's contribution honest, because `0` is the
+    /// truth: it owns none of that partition.
+    ///
+    /// This is why absence and `0` mean different things for a per-partition
+    /// series. Absent is "never measured"; `0` here is "measured, not ours".
     pub(crate) fn retain(&self, keep: &[PartitionId]) {
         let mut gauges = self.gauges.lock().expect("partition gauge lock");
-        gauges.retain(|p, _| keep.iter().any(|k| k.0 == *p));
+        gauges.retain(|p, gauge| {
+            let kept = keep.iter().any(|k| k.0 == *p);
+            if !kept {
+                gauge.set(0.0);
+            }
+            kept
+        });
     }
 }

@@ -1,7 +1,10 @@
 //! Source-stage handles (`etl_source_*`).
 //!
-//! Resolved once at build time; the record loop only touches the resolved
-//! handles and methods take per-batch aggregates (see `docs/METRICS.md`).
+//! Every handle the record loop touches is resolved once at build time, and
+//! its methods take per-batch aggregates (see `docs/METRICS.md`). The
+//! per-partition lag series is the exception: it is resolved lazily, on the
+//! control plane, so that a partition whose lag has never been measured is
+//! absent rather than a `0` that reads as "caught up".
 
 use super::labels::{ComponentLabels, PartitionGauges};
 use super::names;
@@ -17,22 +20,27 @@ pub struct SourceMetrics {
     records: Counter,
     bytes: Counter,
     poll_duration: Histogram,
-    lag_max: Gauge,
     rebalance_assign: Counter,
     rebalance_revoke: Counter,
     lanes_active: Gauge,
-    partition_lag: Option<PartitionGauges>,
+    partition_lag: PartitionGauges,
 }
 
 impl SourceMetrics {
-    /// Resolve all source handles. `per_partition_detail` gates the
-    /// cardinality-sensitive per-partition lag series.
-    pub fn new(labels: &ComponentLabels, per_partition_detail: bool) -> Self {
+    /// Resolve all source handles.
+    ///
+    /// Consumer lag is deliberately not gated by `per_partition_detail`: the
+    /// per-partition series is the *only* representation of a golden signal,
+    /// so a cardinality knob must not be able to delete it. The lag handles
+    /// are also not resolved here — `PartitionGauges` registers a partition's
+    /// series on its first known value, so a partition whose lag has never
+    /// been measured is absent rather than reporting a `0` that reads as
+    /// "caught up".
+    pub fn new(labels: &ComponentLabels) -> Self {
         SourceMetrics {
             records: labels.counter(names::SOURCE_RECORDS_TOTAL),
             bytes: labels.counter(names::SOURCE_BYTES_TOTAL),
             poll_duration: labels.histogram(names::SOURCE_POLL_DURATION_SECONDS),
-            lag_max: labels.gauge(names::SOURCE_LAG_RECORDS),
             rebalance_assign: labels.counter1(
                 names::SOURCE_REBALANCES_TOTAL,
                 names::L_EVENT,
@@ -44,11 +52,11 @@ impl SourceMetrics {
                 "revoke",
             ),
             lanes_active: labels.gauge(names::SOURCE_LANES_ACTIVE),
-            partition_lag: per_partition_detail.then(|| PartitionGauges {
+            partition_lag: PartitionGauges {
                 name: names::SOURCE_LAG_RECORDS,
                 labels: labels.clone(),
                 gauges: Mutex::new(HashMap::new()),
-            }),
+            },
         }
     }
 
@@ -65,23 +73,31 @@ impl SourceMetrics {
         self.poll_duration.record(d.as_secs_f64());
     }
 
-    /// Set the max consumer lag across partitions.
-    pub fn set_lag_max(&self, lag: u64) {
-        self.lag_max.set(lag as f64);
-    }
-
-    /// Set one partition's lag. No-op unless `per_partition_detail`.
+    /// Publish one partition's consumer lag.
+    ///
+    /// Only call this with a lag the client actually measured. The series is
+    /// registered on the first such call, so never publishing is how "lag
+    /// unknown" is expressed — a `0` would be indistinguishable from a
+    /// consumer that has caught up.
     pub fn set_partition_lag(&self, partition: PartitionId, lag: u64) {
-        if let Some(pg) = &self.partition_lag {
-            pg.set(partition, lag as f64);
-        }
+        self.partition_lag.set(partition, lag as f64);
     }
 
-    /// Drop per-partition series for revoked partitions.
+    /// Zero and drop the lag series for partitions this member no longer
+    /// owns.
+    ///
+    /// Load-bearing, but not by deleting anything: the exporter has no
+    /// deletion, so a partition that moved to another member would keep
+    /// rendering this member's last lag forever and every reader that sums
+    /// across partitions would count it twice. Zeroing first makes the sum
+    /// correct — the member that now owns the partition publishes the real
+    /// figure, and this one contributes the `0` it truthfully has.
+    ///
+    /// Call this once the *new* assignment is known, not while partitions are
+    /// still draining: a member that is about to be handed a partition back
+    /// should never publish a zero for it.
     pub fn retain_partitions(&self, keep: &[PartitionId]) {
-        if let Some(pg) = &self.partition_lag {
-            pg.retain(keep);
-        }
+        self.partition_lag.retain(keep);
     }
 
     /// Count a rebalance assignment event.

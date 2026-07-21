@@ -48,7 +48,9 @@ pub const SOURCE_RECORDS_TOTAL: &str = "etl_source_records_total";
 pub const SOURCE_BYTES_TOTAL: &str = "etl_source_bytes_total";
 /// Time spent inside `poll` per call.
 pub const SOURCE_POLL_DURATION_SECONDS: &str = "etl_source_poll_duration_seconds";
-/// Consumer lag; unlabelled series is the max across partitions.
+/// Consumer lag, always labelled by [`L_PARTITION`] — there is no aggregate
+/// series; aggregate with `sum`/`max` in the query layer. A partition whose
+/// lag has never been measured is absent rather than `0`.
 pub const SOURCE_LAG_RECORDS: &str = "etl_source_lag_records";
 /// Rebalance events observed, labelled by [`L_EVENT`].
 pub const SOURCE_REBALANCES_TOTAL: &str = "etl_source_rebalances_total";

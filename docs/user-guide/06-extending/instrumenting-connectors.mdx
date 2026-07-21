@@ -32,28 +32,64 @@ measure from the outside?"
 Some signals live inside the connector: a Kafka consumer's per-partition lag, a
 rebalance callback firing. The framework defines the handle
 ([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
-drives it. That is exactly how `etl-kafka` reports lag — the source takes an
-optional pre-registered handle and, without it, simply logs instead:
+drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
+through a builder of your own:
 
 ```rust
 // crates/etl-kafka/src/source.rs
-pub fn with_metrics(mut self, metrics: SourceMetrics) -> Self {
-    self.metrics = Some(metrics);
-    self
+fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+    // The runtime shares the same handles it uses itself.
+    self.metrics = ctx.stage_metrics.clone();
+    // ...
 }
 
 // ...later, inside the poll/statistics path:
 if let Some(m) = &self.metrics {
+    // Only for partitions whose lag the client actually measured.
     m.set_partition_lag(partition, lag);
-    m.set_lag_max(max_lag);
 }
 ```
 
 The handle is resolved once at build time and injected; the connector never
 looks up a metric name on the hot path, it only calls methods on a handle it was
-handed. If your source can observe lag or rebalances, accept a `SourceMetrics`
-the same way and drive `set_lag_max` / `set_partition_lag` / `rebalance_assigned`
-/ `rebalance_revoked`.
+handed. Lag is the *only* part of it a source drives: take `ctx.stage_metrics`
+at `open` and call `set_partition_lag` and `retain_partitions`. Leave the rest
+alone — records, bytes, poll duration, rebalance counts, and active lanes are
+all recorded by the runtime from the events your source returns, so a source
+that also increments `rebalance_assigned` makes the counter read double.
+
+:::danger[Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose]
+All three of these are scar tissue.
+
+`etl-kafka` once exposed a `with_metrics` builder instead. Nothing in the tree
+called it and the runtime had no path to call it, so the runtime registered
+`etl_source_lag_records` and the connector never wrote it — the gauge rendered a
+permanent `0` on every Kafka pipeline. A maximally backlogged consumer reported
+no lag and every alert keyed on it stayed green. A builder the runtime cannot
+reach is dead code, not an option.
+
+The second half: publish a value only when you have really measured it. A
+registered-but-unwritten gauge renders `0`, and for lag a `0` is
+indistinguishable from "caught up". `SourceMetrics::set_partition_lag`
+registers a partition's series on first call, so *not calling it* is how you
+say "unknown" — which is why `etl-kafka` skips partitions whose librdkafka
+`consumer_lag` is `-1` rather than publishing them as zero.
+
+The third half: a per-partition series you stop owning does not go away. The
+exporter has no deletion and no idle timeout is configured, so dropping your
+handle is invisible — the series renders its last value for the life of the
+process, and a reader summing across members counts a partition twice. Two
+things are needed, and `etl-kafka` does both: filter publication to the live
+assignment (a stale snapshot still lists partitions you have lost), and call
+`SourceMetrics::retain_partitions` with the **new** assignment once a rebalance
+settles, which zeroes what you lost. Do not prune on revocation: an eager
+rebalance revokes everything before handing most of it back, so pruning there
+blanks partitions you still own and are still draining.
+
+Test the wiring, not the registration: assert a **value** arrives end to end.
+A test that only asserts the family appears in the exposition passes happily
+against all three of these bugs.
+:::
 
 :::note
 `SourceMetrics` is the one framework handle a connector is expected to drive
@@ -203,7 +239,9 @@ handle method shapes exist to make them the path of least resistance:
   [Metrics § Histogram buckets](../../METRICS.md)).
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
-  `metrics.per_partition_detail` (default off) precisely because it is unbounded.
+  `metrics.per_partition_detail` (default off) precisely because it is unbounded
+  — with the single exception of `etl_source_lag_records`, which is ungated
+  because it has no aggregate series to fall back to (see the box above).
   Don't attach an unbounded label (a key, an offset) to any series.
 
 :::warning
@@ -260,8 +298,9 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 ```
 
 `SourceCtx` also carries `per_partition_detail` (the `metrics` config flag), so
-a connector's own per-partition families honour the same cardinality gate as
-the framework's.
+a connector's own per-partition families honour the operator's cardinality
+choice. It gates your families and the framework's `etl_checkpoint_*` detail;
+it does **not** gate `etl_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`

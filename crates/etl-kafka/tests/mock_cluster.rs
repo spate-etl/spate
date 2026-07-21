@@ -562,3 +562,143 @@ fn statistics_disabled_registers_no_families() {
         "statistics disabled must register no `etl_kafka_*` series:\n{rendered}"
     );
 }
+
+/// How many `etl_source_lag_records` series the exposition carries. The family
+/// is per-partition only, so this is the number of partitions that have
+/// reported a measured lag.
+fn lag_series_count(rendered: &str) -> usize {
+    rendered
+        .lines()
+        .filter(|l| l.starts_with("etl_source_lag_records{"))
+        .count()
+}
+
+/// The regression this pins: a consumer that commits a small prefix and then stops
+/// consuming must report the remaining backlog as consumer lag.
+///
+/// This is the test that did not exist while `etl_source_lag_records` rendered
+/// a permanent `0` on every Kafka pipeline. The two properties it pins are the
+/// ones that failed:
+///
+/// 1. the framework's source-stage handles reach the connector at `open` (via
+///    `SourceCtx::stage_metrics`) — the existing statistics test opens without
+///    them, so it could never have caught this;
+/// 2. the published value is the real backlog, per partition, rather than a
+///    registered-but-never-written gauge's zero.
+#[test]
+fn a_backlogged_consumer_publishes_its_lag() {
+    const PARTITIONS: i32 = 2;
+    const PRODUCED: usize = 500;
+    const CONSUMED: usize = 50;
+
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster
+        .create_topic(TOPIC, PARTITIONS, 1)
+        .expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, PRODUCED, PARTITIONS, "lag");
+
+    let mut cfg = config(&brokers, "lag");
+    cfg.statistics_interval = Duration::from_millis(100);
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // Committed offset per partition, captured from the run: `drain_lane`
+    // polls in batches so it overshoots `CONSUMED`, and lag is measured
+    // against what was actually committed.
+    let mut committed: Vec<(PartitionId, i64)> = Vec::new();
+    metrics::with_local_recorder(&recorder, || {
+        // Resolved inside the local recorder, exactly as the runtime resolves
+        // them before handing them to `open`.
+        let metrics = std::sync::Arc::new(etl_core::metrics::SourceMetrics::new(
+            &etl_core::metrics::ComponentLabels::new("lag", "source", "kafka"),
+        ));
+
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source
+            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
+            .expect("open");
+
+        let mut lanes = await_assignment(&mut source);
+        assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
+        let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
+        cp.begin_epoch(&partitions, 1);
+
+        // Consume a prefix and commit it: `consumer_lag` is
+        // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`
+        // — unknown, and correctly unpublished — until a commit lands.
+        for lane in &mut lanes {
+            let rows = drain_lane(lane, CONSUMED);
+            assert!(rows.len() >= CONSUMED, "drained {} rows", rows.len());
+        }
+        cp.drain();
+        let watermarks = cp.take_watermarks();
+        assert_eq!(
+            watermarks.len(),
+            PARTITIONS as usize,
+            "every partition committable"
+        );
+        source.commit(&watermarks).expect("store offsets");
+        source.flush_commits().expect("sync commit");
+        committed = watermarks;
+
+        // Stop consuming (lanes stay assigned, simply unpolled) and drive the
+        // control plane until every partition has reported. Waiting for the
+        // *first* series is not enough: `consumer_lag` is per partition, so a
+        // snapshot can carry a number for p0 while p1 is still `-1`, and the
+        // assertions below require one series each.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            source
+                .poll_events(Duration::from_millis(100))
+                .expect("poll_events");
+            if lag_series_count(&handle.render()) == PARTITIONS as usize {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "not every partition published consumer lag within deadline:\n{}",
+                handle.render()
+            );
+        }
+    });
+
+    let rendered = handle.render();
+    for (partition, offset) in &committed {
+        let expected = PRODUCED as f64 - *offset as f64;
+        assert!(expected > 0.0, "the test must leave a backlog");
+        let needle = format!(
+            r#"etl_source_lag_records{{pipeline="lag",component="source",component_type="kafka",partition="{}"}} "#,
+            partition.0
+        );
+        let line = rendered
+            .lines()
+            .find(|l| l.starts_with(&needle))
+            .unwrap_or_else(|| panic!("no lag series for partition {partition:?}:\n{rendered}"));
+        let value: f64 = line
+            .rsplit(' ')
+            .next()
+            .expect("value")
+            .parse()
+            .expect("numeric lag");
+        assert!(
+            value > 0.0,
+            "a backlogged partition must not report zero lag: {line}"
+        );
+        assert_eq!(
+            value, expected,
+            "partition {partition:?} lag must equal produced - committed: {line}"
+        );
+    }
+
+    // No aggregate series shares the family name: readers aggregate with
+    // `sum`/`max`, which double-counts if an unlabelled series exists.
+    assert!(
+        !rendered
+            .lines()
+            .filter(|l| l.starts_with("etl_source_lag_records{"))
+            .any(|l| !l.contains("partition=")),
+        "every lag series must carry a partition label:\n{rendered}"
+    );
+}

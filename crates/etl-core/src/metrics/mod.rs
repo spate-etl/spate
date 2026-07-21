@@ -343,10 +343,9 @@ mod tests {
     #[test]
     fn handle_structs_register_and_render_the_taxonomy() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels(), true);
+            let src = SourceMetrics::new(&labels());
             src.batch(512, 131_072);
             src.poll_duration(Duration::from_millis(3));
-            src.set_lag_max(42);
             src.set_partition_lag(PartitionId(7), 40);
             src.rebalance_assigned();
             src.set_lanes_active(4);
@@ -565,7 +564,7 @@ mod tests {
     #[test]
     fn duration_histograms_use_configured_buckets() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels(), false);
+            let src = SourceMetrics::new(&labels());
             src.poll_duration(Duration::from_millis(3));
         });
         assert!(
@@ -578,29 +577,81 @@ mod tests {
         );
     }
 
+    /// Consumer lag is the only golden signal with no aggregate series, so it
+    /// must publish whatever `per_partition_detail` is set to — a cardinality
+    /// knob that could delete it would silently restore the "backlogged
+    /// consumer reports nothing" failure this shape exists to prevent.
+    #[test]
+    fn source_lag_publishes_independently_of_partition_detail() {
+        let rendered = render_with_local_recorder(|| {
+            let src = SourceMetrics::new(&labels());
+            src.set_partition_lag(PartitionId(1), 5);
+        });
+        assert!(
+            rendered.contains(
+                r#"etl_source_lag_records{pipeline="orders",component="orders_kafka",component_type="kafka",partition="1"} 5"#
+            ),
+            "lag must publish without any detail flag:\n{rendered}"
+        );
+    }
+
+    /// Unmeasured lag must be absent, never `0`: a registered-but-unwritten
+    /// gauge renders a zero that is indistinguishable from "caught up", which
+    /// is exactly how this family read 0 on every Kafka pipeline for 14 days.
+    #[test]
+    fn unmeasured_source_lag_registers_no_series() {
+        let rendered = render_with_local_recorder(|| {
+            let src = SourceMetrics::new(&labels());
+            src.batch(10, 100);
+        });
+        assert!(
+            !rendered.contains("etl_source_lag_records"),
+            "lag must be absent until measured:\n{rendered}"
+        );
+    }
+
     #[test]
     fn per_partition_series_are_gated_and_retained() {
+        // Distinct component labels: both instances share a family name, so
+        // the gated one needs its own series to be provably absent. Its
+        // *unlabelled* aggregate is registered eagerly either way — only the
+        // `partition`-labelled series are gated.
+        let gated_labels = ComponentLabels::new("orders", "gated_checkpoint", "checkpoint");
         let rendered = render_with_local_recorder(|| {
-            let gated = SourceMetrics::new(&labels(), false);
-            gated.set_partition_lag(PartitionId(1), 5);
+            let gated = CheckpointMetrics::new(&gated_labels, false);
+            gated.set_partition_pending(PartitionId(1), 5);
 
             let detailed = CheckpointMetrics::new(&labels(), true);
             detailed.set_partition_pending(PartitionId(1), 5);
             detailed.set_partition_pending(PartitionId(2), 9);
             detailed.retain_partitions(&[PartitionId(2)]);
-            // Re-set after retention: only partition 2 should re-register.
+            // Only partition 2 survives; partition 1 is zeroed on the way out
+            // (the exporter cannot delete a series, so the retention has to
+            // leave a truthful value behind rather than a stale 5).
             detailed.set_partition_pending(PartitionId(2), 11);
         });
-        let gated_series_leaked = rendered
-            .lines()
-            .any(|l| l.starts_with("etl_source_lag_records") && l.contains("partition="));
+        let gated_series_leaked = rendered.lines().any(|l| {
+            l.starts_with("etl_checkpoint_pending_batches")
+                && l.contains("gated_checkpoint")
+                && l.contains("partition=")
+        });
         assert!(
             !gated_series_leaked,
-            "per-partition lag must be gated off:\n{rendered}"
+            "per-partition checkpoint detail must be gated off:\n{rendered}"
         );
         assert!(rendered.contains(
             r#"etl_checkpoint_pending_batches{pipeline="orders",component="orders_kafka",component_type="kafka",partition="2"} 11"#
         ));
+        // The retained half, asserted on the partition that was dropped: it
+        // must read 0, not the 5 it last held. Without the zeroing this line
+        // still renders `5` — the assertion below is the only thing in this
+        // test that can tell the two apart.
+        assert!(
+            rendered.contains(
+                r#"etl_checkpoint_pending_batches{pipeline="orders",component="orders_kafka",component_type="kafka",partition="1"} 0"#
+            ),
+            "a retained-out partition must be zeroed, not left stale:\n{rendered}"
+        );
     }
 
     #[test]

@@ -96,7 +96,7 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 |---|---|---|---|
 | `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` records to a no-op recorder. |
 | `listen` | socket address | `0.0.0.0:9090` | Admin server bind address (`/metrics`, `/healthz`, `/readyz`). |
-| `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. |
+| `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `etl_source_lag_records`, which is always per partition. |
 | `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `etl_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
 
 ## Sink pool (`batch` / `inflight` / `retry`) {#sink-pool}

@@ -62,7 +62,8 @@
 //! GiB before producing; set PREFILL explicitly for anything but a short
 //! window. QUEUED_MIN_MESSAGES sets prefetch depth (0 — the default — means
 //! set nothing, i.e. exercise the shipped path), and PER_PARTITION_DETAIL
-//! enables the per-partition lag and fetch-queue series.
+//! enables the connector's per-partition fetch-queue and stored-lag series
+//! (consumer lag itself is always per-partition and never gated).
 //!
 //! TOPIC defaults to a fresh per-run name (`bench-e2e-<pid>`), and the consumer
 //! group is `bench-e2e-<pid>` too, so each run starts from an empty topic and
@@ -169,8 +170,9 @@ struct Meta {
     /// measured how fast a topic empties, not a ceiling. Zero when the run is
     /// not a prefill.
     prefill_backlog: u64,
-    /// Enables the per-partition lag/fetch-queue series. Off by default because
-    /// cardinality grows with the assignment.
+    /// Enables the connector's per-partition fetch-queue and stored-lag
+    /// series. Off by default because cardinality grows with the assignment.
+    /// Consumer lag itself is always per-partition and never gated.
     per_partition_detail: bool,
     /// Which broker implementation served the run — identity-defining for a
     /// source measurement, so it rides in the variant map.
@@ -423,21 +425,6 @@ fn ensure_prefill(brokers: &str, topic: &str, partitions: i32, target: u64, payl
     available + shortfall
 }
 
-/// The unlabelled `etl_source_lag_records` series — the max across partitions.
-///
-/// The per-partition series shares the family name and is only distinguished
-/// by a `partition` label, and `prom::value` sums every series it matches. An
-/// unfiltered read with `PER_PARTITION_DETAIL=1` would therefore return the
-/// max plus the sum of every partition — for a 16-partition assignment, up to
-/// 17x the real figure.
-fn aggregate_lag(text: &str) -> Option<f64> {
-    text.lines()
-        .filter(|l| l.starts_with("etl_source_lag_records{"))
-        .filter(|l| !l.contains("partition="))
-        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
-        .next()
-}
-
 fn install_metrics() -> MetricsHandle {
     etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
         exporter: etl_core::metrics::Exporter::Prometheus,
@@ -674,12 +661,14 @@ fn spawn_and_measure<MK>(
     // distinguishes "source-bound" from "sink-bound", not "starved" from
     // "healthy".
     //
-    // `etl_source_lag_records` is filtered to the aggregate series: the
-    // per-partition series shares the family name, and `prom::value` sums
-    // every match, so an unfiltered read would return the max plus the sum of
-    // all partitions whenever `PER_PARTITION_DETAIL` is on.
+    // `etl_source_lag_records` is per-partition only, so `prom::value`'s sum
+    // across every matching series is this member's whole backlog — directly
+    // comparable with the broker's group-lag figure. `None` means no
+    // partition has reported a measured lag yet; note that a *partially*
+    // measured assignment sums only what it has, so a small number early in a
+    // run is not evidence of a small backlog.
     let fetch_queue = prom::value(&metrics_text, "etl_kafka_source_fetch_queue_messages", "");
-    let lag = aggregate_lag(&metrics_text);
+    let lag = prom::value(&metrics_text, "etl_source_lag_records", "");
 
     let measure = "rows_per_s = windowed etl_sink_records_total delta / window; \
                    source_records_per_s = windowed etl_source_records_total delta";
@@ -703,11 +692,13 @@ fn spawn_and_measure<MK>(
     // A prefill arm that swallowed its whole backlog measured how fast the
     // topic empties, not a ceiling. Decide it against the backlog the broker
     // reported at start, compared with the source's cumulative record count —
-    // not against the lag gauge, whose zero is also what an unpopulated gauge
-    // reads, and which flagged every arm of an earlier dataset as a drain
-    // while 95% of the backlog was still on the broker. Invalid arms do not
-    // reach the results file: a marker in a free-text note does not stop the
-    // site aggregating the record into a median.
+    // not against the lag gauge, which flagged every arm of an earlier dataset
+    // as a drain while 95% of the backlog was still on the broker. (In that
+    // era the metrics seam was disconnected, so the gauge was registered and
+    // never written and read `0`. Lag series are absent until measured now,
+    // but the backlog remains the honest gate.) Invalid arms do not reach the
+    // results file: a marker in a free-text note does not stop the site
+    // aggregating the record into a median.
     if meta.load == "prefill" && source1 >= meta.prefill_backlog {
         eprintln!(
             "DRAINED: the source consumed {source1} of a {} message backlog — this \

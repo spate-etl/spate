@@ -254,3 +254,161 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     joiner.join().expect("joiner thread");
 }
+
+/// Acceptance for the production symptom: a consumer sitting on a real
+/// backlog must report that backlog, and the sum across its partitions must
+/// match what the broker holds.
+///
+/// The sum is the assertion that matters. Operators compare our number
+/// against the broker's group lag, which is a sum across partitions, so a
+/// per-member maximum is not the same quantity and silently under-reports by
+/// roughly the partition count.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_backlog_reports_summable_lag() {
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+
+    const PARTITIONS: i32 = 4;
+    const PER_PARTITION: usize = 5_000;
+    const CONSUME_PER_LANE: usize = 100;
+
+    let container = Kafka::default().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+
+    // Explicit multi-partition topic: auto-creation yields a single partition,
+    // which would not exercise the aggregate at all.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let admin: AdminClient<_> = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("admin client");
+    rt.block_on(admin.create_topics(
+        &[NewTopic::new(TOPIC, PARTITIONS, TopicReplication::Fixed(1))],
+        &AdminOptions::new(),
+    ))
+    .expect("create topics")
+    .into_iter()
+    .for_each(|r| {
+        r.expect("topic created");
+    });
+
+    let producer: BaseProducer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .set("message.timeout.ms", "30000")
+        .create()
+        .expect("producer");
+    for p in 0..PARTITIONS {
+        for i in 0..PER_PARTITION {
+            producer
+                .send(
+                    BaseRecord::to(TOPIC)
+                        .payload(format!("backlog-p{p}-{i}").as_bytes())
+                        .key(format!("k{p}-{i}").as_bytes())
+                        .partition(p),
+                )
+                .expect("enqueue");
+        }
+    }
+    producer.flush(Duration::from_secs(60)).expect("flush");
+    let produced = PER_PARTITION * PARTITIONS as usize;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let mut committed_total: i64 = 0;
+    metrics::with_local_recorder(&recorder, || {
+        let metrics = std::sync::Arc::new(etl_core::metrics::SourceMetrics::new(
+            &etl_core::metrics::ComponentLabels::new("backlog", "source", "kafka"),
+        ));
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(config(&brokers, "backlog"));
+        source
+            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
+            .expect("open");
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut lanes = loop {
+            assert!(Instant::now() < deadline, "no assignment");
+            if let SourceEvent::LanesAssigned(lanes) = source
+                .poll_events(Duration::from_millis(200))
+                .expect("poll_events")
+            {
+                break lanes;
+            }
+        };
+        assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
+        let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
+        cp.begin_epoch(&partitions, 1);
+
+        // Consume a small prefix so a commit lands: `consumer_lag` is measured
+        // against the committed offset and stays unknown (`-1`) until then.
+        for lane in &mut lanes {
+            let mut seen = 0usize;
+            while seen < CONSUME_PER_LANE {
+                assert!(Instant::now() < deadline, "lane starved");
+                if let Some(mut batch) = lane
+                    .poll(64, Duration::from_millis(500))
+                    .expect("lane poll")
+                {
+                    while batch.next_payload().is_some() {
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        cp.drain();
+        let watermarks = cp.take_watermarks();
+        committed_total = watermarks.iter().map(|(_, o)| *o).sum();
+        source.commit(&watermarks).expect("store offsets");
+        source.flush_commits().expect("sync commit");
+
+        // Stop consuming and drive the control plane until every partition
+        // has reported. Waiting for the first series would race: a snapshot
+        // can carry a number for one partition while another is still `-1`,
+        // and the assertions below need all four.
+        loop {
+            source
+                .poll_events(Duration::from_millis(200))
+                .expect("poll_events");
+            let rendered = handle.render();
+            let reported = rendered
+                .lines()
+                .filter(|l| l.starts_with("etl_source_lag_records{"))
+                .count();
+            if reported == PARTITIONS as usize {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {reported}/{PARTITIONS} partitions published consumer lag \
+                 within deadline:\n{rendered}"
+            );
+        }
+    });
+
+    let rendered = handle.render();
+    let series: Vec<f64> = rendered
+        .lines()
+        .filter(|l| l.starts_with("etl_source_lag_records{"))
+        .map(|l| l.rsplit(' ').next().expect("value").parse().expect("lag"))
+        .collect();
+    assert_eq!(
+        series.len(),
+        PARTITIONS as usize,
+        "one lag series per owned partition:\n{rendered}"
+    );
+    assert!(
+        series.iter().all(|v| *v > 0.0),
+        "a backlogged partition must never report zero lag:\n{rendered}"
+    );
+    let total: f64 = series.iter().sum();
+    let expected = produced as f64 - committed_total as f64;
+    assert_eq!(
+        total, expected,
+        "summed lag must equal the backlog the broker holds \
+         (produced {produced} - committed {committed_total}):\n{rendered}"
+    );
+}

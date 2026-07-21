@@ -107,7 +107,7 @@ is being duty-cycled.
 Sustained `etl_backpressure_paused == 1` means the sink genuinely can't
 keep up (a capacity problem: add replicas or shards, or tune batching) —
 or the budget is undersized as above. For Kafka, paused lanes translate to
-growing consumer lag (`etl_source_lag_records`), which is the correct,
+growing consumer lag (`sum(etl_source_lag_records)`), which is the correct,
 bounded failure mode: data waits in the broker, not in process memory.
 
 ## Further reading

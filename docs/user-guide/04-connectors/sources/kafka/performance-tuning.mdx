@@ -155,9 +155,11 @@ at the shallow depth that runs 22x slow *and* at the depth we recommend. Use it
 to decide whether the bottleneck is upstream or downstream of the source, not
 to size the queue.
 
-`etl_source_lag_records` is the consumer lag, and a lag that is large and not
-shrinking is the signal that catching up matters at all — prefetch depth is
-only worth tuning when there is a backlog to prefetch.
+`sum(etl_source_lag_records)` is the total consumer lag across the partitions
+this member owns — the family is per-partition, so it must be aggregated in the
+query. A lag that is large and not shrinking is the signal that catching up
+matters at all: prefetch depth is only worth tuning when there is a backlog to
+prefetch.
 
 :::note[Prefetch only matters when there is a backlog]
 A consumer caught up with its producers is tail-following: nothing is buffered

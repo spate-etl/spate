@@ -43,10 +43,14 @@ builder. If you assemble manually, call `metrics::install` first — see
   - `component` — the instance id (e.g. `orders_kafka`, `main.deserializer`);
   - `component_type` — the implementation (e.g. `kafka`, `clickhouse`,
     `map`; custom sinks set it via `SinkParts::with_component_type`).
-- **Cardinality is opt-in**: `partition`-labelled series appear only with
-  `metrics.per_partition_detail: true` (default `false`), because their
-  cardinality grows with the assignment. `shard` and `replica` labels are
-  bounded by your cluster topology and always on.
+- **Cardinality is mostly opt-in**: `partition`-labelled series appear only
+  with `metrics.per_partition_detail: true` (default `false`), because their
+  cardinality grows with the assignment. The one exception is
+  `etl_source_lag_records`, which is always per partition — consumer lag has
+  no aggregate series to fall back to, so a cardinality knob is not allowed to
+  delete it. Budget one series per assigned partition per member for that
+  family even on the default config. `shard` and `replica` labels are bounded
+  by your cluster topology and always on.
 
 ## The hot-path discipline
 

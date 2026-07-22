@@ -27,9 +27,9 @@ pub(crate) struct BreakerSet {
     states: Vec<State>,
     cursor: usize,
     metrics: Arc<SinkShardMetrics>,
-    /// Cached `etl_sink_shard_healthy` state (≥1 replica circuit-closed),
-    /// so the gauge and the caller's log fire edge-triggered on
-    /// transitions only.
+    /// Last *reported* shard health (≥1 replica circuit-closed), so the
+    /// caller's log fires on transitions only. The gauge is written on every
+    /// outcome regardless — see [`BreakerSet::refresh_shard_health`].
     shard_healthy: bool,
 }
 
@@ -105,13 +105,10 @@ impl BreakerSet {
     /// Record a successful write on `replica`. Returns the shard-health
     /// transition, if any, for the caller to log outside the lock.
     pub(crate) fn on_success(&mut self, replica: usize) -> Option<ShardHealthTransition> {
-        let was_unhealthy = !matches!(self.states[replica], State::Closed { .. });
         self.states[replica] = State::Closed {
             consecutive_failures: 0,
         };
-        if was_unhealthy {
-            self.metrics.set_replica_healthy(replica, true);
-        }
+        self.publish_replica_health(replica);
         self.refresh_shard_health()
     }
 
@@ -146,28 +143,52 @@ impl BreakerSet {
         let newly_open = matches!(next, State::Open { .. })
             && !matches!(self.states[replica], State::Open { .. });
         self.states[replica] = next;
+        self.publish_replica_health(replica);
+        // The counter stays edge-triggered: it counts transitions, not state.
         if newly_open {
-            self.metrics.set_replica_healthy(replica, false);
             self.metrics.breaker_opened(replica);
         }
         self.refresh_shard_health()
     }
 
-    /// Recompute shard health (≥1 replica circuit-closed) and, on a
-    /// transition, update the gauge and report the transition for the
-    /// caller to log. `next_replica`'s Open→HalfOpen promotion neither adds
-    /// nor removes a `Closed` state, so only the failure/success paths can
-    /// move this signal.
+    /// Republish one replica's health gauge from its current state.
+    ///
+    /// Level-driven, not edge-triggered: writing only on a transition means a
+    /// reading that was wrong when it was written — clobbered by another
+    /// handle set, or lost across a restart of whatever scraped it — stands
+    /// until the *next* transition, which for a quarantined replica may never
+    /// come. Every write outcome refreshes it instead, so a stale reading
+    /// self-corrects within one probe cycle. `HalfOpen` reads `0`: a replica
+    /// being probed is not yet usable, which is the same rule shard health
+    /// uses.
+    fn publish_replica_health(&self, replica: usize) {
+        let healthy = matches!(self.states[replica], State::Closed { .. });
+        self.metrics.set_replica_healthy(replica, healthy);
+    }
+
+    /// Recompute shard health (≥1 replica circuit-closed), republish the
+    /// gauge, and report a transition for the caller to log — the log only on
+    /// an edge, the gauge every time. `next_replica`'s Open→HalfOpen promotion
+    /// neither adds nor removes a `Closed` state, so only the failure/success
+    /// paths can move this signal.
+    ///
+    /// The gauge write is unconditional so that a reading that no longer
+    /// matches the breakers cannot persist: an edge-triggered writer that has
+    /// already published `0` never publishes `0` again, so a shard whose every
+    /// replica is quarantined — the state that most needs to be visible —
+    /// would keep serving whatever value it was left at. Rewriting it on each
+    /// outcome bounds that to one probe cycle. `Gauge::set` is an atomic
+    /// store; this runs per write attempt, never per record.
     fn refresh_shard_health(&mut self) -> Option<ShardHealthTransition> {
         let up = self
             .states
             .iter()
             .any(|s| matches!(s, State::Closed { .. }));
+        self.metrics.set_shard_healthy(up);
         if up == self.shard_healthy {
             return None;
         }
         self.shard_healthy = up;
-        self.metrics.set_shard_healthy(up);
         Some(if up {
             ShardHealthTransition::Recovered
         } else {
@@ -217,8 +238,21 @@ mod tests {
     use crate::metrics::ComponentLabels;
     use std::time::Duration;
 
+    /// A component name unique to each `set()` call. `SinkShardMetrics` owns
+    /// its gauge series (one live owner per process); these tests run
+    /// concurrently under `cargo test`, and while most only read the cached
+    /// `shard_healthy()` bool — unaffected by shadowing — the level-drive test
+    /// below reads the rendered gauge, so it must own the series it inspects.
+    fn breaker_component() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        format!(
+            "breaker-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
     fn set(replicas: usize, threshold: u32) -> BreakerSet {
-        let labels = ComponentLabels::new("p", "sink", "test");
+        let labels = ComponentLabels::new("p", breaker_component(), "test");
         let names: Vec<String> = (0..replicas).map(|r| format!("r{r}")).collect();
         BreakerSet::new(
             replicas,
@@ -353,5 +387,85 @@ mod tests {
         assert!(!b.shard_healthy());
         assert_eq!(b.on_failure(0, t2), None, "still quarantined, no edge");
         assert!(!b.shard_healthy());
+    }
+
+    /// The health gauges are level-driven: every write outcome republishes
+    /// them, not only the ones that flip the cached state. An edge-triggered
+    /// writer that has already published `0` never publishes `0` again, so a
+    /// reading knocked off the truth — by another handle set, or lost across a
+    /// restart of whatever scraped it — would stand until the next transition,
+    /// which for a wedged shard may be never.
+    ///
+    /// The test clobbers both gauges to a healthy-looking `1` directly through
+    /// the facade, then drives a failure that is deliberately *not* a
+    /// transition (the shard is already down), and asserts the exposition is
+    /// back to `0`. Against an edge-triggered writer the clobbered `1` would
+    /// survive.
+    #[tokio::test(start_paused = true)]
+    async fn health_gauges_are_republished_on_every_outcome_not_just_transitions() {
+        use crate::metrics::names;
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let gauge = |name: &str| {
+            handle
+                .render()
+                .lines()
+                .find(|l| l.starts_with(name))
+                .and_then(|l| l.rsplit(' ').next())
+                .and_then(|v| v.parse::<f64>().ok())
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            // Keep a handle to the same metrics the breaker writes through, so
+            // the clobber below hits the very series the breaker republishes.
+            let metrics = Arc::new(SinkShardMetrics::new(
+                &labels,
+                0,
+                &["r0".into(), "r1".into()],
+                crate::metrics::E2eBasis::Ingest,
+            ));
+            let mut b = BreakerSet::new(
+                2,
+                BreakerConfig {
+                    failure_threshold: 1,
+                    open_for: Duration::from_secs(5),
+                    half_open_probes: 1,
+                },
+                Arc::clone(&metrics),
+            );
+
+            // Quarantine both replicas: the shard is down and stays down.
+            b.on_failure(0, Instant::now());
+            b.on_failure(1, Instant::now());
+            assert!(!b.shard_healthy());
+            assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(0.0));
+            assert_eq!(gauge(names::SINK_REPLICA_HEALTHY), Some(0.0));
+
+            // A scrape target restarts, or a rogue writer intervenes: the
+            // gauges now read a healthy shard that is in fact fully down.
+            metrics.set_shard_healthy(true);
+            metrics.set_replica_healthy(0, true);
+            assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(1.0), "clobbered");
+
+            // One more failed outcome — not a transition, the shard was
+            // already down — must put the truth back.
+            assert_eq!(
+                b.on_failure(0, Instant::now()),
+                None,
+                "already quarantined: no edge"
+            );
+            assert_eq!(
+                gauge(names::SINK_SHARD_HEALTHY),
+                Some(0.0),
+                "a non-transition outcome must still republish shard health"
+            );
+            assert_eq!(
+                gauge(names::SINK_REPLICA_HEALTHY),
+                Some(0.0),
+                "and per-replica health with it"
+            );
+        });
     }
 }

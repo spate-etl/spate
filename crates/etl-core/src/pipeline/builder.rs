@@ -93,6 +93,14 @@ pub enum BuildError {
     /// bare [`Pipeline::sink`] collides on the reserved `"default"` name).
     #[error("a sink named {0:?} is already installed")]
     DuplicateSinkName(String),
+    /// Another live handle set in this process already owns a metric series
+    /// this sink would publish — a second pipeline with the same pipeline and
+    /// sink name, usually. Gauge series cannot be shared (see "Series
+    /// ownership" in `docs/METRICS.md`), so assembly stops here rather than
+    /// letting one of the two publish readings the other overwrites. A
+    /// pipeline rebuilt *sequentially* is fine: drop the old one first.
+    #[error("{0}")]
+    DuplicateSeries(String),
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a sink.
     #[error("no sink installed (call Pipeline::sink or Pipeline::add_sink first)")]
     MissingSink,
@@ -475,20 +483,27 @@ impl Pipeline {
         );
         // Pre-register the queue-edge handles before `queues` is cloned into
         // any terminal, so every producer shares the same `etl_queue_*` series.
-        queues.attach_metrics(&sink_labels);
+        queues
+            .attach_metrics(&sink_labels)
+            .map_err(|e| BuildError::DuplicateSeries(e.to_string()))?;
         let e2e_basis = metrics_settings(&self.config).e2e_basis;
+        // Fallible on purpose: a shard's gauges are edge-triggered, so two
+        // live handle sets on one series leave a lie standing rather than a
+        // double count. On the assembly path that is a wiring mistake we can
+        // still refuse, before any data flows.
         let shard_metrics: Vec<SinkShardMetrics> = replica_labels
             .iter()
             .enumerate()
             .map(|(shard, replicas)| {
-                SinkShardMetrics::new(
+                SinkShardMetrics::try_new(
                     &sink_labels,
                     u32::try_from(shard).unwrap_or(u32::MAX),
                     replicas,
                     e2e_basis,
                 )
+                .map_err(|e| BuildError::DuplicateSeries(e.to_string()))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let mut writer = parts.writer;
         writer.attach_metrics(sink_meter);
         let pool = SinkPool::spawn(
@@ -758,6 +773,45 @@ mod tests {
             .expect("second install with a distinct name");
     }
 
+    /// Two *live* pipelines with the same pipeline and sink name would resolve
+    /// the same `etl_sink_*` and `etl_queue_*` gauge series. The second's
+    /// `add_sink` must refuse — those gauges cannot be shared, and letting both
+    /// through leaves each overwriting the other's readings.
+    ///
+    /// A pipeline rebuilt *sequentially* — the supported way to replace one in
+    /// a process — is fine: the first's claim frees when it is dropped, so the
+    /// rebuild re-owns the series. Only overlap collides.
+    #[test]
+    fn two_live_pipelines_on_one_name_collide_but_sequential_reuse_is_fine() {
+        let named = || {
+            let mut cfg = test_config(1);
+            cfg.pipeline.name = "shared-name".into();
+            cfg
+        };
+
+        // First pipeline, held alive across the second's build.
+        let first = Pipeline::from_config(named())
+            .expect("builder")
+            .sink(null_sink(2))
+            .expect("first pipeline claims the sink series");
+
+        let collision = Pipeline::from_config(named())
+            .expect("builder")
+            .sink(null_sink(2));
+        assert!(
+            matches!(collision.err(), Some(BuildError::DuplicateSeries(msg)) if msg.contains("etl_")),
+            "a second live pipeline on the same name must fail on the series claim"
+        );
+
+        // Drop the first, freeing its claims, and rebuild: the series is
+        // available again.
+        drop(first);
+        Pipeline::from_config(named())
+            .expect("builder")
+            .sink(null_sink(2))
+            .expect("sequential rebuild re-owns the freed series");
+    }
+
     #[test]
     fn reserved_and_empty_sink_names_error() {
         // "sink" is the default sink's metric label — installing a sink under
@@ -842,12 +896,14 @@ mod tests {
         let cs = Arc::clone(&chain_shared);
         let log = Arc::clone(&shared);
         let seen = Arc::clone(&seen_threads);
-        let runtime = Pipeline::from_config(test_config(2))
+        let config = test_config(2);
+        let pipeline_name = config.pipeline.name.clone();
+        let runtime = Pipeline::from_config(config)
             .expect("builder")
             .sink(null_sink(1))
             .expect("sink")
             .chains(move |ctx| {
-                assert_eq!(ctx.pipeline, "test");
+                assert_eq!(ctx.pipeline, pipeline_name);
                 // The source's framing contract threads into every ChainCtx —
                 // FakeSource overrides it to the non-default PerRecord.
                 assert_eq!(ctx.source_framing, FramingContract::PerRecord);

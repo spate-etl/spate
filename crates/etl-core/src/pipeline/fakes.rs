@@ -62,6 +62,10 @@ pub(crate) struct LaneSpec {
 pub(crate) type SharedLog = Arc<Mutex<SourceLog>>;
 pub(crate) type SharedScript = Arc<Mutex<VecDeque<Script>>>;
 
+/// The lag `FakeSource` publishes for partition 0 at `open`. Distinctive so a
+/// test can prove it came from this source and not a registration default.
+pub(crate) const FAKE_SOURCE_LAG: u64 = 4242;
+
 pub(crate) struct FakeSource {
     shared: SharedLog,
     script: SharedScript,
@@ -98,6 +102,13 @@ impl Source for FakeSource {
             let mut log = self.shared.lock().unwrap();
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
+        }
+        // Publish a lag figure like a real source would, so a test can tell
+        // whether the handle set it was given actually owns the series. Only
+        // the owner registers a per-partition gauge; a shadow's write is
+        // dropped and the series never appears.
+        if let Some(m) = &ctx.stage_metrics {
+            m.set_partition_lag(PartitionId(0), FAKE_SOURCE_LAG);
         }
         self.issuer = Some(ctx.issuer);
         Ok(())
@@ -348,10 +359,28 @@ impl RunnableChain for FakeChain {
     }
 }
 
+/// A distinct pipeline name per config.
+///
+/// Metric gauge series are owned by exactly one live handle set per process
+/// (`metrics::ownership`), and the pipeline name is part of every key. Under
+/// nextest each test is its own process and a fixed name would do, but
+/// `cargo test` runs a binary's tests concurrently in one process, where two
+/// pipelines called `test` are the very collision the ownership check exists
+/// to reject — the second would fail to start. Naming them apart keeps the
+/// two runners equivalent, and matches production, where two pipelines in one
+/// process are two different pipelines.
+pub(crate) fn test_pipeline_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "test-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 pub(crate) fn test_config(threads: usize) -> PipelineConfig {
     PipelineConfig {
         pipeline: PipelineSection {
-            name: "test".into(),
+            name: test_pipeline_name(),
             threads: Some(threads),
             io_threads: 1,
             pinning: PinningMode::Off,

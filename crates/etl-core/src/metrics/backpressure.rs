@@ -1,27 +1,63 @@
 //! Backpressure handles (`etl_backpressure_*`).
 
-use super::labels::ComponentLabels;
+use super::MetricsError;
+use super::labels::{ComponentLabels, OwnedGauge};
 use super::names;
-use metrics::{Counter, Gauge};
+use super::ownership::{SeriesClaim, series_key};
+use metrics::Counter;
 use std::time::Duration;
 
 /// Backpressure handles (`etl_backpressure_*`).
 #[derive(Debug)]
 pub struct BackpressureMetrics {
-    paused: Gauge,
-    paused_seconds: Gauge,
+    paused: OwnedGauge,
+    paused_seconds: OwnedGauge,
     pause_events: Counter,
-    inflight_bytes: Gauge,
+    inflight_bytes: OwnedGauge,
+    _claim: Option<SeriesClaim>,
 }
 
 impl BackpressureMetrics {
     /// Resolve all backpressure handles.
+    ///
+    /// Claims the `etl_backpressure_*` series for these labels; if another
+    /// live handle set already owns them this one logs and becomes a shadow,
+    /// counting but publishing no gauge (see "Series ownership" in
+    /// `docs/METRICS.md`). Each pipeline thread's controller gets its own
+    /// `component` label, so they own separate series rather than sharing one.
     pub fn new(labels: &ComponentLabels) -> Self {
+        Self::build(labels, SeriesClaim::claim_or_shadow(Self::key(labels)))
+    }
+
+    /// Resolve all backpressure handles, failing when another live handle set
+    /// already owns the series. The pipeline runtime's path.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::DuplicateSeries`] on a collision.
+    pub fn try_new(labels: &ComponentLabels) -> Result<Self, MetricsError> {
+        let claim = SeriesClaim::try_claim(Self::key(labels))?;
+        Ok(Self::build(labels, Some(claim)))
+    }
+
+    fn key(labels: &ComponentLabels) -> String {
+        series_key("backpressure", labels, "")
+    }
+
+    fn build(labels: &ComponentLabels, claim: Option<SeriesClaim>) -> Self {
+        let owned = claim.is_some();
         BackpressureMetrics {
-            paused: labels.gauge(names::BACKPRESSURE_PAUSED),
-            paused_seconds: labels.gauge(names::BACKPRESSURE_PAUSED_SECONDS_TOTAL),
+            paused: OwnedGauge::new(labels.gauge(names::BACKPRESSURE_PAUSED), owned),
+            paused_seconds: OwnedGauge::new(
+                labels.gauge(names::BACKPRESSURE_PAUSED_SECONDS_TOTAL),
+                owned,
+            ),
             pause_events: labels.counter(names::BACKPRESSURE_PAUSE_EVENTS_TOTAL),
-            inflight_bytes: labels.gauge(names::BACKPRESSURE_INFLIGHT_BYTES),
+            inflight_bytes: OwnedGauge::new(
+                labels.gauge(names::BACKPRESSURE_INFLIGHT_BYTES),
+                owned,
+            ),
+            _claim: claim,
         }
     }
 

@@ -183,6 +183,7 @@ fn a_real_revocation_moves_every_metric_seam() {
             // gauge is however many are draining — assert it is positive.
             if handle.render().lines().any(|l| {
                 l.starts_with("etl_coordination_splits_draining")
+                    && l.contains(r#"component="worker-a""#)
                     && l.rsplit(' ')
                         .next()
                         .and_then(|v| v.parse::<f64>().ok())
@@ -314,10 +315,10 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
     let ids = ["x0", "x1", "x2", "x3"];
     let planner = || Box::new(PhasedPlanner::one_final("cancel-metrics:v1", &ids));
 
-    let labels = ComponentLabels::new("coord-metrics", "worker-a", "s3");
+    let labels = ComponentLabels::new("coord-metrics", "cancel-worker-a", "s3");
     let mut a = StoreCoordinator::with_clock(
         store.clone(),
-        support::config(Some("worker-a")),
+        support::config(Some("cancel-worker-a")),
         rt.handle().clone(),
         Some(CoordinationMetrics::new(&labels)),
         clock.clone(),
@@ -337,10 +338,10 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
     // B joins on its own runtime, the leader moves work toward it, and A is
     // asked to give it up. A answers nothing — the drain is in flight.
     let rt_b = runtime();
-    let b_labels = ComponentLabels::new("coord-metrics", "worker-b", "s3");
+    let b_labels = ComponentLabels::new("coord-metrics", "cancel-worker-b", "s3");
     let mut b = StoreCoordinator::with_clock(
         store.clone(),
-        support::config(Some("worker-b")),
+        support::config(Some("cancel-worker-b")),
         rt_b.handle().clone(),
         Some(CoordinationMetrics::new(&b_labels)),
         clock.clone(),
@@ -366,7 +367,7 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
     crash(rt_b, b);
     rt.block_on(async {
         let outcome = store
-            .delete(Keyspace::Ephemeral, "worker.worker-b", None)
+            .delete(Keyspace::Ephemeral, "worker.cancel-worker-b", None)
             .await
             .expect("delete");
         assert!(matches!(outcome, CasOutcome::Won(_)));
@@ -394,6 +395,7 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
         if cancelled > 0.0 {
             draining_after_cancel = text.lines().any(|l| {
                 l.starts_with("etl_coordination_splits_draining")
+                    && l.contains(r#"component="cancel-worker-a""#)
                     && l.rsplit(' ')
                         .next()
                         .and_then(|v| v.parse::<f64>().ok())

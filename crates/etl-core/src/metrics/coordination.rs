@@ -1,8 +1,11 @@
 //! Coordination handles (`etl_coordination_*`).
 
-use super::labels::ComponentLabels;
+use super::MetricsError;
+use super::labels::{ComponentLabels, OwnedGauge};
 use super::names;
-use metrics::{Counter, Gauge, Histogram};
+use super::ownership::{SeriesClaim, series_key};
+use metrics::{Counter, Histogram};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Why a split lease was acquired (the `reason` label on
@@ -188,13 +191,13 @@ pub enum StoreOp {
 /// Cloning is cheap — the fields are shared recorder handles.
 #[derive(Clone, Debug)]
 pub struct CoordinationMetrics {
-    splits_owned: Gauge,
-    splits_completed: Gauge,
-    splits_quarantined: Gauge,
-    live_workers: Gauge,
-    leader: Gauge,
-    idle: Gauge,
-    splits_draining: Gauge,
+    splits_owned: OwnedGauge,
+    splits_completed: OwnedGauge,
+    splits_quarantined: OwnedGauge,
+    live_workers: OwnedGauge,
+    leader: OwnedGauge,
+    idle: OwnedGauge,
+    splits_draining: OwnedGauge,
     acquired_create: Counter,
     acquired_reclaimed: Counter,
     acquired_expired: Counter,
@@ -226,11 +229,41 @@ pub struct CoordinationMetrics {
     store_op_watch: Histogram,
     drain_duration: Histogram,
     assignment_latency: Histogram,
+    /// Shared so `Clone` hands out co-owners rather than duplicate claimants:
+    /// the series is released when the last clone drops.
+    _claim: Option<Arc<SeriesClaim>>,
 }
 
 impl CoordinationMetrics {
     /// Resolve all coordination handles.
+    ///
+    /// Claims the `etl_coordination_*` series for these labels; a second live
+    /// handle set logs and becomes a shadow, counting but publishing no gauge
+    /// (see "Series ownership" in `docs/METRICS.md`). Cloning this struct
+    /// shares the claim — clones are co-owners, not competitors.
     pub fn new(labels: &ComponentLabels) -> Self {
+        let claim = SeriesClaim::claim_or_shadow(Self::key(labels));
+        Self::build(labels, claim.map(Arc::new))
+    }
+
+    /// Resolve all coordination handles, failing when another live handle set
+    /// already owns the series.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::DuplicateSeries`] on a collision.
+    pub fn try_new(labels: &ComponentLabels) -> Result<Self, MetricsError> {
+        let claim = SeriesClaim::try_claim(Self::key(labels))?;
+        Ok(Self::build(labels, Some(Arc::new(claim))))
+    }
+
+    fn key(labels: &ComponentLabels) -> String {
+        series_key("coordination", labels, "")
+    }
+
+    fn build(labels: &ComponentLabels, claim: Option<Arc<SeriesClaim>>) -> Self {
+        let owned = claim.is_some();
+        let gauge = |name| OwnedGauge::new(labels.gauge(name), owned);
         let acquired = |reason| {
             labels.counter1(
                 names::COORDINATION_ACQUISITIONS_TOTAL,
@@ -264,13 +297,13 @@ impl CoordinationMetrics {
             )
         };
         CoordinationMetrics {
-            splits_owned: labels.gauge(names::COORDINATION_SPLITS_OWNED),
-            splits_completed: labels.gauge(names::COORDINATION_SPLITS_COMPLETED),
-            splits_quarantined: labels.gauge(names::COORDINATION_SPLITS_QUARANTINED),
-            live_workers: labels.gauge(names::COORDINATION_LIVE_WORKERS),
-            leader: labels.gauge(names::COORDINATION_LEADER),
-            idle: labels.gauge(names::COORDINATION_IDLE),
-            splits_draining: labels.gauge(names::COORDINATION_SPLITS_DRAINING),
+            splits_owned: gauge(names::COORDINATION_SPLITS_OWNED),
+            splits_completed: gauge(names::COORDINATION_SPLITS_COMPLETED),
+            splits_quarantined: gauge(names::COORDINATION_SPLITS_QUARANTINED),
+            live_workers: gauge(names::COORDINATION_LIVE_WORKERS),
+            leader: gauge(names::COORDINATION_LEADER),
+            idle: gauge(names::COORDINATION_IDLE),
+            splits_draining: gauge(names::COORDINATION_SPLITS_DRAINING),
             acquired_create: acquired("create"),
             acquired_reclaimed: acquired("reclaimed"),
             acquired_expired: acquired("expired"),
@@ -302,6 +335,7 @@ impl CoordinationMetrics {
             store_op_watch: store_op("watch"),
             drain_duration: labels.histogram(names::COORDINATION_DRAIN_DURATION_SECONDS),
             assignment_latency: labels.histogram(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS),
+            _claim: claim,
         }
     }
 

@@ -201,6 +201,43 @@ impl ComponentLabels {
     }
 }
 
+/// A gauge that publishes only for the handle set that **owns** its series.
+///
+/// Registration still happens for a shadow — the key is the same, so it is the
+/// same series and nothing extra renders — but every write is dropped, leaving
+/// the owner's reading intact. Ownership is decided once, at construction (see
+/// [`ownership`](super::ownership)); this is a plain bool test, not a lock.
+///
+/// Wrapping the handle rather than gating each setter is deliberate: a stage
+/// struct's initial publishes run in its constructor, and those are exactly
+/// the writes that clobber a live owner. Routing them through this type makes
+/// the suppression impossible to forget.
+#[derive(Clone, Debug)]
+pub(crate) struct OwnedGauge {
+    gauge: Gauge,
+    owned: bool,
+}
+
+impl OwnedGauge {
+    pub(crate) fn new(gauge: Gauge, owned: bool) -> Self {
+        OwnedGauge { gauge, owned }
+    }
+
+    #[inline]
+    pub(crate) fn set(&self, value: f64) {
+        if self.owned {
+            self.gauge.set(value);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn increment(&self, value: f64) {
+        if self.owned {
+            self.gauge.increment(value);
+        }
+    }
+}
+
 /// Metadata attached to connector- and user-owned metric families. The
 /// framework's own stage metrics register through the `metrics` macros, which
 /// stamp `module_path!()` here; families registered through
@@ -321,10 +358,17 @@ pub(crate) struct PartitionGauges {
     pub(crate) name: &'static str,
     pub(crate) labels: ComponentLabels,
     pub(crate) gauges: Mutex<HashMap<u32, Gauge>>,
+    /// Whether the owning handle set owns this series — see [`OwnedGauge`].
+    /// A shadow registers nothing here and publishes nothing: the owner is
+    /// the one member whose per-partition figures are real.
+    pub(crate) owned: bool,
 }
 
 impl PartitionGauges {
     pub(crate) fn set(&self, partition: PartitionId, value: f64) {
+        if !self.owned {
+            return;
+        }
         let mut gauges = self.gauges.lock().expect("partition gauge lock");
         gauges
             .entry(partition.0)

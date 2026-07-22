@@ -121,11 +121,23 @@ struct Fixture {
     budget: Arc<InflightBudget>,
 }
 
+fn next_component() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "sink-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize) -> Fixture {
     let writer = MockWriter::new();
     let (queues, receivers) = shard_queues(shards, queue_cap);
     let budget = Arc::new(InflightBudget::new());
-    let labels = ComponentLabels::new("test", "sink", "mock");
+    // A distinct component per fixture: the shard gauges are owned by one live
+    // handle set per series (`metrics::ownership`), and under `cargo test`
+    // these fixtures are alive concurrently in one process. Sharing a label
+    // set would make all but the first a shadow that publishes no gauge.
+    let labels = ComponentLabels::new("test", next_component(), "mock");
     let endpoints: Vec<Vec<MockEndpoint>> = (0..shards)
         .map(|s| {
             (0..replicas)

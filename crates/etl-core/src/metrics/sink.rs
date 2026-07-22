@@ -1,11 +1,12 @@
 //! Sink-shard handles (`etl_sink_*`), one struct per shard worker, plus the
 //! end-to-end latency histogram observed at the terminal stage.
 
-use super::E2eBasis;
-use super::labels::ComponentLabels;
+use super::labels::{ComponentLabels, OwnedGauge};
 use super::names;
+use super::ownership::{SeriesClaim, series_key};
+use super::{E2eBasis, MetricsError};
 use crate::error::ErrorClass;
-use metrics::{Counter, Gauge, Histogram, SharedString};
+use metrics::{Counter, Histogram, SharedString};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -37,7 +38,7 @@ impl FlushReason {
 /// Per-replica handles inside one shard.
 #[derive(Debug)]
 struct ReplicaMetrics {
-    healthy: Gauge,
+    healthy: OwnedGauge,
     breaker_opens: Counter,
     errors: Counter,
 }
@@ -55,7 +56,7 @@ pub struct SinkShardMetrics {
     flush_drain: Counter,
     flush_duration: Histogram,
     retries: Counter,
-    retry_backoff: Gauge,
+    retry_backoff: OwnedGauge,
     /// Current backoff step, in seconds, of every batch of this shard that is
     /// sleeping between write attempts, keyed by batch sequence number. The
     /// gauge publishes the max; the map is bounded by `inflight.max_per_shard`
@@ -64,12 +65,13 @@ pub struct SinkShardMetrics {
     err_retryable: Counter,
     err_record: Counter,
     err_fatal: Counter,
-    inflight: Gauge,
+    inflight: OwnedGauge,
     abandoned: Counter,
-    shard_healthy: Gauge,
+    shard_healthy: OwnedGauge,
     e2e: Histogram,
     e2e_basis: E2eBasis,
     replicas: Vec<ReplicaMetrics>,
+    _claim: Option<SeriesClaim>,
 }
 
 impl SinkShardMetrics {
@@ -81,23 +83,69 @@ impl SinkShardMetrics {
     /// Call **after** [`install`](crate::metrics::install): handles bind to
     /// the recorder present at construction, and a handle built before the
     /// exporter exists silently records into the void.
+    ///
+    /// Claims this shard's series — the labels plus `shard` — so that only one
+    /// live handle set publishes them. The gauges here are edge-triggered
+    /// (health flips on a breaker transition, backoff on a retry), so a second
+    /// writer's reading would stand until the owner's next transition, which
+    /// for a quarantined shard may be never. A collision therefore logs and
+    /// leaves this instance a shadow: its counters still record, its gauges do
+    /// not (see "Series ownership" in `docs/METRICS.md`). Assembly through
+    /// [`Pipeline`](crate::pipeline::Pipeline) refuses to build instead.
     pub fn new(
         labels: &ComponentLabels,
         shard: u32,
         replicas: &[String],
         e2e_basis: E2eBasis,
     ) -> Self {
+        let claim = SeriesClaim::claim_or_shadow(Self::key(labels, shard));
+        Self::build(labels, shard, replicas, e2e_basis, claim)
+    }
+
+    /// Resolve all handles for one shard, failing when another live handle set
+    /// already owns the shard's series. The pipeline builder's path.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::DuplicateSeries`] on a collision.
+    pub fn try_new(
+        labels: &ComponentLabels,
+        shard: u32,
+        replicas: &[String],
+        e2e_basis: E2eBasis,
+    ) -> Result<Self, MetricsError> {
+        let claim = SeriesClaim::try_claim(Self::key(labels, shard))?;
+        Ok(Self::build(labels, shard, replicas, e2e_basis, Some(claim)))
+    }
+
+    fn key(labels: &ComponentLabels, shard: u32) -> String {
+        series_key("sink", labels, &format!("shard={shard}"))
+    }
+
+    fn build(
+        labels: &ComponentLabels,
+        shard: u32,
+        replicas: &[String],
+        e2e_basis: E2eBasis,
+        claim: Option<SeriesClaim>,
+    ) -> Self {
+        // Resolved before any handle is written: the initial publishes below
+        // are exactly the writes that would clobber a live owner's reading.
+        let owned = claim.is_some();
         let shard: SharedString = shard.to_string().into();
         let replicas = replicas
             .iter()
             .map(|replica| {
                 let m = ReplicaMetrics {
-                    healthy: labels.gauge2(
-                        names::SINK_REPLICA_HEALTHY,
-                        names::L_SHARD,
-                        shard.clone(),
-                        names::L_REPLICA,
-                        replica.clone(),
+                    healthy: OwnedGauge::new(
+                        labels.gauge2(
+                            names::SINK_REPLICA_HEALTHY,
+                            names::L_SHARD,
+                            shard.clone(),
+                            names::L_REPLICA,
+                            replica.clone(),
+                        ),
+                        owned,
                     ),
                     breaker_opens: labels.counter2(
                         names::SINK_BREAKER_OPENS_TOTAL,
@@ -118,17 +166,23 @@ impl SinkShardMetrics {
                 m
             })
             .collect();
-        let shard_healthy = labels.gauge1(names::SINK_SHARD_HEALTHY, names::L_SHARD, shard.clone());
+        let shard_healthy = OwnedGauge::new(
+            labels.gauge1(names::SINK_SHARD_HEALTHY, names::L_SHARD, shard.clone()),
+            owned,
+        );
         shard_healthy.set(1.0);
         // Published as `0` from construction rather than left absent until the
         // first retry: "this shard is not backing off" is true of a shard that
         // has never written, so there is no measurement to wait for. (Contrast
         // `etl_source_lag_records`, where absence carries information — see the
         // "Absent, zero, and stale" section of `docs/METRICS.md`.)
-        let retry_backoff = labels.gauge1(
-            names::SINK_RETRY_BACKOFF_SECONDS,
-            names::L_SHARD,
-            shard.clone(),
+        let retry_backoff = OwnedGauge::new(
+            labels.gauge1(
+                names::SINK_RETRY_BACKOFF_SECONDS,
+                names::L_SHARD,
+                shard.clone(),
+            ),
+            owned,
         );
         retry_backoff.set(0.0);
         SinkShardMetrics {
@@ -193,12 +247,16 @@ impl SinkShardMetrics {
                 names::L_ERROR_TYPE,
                 ErrorClass::Fatal.label(),
             ),
-            inflight: labels.gauge1(names::SINK_INFLIGHT_BATCHES, names::L_SHARD, shard.clone()),
+            inflight: OwnedGauge::new(
+                labels.gauge1(names::SINK_INFLIGHT_BATCHES, names::L_SHARD, shard.clone()),
+                owned,
+            ),
             abandoned: labels.counter1(names::SINK_ABANDONED_BATCHES_TOTAL, names::L_SHARD, shard),
             shard_healthy,
             e2e: labels.histogram(names::E2E_LATENCY_SECONDS),
             e2e_basis,
             replicas,
+            _claim: claim,
         }
     }
 
@@ -356,8 +414,9 @@ impl SinkShardMetrics {
     }
 
     /// Record whether the shard has at least one circuit-closed replica.
-    /// Level-set and idempotent — safe to call redundantly; the shard's
-    /// breaker set drives it on transitions.
+    /// Level-set and idempotent — the shard's breaker set republishes it on
+    /// every write outcome, not only on a transition, so a reading that has
+    /// gone stale corrects itself within one probe cycle.
     pub fn set_shard_healthy(&self, up: bool) {
         self.shard_healthy.set(if up { 1.0 } else { 0.0 });
     }

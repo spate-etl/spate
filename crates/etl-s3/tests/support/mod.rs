@@ -174,14 +174,27 @@ pub(crate) fn launch_tuned(
 /// (e.g. `.with_framer(...)`, `.with_coordinator(...)`) before it is
 /// handed to the runtime; it receives the pipeline's I/O handle for
 /// coordinator construction.
+fn next_launch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn launch_customized(
     yaml: &str,
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml).expect("config parses"))
-        .expect("pipeline builds");
+    let mut config = PipelineConfig::from_str(yaml).expect("config parses");
+    // Every launch gets its own pipeline name. Metric gauge series have a
+    // single live owner per process (`docs/METRICS.md`, "Series ownership")
+    // and the pipeline name is part of every key, so two launches of one
+    // config — tests running concurrently in a `cargo test` process, or a
+    // multi-instance test running two workers in-process — would collide.
+    // Coordination is unaffected: splits are namespaced by the store, not by
+    // the pipeline name.
+    config.pipeline.name = format!("{}-{}", config.pipeline.name, next_launch());
+    let pipeline = Pipeline::from_config(config).expect("pipeline builds");
     let io = pipeline.io_handle();
     let source = make_source(
         S3Source::from_component_config(&pipeline.config().source, io.clone())

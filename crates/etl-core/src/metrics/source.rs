@@ -6,10 +6,12 @@
 //! control plane, so that a partition whose lag has never been measured is
 //! absent rather than a `0` that reads as "caught up".
 
-use super::labels::{ComponentLabels, PartitionGauges};
+use super::MetricsError;
+use super::labels::{ComponentLabels, OwnedGauge, PartitionGauges};
 use super::names;
+use super::ownership::{SeriesClaim, series_key};
 use crate::record::PartitionId;
-use metrics::{Counter, Gauge, Histogram};
+use metrics::{Counter, Histogram};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,12 +24,23 @@ pub struct SourceMetrics {
     poll_duration: Histogram,
     rebalance_assign: Counter,
     rebalance_revoke: Counter,
-    lanes_active: Gauge,
+    lanes_active: OwnedGauge,
     partition_lag: PartitionGauges,
+    _claim: Option<SeriesClaim>,
 }
 
 impl SourceMetrics {
-    /// Resolve all source handles.
+    /// Resolve all source handles, claiming the `etl_source_*` series for
+    /// these labels.
+    ///
+    /// A pipeline builds several of these on identical labels — one per
+    /// pipeline thread plus the controller's — because every thread counts
+    /// records it polled. Only *one* of them may publish the source gauges,
+    /// and it must be the controller's: it holds the assignment and hands its
+    /// clone to the source, which is the only thing that can measure lag. The
+    /// per-thread instances are therefore built with [`shadow`](Self::shadow),
+    /// not this constructor. A collision here logs and shadows rather than
+    /// panicking (see "Series ownership" in `docs/METRICS.md`).
     ///
     /// Consumer lag is deliberately not gated by `per_partition_detail`: the
     /// per-partition series is the *only* representation of a golden signal,
@@ -37,6 +50,42 @@ impl SourceMetrics {
     /// been measured is absent rather than reporting a `0` that reads as
     /// "caught up".
     pub fn new(labels: &ComponentLabels) -> Self {
+        Self::build(labels, SeriesClaim::claim_or_shadow(Self::key(labels)))
+    }
+
+    /// Resolve all source handles, failing when another live handle set
+    /// already owns the series. The pipeline runtime's path for the
+    /// controller's instance — the one that owns lag and lanes.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::DuplicateSeries`] on a collision.
+    pub fn try_new(labels: &ComponentLabels) -> Result<Self, MetricsError> {
+        let claim = SeriesClaim::try_claim(Self::key(labels))?;
+        Ok(Self::build(labels, Some(claim)))
+    }
+
+    /// Resolve source handles that deliberately **do not** own their series:
+    /// counters and the poll histogram record as normal (they aggregate across
+    /// instances), gauge writes are dropped.
+    ///
+    /// This is how a pipeline thread gets to count its own polls without
+    /// competing for `etl_source_lag_records` and `etl_source_lanes_active`,
+    /// which only the controller can populate correctly. Use it when a second
+    /// instance on the same labels is intended; anything else should use
+    /// [`new`](Self::new) or [`try_new`](Self::try_new) and hear about the
+    /// collision.
+    #[must_use]
+    pub fn shadow(labels: &ComponentLabels) -> Self {
+        Self::build(labels, None)
+    }
+
+    fn key(labels: &ComponentLabels) -> String {
+        series_key("source", labels, "")
+    }
+
+    fn build(labels: &ComponentLabels, claim: Option<SeriesClaim>) -> Self {
+        let owned = claim.is_some();
         SourceMetrics {
             records: labels.counter(names::SOURCE_RECORDS_TOTAL),
             bytes: labels.counter(names::SOURCE_BYTES_TOTAL),
@@ -51,12 +100,14 @@ impl SourceMetrics {
                 names::L_EVENT,
                 "revoke",
             ),
-            lanes_active: labels.gauge(names::SOURCE_LANES_ACTIVE),
+            lanes_active: OwnedGauge::new(labels.gauge(names::SOURCE_LANES_ACTIVE), owned),
             partition_lag: PartitionGauges {
                 name: names::SOURCE_LAG_RECORDS,
                 labels: labels.clone(),
                 gauges: Mutex::new(HashMap::new()),
+                owned,
             },
+            _claim: claim,
         }
     }
 

@@ -799,3 +799,61 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     );
     drop(occupied);
 }
+
+/// The controller's `SourceMetrics` — not one of the per-thread instances —
+/// must own the source series.
+///
+/// A pipeline builds one handle set per driver thread plus the controller's,
+/// all on identical labels, because every thread counts the records it polled.
+/// Only the controller's can publish the gauges: it is the one holding the
+/// assignment, and the one whose clone reaches the source, which is the only
+/// thing that can measure lag. If a driver's instance claimed the series
+/// first, the controller's would be a shadow and `etl_source_lag_records`
+/// would go silent again — the exact failure this project has already shipped
+/// once, invisibly, for fourteen days.
+///
+/// `FakeSource` publishes `FAKE_SOURCE_LAG` for partition 0 at `open`, through
+/// whatever handle set it was given. A per-partition gauge registers on its
+/// first published value, so a shadowed controller leaves the series *absent*
+/// — flip `SourceMetrics::shadow` to `try_new` in `runtime.rs` and this test
+/// fails on a missing series, not on a wrong number.
+#[test]
+fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
+    let mut cfg = test_config(4); // four drivers → four shadows, one owner
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    // Installed before the pipeline builds: handles bind to the recorder
+    // present at construction. Idempotent, so the runtime's own install
+    // reuses this one and renders through this handle.
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        listen: cfg.metrics.listen,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    let rendered = handle.render();
+    let needle = format!(
+        r#"etl_source_lag_records{{pipeline="{pipeline_name}",component="source",component_type="source",partition="0"}} {FAKE_SOURCE_LAG}"#
+    );
+    assert!(
+        rendered.contains(&needle),
+        "the source's lag must reach the exposition — the handle set the \
+         source was given owns the series:\n{rendered}"
+    );
+}

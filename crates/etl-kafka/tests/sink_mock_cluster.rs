@@ -192,12 +192,25 @@ async fn write_batch_round_trips_keys_headers_payloads() {
     );
 }
 
-const PIPELINE_CONFIG: &str = r#"
-pipeline: { name: kafka-sink-test, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: 127.0.0.1:0 }
-source: { memory: {} }
-sink: { kafka: {} }
-"#;
+/// One pipeline config per spawn, with a distinct pipeline name.
+///
+/// Metric gauge series have a single live owner per process and the pipeline
+/// name is part of every key, so two pipelines called `kafka-sink-test` alive
+/// at once — which is what `cargo test` does with the tests in this file —
+/// are a collision the builder refuses. In production these would be separate
+/// processes.
+fn pipeline_config() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        r#"
+pipeline: {{ name: kafka-sink-test-{n}, threads: 1, io_threads: 1 }}
+metrics: {{ exporter: none, listen: 127.0.0.1:0 }}
+source: {{ memory: {{}} }}
+sink: {{ kafka: {{}} }}
+"#
+    )
+}
 
 /// Spawn a memory→kafka pipeline over `sink`; returns the source handle,
 /// the shutdown trigger, and the bounded-join handle.
@@ -210,28 +223,29 @@ fn spawn_pipeline(
 ) {
     let (source, handle) = memory_source();
     let encoder = sink.encoder_bytes();
-    let runtime = Pipeline::from_config(PipelineConfig::from_str(PIPELINE_CONFIG).expect("config"))
-        .expect("builder")
-        .sink(sink)
-        .expect("sink")
-        .chains(move |ctx| {
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .with_metrics(ctx.pipeline, "main")
-                .sink(
-                    encoder.clone(),
-                    KeyHashRouter,
-                    ChunkConfig::default(),
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
-            ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .expect("into_runtime");
+    let runtime =
+        Pipeline::from_config(PipelineConfig::from_str(&pipeline_config()).expect("config"))
+            .expect("builder")
+            .sink(sink)
+            .expect("sink")
+            .chains(move |ctx| {
+                chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                    .with_metrics(ctx.pipeline, "main")
+                    .sink(
+                        encoder.clone(),
+                        KeyHashRouter,
+                        ChunkConfig::default(),
+                        ctx.queues,
+                        ctx.budget,
+                    )
+                    .build()
+            })
+            .runtime_options(RuntimeOptions {
+                handle_signals: false,
+                ..RuntimeOptions::default()
+            })
+            .into_runtime(source)
+            .expect("into_runtime");
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     (handle, shutdown, run)

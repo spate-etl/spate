@@ -134,6 +134,14 @@ run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.
   metrics (`*_dropped_total{reason}` / `*_errors_total{error_type}`).
 - All metrics handles are **pre-registered at build time** — never resolve
   metric names/labels on the per-record path.
+- **A gauge series has exactly one live owner per process.** Handle structs
+  claim their series at construction (`metrics::ownership`); a duplicate handle
+  set on the same key becomes a *shadow* that still counts (counters sum) but
+  publishes no gauge. Assembly fails on a collision (`BuildError`/`StartError`);
+  direct construction logs and shadows. See "Series ownership" in
+  `docs/METRICS.md`. A corollary for tests: `cargo test` runs a binary's tests
+  in one process, so fixtures must carry per-test `pipeline`/`component` labels
+  — a local recorder does not isolate the process-wide claim.
 - **All metrics live under the `etl_` umbrella.** The framework owns the
   reserved stage roots (`etl_source_`, `etl_sink_`, …); connector/user families
   register through a `Meter`, which auto-prefixes `etl_<namespace>_` (default

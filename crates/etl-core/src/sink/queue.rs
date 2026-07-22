@@ -5,7 +5,7 @@
 //! shard worker tasks on the I/O runtime.
 
 use super::EncodedChunk;
-use crate::metrics::{ComponentLabels, QueueMetrics};
+use crate::metrics::{ComponentLabels, MetricsError, QueueMetrics};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -68,11 +68,19 @@ impl ShardQueues {
     /// the `etl_queue_*` series inherit the standard component labels. Call
     /// once, before this handle is cloned into pipeline terminals, so every
     /// producer clone shares the same handles.
-    pub(crate) fn attach_metrics(&mut self, labels: &ComponentLabels) {
+    ///
+    /// Fails when another live handle set already owns one of these queue
+    /// edges — two pipelines with the same names in one process. The depth
+    /// gauge cannot be shared, so the caller refuses to build rather than
+    /// letting two writers alternate readings.
+    pub(crate) fn attach_metrics(&mut self, labels: &ComponentLabels) -> Result<(), MetricsError> {
         let metrics = (0..self.senders.len())
-            .map(|i| QueueMetrics::new(labels, &format!("chain->sink/shard-{i}"), self.capacity))
-            .collect();
+            .map(|i| {
+                QueueMetrics::try_new(labels, &format!("chain->sink/shard-{i}"), self.capacity)
+            })
+            .collect::<Result<_, _>>()?;
         self.metrics = Some(Arc::new(metrics));
+        Ok(())
     }
 
     /// Whether every shard queue is below `ratio` of its capacity —
@@ -176,7 +184,12 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             let (mut q, rx) = shard_queues(1, 2);
-            q.attach_metrics(&ComponentLabels::new("orders", "sink", "clickhouse"));
+            q.attach_metrics(&ComponentLabels::new(
+                "orders",
+                "queue-family-test",
+                "clickhouse",
+            ))
+            .expect("free series");
             q.try_send(0, chunk()).expect("first send fits"); // depth -> 1
             q.try_send(0, chunk()).expect("second send fills"); // depth -> 2
             q.try_send(0, chunk()).expect_err("full"); // Full: full_events -> 1, depth -> 2
@@ -185,7 +198,7 @@ mod tests {
         });
         let rendered = handle.render();
 
-        let series = r#"{pipeline="orders",component="sink",component_type="clickhouse",queue="chain->sink/shard-0"}"#;
+        let series = r#"{pipeline="orders",component="queue-family-test",component_type="clickhouse",queue="chain->sink/shard-0"}"#;
         for needle in [
             format!("etl_queue_capacity{series} 2"),
             // A single Full rejection; the following Closed rejection is excluded.

@@ -192,9 +192,34 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let handle = install_or_reuse(&metrics_settings(&self.config))?;
 
         let runtime_labels = ComponentLabels::new(pipeline_name.clone(), "runtime", "pipeline");
-        let pipeline_metrics = PipelineMetrics::new(&runtime_labels, &self.options.version);
+        // Fallible: a second live pipeline of this name in one process would
+        // publish state and lifecycle gauges over this one's (see "Series
+        // ownership" in `docs/METRICS.md`). Refuse to start instead.
+        let pipeline_metrics = PipelineMetrics::try_new(&runtime_labels, &self.options.version)
+            .map_err(|e| StartError::Metrics(e.to_string()))?;
         pipeline_metrics.set_state(PipelineState::Starting);
         pipeline_metrics.set_threads(threads);
+
+        // The controller's handle sets, resolved here rather than at the
+        // controller's own construction below: both claim series, and a
+        // duplicate must fail before any driver thread exists — past that
+        // point a bare `?` would leak the threads instead of stopping them.
+        let checkpoint_metrics = CheckpointMetrics::try_new(
+            &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
+            self.config.metrics.per_partition_detail,
+        )
+        .map_err(|e| StartError::Metrics(e.to_string()))?;
+        // The owner of the source series: it publishes active lanes, and its
+        // clone goes to the source, which is the only thing that can measure
+        // lag. The per-thread instances are shadows of this one.
+        let controller_source_metrics = Arc::new(
+            SourceMetrics::try_new(&ComponentLabels::new(
+                pipeline_name.clone(),
+                "source",
+                source_ct.clone(),
+            ))
+            .map_err(|e| StartError::Metrics(e.to_string()))?,
+        );
 
         let health = HealthState::new(threads, HealthThresholds::default());
 
@@ -312,12 +337,20 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 budget: Arc::clone(&self.budget),
                 queues: self.sink.queues.clone(),
                 health: Arc::clone(&health),
+                // Each driver's backpressure series is its own (`driver-{i}`),
+                // so every thread owns what it publishes.
                 bp_metrics: BackpressureMetrics::new(&ComponentLabels::new(
                     pipeline_name.clone(),
                     format!("driver-{i}"),
                     "driver",
                 )),
-                source_metrics: SourceMetrics::new(&ComponentLabels::new(
+                // Deliberately a shadow: every thread counts the records and
+                // polls it performed (those sum), but the source *gauges* —
+                // lag and active lanes — belong to the controller's instance
+                // below, which is the only one that sees the assignment and
+                // the only one the source itself is handed. A claiming
+                // constructor here would take the series hostage from it.
+                source_metrics: SourceMetrics::shadow(&ComponentLabels::new(
                     pipeline_name.clone(),
                     "source",
                     source_ct.clone(),
@@ -396,15 +429,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             event_poll_timeout: self.options.event_poll_timeout,
             max_pending_batches: self.config.checkpoint.max_pending_batches,
             stalled_fail_after: self.config.checkpoint.stalled_fail_after,
-            checkpoint_metrics: CheckpointMetrics::new(
-                &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
-                self.config.metrics.per_partition_detail,
-            ),
-            source_metrics: Arc::new(SourceMetrics::new(&ComponentLabels::new(
-                pipeline_name.clone(),
-                "source",
-                source_ct.clone(),
-            ))),
+            checkpoint_metrics,
+            source_metrics: controller_source_metrics,
             source_meter,
             per_partition_detail: self.config.metrics.per_partition_detail,
             pipeline_metrics,

@@ -729,19 +729,34 @@ mod tests {
         use rdkafka::statistics::{Partition, Topic};
         use std::collections::HashMap;
 
-        const STD: &str = r#"pipeline="orders",component="source",component_type="kafka""#;
-
-        /// Run `f` against a local Prometheus recorder and return the rendered
-        /// exposition. Handles must be resolved inside `f`.
-        fn render(f: impl FnOnce(&SourceMetrics)) -> String {
+        /// Run `f` against a local Prometheus recorder; returns the rendered
+        /// exposition and the standard label string its series carry. Handles
+        /// must be resolved inside `f`.
+        ///
+        /// The component name is unique per call because `SourceMetrics` owns
+        /// its gauge series: one live handle set per `(pipeline, component,
+        /// component_type)` publishes, later ones shadow. That check is
+        /// process-wide and deliberately blind to the local recorder here, so
+        /// under `cargo test` — one process, tests in parallel — a fixed
+        /// component would leave every test but the first asserting on an
+        /// empty exposition. Hence the label string comes back with the
+        /// rendering rather than being a constant.
+        fn render(f: impl FnOnce(&SourceMetrics)) -> (String, String) {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let component = format!(
+                "source-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let std =
+                format!(r#"pipeline="orders",component="{component}",component_type="kafka""#);
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
             metrics::with_local_recorder(&recorder, || {
-                let m = SourceMetrics::new(&ComponentLabels::new("orders", "source", "kafka"));
+                let m = SourceMetrics::new(&ComponentLabels::new("orders", component, "kafka"));
                 f(&m);
             });
             handle.run_upkeep();
-            handle.render()
+            (handle.render(), std)
         }
 
         /// `(partition, consumer_lag)` pairs into a snapshot for `orders`.
@@ -775,7 +790,7 @@ mod tests {
         /// its backlog, per partition, at full magnitude.
         #[test]
         fn a_large_backlog_publishes_per_partition_lag() {
-            let rendered = render(|m| {
+            let (rendered, std) = render(|m| {
                 publish_lag(
                     &stats(&[(0, 150_000_000), (1, 90_000_000)]),
                     "orders",
@@ -785,13 +800,13 @@ mod tests {
             });
             assert!(
                 rendered.contains(&format!(
-                    r#"etl_source_lag_records{{{STD},partition="0"}} 150000000"#
+                    r#"etl_source_lag_records{{{std},partition="0"}} 150000000"#
                 )),
                 "backlogged partition must report its lag:\n{rendered}"
             );
             assert!(
                 rendered.contains(&format!(
-                    r#"etl_source_lag_records{{{STD},partition="1"}} 90000000"#
+                    r#"etl_source_lag_records{{{std},partition="1"}} 90000000"#
                 )),
                 "every owned partition gets its own series:\n{rendered}"
             );
@@ -802,7 +817,7 @@ mod tests {
         /// `sum(etl_source_lag_records)` double-count.
         #[test]
         fn no_unlabelled_aggregate_series_is_published() {
-            let rendered = render(|m| {
+            let (rendered, _std) = render(|m| {
                 publish_lag(
                     &stats(&[(0, 17), (1, 4)]),
                     "orders",
@@ -826,7 +841,7 @@ mod tests {
         /// most behind.
         #[test]
         fn unknown_lag_registers_no_series() {
-            let rendered = render(|m| {
+            let (rendered, _std) = render(|m| {
                 publish_lag(
                     &stats(&[(0, -1), (1, -1)]),
                     "orders",
@@ -845,7 +860,7 @@ mod tests {
         /// to zero.
         #[test]
         fn mixed_snapshot_publishes_only_known_partitions() {
-            let rendered = render(|m| {
+            let (rendered, std) = render(|m| {
                 publish_lag(
                     &stats(&[(0, 4_200), (1, -1)]),
                     "orders",
@@ -854,7 +869,7 @@ mod tests {
                 );
             });
             assert!(rendered.contains(&format!(
-                r#"etl_source_lag_records{{{STD},partition="0"}} 4200"#
+                r#"etl_source_lag_records{{{std},partition="0"}} 4200"#
             )));
             assert!(
                 !rendered.contains(r#"partition="1""#),
@@ -868,13 +883,13 @@ mod tests {
         /// happened.
         #[test]
         fn a_known_partition_holds_its_value_when_lag_goes_unknown() {
-            let rendered = render(|m| {
+            let (rendered, std) = render(|m| {
                 publish_lag(&stats(&[(0, 5_000)]), "orders", &[PartitionId(0)], m);
                 publish_lag(&stats(&[(0, -1)]), "orders", &[PartitionId(0)], m);
             });
             assert!(
                 rendered.contains(&format!(
-                    r#"etl_source_lag_records{{{STD},partition="0"}} 5000"#
+                    r#"etl_source_lag_records{{{std},partition="0"}} 5000"#
                 )),
                 "last known value is held:\n{rendered}"
             );
@@ -884,7 +899,7 @@ mod tests {
         /// source owns exactly one topic.
         #[test]
         fn a_snapshot_without_our_topic_publishes_nothing() {
-            let rendered = render(|m| {
+            let (rendered, _std) = render(|m| {
                 publish_lag(&stats(&[(0, 900)]), "other-topic", &[PartitionId(0)], m);
             });
             assert!(
@@ -906,7 +921,7 @@ mod tests {
         /// reviving it.
         #[test]
         fn revoked_partitions_zero_out_and_stop_updating() {
-            let rendered = render(|m| {
+            let (rendered, std) = render(|m| {
                 // Both owned.
                 publish_lag(
                     &stats(&[(0, 11), (1, 22)]),
@@ -921,11 +936,11 @@ mod tests {
                 publish_lag(&stats(&[(0, 33), (1, 44)]), "orders", &[PartitionId(0)], m);
             });
             assert!(rendered.contains(&format!(
-                r#"etl_source_lag_records{{{STD},partition="0"}} 33"#
+                r#"etl_source_lag_records{{{std},partition="0"}} 33"#
             )));
             assert!(
                 rendered.contains(&format!(
-                    r#"etl_source_lag_records{{{STD},partition="1"}} 0"#
+                    r#"etl_source_lag_records{{{std},partition="1"}} 0"#
                 )),
                 "revoked partition must be zeroed, not left at its last lag:\n{rendered}"
             );

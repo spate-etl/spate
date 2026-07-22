@@ -24,6 +24,16 @@
 //! succeeds at most once per process; a second call returns
 //! [`MetricsError::AlreadyInstalled`].
 //!
+//! # Series ownership
+//!
+//! Counters aggregate under a label collision; gauges do not. So every handle
+//! struct that owns gauges claims its series at construction, and a second
+//! struct resolving the same series becomes a **shadow**: it still counts, but
+//! it publishes no gauge, leaving the owner's readings truthful. The pipeline
+//! builder and runtime take the fallible constructors (`try_new`) and refuse
+//! to start on a collision; direct construction (`new`) logs and shadows. The
+//! contract is written up under "Series ownership" in `docs/METRICS.md`.
+//!
 //! # Hot-path discipline
 //!
 //! All handles are pre-registered at pipeline build time via the structs in
@@ -39,6 +49,7 @@ mod labels;
 mod meter;
 pub mod names;
 mod operator;
+mod ownership;
 mod pipeline;
 mod queue;
 mod sink;
@@ -71,7 +82,7 @@ pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// Buckets for `*_duration_seconds` histograms and
@@ -158,6 +169,14 @@ pub enum MetricsError {
     /// The exporter rejected its configuration.
     #[error("failed to build the metrics exporter: {0}")]
     Build(String),
+    /// Another live handle set already owns this gauge series — two
+    /// pipelines, or two components sharing a name, in one process (see the
+    /// "Series ownership" section of `docs/METRICS.md`).
+    #[error(
+        "metric series {0} already has a live owner in this process; \
+         gauge series cannot be shared (rename the component or the pipeline)"
+    )]
+    DuplicateSeries(String),
 }
 
 /// Handle to the installed exporter. Cheap to clone.
@@ -279,6 +298,13 @@ static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::Onc
 /// collector (CPU, memory, fds). No HTTP listener is spawned here — the
 /// admin server owns the socket.
 pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError> {
+    // Serialized: the check-then-install below is not atomic on its own, and
+    // two threads racing it both find the slot empty, both call
+    // `install_recorder`, and the loser reports `AlreadyInstalled` — against
+    // *our own* recorder, which the very next call would have reused. One
+    // uncontended lock on a once-per-process path.
+    static INSTALL: Mutex<()> = Mutex::new(());
+    let _serialized = INSTALL.lock().unwrap_or_else(PoisonError::into_inner);
     // Exporter::None installs no global recorder at all, so it neither
     // claims nor consults the once-per-process slot — a later Prometheus
     // install still works (and tests with metrics disabled stay isolated).
@@ -336,40 +362,47 @@ mod tests {
         handle.render()
     }
 
-    fn labels() -> ComponentLabels {
-        ComponentLabels::new("orders", "orders_kafka", "kafka")
+    /// Labels for one test's handle sets.
+    ///
+    /// Every test passes its own `component`: gauge series have one live owner
+    /// per process (see [`ownership`]), and under `cargo test` these tests run
+    /// concurrently in one process, so a shared label set would leave all but
+    /// the first test's handles shadowed and publishing nothing. Local
+    /// recorders do not help — the claim registry is process-wide by design.
+    fn labels(component: &str) -> ComponentLabels {
+        ComponentLabels::new("orders", component.to_owned(), "kafka")
     }
 
     #[test]
     fn handle_structs_register_and_render_the_taxonomy() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels());
+            let src = SourceMetrics::new(&labels("orders_kafka"));
             src.batch(512, 131_072);
             src.poll_duration(Duration::from_millis(3));
             src.set_partition_lag(PartitionId(7), 40);
             src.rebalance_assigned();
             src.set_lanes_active(4);
 
-            let deser = DeserMetrics::new(&labels());
+            let deser = DeserMetrics::new(&labels("orders_kafka"));
             deser.batch(510, 2, Duration::from_millis(1));
             deser.dropped(2);
 
-            let op = OperatorMetrics::new(&labels());
+            let op = OperatorMetrics::new(&labels("orders_kafka"));
             op.batch(510, 380, Duration::from_micros(600));
             op.filtered(130);
             op.errors(ErrorClass::RecordLevel, 1);
 
-            let q = QueueMetrics::new(&labels(), "chain->sink/0", 4096);
+            let q = QueueMetrics::new(&labels("orders_kafka"), "chain->sink/0", 4096);
             q.set_depth(17);
             q.full_events(1);
 
-            let bp = BackpressureMetrics::new(&labels());
+            let bp = BackpressureMetrics::new(&labels("orders_kafka"));
             bp.pause_started();
             bp.pause_ended(Duration::from_millis(250));
             bp.set_inflight_bytes(1 << 20);
 
             let shard = SinkShardMetrics::new(
-                &labels(),
+                &labels("orders_kafka"),
                 3,
                 &["ch-3-0".into(), "ch-3-1".into()],
                 E2eBasis::Ingest,
@@ -389,12 +422,12 @@ mod tests {
             shard.set_shard_healthy(false);
             shard.abandoned(0);
 
-            let cp = CheckpointMetrics::new(&labels(), false);
+            let cp = CheckpointMetrics::new(&labels("orders_kafka"), false);
             cp.set_pending_max(12);
             cp.commit(true, Duration::from_millis(4));
             cp.set_watermark_age(Duration::from_secs(1));
 
-            let coord = CoordinationMetrics::new(&labels());
+            let coord = CoordinationMetrics::new(&labels("orders_kafka"));
             coord.set_splits_owned(3);
             coord.set_splits_completed(1);
             coord.set_splits_quarantined(1);
@@ -420,7 +453,7 @@ mod tests {
             coord.reconcile(Duration::from_millis(15));
             coord.store_op(StoreOp::Put, Duration::from_micros(600));
 
-            let pl = PipelineMetrics::new(&labels(), "0.1.0");
+            let pl = PipelineMetrics::new(&labels("orders_kafka"), "0.1.0");
             pl.set_state(PipelineState::Running);
             pl.set_threads(4);
         });
@@ -459,6 +492,107 @@ mod tests {
         }
     }
 
+    /// A second handle set on a live shard's labels must not reset its
+    /// gauges — the defect this ownership machinery exists to close.
+    ///
+    /// The scenario is the one that hurts: shard 0 has every replica
+    /// quarantined and is asleep on a 600s backoff. A second `SinkShardMetrics`
+    /// for the same component and shard appears (a pipeline rebuilt in-process,
+    /// or a component name used twice) and its constructor publishes the
+    /// defaults of a fresh shard — `healthy = 1`, `backoff = 0`. Both of the
+    /// real writers are edge-triggered, so nothing would ever put the truth
+    /// back: the exposition would report a healthy, idle shard for the length
+    /// of the outage.
+    ///
+    /// Counters are the deliberate contrast. They aggregate correctly across
+    /// instances, so the shadow keeps counting; only the gauges are withheld.
+    #[test]
+    fn a_second_handle_set_cannot_reset_a_live_shards_gauges() {
+        let recorder = configured_builder()
+            .expect("bucket config must be valid")
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let owner = SinkShardMetrics::new(
+                &labels("clobbered_shard"),
+                0,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            );
+            let healthy = || gauge_value(&handle.render(), names::SINK_SHARD_HEALTHY);
+            let backoff = || gauge_value(&handle.render(), names::SINK_RETRY_BACKOFF_SECONDS);
+            let written = || gauge_value(&handle.render(), names::SINK_RECORDS_TOTAL);
+
+            // The outage: quarantined and sleeping on its ceiling.
+            owner.set_shard_healthy(false);
+            owner.set_replica_healthy(0, false);
+            let _sleeping = owner.backing_off(1, Duration::from_secs(600));
+            owner.flushed(FlushReason::Rows, 5, 50, Duration::from_millis(1));
+            assert_eq!(healthy(), 0.0);
+            assert_eq!(backoff(), 600.0);
+
+            // The colliding handle set. Its constructor publishes `1` and `0`
+            // for a shard it believes is fresh; both must be withheld.
+            let shadow = SinkShardMetrics::new(
+                &labels("clobbered_shard"),
+                0,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            );
+            assert_eq!(healthy(), 0.0, "a second handle set reset shard health");
+            assert_eq!(backoff(), 600.0, "a second handle set reset the backoff");
+
+            // And its later writes stay off the series too — construction is
+            // not the only way it would lie.
+            shadow.set_shard_healthy(true);
+            shadow.set_replica_healthy(0, true);
+            let _shadow_sleep = shadow.backing_off(9, Duration::from_secs(1));
+            assert_eq!(healthy(), 0.0, "the shadow published a gauge");
+            assert_eq!(backoff(), 600.0, "the shadow published a gauge");
+
+            // Counters still sum: the shadow's records are real work.
+            shadow.flushed(FlushReason::Rows, 7, 70, Duration::from_millis(1));
+            assert_eq!(
+                written(),
+                12.0,
+                "counters must aggregate across handle sets, not be suppressed"
+            );
+        });
+    }
+
+    /// Ownership is process-wide and deliberately blind to which recorder a
+    /// handle set resolves against: the `metrics` facade gives no way to key a
+    /// claim by recorder, and the framework installs exactly one. This is the
+    /// rule that forces test helpers to carry per-test labels — recorder
+    /// isolation does not buy test independence here.
+    #[test]
+    fn ownership_is_process_wide_not_per_recorder() {
+        let owner_recorder = configured_builder().expect("buckets").build_recorder();
+        let owner_handle = owner_recorder.handle();
+        let shadow_recorder = configured_builder().expect("buckets").build_recorder();
+        let shadow_handle = shadow_recorder.handle();
+
+        let shard =
+            |name: &str| SinkShardMetrics::new(&labels(name), 0, &["r0".into()], E2eBasis::Ingest);
+        let owner = metrics::with_local_recorder(&owner_recorder, || shard("cross_recorder"));
+        let shadow = metrics::with_local_recorder(&shadow_recorder, || shard("cross_recorder"));
+
+        owner.set_shard_healthy(false);
+        shadow.set_shard_healthy(true);
+
+        assert_eq!(
+            gauge_value(&owner_handle.render(), names::SINK_SHARD_HEALTHY),
+            0.0,
+            "the owner's reading stands"
+        );
+        assert_eq!(
+            gauge_value(&shadow_handle.render(), names::SINK_SHARD_HEALTHY),
+            0.0,
+            "the shadow registered its series but never published to it — the \
+             `1` it asked for must not appear even in its own recorder"
+        );
+    }
+
     /// One gauge stands for a shard that writes up to `inflight.max_per_shard`
     /// batches at once, each backing off on its own schedule, so it publishes
     /// the longest live step. The middle assertion is the one that matters:
@@ -472,7 +606,12 @@ mod tests {
             .build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            let shard = SinkShardMetrics::new(&labels(), 0, &["r0".into()], E2eBasis::Ingest);
+            let shard = SinkShardMetrics::new(
+                &labels("backoff_longest_step"),
+                0,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            );
             let backoff = || gauge_value(&handle.render(), names::SINK_RETRY_BACKOFF_SECONDS);
 
             // Published from construction: a shard that has never retried is
@@ -521,7 +660,12 @@ mod tests {
             // Handles bind to the recorder at construction, so the threads
             // below publish through this one without inheriting the
             // thread-local.
-            let shard = SinkShardMetrics::new(&labels(), 0, &["r0".into()], E2eBasis::Ingest);
+            let shard = SinkShardMetrics::new(
+                &labels("backoff_concurrent"),
+                0,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            );
             let gate = std::sync::Barrier::new(SLEEPERS + 1);
 
             std::thread::scope(|scope| {
@@ -693,7 +837,7 @@ mod tests {
     #[test]
     fn duration_histograms_use_configured_buckets() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels());
+            let src = SourceMetrics::new(&labels("buckets"));
             src.poll_duration(Duration::from_millis(3));
         });
         assert!(
@@ -713,12 +857,12 @@ mod tests {
     #[test]
     fn source_lag_publishes_independently_of_partition_detail() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels());
+            let src = SourceMetrics::new(&labels("lag_ungated"));
             src.set_partition_lag(PartitionId(1), 5);
         });
         assert!(
             rendered.contains(
-                r#"etl_source_lag_records{pipeline="orders",component="orders_kafka",component_type="kafka",partition="1"} 5"#
+                r#"etl_source_lag_records{pipeline="orders",component="lag_ungated",component_type="kafka",partition="1"} 5"#
             ),
             "lag must publish without any detail flag:\n{rendered}"
         );
@@ -730,7 +874,7 @@ mod tests {
     #[test]
     fn unmeasured_source_lag_registers_no_series() {
         let rendered = render_with_local_recorder(|| {
-            let src = SourceMetrics::new(&labels());
+            let src = SourceMetrics::new(&labels("lag_unmeasured"));
             src.batch(10, 100);
         });
         assert!(
@@ -750,7 +894,7 @@ mod tests {
             let gated = CheckpointMetrics::new(&gated_labels, false);
             gated.set_partition_pending(PartitionId(1), 5);
 
-            let detailed = CheckpointMetrics::new(&labels(), true);
+            let detailed = CheckpointMetrics::new(&labels("detailed_checkpoint"), true);
             detailed.set_partition_pending(PartitionId(1), 5);
             detailed.set_partition_pending(PartitionId(2), 9);
             detailed.retain_partitions(&[PartitionId(2)]);
@@ -769,7 +913,7 @@ mod tests {
             "per-partition checkpoint detail must be gated off:\n{rendered}"
         );
         assert!(rendered.contains(
-            r#"etl_checkpoint_pending_batches{pipeline="orders",component="orders_kafka",component_type="kafka",partition="2"} 11"#
+            r#"etl_checkpoint_pending_batches{pipeline="orders",component="detailed_checkpoint",component_type="kafka",partition="2"} 11"#
         ));
         // The retained half, asserted on the partition that was dropped: it
         // must read 0, not the 5 it last held. Without the zeroing this line
@@ -777,7 +921,7 @@ mod tests {
         // test that can tell the two apart.
         assert!(
             rendered.contains(
-                r#"etl_checkpoint_pending_batches{pipeline="orders",component="orders_kafka",component_type="kafka",partition="1"} 0"#
+                r#"etl_checkpoint_pending_batches{pipeline="orders",component="detailed_checkpoint",component_type="kafka",partition="1"} 0"#
             ),
             "a retained-out partition must be zeroed, not left stale:\n{rendered}"
         );
@@ -786,7 +930,7 @@ mod tests {
     #[test]
     fn state_gauge_flips_exactly_one_state() {
         let rendered = render_with_local_recorder(|| {
-            let pl = PipelineMetrics::new(&labels(), "0.1.0");
+            let pl = PipelineMetrics::new(&labels("state_gauge"), "0.1.0");
             pl.set_state(PipelineState::Draining);
         });
         assert!(rendered.contains(r#"state="draining"} 1"#));
@@ -817,7 +961,7 @@ mod tests {
     fn install_prometheus_end_to_end() {
         let handle = install(&MetricsSettings::default()).expect("first install succeeds");
 
-        let pl = PipelineMetrics::new(&labels(), "0.1.0");
+        let pl = PipelineMetrics::new(&labels("install_e2e"), "0.1.0");
         pl.set_threads(4);
 
         let rendered = handle.render();
@@ -837,7 +981,12 @@ mod tests {
         // the assembly-order guarantee: user code installs early, registers
         // sink handles, and the runtime's own install() reuses the exporter
         // (the flagship-example pattern).
-        let shard = SinkShardMetrics::new(&labels(), 7, &["reuse-7-0".into()], E2eBasis::Ingest);
+        let shard = SinkShardMetrics::new(
+            &labels("install_e2e"),
+            7,
+            &["reuse-7-0".into()],
+            E2eBasis::Ingest,
+        );
         shard.flushed(FlushReason::Rows, 10, 1_000, Duration::from_millis(3));
         shard.e2e_observed(Duration::from_millis(25), i64::MAX);
         let second = install(&MetricsSettings::default()).expect("second install reuses");

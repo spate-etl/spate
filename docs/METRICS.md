@@ -105,6 +105,51 @@ states are therefore distinguished by value, not by presence:
   the last known value is held deliberately, because dropping it to `0` would
   look like a drain that never happened.
 
+### Series ownership
+
+The same "no deletion, no idle timeout" fact has a second consequence: a gauge
+series is backed by one shared atomic in the recorder, so two handle sets that
+resolve the *same* `(name, labels)` are two writers on one cell. Counters
+survive that — they only ever add, so a duplicate degrades into a sum a reader
+can still make sense of. Gauges do not: the interesting ones here are
+**edge-triggered** (sink shard health flips on a breaker transition, retry
+backoff on a retry), so a second writer's reading stands until the owner's next
+transition — which for a quarantined shard may be never. A duplicated gauge
+degrades into a lie.
+
+So every framework handle struct that owns gauges **claims** its series at
+construction, keyed by its stage root and the standard labels (plus `shard` or
+the queue name where those identify the instance). One claim per series per
+process:
+
+- The **owner** — the first to claim — publishes normally.
+- A **shadow** — any later handle set on the same key — still records its
+  counters and histograms (they aggregate), but every gauge write is dropped,
+  so the owner's readings are never overwritten. This is what lets each pipeline
+  thread keep its own `SourceMetrics` for counting polls while only the
+  controller's instance publishes lag and active lanes.
+
+On the assembly path (`Pipeline`) a collision is a hard `BuildError` /
+`StartError` — two pipelines, or two components, sharing a name in one process
+is a wiring mistake caught before any data flows. Constructing a handle struct
+directly (a benchmark, a hand-built harness) logs an error and shadows instead,
+because a metrics label collision must never take down a healthy data path.
+
+Two consequences worth stating outright:
+
+- **A shadow is never promoted.** The claim frees when the owner is dropped, so
+  a pipeline rebuilt *sequentially* — drop the old one, then build — re-owns its
+  series cleanly. But an *overlapping* rebuild (build the replacement while the
+  original still runs) leaves the newcomer a permanent shadow: on the assembly
+  path it fails to build; on the direct path it runs gauge-silent for its whole
+  life. In-process blue-green is therefore drop-then-build, not build-then-drop.
+- **Ownership is process-local.** Horizontal replicas never collide: each pod is
+  its own recorder and Prometheus attaches `instance` at scrape, so identical
+  label sets from different pods are different TSDB series. The one way to
+  re-create the collision across pods is an aggregation layer that *strips*
+  `instance` — a Pushgateway with `honor_labels`, or a recording rule / remote
+  write relabeling that drops it — which is outside the framework's reach.
+
 ## Kafka source (`etl_kafka_source_*`)
 
 Connector-owned families registered through the Kafka source's `Meter`

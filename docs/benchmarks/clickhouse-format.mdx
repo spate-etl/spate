@@ -131,8 +131,42 @@ Native is the better choice when the ClickHouse cluster is CPU-bound or
 egress/wire is the constraint — the offload is exactly the point. RowBinary is
 better when client CPU is the constraint. Not yet run as a sustained pass:
 point `e2e_kafka_clickhouse` at a `format: native` sink and sample
-`system.metric_log`/`part_log` — the extended
-[E2E rig](./avro-fast-pipeline.mdx#e2e-rig) now carries those knobs.
+`system.metric_log`/`part_log` — the [E2E rig](#e2e-rig) below carries those
+knobs.
+
+## E2E rig — the format A/B with a broker and server in the loop {#e2e-rig}
+
+`benchmarks/src/bin/e2e_kafka_clickhouse.rs` runs the same question end to end:
+an Avro batch payload produced to Kafka, decoded, fanned out with `flat_map`,
+and written to ClickHouse as RowBinary or Native (`FORMAT`).
+
+The rig runs **saturated** — `RATE=0` means the producer deliberately outruns
+the pipeline, so the measured rate is the pipeline's ceiling rather than a
+throttled target. Each arm runs three times and the quoted figures are per-arm
+medians (n=3); every run is a 30 s consumption window, `EVENTS=20` (20 event
+rows exploded per Kafka message, recorded in each record's `variant.events`), 4
+partitions, 2 pipeline threads, against local Kafka and ClickHouse containers.
+Each run uses a **fresh per-pid topic and consumer group**, so the un-drained
+saturation tail is abandoned when the window closes — it is **not** replayed on
+a later run.
+
+The headline from this rig is that **throughput is sink-bound and the insert
+format does not move it**; what the format changes is the flush tail. Read the
+`sink_flush_p99` figures as coarse: they are linear-interpolation positions
+inside second- and decade-wide histogram buckets, not fine measurements.
+
+The raw `deser: none` arm is a byte passthrough that writes **one** ClickHouse
+row per Kafka message, while every Avro arm explodes each message into 20 event
+rows — so it is not comparable on a rows/s axis. Each record carries its explode
+factor in `variant.events` (the raw arm records `variant.payload` instead), so
+that caveat is machine-visible rather than prose-only.
+
+`etl_e2e_latency_seconds` **is** wired — observed on the sink ack path
+(`crates/etl-core/src/sink/worker.rs`, via `SinkShardMetrics::e2e_observed`) —
+and every arm reports e2e p50/p99, also bucket-interpolated and so not to be
+read to three decimals. A related harness lesson, now encoded in the binaries:
+metric handles created before `metrics::install` bind to the no-op recorder and
+silently render nothing.
 
 ## ClickHouse insert transport (design validation, 2026-07)
 

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>etl-rs — third-party licences</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1c1e21; --muted: #5c6470;
+    --rule: #e3e6ea; --card: #f6f8fa; --link: #1667c4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1d; --fg: #e3e3e3; --muted: #9aa0a6;
+            --rule: #33353a; --card: #242526; --link: #62a0ea; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 52rem; margin: 0 auto; }
+  h1 { font-size: 1.9rem; margin: 0 0 .5rem; }
+  h2 { font-size: 1.3rem; margin: 2.5rem 0 .75rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); }
+  a { color: var(--link); }
+  .lede { color: var(--muted); margin: 0 0 2rem; }
+  .toc { background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 1rem 1.25rem; }
+  .toc ul { margin: .5rem 0 0; padding-left: 1.2rem; }
+  .crates { display: flex; flex-wrap: wrap; gap: .4rem; margin: .75rem 0 1.25rem; padding: 0; list-style: none; }
+  .crates li {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 5px;
+    padding: .15rem .5rem; font-size: .85rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  pre {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 1rem; overflow-x: auto; font-size: .8rem; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+<h1>Third-party licences</h1>
+<p class="lede">
+  Generated from <code>Cargo.lock</code> by
+  <a href="https://github.com/EmbarkStudios/cargo-about">cargo-about</a> — not hand-maintained.
+  etl-rs itself is licensed under Apache-2.0; this page inventories the
+  <strong>dependencies</strong> it links and reproduces the full text of each
+  licence they are used under. Where a dependency offers a choice
+  (<code>MIT OR Apache-2.0</code> and similar), the term shown is the one elected.
+</p>
+<p class="lede">
+  This is the <strong>union across every optional feature</strong>. A default
+  build links a strict subset; the extra crates come from opt-in features such as
+  <code>kafka-tls</code>, <code>coordination-nats</code> and <code>json-simd</code>.
+  Dev-dependencies are excluded — they are never distributed. etl-rs's own
+  crates appear alongside the third-party ones, each under Apache-2.0. A compact,
+  text-free inventory lives in <code>THIRD-PARTY.md</code> in the repository.
+</p>
+
+<div class="toc">
+  <strong>Licences in this build</strong>
+  <ul>
+  {{#each overview}}
+    <li>{{name}} <code>({{id}})</code> — {{count}} crate(s)</li>
+  {{/each}}
+  </ul>
+</div>
+
+<p class="lede">
+  Each section below is one dependency's own copy of its licence. They are listed
+  per crate rather than merged per licence because the copyright lines differ,
+  and reproducing each crate's notice is exactly what MIT and Apache-2.0 section 4
+  require.
+</p>
+
+{{#each licenses}}
+<h2 id="lic-{{@index}}">
+  {{#each used_by}}<code>{{crate.name}} {{crate.version}}</code>{{/each}}
+  — {{name}} <code>({{id}})</code>
+</h2>
+<pre>{{text}}</pre>
+{{/each}}
+</main>
+</body>
+</html>

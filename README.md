@@ -85,4 +85,13 @@ Under active initial development — APIs are not yet stable (0.x).
 
 ## License
 
-MIT OR Apache-2.0.
+Copyright 2026 Marcus Kainth.
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
+
+Dependency licences are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md); the full
+texts are published at
+[etl-rs.pages.kainth.net/licenses](https://etl-rs.pages.kainth.net/licenses/).
+
+Contributions are accepted under the same terms, per Apache-2.0 §5 — there is no
+CLA to sign.

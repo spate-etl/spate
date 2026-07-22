@@ -74,11 +74,42 @@ jobs:
       - run: cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
 
   deny:
-    name: Licenses and advisories
+    name: Licences, advisories and attribution
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+      # cargo-deny *gates* (fails on a licence we will not accept); cargo-about
+      # *attributes* (reproduces what we ship, for our users' own compliance).
+      # Same lockfile, same maintainers, different jobs — see about.toml.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The `cli` feature is NOT default; without it cargo installs the library
+      # and `cargo about` is simply not a command.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      # `--fail` is the real gate: non-zero if any crate's licence cannot be
+      # determined. `--locked`, not `--frozen`: offline mode drops the
+      # clearlydefined.io clarifications and silently degrades accuracy. If
+      # curation drift ever makes the diff below flaky, `--frozen` is the
+      # fallback — the committed file holds licence *ids*, which are
+      # metadata-derived and stable, precisely so that stays unlikely.
+      - name: Regenerate the attribution inventory
+        run: |
+          cargo about generate --workspace --all-features --locked --fail \
+            -o THIRD-PARTY.md about-md.hbs
+
+      - name: THIRD-PARTY.md is up to date
+        run: |
+          if ! git diff --exit-code THIRD-PARTY.md; then
+            echo "::error::THIRD-PARTY.md is stale. Regenerate and commit it:"
+            echo "  cargo install cargo-about --locked --features cli"
+            echo "  cargo about generate --workspace --all-features --locked --fail -o THIRD-PARTY.md about-md.hbs"
+            exit 1
+          fi
 
   coverage:
     name: Coverage

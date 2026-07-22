@@ -5,12 +5,11 @@
 //! Two payload shapes, selected by `DESER`:
 //! - `DESER=none` (default): the raw baseline — `id,body` text payloads
 //!   passed through byte-for-byte into a `bench_events` RowBinary table.
-//! - `DESER=apache_owned|fast_owned|fast_borrowed`: an Avro *sensor batch*
-//!   per message (bare datum, `raw` framing), decoded by the chosen backend,
-//!   exploded with `flat_map` into one `sensor_events` row per event, and
-//!   inserted as RowBinary or Native (`FORMAT`). This is the at-scale twin
-//!   of the in-process `avro_pipeline` rig — the same A/B, now with a real
-//!   broker and server in the loop (rig D).
+//! - `DESER=apache_owned`: an Avro *sensor batch* per message (bare datum,
+//!   `raw` framing), exploded with `flat_map` into one `sensor_events` row
+//!   per event, and inserted as RowBinary or Native (`FORMAT`) — so the arm
+//!   measures the insert-format A/B with a real broker and server in the
+//!   loop (rig D).
 //!
 //! Profiles:
 //! - **Local** (default): starts/reuses the bench broker (`BROKER`, default
@@ -72,10 +71,7 @@
 //! group with `auto.offset.reset=earliest` — into the freshly recreated table.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use benchmarks::avro_batch::{
-    self, BatchFam, EventFam, SensorBatchOwned, SensorEventOwned, explode_borrowed, explode_owned,
-    keep_borrowed, keep_owned,
-};
+use benchmarks::avro_batch::{self, SensorBatchOwned, SensorEventOwned, explode_owned, keep_owned};
 use benchmarks::report::{Metric, Report};
 use benchmarks::{docker, ensure_topic, env_str, env_u64, prom};
 use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
@@ -907,92 +903,6 @@ fn run_avro(
     // deserializer and encoder into the chain factory; only the arm chosen by
     // env is ever assembled at runtime.
     match (deser_kind, format) {
-        ("fast_borrowed", "native") => {
-            let d = builder.build_fast::<BatchFam>().expect("fast_borrowed");
-            let e = NativeEncoder::<EventFam>::new(avro_batch::native_schema());
-            let chunk_cfg = meta.chunk_config();
-            spawn_and_measure(
-                config,
-                source,
-                ch,
-                metrics_handle,
-                io,
-                move |q, b| {
-                    chain::<BatchFam, _>(d.clone())
-                        .with_metrics("bench-e2e", "main")
-                        .flat_map::<EventFam, _>(explode_borrowed)
-                        .filter(keep_borrowed)
-                        .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
-                        .build()
-                },
-                &meta,
-                stop,
-                produced,
-                loadgen,
-                count_rows,
-            );
-        }
-        ("fast_borrowed", _) => {
-            let d = builder.build_fast::<BatchFam>().expect("fast_borrowed");
-            let e = ClickHouseEncoder::<EventFam>::new();
-            let chunk_cfg = meta.chunk_config();
-            spawn_and_measure(
-                config,
-                source,
-                ch,
-                metrics_handle,
-                io,
-                move |q, b| {
-                    chain::<BatchFam, _>(d.clone())
-                        .with_metrics("bench-e2e", "main")
-                        .flat_map::<EventFam, _>(explode_borrowed)
-                        .filter(keep_borrowed)
-                        .sink(e.clone(), KeyHashRouter, chunk_cfg, q, b)
-                        .build()
-                },
-                &meta,
-                stop,
-                produced,
-                loadgen,
-                count_rows,
-            );
-        }
-        ("fast_owned", "native") => {
-            let d = builder
-                .build_serde_fast::<SensorBatchOwned>()
-                .expect("fast_owned");
-            run_owned_native(
-                config,
-                source,
-                ch,
-                metrics_handle,
-                io,
-                d,
-                &meta,
-                stop,
-                produced,
-                loadgen,
-                count_rows,
-            );
-        }
-        ("fast_owned", _) => {
-            let d = builder
-                .build_serde_fast::<SensorBatchOwned>()
-                .expect("fast_owned");
-            run_owned_rowbinary(
-                config,
-                source,
-                ch,
-                metrics_handle,
-                io,
-                d,
-                &meta,
-                stop,
-                produced,
-                loadgen,
-                count_rows,
-            );
-        }
         ("apache_owned", "native") => {
             let d = builder
                 .build_serde::<SensorBatchOwned>()

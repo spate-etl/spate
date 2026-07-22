@@ -24,27 +24,6 @@
 //! resolved into, using Avro's schema-resolution rules (field reordering,
 //! defaults, promotions, aliases). Registry schemas using references are
 //! not supported yet and are surfaced as unavailable.
-//!
-//! # The `fast` backend (opt-in feature)
-//!
-//! The `fast` feature adds a `serde_avro_fast`-based backend
-//! (`AvroFastDeserializer`, built by
-//! [`AvroDeserializerBuilder::build_serde_fast`] /
-//! [`AvroDeserializerBuilder::build_fast`]): single-pass datum→`T` decoding
-//! several times faster than the apache-avro paths, and the only backend
-//! able to emit **borrowed** (zero-copy) records. Its evolution model
-//! differs — serde attributes against each writer schema instead of
-//! reader-schema resolution — see the type's docs. Backends are chosen per
-//! pipeline; both coexist in one build.
-//!
-//! **License note:** the feature pulls in `serde_avro_fast`, whose crates.io
-//! metadata declares `LGPL-3.0-only` even though the upstream repository
-//! (`github.com/Ten0/serde_avro_fast`) is MPL-2.0 — the fix is merged
-//! upstream but unreleased as of 2026-07 — and one of its dependencies,
-//! `serde_serializer_quick_unsupported` (a ~300-line `no_std` macro-only
-//! helper by the same author), which **is** genuinely LGPL-3.0-only. The
-//! feature is off by default and the default build contains no trace of
-//! either crate; enabling it is your project's own compliance call.
 
 mod cache;
 mod config;
@@ -55,7 +34,5 @@ mod wire;
 pub use config::{
     AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection, SchemaSource,
 };
-#[cfg(feature = "fast")]
-pub use deser::AvroFastDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};
 pub use wire::{parse_confluent, parse_single_object};

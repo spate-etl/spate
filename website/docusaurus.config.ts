@@ -22,6 +22,11 @@ const githubUrl = `https://github.com/${organizationName}/${projectName}`;
 //   - /docs/BENCHMARKS -> /docs/benchmarks (folder was renamed).
 //   - connectors/* -> connectors/{sources,sinks,formats}/* (connectors were
 //     regrouped by role; every page below moved).
+//
+// A redirect whose `to` names a page that no longer exists FAILS the build.
+// Deleting a page therefore means deleting any redirect aimed at it — the
+// avro `fast-backend` entry went when that backend was removed. Note this is
+// only caught with `CI=true` (see where the plugin is registered below).
 const chConnector = '/docs/user-guide/connectors';
 const clientRedirects: PluginConfig = [
   '@docusaurus/plugin-client-redirects',
@@ -38,7 +43,6 @@ const clientRedirects: PluginConfig = [
       { from: `${chConnector}/clickhouse/performance-tuning`, to: `${chConnector}/sinks/clickhouse/performance-tuning` },
       { from: `${chConnector}/clickhouse/permissions`, to: `${chConnector}/sinks/clickhouse/permissions` },
       { from: `${chConnector}/avro`, to: `${chConnector}/formats/avro` },
-      { from: `${chConnector}/avro/fast-backend`, to: `${chConnector}/formats/avro/fast-backend` },
     ],
   },
 ];
@@ -167,6 +171,13 @@ const config: Config = {
           to: '/docs/benchmarks',
           label: 'Benchmarks',
           position: 'left',
+        },
+        {
+          // Generated third-party licence texts, published under
+          // <baseUrl>/licenses/ by CI alongside the rustdoc.
+          to: 'pathname:///licenses/',
+          label: 'Licences',
+          position: 'right',
         },
         {
           // Static rustdoc output published under <baseUrl>/api/ by CI.

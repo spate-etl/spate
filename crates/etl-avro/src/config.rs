@@ -20,8 +20,6 @@
 //! ```
 
 use crate::cache::CompiledSchema;
-#[cfg(feature = "fast")]
-use crate::deser::AvroFastDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
 use crate::registry::{RegistryConfig, spawn_fetcher};
 use apache_avro::Schema;
@@ -255,9 +253,9 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
-                // The single-object header fingerprint is computed by
-                // apache-avro, so this mode needs the apache parse to
-                // succeed even for a fast-only pipeline (unlike `raw`).
+                // The single-object header fingerprint is computed from the
+                // parsed schema, so this mode needs the parse to succeed at
+                // settings-load time (unlike `raw`).
                 let apache =
                     schema
                         .schema
@@ -314,15 +312,13 @@ impl AvroDeserializerBuilder {
         Ok(Arc::new(compiled))
     }
 
-    /// The fixed schema's apache-side failure, if any. Fixed-schema modes
-    /// compile every backend eagerly at build time, so a schema this
-    /// backend cannot use fails the apache builders *here* rather than
-    /// surfacing per record as `SchemaUnavailable` — which under the
-    /// default Skip policy would drop and ack 100% of the input while
-    /// watermarks advance (the same gate `build_fast` applies to the fast
-    /// side). Confluent writer schemas arrive per id at runtime and cannot
-    /// be checked until then.
-    fn fixed_apache_error(&self) -> Option<String> {
+    /// The fixed schema's compile failure, if any. Fixed-schema modes
+    /// compile eagerly at build time, so an unusable schema fails the
+    /// builders *here* rather than surfacing per record as
+    /// `SchemaUnavailable` — which under the default Skip policy would drop
+    /// and ack 100% of the input while watermarks advance. Confluent writer
+    /// schemas arrive per id at runtime and cannot be checked until then.
+    fn fixed_schema_error(&self) -> Option<String> {
         match &self.core.mode {
             SchemaSourceMode::Raw { schema } | SchemaSourceMode::SingleObject { schema, .. } => {
                 schema.schema.as_ref().err().cloned()
@@ -335,12 +331,11 @@ impl AvroDeserializerBuilder {
     ///
     /// # Errors
     ///
-    /// Rejects a fixed schema (`raw`/`single_object`) that the apache
-    /// backend cannot parse — deferring it would surface every record as
-    /// `SchemaUnavailable` and drop it under the default Skip policy. The
-    /// fast builders gate on their own backend the same way.
+    /// Rejects a fixed schema (`raw`/`single_object`) that cannot be
+    /// parsed — deferring it would surface every record as
+    /// `SchemaUnavailable` and drop it under the default Skip policy.
     pub fn build_value(&self) -> Result<AvroValueDeserializer, AvroConfigError> {
-        if let Some(reason) = self.fixed_apache_error() {
+        if let Some(reason) = self.fixed_schema_error() {
             return Err(AvroConfigError::Invalid { detail: reason });
         }
         Ok(AvroValueDeserializer::new(self.core.clone()))
@@ -350,82 +345,16 @@ impl AvroDeserializerBuilder {
     ///
     /// # Errors
     ///
-    /// Rejects a fixed schema the apache backend cannot parse — see
+    /// Rejects a fixed schema that cannot be parsed — see
     /// [`Self::build_value`].
     pub fn build_serde<T>(&self) -> Result<AvroSerdeDeserializer<T>, AvroConfigError>
     where
         T: serde::de::DeserializeOwned + Send + 'static,
     {
-        if let Some(reason) = self.fixed_apache_error() {
+        if let Some(reason) = self.fixed_schema_error() {
             return Err(AvroConfigError::Invalid { detail: reason });
         }
         Ok(AvroSerdeDeserializer::new(self.core.clone()))
-    }
-
-    /// The fast single-pass deserializer for **owned** records (emits `T`).
-    /// The `Owned<T>` counterpart of [`Self::build_fast`] — see
-    /// [`AvroFastDeserializer`] for the backend's semantics.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a configured `reader_schema`: the fast backend resolves each
-    /// writer schema directly into `T` and has no reader-schema resolution —
-    /// evolution is expressed with serde attributes instead (see the
-    /// [`AvroFastDeserializer`] docs). Also rejects a fixed schema this
-    /// backend cannot compile, mirroring [`Self::build_value`]'s gate on
-    /// the apache side.
-    #[cfg(feature = "fast")]
-    pub fn build_serde_fast<T>(
-        &self,
-    ) -> Result<AvroFastDeserializer<etl_core::deser::Owned<T>>, AvroConfigError>
-    where
-        T: serde::de::DeserializeOwned + Send + 'static,
-    {
-        self.build_fast::<etl_core::deser::Owned<T>>()
-    }
-
-    /// The fast single-pass deserializer for an arbitrary record family —
-    /// including **borrowed** (zero-copy) families whose records point into
-    /// the payload buffer. See [`AvroFastDeserializer`] for the family
-    /// pattern and the backend's semantics.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a configured `reader_schema` — see
-    /// [`Self::build_serde_fast`].
-    #[cfg(feature = "fast")]
-    pub fn build_fast<F>(&self) -> Result<AvroFastDeserializer<F>, AvroConfigError>
-    where
-        F: etl_core::deser::RecFamily,
-        for<'buf> F::Rec<'buf>: serde::Deserialize<'buf>,
-    {
-        if self.core.reader_schema.is_some() {
-            return Err(AvroConfigError::Invalid {
-                detail: "the fast backend resolves each writer schema directly into \
-                         the target type; `reader_schema` is not supported — use \
-                         serde attributes (`#[serde(default)]`, `#[serde(alias)]`) \
-                         for evolution, or the apache backend (`build_serde`) for \
-                         Avro schema resolution"
-                    .into(),
-            });
-        }
-        // Fixed-schema modes compile the fast form eagerly at build time, so a
-        // schema `apache-avro` accepts but `serde_avro_fast` rejects is a
-        // build-time error here rather than a per-record `SchemaUnavailable`
-        // that would drop every record under the default Skip policy while
-        // watermarks advance. Confluent writer schemas are compiled per id as
-        // they arrive from the registry and cannot be checked until then.
-        match &self.core.mode {
-            SchemaSourceMode::Raw { schema } | SchemaSourceMode::SingleObject { schema, .. } => {
-                if let Err(reason) = &schema.fast {
-                    return Err(AvroConfigError::Invalid {
-                        detail: reason.clone(),
-                    });
-                }
-            }
-            SchemaSourceMode::Confluent { .. } => {}
-        }
-        Ok(AvroFastDeserializer::new(self.core.clone()))
     }
 }
 
@@ -520,115 +449,6 @@ mod tests {
                 "must reject: {yaml}"
             );
         }
-    }
-
-    #[cfg(feature = "fast")]
-    #[test]
-    fn reader_schema_is_rejected_by_the_fast_builders() {
-        // The fast backend has no reader-schema resolution; the rejection
-        // happens at build time (the backend choice postdates the settings),
-        // mirroring the single_object + reader_schema rejection above.
-        let rt = runtime();
-        let yaml = format!(
-            "mode: raw\nschema: {{inline: '{SCHEMA}'}}\nreader_schema: {{inline: '{SCHEMA}'}}"
-        );
-        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
-        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
-
-        #[derive(serde::Deserialize)]
-        struct E {
-            #[expect(dead_code, reason = "shape only")]
-            id: i64,
-        }
-        let err = builder.build_serde_fast::<E>().unwrap_err();
-        assert!(
-            matches!(&err, AvroConfigError::Invalid { detail } if detail.contains("reader_schema")),
-            "{err}"
-        );
-        // The apache builders accept the same settings.
-        builder.build_serde::<E>().unwrap();
-        builder.build_value().unwrap();
-    }
-
-    #[cfg(feature = "fast")]
-    #[test]
-    fn fast_incompatible_fixed_schema_is_rejected_at_build_time() {
-        // A fixed schema apache-avro accepts but serde_avro_fast 2.1 rejects
-        // (here a `bytes` decimal logical type missing `precision`) must fail
-        // the fast builders at *build* time. Deferring it would surface every
-        // record as SchemaUnavailable and drop it under the default Skip
-        // policy while watermarks advance. The apache builders, which do not
-        // use the fast form, accept the very same settings.
-        let rt = runtime();
-        let bad = r#"{"type":"record","name":"D","fields":[{"name":"amt","type":{"type":"bytes","logicalType":"decimal","scale":2}}]}"#;
-        let yaml = format!("mode: raw\nschema: {{inline: '{bad}'}}");
-        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
-        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
-
-        #[derive(serde::Deserialize)]
-        struct D {
-            #[expect(dead_code, reason = "shape only")]
-            amt: Vec<u8>,
-        }
-        let err = builder.build_serde_fast::<D>().unwrap_err();
-        assert!(
-            matches!(&err, AvroConfigError::Invalid { detail }
-                if detail.contains("fast backend") && detail.contains("precision")),
-            "{err}"
-        );
-        // The apache builders accept the same settings.
-        builder.build_serde::<D>().unwrap();
-        builder.build_value().unwrap();
-    }
-
-    #[cfg(feature = "fast")]
-    #[test]
-    fn apache_incompatible_fixed_schema_builds_only_the_fast_backend() {
-        // The mirror image: a raw-mode schema apache-avro rejects (it panics
-        // on the dashed record name) but serde_avro_fast accepts. The fast
-        // builders work — this used to be impossible, the load poisoned the
-        // whole builder — while the apache builders reject at build time
-        // with the stored reason instead of draining records at runtime.
-        let rt = runtime();
-        let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
-        let yaml = format!("mode: raw\nschema: {{inline: '{bad}'}}");
-        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
-        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
-
-        #[derive(Debug, serde::Deserialize)]
-        struct E {
-            #[expect(dead_code, reason = "shape only")]
-            id: i64,
-        }
-        builder.build_serde_fast::<E>().unwrap();
-
-        let err = builder.build_value().unwrap_err();
-        assert!(
-            matches!(&err, AvroConfigError::Invalid { detail } if detail.contains("apache backend")),
-            "{err}"
-        );
-        let err = builder.build_serde::<E>().unwrap_err();
-        assert!(
-            matches!(&err, AvroConfigError::Invalid { detail } if detail.contains("apache backend")),
-            "{err}"
-        );
-    }
-
-    #[cfg(feature = "fast")]
-    #[test]
-    fn single_object_requires_the_apache_parse_for_its_fingerprint() {
-        // single_object frames with the Rabin fingerprint, which apache-avro
-        // computes — so unlike `raw`, an apache-rejected schema fails the
-        // settings even though the fast backend could decode the datum.
-        let rt = runtime();
-        let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
-        let yaml = format!("mode: single_object\nschema: {{inline: '{bad}'}}");
-        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
-        let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err();
-        assert!(
-            matches!(&err, AvroConfigError::SchemaLoad { detail } if detail.contains("fingerprint")),
-            "{err}"
-        );
     }
 
     #[test]

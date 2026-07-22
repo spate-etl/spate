@@ -1,16 +1,13 @@
-//! Shared sensor-batch Avro shapes for the `avro_pipeline` and
-//! `e2e_kafka_clickhouse` rigs.
+//! Shared sensor-batch Avro shapes for the `e2e_kafka_clickhouse` rig.
 //!
 //! One datum is a *sensor batch*: a `sensor` string, a `batch_ts_ms`
 //! timestamp, and an array of `{name, value, unit}` events. The chain
 //! explodes the array with `flat_map` into one ClickHouse row per event.
-//! Both a borrowed (zero-copy) family and an owned family are provided so a
-//! rig can A/B the decode backends against each other.
 
 use apache_avro::types::{Record as AvroRecord, Value as AvroValue};
 use apache_avro::{Schema, to_avro_datum};
 use etl_clickhouse::NativeSchema;
-use etl_core::deser::{Owned, RecFamily};
+use etl_core::deser::Owned;
 use etl_core::ops::Emitter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -38,64 +35,9 @@ pub const EVENT_COLUMNS: &[(&str, &str)] = &[
     ("unit", "LowCardinality(String)"),
 ];
 
-// ---- borrowed family -------------------------------------------------------
-
-/// Borrowed sensor batch: string fields point into the payload buffer.
-#[derive(Debug, Deserialize)]
-pub struct SensorBatch<'a> {
-    /// The sensor identifier.
-    #[serde(borrow)]
-    pub sensor: &'a str,
-    /// Batch timestamp in epoch milliseconds.
-    pub batch_ts_ms: i64,
-    /// The events carried in this batch.
-    #[serde(borrow)]
-    pub events: Vec<Event<'a>>,
-}
-
-/// Borrowed inner event.
-#[derive(Debug, Deserialize)]
-pub struct Event<'a> {
-    /// Metric name.
-    pub name: &'a str,
-    /// Metric value.
-    pub value: i64,
-    /// Metric unit.
-    pub unit: &'a str,
-}
-
-/// The `flat_map` output = one ClickHouse row, still borrowing the payload.
-#[derive(Debug, Serialize)]
-pub struct SensorEvent<'a> {
-    /// The parent batch's sensor.
-    pub sensor: &'a str,
-    /// The parent batch's timestamp.
-    pub batch_ts_ms: i64,
-    /// This event's metric name.
-    pub name: &'a str,
-    /// This event's value.
-    pub value: i64,
-    /// This event's unit.
-    pub unit: &'a str,
-}
-
-/// Record family for [`SensorBatch`].
-#[derive(Debug)]
-pub struct BatchFam;
-impl RecFamily for BatchFam {
-    type Rec<'buf> = SensorBatch<'buf>;
-}
-
-/// Record family for [`SensorEvent`].
-#[derive(Debug)]
-pub struct EventFam;
-impl RecFamily for EventFam {
-    type Rec<'buf> = SensorEvent<'buf>;
-}
-
 // ---- owned family ----------------------------------------------------------
 
-/// Owned sensor batch (the `apache_owned` / `fast_owned` decode targets).
+/// Owned sensor batch (the `apache_owned` decode target).
 /// `Clone` satisfies the serde deserializer's (spurious, `PhantomData`-driven)
 /// `Clone` bound so a per-thread clone is legal.
 #[derive(Debug, Deserialize, Clone)]
@@ -136,25 +78,6 @@ pub struct SensorEventOwned {
 
 // ---- operator stages (fn items: naturally higher-ranked) -------------------
 
-/// Explode a borrowed batch into one borrowed [`SensorEvent`] per event.
-pub fn explode_borrowed<'buf>(b: SensorBatch<'buf>, out: &mut Emitter<'_, EventFam>) {
-    let (sensor, batch_ts_ms) = (b.sensor, b.batch_ts_ms);
-    for e in b.events {
-        out.emit(SensorEvent {
-            sensor,
-            batch_ts_ms,
-            name: e.name,
-            value: e.value,
-            unit: e.unit,
-        });
-    }
-}
-
-/// Keep events with a non-negative value (exercises the filter stage).
-pub fn keep_borrowed(e: &SensorEvent<'_>) -> bool {
-    e.value >= 0
-}
-
 /// Explode an owned batch into one owned [`SensorEventOwned`] per event.
 pub fn explode_owned(b: SensorBatchOwned, out: &mut Emitter<'_, Owned<SensorEventOwned>>) {
     let SensorBatchOwned {
@@ -173,7 +96,7 @@ pub fn explode_owned(b: SensorBatchOwned, out: &mut Emitter<'_, Owned<SensorEven
     }
 }
 
-/// The owned twin of [`keep_borrowed`].
+/// Keep events with a non-negative value (exercises the filter stage).
 pub fn keep_owned(e: &SensorEventOwned) -> bool {
     e.value >= 0
 }

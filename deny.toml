@@ -6,9 +6,15 @@ version = 2
 yanked = "deny"
 ignore = [
     # `paste` is unmaintained (author archived it) but has no safe replacement
-    # in this position: it reaches us only through the `clickhouse` dev-dependency
-    # (clickhouse -> polonius-the-crab -> higher-kinded-types -> paste). It is a
-    # proc-macro with no runtime or network surface. Re-check when clickhouse
+    # in this position: it arrives under `clickhouse`
+    # (clickhouse -> polonius-the-crab -> higher-kinded-types -> paste).
+    #
+    # Corrected 2026-07-22: an earlier revision of this note called that a *dev*
+    # dependency. It is not — `cargo tree --edges normal -i paste` puts the whole
+    # chain in the shipped tree, which is also why `paste` appears in
+    # THIRD-PARTY.md. The argument for ignoring it never rested on that claim:
+    # `paste` is a **proc-macro**, so it runs at compile time only and contributes
+    # no runtime or network surface to the artifact. Re-check when clickhouse
     # ships a release that drops it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained transitive dev-dep of clickhouse; no upgrade path" },
     # quick-xml 0.40.1 (object_store's S3 list-response parser) carries two
@@ -34,27 +40,7 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    "MPL-2.0",
     "CDLA-Permissive-2.0", # webpki-roots (Mozilla CCADB root store data)
-]
-# NOTE: these two crates power the opt-in `fast` feature of etl-avro. The
-# feature is off by default — the default build contains no trace of either —
-# and users who enable it make their own compliance call, so the exceptions
-# admit exactly these crates at the exact evaluated versions. Two distinct
-# situations:
-#   - serde_avro_fast: metadata error. The repository is MPL-2.0 (fix merged
-#     upstream, awaiting a release); crates.io metadata still says
-#     LGPL-3.0-only. Narrow this exception when a corrected release ships
-#     (MPL-2.0 is already on the allow list).
-#   - serde_serializer_quick_unsupported: genuinely LGPL-3.0-only (LICENSE
-#     file matches the metadata) — a ~300-line no_std macro-only helper by
-#     the same author, and still a dependency of serde_avro_fast master, so
-#     it remains in the feature's tree even after the metadata fix ships.
-exceptions = [
-    { name = "serde_avro_fast", version = "=2.1.0", allow = ["LGPL-3.0-only"] },
-    { name = "serde_serializer_quick_unsupported", version = "=1.0.0", allow = [
-        "LGPL-3.0-only",
-    ] },
 ]
 
 [bans]

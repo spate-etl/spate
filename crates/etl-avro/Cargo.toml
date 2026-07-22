@@ -5,16 +5,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-
-[features]
-# Opt-in serde_avro_fast decode backend (single-pass typed decode, borrowed
-# records). Off by default: the dependency's crates.io license metadata is
-# LGPL-3.0-only while its repository is MPL-2.0 — enabling this feature is a
-# deliberate compliance call (see the crate docs).
-fast = ["dep:serde_avro_fast"]
 
 [dependencies]
 apache-avro = { workspace = true }
@@ -23,7 +17,6 @@ etl-core = { workspace = true }
 schema_registry_converter = { workspace = true, features = ["futures", "rustls_tls"] }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
-serde_avro_fast = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }

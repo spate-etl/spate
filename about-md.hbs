@@ -1,0 +1,55 @@
+# Third-party licences
+
+**Generated file — do not edit.** Regenerate with:
+
+```sh
+cargo about generate --workspace --all-features --locked --fail -o THIRD-PARTY.md about-md.hbs
+```
+
+CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
+
+etl-rs itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
+inventories the **dependencies** it links, and the terms each is used under.
+Where a dependency offers a choice (`MIT OR Apache-2.0` and similar), the term
+listed here is the one elected — the priority order in `about.toml` decides,
+and the rationale is documented there.
+
+Two things to know when reading it:
+
+- **This is the union across every optional feature** (`--all-features`). A
+  default build links a strict subset; the extra crates come from opt-in
+  features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
+  more than you distribute is safe, so this file is deliberately the superset.
+- **Full licence texts are not reproduced here**, to keep the file diffable.
+  They are published at <https://etl-rs.pages.kainth.net/licenses/>, generated
+  from the same lockfile by the same tool.
+
+Dev-dependencies are excluded: they are never distributed and so require no
+attribution. Build-dependencies are included, since a build script can
+contribute generated code to the shipped artifact — as can a proc-macro, which
+is why compile-time-only crates are listed.
+
+etl-rs's **own** crates (`etl`, `etl-core`, …) appear in the table too, each
+under Apache-2.0. `cargo-about` only omits workspace members that are
+unpublished (which is why `benchmarks` is absent), and leaving the published
+ones in is useful: it shows at a glance that every crate you receive from this
+project carries the same terms as the repository.
+
+
+## Summary
+
+| Licence | Crates |
+|---|---|
+{{#each overview}}| `{{id}}` | {{count}} |
+{{/each}}
+
+## Crates
+
+One row per crate, grouped by the licence elected for it. `cargo-about` records
+each crate's own licence text separately (the copyright lines differ), so the
+full texts live on the site rather than here.
+
+| Crate | Version | Licence |
+|---|---|---|
+{{#each licenses}}{{#each used_by}}| `{{crate.name}}` | {{crate.version}} | `{{../id}}` |
+{{/each}}{{/each}}

@@ -180,8 +180,8 @@ fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
 
 /// Retry `deserialize` until the async fetch lands or the deadline passes.
 ///
-/// Generic over the deserializer family and emitter so both the apache value
-/// path and the `fast` typed path share one driver. The 20ms backoff is a
+/// Generic over the deserializer family and emitter so the value path and the
+/// serde-typed path share one driver. The 20ms backoff is a
 /// retry cadence, not a sleep-poll: `deserialize` is itself the readiness
 /// probe (there is no external signal to block on), so no blocking wait helper
 /// applies here.
@@ -487,15 +487,14 @@ async fn prewarm_loads_subjects_at_startup() {
 }
 
 /// apache-avro 0.21 `Schema::parse_str` *panics* (not `Err`) on some
-/// malformed names — `"my-record"` trips an internal unwrap — while
-/// serde_avro_fast accepts the very same schema. The compile catches the
-/// panic and stores it as the apache side's failure, so the apache path
+/// malformed names — `"my-record"` trips an internal unwrap. The compile
+/// catches the panic and stores it as an ordinary failure, so the id
 /// surfaces a per-record poison (SchemaUnavailable) the ErrorPolicy can act
-/// on — never a permanent NotReady stall — while the fast path decodes the
-/// id normally. (The caught panic prints a backtrace to stderr; that is
-/// expected and harmless.)
+/// on — never a permanent NotReady stall, and never an unwind on whichever
+/// pipeline thread touched it first. (The caught panic prints a backtrace to
+/// stderr; that is expected and harmless.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn panicking_schema_parse_fails_only_the_apache_side_not_stalls() {
+async fn panicking_schema_parse_poisons_the_id_rather_than_stalling() {
     let stub = StubRegistry::default();
     let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
     stub.script("/schemas/ids/77", 200, &schema_body(bad), 0);
@@ -518,88 +517,6 @@ async fn panicking_schema_parse_fails_only_the_apache_side_not_stalls() {
     .unwrap_err();
     assert!(
         matches!(err, DeserError::SchemaUnavailable { .. }),
-        "a panicking schema parse must poison only the apache side, not stall at NotReady: {err}"
+        "a panicking schema parse must poison the id, not stall at NotReady: {err}"
     );
-
-    // The same id decodes single-pass on the fast backend: apache's
-    // rejection no longer poisons the schema for the backend that accepts
-    // it.
-    #[cfg(feature = "fast")]
-    {
-        #[derive(Debug, serde::Deserialize)]
-        struct EventRow {
-            id: i64,
-        }
-        struct CollectedRows(Vec<EventRow>);
-        impl EmitRecord<'_, EventRow> for CollectedRows {
-            fn emit(&mut self, rec: Record<EventRow>) -> Flow {
-                self.0.push(rec.payload);
-                Flow::Continue
-            }
-        }
-
-        let mut fast = builder.build_serde_fast::<EventRow>().unwrap();
-        let payload = confluent_payload(77, 9);
-        let rows = tokio::task::spawn_blocking(move || {
-            let mut out = CollectedRows(Vec::new());
-            drive_until_ready(&mut fast, &payload, &mut out).map(|()| out.0)
-        })
-        .await
-        .unwrap()
-        .expect("the fast backend must decode a schema only apache rejects");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, 9);
-    }
-}
-
-/// The fast backend rides the same NotReady/fetch/replay contract: the
-/// fetcher eagerly compiles the fast schema alongside the apache one, so the
-/// replay decodes single-pass once the fetch lands.
-#[cfg(feature = "fast")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fast_backend_reports_not_ready_then_decodes_after_fetch() {
-    #[derive(Debug, serde::Deserialize)]
-    struct EventRow {
-        id: i64,
-    }
-    struct CollectedRows(Vec<EventRow>);
-    impl EmitRecord<'_, EventRow> for CollectedRows {
-        fn emit(&mut self, rec: Record<EventRow>) -> Flow {
-            self.0.push(rec.payload);
-            Flow::Continue
-        }
-    }
-
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
-
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
-    let mut deser = builder.build_serde_fast::<EventRow>().unwrap();
-
-    let payload = confluent_payload(42, 7);
-    let (ack, _rx) = AckRef::test_pair();
-    let mut out = CollectedRows(Vec::new());
-
-    // First call: not ready (fetch just triggered), nothing emitted.
-    let err = deser
-        .deserialize(&raw(&payload), &ack, &mut out)
-        .unwrap_err();
-    assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
-    assert!(out.0.is_empty());
-
-    // The driver's retry loop, condensed.
-    let rows = tokio::task::spawn_blocking(move || {
-        let mut out = CollectedRows(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(rows.len(), 1, "exactly one record after the fetch");
-    assert_eq!(rows[0].id, 7);
 }

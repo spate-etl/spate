@@ -17,7 +17,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
+authors = ["Marcus Kainth <marcus@kainth.dev>"]
 repository = "https://github.com/marcuskainth/etl-rs"
 keywords = ["etl", "pipeline", "streaming", "kafka", "clickhouse"]
 categories = ["asynchronous", "data-structures"]
@@ -48,11 +49,10 @@ serde_json = "1.0"
 # Opt-in SIMD JSON decode backend behind etl-json's `simd` feature (off by
 # default, excluded from `full`). The deserialization-formats study measured it
 # faster than serde_json on the single-document and array paths (the
-# Kafka-message default). Apache-2.0 / MIT with a clean transitive tree — no
-# deny.toml exception, unlike serde_avro_fast. Exact-pinned (like
-# serde_avro_fast) so the benchmark and license review evaluate one fixed
-# release. Default features stay on — they enable `serde_impl` (the `from_slice`
-# path used here) and `runtime-detection`.
+# Kafka-message default). Apache-2.0 / MIT with a clean transitive tree, so no
+# deny.toml carve-out is needed. Exact-pinned so the benchmark and the license
+# review evaluate one fixed release. Default features stay on — they enable
+# `serde_impl` (the `from_slice` path used here) and `runtime-detection`.
 simd-json = "=0.17.3"
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 serde_path_to_error = "0.1"
@@ -100,11 +100,6 @@ futures-util = { version = "0.3", default-features = false }
 base64 = "0.22"
 flate2 = "1.1"
 zstd = "0.13"
-# Exact pin: =2.1.0 is the release the benchmarks and the license review
-# evaluated; a later 2.x could silently change its license metadata (see
-# deny.toml). Default features stay on: 2.1.0 fails to compile with them off
-# (its codec-dispatch enum becomes empty), and `deflate` only adds flate2.
-serde_avro_fast = "=2.1.0"
 schema_registry_converter = { version = "4.9", default-features = false }
 
 # Test and bench tooling.

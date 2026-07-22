@@ -600,15 +600,6 @@ re-exports the handle types (`etl_core::metrics::{Counter, ...}`); connectors
 never take a direct `metrics` dependency, so exactly one facade version lives
 in the tree and a breaking `metrics` release is upgraded in a single edit.
 
-Avro's optional `fast` backend (`serde_avro_fast`) is
-license-disclosed: crates.io metadata says LGPL-3.0-only while upstream is
-MPL-2.0 (fix merged, unreleased), and its microdependency
-`serde_serializer_quick_unsupported` is genuinely LGPL-3.0-only. It ships
-behind the off-by-default `fast` feature — the default build contains no
-trace of either crate, `deny.toml` carries scoped exceptions for exactly
-the pinned versions, and enabling the feature is the user's own compliance
-call. No `serde_avro_fast` types appear in the public API.
-
 ## Crate map
 
 | Crate | Role |
@@ -619,7 +610,7 @@ call. No `serde_avro_fast` types appear in the public API.
 | `etl-clickhouse` | ClickHouse `ShardWriter`. |
 | `etl-json` | JSON deserializer: single/ndjson/array framings; opt-in `simd` backend. |
 | `etl-s3` | Coordinated S3/object-storage backfill source: leader-planned splits (listing-order packing, digest-identified descriptors carrying member keys+ETags), one lane per leased split with composite split-relative offsets, per-split fenced progress as the only checkpoint, object-level poison → quarantine, self-terminating via `AllComplete` → `SourceEvent::Drained`. No coordination backend appears in its public API or its cargo features — the coordinator is injected at assembly (`with_coordinator`); solo runs fall back to `etl-coordination`'s in-process `MemoryStore`, which is linked unconditionally (ephemeral progress). |
-| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache; opt-in `fast` feature adds the `serde_avro_fast` backend (single-pass typed decode, borrowed/zero-copy records — see the dependency-policy note above). |
+| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. |
 | `etl-coordination` | Multi-instance coordination backend for broker-less sources: leader-elected planning and work assignment, TTL'd split leases with heartbeats, cooperative revocation, epoch-fenced resumable commits — over a public six-primitive store trait with an in-memory store (tests, embedding) and a NATS JetStream KV store (server ≥ 2.11, default `nats` feature). The seam it implements (`SplitPlanner`/`SplitCoordinator`) and the reusable source-side `CoordinationDriver` live in `etl-core::coordination` — synchronous and tokio-free (no async runtime in etl-core). |
 | `etl-test` | Public in-memory source/sink mocks with scripting handles, plus a scripted `SplitCoordinator` for coordinated-source tests. |
 | `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |

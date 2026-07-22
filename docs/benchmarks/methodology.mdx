@@ -24,7 +24,7 @@ defined once, versioned, in `benchmarks/src/report.rs`:
 - `kind` — `measurement` or `verdict` (a go/no-go conclusion drawn across arms).
 - `run` — provenance: timestamp, short commit, host, CPU brand, cores, OS,
   profile. This is what the "provenance" line under each chart reports.
-- `variant` — the arm under test (an open map, e.g. `{"deser":"fast_borrowed",
+- `variant` — the arm under test (an open map, e.g. `{"deser":"apache_owned",
   "format":"native"}`).
 - `metrics` — each measured quantity with its `value`, `unit`,
   `higher_is_better`, and optional `ci95` / `n`. The direction of goodness
@@ -80,122 +80,14 @@ for rep in 1 2 3; do \
   done; \
 done
 
-# CPU-bound Avro A/B → avro-fast-pipeline.jsonl (no broker, no server; 50 events/datum)
-# One invocation = one arm (chosen by STAGE/DESER/FORMAT env), a median over REPS.
-# STAGE=decode isolates the decoder (3 DESER arms); STAGE=pipeline adds flat_map +
-# filter + encode + shard handoff, sweeping DESER × FORMAT (6 arms). Nine records,
-# n = 9 reps each.
-for DESER in apache_owned fast_owned fast_borrowed; do
-  STAGE=decode DESER=$DESER EVENTS=50 THREADS=1 REPS=9 \
-    RESULTS=benchmarks/results/avro-fast-pipeline.jsonl \
-    cargo run -p benchmarks --release --bin avro_pipeline
-done
-for DESER in apache_owned fast_owned fast_borrowed; do
-  for FORMAT in rowbinary native; do
-    STAGE=pipeline DESER=$DESER FORMAT=$FORMAT EVENTS=50 THREADS=1 REPS=9 \
-      RESULTS=benchmarks/results/avro-fast-pipeline.jsonl \
-      cargo run -p benchmarks --release --bin avro_pipeline
-  done
-done
-
-# Cross-format decode → deser-formats.jsonl (no broker, no server; same data as
-# Avro and JSON). One invocation = one arm. Two workloads (SHAPE=order|batch), two
-# record modes (RECORD=typed|value); the batch runs Avro's nested datum against
-# JSON's single/array/ndjson framings — 12 arms, n = 9 reps each.
-for R in typed value; do
-  for F in avro json; do
-    SHAPE=order FORMAT=$F RECORD=$R REPS=9 \
-      RESULTS=benchmarks/results/deser-formats.jsonl \
-      cargo run -p benchmarks --release --bin deser_formats
-  done
-  SHAPE=batch FORMAT=avro RECORD=$R REPS=9 \
-    RESULTS=benchmarks/results/deser-formats.jsonl \
-    cargo run -p benchmarks --release --bin deser_formats
-  for FR in single array ndjson; do
-    SHAPE=batch FORMAT=json FRAMING=$FR RECORD=$R REPS=9 \
-      RESULTS=benchmarks/results/deser-formats.jsonl \
-      cargo run -p benchmarks --release --bin deser_formats
-  done
-done
-
-# ClickHouse Native vs RowBinary → clickhouse-native-format.jsonl (Docker ClickHouse 25.6)
-# 200k rows/insert, medians over 15 interleaved reps; SERVER=1 samples server CPU.
-# The committed data was recorded on 25.6 — pin CLICKHOUSE_IMAGE explicitly, because
-# the default image is now 26.3 (see the sink-saturation block below). The raw
-# inserts also pin async_insert=0 and record SELECT version() into the note.
-CLICKHOUSE_IMAGE=clickhouse/clickhouse-server:25.6 \
-ROWS=200000 ITERS=41 REPS=15 SERVER=1 \
-  RESULTS=benchmarks/results/clickhouse-native-format.jsonl \
-  cargo run -p benchmarks --release --bin ch_native_format
-
-# Kafka consumer topology → kafka-topology-confirm.jsonl (local single-broker Kafka)
-# 16 partitions × 4 threads × 10 µs/record × 256 B. The binary takes a
-# `produce|consume` subcommand (no-arg exits 2). Pre-fill the topic once — its name
-# derives from PARTITIONS×PAYLOAD, so one fill serves both modes — then consume
-# 2 reps per mode. `consume` is time-boxed by DURATION_S (MESSAGES only sizes the
-# fill), and exits 3 if it drained the topic — a drain measures how fast a topic
-# empties, not a throughput ceiling, so treat a 3 as "produce more and rerun".
-PARTITIONS=16 THREADS=4 PAYLOAD=256 MESSAGES=10000000 \
-  cargo run -p benchmarks --release --bin kafka_topology produce
-for MODE in perthread split; do for _ in 1 2; do \
-  MODE=$MODE PARTITIONS=16 THREADS=4 WORK_US=10 PAYLOAD=256 DURATION_S=30 \
-    RESULTS=benchmarks/results/kafka-topology-confirm.jsonl \
-    cargo run -p benchmarks --release --bin kafka_topology consume; \
-done; done
-
-# Kafka source ceiling → kafka-source-ceiling.jsonl (raw client, no framework)
-# The prefetch × threads sweep behind the tuning guidance, on a Redpanda broker
-# (BROKER defaults to redpanda; it is recorded as a variant key, so Redpanda and
-# Apache Kafka arms never aggregate). WORK_US=0 so the fetch path is the only
-# thing measured; QUEUED_MIN_MESSAGES=0 means "set nothing", the shipped default.
-#
-# BOTH payload sizes are swept, and the payload loop is INSIDE the rep loop so
-# the two sizes interleave — the cross-size comparison is the page's headline
-# claim, and running one size then the other is exactly the sequential A/B that
-# has faked a 30% delta from thermal drift on this box.
-#
-# The backlog must outlast a saturated window: `consume` exits 3 and emits
-# nothing if it drains the topic (a drain measures how fast a topic empties,
-# not a ceiling), and exits 4 if messages leaked to a main queue.
-for b in 64 256; do
-  PARTITIONS=16 PAYLOAD=$b MESSAGES=60000000 \
-    cargo run -p benchmarks --release --bin kafka_topology produce
-done
-for rep in 1 2 3; do
-  for q in 1000 3000 10000 30000 100000 300000; do for b in 64 256; do \
-    MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
-      THREADS=1 PAYLOAD=$b QUEUED_MIN_MESSAGES=$q \
-      RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
-      cargo run -p benchmarks --release --bin kafka_topology consume; \
-  done; done
-  for t in 1 2 4 8; do for b in 64 256; do \
-    MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
-      THREADS=$t PAYLOAD=$b QUEUED_MIN_MESSAGES=100000 \
-      RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
-      cargo run -p benchmarks --release --bin kafka_topology consume; \
-  done; done
-done
-# Where the byte cap binds, 64 B only: flat from 300000 up, because
-# queued.max.messages.kbytes (65536 x 1000 = 65.5 MB) caps at ~1.02M messages.
-for rep in 1 2 3; do for q in 1000000 3000000; do \
-  MODE=split INSTANCES=1 PARTITIONS=16 WORK_US=0 DURATION_S=6 \
-    THREADS=1 PAYLOAD=64 QUEUED_MIN_MESSAGES=$q \
-    RESULTS=benchmarks/results/kafka-source-ceiling.jsonl \
-    cargo run -p benchmarks --release --bin kafka_topology consume; \
-done; done
-
-# End-to-end Kafka → ClickHouse → e2e-kafka-clickhouse.jsonl (local containers)
-# RATE=0 saturates on purpose — the producer outruns the pipeline, so the measured
-# rate is the ceiling. 30 s window, 20 event rows exploded per message, 4 partitions,
 # 2 pipeline threads. One invocation = one arm (DESER/FORMAT); the committed matrix
-# is the DESER=none rowbinary baseline plus four avro arms, three runs each; charts
+# is the DESER=none rowbinary baseline plus the two avro arms, three runs each; charts
 # and quoted figures use per-arm medians. Committed data is ClickHouse 25.6 — pin
 # CLICKHOUSE_IMAGE (the default is now 26.3); the sink YAML pins async_insert=0 and
 # the run records SELECT version() into its note.
 export CLICKHOUSE_IMAGE=clickhouse/clickhouse-server:25.6
 for rep in 1 2 3; do
-  for arm in "none rowbinary" "apache_owned native" "fast_owned native" \
-             "fast_borrowed native" "fast_borrowed rowbinary"; do
+  for arm in "none rowbinary" "apache_owned native" "apache_owned rowbinary"; do
     set -- $arm
     DESER=$1 FORMAT=$2 RATE=0 DURATION_S=30 EVENTS=20 PARTITIONS=4 THREADS=2 \
       EGRESS=fixed LOAD=concurrent \
@@ -363,8 +255,7 @@ above (`RATE=0`), which measures the pipeline ceiling instead of a throttled
 target.
 
 The micro-benchmarks are separate: `cargo bench -p etl-core` and
-`cargo bench -p etl-avro --features fast` (criterion + divan; the fast-backend
-decode variants are gated behind the `fast` feature). Divan's `AllocProfiler`
+`cargo bench -p etl-avro` (criterion + divan). Divan's `AllocProfiler`
 allocation assertions are hard failures in CI, and the counting-allocator
 integration test (`crates/etl-core/tests/chain_alloc.rs`) hard-fails if
 per-iteration allocations scale with record count.
@@ -388,7 +279,7 @@ by `sink_records_metric_matches_rows_written_exactly` in `etl-core`.
 ## E2E rate accounting (2026-07 correction) {#e2e-rate-accounting}
 
 An earlier revision of the end-to-end rig
-([E2E rig](./avro-fast-pipeline.mdx#e2e-rig)) divided every row that landed —
+([E2E rig](./clickhouse-format.mdx#e2e-rig)) divided every row that landed —
 window plus the grace and drain tail — by the 30 s window alone, which under
 `RATE=0` (the producer deliberately outruns the pipeline) inflated the reported
 `rows_per_s` by roughly 2×. It now divides by the elapsed consumption interval,

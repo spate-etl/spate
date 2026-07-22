@@ -64,8 +64,7 @@ outside `confluent`, and so on, all fail fast at startup.
 
 ## Typed or dynamic records
 
-The builder hands out two deserializer flavors (plus two more behind the
-opt-in [fast backend](fast-backend.mdx)):
+The builder hands out two deserializer flavors:
 
 - `build_serde::<T>()` — decodes each datum into your own
   `T: serde::de::DeserializeOwned` struct (field names match the writer
@@ -74,11 +73,6 @@ opt-in [fast backend](fast-backend.mdx)):
   derives `Deserialize` for Avro in and `Serialize` for RowBinary out.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
-- `build_serde_fast::<T>()` / `build_fast::<F>()` (feature `avro-fast`) —
-  single-pass typed decode, several times faster, including **borrowed**
-  (zero-copy) records; different evolution semantics. See
-  [the fast backend](fast-backend.mdx).
-
 ## Schema fetching never blocks a pipeline thread
 
 In `confluent` mode, registry schemas are fetched by an **asynchronous task
@@ -105,21 +99,8 @@ defaults for missing fields, type promotions, aliases. Pin a reader schema
 when your struct must stay stable while producers evolve. Registry schemas
 using schema references are not supported yet and surface as unavailable.
 
-## Backends
-
-Decoding uses the `apache-avro` crate by default. An opt-in
-`serde_avro_fast` backend — single-pass typed decoding, several times
-faster, and the only one able to emit borrowed (zero-copy) records — ships
-behind the `avro-fast` feature; the default build contains no trace of it.
-Backends are chosen **per pipeline** by builder method, so both coexist in
-one binary: keep the apache backend where you need real Avro reader-schema
-resolution, use the fast one where decode throughput matters. Details,
-trade-offs, and the license note: [the fast backend](fast-backend.mdx).
-
 ## Related
 
-- [The fast backend](fast-backend.mdx) — opt-in single-pass decoding and
-  zero-copy records.
 - [Kafka source](../../sources/kafka/README.mdx) — the payloads this format decodes.
 - [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail for
   undecodable payloads.

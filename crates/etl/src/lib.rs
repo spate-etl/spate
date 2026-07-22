@@ -14,7 +14,6 @@
 //! | `clickhouse-time` | `time` crate fields for the same date/time columns |
 //! | `clickhouse-rust-decimal` | `rust_decimal::Decimal` conversions for `Decimal` columns |
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
-//! | `avro-fast` | Opt-in `serde_avro_fast` decode backend for [`avro`]: single-pass typed decode, borrowed (zero-copy) records. Not part of `full` — see the `etl-avro` docs for the license note |
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
 //! | `coordination` | [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `etl::coordination` without any feature |

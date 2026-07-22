@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -78,11 +79,11 @@ required-features = ["full"]
 
 [[example]]
 name = "kafka_avro_flatmap_clickhouse"
-required-features = ["full", "avro-fast"]
+required-features = ["full"]
 
 [[example]]
 name = "multi_table_split"
-required-features = ["full", "avro-fast"]
+required-features = ["full"]
 
 [[example]]
 name = "kafka_to_kafka_split"
@@ -117,9 +118,8 @@ json-raw-value = ["json", "etl-json/raw-value"]
 # Opt-in simd-json decode backend for JSON (implies `json`). Deliberately
 # excluded from `full`: it pulls in simd-json (SIMD JSON parsing) — a decode
 # speedup on the single-document/array path over serde_json, per the
-# deserialization-formats benchmark study. Permissively licensed (no compliance
-# caveat like avro-fast), but kept opt-in so `full` stays lean. See the JSON
-# connector docs.
+# deserialization-formats benchmark study. Kept opt-in so `full` stays lean.
+# See the JSON connector docs.
 json-simd = ["json", "etl-json/simd"]
 kafka = ["dep:etl-kafka"]
 clickhouse = ["dep:etl-clickhouse"]
@@ -133,11 +133,6 @@ coordination = ["dep:etl-coordination"]
 # `coordination`; this is what pulls the async-nats dependency tree.
 coordination-nats = ["coordination", "etl-coordination/nats"]
 s3 = ["dep:etl-s3"]
-# Fast Avro decode backend (implies `avro`). Deliberately excluded from
-# `full`: it pulls in `serde_avro_fast`, whose crates.io license metadata
-# (LGPL-3.0-only) conflicts with its repository license (MPL-2.0) — enabling
-# it is a per-project compliance call. See the etl-avro crate docs.
-avro-fast = ["avro", "etl-avro/fast"]
 # Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) for the Kafka connector (implies
 # `kafka`). Deliberately excluded from `full`: it compiles OpenSSL from source
 # (rdkafka's `ssl-vendored`), so `full` stays buildable without the extra

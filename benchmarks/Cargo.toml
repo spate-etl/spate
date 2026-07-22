@@ -6,6 +6,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 # Every auto-discovered bin would also get a libtest harness, and each of those
 # harnesses is a separate binary the workspace test run has to link and execute
 # for zero tests. Declared explicitly with `test = false` instead. `bench` stays
@@ -21,9 +22,7 @@ json-simd = ["etl-json/simd"]
 apache-avro = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
-# `fast` pulls the serde_avro_fast backend in for the avro_pipeline A/B; the
-# licence exceptions it needs are already scoped in deny.toml.
-etl-avro = { workspace = true, features = ["fast"] }
+etl-avro = { workspace = true }
 etl-clickhouse = { workspace = true }
 # `default-features = false` (from the workspace entry) drops the NATS backend:
 # the coordinated rig runs over the in-memory store, no broker.
@@ -47,10 +46,6 @@ workspace = true
 
 # See `autobins` above: these exist only to be run by hand (and to be
 # compile-checked by `cargo clippy --all-targets` / `cargo bench --no-run`).
-[[bin]]
-name = "avro_pipeline"
-test = false
-
 [[bin]]
 name = "ch_native_format"
 test = false

@@ -11,8 +11,10 @@
 //!   Every batch arm decodes the identical `EVENTS` readings; only the physical
 //!   layout differs.
 //!
-//! Avro's `typed` arm uses the single-pass fast backend (`serde_avro_fast`) —
-//! Avro's recommended typed decoder and the fair peer to JSON's `serde_json`.
+//! Avro's `typed` arm is `apache-avro`'s serde path — note it decodes twice
+//! (datum → `AvroValue` → `T`), which is the only typed decode `apache-avro`
+//! 0.21 offers, so it is not a like-for-like peer to JSON's single-pass
+//! `serde_json`. The `value` arm is Avro's single-decode path.
 //!
 //! One invocation measures one arm, a mean over `REPS` reps with a Student-t
 //! 95% CI. Sweep the matrix by running it repeatedly.
@@ -199,8 +201,8 @@ fn run_arm(
     match (format, shape, record, framing) {
         ("avro", "order", "typed", _) => run_decode(
             &avro_builder(deser_sample::ORDER_SCHEMA)
-                .build_serde_fast::<Order>()
-                .expect("avro fast order"),
+                .build_serde::<Order>()
+                .expect("avro typed order"),
             payload,
             per_call,
             threads,
@@ -217,8 +219,8 @@ fn run_arm(
         ),
         ("avro", "batch", "typed", _) => run_decode(
             &avro_builder(deser_sample::BATCH_SCHEMA)
-                .build_serde_fast::<SensorBatch>()
-                .expect("avro fast batch"),
+                .build_serde::<SensorBatch>()
+                .expect("avro typed batch"),
             payload,
             per_call,
             threads,

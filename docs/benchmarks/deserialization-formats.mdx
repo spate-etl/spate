@@ -8,14 +8,14 @@ import BenchBars from '@site/src/components/Bench/BenchBars';
 import BenchStat, { StatRow } from '@site/src/components/Bench/BenchStat';
 
 export const framingLabels = {
-  datum: 'Avro (fast · nested datum)',
+  datum: 'Avro (nested datum)',
   single: 'JSON (nested document)',
   array: 'JSON (top-level array)',
   ndjson: 'JSON (NDJSON)',
 };
 
 export const formatLabels = {
-  avro: 'Avro (fast)',
+  avro: 'Avro (apache-avro)',
   json: 'JSON (serde_json)',
 };
 
@@ -37,10 +37,9 @@ this chart grows with them; today it is Avro and JSON.
 
 Two workloads are measured: a **nested batch** of 50 richer readings (a bool, a
 float, and a small nested string array each) and a **single flat 15-field
-record**. Avro's `typed` arm uses the single-pass fast backend
-(`serde_avro_fast`) — Avro's recommended typed decoder and the fair peer to
-JSON's `serde_json`. See the [Avro-fast pipeline](avro-fast-pipeline.mdx) study
-for Avro's backend A/B in depth.
+record**. Both formats are measured on **both** of their decode paths — `typed`
+(into your own structs) and `value` (a dynamic tree) — because, as the numbers
+below show, which path is cheaper is *not* the same answer for both formats.
 
 ## Batch — per-record decode cost
 
@@ -54,7 +53,7 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
   exclude={{ backend: ['simd-json', 'memcpy_baseline'] }}
   metric="ns_per_event"
   category="framing"
-  emphasize="datum"
+  emphasize="single"
   labels={framingLabels}
   title="Decode cost per record (typed)"
   caption="Per-reading decode time for a 50-reading batch, by format and framing (serde_json). Lower is better."
@@ -63,12 +62,12 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
 <StatRow>
   <BenchStat
     emphasis
-    label="Avro (fast) vs JSON NDJSON — decode cost per record"
+    label="Avro vs JSON NDJSON — typed decode cost per record"
     bench="deser_formats"
     metric="ns_per_event"
-    numer={{ shape: 'batch', record: 'typed', framing: 'ndjson', backend: 'serde_json' }}
-    denom={{ shape: 'batch', record: 'typed', framing: 'datum' }}
-    sub="typed decode · lower ns/record is better"
+    numer={{ shape: 'batch', record: 'typed', framing: 'datum' }}
+    denom={{ shape: 'batch', record: 'typed', framing: 'ndjson', backend: 'serde_json' }}
+    sub="typed decode · >1× means Avro costs more"
   />
   <BenchStat
     label="JSON NDJSON vs JSON array — reframing overhead"
@@ -80,23 +79,47 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
   />
 </StatRow>
 
-Avro's compact binary datum decodes fastest — roughly **1.8×** cheaper per record
-than JSON typed, since JSON pays to parse text, unescape strings, and re-parse
-numbers. Among JSON's framings the difference is small: a nested document and a
-top-level array sit within a few percent of each other (the array marginally
-faster), while **NDJSON** trails by ~10–15% because it re-frames per line (a
-line split plus a fresh parse per
-record) instead of amortizing one parse across the whole batch. NDJSON buys that
-back in **per-line error isolation** and true streaming — the design trade-off
-the [JSON format](../user-guide/04-connectors/formats/json/README.mdx) page
-covers.
+On the **typed** path JSON is the cheaper format — Avro costs ~**409 ns/record**
+against JSON's ~212 (nested document), a **1.9×** gap, even though Avro's wire
+format is compact binary and JSON pays to parse text, unescape strings, and
+re-parse numbers. The reason is not the format but the decoder: `apache-avro`
+0.21 exposes no single-pass datum→`T` decode, so the typed path decodes **twice**
+— datum → `AvroValue` → `T` — roughly doubling per-record allocations and CPU.
+The `value` chart below shows what Avro's format is actually worth once that
+second decode is removed.
+
+Among JSON's framings the difference is small: a nested document and a top-level
+array sit within a few percent of each other, while **NDJSON** trails by ~12%
+because it re-frames per line (a line split plus a fresh parse per record)
+instead of amortizing one parse across the whole batch. NDJSON buys that back in
+**per-line error isolation** and true streaming — the design trade-off the
+[JSON format](../user-guide/04-connectors/formats/json/README.mdx) page covers.
 
 ### Typed vs dynamic
 
 Decoding into your own structs (`typed`) versus a dynamic tree
-(`serde_json::Value` / `apache_avro::Value`) is the other lever. The dynamic path
-allocates a node per field and is roughly **2× costlier** for both formats — use
-it only when the schema is unknown at compile time.
+(`serde_json::Value` / `apache_avro::Value`) is the other lever — and it points
+in **opposite directions** for the two formats.
+
+For **JSON**, the dynamic path allocates a node per field and costs ~**1.8×**
+more than typed (384 vs 212 ns/record): use it only when the schema is unknown at
+compile time. For **Avro** the ordering reverses — the dynamic path is ~**1.6×**
+*cheaper* than typed (251 vs 409 ns/record), because `AvroValue` is exactly the
+intermediate the typed path already builds before re-decoding it into `T`. The
+typed path is therefore a convenience, not an optimization: `etl-avro`'s API docs
+say so, and this is the measurement behind that claim.
+
+And on the dynamic path Avro's compact binary format does win — 251 ns/record
+against JSON's 384, a **1.5×** margin, the reverse of the typed chart. The same
+reversal holds on the flat record below (605 vs 772 ns).
+
+:::tip Choosing an Avro decode path
+If decode CPU matters, prefer `build_value()` over `build_serde::<T>()` and
+convert yourself, or keep `build_serde` for the clean typed API and accept the
+second decode. Note this is a **CPU-rig** finding: an end-to-end pipeline is
+normally sink-bound, where a decode difference of this size does not reach the
+measured rate at all.
+:::
 
 <BenchBars
   bench="deser_formats"
@@ -114,13 +137,19 @@ it only when the schema is unknown at compile time.
 The batch shape stresses nested-array and small-object decoding; this one is a
 single flat record decoded per payload, so it isolates per-field scalar cost.
 
+The double-decode penalty is **larger** here than on the batch: Avro's typed path
+costs ~925 ns/record against JSON's ~353, a **2.6×** gap, because a flat
+15-field record is almost entirely per-field scalar work — exactly what gets paid
+twice. Avro's `value` path lands at ~605 ns, back under JSON's own dynamic path
+(~772 ns) and consistent with the reversal seen on the batch.
+
 <BenchBars
   bench="deser_formats"
   where={{ shape: 'order', record: 'typed' }}
   exclude={{ backend: ['simd-json', 'memcpy_baseline'] }}
   metric="ns_per_record"
   category="format"
-  emphasize="avro"
+  emphasize="json"
   labels={formatLabels}
   title="Flat 15-field record — decode cost"
   caption="Per-record decode time for one flat 15-field order (serde_json). Lower is better."
@@ -178,12 +207,23 @@ Both are per-message allocations a production integration avoids; the
 `memcpy_baseline` bar isolates what remains — the copy itself, about **1 ns per
 reading**, under 1% of the decode.
 
+:::caution simd-json is more machine-sensitive than serde_json
+This dataset was re-recorded in full when the Avro backend changed. Across that
+re-record every `serde_json` and `value`-path arm reproduced within **±2%**, but
+the four `simd-json` arms landed **6–8% slower** than the previous dataset — on
+the same host, the same `rustc 1.96.1`, the same pinned `simd-json 0.17.3`, with
+no change to any crate in its dependency subtree, and reproducibly across two
+independent sweeps (grouped and interleaved alike). Treat the simd ratios as
+having a wider error bar than the scalar ones, and re-measure on your own
+hardware before sizing a deployment on them.
+:::
+
 On the **single-document** and **top-level-array** framings — one parse over the
 whole payload, and the JSON connector's Kafka-message default — simd-json decodes
-roughly **1.4× faster** than serde_json. On **NDJSON** (50 independent line
-parses) the gap narrows to ~1.15× as per-parse overhead dominates, and on the
-flat single-record `order` shape it is ~1.25×. Every arm is faster; the win is
-largest exactly where one large document is parsed.
+roughly **1.3× faster** than serde_json. On **NDJSON** (50 independent line
+parses) the gap nearly closes (~1.07×) as per-parse overhead dominates, and on
+the flat single-record `order` shape it is ~1.24×. Every arm is faster; the win
+is largest exactly where one large document is parsed.
 
 :::note Measured on aarch64
 These numbers are from an Apple M5 Max (aarch64, NEON) — the machine every page

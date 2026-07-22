@@ -60,40 +60,31 @@ exact data table (its `<details>` fallback); the committed JSONL under
 
 ## The two rigs, and the honest framing
 
-The `avro-fast` backend (borrowed, zero-copy) decodes roughly **7.2× faster** than
-`apache-avro` on the CPU rig. But a full end-to-end pass sustains hundreds of
-thousands of rows per second, and the ClickHouse sink — not the decoder — sets
-that rate, so the decode win shrinks to a fraction of a percent end to end
-(within ±0.5% across n=3): real, but not the headline. Two rigs exist precisely to
-say this out loud rather than cherry-pick:
-
-- **CPU rig** (no broker, no server): decode → `flat_map` → Native encode. Shows
-  the true multiple the zero-copy decoder buys.
-- **E2E rig** (Kafka + ClickHouse): the same work end to end. Shows the
-  bottleneck has moved to the sink.
-
-The [Avro-fast pipeline](./avro-fast-pipeline.mdx) page states both.
+In-process decode and operator costs are measured in isolation by the micro
+and framework-overhead tiers; a full end-to-end pass sustains hundreds of
+thousands of rows per second and the **sink** — not the decoder or the chain —
+sets that rate. Both tiers exist precisely so a CPU-rig multiple is never
+quoted as an end-to-end one: a several-fold decode win has repeatedly shrunk to
+a fraction of a percent once a real broker and server are in the loop. Read
+every micro figure as a ceiling on what the stage could contribute, not as a
+throughput claim.
 
 ## Tiers
 
 1. **Micro** — `cargo bench` (criterion + divan `AllocProfiler`) in
-   `crates/etl-core/benches` and `crates/etl-avro/benches` (the fast-backend
-   decode variants are feature-gated: `cargo bench -p etl-avro --features fast`).
+   `crates/etl-core/benches` and `crates/etl-avro/benches`.
 2. **Framework overhead** — `benchmarks/pipeline_synthetic` (release binary,
    JSON report): in-memory source → chain → null sink; no broker in the loop.
 3. **At scale** — `benchmarks/e2e_kafka_clickhouse` + `benchmarks/loadgen`
    against local containers or external clusters (env-configured endpoints).
 
-Nightly CI compares criterion baselines with `critcmp` — including `etl-avro`'s
-fast-backend decode variants, which run as their own `--features fast` step so the
-gated benches are regression-tracked too; divan allocation assertions are hard
-failures.
+Nightly CI compares criterion baselines with `critcmp`; divan allocation
+assertions are hard failures.
 
 ## The studies
 
 | Page | What it answers | Backing data |
 |---|---|---|
-| [Avro-fast pipeline](./avro-fast-pipeline.mdx) | The zero-copy decode A/B, CPU-bound and at scale | `avro_pipeline`, `e2e_kafka_clickhouse` |
 | [Deserialization formats](./deserialization-formats.mdx) | Decode throughput per record across all formats — Avro vs JSON and JSON's framings | `deser_formats` |
 | [ClickHouse format](./clickhouse-format.mdx) | Native vs RowBinary go/no-go | `ch_native_format` |
 | [Sink saturation](./sink-saturation.mdx) | The ClickHouse sink ceiling and where the sink becomes the limiter: threads, format, part size, async_insert, compression, shards | `ch_sink_saturation` |
@@ -108,5 +99,4 @@ A few figures are hand-recorded where no rig emits them — the
 [zero-copy seam](./zero-copy-seam.mdx) micro-bench table, the ClickHouse
 insert-transport table on the [ClickHouse format](./clickhouse-format.mdx) page,
 the [Kafka topology](./kafka-topology.mdx) spike table, the framework-overhead
-24× collapse figure, and the fast-backend criterion table. Each is disclosed
-inline on its own page.
+24× collapse figure. Each is disclosed inline on its own page.

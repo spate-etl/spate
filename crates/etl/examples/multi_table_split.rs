@@ -1,7 +1,7 @@
-//! Multi-sink split: Kafka → Avro (borrowed) → `flat_map` → **split** into one
-//! ClickHouse table per record kind.
+//! Multi-sink split: Kafka → Avro → `flat_map` → **split** into one ClickHouse
+//! table per record kind.
 //!
-//! The zero-copy chain of `kafka_avro_flatmap_clickhouse.rs`, extended with a
+//! The chain of `kafka_avro_flatmap_clickhouse.rs`, extended with a
 //! [`split`](etl::ops::ChainBuilder) terminal: one interleaved stream of typed
 //! metric readings fans out to **N tables, each with its own schema, encoder,
 //! and batch/linger tuning**, instead of one wide table. A `gauge` reading
@@ -42,7 +42,7 @@
 //! ```
 //!
 //! ```sh
-//! cargo run --release -p etl --features full,avro-fast \
+//! cargo run --release -p etl --features full \
 //!   --example multi_table_split
 //! ```
 //!
@@ -60,88 +60,62 @@ use etl::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// One Kafka datum: a host's batch of typed readings, decoded **borrowed**.
+/// One Kafka datum: a host's batch of typed readings.
 #[derive(Debug, Deserialize)]
-struct MetricBatch<'a> {
-    #[serde(borrow)]
-    host: &'a str,
+struct MetricBatch {
+    host: String,
     ts_ms: i64,
-    #[serde(borrow)]
-    readings: Vec<Reading<'a>>,
+    readings: Vec<Reading>,
 }
 
 /// One reading. `kind` selects the destination table; a gauge uses `value`, a
 /// text metric uses `text` — the fields the two tables do not share.
 #[derive(Debug, Deserialize)]
-struct Reading<'a> {
-    kind: &'a str,
-    name: &'a str,
+struct Reading {
+    kind: String,
+    name: String,
     value: i64,
-    text: &'a str,
+    text: String,
 }
 
-/// The `flat_map` output: a reading enriched with its batch's host and time,
-/// still borrowing the payload. This is the family the split classifies.
+/// The `flat_map` output: a reading enriched with its batch's host and time.
+/// This is the record the split classifies.
 #[derive(Debug)]
-struct Sample<'a> {
-    host: &'a str,
+struct Sample {
+    host: String,
     ts_ms: i64,
-    kind: &'a str,
-    name: &'a str,
+    kind: String,
+    name: String,
     value: i64,
-    text: &'a str,
+    text: String,
 }
 
 /// The gauge table's row (numeric `value`, no `text` column). Field order
 /// matches the YAML `columns` — Native maps positionally.
 #[derive(Debug, Serialize)]
-struct GaugeRow<'a> {
-    host: &'a str,
+struct GaugeRow {
+    host: String,
     ts_ms: DateTime64Millis,
-    name: &'a str,
+    name: String,
     value: i64,
 }
 
 /// The text table's row (string `text`, no `value` column).
 #[derive(Debug, Serialize)]
-struct TextRow<'a> {
-    host: &'a str,
+struct TextRow {
+    host: String,
     ts_ms: DateTime64Millis,
-    name: &'a str,
-    text: &'a str,
-}
-
-#[derive(Debug)]
-struct BatchFam;
-impl RecFamily for BatchFam {
-    type Rec<'buf> = MetricBatch<'buf>;
-}
-
-#[derive(Debug)]
-struct SampleFam;
-impl RecFamily for SampleFam {
-    type Rec<'buf> = Sample<'buf>;
-}
-
-#[derive(Debug)]
-struct GaugeFam;
-impl RecFamily for GaugeFam {
-    type Rec<'buf> = GaugeRow<'buf>;
-}
-
-#[derive(Debug)]
-struct TextFam;
-impl RecFamily for TextFam {
-    type Rec<'buf> = TextRow<'buf>;
+    name: String,
+    text: String,
 }
 
 /// Shard each table by `host`, matching a `Distributed` DDL of
 /// `xxHash64(host)`. `fn` items: higher-ranked over the payload lifetime.
-fn gauge_key<'a>(row: &'a GaugeRow<'_>) -> ShardKey<'a> {
-    ShardKey::Str(row.host)
+fn gauge_key(row: &GaugeRow) -> ShardKey<'_> {
+    ShardKey::Str(&row.host)
 }
-fn text_key<'a>(row: &'a TextRow<'_>) -> ShardKey<'a> {
-    ShardKey::Str(row.host)
+fn text_key(row: &TextRow) -> ShardKey<'_> {
+    ShardKey::Str(&row.host)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -152,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Source: Kafka ───────────────────────────────────────────────────
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
 
-    // ── Deserializer: Avro, borrowed (zero-copy) ────────────────────────
+    // ── Deserializer: Avro, typed ───────────────────────────────────────
     let deser_section = pipeline
         .config()
         .deserializer
@@ -160,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_fast::<BatchFam>()?;
+            .build_serde::<MetricBatch>()?;
 
     // ── Sinks: one ClickHouse table per kind, from the `sinks:` map ──────
     // Each sink mints its own Native encoder (its table's column types) and a
@@ -170,10 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         etl::clickhouse::config::from_component_config(pipeline.config().sink_config("gauge")?)?;
     let text_sink =
         etl::clickhouse::config::from_component_config(pipeline.config().sink_config("text")?)?;
-    let gauge_router = gauge_sink.router::<GaugeFam>(gauge_key);
-    let text_router = text_sink.router::<TextFam>(text_key);
-    let gauge_enc = NativeEncoder::<GaugeFam>::new(pipeline.block_on(gauge_sink.native_schema())?);
-    let text_enc = NativeEncoder::<TextFam>::new(pipeline.block_on(text_sink.native_schema())?);
+    let gauge_router = gauge_sink.router::<Owned<GaugeRow>>(gauge_key);
+    let text_router = text_sink.router::<Owned<TextRow>>(text_key);
+    let gauge_enc =
+        NativeEncoder::<Owned<GaugeRow>>::new(pipeline.block_on(gauge_sink.native_schema())?);
+    let text_enc =
+        NativeEncoder::<Owned<TextRow>>::new(pipeline.block_on(text_sink.native_schema())?);
 
     // ── The chain, and run ──────────────────────────────────────────────
     let report = pipeline
@@ -183,15 +159,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // deserialize → explode readings (enriched with host/time) → split
             // by `kind` into the two tables. `ErrorPolicy::Skip`: an unknown
             // kind is dropped and counted, not fatal.
-            let mut split = chain::<BatchFam, _>(deserializer.clone())
+            let mut split = chain::<Owned<MetricBatch>, _>(deserializer.clone())
                 // Clone: `ctx.sink(...)` below borrows `ctx`, so `ctx.pipeline`
                 // must not be moved out of it.
                 .with_metrics(ctx.pipeline.clone(), "main")
-                .flat_map::<SampleFam, _>(|batch, out| {
+                .flat_map::<Owned<Sample>, _>(|batch, out| {
                     let (host, ts_ms) = (batch.host, batch.ts_ms);
                     for r in batch.readings {
                         out.emit(Sample {
-                            host,
+                            host: host.clone(),
                             ts_ms,
                             kind: r.kind,
                             name: r.name,
@@ -203,17 +179,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split(ChunkConfig::default(), ErrorPolicy::Skip);
 
             // Declare the branches; each `add` returns a Copy, typed handle.
-            let gauge = split.add::<GaugeFam, _, _>(
+            let gauge = split.add::<Owned<GaugeRow>, _, _>(
                 gauge_enc.clone(),
                 gauge_router.clone(),
                 ctx.sink("gauge"),
             );
-            let text =
-                split.add::<TextFam, _, _>(text_enc.clone(), text_router.clone(), ctx.sink("text"));
+            let text = split.add::<Owned<TextRow>, _, _>(
+                text_enc.clone(),
+                text_router.clone(),
+                ctx.sink("text"),
+            );
 
             // The routing logic: one match, O(1) dispatch, type-checked per arm.
             split
-                .route(move |s: Sample<'_>, out| match s.kind {
+                .route(move |s: Sample, out| match s.kind.as_str() {
                     "gauge" => out.emit(
                         gauge,
                         GaugeRow {

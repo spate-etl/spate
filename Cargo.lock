@@ -1242,7 +1242,6 @@ dependencies = [
  "hyper-util",
  "schema_registry_converter",
  "serde",
- "serde_avro_fast",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -2105,12 +2104,6 @@ dependencies = [
  "serde",
  "serde_core",
 ]
-
-[[package]]
-name = "integer-encoding"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c00403deb17c3221a1fe4fb571b9ed0370b3dcd116553c77fa294a3d918699"
 
 [[package]]
 name = "ipnet"
@@ -3792,34 +3785,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-transcode"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "590c0e25c2a5bb6e85bf5c1bce768ceb86b316e7a01bdf07d2cb4ec2271990e2"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde_avro_fast"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d291e5ad9c62ffddfe41bb93251875f10892002c986e41290db5573599e040f5"
-dependencies = [
- "flate2",
- "integer-encoding",
- "num-traits",
- "rand 0.10.2",
- "rust_decimal",
- "serde",
- "serde-transcode",
- "serde_derive",
- "serde_json",
- "serde_serializer_quick_unsupported",
- "thiserror",
-]
-
-[[package]]
 name = "serde_bytes"
 version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3903,12 +3868,6 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
-
-[[package]]
-name = "serde_serializer_quick_unsupported"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465e5d63f818dfafee003c70e0812d46c82d7a5214776a0fb86b4e08db5a7133"
 
 [[package]]
 name = "serde_urlencoded"
@@ -4830,7 +4789,6 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
- "serde",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]

@@ -66,6 +66,21 @@ jobs:
           </html>
           EOF
 
+      # Same generator as CI's attribution gate, different template: the
+      # committed THIRD-PARTY.md carries licence ids only (so it stays
+      # diffable), while the site carries every crate's full licence text.
+      # ~300KB, regenerated per deploy rather than committed.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Build third-party licence texts
+        run: |
+          rm -rf website/static/licenses
+          mkdir -p website/static/licenses
+          cargo about generate --workspace --all-features --locked --fail \
+            -o website/static/licenses/index.html about-html.hbs
+
       - name: Install dependencies
         working-directory: website
         run: npm ci

@@ -33,7 +33,9 @@ mod retry;
 mod worker;
 
 pub use bundle::{SinkBundle, SinkParts};
-pub use config::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
+pub use config::{
+    BatchConfig, BreakerConfig, InflightConfig, RetryConfig, RetryConfigError, SinkPoolConfig,
+};
 pub use pool::{DrainReport, SinkPool};
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
 

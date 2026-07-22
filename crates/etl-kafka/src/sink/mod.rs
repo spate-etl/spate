@@ -28,10 +28,7 @@ pub(crate) mod frame;
 mod metrics;
 mod writer;
 
-pub use config::{
-    BatchSection, BreakerSection, Compression, InflightSection, KafkaSink, KafkaSinkConfig,
-    RetrySection, build, from_component_config,
-};
+pub use config::{Compression, KafkaSink, KafkaSinkConfig, build, from_component_config};
 pub use encoder::{
     BytesKeyFn, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KeyFn,
     MessageEncoder,

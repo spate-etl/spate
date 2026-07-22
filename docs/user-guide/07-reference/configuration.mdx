@@ -113,14 +113,32 @@ it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
 | `batch.max_bytes` | bytes | `128MiB` | Encoded (uncompressed) byte size that seals a batch. |
 | `batch.linger` | duration | `1s` | Max time an unsealed batch waits before flushing — bounds latency at low throughput. |
 | `inflight.max_per_shard` | integer | `2` | In-flight batches allowed per shard worker before backpressure. |
-| `retry.initial` | duration | `100ms` | First retry backoff after a retryable batch failure. |
-| `retry.max` | duration | `10s` | Backoff ceiling. |
-| `retry.multiplier` | float | `2.0` | Exponential backoff growth factor. |
-| `retry.jitter` | float | `0.2` | Jitter fraction (`0..1`) applied to each backoff. |
+| `retry.initial` | duration | `100ms` | First retry backoff after a retryable batch failure. Must be non-zero and no larger than `retry.max`. |
+| `retry.max` | duration | `10s` | Backoff ceiling. Must be non-zero. Once the delay reaches it, it stays there for the rest of that batch's retries. |
+| `retry.multiplier` | float | `2.0` | Exponential backoff growth factor. Must be finite and within `[1.0, 1e9]` — below `1.0` the delay would shrink each attempt instead of backing off. |
+| `retry.jitter` | float | `0.2` | Fraction of each delay randomized away. Must be finite and within `[0.0, 1.0]`, both ends allowed. Jitter only ever **shortens**: the sleep lands in `[(1 - jitter) × delay, delay]`, never above it and never at zero. |
 | `retry.max_attempts` | integer | `0` | Attempt cap; `0` = unbounded (retry until the drain deadline — the at-least-once default). |
 | `breaker.failure_threshold` | integer | `3` | Consecutive failures before a shard/replica endpoint is quarantined. |
 | `breaker.open_for` | duration | `5s` | Quarantine duration before a half-open probe. |
 | `breaker.half_open_probes` | integer | `1` | Probe writes allowed while half-open. |
+
+The `retry` bounds above are enforced at load by `RetryConfig::validate`, which
+every sink calls, so a bad multiplier or a zero delay fails startup with the
+offending key rather than surfacing in the write loop. They rule out the
+nonsensical, not the merely aggressive: `initial: 1ns` passes. The backoff
+itself is independently total — it saturates at `retry.max` and never yields a
+zero-delay retry — so a sink assembled in code rather than YAML cannot escape
+those guarantees by skipping validation.
+
+There is deliberately **no upper bound on `retry.max`** — a sink fronting an
+expensive or rate-limited destination may legitimately want a very patient
+policy. But `max_attempts: 0` (unbounded) together with a `retry.max` over five
+minutes logs a warning at startup: once a shard backs off to that ceiling it
+sleeps that long between attempts and never abandons the batch, so a stalled
+shard is indistinguishable from a healthy idle one. Bound it with
+`retry.max_attempts` or lower `retry.max` if you did not mean it. Delivery is
+unaffected either way — the drain deadline aborts an in-flight write at
+shutdown, and its data replays.
 
 Connectors add their own keys on top of these — e.g. ClickHouse's
 `timeouts.{send,end}` (its HTTP client, **not** the shared pool) and Kafka's

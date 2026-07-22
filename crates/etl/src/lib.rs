@@ -132,7 +132,9 @@ pub mod prelude {
         RuntimeOptions, ShutdownHandle, SinkOptions,
     };
     pub use etl_core::record::PartitionId;
-    pub use etl_core::sink::{KeyHashRouter, SinkBundle, SinkParts, SinkPoolConfig};
+    pub use etl_core::sink::{
+        KeyHashRouter, RetryConfig, RetryConfigError, SinkBundle, SinkParts, SinkPoolConfig,
+    };
     pub use etl_core::telemetry::LogFormat;
 }
 

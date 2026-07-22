@@ -167,104 +167,6 @@ impl Compression {
     }
 }
 
-/// Batch sealing thresholds (defaults match the framework's).
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct BatchSection {
-    /// Seal after this many rows (messages).
-    pub max_rows: u64,
-    /// Seal after this many encoded bytes.
-    pub max_bytes: ByteSize,
-    /// Seal a partial batch after this long.
-    #[serde(with = "humantime_serde")]
-    pub linger: Duration,
-}
-
-impl Default for BatchSection {
-    fn default() -> Self {
-        let d = BatchConfig::default();
-        BatchSection {
-            max_rows: d.max_rows,
-            max_bytes: ByteSize(d.max_bytes),
-            linger: d.linger,
-        }
-    }
-}
-
-/// In-flight batch limit per shard.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct InflightSection {
-    /// Concurrent batch writes per shard.
-    pub max_per_shard: usize,
-}
-
-impl Default for InflightSection {
-    fn default() -> Self {
-        InflightSection {
-            max_per_shard: InflightConfig::default().max_per_shard,
-        }
-    }
-}
-
-/// Retry/backoff policy for failed batch writes.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct RetrySection {
-    /// First backoff delay.
-    #[serde(with = "humantime_serde")]
-    pub initial: Duration,
-    /// Backoff cap.
-    #[serde(with = "humantime_serde")]
-    pub max: Duration,
-    /// Backoff growth factor.
-    pub multiplier: f64,
-    /// Jitter fraction (`0..1`).
-    pub jitter: f64,
-    /// Attempt cap; `0` = unbounded (yields to the drain deadline).
-    pub max_attempts: u32,
-}
-
-impl Default for RetrySection {
-    fn default() -> Self {
-        let d = RetryConfig::default();
-        RetrySection {
-            initial: d.initial,
-            max: d.max,
-            multiplier: d.multiplier,
-            jitter: d.jitter,
-            max_attempts: d.max_attempts,
-        }
-    }
-}
-
-/// Per-replica circuit breaker. With this sink's single-endpoint shards,
-/// an open breaker quarantines the shard's whole write path until a probe
-/// succeeds — surfaced as `etl_sink_shard_healthy == 0` and source
-/// backpressure.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct BreakerSection {
-    /// Consecutive failures before the endpoint is quarantined.
-    pub failure_threshold: u32,
-    /// Quarantine duration before a half-open probe.
-    #[serde(with = "humantime_serde")]
-    pub open_for: Duration,
-    /// Probe writes allowed while half-open.
-    pub half_open_probes: u32,
-}
-
-impl Default for BreakerSection {
-    fn default() -> Self {
-        let d = BreakerConfig::default();
-        BreakerSection {
-            failure_threshold: d.failure_threshold,
-            open_for: d.open_for,
-            half_open_probes: d.half_open_probes,
-        }
-    }
-}
-
 /// Configuration of a Kafka sink, deserialized from the pipeline's opaque
 /// `sink: { kafka: ... }` section.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -302,16 +204,16 @@ pub struct KafkaSinkConfig {
     pub compression: Option<Compression>,
     /// Batch sealing thresholds.
     #[serde(default)]
-    pub batch: BatchSection,
+    pub batch: BatchConfig,
     /// In-flight limits.
     #[serde(default)]
-    pub inflight: InflightSection,
+    pub inflight: InflightConfig,
     /// Write retry policy.
     #[serde(default)]
-    pub retry: RetrySection,
+    pub retry: RetryConfig,
     /// Endpoint circuit breaker.
     #[serde(default)]
-    pub breaker: BreakerSection,
+    pub breaker: BreakerConfig,
     /// Raw librdkafka producer properties, applied verbatim after
     /// validation. Sink-owned properties (see [`KafkaSinkConfig`] docs and
     /// the connector guide) are rejected; batching knobs like `linger.ms`
@@ -356,39 +258,20 @@ impl KafkaSinkConfig {
                  (librdkafka's `message.max.bytes` range), got {mmb}"
             ));
         }
-        if self.batch.max_rows == 0 || self.batch.max_bytes.as_u64() == 0 {
+        if self.batch.max_rows == 0 || self.batch.max_bytes == 0 {
             return fail("batch thresholds must be non-zero".into());
         }
         if self.inflight.max_per_shard == 0 {
             return fail("inflight.max_per_shard must be at least 1".into());
         }
 
-        // Retry policy: these values flow unchecked into `Duration::mul_f64`
-        // in the framework backoff, which panics on non-finite, negative, or
-        // overflowing results — and a sub-1.0 multiplier or a zero delay
-        // yields a zero-delay hot-retry loop. Validate at load (mirrors the
-        // ClickHouse sink).
-        let retry = &self.retry;
-        if !retry.multiplier.is_finite() || !(1.0..=1e9).contains(&retry.multiplier) {
-            return fail(format!(
-                "retry.multiplier must be a finite number in [1.0, 1e9] (got {})",
-                retry.multiplier
-            ));
-        }
-        if !retry.jitter.is_finite() || !(0.0..=1.0).contains(&retry.jitter) {
-            return fail(format!(
-                "retry.jitter must be a finite fraction in [0.0, 1.0] (got {})",
-                retry.jitter
-            ));
-        }
-        if retry.initial.is_zero() || retry.max.is_zero() {
-            return fail("retry.initial and retry.max must be non-zero".into());
-        }
-        if retry.initial > retry.max {
-            return fail(format!(
-                "retry.initial ({:?}) must not exceed retry.max ({:?})",
-                retry.initial, retry.max
-            ));
+        // Retry policy: a sub-1.0 multiplier shrinks the delay instead of
+        // backing off, and a zero delay is not a backoff at all. The backoff
+        // saturates rather than trusting these bounds, so this catches the
+        // operator's intent at load, not a runtime hazard. The rules live in
+        // the framework so every sink enforces the same ones.
+        if let Err(why) = self.retry.validate() {
+            return fail(why.to_string());
         }
         if self.breaker.failure_threshold == 0 {
             return fail("breaker.failure_threshold must be at least 1".into());
@@ -573,26 +456,10 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
     let pool = SinkPoolConfig {
-        batch: BatchConfig {
-            max_rows: cfg.batch.max_rows,
-            max_bytes: cfg.batch.max_bytes.as_u64(),
-            linger: cfg.batch.linger,
-        },
-        inflight: InflightConfig {
-            max_per_shard: cfg.inflight.max_per_shard,
-        },
-        retry: RetryConfig {
-            initial: cfg.retry.initial,
-            max: cfg.retry.max,
-            multiplier: cfg.retry.multiplier,
-            jitter: cfg.retry.jitter,
-            max_attempts: cfg.retry.max_attempts,
-        },
-        breaker: BreakerConfig {
-            failure_threshold: cfg.breaker.failure_threshold,
-            open_for: cfg.breaker.open_for,
-            half_open_probes: cfg.breaker.half_open_probes,
-        },
+        batch: cfg.batch,
+        inflight: cfg.inflight,
+        retry: cfg.retry,
+        breaker: cfg.breaker,
     };
 
     Ok(KafkaSink {
@@ -638,8 +505,8 @@ mod tests {
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
         assert_eq!(cfg.compression, None);
         assert!(cfg.rdkafka.is_empty());
-        assert_eq!(cfg.batch, BatchSection::default());
-        assert_eq!(cfg.retry, RetrySection::default());
+        assert_eq!(cfg.batch, BatchConfig::default());
+        assert_eq!(cfg.retry, RetryConfig::default());
     }
 
     #[test]

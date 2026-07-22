@@ -29,7 +29,9 @@ per topic — see the `kafka_to_kafka_split` example.
 
 The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
 (`crates/etl-kafka/src/sink/config.rs`); unknown fields are rejected with
-the offending key.
+the offending key, and the retry/breaker values are validated at load
+against the same framework rules the ClickHouse sink uses (a bad multiplier
+or zero threshold fails startup, naming the key).
 
 ```yaml
 sink:
@@ -54,7 +56,7 @@ sink:
 | `max_message_bytes` | bytes | `1MB` (1,000,000) | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `etl_kafka_sink_*` families; `0s` disables statistics and those families with it. |
 | `compression` | `none\|gzip\|snappy\|lz4\|zstd` | unset | Producer compression (`compression.codec`). `zstd` needs an rdkafka build with zstd support — an unavailable codec fails at startup, never mid-stream. |
-| `batch` / `inflight` / `retry` / `breaker` | sections | framework defaults | Sink pool tuning, identical shape to the ClickHouse sink's sections. |
+| `batch` / `inflight` / `retry` / `breaker` | sections | framework defaults | Sink pool tuning — keys, defaults and validation rules in the [reference](../../../07-reference/configuration.mdx#sink-pool). |
 | `rdkafka` | string map | `{}` | Raw librdkafka producer properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist

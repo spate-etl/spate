@@ -9,7 +9,6 @@ use crate::distributed::{self, DistributedCheckError};
 use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
-use bytesize::ByteSize;
 use etl_core::config::{ComponentConfig, ConfigError};
 use etl_core::deser::RecFamily;
 use etl_core::sink::{
@@ -69,16 +68,16 @@ pub struct ClickHouseSinkConfig {
     pub settings: BTreeMap<String, String>,
     /// Batch sealing thresholds.
     #[serde(default)]
-    pub batch: BatchSection,
+    pub batch: BatchConfig,
     /// Concurrent in-flight batches per shard.
     #[serde(default)]
-    pub inflight: InflightSection,
+    pub inflight: InflightConfig,
     /// Retry/backoff policy for failed writes.
     #[serde(default)]
-    pub retry: RetrySection,
+    pub retry: RetryConfig,
     /// Per-replica circuit breaker.
     #[serde(default)]
-    pub breaker: BreakerSection,
+    pub breaker: BreakerConfig,
     /// Client-side send/end timeouts.
     #[serde(default)]
     pub timeouts: TimeoutSection,
@@ -293,101 +292,6 @@ pub struct DistributedCheckSection {
     pub endpoint: Option<String>,
 }
 
-/// Batch sealing thresholds (defaults match the framework's).
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct BatchSection {
-    /// Seal after this many rows.
-    pub max_rows: u64,
-    /// Seal after this many (uncompressed, encoded) bytes.
-    pub max_bytes: ByteSize,
-    /// Seal a partial batch after this long.
-    #[serde(with = "humantime_serde")]
-    pub linger: Duration,
-}
-
-impl Default for BatchSection {
-    fn default() -> Self {
-        let d = BatchConfig::default();
-        BatchSection {
-            max_rows: d.max_rows,
-            max_bytes: ByteSize(d.max_bytes),
-            linger: d.linger,
-        }
-    }
-}
-
-/// In-flight batch limit per shard.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct InflightSection {
-    /// Concurrent writes per shard (to different replicas).
-    pub max_per_shard: usize,
-}
-
-impl Default for InflightSection {
-    fn default() -> Self {
-        InflightSection {
-            max_per_shard: InflightConfig::default().max_per_shard,
-        }
-    }
-}
-
-/// Retry/backoff policy.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct RetrySection {
-    /// First backoff delay.
-    #[serde(with = "humantime_serde")]
-    pub initial: Duration,
-    /// Backoff cap.
-    #[serde(with = "humantime_serde")]
-    pub max: Duration,
-    /// Backoff growth factor.
-    pub multiplier: f64,
-    /// Jitter fraction (`0..1`).
-    pub jitter: f64,
-    /// Attempt cap; `0` = unbounded (yields to the drain deadline).
-    pub max_attempts: u32,
-}
-
-impl Default for RetrySection {
-    fn default() -> Self {
-        let d = RetryConfig::default();
-        RetrySection {
-            initial: d.initial,
-            max: d.max,
-            multiplier: d.multiplier,
-            jitter: d.jitter,
-            max_attempts: d.max_attempts,
-        }
-    }
-}
-
-/// Per-replica circuit breaker.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-pub struct BreakerSection {
-    /// Consecutive failures before the replica is quarantined.
-    pub failure_threshold: u32,
-    /// Quarantine duration before a half-open probe.
-    #[serde(with = "humantime_serde")]
-    pub open_for: Duration,
-    /// Probe writes allowed while half-open.
-    pub half_open_probes: u32,
-}
-
-impl Default for BreakerSection {
-    fn default() -> Self {
-        let d = BreakerConfig::default();
-        BreakerSection {
-            failure_threshold: d.failure_threshold,
-            open_for: d.open_for,
-            half_open_probes: d.half_open_probes,
-        }
-    }
-}
-
 /// Client-side timeouts for one insert.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
@@ -595,26 +499,10 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
     });
 
     let pool = SinkPoolConfig {
-        batch: BatchConfig {
-            max_rows: cfg.batch.max_rows,
-            max_bytes: cfg.batch.max_bytes.as_u64(),
-            linger: cfg.batch.linger,
-        },
-        inflight: InflightConfig {
-            max_per_shard: cfg.inflight.max_per_shard,
-        },
-        retry: RetryConfig {
-            initial: cfg.retry.initial,
-            max: cfg.retry.max,
-            multiplier: cfg.retry.multiplier,
-            jitter: cfg.retry.jitter,
-            max_attempts: cfg.retry.max_attempts,
-        },
-        breaker: BreakerConfig {
-            failure_threshold: cfg.breaker.failure_threshold,
-            open_for: cfg.breaker.open_for,
-            half_open_probes: cfg.breaker.half_open_probes,
-        },
+        batch: cfg.batch,
+        inflight: cfg.inflight,
+        retry: cfg.retry,
+        breaker: cfg.breaker,
     };
 
     Ok(ClickHouseSink {
@@ -716,38 +604,20 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     {
         return fail(format!("database `{db}` is not a valid identifier"));
     }
-    if cfg.batch.max_rows == 0 || cfg.batch.max_bytes.as_u64() == 0 {
+    if cfg.batch.max_rows == 0 || cfg.batch.max_bytes == 0 {
         return fail("batch thresholds must be non-zero".into());
     }
     if cfg.inflight.max_per_shard == 0 {
         return fail("inflight.max_per_shard must be at least 1".into());
     }
 
-    // Retry policy: these values flow unchecked into `Duration::mul_f64` in
-    // the backoff, which panics on non-finite, negative, or overflowing
-    // results — and a sub-1.0 multiplier or a zero delay yields a zero-delay
-    // hot-retry loop hammering an already-failing replica. Validate at load.
-    let retry = &cfg.retry;
-    if !retry.multiplier.is_finite() || !(1.0..=1e9).contains(&retry.multiplier) {
-        return fail(format!(
-            "retry.multiplier must be a finite number in [1.0, 1e9] (got {})",
-            retry.multiplier
-        ));
-    }
-    if !retry.jitter.is_finite() || !(0.0..=1.0).contains(&retry.jitter) {
-        return fail(format!(
-            "retry.jitter must be a finite fraction in [0.0, 1.0] (got {})",
-            retry.jitter
-        ));
-    }
-    if retry.initial.is_zero() || retry.max.is_zero() {
-        return fail("retry.initial and retry.max must be non-zero".into());
-    }
-    if retry.initial > retry.max {
-        return fail(format!(
-            "retry.initial ({:?}) must not exceed retry.max ({:?})",
-            retry.initial, retry.max
-        ));
+    // Retry policy: a sub-1.0 multiplier shrinks the delay instead of backing
+    // off, and a zero delay is not a backoff at all. The backoff saturates
+    // rather than trusting these bounds, so this catches the operator's
+    // intent at load, not a runtime hazard. The rules live in the framework
+    // so every sink enforces the same ones.
+    if let Err(why) = cfg.retry.validate() {
+        return fail(why.to_string());
     }
 
     // Compression: the string parser already bounds the level, but a
@@ -953,8 +823,10 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn validation_rejects_bad_retry_and_breaker() {
-        // Every one of these previously reached `Duration::mul_f64` (or a
-        // broken breaker) at runtime instead of failing at load.
+        // Every one of these reaches the write loop (or a broken breaker) at
+        // runtime rather than failing at load if the rules are dropped. The
+        // rules live in `RetryConfig::validate`; this asserts the ClickHouse
+        // sink still applies them and still reports them under its prefix.
         let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
         let cases = [
             ("retry: { multiplier: 0.5 }", "multiplier"),

@@ -77,6 +77,18 @@ impl<W: ShardWriter> SinkPool<W> {
             "every shard needs at least one replica"
         );
 
+        // Warn once per pool, from the seam every sink passes through, so no
+        // connector has to mirror the check.
+        if config.retry.stalls_indefinitely() {
+            tracing::warn!(
+                retry_max = ?config.retry.max,
+                "retry.max_attempts is 0 (unbounded) and retry.max is over 5m: once a \
+                 shard backs off to its ceiling it sleeps that long between attempts and \
+                 never abandons the batch, so a stalled shard looks identical to a \
+                 healthy idle one. Bound it with retry.max_attempts, or lower retry.max."
+            );
+        }
+
         let (drain_tx, drain_rx) = watch::channel(None);
         let endpoints: Vec<Arc<Vec<W::Endpoint>>> =
             shard_endpoints.into_iter().map(Arc::new).collect();

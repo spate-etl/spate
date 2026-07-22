@@ -9,6 +9,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  features:
+    name: Feature powerset (exhaustive)
+    runs-on: ubuntu-latest
+    # The exhaustive check CI's PR path cannot afford: the `etl` facade has 19
+    # features, so this is 2^19 combinations and several build librdkafka or
+    # compile OpenSSL from source. ~48 minutes, which is fine once a night and
+    # was not fine on every PR. CI runs `--each-feature` (linear) instead, so a
+    # feature that fails alone is still caught in minutes; what lands here is
+    # the interaction between two features that individually work.
+    #
+    # `--no-dev-deps` rewrites each Cargo.toml while it runs and restores it
+    # afterwards, so a cancelled run can leave manifests stripped. Harmless on
+    # a throwaway runner; worth knowing before running it locally.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-hack
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
+
   miri:
     name: Miri (etl-core)
     runs-on: ubuntu-latest
@@ -30,6 +51,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Stays on the built-in harness deliberately: the loom models must run
+      # as `--lib` only (doc tests compiled under `--cfg loom` construct
+      # loom-typed primitives outside a model and abort), and nextest would
+      # buy nothing here. Do not "modernise" this onto nextest.
       - run: cargo test -p etl-core --release --lib
         env:
           RUSTFLAGS: --cfg loom
@@ -40,12 +65,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p etl --test e2e -- --ignored
-      - run: cargo test -p etl-kafka -- --ignored
-      - run: cargo test -p etl-clickhouse -- --ignored
-      # SeaweedFS containers bind one S3 gateway each; run serially.
-      - run: cargo test -p etl-s3 -- --ignored --test-threads=1
+      # One run over every container-backed suite. Previously this was four
+      # `cargo test` invocations, the first of which named `--test e2e` — a
+      # target that does not exist (the facade's are `e2e_happy`,
+      # `e2e_rebalance`, …), so that step could never have passed.
+      #
+      # Serial not because of port conflicts — testcontainers maps every
+      # container to an ephemeral host port (`get_host_port_ipv4`), and the
+      # suites run fine 2-up locally — but because a hosted runner is 2 cores
+      # and ~7 GB, and this spans SeaweedFS, NATS, Redpanda and ClickHouse.
+      # Concurrency here buys little and risks an OOM that looks like a flake.
+      - run: >
+          cargo nextest run --profile docker
+          -p etl -p etl-kafka -p etl-clickhouse -p etl-s3 -p etl-coordination
+          --all-features --run-ignored ignored-only --test-threads 1
+        timeout-minutes: 60
 
   bench:
     name: Criterion + divan micro benches
@@ -54,6 +90,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Compile every bench target and benchmark rig in the bench (release)
+      # profile. CI's clippy `--all-targets` already type-checks all of them on
+      # each PR, so what this adds is release-profile-only breakage — a link
+      # error, or a `cfg(not(debug_assertions))` path. It lives here because
+      # this job needs a release build anyway; on the PR path it was a second
+      # full dependency compile and the slowest job in CI.
+      - run: cargo bench --no-run --workspace --all-features
       # Alloc-count benches are hard assertions: a per-record allocation on
       # the hot path fails this job.
       - run: cargo test -p etl-core --release --test chain_alloc

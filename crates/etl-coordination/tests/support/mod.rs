@@ -12,7 +12,6 @@ use etl_coordination::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Test lease: short enough for fast takeover tests, far above the
@@ -60,40 +59,28 @@ pub fn store() -> MemoryStore {
     MemoryStore::new(LEASE)
 }
 
-/// A frozen (optionally advanceable) [`Clock`] for deterministic lease
-/// fencing. `now()` is a fixed base plus an atomic offset, so a real
-/// wall-clock stall (a CI scheduler starving the renewal task) can never
-/// move it — the starvation self-fence and store expiry only fire when the
-/// test advances time, not when the process is merely slow. Share one
-/// instance between the store and the coordinator so both stay coherent.
-#[derive(Debug)]
-pub struct TestClock {
-    base: tokio::time::Instant,
-    offset_nanos: AtomicU64,
+/// The deterministic clock lives in the crate, behind its `testing`
+/// feature — these are external test binaries, so a `#[cfg(test)]` item
+/// would be invisible to them. Re-exported here so the suites read
+/// unchanged. Share one instance between the store and the coordinator so
+/// expiry, the self-fence, and the control-loop cadence stay coherent.
+pub use etl_coordination::clock::TestClock;
+
+/// A store whose ephemeral expiry runs on `clock` rather than wall time.
+pub fn store_with_clock(clock: Arc<dyn Clock>) -> MemoryStore {
+    MemoryStore::with_clock(LEASE, clock)
 }
 
-impl TestClock {
-    /// A clock frozen at construction. Build it after [`runtime`] exists so
-    /// `tokio::time::Instant::now()` reads the runtime's clock.
-    pub fn frozen() -> Arc<TestClock> {
-        Arc::new(TestClock {
-            base: tokio::time::Instant::now(),
-            offset_nanos: AtomicU64::new(0),
-        })
-    }
-
-    /// Move the clock forward. Unused by the current suite — here so genuine
-    /// expiry/takeover tests can drive time deterministically.
-    pub fn advance(&self, by: Duration) {
-        self.offset_nanos
-            .fetch_add(by.as_nanos() as u64, Ordering::Relaxed);
-    }
-}
-
-impl Clock for TestClock {
-    fn now(&self) -> tokio::time::Instant {
-        self.base + Duration::from_nanos(self.offset_nanos.load(Ordering::Relaxed))
-    }
+/// A worker whose protocol timing runs on `clock`. Pass the same clock the
+/// store was built with.
+pub fn worker_with_clock(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+    clock: Arc<dyn Clock>,
+) -> MemoryCoordinator {
+    StoreCoordinator::with_clock(store.clone(), config(instance_id), io.clone(), None, clock)
+        .expect("coordinator")
 }
 
 pub fn worker(
@@ -132,6 +119,22 @@ pub fn worker_rebalance_delay(
     let mut config = config(instance_id);
     config.rebalance_delay = rebalance_delay;
     StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+}
+
+/// [`worker_rebalance_delay`] on an injected clock, so a grace-window test
+/// can advance time deterministically instead of waiting the window out in
+/// wall-clock. Build the store with [`store_with_clock`] and the same clock.
+pub fn worker_rebalance_delay_clock(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+    rebalance_delay: Duration,
+    clock: Arc<dyn Clock>,
+) -> MemoryCoordinator {
+    let mut config = config(instance_id);
+    config.rebalance_delay = rebalance_delay;
+    StoreCoordinator::with_clock(store.clone(), config, io.clone(), None, clock)
+        .expect("coordinator")
 }
 
 /// A worker with a pinned lane budget, so a test can force the leader to
@@ -278,6 +281,52 @@ pub fn drive(
     }
 }
 
+/// Like [`drive`], but for a worker on a **frozen** clock: advance `clock`
+/// a fraction of a renew-interval each poll so the protocol keeps making
+/// progress (heartbeat, reconcile, replan, and the completion sweep all read
+/// the clock now, so a never-advanced frozen clock stalls them all).
+///
+/// The step is small enough that a live worker renews inside it — the "advance
+/// to settle" pattern from [`etl_coordination::clock`] — so a genuine
+/// self-fence never fires merely because the test moved time in one jump.
+pub fn drive_clocked(
+    coordinator: &mut impl SplitCoordinator,
+    clock: &TestClock,
+    held: &mut Held,
+    what: &str,
+    mut done: impl FnMut(&Held) -> bool,
+) {
+    let step = LEASE / 12;
+    let deadline = Instant::now() + DEADLINE;
+    while !done(held) {
+        assert!(Instant::now() < deadline, "timed out: {what}");
+        clock.advance(step);
+        std::thread::sleep(POLL_INTERVAL);
+        held.fold(
+            coordinator
+                .poll()
+                .unwrap_or_else(|e| panic!("poll failed while {what}: {e}")),
+        );
+    }
+}
+
+/// Poll `check` until it returns true or `timeout` elapses; panics with
+/// `what` on timeout. Mirrors `etl_test::wait_until`, which this crate
+/// cannot reach (`etl-test` is not a dev-dependency here). Use it instead
+/// of sleeping a guessed interval: a sleep long enough for a loaded CI
+/// scheduler is dead time on every other run, and one that is not is a
+/// flake.
+pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    panic!("timed out after {timeout:?} waiting for: {what}");
+}
+
 /// The watermark [`commit_held`] writes: what a running data plane has
 /// durably committed before a rebalance starts.
 pub const BASE_WATERMARK: i64 = 1;
@@ -355,6 +404,85 @@ pub fn drive_pair<C: SplitCoordinator>(
         }
     }
 }
+
+/// Drive two **cooperating** workers on a frozen `clock` until the fleet
+/// reaches `done` **and stays there without being asked to give anything
+/// up**. Returns with both revocation slates provably empty.
+///
+/// Unlike [`drive_pair`], this one answers revocations: it commits and
+/// releases on both sides every iteration, so a hand-off completes the
+/// moment the leader asks rather than waiting out `drain_deadline`. Use it
+/// to reach a settled baseline before asserting on what a fleet does next
+/// — a mid-rebalance fleet revokes for its own reasons, and those requests
+/// linger in [`Held::revoke_requests`], which nothing but
+/// [`consent_to_revocations`] ever drains. A test that needs a declining
+/// source wants [`drive_pair`] instead.
+///
+/// Reaching `done` is not enough on its own: the balancer can satisfy a
+/// split-count predicate mid-rebalance and revoke again a step later. So
+/// after `done` first holds this runs [`QUIET_ROUNDS`] further rounds
+/// *without* consenting — if a request arrives, the fleet was not settled,
+/// so it consents and goes back to converging. Because the quiet rounds
+/// drain nothing, an empty slate on exit is a measurement rather than an
+/// artefact of having just drained it.
+///
+/// The clock step matches [`drive_clocked`]'s: a fraction of a
+/// renew-interval, so both workers stay live across it (advance to settle).
+pub fn settle_pair_clocked<C: SplitCoordinator>(
+    a: (&mut C, &mut Held),
+    b: (&mut C, &mut Held),
+    clock: &TestClock,
+    what: &str,
+    mut done: impl FnMut(&Held, &Held) -> bool,
+) {
+    let step = LEASE / 12;
+    let deadline = Instant::now() + DEADLINE;
+    // One clocked round: advance, let the tasks run, fold, commit. Consent
+    // is the caller's choice, because whether requests are drained is
+    // exactly what distinguishes converging from proving quiescence.
+    let round = |a: (&mut C, &mut Held), b: (&mut C, &mut Held), consent: bool| {
+        clock.advance(step);
+        std::thread::sleep(POLL_INTERVAL);
+        for (coordinator, held) in [(a.0, a.1), (b.0, b.1)] {
+            held.fold(
+                coordinator
+                    .poll()
+                    .unwrap_or_else(|e| panic!("poll failed while {what}: {e}")),
+            );
+            commit_held(coordinator, held);
+            if consent {
+                consent_to_revocations(coordinator, held);
+            }
+        }
+    };
+    loop {
+        assert!(Instant::now() < deadline, "timed out: {what}");
+        if !done(a.1, b.1) {
+            round((&mut *a.0, &mut *a.1), (&mut *b.0, &mut *b.1), true);
+            continue;
+        }
+        // `done` holds. Hold the fleet still and see whether it stays that
+        // way without us answering anything.
+        for _ in 0..QUIET_ROUNDS {
+            round((&mut *a.0, &mut *a.1), (&mut *b.0, &mut *b.1), false);
+        }
+        let disturbed =
+            !a.1.revoke_requests.is_empty() || !b.1.revoke_requests.is_empty() || !done(a.1, b.1);
+        if !disturbed {
+            return;
+        }
+        // Still rebalancing: answer what it asked for and converge again.
+        for (coordinator, held) in [(&mut *a.0, &mut *a.1), (&mut *b.0, &mut *b.1)] {
+            consent_to_revocations(coordinator, held);
+        }
+    }
+}
+
+/// How many revocation-free rounds prove a fleet has stopped moving. Each
+/// round is a clock step of `LEASE / 12`, so this spans a renew-interval —
+/// long enough for the leader to have reconciled and republished, which is
+/// when a spurious revocation would surface.
+pub const QUIET_ROUNDS: usize = 4;
 
 /// Simulate a crash: the worker's runtime is torn down (its task dies
 /// mid-heartbeat) and the handle is forgotten so no drop-time release

@@ -8,6 +8,21 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Pushing again to an open PR cancels the previous run rather than letting two
+# full matrices race to tell you about the same branch. Keyed per ref, and
+# never cancelling on main so the push-only jobs (coverage-full, integration)
+# always complete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The repo's default workflow token is read-only, so anything that writes back
+# to GitHub has to ask for it explicitly. Restrictive here, widened per job.
+# (Codecov's PR comment comes from its own GitHub App, not this token, so the
+# coverage jobs need nothing beyond `contents: read`.)
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Format and lint
@@ -19,19 +34,44 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # `--all-targets` is doing the work of three steps: it compiles every
+      # lib, bin, test, bench and example in the workspace. The two steps that
+      # used to follow it — `cargo check -p etl --examples` and
+      # `cargo bench --no-run --workspace` — were subsets of it, verified by
+      # planting a type error in `benchmarks/src/bin/loadgen.rs` and in
+      # `crates/etl/examples/`, both of which this line catches.
+      #
+      # `cargo bench --no-run` also built the whole dependency tree a second
+      # time in the bench (release) profile, which made this the slowest job
+      # in CI. It moved to nightly's bench job, where a release build already
+      # exists and the marginal cost is nil. What that loses on a PR is
+      # release-only breakage — a link error, or a `cfg(not(debug_assertions))`
+      # path — which is worth a night's latency, not ~6 minutes per PR.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo check -p etl --examples --all-features
-      - run: cargo bench --no-run --workspace --all-features
 
   features:
-    name: Feature powerset
+    name: Feature matrix (each feature)
     runs-on: ubuntu-latest
+    # Linear, not the powerset. The `etl` facade carries 19 features, so a
+    # full powerset is 2^19 combinations and several of them build librdkafka
+    # or compile OpenSSL from source — it ran ~48 minutes, on every PR, which
+    # is not what that signal is worth.
+    #
+    # `--each-feature` is n+2 checks instead of 2^n and still catches the
+    # common break: a feature that does not compile on its own, or a crate
+    # that only builds because something else in the graph enabled a
+    # dependency for it. The exhaustive powerset moved to nightly, where 48
+    # minutes is free.
+    #
+    # `full` is excluded because it is a superset alias — `--all-features` in
+    # the lint and test jobs already covers that shape.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
-      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
+      - run: cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
 
   deny:
     name: Licenses and advisories
@@ -43,28 +83,172 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    # Docker-free, deliberately. The worry was that leaving the container
+    # suites out would make the connector crates under-report and push
+    # contributors toward shallow unit tests to clear the patch target. It
+    # was measured instead of assumed, and it does not hold: docker-free the
+    # workspace is at 87.6% line coverage, with etl-s3 at 92.2% and
+    # etl-kafka at 91.5% — their mock-cluster and in-memory-store tests
+    # already carry it. Merging the container runs in bought single-digit
+    # points for ~an hour of serial docker on every PR.
+    #
+    # The docker-inclusive number is still produced, on pushes to main
+    # (`coverage-full` below), so the trend line stays honest.
+    timeout-minutes: 20
+    env:
+      # Coverage builds a second full target tree (`target/llvm-cov-target`)
+      # alongside the cached one, and at the default `debuginfo=2` that filled
+      # the runner's disk — the linker died with SIGBUS mid-link, which reads
+      # as a compile failure but is the filesystem running out from under it.
+      # llvm-cov maps regions from the `__llvm_covmap` section, not DWARF, so
+      # line tables are all it needs.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+      # Reclaims ~25GB of preinstalled SDKs. Cheap next to re-running a build
+      # that dies at link time.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      # Test scaffolding is excluded from the denominator so the number
+      # reflects shipped code. Note `--all-features` turns on
+      # etl-coordination's `testing` feature, so `TestClock` is counted as
+      # library code; it is exercised hard by the suites that drive it, so it
+      # inflates the number slightly rather than hiding anything.
+      - name: Coverage
+        run: >
+          cargo llvm-cov nextest --profile ci --workspace --all-features
+          --lcov --output-path lcov.info
+          --ignore-filename-regex '(/tests/|/benchmarks/)'
+
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage-lcov
           path: lcov.info
 
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # Two different questions, deliberately answered differently:
+          # *did the data arrive* is loud, because a silently failed upload
+          # leaves the coverage check permanently absent and nobody notices
+          # — the same dead-artifact failure this job used to have. *Is the
+          # number good enough* is informational for now, and that lives in
+          # codecov.yml's `informational: true`.
+          fail_ci_if_error: true
+          flags: unit
+
+  coverage-full:
+    name: Coverage (with containers)
+    # The docker-inclusive number, kept off the PR path because it costs ~an
+    # hour of serial docker to move the total by single digits (measured:
+    # 87.6% without it). On main only, so the trend line still accounts for
+    # what the container suites cover. Reported under its own Codecov flag
+    # rather than replacing the PR number — two flags that mean different
+    # things, not one number that changes meaning by trigger.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # See the `coverage` job: the instrumented target tree at full debuginfo
+      # exhausts the runner's disk and the linker dies with SIGBUS.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+
+      # `--no-report` accumulates raw profile data without rendering; the
+      # `report` step merges both runs into one lcov file.
+      - name: Clean coverage state
+        run: cargo llvm-cov clean --workspace
+      - name: Coverage — unit and integration
+        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features
+      # Serial: a hosted runner is 2 cores / ~7 GB and this spans SeaweedFS,
+      # NATS, Redpanda and ClickHouse. Concurrency risks an OOM that would
+      # read as a flake.
+      - name: Coverage — docker suites
+        run: >
+          cargo llvm-cov --no-report nextest --profile docker
+          --workspace --all-features --run-ignored ignored-only --test-threads 1
+      - name: Merge coverage
+        run: >
+          cargo llvm-cov report --lcov --output-path lcov-full.info
+          --ignore-filename-regex '(/tests/|/benchmarks/)'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov-full
+          path: lcov-full.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov-full.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          flags: with-containers
+
   test:
     name: Test (stable)
     runs-on: ubuntu-latest
+    # `checks: write` is what lets the JUnit step publish its check run. Without
+    # it the step fails outright — the repo default is read-only.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo nextest run --profile ci --workspace --all-features
+      # nextest does not run doctests; they stay on the built-in harness.
       - run: cargo test --workspace --all-features --doc
+
+      # The `ci` profile retries once, so a flake passes on the retry and the
+      # run goes green. Publishing the JUnit report is what keeps that flake
+      # visible — it lands as a check annotation instead of living only in
+      # scrolled-past log text. `always()` so a failing run still reports.
+      - name: Publish test report
+        uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          # The job's own exit code already failed the build; this step
+          # exists to annotate, not to re-decide.
+          fail_on_failure: false
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-nextest
+          path: target/nextest/ci/junit.xml
 
   msrv:
     name: Check (MSRV 1.94)
@@ -86,6 +270,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p etl --all-features -- --ignored --test-threads=1
+      # The `docker` profile warns late and never terminates: these boot real
+      # containers, so a cold image pull can outlast any per-test kill, and a
+      # SIGKILL would report TIMEOUT indistinguishably from a real hang. The
+      # job's `timeout-minutes` is the real bound.
+      - run: >
+          cargo nextest run --profile docker -p etl --all-features
+          --run-ignored ignored-only --test-threads 1
         timeout-minutes: 30

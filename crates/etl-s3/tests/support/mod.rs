@@ -107,6 +107,28 @@ pub(crate) fn test_tuning() -> CoordinationConfig {
         lease_duration: TEST_LEASE,
         op_timeout: Duration::from_millis(200),
         replan_interval: TEST_LEASE,
+        // Both below are sized against the 30s production lease; left at
+        // their defaults they dwarf a 1s test one, and every takeover test
+        // pays the full production grace window in wall clock —
+        // `rebalance_delay` alone was ~20s of the 32s `coordinated_takeover`
+        // run. Scaled here rather than in `Default` so production keeps the
+        // documented values, the same split `etl-coordination`'s own
+        // `config()` helper makes.
+        reconcile_interval: Duration::from_millis(300),
+        // Zero: these suites assert that a dead instance's splits flow back
+        // promptly, and a grace window is pure latency on every one of them.
+        // No etl-s3 test asserts the withhold behaviour — the two arms that
+        // do are `etl-coordination`'s, and they set the window themselves.
+        rebalance_delay: Duration::ZERO,
+        // NOT scaled with the lease. This one bounds how long a *data
+        // plane* takes to drain, not how long a protocol step takes, and
+        // these sinks are paced at ~100ms/write. Cut to a fraction of a
+        // test lease it silently forces drains that would have completed
+        // cooperatively — same green suite, different code path, and
+        // replayed tails instead of clean hand-offs. It only costs wall
+        // clock when a drain actually wedges, which is the case it exists
+        // to bound, so there is no speed to win here.
+        drain_deadline: Duration::from_secs(5),
         ..CoordinationConfig::default()
     }
 }

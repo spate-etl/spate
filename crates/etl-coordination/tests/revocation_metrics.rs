@@ -225,9 +225,19 @@ fn a_real_revocation_moves_every_metric_seam() {
 
     // Let B's assignment-latency observation land: it is recorded on the
     // claim that transferred ownership, which the loop above waited for,
-    // but the exporter render is a separate read.
-    std::thread::sleep(Duration::from_millis(50));
-    let text = handle.render();
+    // but the exporter render is a separate read. Poll for it rather than
+    // sleeping a guessed interval — it is the last of these signals to
+    // arrive, so once it is present the rest have landed too.
+    let name = "etl_coordination_assignment_latency_seconds";
+    let mut text = handle.render();
+    support::wait_until(
+        Duration::from_secs(5),
+        "B's assignment latency reaches the exporter",
+        || {
+            text = handle.render();
+            histogram_count(&text, name).is_some_and(|c| c > 0.0)
+        },
+    );
 
     assert!(
         counter_sum(
@@ -252,7 +262,6 @@ fn a_real_revocation_moves_every_metric_seam() {
         histogram_count(&text, "etl_coordination_drain_duration_seconds").is_some_and(|c| c > 0.0),
         "the releasing worker never observed a drain duration:\n{text}"
     );
-    let name = "etl_coordination_assignment_latency_seconds";
     assert!(
         histogram_count(&text, name).is_some_and(|c| c > 0.0),
         "the gaining worker never observed an assignment latency — the \

@@ -14,6 +14,12 @@ default = ["nats"]
 # The NATS JetStream KV store backend. Off leaves the store trait, the
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats"]
+# Test-only injection seam: exposes `clock::TestClock`, the deterministic
+# clock this crate's `tests/` binaries drive. Off by default and never
+# enabled by the `etl` facade, so a `TestClock` can never be wired into a
+# real pipeline — it would stop the control loop dead. Enabled for our own
+# integration tests via the self dev-dependency below.
+testing = []
 
 [dependencies]
 async-nats = { workspace = true, optional = true }
@@ -33,6 +39,9 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+# Self dev-dependency so the external `tests/` binaries see the `testing`
+# feature's `TestClock` while consumers never do.
+etl-coordination = { path = ".", features = ["testing"] }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }

@@ -192,15 +192,16 @@ fn failed_plan_publish_heals_and_the_job_still_completes() {
 #[test]
 fn maybe_landed_renewal_is_adopted_not_fenced() {
     let rt = runtime();
-    // Freeze time. The self-fence (task) and lease expiry (store) both read
-    // this clock, so a real wall-clock stall — a renewal task starved past
-    // the lease TTL under parallel CI load — can no longer expire the lease:
-    // `clock.now() - last_ok_write` stays 0 while frozen. Only a genuine peer
-    // fence could drop the split, and there is no peer here. Renewal *cadence*
-    // still runs on real `.elapsed()`, so the maybe-landed fault below is
-    // really exercised. This removes the wall-clock flake (#45) without
-    // weakening what the test asserts.
-    let clock: Arc<dyn Clock> = support::TestClock::frozen();
+    // Freeze time. Every protocol deadline now reads this clock — lease
+    // expiry, the self-fence, AND the renewal cadence — so nothing fires
+    // until the test advances it. That is exactly what makes the negative
+    // assertion below meaningful: a Lost/Quarantined can only come from
+    // mishandling the maybe-landed renewal, never from a CI scheduler stall.
+    // We drive the renewals ourselves by stepping the clock, one fraction of
+    // a renew-interval at a time so a live worker always gets to renew before
+    // the self-fence would fire (the "advance to settle" pattern — see
+    // `etl_coordination::clock`).
+    let clock = support::TestClock::frozen();
     let store = FaultStore::new(MemoryStore::with_clock(support::LEASE, clock.clone()));
     let lease_maybe_land = store.lease_maybe_land.clone();
 
@@ -210,7 +211,7 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
         config(Some("solo")),
         rt.handle().clone(),
         None,
-        clock,
+        clock.clone() as Arc<dyn Clock>,
     )
     .expect("coordinator");
     worker.start(planner).unwrap();
@@ -219,19 +220,15 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     support::drive(&mut worker, &mut held, "claiming the split", |h| {
         h.splits.len() == 1
     });
-    // Arm the fault: the next lease renewal writes but reports an error, and
-    // the one after loses its CAS against the landed write and must ADOPT it
-    // (not fence). Drive until the fault has fired (the flag clears), then a
-    // settle window so the adopting renewal runs — asserting no
-    // Lost/Quarantined throughout. Frozen time makes this robust: the
-    // negative assertion can only be tripped by a real mishandling of the
-    // maybe-landed renewal, never by a scheduler stall.
-    lease_maybe_land.store(true, Ordering::Release);
-    let deadline = Instant::now() + DEADLINE;
-    let mut settle_until: Option<Instant> = None;
-    loop {
-        assert!(Instant::now() < deadline, "adoption never settled");
-        for event in worker.poll().expect("poll") {
+
+    // Poll the worker once, folding events and asserting the split is never
+    // dropped. `RefCell` so it can be called from inside the `advance_stepped`
+    // step closure, which already borrows the clock.
+    let held = std::cell::RefCell::new(held);
+    let worker = std::cell::RefCell::new(worker);
+    let pump = || {
+        std::thread::sleep(support::POLL_INTERVAL);
+        for event in worker.borrow_mut().poll().expect("poll") {
             assert!(
                 !matches!(
                     event,
@@ -239,26 +236,44 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
                 ),
                 "a maybe-landed renewal must not cost the split: {event:?}"
             );
-            held.fold(vec![event]);
+            held.borrow_mut().fold(vec![event]);
         }
-        match settle_until {
-            // Fault has fired: watch a few more renewal intervals so the
-            // adopting renewal executes under the no-loss assertion.
-            None if !lease_maybe_land.load(Ordering::Acquire) => {
-                settle_until = Some(Instant::now() + support::LEASE);
-            }
-            Some(until) if Instant::now() >= until => break,
-            _ => {}
-        }
+    };
+
+    // Arm the fault: the next lease renewal writes but reports an error, and
+    // the one after loses its CAS against that landed write and must ADOPT it
+    // (not fence). Step a renew-interval per iteration until the fault has
+    // fired (the flag clears), then a couple more so the adopting renewal
+    // runs under the no-loss assertion. A step of a quarter renew-interval
+    // keeps `last_ok_write` within a lease throughout, so a genuine self-fence
+    // never masquerades as the loss we are refuting.
+    lease_maybe_land.store(true, Ordering::Release);
+    let renew = support::LEASE / 3;
+    let deadline = Instant::now() + DEADLINE;
+    while lease_maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        clock.advance_stepped(renew, renew / 4, pump);
     }
+    for _ in 0..3 {
+        clock.advance_stepped(renew, renew / 4, pump);
+    }
+
+    let mut held = held.into_inner();
+    let mut worker = worker.into_inner();
     assert_eq!(held.splits.len(), 1, "still held");
     // The tenancy is intact: the fenced commit path would reject this.
     worker
         .commit(&split_id("r0"), &SplitProgress::completed(7, vec![]))
         .unwrap();
-    support::drive(&mut worker, &mut held, "completing after the flake", |h| {
-        h.all_complete
-    });
+    // The completion sweep runs on a reconcile tick, which is clock-driven
+    // now — keep stepping the frozen clock so it fires.
+    support::drive_clocked(
+        &mut worker,
+        &clock,
+        &mut held,
+        "completing after the flake",
+        |h| h.all_complete,
+    );
 }
 
 /// A dropped assignment publish must be republished, not treated as

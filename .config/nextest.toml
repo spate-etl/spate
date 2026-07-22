@@ -1,0 +1,62 @@
+# cargo-nextest configuration.
+#
+# nextest runs one process per test, concurrently, where `cargo test` runs one
+# test binary at a time. That matters here for two reasons: the workspace's
+# in-process test time is spread over ~40 binaries whose sum dominates the max,
+# and on macOS every freshly linked binary pays a one-off Gatekeeper/XProtect
+# scan on its first exec. Both costs fan out across cores instead of summing.
+#
+# nextest does NOT run doctests — `cargo test --doc` stays a separate gate.
+
+# nextest only *warns* on configuration keys it does not recognise, then runs
+# with its own defaults. An older binary would therefore silently ignore
+# `fail-fast = false` below (its default is `true`) and stop at the first
+# failure, which reads as a broken config rather than an old tool. The floor is
+# the release documenting the structured `fail-fast` form; `recommended` is the
+# version this file was validated against.
+[nextest-version]
+required = "0.9.89"
+recommended = "0.9.140"
+
+[profile.default]
+# Surface every failure in one run: chasing them one-per-run is the thing that
+# makes a slow suite feel slower than it is.
+fail-fast = false
+
+# The docker-backed suites are `#[ignore]`d and excluded here; nothing left
+# should take this long. A test that does is a bug, not a slow machine. Run the
+# ignored suites under `--profile docker`, which lifts this.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Docker/testcontainers runs:
+#   cargo nextest run --profile docker --run-ignored all
+#
+# These pull and boot real containers (SeaweedFS, NATS, Redpanda, ClickHouse),
+# so their wall time is dominated by infrastructure, not by the test. Under
+# `default` they inherit a 120s hard kill, and a cold image pull can exceed
+# that on a fresh machine — SIGKILL at 120s reports TIMEOUT, indistinguishable
+# from a genuine hang, and can orphan the container. Warn late, never
+# terminate: CI already bounds these with `timeout-minutes`.
+[profile.docker]
+slow-timeout = { period = "120s" }
+
+[profile.ci]
+# `fail-fast` is inherited from `[profile.default]`; restating it here would
+# only be a second place to forget to change it.
+slow-timeout = { period = "60s", terminate-after = 4 }
+# Flaky-on-CI is a defect we want reported, not retried into green — but a
+# single retry keeps one scheduler stall from blocking an unrelated PR. Retried
+# tests are reported as flaky in the summary AND in the JUnit report, which CI
+# uploads and surfaces as a check annotation. Without that upload the retry
+# would hide the flake completely: the run simply goes green and the only trace
+# is scrolled-past log text.
+retries = 1
+failure-output = "immediate-final"
+status-level = "retry"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# Docker runs on CI report through the same JUnit pipeline as the fast suite.
+[profile.docker.junit]
+path = "junit.xml"

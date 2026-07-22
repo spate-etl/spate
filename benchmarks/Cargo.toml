@@ -6,6 +6,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Every auto-discovered bin would also get a libtest harness, and each of those
+# harnesses is a separate binary the workspace test run has to link and execute
+# for zero tests. Declared explicitly with `test = false` instead. `bench` stays
+# on so `cargo bench --no-run --workspace` keeps proving these compile.
+autobins = false
 
 [features]
 # Pass-through selector for the deser_formats simd-json arm. Rebuild the rig
@@ -39,3 +44,53 @@ zstd = "0.13"
 
 [lints]
 workspace = true
+
+# See `autobins` above: these exist only to be run by hand (and to be
+# compile-checked by `cargo clippy --all-targets` / `cargo bench --no-run`).
+[[bin]]
+name = "avro_pipeline"
+test = false
+
+[[bin]]
+name = "ch_native_format"
+test = false
+
+[[bin]]
+name = "ch_sink_saturation"
+test = false
+
+[[bin]]
+name = "deser_formats"
+test = false
+
+[[bin]]
+name = "e2e_kafka_clickhouse"
+test = false
+
+[[bin]]
+name = "kafka_sink_saturation"
+test = false
+
+[[bin]]
+name = "kafka_topology"
+test = false
+
+[[bin]]
+name = "loadgen"
+test = false
+
+[[bin]]
+name = "multi_table_split"
+test = false
+
+[[bin]]
+name = "pipeline_synthetic"
+test = false
+
+[[bin]]
+name = "s3_backfill"
+test = false
+
+[[bin]]
+name = "s3_backfill_coordinated"
+test = false

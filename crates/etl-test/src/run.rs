@@ -46,15 +46,21 @@ impl PipelineRun {
     }
 }
 
-/// Poll `check` until it returns `true` or `timeout` elapses (250ms cadence);
-/// panics with `what` on timeout.
+/// How often [`wait_until`] re-checks its predicate. Small enough that the
+/// cadence is not itself the latency a test measures — at the old 250ms every
+/// wait paid up to a quarter second of pure sleep, and the suites use dozens of
+/// them — but coarse enough not to spin a core.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Poll `check` until it returns `true` or `timeout` elapses; panics with `what`
+/// on timeout.
 pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if check() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(POLL_INTERVAL);
     }
     panic!("timed out after {timeout:?} waiting for: {what}");
 }

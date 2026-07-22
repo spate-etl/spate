@@ -12,7 +12,7 @@ use etl_coordination::{CoordinationErrorKind, SplitCoordinator, SplitProgress};
 use std::time::Instant;
 use support::{
     Held, LEASE, PhasedPlanner, crash, drive, drive_pair, runtime, split_id, store, worker,
-    worker_drain_deadline, worker_max_in_flight, worker_rebalance_delay,
+    worker_drain_deadline, worker_max_in_flight,
 };
 
 #[test]
@@ -611,41 +611,80 @@ fn a_departed_workers_splits_are_withheld_for_the_grace_window() {
     );
 }
 
-/// Crash one of two workers and return how long the survivor took to pick
-/// up its split. Both workers share `delay`, because the leader's copy is
-/// the one that governs.
+/// Crash one of two workers and return how much *clock time* the survivor
+/// needed to pick up its split. Both workers share `delay`, because the
+/// leader's copy is the one that governs.
+///
+/// Runs on a frozen clock the test steps itself: the grace window is a span
+/// of clock time, so measuring it against wall time is exactly the flake
+/// (#45's cousin) — a loaded CI scheduler stretches "how long it took" for
+/// reasons that have nothing to do with the window. Stepping the clock makes
+/// the measurement the window and nothing else, and collapses a ~10s
+/// wall-clock wait to milliseconds.
 fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
     let rt = runtime();
-    let store = store();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
     let ids = ["s0", "s1"];
     let planner = || Box::new(PhasedPlanner::one_final("delay:v1", &ids));
 
-    let mut a = worker_rebalance_delay(&store, rt.handle(), Some("worker-a"), delay);
+    let mut a = support::worker_rebalance_delay_clock(
+        &store,
+        rt.handle(),
+        Some("worker-a"),
+        delay,
+        clock.clone(),
+    );
     // B gets its own runtime so it can be killed outright rather than shut
     // down cleanly — a clean stop releases its split and would prove
     // nothing about reassignment.
     let rt_b = runtime();
-    let mut b = worker_rebalance_delay(&store, rt_b.handle(), Some("worker-b"), delay);
+    let mut b = support::worker_rebalance_delay_clock(
+        &store,
+        rt_b.handle(),
+        Some("worker-b"),
+        delay,
+        clock.clone(),
+    );
     a.start(planner()).unwrap();
     b.start(planner()).unwrap();
     let (mut held_a, mut held_b) = (Held::default(), Held::default());
-    drive_pair(
-        (&mut a, &mut held_a),
-        (&mut b, &mut held_b),
-        "both workers hold a split",
-        |x, y| x.splits.len() == 1 && y.splits.len() == 1,
-    );
+    // Step the clock while both claim: the leader's first assignment can
+    // hinge on a reconcile tick, which is clock-driven now, so a frozen clock
+    // that never moves can leave the pair un-assigned. Both are alive, so the
+    // step stays under a renew-interval (advance-to-settle).
+    let step = LEASE / 6;
+    let claim_deadline = Instant::now() + support::DEADLINE;
+    while !(held_a.splits.len() == 1 && held_b.splits.len() == 1) {
+        assert!(
+            Instant::now() < claim_deadline,
+            "both workers never held a split"
+        );
+        clock.advance(step);
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().unwrap());
+        held_b.fold(b.poll().unwrap());
+    }
     support::commit_held(&mut a, &held_a);
 
+    // Kill B: it can no longer renew, so its lease and presence expire only
+    // as the clock advances. A is alive and must keep its own lease, so step
+    // in fractions of a renew-interval — a single lease-sized jump would
+    // expire A too. `advanced` is the clock time from the crash to the
+    // hand-off: B's lease expiry plus, for a non-zero delay, the whole grace
+    // window on top.
     crash(rt_b, b);
-    let died_at = Instant::now();
-    drive(
-        &mut a,
-        &mut held_a,
-        "the survivor picks up the departed worker's split",
-        |h| h.splits.len() == 2,
-    );
-    died_at.elapsed()
+    let cap = LEASE * 10;
+    let mut advanced = std::time::Duration::ZERO;
+    while held_a.splits.len() < 2 {
+        assert!(advanced < cap, "the survivor never picked up the split");
+        clock.advance(step);
+        advanced += step;
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().unwrap());
+        support::commit_held(&mut a, &held_a);
+    }
+    advanced
 }
 
 /// A source that will not stop cleanly still has to give the split up —
@@ -721,27 +760,47 @@ fn a_drain_that_never_completes_is_forced_out() {
 /// job would stall behind a rebalance nobody asked for. This is the most
 /// dangerous inversion in the design, so it is asserted directly rather
 /// than left to fall out of the happy path.
+///
+/// The baseline has to be a **settled** fleet, not merely a working one.
+/// Until the leader's assignment has converged, a worker is legitimately
+/// asked to give splits up — the first worker to claim takes the whole
+/// plan, and the balancer moves half of it to the peer — and those
+/// requests are exactly what this test reads as the inversion. So both
+/// sides consent their way to the fixpoint first, and the window below
+/// starts from an empty revocation slate.
 #[test]
 fn a_withdrawn_assignment_record_does_not_release_anything() {
     let rt = runtime();
-    let store = store();
+    // Frozen clock: the window is a span of protocol time, and running it
+    // in wall time both costs a full lease per run and lets a scheduler
+    // stall expire the very leases the invariant is about.
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
     let ids = ["w0", "w1", "w2", "w3"];
     let planner = || Box::new(PhasedPlanner::one_final("withdrawn:v1", &ids));
 
-    let mut a = worker(&store, rt.handle(), Some("worker-a"));
+    let mut a = support::worker_with_clock(&store, rt.handle(), Some("worker-a"), clock.clone());
     a.start(planner()).unwrap();
     let mut held_a = Held::default();
-    let mut b = worker(&store, rt.handle(), Some("worker-b"));
+    let mut b = support::worker_with_clock(&store, rt.handle(), Some("worker-b"), clock.clone());
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
-    drive_pair(
+    // Four splits, two workers, equal weights, a lane budget neither
+    // reaches: the balancer's fixpoint is two each, and reaching it is what
+    // makes "nothing changed" below mean anything. The helper settles to
+    // that fixpoint *and* proves the fleet stopped moving — it only returns
+    // after `QUIET_ROUNDS` rounds in which it drained nothing and nothing
+    // was revoked. Asserting the slates are empty here instead would be
+    // dead: `consent_to_revocations` empties them unconditionally, so it
+    // would hold however hard the fleet was churning. The guarantee has to
+    // come from rounds that drain nothing.
+    support::settle_pair_clocked(
         (&mut a, &mut held_a),
         (&mut b, &mut held_b),
-        "both workers settle on a share",
-        |x, y| !x.splits.is_empty() && !y.splits.is_empty(),
+        &clock,
+        "both workers settle on half the plan",
+        |x, y| x.splits.len() == 2 && y.splits.len() == 2,
     );
-    support::commit_held(&mut a, &held_a);
-    support::commit_held(&mut b, &held_b);
     let before: Vec<String> = held_b.splits.keys().cloned().collect();
 
     // Delete B's assignment record out from under it. Whichever worker is
@@ -758,8 +817,11 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
         );
     });
 
-    let until = Instant::now() + LEASE;
-    while Instant::now() < until {
+    // A lease of protocol time, stepped so both workers keep renewing. The
+    // reconcile tick reads the clock too, so the leader's republish still
+    // happens inside this window — it is just not paid for in wall time.
+    clock.advance_stepped(LEASE, LEASE / 12, || {
+        std::thread::sleep(support::POLL_INTERVAL);
         for event in a.poll().expect("poll a") {
             held_a.fold(vec![event]);
         }
@@ -777,8 +839,7 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
         );
         support::commit_held(&mut a, &held_a);
         support::commit_held(&mut b, &held_b);
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
+    });
     let after: Vec<String> = held_b.splits.keys().cloned().collect();
     assert_eq!(
         before, after,

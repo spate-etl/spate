@@ -1,0 +1,101 @@
+# Codecov configuration.
+#
+# Two flags, uploaded by two different jobs and meaning different things:
+#
+#   unit            — every PR. The docker-free suite. This is what the
+#                     status checks below gate on, so the PR signal is fast
+#                     and always means the same thing.
+#   with-containers — pushes to main only. Merges the docker-free run with
+#                     the `#[ignore]`d testcontainers suites.
+#
+# The container suites were measured before being left off the PR path
+# rather than assumed either way: docker-free the workspace is already at
+# 87.6% line coverage, with etl-s3 at 92.2% and etl-kafka at 91.5%. Merging
+# the container runs in moved the total by single digits and cost ~an hour
+# of serial docker per PR, so it reports on main instead of gating there.
+
+coverage:
+  precision: 1
+  round: down
+  range: "70...90"
+
+  status:
+    # Coverage of the lines this PR adds or changes. This is the number we
+    # actually care about — a project-wide percentage moves too slowly to
+    # say anything about a single change.
+    #
+    # Both statuses are scoped to the `unit` flag. Without that they would
+    # aggregate `with-containers` too, which is carried forward from main on
+    # a PR that never ran it — so the gate would silently include coverage
+    # the PR did not produce.
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+        flags: [unit]
+        # Informational while the target is calibrated: it posts the check
+        # and annotates the diff, but does not block the merge. The repo
+        # sits at ~87.6% docker-free, so 80% should be comfortable — the
+        # crate to watch is etl-clickhouse at 77.6%. Flip to `false` once a
+        # few real PRs confirm it behaves.
+        informational: true
+
+    # Whole-repo coverage: only complain if a PR makes it meaningfully worse.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        flags: [unit]
+        informational: true
+
+# Line-level annotations in the diff view, plus one comment per PR that is
+# updated in place rather than re-posted.
+comment:
+  layout: "condensed_header, diff, flags, components, condensed_files"
+  behavior: default
+  require_changes: false
+
+github_checks:
+  annotations: true
+
+flags:
+  unit:
+    # Never carried forward: on a PR this flag must reflect what that PR's
+    # run actually produced, not the last value seen on main.
+    carryforward: false
+  with-containers:
+    # Only uploaded on main, so a PR has none of its own. Carried forward so
+    # the flag keeps its last known value instead of reading as a regression
+    # to zero. It gates nothing — see the flag scoping on the statuses above.
+    carryforward: true
+
+ignore:
+  - "benchmarks/**"
+  - "**/tests/**"
+  - "crates/etl-test/**" # the mock/test-harness crate shipped for users
+  - "examples/**"
+
+# Per-crate visibility, so a regression is attributable rather than diffuse.
+component_management:
+  individual_components:
+    - component_id: core
+      name: etl-core
+      paths: ["crates/etl-core/**"]
+    - component_id: coordination
+      name: etl-coordination
+      paths: ["crates/etl-coordination/**"]
+    - component_id: kafka
+      name: etl-kafka
+      paths: ["crates/etl-kafka/**"]
+    - component_id: s3
+      name: etl-s3
+      paths: ["crates/etl-s3/**"]
+    - component_id: clickhouse
+      name: etl-clickhouse
+      paths: ["crates/etl-clickhouse/**"]
+    - component_id: codecs
+      name: codecs (avro, json)
+      paths: ["crates/etl-avro/**", "crates/etl-json/**"]
+    - component_id: facade
+      name: etl
+      paths: ["crates/etl/**"]

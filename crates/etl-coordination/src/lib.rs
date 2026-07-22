@@ -26,10 +26,11 @@ pub use etl_core::coordination::*;
 pub mod config;
 pub mod store;
 
-// Time seam behind lease expiry and the self-fence: `SystemClock` in
-// production, a frozen/advanced clock in tests. `#[doc(hidden)]` keeps it off
-// the documented, semver-stable surface while staying reachable from the
-// external `tests/` binaries.
+// Time seam behind every deadline in the control loop: `SystemClock` in
+// production, a clock the test advances in tests. `#[doc(hidden)]` hides the
+// *module path* only — `Clock`, `SystemClock` and `Sleep` are re-exported
+// below without it, so the trait is public, documented, semver-stable
+// surface. Adding a required method to it is a breaking change.
 #[doc(hidden)]
 pub mod clock;
 mod coordinator;
@@ -39,7 +40,9 @@ mod protocol;
 mod records;
 mod task;
 
-pub use clock::{Clock, SystemClock};
+// `Sleep` is the return type of a required `Clock` method, so an external
+// implementor has to be able to name it.
+pub use clock::{Clock, Sleep, SystemClock};
 pub use config::CoordinationConfig;
 pub use coordinator::StoreCoordinator;
 

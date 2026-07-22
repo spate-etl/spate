@@ -13,9 +13,13 @@ changing engine behavior.
 
 ```sh
 cargo check --workspace --all-features
-cargo test --workspace --all-features          # unit + integration (no docker)
+cargo nextest run --workspace --all-features   # unit + integration (no docker)
+cargo nextest run -p etl-s3 --all-features     # between edits; --workspace is the final gate
+cargo test --workspace --all-features --doc    # nextest does not run doctests
+cargo nextest run --profile docker --workspace --all-features --run-ignored ignored-only  # container suites
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all
+cargo bench --no-run --workspace --all-features # the 12 benchmark rigs still compile
 cargo bench -p etl-core                        # criterion + divan micro benches
 cargo bench -p etl-avro --features fast        # fast-backend decode variants need the feature
 RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
@@ -40,8 +44,59 @@ To populate it locally: `cargo doc --workspace --exclude benchmarks --no-deps
 --all-features`, then copy `target/doc/.` into `website/static/api/`.
 
 Verify gates by **explicit exit codes** (redirect to a log, check `$?`);
-piped `grep`/`tail` chains have masked real failures in this repo. The
-full etl-kafka suite takes ~50s (MockCluster timing).
+piped `grep`/`tail` chains have masked real failures in this repo.
+
+Tests run under [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest`
+or `brew install cargo-nextest`; config in `.config/nextest.toml`). It runs one
+process per test concurrently, where `cargo test` runs one binary at a time —
+plain `cargo test --workspace` still works but is many times slower. Two costs it
+hides, both measured on this workspace:
+
+- The suite's in-process time is ~150s spread over ~40 binaries; serially that
+  is the sum, concurrently it is the max.
+- **On macOS, every freshly linked binary stalls 13–35s at 0% CPU on its first
+  exec** while Gatekeeper/XProtect scans it (per inode; re-exec is instant).
+  Across the workspace that alone was ~30 min per edit-test cycle. Add your
+  terminal to *System Settings → Privacy & Security → Developer Tools* to
+  exempt it; verify with
+  `cp target/debug/deps/<bin> /tmp/probe && time /tmp/probe --list`.
+
+`--all-features` enables `etl-kafka/tls` → `rdkafka/ssl-vendored`, which compiles
+OpenSSL from source. Drop it when you don't need the TLS surface. It also enables
+`etl-coordination/testing`, which exposes `clock::TestClock` — that feature is off
+by default and must never be enabled by the `etl` facade: a `TestClock` in
+production stops the coordination control loop dead.
+
+Three nextest profiles: `default` (local), `ci`, and `docker`. Use `--profile
+docker` for anything `--run-ignored` — `default` hard-kills a test at 120s, which
+a cold container pull can exceed, and the SIGKILL reports `TIMEOUT`
+indistinguishably from a real hang.
+
+`benchmarks/` sets `autobins = false`, so a new rig in `benchmarks/src/bin/` is
+invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
+`benchmarks::manifest::every_rig_is_declared_as_a_bin` fails if the two diverge.
+Note the rigs are no longer built by `cargo nextest run`; `cargo clippy
+--workspace --all-targets` is what compile-checks them (and the examples) on
+every PR. `cargo bench --no-run` adds only release-profile breakage on top of
+that, and costs a second full dependency build, so CI runs it nightly.
+
+Coverage is `cargo llvm-cov`, reported to Codecov under two flags. `unit` runs on
+every PR (docker-free) and is what the 80% **patch** target gates on
+(`codecov.yml`, informational until calibrated). `with-containers` runs only on
+pushes to main and merges the `#[ignore]`d container suites in. Measured before
+splitting them: docker-free the workspace is at **87.6%** line coverage, etl-s3
+92.2% and etl-kafka 91.5% — the container suites move the total by single digits
+and cost ~an hour of serial docker, so they report rather than gate. Lowest crate
+is etl-clickhouse at 77.6%; that is the one a patch target can realistically bite
+on. Reproduce locally with:
+
+```sh
+cargo llvm-cov nextest --profile ci --workspace --all-features --summary-only \
+  --ignore-filename-regex '(/tests/|/benchmarks/)'
+```
+
+nextest's JUnit report is published as a check annotation; that is what keeps
+`retries = 1` from hiding a flake behind a green run.
 
 The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
 construct loom-typed primitives outside a model and abort. The same applies

@@ -23,11 +23,22 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
         startup_timeout: Duration::from_secs(30),
         // Statistics off: deterministic tests.
         statistics_interval: Duration::ZERO,
-        // These tests produce BEFORE the consumer joins. librdkafka's
-        // default (`latest`) would legitimately deliver nothing — any past
-        // "green" run of that shape was a pause-race leaking a message to
-        // the main queue, whose rewind seek overrode the reset policy.
-        rdkafka: BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]),
+        rdkafka: BTreeMap::from([
+            // These tests produce BEFORE the consumer joins. librdkafka's
+            // default (`latest`) would legitimately deliver nothing — any past
+            // "green" run of that shape was a pause-race leaking a message to
+            // the main queue, whose rewind seek overrode the reset policy.
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+            // The mock broker paces a rebalance of an *established* group at
+            // `session.timeout.ms - 1000` (rdkafka_mock_cgrp.c: the JOINING
+            // timeout), so librdkafka's 45s default made every second-member
+            // test wait ~44s for its reassignment. Only the group's *first*
+            // formation uses `group.initial.rebalance.delay.ms`. 6s keeps us at
+            // real Kafka's `group.min.session.timeout.ms` floor while capping
+            // that wait at 5s.
+            ("session.timeout.ms".to_string(), "6000".to_string()),
+            ("heartbeat.interval.ms".to_string(), "2000".to_string()),
+        ]),
     }
 }
 
@@ -374,9 +385,25 @@ fn empty_assignment_completes_rebalance_protocol() {
 
     // Round-robin both members from this thread until the group settles with
     // one owner and one empty member (stable for several quiet ticks).
+    //
+    // Both conditions are required. Quiet alone is not settled: if the two
+    // members do not land in the same initial rebalance window, the second
+    // join re-forms an established group, and the mock broker paces that at
+    // `session.timeout.ms - 1000` — long enough to look quiet while the
+    // reassignment is still in flight.
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut quiet = 0;
-    while Instant::now() < deadline && quiet < 25 {
+    while !(quiet >= 25 && a_count + b_count == 1) {
+        // Assert rather than fall out of the loop: on the deadline path the
+        // counts can transiently read 1 mid-flight, which would satisfy the
+        // assertion below and let the test continue against a group that
+        // never settled. Requiring the settled predicate makes reaching the
+        // deadline a failure with a diagnosis attached.
+        assert!(
+            Instant::now() < deadline,
+            "the group never settled: quiet={quiet}, a={a_count}, b={b_count} \
+             (want one owner, one empty member, stable for 25 ticks)"
+        );
         let sa = drive_step(
             &mut a,
             &mut a_lanes,

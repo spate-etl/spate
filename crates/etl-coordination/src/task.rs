@@ -124,18 +124,22 @@ enum ReleaseOutcome {
 /// pinning a rebalance open forever.
 struct Revoking {
     /// When the revocation was requested: the drain deadline's anchor and
-    /// the `drain` phase of
-    /// `etl_coordination_drain_duration_seconds`. Real time, not the
-    /// injected `Clock` — that seam is scoped to the two expiry surfaces.
+    /// the `drain` phase of `etl_coordination_drain_duration_seconds`.
+    /// Drawn from the injected `Clock`, so both readers must be too —
+    /// measuring it with real `.elapsed()` would compare two timelines and
+    /// saturate to zero under a test clock running ahead of wall time.
     started: Instant,
 }
 
 pub(crate) struct Task<S: CoordinationStore> {
     pub(crate) store: S,
     pub(crate) config: CoordinationConfig,
-    /// Time source for the starvation self-fence. `SystemClock` in
-    /// production; frozen in tests so scheduler jitter cannot spuriously
-    /// expire a held lease. Renewal cadence still uses real `.elapsed()`.
+    /// Time source for every deadline in the control loop — lease expiry
+    /// and the starvation self-fence, the heartbeat/reconcile/replan
+    /// cadence, the grace window, the drain deadline, and the renewal
+    /// cadence gate. `SystemClock` in production; in tests an injected
+    /// clock the test advances, so no transition fires on scheduler jitter.
+    /// Anything anchored to it must also be *read* through it.
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) fingerprint: String,
     pub(crate) fp: u64,
@@ -324,9 +328,9 @@ impl<S: CoordinationStore> Task<S> {
         // renewals, watch processing, or command service.
         let mut planning: Option<PlanRun> = None;
 
-        let mut heartbeat = Instant::now() + self.next_heartbeat();
-        let mut reconcile = Instant::now() + self.config.reconcile_interval;
-        let mut replan = Instant::now() + self.config.replan_interval;
+        let mut heartbeat = self.clock.now() + self.next_heartbeat();
+        let mut reconcile = self.clock.now() + self.config.reconcile_interval;
+        let mut replan = self.clock.now() + self.config.replan_interval;
 
         loop {
             if planning.is_none() {
@@ -369,22 +373,22 @@ impl<S: CoordinationStore> Task<S> {
                     }
                     Box::pin(self.step()).await?;
                 }
-                () = tokio::time::sleep_until(heartbeat) => {
+                () = self.clock.sleep_until(heartbeat) => {
                     self.round += 1;
                     Box::pin(self.heartbeat()).await?;
-                    heartbeat = Instant::now() + self.next_heartbeat();
+                    heartbeat = self.clock.now() + self.next_heartbeat();
                     Box::pin(self.step()).await?;
                 }
-                () = tokio::time::sleep_until(reconcile) => {
+                () = self.clock.sleep_until(reconcile) => {
                     Box::pin(self.reconcile()).await?;
-                    reconcile = Instant::now() + self.config.reconcile_interval;
+                    reconcile = self.clock.now() + self.config.reconcile_interval;
                     Box::pin(self.step()).await?;
                 }
-                () = tokio::time::sleep_until(replan) => {
+                () = self.clock.sleep_until(replan) => {
                     if self.leadership.is_some() && self.plan_is_open() {
                         self.plan_now = true;
                     }
-                    replan = Instant::now() + self.config.replan_interval;
+                    replan = self.clock.now() + self.config.replan_interval;
                     Box::pin(self.step()).await?;
                 }
                 joined = async { (&mut planning.as_mut().expect("guarded by is_some").handle).await },
@@ -836,9 +840,8 @@ impl<S: CoordinationStore> Task<S> {
                 // leader bounce made it most useful. `reserved_splits`
                 // clears the entry the moment the instance reappears.
                 if instance != self.instance {
-                    self.departed
-                        .entry(instance.to_string())
-                        .or_insert_with(Instant::now);
+                    let now = self.clock.now();
+                    self.departed.entry(instance.to_string()).or_insert(now);
                 }
             }
             return;
@@ -1423,7 +1426,9 @@ impl<S: CoordinationStore> Task<S> {
             return;
         }
         let delay = self.config.rebalance_delay;
-        self.departed.retain(|_, since| since.elapsed() < delay);
+        let now = self.clock.now();
+        self.departed
+            .retain(|_, since| now.duration_since(*since) < delay);
     }
 
     /// Splits withheld from assignment because their owner departed less
@@ -1479,12 +1484,8 @@ impl<S: CoordinationStore> Task<S> {
         let Ok(split) = SplitId::new(id.to_string()) else {
             return;
         };
-        self.revoking.insert(
-            id.to_string(),
-            Revoking {
-                started: Instant::now(),
-            },
-        );
+        let started = self.clock.now();
+        self.revoking.insert(id.to_string(), Revoking { started });
         // The denominator of the revocation lifecycle, counted exactly
         // once per revocation: the only caller filters on `revoking` not
         // already holding the split. Every revocation counted here later
@@ -1519,10 +1520,11 @@ impl<S: CoordinationStore> Task<S> {
             self.settle_revocation(&id, RevocationOutcome::Forced);
         }
         let deadline = self.config.drain_deadline;
+        let now = self.clock.now();
         let overdue: Vec<String> = self
             .revoking
             .iter()
-            .filter(|(_, r)| r.started.elapsed() >= deadline)
+            .filter(|(_, r)| now.duration_since(r.started) >= deadline)
             .map(|(id, _)| id.clone())
             .collect();
         for id in overdue {
@@ -1543,12 +1545,17 @@ impl<S: CoordinationStore> Task<S> {
         let Some(entry) = self.revoking.remove(id) else {
             return;
         };
+        // Same clock that stamped `started` and that `service_revocations`
+        // compares against: reading it with real `.elapsed()` would mix two
+        // timelines and saturate to zero whenever the clock runs ahead of
+        // wall time.
+        let drained_for = self.clock.now().duration_since(entry.started);
         self.metrics(|m| {
             m.revocation(outcome);
             // Only a cooperative drain is timed: a forced release measures
             // `drain_deadline`, not how long draining takes.
             if outcome == RevocationOutcome::Drained {
-                m.drain_duration(entry.started.elapsed());
+                m.drain_duration(drained_for);
             }
         });
     }
@@ -1901,10 +1908,12 @@ impl<S: CoordinationStore> Task<S> {
         }
         // Starvation self-fence: any owned split without a successful
         // write for a full lease is dropped before peers must fight our
-        // zombie for it. Reads `clock` (not real time) so a frozen test
-        // clock cannot self-fence a lease the scheduler merely stalled;
-        // `last_ok_write` is stamped from the same clock, so the difference
-        // is 0 while frozen. Production `SystemClock` is real wall time.
+        // zombie for it. Reads `clock`, the same source that stamps
+        // `last_ok_write`, so a scheduler stall cannot fence a lease that
+        // is healthy in protocol time. A test therefore only fences what it
+        // advances the clock past — and must step by no more than a
+        // renew-interval while the worker is alive, or it expires the lease
+        // and the renewal that would have saved it at the same instant.
         let now = self.clock.now();
         let starved: Vec<String> = self
             .owned
@@ -1976,14 +1985,15 @@ impl<S: CoordinationStore> Task<S> {
         let Some(owned) = self.owned.get(id) else {
             return Ok(());
         };
-        // Cadence gate: skip if we renewed within the last interval. This
-        // MUST stay real `.elapsed()`, not `clock.now()`. `last_ok_write` is
-        // stamped from `clock`; under a frozen test clock `clock.now() -
-        // last_ok_write` is always 0, which would gate out every renewal and
-        // never exercise the fault. `.elapsed()` measures real wall time, so
-        // renewals still fire on cadence (identical to `Instant::now()` under
-        // the production `SystemClock`).
-        if owned.last_ok_write.elapsed() < self.config.renew_interval() {
+        // Cadence gate: skip if we renewed within the last interval. Read
+        // from `clock`, the same source that stamps `last_ok_write` and that
+        // `fence_starved_splits` compares against — a gate on real time while
+        // expiry ran on the clock could starve a renewal the clock says is
+        // due, or fire one it says is not. Under a frozen test clock nothing
+        // renews until the test advances, which is the point: advancing is
+        // what drives the cadence, and `TestClock::advance_stepped` exists so
+        // a live worker still gets its renewal inside every step.
+        if self.clock.now().duration_since(owned.last_ok_write) < self.config.renew_interval() {
             return Ok(());
         }
         let lease_rev = owned.lease_rev;

@@ -1285,6 +1285,7 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "base64",
+ "etl-coordination",
  "etl-core",
  "foldhash",
  "futures-util",

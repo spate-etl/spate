@@ -339,3 +339,48 @@ pub fn http_get(host: &str, port: u16, path: &str) -> std::io::Result<String> {
     stream.read_to_string(&mut raw)?;
     Ok(decode_http(&raw))
 }
+
+#[cfg(test)]
+mod manifest {
+    /// `autobins = false` means cargo no longer discovers `src/bin/*.rs` —
+    /// a rig added without a matching `[[bin]]` stanza is simply never
+    /// built, with no warning from cargo, clippy, or `cargo bench --no-run`.
+    /// It would rot silently until someone tried to run it. The explicit
+    /// declarations exist so each bin can carry `test = false` (they have no
+    /// tests, and each empty libtest harness is another binary to link and
+    /// exec); this test is what keeps that bookkeeping honest.
+    #[test]
+    fn every_rig_is_declared_as_a_bin() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("benchmarks/src/bin is readable")
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .map(|p| {
+                p.file_stem()
+                    .expect("a .rs file has a stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        on_disk.sort();
+
+        let manifest = include_str!("../Cargo.toml");
+        let mut declared: Vec<String> = manifest
+            .lines()
+            .map(str::trim)
+            .skip_while(|l| *l != "[[bin]]")
+            .filter_map(|l| l.strip_prefix("name = \""))
+            .filter_map(|l| l.strip_suffix('"'))
+            .map(str::to_owned)
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            on_disk, declared,
+            "benchmarks/src/bin and the [[bin]] stanzas in benchmarks/Cargo.toml \
+             have diverged. With `autobins = false` an undeclared rig is never \
+             compiled by anything. Add a `[[bin]]` stanza with `test = false`."
+        );
+    }
+}

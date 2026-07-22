@@ -42,7 +42,9 @@ a split, and the worker drains that split (intake stopped, the emitted
 tail acknowledged, the final watermark committed) and releases it, so the
 transfer replays nothing. A source that cannot stop cleanly has the
 release forced after `drain_deadline` instead, and its uncommitted tail
-replays under the next owner — bounded by one commit interval.
+replays under the next owner — bounded by one commit interval. A leader
+that changes its mind mid-drain cancels the revocation, and the split stays
+where it is.
 
 How the assignment itself is computed — the balance objective, the
 stickiness and convergence guarantees, the rebalance delay, and the

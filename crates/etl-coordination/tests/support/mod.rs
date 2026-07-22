@@ -370,6 +370,29 @@ pub fn consent_to_revocations(coordinator: &mut impl SplitCoordinator, held: &mu
 /// already past [`BASE_WATERMARK`], and the backend rejects a regressing
 /// watermark as a source bug — correctly, so the helper must behave like a
 /// real data plane and not walk backwards.
+/// Like [`commit_held`], but silent about `skip`.
+///
+/// A committing split is a *live* one as far as the coordinator is
+/// concerned — a landed commit is the only progress signal a draining split
+/// gives it, and what a cancelled revocation's watchdog is armed against.
+/// Excluding a split here is therefore how a test stages a wedged drain: it
+/// keeps the worker healthy while one split goes quiet.
+pub fn commit_held_except(coordinator: &mut impl SplitCoordinator, held: &Held, skip: &[String]) {
+    for (id, (_, carried)) in &held.splits {
+        if skip.contains(id) {
+            continue;
+        }
+        let watermark = carried
+            .as_ref()
+            .map_or(BASE_WATERMARK, |p| p.watermark.max(BASE_WATERMARK));
+        match coordinator.commit(&split_id(id), &SplitProgress::new(watermark, vec![])) {
+            Ok(()) => {}
+            Err(e) if e.kind == etl_coordination::CoordinationErrorKind::Fenced => {}
+            Err(e) => panic!("commit failed: {e}"),
+        }
+    }
+}
+
 pub fn commit_held(coordinator: &mut impl SplitCoordinator, held: &Held) {
     for (id, (_, carried)) in &held.splits {
         let watermark = carried

@@ -371,6 +371,16 @@ pub enum CoordinationEvent {
     /// uncommitted tail replays under the next owner. Declining is
     /// therefore still *safe*; it is just the expensive way to comply.
     ///
+    /// The one exception is not the source's to take: a backend may cancel a
+    /// revocation its leader took back — the split is named for this instance
+    /// again while it still holds it — and then nothing is forced. A source
+    /// cannot observe that and must not wait for it. It also changes little
+    /// for a source that already accepted: intake stays stopped, the drain
+    /// still ends by handing the split back, and this instance is simply the
+    /// one that gains it again, through a fresh
+    /// [`Gained`](CoordinationEvent::Gained) with a new lane. Only a source
+    /// that *declined* keeps the split without interruption.
+    ///
     /// Idempotent: the event may be re-emitted for a split already
     /// draining, and a revocation for a split this instance does not hold
     /// is a silent no-op.
@@ -672,14 +682,22 @@ pub trait SplitCoordinator: Send {
     /// expensive one immediately instead of holding the rebalance open
     /// until its deadline; the split still leaves, and its uncommitted tail
     /// replays under the next owner. Best-effort and idempotent; declining
-    /// a split that was never revoked is a no-op.
+    /// a split that was never revoked is a no-op. The one case where a
+    /// decline does keep the split is not the source's doing: the backend
+    /// had already cancelled that revocation, so there is nothing left to
+    /// comply with.
     ///
     /// **Backend obligation.** A backend that emits `RevokeRequested` must
-    /// guarantee the split leaves whatever the source does: force the
-    /// release on a decline, and bound a drain that never finishes with a
-    /// deadline of its own. Without that, one uncooperative source pins the
-    /// fleet's rebalancing open forever. (`etl-coordination` spells this
-    /// deadline `drain_deadline`.)
+    /// bound what it started, whatever the source does: force the release
+    /// on a decline, and bound a drain that never finishes with a deadline
+    /// of its own. Without that, one uncooperative source pins the fleet's
+    /// rebalancing open forever — and, worse, a source that *did* stop
+    /// intake for a drain that then wedges is left holding a split it will
+    /// never read again, since nothing can ask it to resume. A backend that
+    /// withdraws a revocation therefore does not get to drop that second
+    /// obligation with it. (`etl-coordination` spells the deadline
+    /// `drain_deadline`, and applies it to a withdrawn revocation's drain
+    /// as a no-progress timeout rather than an absolute one.)
     ///
     /// Defaulted to a no-op so existing backends keep working and the
     /// trait stays dyn-compatible.

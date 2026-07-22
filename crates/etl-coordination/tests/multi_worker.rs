@@ -847,6 +847,251 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
     );
 }
 
+/// A revocation the leader takes back is **cancelled**, not forced.
+///
+/// `desired_assignment` is sticky on the current owner, and a draining
+/// split still holds its lease — so any input that reverts (a peer leaving,
+/// a spec landing, an improving move undone) names the split for the very
+/// worker that is giving it up. Forcing it out at `drain_deadline` then
+/// serves a move nobody wants any more, and charges a re-claim plus one
+/// commit interval of replay for it.
+///
+/// The window here is the whole point: the source never answers the
+/// request, so under the pre-fix code the deadline is the *only* thing that
+/// can move the split, and it fires at half a lease. This test runs a full
+/// lease of protocol time past that.
+///
+/// The worker keeps committing throughout, which is what a drain winding
+/// down does as its tail acks. That is not incidental: a cancelled drain is
+/// still bounded, by silence rather than by the deadline, so the split
+/// staying put here is the *progressing* half of a pair with
+/// [`a_stalled_cancelled_drain_is_still_released`].
+#[test]
+fn a_reassigned_split_cancels_its_own_revocation() {
+    let rt = runtime();
+    // Frozen clock: the assertion is that nothing happens across a span of
+    // protocol time, and paying for that span in wall time both slows the
+    // suite and lets a scheduler stall expire the leases it is about.
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
+    let ids = ["c0", "c1", "c2", "c3"];
+    let planner = || Box::new(PhasedPlanner::one_final("cancel:v1", &ids));
+
+    // A alone takes the whole plan and commits, so its splits carry a
+    // resume point a forced move would visibly replay from.
+    let mut a = support::worker_with_clock(&store, rt.handle(), Some("worker-a"), clock.clone());
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive_clocked(
+        &mut a,
+        &clock,
+        &mut held_a,
+        "worker-a takes the plan",
+        |h| h.splits.len() == ids.len(),
+    );
+    support::commit_held(&mut a, &held_a);
+
+    // B joins on its own runtime so it can be killed outright. The leader
+    // moves half the plan toward it; A is asked, and — like a source that
+    // has stopped intake but not yet finished its tail — answers nothing.
+    let rt_b = runtime();
+    let mut b = support::worker_with_clock(&store, rt_b.handle(), Some("worker-b"), clock.clone());
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let deadline = Instant::now() + support::DEADLINE;
+    while held_a.revoke_requests.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the leader never revoked anything from worker-a"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().expect("poll a"));
+        held_b.fold(b.poll().expect("poll b"));
+        support::commit_held(&mut a, &held_a);
+    }
+    let asked = held_a.revoke_requests.clone();
+    let before: Vec<String> = held_a.splits.keys().cloned().collect();
+    assert_eq!(
+        before.len(),
+        ids.len(),
+        "worker-a must still hold everything when the window opens: the drain \
+         has been asked for, not answered"
+    );
+
+    // B dies mid-drain and its presence key goes with it. Deleting the key
+    // rather than waiting out its TTL is what keeps the leader's change of
+    // mind inside the drain deadline — which is the case under test.
+    crash(rt_b, b);
+    rt.block_on(async {
+        let outcome = store
+            .delete(Keyspace::Ephemeral, "worker.worker-b", None)
+            .await
+            .expect("delete");
+        assert!(
+            matches!(outcome, CasOutcome::Won(_)),
+            "the presence key has to have existed, or this tests nothing"
+        );
+    });
+
+    // A full lease of protocol time — twice the drain deadline the test
+    // config sets. The leader (A itself) re-decides that every split stays
+    // put, and the pending revocations must simply end.
+    clock.advance_stepped(LEASE, LEASE / 12, || {
+        std::thread::sleep(support::POLL_INTERVAL);
+        for event in a.poll().expect("poll a") {
+            if let etl_coordination::CoordinationEvent::Lost { split } = &event {
+                assert!(
+                    !asked.contains(&split.as_str().to_string()),
+                    "worker-a gave up {split}, which the leader had already assigned \
+                     back to it: the revocation was forced instead of cancelled"
+                );
+            }
+            held_a.fold(vec![event]);
+        }
+        support::commit_held(&mut a, &held_a);
+    });
+    let after: Vec<String> = held_a.splits.keys().cloned().collect();
+    assert_eq!(
+        before, after,
+        "worker-a's working set moved while every split was assigned to it"
+    );
+}
+
+/// Cancelling a revocation drops the deadline, not the obligation to keep
+/// the split **readable**.
+///
+/// The drain the cancelled revocation started is still out there, and a
+/// source that has stopped intake at a safe boundary cannot be asked to
+/// resume — that seam does not exist. So a drain that never finishes would
+/// leave the split owned, leased, assigned, and read by nobody for the life
+/// of the process, with `splits_draining` the only sign and a bounded job
+/// containing it unable to ever complete. It is bounded by silence instead:
+/// commit nothing at all for `drain_deadline` and the split is released
+/// anyway, then re-claimed with a fresh lane that reads again.
+///
+/// The two phases are the point, and the first is what makes the second
+/// mean anything. Phase 1 runs the full
+/// [`a_reassigned_split_cancels_its_own_revocation`] window with the worker
+/// committing, and proves the revocation really was cancelled — a live one
+/// would have been forced at half a lease. Only then does phase 2 go quiet.
+/// Without phase 1 a passing test could just be watching the ordinary drain
+/// deadline fire.
+#[test]
+fn a_stalled_cancelled_drain_is_still_released() {
+    let rt = runtime();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
+    let ids = ["w0", "w1", "w2", "w3"];
+    let planner = || Box::new(PhasedPlanner::one_final("stalled-cancel:v1", &ids));
+
+    let mut a = support::worker_with_clock(&store, rt.handle(), Some("worker-a"), clock.clone());
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive_clocked(
+        &mut a,
+        &clock,
+        &mut held_a,
+        "worker-a takes the plan",
+        |h| h.splits.len() == ids.len(),
+    );
+    support::commit_held(&mut a, &held_a);
+
+    // Same opening as the cancellation test: B joins, the leader moves work
+    // toward it, A is asked and answers nothing — a source that stopped
+    // intake and is still chasing its tail.
+    let rt_b = runtime();
+    let mut b = support::worker_with_clock(&store, rt_b.handle(), Some("worker-b"), clock.clone());
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let deadline = Instant::now() + support::DEADLINE;
+    while held_a.revoke_requests.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the leader never revoked anything from worker-a"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().expect("poll a"));
+        held_b.fold(b.poll().expect("poll b"));
+        support::commit_held(&mut a, &held_a);
+    }
+    let asked = held_a.revoke_requests.clone();
+    crash(rt_b, b);
+    rt.block_on(async {
+        let outcome = store
+            .delete(Keyspace::Ephemeral, "worker.worker-b", None)
+            .await
+            .expect("delete");
+        assert!(
+            matches!(outcome, CasOutcome::Won(_)),
+            "the presence key has to have existed, or this tests nothing"
+        );
+    });
+
+    // Phase 1 — the drain is progressing, so nothing is forced. A full
+    // lease is twice the drain deadline: a revocation that had not been
+    // cancelled would have fired inside this window.
+    clock.advance_stepped(LEASE, LEASE / 12, || {
+        std::thread::sleep(support::POLL_INTERVAL);
+        for event in a.poll().expect("poll a") {
+            if let etl_coordination::CoordinationEvent::Lost { split } = &event {
+                assert!(
+                    !asked.contains(&split.as_str().to_string()),
+                    "worker-a gave up {split} while still committing it: the revocation \
+                     was forced instead of cancelled, so phase 2 would prove nothing"
+                );
+            }
+            held_a.fold(vec![event]);
+        }
+        support::commit_held(&mut a, &held_a);
+    });
+    assert_eq!(
+        held_a.splits.len(),
+        ids.len(),
+        "worker-a must still hold everything before the stall begins"
+    );
+
+    // Phase 2 — the asked splits go quiet while the rest keep committing,
+    // so this cannot pass by the worker looking dead. The stalled drain must
+    // be released and then re-claimed: a split that comes back is a split
+    // being read again, which is the whole point of releasing it.
+    let mut lost: Option<String> = None;
+    let deadline = Instant::now() + support::DEADLINE;
+    while lost
+        .as_ref()
+        .is_none_or(|id| !held_a.splits.contains_key(id))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the stalled drain was never released: {asked:?} stayed owned with nothing \
+             reading them"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        for event in a.poll().expect("poll a") {
+            if let etl_coordination::CoordinationEvent::Lost { split } = &event
+                && asked.contains(&split.as_str().to_string())
+                && lost.is_none()
+            {
+                lost = Some(split.as_str().to_string());
+            }
+            held_a.fold(vec![event]);
+        }
+        support::commit_held_except(&mut a, &held_a, &asked);
+    }
+    let lost = lost.expect("a stalled split was released");
+    assert!(
+        asked.contains(&lost),
+        "the released split must be one the leader had asked for"
+    );
+    assert_eq!(
+        held_a.splits.len(),
+        ids.len(),
+        "worker-a must be whole again: the stalled split was released and re-claimed"
+    );
+}
+
 /// Giving up the last split under a revocation is **not** a departure.
 ///
 /// `release` doubles as the shutdown path: a worker that releases its last

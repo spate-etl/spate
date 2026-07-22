@@ -167,9 +167,12 @@ pub trait SplitSource {
     /// Declining is safe but not free. The split still leaves — a
     /// revocation is the leader's decision, not a proposal — so the backend
     /// forces the release instead and this split's uncommitted tail replays
-    /// under its next owner. A source that *can* stop intake at a safe
-    /// boundary should, because that is the difference between a
-    /// replay-free move and a bounded-duplicate one.
+    /// under its next owner. (The exception is the backend's to decide, not
+    /// the source's: a revocation the leader takes back before the decline
+    /// lands is cancelled, and then the split stays and keeps being read.)
+    /// A source that *can* stop intake at a safe boundary should, because
+    /// that is the difference between a replay-free move and a
+    /// bounded-duplicate one.
     ///
     /// While a split is handing off, [`encode_commit`](SplitSource::encode_commit)
     /// must never report it `completed` — a drain cut can look terminal to
@@ -586,6 +589,24 @@ impl CoordinationDriver {
                 // is declined back to the backend so it forces the release
                 // now instead of waiting out its drain deadline; the split
                 // leaves either way.
+                //
+                // A repeat request for a tenancy already draining is
+                // satisfied by the drain in flight, so it is accepted
+                // silently — no second `begin_revoke`, no decline. Declining
+                // would tell the backend to force a handoff that is
+                // progressing fine, costing exactly the replay the
+                // cooperative path exists to avoid. Re-emission is reachable
+                // because the backend cancels a revocation the leader takes
+                // back: the leader can drop a split, restore it, drop it
+                // again.
+                if let Some(&partition) = self.by_split.get(&split)
+                    && self
+                        .tenancies
+                        .get(&partition)
+                        .is_some_and(|t| t.state == TenancyState::Draining && !t.fenced)
+                {
+                    return Ok(());
+                }
                 let accepted = match self.by_split.get(&split) {
                     Some(&partition) => {
                         let eligible = self.tenancies.get(&partition).is_some_and(|t| {
@@ -2000,6 +2021,58 @@ mod tests {
         assert_eq!(s.encoded, vec![("a".to_string(), 30)]);
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].0.as_str(), "a");
+    }
+
+    #[test]
+    fn a_repeated_revoke_request_mid_drain_is_not_declined() {
+        // `RevokeRequested` is documented idempotent, and re-emission is real:
+        // the backend cancels a revocation the leader takes back, so a leader
+        // can drop a split, restore it, and drop it again. Answering the
+        // second request with a decline would tell the backend to force a
+        // handoff that is draining fine — the replay the cooperative path
+        // exists to avoid.
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource {
+            accept_revoke: HashSet::from(["a".to_string()]),
+            ..TestSource::default()
+        };
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+
+        // First request: accepted, and the drain does not finish
+        // (`drain_ready` reports None), so the tenancy stays `Draining`.
+        script.push(vec![CoordinationEvent::RevokeRequested {
+            split: SplitId::new("a").unwrap(),
+        }]);
+        assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
+        assert_eq!(s.begin_revoke_calls, ["a"]);
+
+        // Second request for the same, still-draining split.
+        script.push(vec![CoordinationEvent::RevokeRequested {
+            split: SplitId::new("a").unwrap(),
+        }]);
+        assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
+        assert_eq!(
+            s.begin_revoke_calls,
+            ["a"],
+            "the source must not be asked to stop intake it has already stopped"
+        );
+        assert!(
+            script.declined().is_empty(),
+            "a drain already in flight satisfies the request; declining it would force the release"
+        );
+
+        // And the drain still completes on its own terms.
+        s.ready_progress
+            .borrow_mut()
+            .insert("a".into(), SplitProgress::new(50, vec![]));
+        let event = poll(&mut d, &mut s);
+        let SourceEvent::LanesRetired { lanes } = event else {
+            panic!("the drain must still retire, got {event:?}");
+        };
+        assert_eq!(lanes, vec![LaneId(0)]);
+        assert_eq!(script.released_drained(), vec![SplitId::new("a").unwrap()]);
     }
 
     #[test]

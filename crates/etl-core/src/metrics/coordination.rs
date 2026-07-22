@@ -24,6 +24,11 @@ pub enum AcquireReason {
     /// releasing side. Contrast [`Expired`](AcquireReason::Expired), where
     /// a dead owner's uncommitted tail replays.
     ///
+    /// One clean release counts here with *no* matching `drained`: the drain
+    /// left behind by a [`RevocationOutcome::Cancelled`] revocation, which
+    /// hands the split back to the worker that already had it. Counting it
+    /// `drained` would claim a move that never happened.
+    ///
     /// The two clean cases are one reason on purpose: a claiming worker
     /// cannot tell them apart (both present as a cleared owner and a
     /// vanished lease), and a label it cannot populate correctly is a
@@ -35,14 +40,20 @@ pub enum AcquireReason {
 /// `etl_coordination_revocations_total`) — the leader moving a split away
 /// from a live owner by dropping it from that owner's assignment.
 ///
-/// All three count on the **releasing** worker, so they read as one
+/// All four count on the **releasing** worker, so they read as one
 /// lifecycle rather than as two sides of a negotiation: `Requested` is the
 /// denominator, and every revocation that leaves it terminates in exactly
-/// one of `Drained` or `Forced` — including the paths that do not look
-/// like a revocation ending at all, where the split completes or is
+/// one of `Drained`, `Forced`, or `Cancelled` — including the paths that do
+/// not look like a revocation ending at all, where the split completes or is
 /// `fail`ed mid-drain, or the process departs while draining.
-/// `requested - drained - forced` is therefore the drains still in flight,
-/// which `etl_coordination_splits_draining` reports directly.
+/// `requested - drained - forced - cancelled` is therefore the **revocations**
+/// still in flight.
+///
+/// That is not the same number as `etl_coordination_splits_draining`, which
+/// counts **drains**. `Cancelled` ends a revocation while leaving its drain
+/// running, so the gauge sits one higher than the counter arithmetic for as
+/// long as that drain takes. Two questions, two series: "how much is the
+/// leader still trying to move" and "how many splits are winding down".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RevocationOutcome {
@@ -66,6 +77,37 @@ pub enum RevocationOutcome {
     /// revocation is a decision, not a request, so both end the same way
     /// and differ only in how long the fleet waited to find out.
     Forced,
+    /// The leader took the revocation back: it named the split for this
+    /// worker again while this worker still held it, so the pending forced
+    /// release was dropped. Nothing is waiting for the split any more, so a
+    /// drain that is merely slower than `drain_deadline` gets to finish
+    /// cleanly instead of being charged a replay for a move nobody wants.
+    /// That is the whole of what cancelling buys — a drain that finishes
+    /// inside the deadline was never going to be forced anyway.
+    ///
+    /// This counts the *revocation* ending, not the drain, and the two then
+    /// diverge:
+    ///
+    /// - If the source had already stopped intake, the drain runs on
+    ///   (resuming stopped intake is a seam sources do not have). It ends by
+    ///   handing the split back, and this worker re-claims it
+    ///   ([`AcquireReason::Reassigned`]) replay-free — one lane teardown and
+    ///   re-open, counted under neither `drained` nor
+    ///   `drain_duration_seconds`, because by then it is not a revocation
+    ///   ending. `splits_draining` stays up until it lands.
+    /// - If the source declined, or was never asked, nothing stopped and
+    ///   nothing leaves: the split simply stays, still being read.
+    ///
+    /// A cancelled drain is still bounded, just by silence rather than by
+    /// the deadline: if it commits nothing at all for `drain_deadline` the
+    /// split is released anyway and re-claimed with a fresh lane, because a
+    /// drain that never finishes would otherwise leave it owned, leased,
+    /// and read by nobody. That release counts a
+    /// [`SplitLossReason::Revoked`] and no second revocation outcome.
+    ///
+    /// Sustained `cancelled` means the fleet's membership is flapping faster
+    /// than a drain takes: look at pod churn and at `drain_deadline`.
+    Cancelled,
 }
 
 /// Why a split lease was lost involuntarily (the `reason` label on
@@ -77,13 +119,19 @@ pub enum SplitLossReason {
     Fenced,
     /// Self-fenced: no successful lease write for a full lease duration.
     Starved,
-    /// The leader stopped assigning the split and the cooperative drain
-    /// never completed — the source declined it, or it outran
-    /// `drain_deadline` — so this worker forced its own release. The
-    /// split's uncommitted tail replays under its next owner: the
-    /// bounded-replay outcome the cooperative path exists to avoid, and
-    /// therefore a signal that `drain_deadline` is too tight for this
-    /// source's commit interval, or that a lane is wedged.
+    /// A cooperative drain that never completed, so this worker forced its
+    /// own release. Either the leader had stopped assigning the split and
+    /// the source declined or outran `drain_deadline`, or the leader took
+    /// the revocation back ([`RevocationOutcome::Cancelled`]) and the drain
+    /// it left behind then went a full `drain_deadline` without committing
+    /// anything — a stalled drain releases too, or the split would stay
+    /// owned with nothing reading it.
+    ///
+    /// The split's uncommitted tail replays under its next owner (for the
+    /// cancelled case, usually this same worker): the bounded-replay
+    /// outcome the cooperative path exists to avoid, and therefore a signal
+    /// that `drain_deadline` is too tight for this source's commit
+    /// interval, or that a lane is wedged.
     ///
     /// Narrower than [`RevocationOutcome::Forced`], which also covers a
     /// revocation whose split was fenced away mid-drain; that one is lost
@@ -158,6 +206,7 @@ pub struct CoordinationMetrics {
     revocations_requested: Counter,
     revocations_drained: Counter,
     revocations_forced: Counter,
+    revocations_cancelled: Counter,
     splits_planned: Counter,
     replans_ok: Counter,
     replans_error: Counter,
@@ -233,6 +282,7 @@ impl CoordinationMetrics {
             revocations_requested: revocations("requested"),
             revocations_drained: revocations("drained"),
             revocations_forced: revocations("forced"),
+            revocations_cancelled: revocations("cancelled"),
             splits_planned: labels.counter(names::COORDINATION_SPLITS_PLANNED_TOTAL),
             replans_ok: replans("ok"),
             replans_error: replans("error"),
@@ -301,6 +351,7 @@ impl CoordinationMetrics {
             RevocationOutcome::Requested => self.revocations_requested.increment(1),
             RevocationOutcome::Drained => self.revocations_drained.increment(1),
             RevocationOutcome::Forced => self.revocations_forced.increment(1),
+            RevocationOutcome::Cancelled => self.revocations_cancelled.increment(1),
         }
     }
 

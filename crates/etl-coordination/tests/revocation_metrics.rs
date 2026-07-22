@@ -14,11 +14,12 @@
 mod support;
 
 use etl_coordination::StoreCoordinator;
+use etl_coordination::store::{CasOutcome, CoordinationStore as _, Keyspace};
 use etl_core::coordination::{CoordinationEvent, SplitCoordinator, SplitProgress};
 use etl_core::metrics::{ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
-use support::{PhasedPlanner, runtime, split_id, store};
+use support::{Held, LEASE, PhasedPlanner, crash, runtime, split_id, store};
 
 /// Total observations in a histogram, summed over every component's
 /// series. `None` = the family is absent entirely. Summing matters:
@@ -282,5 +283,149 @@ fn a_real_revocation_moves_every_metric_seam() {
     assert!(
         saw_draining,
         "etl_coordination_splits_draining never read 1 while a drain was in flight"
+    );
+}
+
+/// A cancelled revocation must move its own seam, and only its own.
+///
+/// `outcome=cancelled` is written from exactly one place, so nothing else in
+/// the suite would notice if it were recorded as `drained`, or not recorded
+/// at all — the behavioural tests in `multi_worker` assert events and held
+/// sets, which are identical either way. This drives a real cancellation and
+/// reads the exposition.
+///
+/// The `splits_draining` assertion is the load-bearing one. The gauge counts
+/// **drains**, not revocations: cancelling ends the revocation and leaves the
+/// drain running, and that surviving entry is what bounds a drain that never
+/// finishes. If cancelling dropped it, the gauge would read 0 here while a
+/// split sat with its intake stopped and nothing watching it.
+#[test]
+fn a_cancelled_revocation_moves_its_own_metric_seam() {
+    let handle = install(&MetricsSettings {
+        exporter: Exporter::Prometheus,
+        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        ..MetricsSettings::default()
+    })
+    .expect("install the exporter");
+
+    let rt = runtime();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
+    let ids = ["x0", "x1", "x2", "x3"];
+    let planner = || Box::new(PhasedPlanner::one_final("cancel-metrics:v1", &ids));
+
+    let labels = ComponentLabels::new("coord-metrics", "worker-a", "s3");
+    let mut a = StoreCoordinator::with_clock(
+        store.clone(),
+        support::config(Some("worker-a")),
+        rt.handle().clone(),
+        Some(CoordinationMetrics::new(&labels)),
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive_clocked(
+        &mut a,
+        &clock,
+        &mut held_a,
+        "worker-a takes the plan",
+        |h| h.splits.len() == ids.len(),
+    );
+    support::commit_held(&mut a, &held_a);
+
+    // B joins on its own runtime, the leader moves work toward it, and A is
+    // asked to give it up. A answers nothing — the drain is in flight.
+    let rt_b = runtime();
+    let b_labels = ComponentLabels::new("coord-metrics", "worker-b", "s3");
+    let mut b = StoreCoordinator::with_clock(
+        store.clone(),
+        support::config(Some("worker-b")),
+        rt_b.handle().clone(),
+        Some(CoordinationMetrics::new(&b_labels)),
+        clock.clone(),
+    )
+    .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let deadline = Instant::now() + support::DEADLINE;
+    while held_a.revoke_requests.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the leader never revoked anything from worker-a"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().expect("poll a"));
+        held_b.fold(b.poll().expect("poll b"));
+        support::commit_held(&mut a, &held_a);
+    }
+
+    // B dies and its presence key with it, so the leader hands the draining
+    // splits straight back to the worker already holding them.
+    crash(rt_b, b);
+    rt.block_on(async {
+        let outcome = store
+            .delete(Keyspace::Ephemeral, "worker.worker-b", None)
+            .await
+            .expect("delete");
+        assert!(matches!(outcome, CasOutcome::Won(_)));
+    });
+
+    let mut cancelled = 0.0;
+    let mut draining_after_cancel = false;
+    let deadline = Instant::now() + support::DEADLINE;
+    while cancelled == 0.0 {
+        assert!(
+            Instant::now() < deadline,
+            "revocations_total{{outcome=cancelled}} never moved"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        held_a.fold(a.poll().expect("poll a"));
+        support::commit_held(&mut a, &held_a);
+        let text = handle.render();
+        cancelled = counter_sum(
+            &text,
+            "etl_coordination_revocations_total",
+            r#"outcome="cancelled""#,
+        )
+        .unwrap_or(0.0);
+        if cancelled > 0.0 {
+            draining_after_cancel = text.lines().any(|l| {
+                l.starts_with("etl_coordination_splits_draining")
+                    && l.rsplit(' ')
+                        .next()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .is_some_and(|v| v >= 1.0)
+            });
+        }
+    }
+
+    let text = handle.render();
+    assert!(
+        counter_sum(
+            &text,
+            "etl_coordination_revocations_total",
+            r#"outcome="requested""#
+        )
+        .is_some_and(|c| c >= cancelled),
+        "every cancelled revocation must have been requested first:\n{text}"
+    );
+    assert_eq!(
+        counter_sum(
+            &text,
+            "etl_coordination_revocations_total",
+            r#"outcome="forced""#
+        ),
+        Some(0.0),
+        "the cancelled revocation was forced as well — the outcomes must be \
+         exclusive, or `requested - drained - forced - cancelled` stops \
+         counting revocations in flight:\n{text}"
+    );
+    assert!(
+        draining_after_cancel,
+        "splits_draining read 0 the moment the revocation was cancelled — the \
+         drain is still in flight and nothing is now bounding it:\n{text}"
     );
 }

@@ -408,6 +408,7 @@ mod tests {
             coord.revocation(RevocationOutcome::Requested);
             coord.revocation(RevocationOutcome::Drained);
             coord.revocation(RevocationOutcome::Forced);
+            coord.revocation(RevocationOutcome::Cancelled);
             coord.assignment_latency(Duration::from_millis(900));
             coord.drain_duration(Duration::from_millis(120));
             coord.set_splits_draining(2);
@@ -443,6 +444,7 @@ mod tests {
             r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="requested"} 1"#,
             r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="drained"} 1"#,
             r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="forced"} 1"#,
+            r#"etl_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="cancelled"} 1"#,
             r#"etl_coordination_splits_draining{pipeline="orders",component="orders_kafka",component_type="kafka"} 2"#,
             r#"etl_coordination_replans_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="noop"} 1"#,
             r#"etl_coordination_writes_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="conflict"} 1"#,

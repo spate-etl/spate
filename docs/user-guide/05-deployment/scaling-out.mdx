@@ -140,7 +140,12 @@ queued-but-unacked records).
 `drain_deadline` (default 10s) is what stops one wedged drain from pinning
 a rebalance open. A source that declines to stop at a safe boundary, or a
 drain still running when the deadline elapses, has its release **forced**:
-the split goes back the replaying way instead of the clean one. Its next
+the split goes back the replaying way instead of the clean one. (If the
+leader takes the move back mid-drain the revocation is cancelled and the
+deadline stops applying — nothing is waiting for the split. The drain is
+then bounded by silence instead: no commit at all for `drain_deadline` and
+it is released anyway, so a wedged drain cannot leave a split owned with
+nothing reading it.) Its next
 owner resumes from the last *committed* watermark and re-reads what came
 after, so a forced revocation costs up to one commit interval
 (`checkpoint.interval`) of duplicates. A decline is forced immediately
@@ -221,7 +226,7 @@ irreducible at-least-once replay.
 | `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
 | `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
 | `rebalance_delay` | 20s | How long the leader withholds a departed instance's splits before reassigning them, so a pod bounce reclaims its own work instead of the fleet churning around it. Cancelled early when the instance returns. 0 reassigns immediately. |
-| `drain_deadline` | 10s | How long a revoked split may keep draining before the release is forced (and its uncommitted tail replays). Larger = more patience with slow-draining sinks, slower rebalances; smaller = faster rebalances, more duplicates. May exceed `lease_duration` — a draining split is still heartbeated, so a long drain does not race its own lease; size it against how long the sink takes to flush a split's tail. See [time to balance](#time-to-balance). |
+| `drain_deadline` | 10s | How long a revoked split may keep draining before the release is forced (and its uncommitted tail replays). Doubles as the no-progress timeout over a drain whose revocation was cancelled: that one is forced only if it commits nothing at all for this long. Larger = more patience with slow-draining sinks, slower rebalances; smaller = faster rebalances, more duplicates. May exceed `lease_duration` — a draining split is still heartbeated, so a long drain does not race its own lease; size it against how long the sink takes to flush a split's tail. See [time to balance](#time-to-balance). |
 
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
 ~128 MB range (or the row-count equivalent) — big enough that lease
@@ -250,12 +255,14 @@ The `etl_coordination_*` families (see
 [METRICS.md](https://github.com/marcuskainth/etl-rs/blob/main/docs/METRICS.md))
 carry the whole story: `splits_owned` per worker, `live_workers` for the
 fleet view, `leader` for who plans, `acquisitions_total` by reason
-(`create`/`released`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
+(`create`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
 the healthy rebalance path, `expired` means a worker died),
-`revocations_total` by outcome (`requested`/`drained`/`forced`, all on the
-worker giving the split up — `drained` is replay-free, and a rising
+`revocations_total` by outcome (`requested`/`drained`/`forced`/`cancelled`,
+all on the worker giving the split up — `drained` is replay-free, a rising
 `forced` means drains are being cut short, so look at that worker's sink
-health and `drain_deadline`), `split_losses_total`
+health and `drain_deadline`, and `cancelled` is the leader taking a move
+back, which is only worth chasing if it is sustained: membership is
+flapping faster than a drain takes), `split_losses_total`
 (`fenced`/`starved`/`revoked`), `splits_quarantined` for poison, and
 store-op latency histograms for the NATS round-trips.
 
@@ -264,7 +271,8 @@ Time to balance reads from two separate families, one per side:
 `assignment_latency_seconds` on the worker gaining one. They are recorded
 in different processes and do not compose — do not add or subtract them.
 `splits_draining` shows whether a worker is stuck mid-drain while the
-fleet is visibly uneven. `etl_coordination_writes_total{outcome="conflict"}`
+fleet is visibly uneven — it counts drains, so a drain left behind by a
+cancelled revocation keeps showing until it lands. `etl_coordination_writes_total{outcome="conflict"}`
 is fencing working as designed — alarming only in bulk.
 
 Two families were renamed when coordination moved to leader-assigned
@@ -309,7 +317,7 @@ be at least `op_timeout`, and both default to 10s. If you raised
 
 | Was | Now |
 |---|---|
-| `etl_coordination_handoffs_total{outcome}` | `etl_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`) |
+| `etl_coordination_handoffs_total{outcome}` | `etl_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`/`cancelled`) |
 | `etl_coordination_revocations_total{reason}` | `etl_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
 | `etl_coordination_handoff_duration_seconds{phase}` | `etl_coordination_drain_duration_seconds` and `etl_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-two-coordination-latencies-do-not-compose) |
 | `etl_coordination_handoffs_in_flight` | `etl_coordination_splits_draining` |

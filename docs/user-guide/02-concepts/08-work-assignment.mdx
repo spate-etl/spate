@@ -25,6 +25,7 @@ its own record and moves toward it:
 | assigned, not held | claim it (lease write, then the record CAS) |
 | held, still assigned | nothing — stickiness is free |
 | held, no longer assigned | drain it cooperatively, then release |
+| held, draining, assigned again | cancel the revocation; the drain finishes on its own |
 | no record at all | hold what it has, claim nothing |
 
 That last row is load-bearing. **Absence of an instruction is not an
@@ -205,16 +206,49 @@ This is the distinction Kafka draws between `onPartitionsRevoked` (clean —
 flush and commit) and `onPartitionsLost` (fenced — discard), and the same
 shape as KCL 3.x's graceful lease handoff with its timeout.
 
-**A revocation, once begun, always finishes.** There is no cancel. If
-membership changes again mid-drain and the leader decides the split should
-stay where it is after all, the drain still completes, the split is
-released, and its original owner claims it back on the next pass. That
-costs a lane teardown and re-open — and, if the drain had to be forced, one
-commit interval of replay. It is bounded and it never loses rows, but it is
-real: cancelling would mean asking a source to *resume* intake it has
-already stopped at a safe boundary, and that is a seam
-[`SplitSource`](../06-extending/custom-source.mdx) deliberately does not
-have.
+**A revocation the leader takes back is cancelled.** If membership changes
+again mid-drain and the leader names the split for its current owner once
+more — while that owner still holds it — the pending forced release is
+dropped and the revocation ends as
+`revocations_total{outcome="cancelled"}`. The deadline exists to stop a
+slow drain from pinning a *rebalance* open, and there is no longer a
+rebalance to pin; forcing would charge one commit interval of replay to
+serve a move nobody wants. That is the whole of what cancelling buys: a
+drain that would have finished inside the deadline was never going to be
+forced anyway, so the only case this changes is the drain that is slower
+than the deadline. Enforced by
+`a_reassigned_split_cancels_its_own_revocation`.
+
+**What cancelling removes is the replay, not the lane teardown** — and
+only if the source had accepted. Two shapes:
+
+- **The source had already stopped intake.** It keeps draining, so the
+  split is still released and then re-claimed by the same worker on the
+  next pass — one teardown and re-open, replaying nothing. Going further
+  would mean asking a source to *resume* intake it has stopped at a safe
+  boundary, and that is a seam
+  [`SplitSource`](../06-extending/custom-source.mdx) deliberately does not
+  have.
+- **The source had declined**, or was never eligible. Nothing stopped, so
+  nothing leaves: the split stays and keeps being read, with no teardown at
+  all.
+
+**A cancelled drain is still bounded — by silence, not by the deadline.**
+Cancelling ends the revocation, and with it the deadline that served the
+rebalance. It does not end the obligation to keep the split *readable*: a
+source that stopped intake cannot be asked to resume, so a drain that never
+finishes would leave the split owned, leased, assigned, and read by nobody
+for the life of the process — and a bounded job containing it could never
+complete. So a cancelled drain that commits nothing at all for
+`drain_deadline` has its release forced anyway, and the same worker
+re-claims it with a fresh lane and starts reading, at a cost of one bounded
+replay. A live drain commits as its tail acks its way to the sink, so this
+fires only on a wedged one. Enforced by
+`a_stalled_cancelled_drain_is_still_released`.
+
+An absent assignment record cancels nothing — it means "nothing has been
+decided", which is the same load-bearing row of the table above read from
+the other side.
 
 `drain_deadline` may exceed `lease_duration`. A draining split is still
 owned and still heartbeated, so a long drain does not race its own lease —
@@ -232,7 +266,8 @@ land.
 | Worker dies | Presence key expires; after `rebalance_delay` the leader reassigns. Split leases expire independently, so the work is claimable. |
 | Worker wedged but alive | Its lease stops being renewed and expires, and its presence key with it; the leader withholds its splits for `rebalance_delay` and then assigns them elsewhere. The expiry makes the split *claimable*; the assignment is still what makes someone claim it. |
 | Assignment write lost | The worker keeps its previous assignment. The leader republishes on its next step. |
-| Source refuses to drain | Forced revocation after `drain_deadline`; bounded replay. |
+| Source refuses to drain | Forced revocation as soon as the decline lands, or after `drain_deadline` if it never does; bounded replay. If the revocation was cancelled first, the refusal costs nothing — the split was staying anyway. |
+| Drain wedges after its revocation was cancelled | Released after `drain_deadline` with no commit landing, then re-claimed by the same worker with a fresh lane; bounded replay. Without this the split would be owned and read by nobody. |
 
 ## What this is not
 

@@ -177,19 +177,25 @@ pub const COORDINATION_ACQUISITIONS_TOTAL: &str = "etl_coordination_acquisitions
 pub const COORDINATION_SPLIT_LOSSES_TOTAL: &str = "etl_coordination_split_losses_total";
 /// Voluntary split releases (graceful shutdown or scale-down).
 pub const COORDINATION_RELEASES_TOTAL: &str = "etl_coordination_releases_total";
-/// Split revocations, by [`L_OUTCOME`] (`requested`, `drained`, `forced`)
-/// — the leader moving a split away from a live owner. All three count on
-/// the releasing worker; `drained` is the replay-free outcome.
+/// Split revocations, by [`L_OUTCOME`] (`requested`, `drained`, `forced`,
+/// `cancelled`) — the leader moving a split away from a live owner. All
+/// four count on the releasing worker; `drained` is the replay-free
+/// outcome, and `cancelled` is the leader taking the move back.
 pub const COORDINATION_REVOCATIONS_TOTAL: &str = "etl_coordination_revocations_total";
 /// Cooperative drain time on the **releasing** worker: revocation
-/// requested to the release landing. Only drains that finish cooperatively
-/// are observed — a forced release is a `forced` revocation, not a drain.
+/// requested to the release landing. Only drains that end a revocation
+/// cooperatively are observed — a forced release is a `forced` revocation,
+/// not a drain, and a drain whose revocation was `cancelled` is no longer
+/// ending a revocation at all when it lands.
 pub const COORDINATION_DRAIN_DURATION_SECONDS: &str = "etl_coordination_drain_duration_seconds";
 /// Assignment convergence on the **gaining** worker: a split appearing in
 /// this worker's assignment to this worker holding its lease.
 pub const COORDINATION_ASSIGNMENT_LATENCY_SECONDS: &str =
     "etl_coordination_assignment_latency_seconds";
-/// Splits this worker is currently draining away under revocation.
+/// Splits this worker is currently draining away under revocation —
+/// including a drain whose revocation was cancelled and which is still
+/// winding down, so this is the drain count rather than the revocation
+/// count.
 pub const COORDINATION_SPLITS_DRAINING: &str = "etl_coordination_splits_draining";
 /// Splits written into the plan by this worker while leader (seeded
 /// create-if-absent; replayed ids that already exist are not counted).

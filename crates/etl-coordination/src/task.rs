@@ -129,6 +129,19 @@ struct Revoking {
     /// measuring it with real `.elapsed()` would compare two timelines and
     /// saturate to zero under a test clock running ahead of wall time.
     started: Instant,
+    /// The last commit this worker landed for the split, same clock. Only
+    /// a *cancelled* entry is judged against it: a live revocation holds a
+    /// rebalance open and gets one absolute deadline, whereas a cancelled
+    /// one has nobody waiting and is bounded instead by going quiet.
+    last_progress: Instant,
+    /// The leader took this revocation back, but the drain it started is
+    /// still out there. The entry outlives the revocation because
+    /// something has to bound that drain — a source cannot be asked to
+    /// resume intake it has already stopped, so a drain that never
+    /// finishes would otherwise strand the split with nothing reading it.
+    /// Already counted [`RevocationOutcome::Cancelled`]; it owes no second
+    /// outcome.
+    cancelled: bool,
 }
 
 pub(crate) struct Task<S: CoordinationStore> {
@@ -1227,7 +1240,8 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     /// Move this worker toward the assignment it was given: claim what is
-    /// named and not held, drain away what is held and not named.
+    /// named and not held, drain away what is held and not named, and cancel
+    /// the drain of anything the leader has named again.
     ///
     /// **Absence of an assignment is not an instruction to hold nothing.**
     /// Until a record for this instance has been observed the worker keeps
@@ -1272,13 +1286,66 @@ impl<S: CoordinationStore> Task<S> {
                 }
             }
         }
+        // The leader can take a revocation back. `desired_assignment` is
+        // sticky on the current owner and a draining split still holds its
+        // lease, so a peer leaving — or any other input reverting — re-names
+        // the split for the very worker that is giving it up. Forcing it out
+        // at the drain deadline then satisfies a move nobody wants any more,
+        // at the price of a re-claim and one commit interval of replay: that
+        // deadline exists to stop a slow drain pinning a *rebalance* open,
+        // and there is no longer a rebalance to pin. A drain that is merely
+        // slower than the deadline now gets to finish cleanly, which is the
+        // whole of what cancelling buys.
+        //
+        // This ends the revocation, not the drain, so the entry stays —
+        // flagged, and re-anchored on a slower bound. A source that already
+        // stopped intake keeps draining (resuming it is a seam `SplitSource`
+        // deliberately lacks) and its hand-back settles the entry silently,
+        // re-claimed as `Released`/`Reassigned`, replaying nothing. What
+        // still has to be bounded is a drain that never finishes: nothing
+        // else can end one, and a stranded split reads nothing for the life
+        // of the process. `service_revocations` keeps that watch.
+        //
+        // Three filters, all load-bearing: `!cancelled` counts one
+        // `Cancelled` per revocation rather than one per step; `owned`
+        // leaves the orphan sweep in `service_revocations` to settle a split
+        // that left by a terminal commit or a `fail`; and `assigned` is
+        // empty during a leader gap, so an absent assignment record still
+        // means "nothing has been decided".
+        let restored: Vec<String> = self
+            .revoking
+            .iter()
+            .filter(|(id, r)| {
+                !r.cancelled && self.assigned.contains(*id) && self.owned.contains_key(*id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let now = self.clock.now();
+        for id in restored {
+            tracing::debug!(split = %id, "revocation cancelled: the leader assigned it back");
+            if let Some(entry) = self.revoking.get_mut(&id) {
+                entry.cancelled = true;
+                // Re-anchor. The absolute clock stops here and the silence
+                // clock starts: the drain is measured from now on by
+                // whether it is still committing, and it has not been
+                // asked to prove that until this moment.
+                entry.last_progress = now;
+            }
+            self.metrics(|m| m.revocation(RevocationOutcome::Cancelled));
+        }
         if !self.assignment_seen {
             return Ok(());
         }
+        // A cancelled entry is a drain, not a revocation, so the leader
+        // dropping the split again is a genuinely new revocation and must
+        // re-request — `is_none_or` rather than `!contains_key` is what
+        // stops the surviving watchdog entry from swallowing it.
         let stale: Vec<String> = self
             .owned
             .keys()
-            .filter(|id| !self.assigned.contains(*id) && !self.revoking.contains_key(*id))
+            .filter(|id| {
+                !self.assigned.contains(*id) && self.revoking.get(*id).is_none_or(|r| r.cancelled)
+            })
             .cloned()
             .collect();
         for id in stale {
@@ -1466,8 +1533,17 @@ impl<S: CoordinationStore> Task<S> {
             self.assign_generation = val.generation;
             let now: BTreeSet<String> = val.splits.iter().cloned().collect();
             // Start the acquisition clock for newly-named splits, and stop
-            // it for anything no longer expected.
+            // it for anything no longer expected. Not for one already held:
+            // there is no acquisition to wait for, and the timer would
+            // otherwise sit unconsumed until the split next changed hands.
+            // The reachable case is a revocation the leader takes back —
+            // the split is re-named for the worker that never let go — and
+            // timing that as "work sat undone" would report a drain's
+            // length as a fleet handover.
             for id in now.difference(&self.assigned) {
+                if self.owned.contains_key(id) {
+                    continue;
+                }
                 self.awaiting.insert(id.clone(), Instant::now());
             }
             self.awaiting.retain(|id, _| now.contains(id));
@@ -1484,32 +1560,71 @@ impl<S: CoordinationStore> Task<S> {
         let Ok(split) = SplitId::new(id.to_string()) else {
             return;
         };
-        let started = self.clock.now();
-        self.revoking.insert(id.to_string(), Revoking { started });
-        // The denominator of the revocation lifecycle, counted exactly
-        // once per revocation: the only caller filters on `revoking` not
-        // already holding the split. Every revocation counted here later
-        // terminates in exactly one `Drained` or `Forced`, which is what
-        // makes `requested - drained - forced` the in-flight drain count.
+        let now = self.clock.now();
+        match self.revoking.get_mut(id) {
+            // Re-revoking a drain this worker had cancelled. The drain
+            // never stopped, so its clock must not restart: `started` still
+            // anchors the deadline, and a drain that has already outlived
+            // one is forced on the spot — it has had its patience, and a
+            // rebalance is waiting on it again.
+            Some(entry) => entry.cancelled = false,
+            None => {
+                self.revoking.insert(
+                    id.to_string(),
+                    Revoking {
+                        started: now,
+                        last_progress: now,
+                        cancelled: false,
+                    },
+                );
+            }
+        }
+        // The denominator of the revocation lifecycle, counted exactly once
+        // per revocation: the only caller filters out entries that are
+        // still live revocations. Every revocation counted here later
+        // terminates in exactly one `Drained`, `Forced`, or `Cancelled`, so
+        // `requested - drained - forced - cancelled` is the revocations
+        // still in flight. That is *not* `splits_draining`, which counts
+        // the drains — a cancelled revocation leaves one behind.
         self.metrics(|m| m.revocation(RevocationOutcome::Requested));
         self.emit(CoordinationEvent::RevokeRequested { split });
     }
 
-    /// Enforce the drain deadline. A cooperative revocation that completes
-    /// releases through [`Task::release_splits`] and clears itself from
-    /// `revoking`; what is left here after `drain_deadline` is a drain that
-    /// declined or wedged, and it is forced.
+    /// Enforce the drain deadline, against two different clocks.
+    ///
+    /// A cooperative revocation that completes releases through
+    /// [`Task::release_splits`] and clears itself from `revoking`. What is
+    /// left is bounded one of two ways, because the deadline is protecting
+    /// two different things:
+    ///
+    /// - **A live revocation** holds a rebalance open, so it gets one
+    ///   absolute `drain_deadline` from the request. Past it the drain
+    ///   declined or is too slow to wait for, and it is forced.
+    /// - **A cancelled revocation** ([`Task::reconcile_assignment`] takes
+    ///   the decision back, and runs first in every step) has nobody
+    ///   waiting, so slowness costs nothing and is not forced. What it
+    ///   still owes is *liveness*: the source stopped intake at a safe
+    ///   boundary and cannot be asked to resume, so a drain that never
+    ///   finishes leaves the split owned, leased, assigned, and read by
+    ///   nobody for the life of the process — and a bounded job that
+    ///   contains it can never complete. It is therefore bounded by
+    ///   silence: `drain_deadline` with no commit landing at all, which for
+    ///   a live drain cannot happen (its tail acks as it flushes) and for a
+    ///   wedged one always does.
     ///
     /// Forcing is a *release*, not an abandonment: the owner field is
     /// cleared so the next claimant sees `Released` rather than `Expired`
     /// and spends no delivery attempt. Being revoked is not poison
-    /// evidence — the split did nothing wrong.
+    /// evidence — the split did nothing wrong. A stalled cancelled drain is
+    /// re-claimed by this same worker (the leader still names it here), so
+    /// forcing it costs one lane teardown and a bounded replay, and gets a
+    /// reading split back.
     async fn service_revocations(&mut self) -> Result<(), CoordinationError> {
         // An entry whose split left `owned` by a route that did not settle
         // it — a terminal commit, or an explicit `fail` — is still a
         // revocation that ended. Count it, or `requested - drained -
-        // forced` stops being the in-flight drain count the metric docs
-        // promise it is.
+        // forced - cancelled` stops being the in-flight revocation count
+        // the metric docs promise it is.
         let orphans: Vec<String> = self
             .revoking
             .keys()
@@ -1521,18 +1636,35 @@ impl<S: CoordinationStore> Task<S> {
         }
         let deadline = self.config.drain_deadline;
         let now = self.clock.now();
-        let overdue: Vec<String> = self
+        let overdue: Vec<(String, bool)> = self
             .revoking
             .iter()
-            .filter(|(_, r)| now.duration_since(r.started) >= deadline)
-            .map(|(id, _)| id.clone())
+            .filter(|(_, r)| {
+                let anchor = if r.cancelled {
+                    r.last_progress
+                } else {
+                    r.started
+                };
+                now.duration_since(anchor) >= deadline
+            })
+            .map(|(id, r)| (id.clone(), r.cancelled))
             .collect();
-        for id in overdue {
-            tracing::warn!(
-                split = %id,
-                ?deadline,
-                "drain deadline exceeded; forcing the revocation (its uncommitted tail replays)"
-            );
+        for (id, cancelled) in overdue {
+            if cancelled {
+                tracing::warn!(
+                    split = %id,
+                    ?deadline,
+                    "a cancelled revocation's drain has committed nothing for a full drain \
+                     deadline; releasing the split so it can be re-claimed and read again \
+                     (its uncommitted tail replays)"
+                );
+            } else {
+                tracing::warn!(
+                    split = %id,
+                    ?deadline,
+                    "drain deadline exceeded; forcing the revocation (its uncommitted tail replays)"
+                );
+            }
             self.force_revocation(&id).await?;
         }
         Ok(())
@@ -1541,10 +1673,21 @@ impl<S: CoordinationStore> Task<S> {
     /// Retire one `revoking` entry under a terminal outcome, exactly once.
     /// A no-op for a split that is not being revoked, which is what lets
     /// every path that can end a tenancy call it unconditionally.
+    ///
+    /// A **cancelled** entry retires silently. Its revocation already
+    /// terminated under [`RevocationOutcome::Cancelled`] and the entry
+    /// outlived it only as a watchdog over the drain; counting a second
+    /// outcome here would break `requested = drained + forced + cancelled`.
+    /// The drain that finishes after a cancellation is therefore invisible
+    /// to both the counter and the duration histogram — by then it is not
+    /// a revocation ending, it is a split going nowhere.
     fn settle_revocation(&mut self, id: &str, outcome: RevocationOutcome) {
         let Some(entry) = self.revoking.remove(id) else {
             return;
         };
+        if entry.cancelled {
+            return;
+        }
         // Same clock that stamped `started` and that `service_revocations`
         // compares against: reading it with real `.elapsed()` would mix two
         // timelines and saturate to zero whenever the clock runs ahead of
@@ -1563,6 +1706,12 @@ impl<S: CoordinationStore> Task<S> {
     /// End a revocation the expensive way: give the split back without
     /// waiting for the drain, so its uncommitted tail replays under the
     /// next owner.
+    ///
+    /// Also the exit from a cancelled revocation's stalled drain, where
+    /// "the next owner" is usually this worker again — the split is still
+    /// assigned here, so it is re-claimed with a fresh lane and starts
+    /// reading. That path counts no `Forced` (the revocation ended as
+    /// `Cancelled`); the release and the `Lost` it reports are the point.
     ///
     /// Releasing first is deliberate — the release CAS needs the lease
     /// revision, which lives in `owned`, and a fence would take it away.
@@ -2127,10 +2276,21 @@ impl<S: CoordinationStore> Task<S> {
                 // `drain_deadline` costs a rebalance nothing: the source
                 // has already said the answer will not change.
                 let id = split.as_str().to_string();
-                let result = if self.revoking.contains_key(&id) {
+                // A decline says the source never stopped intake, so there
+                // is no drain — which is what tells the two live cases
+                // apart. A live revocation is forced (the split is wanted
+                // elsewhere). A cancelled one is the good ending: the
+                // leader wants the split here and it never stopped being
+                // read, so the entry is dropped rather than forced, taking
+                // the drain watchdog with it — there is no drain to watch.
+                let cancelled = self.revoking.get(&id).is_some_and(|r| r.cancelled);
+                let result = if cancelled {
+                    self.revoking.remove(&id);
+                    Ok(())
+                } else if self.revoking.contains_key(&id) {
                     self.force_revocation(&id).await
                 } else {
-                    Ok(()) // never offered, or already settled: a no-op
+                    Ok(()) // never offered, or already settled
                 };
                 let _ = reply.try_send(result);
                 Ok(())
@@ -2185,6 +2345,16 @@ impl<S: CoordinationStore> Task<S> {
         {
             Ok(CasOutcome::Won(rev)) => {
                 self.metrics(|m| m.write(WriteOutcome::Ok, started.elapsed()));
+                // A landed commit is the only liveness signal a draining
+                // split gives the task, and the one a cancelled
+                // revocation's watchdog is armed against. The driver
+                // commits a `Draining` tenancy exactly as its tail acks its
+                // way to the sink, so a drain that is moving keeps this
+                // stamped and a wedged one never does.
+                let now = self.clock.now();
+                if let Some(entry) = self.revoking.get_mut(id) {
+                    entry.last_progress = now;
+                }
                 self.upsert_progress(id, record, rev)?;
                 if progress.completed {
                     self.finish_completed(id).await;

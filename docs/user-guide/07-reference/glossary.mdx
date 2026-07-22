@@ -183,6 +183,13 @@ what keeps one wedged drain from pinning a rebalance open — the leader's
 revocation is a decision, not a request. Modeled on Kafka's incremental
 cooperative rebalancing (KIP-429) and Flink's stop-with-savepoint.
 
+If the leader takes the revocation back mid-drain, it is **cancelled** and
+the deadline no longer applies: nothing is waiting for the split, so a slow
+drain gets to finish cleanly. The drain is then bounded by silence instead
+— committing nothing for `drain_deadline` releases it anyway, so a wedged
+drain cannot leave a split owned with nothing reading it. See
+[Work assignment](../02-concepts/08-work-assignment.mdx#revocation).
+
 ### Partition
 
 The source-side unit of ordering and checkpointing (`PartitionId`) — for

@@ -59,7 +59,7 @@ pub(crate) use meter::MetricRole;
 pub use operator::OperatorMetrics;
 pub use pipeline::{PipelineMetrics, PipelineState};
 pub use queue::QueueMetrics;
-pub use sink::{FlushReason, SinkShardMetrics};
+pub use sink::{BackoffGuard, FlushReason, SinkShardMetrics};
 pub use source::SourceMetrics;
 
 // The framework's instrumentation API *is* the `metrics` facade, so its
@@ -457,6 +457,133 @@ mod tests {
                 "rendered output missing `{needle}`:\n{rendered}"
             );
         }
+    }
+
+    /// One gauge stands for a shard that writes up to `inflight.max_per_shard`
+    /// batches at once, each backing off on its own schedule, so it publishes
+    /// the longest live step. The middle assertion is the one that matters:
+    /// when the longest sleeper wakes, the gauge must fall back to the batch
+    /// still asleep, not to `0` — the failure mode of every implementation
+    /// where each write task simply sets and clears the gauge itself.
+    #[test]
+    fn retry_backoff_gauge_publishes_the_longest_live_step() {
+        let recorder = configured_builder()
+            .expect("bucket config must be valid")
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let shard = SinkShardMetrics::new(&labels(), 0, &["r0".into()], E2eBasis::Ingest);
+            let backoff = || gauge_value(&handle.render(), names::SINK_RETRY_BACKOFF_SECONDS);
+
+            // Published from construction: a shard that has never retried is
+            // not backing off, so there is no measurement to wait for.
+            assert_eq!(backoff(), 0.0, "a fresh shard is not backing off");
+
+            let short = shard.backing_off(1, Duration::from_secs(4));
+            assert_eq!(backoff(), 4.0);
+            let long = shard.backing_off(2, Duration::from_secs(30));
+            assert_eq!(backoff(), 30.0, "the longer sleep wins");
+            drop(long);
+            assert_eq!(backoff(), 4.0, "batch 1 is still asleep");
+            drop(short);
+            assert_eq!(backoff(), 0.0, "nothing is backing off");
+        });
+    }
+
+    /// The same property under concurrent publishers, which is the case that
+    /// actually occurs: `inflight.max_per_shard` defaults to 2 and the write
+    /// tasks share one `SinkShardMetrics` across a multi-threaded I/O runtime.
+    ///
+    /// The regression is publishing the max *outside* the map lock: two
+    /// publishers' `set` calls then land in the opposite order from the
+    /// snapshots they computed, and the loser strands the gauge at a value no
+    /// batch is serving — until the next mutation, which under a patient retry
+    /// policy is `retry.max` away, and after the shard recovers is never. Both
+    /// directions are checked, because both are reachable and the stranded-high
+    /// one never self-clears: a sustained false reading on a healthy shard.
+    ///
+    /// Each round races the two mutations against each other and then asserts
+    /// at a *quiescent* point — every operation has returned and the live set
+    /// is known exactly, so there is one correct reading and no tolerance to
+    /// tune. Against the fixed code this holds by construction; the round and
+    /// sleeper counts are sized against the unfixed code, which diverged
+    /// within the first 50 rounds on every one of six calibration runs.
+    #[test]
+    fn retry_backoff_gauge_is_consistent_under_concurrent_publishers() {
+        const SLEEPERS: usize = 7;
+        const ROUNDS: usize = 1_000;
+
+        let recorder = configured_builder()
+            .expect("bucket config must be valid")
+            .build_recorder();
+        let handle = recorder.handle();
+        let divergence = metrics::with_local_recorder(&recorder, || {
+            // Handles bind to the recorder at construction, so the threads
+            // below publish through this one without inheriting the
+            // thread-local.
+            let shard = SinkShardMetrics::new(&labels(), 0, &["r0".into()], E2eBasis::Ingest);
+            let gate = std::sync::Barrier::new(SLEEPERS + 1);
+
+            std::thread::scope(|scope| {
+                for k in 1..=SLEEPERS {
+                    let (shard, gate) = (&shard, &gate);
+                    scope.spawn(move || {
+                        let step = Duration::from_secs(k as u64);
+                        let mut guard = Some(shard.backing_off(k as u64, step));
+                        for _ in 0..ROUNDS {
+                            gate.wait();
+                            drop(guard.take()); // races the long sleep starting
+                            gate.wait();
+                            gate.wait();
+                            guard = Some(shard.backing_off(k as u64, step)); // races it ending
+                            gate.wait();
+                            gate.wait();
+                        }
+                    });
+                }
+
+                // Divergences are recorded, not asserted in place: a panic
+                // here would leave the sleepers parked on the barrier and
+                // `scope` would join them forever, turning a failure into a
+                // 120s nextest TIMEOUT. Run every round out, report after.
+                let backoff = || gauge_value(&handle.render(), names::SINK_RETRY_BACKOFF_SECONDS);
+                let mut first_bad = None;
+                let mut record = |round, phase, want: f64, got: f64| {
+                    if got != want && first_bad.is_none() {
+                        first_bad = Some(format!(
+                            "round {round}, {phase}: gauge read {got}, expected {want}"
+                        ));
+                    }
+                };
+                for round in 0..ROUNDS {
+                    gate.wait();
+                    let long = shard.backing_off(0, Duration::from_secs(1000));
+                    gate.wait();
+                    // Only batch 0 is asleep: a short sleeper ending must not
+                    // strand the gauge below the sleep still running.
+                    record(round, "a short sleeper ended", 1000.0, backoff());
+                    gate.wait();
+                    drop(long);
+                    gate.wait();
+                    // Batch 0 has woken: the gauge must fall back to the
+                    // longest sleeper still asleep, not to 0 and not to 1000.
+                    record(round, "the long sleeper ended", SLEEPERS as f64, backoff());
+                    gate.wait();
+                }
+                first_bad
+            })
+        });
+        assert_eq!(divergence, None, "gauge stranded off the live backoff set");
+    }
+
+    /// The value of an unlabelled-or-single-series gauge in a rendered
+    /// exposition (the value is the line's last space-separated token).
+    fn gauge_value(rendered: &str, name: &str) -> f64 {
+        let line = rendered
+            .lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("`{name}` not rendered:\n{rendered}"));
+        line.rsplit(' ').next().unwrap().parse().expect("value")
     }
 
     #[test]

@@ -280,6 +280,7 @@ series carry its name as the `component` label (a single sink uses
 | `etl_sink_flushes_total` | counter | `shard`, `reason` (`rows`\|`bytes`\|`linger`\|`drain`) | Flushes by trigger. |
 | `etl_sink_flush_duration_seconds` | histogram | `shard` | Write round-trip per flush (including retries). |
 | `etl_sink_retries_total` | counter | `shard` | Flush attempts beyond the first. |
+| `etl_sink_retry_backoff_seconds` | gauge | `shard` | Retry backoff the shard is currently sleeping between write attempts **on an available replica**; `0` when no write is backing off. The step being served, **not** the time left in it — it does not count down, and jitter puts it in `[(1 - retry.jitter) × step, step]`. A shard writes up to `inflight.max_per_shard` batches at once, each backing off independently, so this is the max across them: it answers "is this shard asleep right now, and for how long", which the counters cannot (`etl_sink_retries_total` only moves on an *attempt*, so a shard parked in a long backoff looks flat and idle). A shard whose every replica is quarantined also sleeps — waiting for the earliest probe window — and reads `0` here, because no attempt is being backed off; `etl_sink_shard_healthy == 0` is that state's signal and is exactly coincident with it. |
 | `etl_sink_errors_total` | counter | `shard`, `error_type` | Write errors by taxonomy class. |
 | `etl_sink_inflight_batches` | gauge | `shard` | Sealed batches currently in flight. |
 | `etl_sink_replica_healthy` | gauge | `shard`, `replica` | 1 = circuit closed, 0 = open (replica quarantined). |
@@ -406,6 +407,23 @@ config section):
   still fire each `open_for` window, so the gauge stays 0 through failed
   probe cycles until one succeeds. Pair with a rising
   `etl_sink_replica_errors_total{replica}` to identify the failing endpoints.
+- `etl_sink_retry_backoff_seconds` sustained near `retry.max` — the shard is
+  parked between attempts, not idle. Threshold at `(1 - retry.jitter) *
+  retry.max`, **not** at `retry.max`: jitter only ever shortens a delay, so at
+  the ceiling the published step is spread over `[(1 - jitter) * max, max]`
+  and an `== retry.max` rule never fires. With a patient policy
+  (`max_attempts: 0` and a `retry.max` over 5m, the combination
+  `SinkPool::spawn` warns about at startup) this is the *only* live signal:
+  `etl_sink_retries_total` goes flat because it moves on attempts,
+  `etl_sink_inflight_batches` stays pinned, and `etl_sink_shard_healthy` can
+  read `1` throughout *as long as no replica's breaker opens* — a batch can
+  keep failing retryably while other batches keep the breakers closed. Pair
+  with `etl_sink_errors_total{error_type="retryable"}` for the cause.
+  Complementary, not overlapping: a shard whose every replica *is* quarantined
+  also sleeps, and this gauge reads `0` there because no attempt is being
+  backed off. `etl_sink_shard_healthy == 0` is that state's signal, and the two
+  are exactly coincident — the write loop waits for a probe window precisely
+  when no replica is circuit-closed. Alert on both to cover every parked state.
 - `etl_kafka_source_group_healthy == 0` sustained — the consumer-group member
   is stuck joining/rebalancing; pair with
   `rate(etl_kafka_source_group_rebalances_total[15m])` to distinguish churn

@@ -80,7 +80,7 @@ enrich_seconds.record(0.012);
 
 ## Starting alerts
 
-These three catch the failure modes that matter most; verify thresholds
+These four catch the failure modes that matter most; verify thresholds
 against your latency budget. The full list of starting points is at the end
 of [docs/METRICS.md](../../METRICS.md).
 
@@ -104,6 +104,16 @@ of [docs/METRICS.md](../../METRICS.md).
   paused because the in-flight budget is above its high watermark: the sink
   cannot keep up, or the budget is undersized for the batch settings — see
   the sizing rule in [Tuning](tuning.mdx).
+- **A shard asleep between retries** — `etl_sink_retry_backoff_seconds`
+  sustained above `(1 - retry.jitter) * retry.max`. The shard is not idle, it
+  is parked between write attempts; with an unbounded `retry.max_attempts` it
+  will stay there. The retry *counter* goes flat while this happens (it only
+  moves on an attempt), which is exactly why the gauge exists. Threshold below
+  the ceiling rather than at it: jitter only shortens a delay, so the published
+  step never sits exactly on `retry.max`. This covers backoff against a replica
+  that is still available — when every replica is quarantined the shard sleeps
+  waiting for a probe window instead, and `etl_sink_shard_healthy == 0` is the
+  signal for that.
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,

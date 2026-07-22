@@ -121,6 +121,10 @@ pub const SINK_FLUSHES_TOTAL: &str = "etl_sink_flushes_total";
 pub const SINK_FLUSH_DURATION_SECONDS: &str = "etl_sink_flush_duration_seconds";
 /// Flush attempts beyond the first, by [`L_SHARD`].
 pub const SINK_RETRIES_TOTAL: &str = "etl_sink_retries_total";
+/// Current retry backoff step of the shard's longest-sleeping in-flight
+/// batch, by [`L_SHARD`]; `0` when no write is backing off. The step being
+/// served, not the time left in it — it does not count down.
+pub const SINK_RETRY_BACKOFF_SECONDS: &str = "etl_sink_retry_backoff_seconds";
 /// Write errors, by [`L_SHARD`] and [`L_ERROR_TYPE`].
 pub const SINK_ERRORS_TOTAL: &str = "etl_sink_errors_total";
 /// Sealed batches currently in flight, by [`L_SHARD`].
@@ -278,6 +282,7 @@ pub const GAUGES: &[&str] = &[
     BACKPRESSURE_PAUSED_SECONDS_TOTAL,
     BACKPRESSURE_INFLIGHT_BYTES,
     SINK_INFLIGHT_BATCHES,
+    SINK_RETRY_BACKOFF_SECONDS,
     SINK_REPLICA_HEALTHY,
     SINK_SHARD_HEALTHY,
     CHECKPOINT_PENDING_BATCHES,

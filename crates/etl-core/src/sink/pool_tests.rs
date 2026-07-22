@@ -967,3 +967,86 @@ fn replica_errors_attribute_failures_asymmetrically() {
         "a circuit-closed replica remains ⇒ shard_healthy == 1"
     );
 }
+
+/// End-to-end wiring of `etl_sink_retry_backoff_seconds` through the real
+/// write loop: a shard parked between attempts publishes the step it is
+/// sleeping, and stops publishing it when the sleep ends — here by the drain
+/// deadline *aborting* the task mid-sleep, the one exit that runs none of the
+/// write loop's own code. Registering the family proves nothing; a scrape
+/// taken while the shard is actually asleep does.
+///
+/// Paused time makes the observation deterministic: it only advances when
+/// nothing is ready, so the first attempt has failed and parked in its 60s
+/// backoff before the 1s observation sleep below returns.
+#[test]
+fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // A flat, patient policy: every attempt sleeps exactly 60s, and
+            // nothing ever abandons the batch — the shape the startup warning
+            // fires on, and the one this gauge exists to make visible.
+            cfg.retry.initial = Duration::from_secs(60);
+            cfg.retry.max = Duration::from_secs(60);
+            cfg.retry.jitter = 0.0;
+            cfg.retry.max_attempts = 0;
+            // Keep the breaker closed throughout, so the task is provably in
+            // the retry sleep and not in the all-replicas-quarantined wait
+            // (which this gauge deliberately does not cover).
+            cfg.breaker.failure_threshold = u32::MAX;
+            let fx = fixture(1, 1, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+
+            let (ack, ack_rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            assert_eq!(
+                fx.writer.calls().len(),
+                1,
+                "one attempt made, and the shard is asleep before the next"
+            );
+            assert_eq!(
+                metric_value(
+                    &handle.render(),
+                    "etl_sink_retry_backoff_seconds",
+                    "shard=\"0\""
+                ),
+                60.0,
+                "a shard sleeping between attempts must say how long for"
+            );
+
+            drop(ack);
+            drop(fx.queues);
+            // A zero deadline: the sweep aborts the write task where it is
+            // parked, inside the sleep.
+            let report = fx.pool.drain(Duration::ZERO).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 0,
+                    abandoned: 1
+                }
+            );
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+        });
+    });
+
+    assert_eq!(
+        metric_value(
+            &handle.render(),
+            "etl_sink_retry_backoff_seconds",
+            "shard=\"0\""
+        ),
+        0.0,
+        "an aborted sleep must not strand the gauge at its last step"
+    );
+}

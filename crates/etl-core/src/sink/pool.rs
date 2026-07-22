@@ -85,7 +85,9 @@ impl<W: ShardWriter> SinkPool<W> {
                 "retry.max_attempts is 0 (unbounded) and retry.max is over 5m: once a \
                  shard backs off to its ceiling it sleeps that long between attempts and \
                  never abandons the batch, so a stalled shard looks identical to a \
-                 healthy idle one. Bound it with retry.max_attempts, or lower retry.max."
+                 healthy idle one. Bound it with retry.max_attempts, or lower retry.max. \
+                 If this is deliberate, watch etl_sink_retry_backoff_seconds — it reads \
+                 the backoff a shard is sleeping between attempts right now."
             );
         }
 

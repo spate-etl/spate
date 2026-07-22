@@ -140,6 +140,16 @@ shard is indistinguishable from a healthy idle one. Bound it with
 unaffected either way — the drain deadline aborts an in-flight write at
 shutdown, and its data replays.
 
+If you *did* mean it, `etl_sink_retry_backoff_seconds{shard}` is the live
+counterpart to that startup warning: it reads the backoff a shard is currently
+sleeping between attempts on an available replica (`0` when it is not backing
+off), so a patient policy stays legible on a dashboard instead of looking like
+an idle shard. Alert above `(1 - jitter) × retry.max` rather than at
+`retry.max` — the sleep is jittered downwards, so the gauge never sits exactly
+on the ceiling. When every replica is quarantined the shard sleeps waiting for
+a probe window and this gauge reads `0`; `etl_sink_shard_healthy` covers that
+state.
+
 Connectors add their own keys on top of these — e.g. ClickHouse's
 `timeouts.{send,end}` (its HTTP client, **not** the shared pool) and Kafka's
 top-level `delivery_timeout`. Those live on the respective connector pages.

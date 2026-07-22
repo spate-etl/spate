@@ -8,7 +8,7 @@ metrics. There are no dead-letter queues and no silent drops.
 
 | Class | Examples | What happens |
 |---|---|---|
-| **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `etl_sink_retries_total` and `etl_sink_replica_healthy`, with `etl_sink_replica_errors_total` to pin the failing endpoint and `etl_sink_shard_healthy` for the whole-shard escalation. |
+| **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `etl_sink_retries_total` and `etl_sink_replica_healthy`, with `etl_sink_replica_errors_total` to pin the failing endpoint and `etl_sink_shard_healthy` for the whole-shard escalation. The retry counter only moves on an *attempt*, so pair it with `etl_sink_retry_backoff_seconds` — the gauge that says whether the shard is asleep between attempts on an available replica right now, and for how long. |
 | **Record-level** | A payload that won't deserialize, a `try_map` closure returning `Err` | Subject to the per-stage policy: **Skip** or **Fail** (below). |
 | **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. |
 

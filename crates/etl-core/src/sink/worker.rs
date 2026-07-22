@@ -465,7 +465,15 @@ impl<W: ShardWriter> ShardWorker<W> {
                             };
                         }
                         metrics.retries(1);
-                        tokio::time::sleep(backoff.next_delay()).await;
+                        // The guard publishes the step for the length of the
+                        // sleep and withdraws it on drop — which includes the
+                        // drain deadline aborting this task mid-sleep, the one
+                        // exit that runs no code of ours.
+                        let delay = backoff.next_delay();
+                        {
+                            let _backoff = metrics.backing_off(this_seq, delay);
+                            tokio::time::sleep(delay).await;
+                        }
                     }
                 }
             }

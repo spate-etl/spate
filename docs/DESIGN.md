@@ -249,6 +249,14 @@ revoked assignments are discarded) it keeps a ring of outstanding batch seqs,
 pops the contiguous acknowledged prefix, and advances the committable
 watermark. Watermarks are stored on advance and committed on an interval
 (default 5s); revocation and shutdown drain then commit synchronously.
+The commit tick also broadcasts a chain flush to every driver thread,
+sealing below-target chunk buffers: a low-volume split branch's partial
+chunk would otherwise hold its records' acknowledgements — and every
+watermark behind them — for as long as the branch takes to fill 64 KiB,
+which under sustained load is unbounded (the driver's idle flush needs an
+empty poll it never gets). Worst-case watermark staleness is therefore
+~two commit intervals plus the sink linger and write, degenerating to the
+idle-flush path when the pipeline goes quiet.
 
 At-least-once invariant: **never commit past unacknowledged data.** A failed
 batch stalls its partition's watermark (alert on

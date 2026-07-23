@@ -301,6 +301,13 @@ pub(crate) enum ChainMode {
         held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
         release: Arc<AtomicBool>,
     },
+    /// Park every batch's ack until the next `flush`, as a real terminal's
+    /// chunk buffer does: watermarks can only advance after a flush resolves
+    /// the stash. Pins choreography that must flush the chain before
+    /// committing (revocation, shutdown).
+    HoldAcksUntilFlush {
+        held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
+    },
 }
 
 pub(crate) struct FakeChain {
@@ -347,6 +354,9 @@ impl RunnableChain for FakeChain {
             ChainMode::HoldAcks { held, release } if !release.load(Ordering::Relaxed) => {
                 held.lock().unwrap().push(batch.ack().clone());
             }
+            ChainMode::HoldAcksUntilFlush { held } => {
+                held.lock().unwrap().push(batch.ack().clone());
+            }
             _ => {}
         }
         PushOutcome::Done
@@ -355,6 +365,12 @@ impl RunnableChain for FakeChain {
     fn flush(&mut self) -> PushOutcome {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
+        if let ChainMode::HoldAcksUntilFlush { held } = &self.mode {
+            // Dropping the stashed clones resolves the batches Delivered —
+            // the fake equivalent of sealing a partial chunk and having the
+            // sink write it.
+            held.lock().unwrap().clear();
+        }
         PushOutcome::Done
     }
 }

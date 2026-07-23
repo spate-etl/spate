@@ -120,10 +120,15 @@ seals on rows in milliseconds; a rare table would trickle, so you raise its
 `linger` on a rare table is **not free**: because the source watermark is
 held until every table a batch touched has flushed, a long rare-table
 `linger` holds the offsets of every source batch that carried even one rare
-record — inflating checkpoint lag and restart replay. Keep rare-table
-`linger` well under `checkpoint.stalled_fail_after`, and prefer sealing on a
-modest `max_rows` so `linger` only bites in genuine lulls. The full reasoning
-— including segregating the source by kind to dissolve the tension — is in the
+record — inflating checkpoint lag and restart replay. The framework bounds
+the *pre-batch* half of that hold for you: a rare table's below-target chunk
+buffer is sealed on every commit tick, so worst-case checkpoint lag is
+`checkpoint.interval` (chunk seal) + that table's `linger` (batch close) +
+the write. The `linger` half is yours to size: prefer sealing on a modest
+`max_rows` so `linger` only bites in genuine lulls. (A *pending* batch never
+trips `checkpoint.stalled_fail_after` — that watchdog fires only when a
+batch has permanently **failed**.) The full reasoning — including
+segregating the source by kind to dissolve the tension — is in the
 [concept page's trade-off section](../../../02-concepts/06-multi-sink.mdx#the-trade-youre-making-part-size-vs-checkpoint-lag).
 :::
 

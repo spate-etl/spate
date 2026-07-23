@@ -27,7 +27,13 @@ pub struct ChunkConfig {
     /// Seal and send a chunk once its frame reaches this size. Small
     /// enough to flow steadily, large enough to amortize queue traffic;
     /// sink workers merge chunks into full-size batches, so this does
-    /// **not** bound insert sizes.
+    /// **not** bound insert sizes. A buffer below this size is not held
+    /// indefinitely: the controller flushes partial chunks on every commit
+    /// tick (`checkpoint.interval`), and the driver flushes them on an idle
+    /// lull, so while the pipeline is unblocked a partial buffer holds its
+    /// acknowledgements for at most ~one checkpoint interval. (A driver
+    /// wedged retrying a blocked batch defers the flush until the sink
+    /// drains — but nothing commits during that time anyway.)
     pub target_bytes: usize,
     /// Policy for record-level encoder failures. `Skip` drops the record
     /// (metrics-counted); `Fail` stops the pipeline. An encoder error of

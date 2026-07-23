@@ -137,9 +137,13 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     }
                 }
                 ThreadControl::FlushNow => {
-                    // A lane hit end-of-input: push its tail out now so the
-                    // acks it is waiting on can resolve, instead of holding
-                    // the unit of work open for a full `idle_flush` lull.
+                    // Two senders: the controller broadcasts on every commit
+                    // tick (sealing below-target chunks whose held acks would
+                    // otherwise pin partition watermarks under sustained
+                    // load), and the CommitReady chase targets threads whose
+                    // lane hit end-of-input — either way, push the tail out
+                    // now so the acks it is waiting on can resolve, instead
+                    // of holding them for a full `idle_flush` lull.
                     match chain.flush() {
                         PushOutcome::Done => flushed_since_data = true,
                         PushOutcome::Blocked { .. } => bp.on_send_rejected(),

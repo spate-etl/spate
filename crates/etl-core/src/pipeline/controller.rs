@@ -152,6 +152,18 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         // 2. Commit tick.
         if last_commit.elapsed() >= commit_interval {
             last_commit = Instant::now();
+            // Seal partial chain buffers before harvesting acknowledgements.
+            // A below-target chunk — a low-volume split branch under
+            // sustained load — otherwise holds its records' acks, and with
+            // them the partition watermark, until it happens to fill:
+            // `idle_flush` needs an empty poll that a loaded pipeline never
+            // produces. Best-effort like the CommitReady chase below; sealed
+            // chunks settle through the sink and commit on a later tick, so
+            // watermark staleness is bounded by ~two commit intervals plus
+            // the sink linger instead of growing without bound.
+            for tx in &control_txs {
+                let _ = tx.send(ThreadControl::FlushNow);
+            }
             commit_cycle(
                 &mut source,
                 &mut checkpointer,

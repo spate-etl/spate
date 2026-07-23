@@ -41,6 +41,10 @@ Environment: Apple M5 Max (18-core), macos/aarch64, Rust release, ClickHouse
 resource and the ETL has the rest of the host — the shape the split exists for.
 Harness: `benchmarks/src/bin/multi_table_split.rs`; raw JSONL in
 `benchmarks/results/`, reproduction in [Methodology](./methodology.mdx).
+(The `multi-table-split-commit-tick-ab.jsonl` dataset alongside is a
+separate A/B validation of the commit-tick flush change, recorded with
+ClickHouse at 8 cores; the charts pin `clickhouse_cpus: 6` so those runs
+stay out of this comparison.)
 
 :::note
 **Bottleneck discipline.** The comparison only means something if ClickHouse
@@ -57,7 +61,7 @@ result would be invalid — see the concept page.
   metric="rows_per_s"
   category="types"
   series="arm"
-  where={{ skew: 'skewed', linger_ms: 1000 }}
+  where={{ skew: 'skewed', linger_ms: 1000, clickhouse_cpus: 6 }}
   order={['4', '8', '16']}
   seriesOrder={['single Null (ceiling)', 'Null + MV', 'ETL split']}
   emphasize="split"
@@ -80,7 +84,7 @@ do not depend on write concurrency.
   metric="ch_server_cpu_us_per_row"
   category="types"
   series="arm"
-  where={{ skew: 'skewed', linger_ms: 1000 }}
+  where={{ skew: 'skewed', linger_ms: 1000, clickhouse_cpus: 6 }}
   order={['4', '8', '16']}
   seriesOrder={['Null + MV', 'ETL split']}
   emphasize="split"
@@ -100,7 +104,7 @@ the CPU the split hands back to the database for queries and merges.
   metric="ch_avg_part_rows"
   category="types"
   series="arm"
-  where={{ skew: 'skewed', linger_ms: 1000 }}
+  where={{ skew: 'skewed', linger_ms: 1000, clickhouse_cpus: 6 }}
   order={['4', '8', '16']}
   seriesOrder={['Null + MV', 'ETL split']}
   emphasize="split"

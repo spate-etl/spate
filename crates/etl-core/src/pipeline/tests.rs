@@ -57,6 +57,14 @@ fn start_with_config(
     config: PipelineConfig,
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
+    start_with_options(config, test_options(), mode_factory)
+}
+
+fn start_with_options(
+    config: PipelineConfig,
+    options: RuntimeOptions,
+    mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
+) -> Harness {
     let (source, shared, script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let (sink, drained) = test_sink();
@@ -72,7 +80,7 @@ fn start_with_config(
         sink,
         budget,
     )
-    .with_options(test_options());
+    .with_options(options);
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
     Harness {
@@ -97,6 +105,37 @@ fn assign_one_lane(h: &Harness, ranges: &[std::ops::Range<i64>]) {
 }
 
 // ---------------------------------------------------------------- tests --
+
+/// The controller broadcasts `FlushNow` on every commit tick, so a partial
+/// terminal buffer can never hold acknowledgements (and with them the
+/// partition watermark) longer than the checkpoint interval just because
+/// polls keep returning data. The idle flush is pushed out of reach (60s
+/// against a 20ms commit interval), so every flush observed here can only
+/// have come from the tick broadcast.
+#[test]
+fn commit_tick_flushes_chains_without_an_idle_lull() {
+    let options = RuntimeOptions {
+        idle_flush: Duration::from_secs(60),
+        ..test_options()
+    };
+    let h = start_with_options(test_config(1), options, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("batches consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) >= 20
+    });
+    let flushes_before = h.chain.flushes.load(Ordering::Relaxed);
+    wait_for("commit-tick flushes", Duration::from_secs(5), || {
+        h.chain.flushes.load(Ordering::Relaxed) >= flushes_before + 3
+    });
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
 
 #[test]
 fn happy_path_consumes_and_commits() {
@@ -167,13 +206,70 @@ fn revocation_drains_flushes_and_commits_in_order() {
             commit_after.is_some(),
             "revocation must commit acknowledged offsets"
         );
-        assert!(flush_after < commit_after, "flush precedes the commit");
-        // Everything consumed was committed — nothing consumed was lost.
+        // No flush/commit *ordering* assertion here: the controller also
+        // broadcasts FlushNow on every commit tick (20ms in tests), so the
+        // log interleaves periodic flushes and commits nondeterministically —
+        // and this chain resolves acks on consumption, so the equality below
+        // cannot see whether revocation flushed before committing. That
+        // ordering is pinned by `revocation_flushes_parked_acks_before_committing`,
+        // whose chain parks acks until a flush. This test keeps the
+        // ack-on-consume half: everything consumed was committed — nothing
+        // consumed was lost.
         assert_eq!(
             log.committed.get(&PartitionId(0)),
             Some(&(consumed_at_revoke as i64))
         );
     }
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// Revocation must flush the chain *before* committing — the drain is what
+/// turns parked acknowledgements into committable watermarks. The chain here
+/// parks every batch's ack until it is flushed, as a real terminal's partial
+/// chunk buffer does, and both periodic flush paths are out of reach (60s
+/// commit interval, 60s idle flush, sub-second test), so the only thing that
+/// can resolve the acks before the revocation commit is the `StopLanes`
+/// drain itself. Deleting `flush_until` from the `StopLanes` arm fails this
+/// test; `revocation_drains_flushes_and_commits_in_order` cannot see that.
+#[test]
+fn revocation_flushes_parked_acks_before_committing() {
+    let mut config = test_config(1);
+    config.checkpoint.interval = Duration::from_secs(60);
+    let options = RuntimeOptions {
+        idle_flush: Duration::from_secs(60),
+        ..test_options()
+    };
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let h = start_with_options(config, options, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcksUntilFlush {
+            held: Arc::clone(&held),
+        },
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("batches consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) >= 20
+    });
+    assert!(
+        h.shared.lock().unwrap().committed.is_empty(),
+        "acks are parked and no commit tick is due; nothing may commit \
+         before the revocation drain"
+    );
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    // StopLanes → flush_until resolves the parked acks; the commit that
+    // follows inside `revoke_lanes` must then cover everything consumed.
+    wait_for(
+        "revocation committed the drained acks",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&20),
+    );
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);

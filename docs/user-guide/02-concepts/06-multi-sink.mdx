@@ -115,7 +115,12 @@ in has durably written. Two properties fall straight out of the shared ack:
 Per-table part size is governed by each sink's [`batch`](../04-connectors/sinks/clickhouse/README.mdx)
 (`max_rows` / `max_bytes` / `linger`). To build **big parts** on a low-volume
 table you raise its `linger`. But the watermark is **poll-batch-granular**, and
-a batch is held until every destination it touched has flushed:
+a batch is held until every destination it touched has flushed. The hold has
+two halves: the chain-side chunk buffer, which the framework bounds for you
+(partial chunks are sealed on every commit tick, so while the pipeline is
+unblocked this half stays within ~`checkpoint.interval` — even for a branch
+too cold to ever fill a chunk), and
+the sink-side batch `linger`, which is the trade you are choosing here:
 
 :::info
 If a source batch mixes hot and rare records, its offsets are held until the

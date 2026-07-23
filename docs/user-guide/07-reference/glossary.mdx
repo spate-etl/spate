@@ -55,8 +55,11 @@ virtual call per batch. Built by the chain factory you pass to
 The handoff unit between a pipeline thread and a shard worker: rows encoded
 (by the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes`
 (default 64 KiB), carrying its rows' acks as an [`AckSet`](#ackset).
-Workers merge chunks into [sealed batches](#sealed-batch), so chunk size
-does not bound insert size.
+A chunk seals when it reaches the target, on every commit tick
+(`checkpoint.interval`), or on an idle lull — so while the pipeline is
+unblocked, a slow-filling buffer holds its acks for at most ~one checkpoint
+period. Workers merge chunks into
+[sealed batches](#sealed-batch), so chunk size does not bound insert size.
 
 ### Component / `component_type` labels
 

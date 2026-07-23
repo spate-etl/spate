@@ -1,6 +1,7 @@
 # etl-rs
 
-[![Documentation](https://img.shields.io/badge/docs-etl--rs.pages.kainth.net-e8590c)](https://etl-rs.pages.kainth.net/)
+[![Documentation](https://img.shields.io/badge/docs-etl--rs.kainth.dev-e8590c)](https://etl-rs.kainth.dev/)
+[![codecov](https://codecov.io/github/MarcusKainth/etl-rs/graph/badge.svg?token=NZ5RQO6WH3)](https://codecov.io/github/MarcusKainth/etl-rs)
 
 A high-performance, at-least-once ETL pipeline framework for Rust.
 

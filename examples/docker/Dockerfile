@@ -7,7 +7,7 @@
 # beyond the rust image's toolchain); expect the first build to take several
 # minutes. For CI, layer a cargo-chef stage in front to cache dependencies.
 
-FROM rust:1.96-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release -p etl --example kafka_avro_to_clickhouse --features full \

@@ -130,6 +130,13 @@ run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.
   re-exported from `etl-core` (never depended on directly by connectors) so a
   breaking `metrics` bump is one coordinated change, not per-crate drift.
 - **Acks can never block behind data.** The ack path is unbounded/atomic.
+- **The sink worker's intake path never awaits outside a `select!` arm.**
+  Anything it blocks on must sit in a branch position alongside the
+  drain-deadline branch, or the deadline is not polled while it waits and
+  shutdown deadlocks. `ShardWorker::dispatch` is deliberately not `async`:
+  it parks a sealed batch for a permit instead of awaiting one. `SinkPool::drain`
+  force-aborts a worker 2s past the deadline as a backstop, but that loses the
+  worker's drain report — it is not a licence to add a blocking await.
 - Record error policies are **Skip or Fail only**, always surfaced through
   metrics (`*_dropped_total{reason}` / `*_errors_total{error_type}`).
 - All metrics handles are **pre-registered at build time** — never resolve

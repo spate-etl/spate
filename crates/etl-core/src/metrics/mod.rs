@@ -424,6 +424,7 @@ mod tests {
             shard.replica_error(1);
             shard.set_shard_healthy(false);
             shard.abandoned(0);
+            shard.drain_overrun();
 
             let cp = CheckpointMetrics::new(&labels("orders_kafka"), false);
             cp.set_pending_max(12);

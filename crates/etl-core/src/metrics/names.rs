@@ -148,7 +148,10 @@ pub const SINK_RETRIES_TOTAL: &str = "etl_sink_retries_total";
 pub const SINK_RETRY_BACKOFF_SECONDS: &str = "etl_sink_retry_backoff_seconds";
 /// Write errors, by [`L_SHARD`] and [`L_ERROR_TYPE`].
 pub const SINK_ERRORS_TOTAL: &str = "etl_sink_errors_total";
-/// Sealed batches currently in flight, by [`L_SHARD`].
+/// Sealed batches not yet settled, by [`L_SHARD`]: those being written plus
+/// any sealed batch still queueing for an `inflight.max_per_shard` slot. It
+/// can therefore read above the cap while a batch waits — compare it to the
+/// cap for saturation, not for equality.
 pub const SINK_INFLIGHT_BATCHES: &str = "etl_sink_inflight_batches";
 /// 1 = circuit closed, 0 = open, by [`L_SHARD`] and [`L_REPLICA`].
 pub const SINK_REPLICA_HEALTHY: &str = "etl_sink_replica_healthy";
@@ -166,6 +169,11 @@ pub const SINK_REPLICA_ERRORS_TOTAL: &str = "etl_sink_replica_errors_total";
 pub const SINK_SHARD_HEALTHY: &str = "etl_sink_shard_healthy";
 /// Batches abandoned at the drain deadline (replayed after restart).
 pub const SINK_ABANDONED_BATCHES_TOTAL: &str = "etl_sink_abandoned_batches_total";
+/// Shard workers force-aborted for failing to return by the drain deadline,
+/// by [`L_SHARD`]. Non-zero is a framework bug, not an operating condition:
+/// the drain still completed and the data still replays, but that shard's
+/// contribution to the drain report was lost with it.
+pub const SINK_DRAIN_OVERRUN_TOTAL: &str = "etl_sink_drain_overrun_total";
 
 // Checkpointing.
 

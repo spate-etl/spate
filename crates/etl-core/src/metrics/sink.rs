@@ -92,6 +92,7 @@ pub struct SinkShardMetrics {
     err_fatal: Counter,
     inflight: OwnedGauge,
     abandoned: Counter,
+    drain_overrun: Counter,
     shard_healthy: OwnedGauge,
     e2e: Histogram,
     e2e_basis: E2eBasis,
@@ -295,7 +296,12 @@ impl SinkShardMetrics {
                 labels.gauge1(names::SINK_INFLIGHT_BATCHES, names::L_SHARD, shard.clone()),
                 owned,
             ),
-            abandoned: labels.counter1(names::SINK_ABANDONED_BATCHES_TOTAL, names::L_SHARD, shard),
+            abandoned: labels.counter1(
+                names::SINK_ABANDONED_BATCHES_TOTAL,
+                names::L_SHARD,
+                shard.clone(),
+            ),
+            drain_overrun: labels.counter1(names::SINK_DRAIN_OVERRUN_TOTAL, names::L_SHARD, shard),
             shard_healthy,
             e2e: labels.histogram(names::E2E_LATENCY_SECONDS),
             e2e_basis,
@@ -536,6 +542,13 @@ impl SinkShardMetrics {
     /// Count batches abandoned at the drain deadline.
     pub fn abandoned(&self, n: u64) {
         self.abandoned.increment(n);
+    }
+
+    /// Record that this shard's worker had to be force-aborted because it did
+    /// not return by the drain deadline. A framework bug, not an operating
+    /// condition — see `SinkPool::drain`.
+    pub fn drain_overrun(&self) {
+        self.drain_overrun.increment(1);
     }
 }
 

@@ -7,6 +7,29 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug info, not code, is what fills a hosted runner's disk here: the
+  # workspace links ~44 test binaries, and the `etl` end-to-end ones each pull
+  # rdkafka (with vendored OpenSSL), ClickHouse and Avro into a single
+  # statically linked artifact. A full-DWARF build of that set exhausted the
+  # runner outright — `rustc-LLVM ERROR: IO failure on output stream: No space
+  # left on device`, reproducibly (#83's PR).
+  #
+  # `line-tables-only` keeps exactly what CI needs — `file:line` in a
+  # backtrace, which is the whole story when a failure reproduces only here —
+  # and drops the type and variable records nothing in a headless run can use.
+  # Measured on the etl-test slice alone: 27% off the target directory, 63%
+  # off the emitted debug info. Local builds are untouched, so interactive
+  # debugging keeps full DWARF; setting this in `[profile.dev]` instead would
+  # degrade every contributor's machine to fix a problem only CI has.
+  #
+  # Both keys are needed. `cargo test` builds the test *target* under `test`
+  # but its dependencies under `dev`, and the dependencies are nearly all of
+  # the bytes — `test` alone measured a 6% saving. Verified not to disturb
+  # coverage: `cargo llvm-cov` reports identical region and line numbers with
+  # and without it, since instrumentation-based coverage reads its own
+  # coverage map rather than DWARF.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 # Pushing again to an open PR cancels the previous run rather than letting two
 # full matrices race to tell you about the same branch. Keyed per ref, and

@@ -75,8 +75,16 @@ pub struct RetryConfig {
     /// Fraction of the delay randomized away (`0.0..=1.0`).
     pub jitter: f64,
     /// Total write attempts before the batch is abandoned (acknowledgements
-    /// failed, watermark stalls). `0` means unbounded — retry until the
-    /// drain deadline, the at-least-once default.
+    /// failed, watermark stalls). `0` means unbounded — retry until the drain
+    /// deadline, at which point the attempt in flight is aborted and the batch
+    /// abandoned. The at-least-once default.
+    ///
+    /// An unbounded policy holds its in-flight slot
+    /// ([`InflightConfig::max_per_shard`]) for the whole outage, since a slot
+    /// frees only when its write task ends. That is intended — it is how a
+    /// down sink back-pressures the source rather than buffering — but it does
+    /// mean a shard talking to a dead sink runs at zero in-flight capacity
+    /// until either the sink recovers or the drain deadline arrives.
     pub max_attempts: u32,
 }
 

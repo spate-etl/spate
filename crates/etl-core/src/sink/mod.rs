@@ -208,6 +208,14 @@ pub trait ShardWriter: Send + Sync + 'static {
     }
 
     /// Write `batch` to `endpoint` durably.
+    ///
+    /// **Bound it.** The framework guarantees that shutdown terminates, not
+    /// that this call does: at the drain deadline the write task is aborted,
+    /// which only lands if this future is at an await point. A client with no
+    /// request timeout turns every shutdown into a wait for the deadline, and
+    /// one that blocks its thread between awaits cannot be aborted at all.
+    /// Give the underlying client a request timeout and let the framework's
+    /// retry policy handle the failure.
     fn write_batch(
         &self,
         endpoint: &Self::Endpoint,

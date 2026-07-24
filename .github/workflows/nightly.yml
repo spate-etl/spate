@@ -7,6 +7,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Same disk pressure as the PR workflow, same reasoning — see the comment on
+  # these keys in `ci.yml`. This workflow builds the whole workspace under
+  # `--all-features` too, so it is exposed identically. Benchmarks are
+  # unaffected: the `bench` profile inherits `release`, which carries no debug
+  # info to trim.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   features:

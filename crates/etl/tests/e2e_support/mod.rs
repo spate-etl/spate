@@ -372,6 +372,10 @@ pub struct PipelineParams {
     pub linger: &'static str,
     pub commit_interval: &'static str,
     pub drain_timeout: &'static str,
+    /// Concurrent sealed batches per shard. Lowering it to 1 makes a sink
+    /// outage saturate the in-flight window immediately, which is what the
+    /// drain-during-outage scenario needs to set up deterministically.
+    pub inflight_max_per_shard: usize,
 }
 
 impl PipelineParams {
@@ -390,6 +394,7 @@ impl PipelineParams {
             linger: "200ms",
             commit_interval: "500ms",
             drain_timeout: "20s",
+            inflight_max_per_shard: 2,
         }
     }
 
@@ -437,7 +442,7 @@ sink:
       max_bytes: 8MiB
       linger: {linger}
     inflight:
-      max_per_shard: 2
+      max_per_shard: {inflight}
 "#,
             name = self.name,
             threads = self.threads,
@@ -453,6 +458,7 @@ sink:
             password = CH_PASSWORD,
             max_rows = self.batch_max_rows,
             linger = self.linger,
+            inflight = self.inflight_max_per_shard,
         )
     }
 }

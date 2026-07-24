@@ -33,7 +33,25 @@ pub struct SinkPool<W: ShardWriter> {
     endpoints: Vec<Arc<Vec<W::Endpoint>>>,
     workers: Vec<JoinHandle<WorkerReport>>,
     drain_tx: watch::Sender<Option<Instant>>,
+    metrics: Vec<Arc<SinkShardMetrics>>,
 }
+
+/// How long past the drain deadline a shard worker gets before `drain` gives
+/// up on it and force-aborts it.
+///
+/// The deadline itself is cooperative: workers watch it, abort their in-flight
+/// writes and abandon what is left, loudly. This is the backstop under that,
+/// so a worker that cannot honour it — a framework bug — degrades shutdown to
+/// a lost drain report rather than an unbounded hang (#83).
+///
+/// Sized by the tightest constraint, which is not the pod's
+/// `terminationGracePeriodSeconds` but the controller: it waits only
+/// `deadline + 2s` for the drain to report before giving up and running the
+/// final commit anyway (`pipeline::controller`). At an equal 2s the backstop
+/// could never fire *before* that, so the commit would race a pool still
+/// resolving. Ordering, tightest first: the worker's own `ABORT_GRACE`
+/// (500ms) < this < the controller's 2s.
+const BACKSTOP_GRACE: Duration = Duration::from_secs(1);
 
 impl<W: ShardWriter> SinkPool<W> {
     /// Spawn one worker per shard onto `runtime`.
@@ -76,6 +94,14 @@ impl<W: ShardWriter> SinkPool<W> {
             shard_endpoints.iter().all(|r| !r.is_empty()),
             "every shard needs at least one replica"
         );
+        // Connectors validate this in their own config parsing, but a
+        // programmatically built `SinkPoolConfig` reaches here unchecked — and
+        // a zero-permit semaphore means every sealed batch parks forever
+        // instead of failing loudly at construction.
+        assert!(
+            config.inflight.max_per_shard > 0,
+            "inflight.max_per_shard must be greater than zero"
+        );
 
         // Warn once per pool, from the seam every sink passes through, so no
         // connector has to mirror the check.
@@ -96,9 +122,12 @@ impl<W: ShardWriter> SinkPool<W> {
             shard_endpoints.into_iter().map(Arc::new).collect();
 
         let nonce = run_nonce();
+        // Shared with the workers rather than moved into them: `drain` needs
+        // the handles too, to report a shard that overruns its deadline.
+        let metrics: Vec<Arc<SinkShardMetrics>> = metrics.into_iter().map(Arc::new).collect();
         let workers = receivers
             .into_iter()
-            .zip(metrics)
+            .zip(metrics.iter().map(Arc::clone))
             .enumerate()
             .map(|(shard, (rx, shard_metrics))| {
                 let worker = ShardWorker {
@@ -108,7 +137,7 @@ impl<W: ShardWriter> SinkPool<W> {
                     rx,
                     cfg: config,
                     budget: Arc::clone(&budget),
-                    metrics: Arc::new(shard_metrics),
+                    metrics: shard_metrics,
                     drain_deadline: drain_rx.clone(),
                     token_prefix: format!("{pipeline_name}-{nonce}-{shard}-"),
                 };
@@ -121,6 +150,27 @@ impl<W: ShardWriter> SinkPool<W> {
             endpoints,
             workers,
             drain_tx,
+            metrics,
+        }
+    }
+
+    /// A pool around arbitrary worker handles, so the drain backstop can be
+    /// tested against a worker that ignores its deadline. Real workers cannot
+    /// do that — which is the point of the backstop and the reason this seam
+    /// exists.
+    #[cfg(test)]
+    pub(crate) fn from_workers(
+        writer: Arc<W>,
+        workers: Vec<JoinHandle<WorkerReport>>,
+        drain_tx: watch::Sender<Option<Instant>>,
+        metrics: Vec<Arc<SinkShardMetrics>>,
+    ) -> Self {
+        SinkPool {
+            writer,
+            endpoints: Vec::new(),
+            workers,
+            drain_tx,
+            metrics,
         }
     }
 
@@ -138,17 +188,59 @@ impl<W: ShardWriter> SinkPool<W> {
     /// Drain the pool: workers force-seal partial batches, then in-flight
     /// writes get until `deadline` before being aborted and abandoned.
     ///
+    /// Always returns. A worker that does not stop by `deadline` is
+    /// force-aborted [`BACKSTOP_GRACE`] later; its acknowledgements fail with
+    /// it (so at-least-once holds and the data replays), but its counts are
+    /// missing from the returned report.
+    ///
     /// Contract: the caller must have dropped every [`ShardQueues`]
     /// (super::ShardQueues) clone first — workers only enter their drain
     /// phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
-        let _ = self.drain_tx.send(Some(Instant::now() + deadline));
+        let deadline_at = Instant::now() + deadline;
+        let _ = self.drain_tx.send(Some(deadline_at));
+        // Absolute, so joining the shards in sequence still bounds the whole
+        // drain: one wedged shard spends the budget once, and the shards
+        // behind it — long since finished — are joined immediately after.
+        let hard_at = deadline_at + BACKSTOP_GRACE;
         let mut report = WorkerReport::default();
-        for handle in self.workers {
-            match handle.await {
-                Ok(r) => report.absorb(r),
-                Err(join_err) => {
-                    tracing::error!(error = %join_err, "sink shard worker panicked");
+        let mut forced = 0usize;
+        for (shard, mut handle) in self.workers.into_iter().enumerate() {
+            match tokio::time::timeout_at(hard_at, &mut handle).await {
+                Ok(Ok(r)) => report.absorb(r),
+                Ok(Err(join_err)) => {
+                    tracing::error!(shard, error = %join_err, "sink shard worker panicked");
+                }
+                Err(_) => {
+                    handle.abort();
+                    self.metrics[shard].drain_overrun();
+                    // `hard_at` is absolute, which is what bounds the whole
+                    // sequential join — but it also means the first overrun
+                    // spends the budget and every shard behind it times out
+                    // instantly, however healthy. Only the first can be
+                    // diagnosed as the culprit; the rest are collateral, and
+                    // saying so keeps the ERROR honest. The realistic cause
+                    // (a writer blocking runtime threads) starves them all,
+                    // so this is the expected shape, not a corner case.
+                    if forced == 0 {
+                        tracing::error!(
+                            shard,
+                            grace = ?BACKSTOP_GRACE,
+                            "sink shard worker did not return by the drain deadline and was \
+                             force-aborted — a framework bug, not an operating condition. Its \
+                             acknowledgements fail and that data replays after restart, but its \
+                             flushed/abandoned counts are missing from the drain report."
+                        );
+                    } else {
+                        tracing::error!(
+                            shard,
+                            "sink shard worker force-aborted: the drain budget was already spent \
+                             by an earlier shard, so this one was given no time of its own. It \
+                             may have been healthy. Same consequence — its acknowledgements fail \
+                             and that data replays — but diagnose the first shard reported above."
+                        );
+                    }
+                    forced += 1;
                 }
             }
         }

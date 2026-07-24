@@ -495,7 +495,14 @@ exactly-once.
   `drain_timeout` (default 25s, must be < `terminationGracePeriodSeconds`) →
   final synchronous commit → join. If a sink is down at the deadline,
   unflushed batches are abandoned loudly (metric + log) and replay on
-  restart — at-least-once holds either way. A bounded source's
+  restart — at-least-once holds either way. The sink deadline is bounded
+  twice: cooperatively (workers watch it and abandon under their own power)
+  and then by a hard backstop 2s later that force-aborts a worker which has
+  not returned, so a stall costs a lost drain report
+  (`etl_sink_drain_overrun_total`) rather than a hang. The cooperative layer
+  is only sound if nothing on the worker's intake path can block outside its
+  deadline-armed `select!` — which is why `dispatch` parks batches for a
+  permit instead of awaiting one. A bounded source's
   `SourceEvent::Drained` enters this same choreography, with one addition:
   abandoned batches or an unpersisted final commit downgrade the exit from
   `Completed` to `Failed` (see the bounded-sources note under Source

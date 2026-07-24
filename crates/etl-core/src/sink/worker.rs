@@ -17,11 +17,20 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::error::{ErrorClass, SinkError};
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
+
+/// How long the drain sweep waits for aborted write tasks to actually stop.
+/// An abort only lands at a yield point, so a writer that blocks its thread
+/// would otherwise hold the worker here past the deadline. Kept below the
+/// pool's own backstop (`SinkPool::drain`) so an overrunning worker still
+/// returns its own report instead of being force-aborted and losing it.
+/// Generous for the intended case: a writer parked on I/O aborts at once.
+const ABORT_GRACE: Duration = Duration::from_millis(500);
 
 /// What one shard worker did over its lifetime, for the drain report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -133,6 +142,21 @@ struct Ledger {
     /// real victim's acks and budget forever).
     ids: HashMap<tokio::task::Id, u64>,
     report: WorkerReport,
+    /// Held so the reservations of anything still pending are released even
+    /// when the worker never gets to sweep — `SinkPool::drain`'s backstop
+    /// aborting it, or the I/O runtime shutting down under it. `settle` and
+    /// `abandon` remove their entry before releasing, so the ordinary path
+    /// drops an empty map and cannot double-release.
+    budget: Arc<InflightBudget>,
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        for p in self.pending.values() {
+            self.budget
+                .sub(usize::try_from(p.bytes).unwrap_or(usize::MAX));
+        }
+    }
 }
 
 impl<W: ShardWriter> ShardWorker<W> {
@@ -142,6 +166,7 @@ impl<W: ShardWriter> ShardWorker<W> {
             pending: HashMap::new(),
             ids: HashMap::new(),
             report: WorkerReport::default(),
+            budget: Arc::clone(&self.budget),
         };
         let mut tasks: JoinSet<WriteDone> = JoinSet::new();
         let semaphore = Arc::new(Semaphore::new(self.cfg.inflight.max_per_shard));
@@ -164,6 +189,36 @@ impl<W: ShardWriter> ShardWorker<W> {
         let mut deadline_watch_live = true;
         let mut seq: u64 = 0;
         let mut recv_buf: Vec<EncodedChunk> = Vec::with_capacity(64);
+        // Batches sealed but not yet spawned, oldest first: the in-flight
+        // window was full when they sealed. Their `Pending` is already in the
+        // ledger (`seal` registers it), so the deadline sweep abandons them
+        // like any other batch, dropping the sealed frames unspawned.
+        //
+        // Nothing on this path may *block* on the in-flight semaphore.
+        // `dispatch` is deliberately not `async`: an `.await` in it would
+        // suspend `run` outside both `select!`s, where neither the drain
+        // deadline nor finished write tasks are polled — and with every permit
+        // held by a write that does not return (a hung sink, or the default
+        // unbounded retry policy against a sink that is down) no permit would
+        // ever free either. That deadlocked shutdown (#83). Instead the permit
+        // wait is a `select!` arm below, so the deadline branch stays live
+        // while a batch waits, and intake is gated off meanwhile — the same
+        // backpressure the blocking acquire used to provide, though not
+        // instant-for-instant the same: intake finishes the `recv_many` pass
+        // it is already in, and resumes only once this drains fully rather
+        // than on the first freed permit.
+        //
+        // Bounded: intake is gated on this being empty, so at most one
+        // `recv_many` pass can fill it (64 chunks, hence 64 batches only if
+        // every chunk seals its own), plus the drain force-seal. More than one
+        // entry needs a single chunk to cross `batch.max_bytes` by itself, so
+        // in practice it holds one. The frames it holds are the ones that
+        // would otherwise sit in `acc`, and the `InflightBudget` accounts for
+        // them either way.
+        //
+        // While it is non-empty the queue keeps filling, so the drain phase
+        // must drain `rx` itself — see there.
+        let mut waiting: VecDeque<(u64, SealedBatch, Instant)> = VecDeque::new();
 
         loop {
             let linger_at = acc.first_at.map(|t| t + self.cfg.batch.linger);
@@ -174,31 +229,37 @@ impl<W: ShardWriter> ShardWorker<W> {
                     self.handle_join(joined, &mut ledger);
                 }
 
-                n = self.rx.recv_many(&mut recv_buf, 64) => {
+                // The permit wait for an already-sealed batch. The third
+                // element of `waiting` is the stamp it is measured from, so a
+                // batch that queues behind a slow write lands in the same
+                // histogram as one that never waited at all.
+                permit = Arc::clone(&semaphore).acquire_owned(), if !waiting.is_empty() => {
+                    let permit = permit.expect("sink semaphore closed");
+                    self.launch_waiting(permit, &mut waiting, &mut tasks, &breakers, &mut ledger);
+                }
+
+                // Gated on `waiting`: while a sealed batch has no permit the
+                // shard queue fills and back-pressures the chain, exactly as
+                // the blocking acquire used to make it.
+                n = self.rx.recv_many(&mut recv_buf, 64), if waiting.is_empty() => {
                     if n == 0 {
                         break; // intake closed: drain
                     }
                     let now = Instant::now();
                     for chunk in recv_buf.drain(..) {
                         acc.push(chunk, now);
-                        let reason = if acc.rows >= self.cfg.batch.max_rows {
-                            Some(FlushReason::Rows)
-                        } else if acc.bytes >= self.cfg.batch.max_bytes {
-                            Some(FlushReason::Bytes)
-                        } else {
-                            None
-                        };
-                        if let Some(reason) = reason {
-                            self.dispatch(&mut acc, reason, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers)
-                                .await;
+                        if let Some(reason) = self.seal_reason(&acc) {
+                            self.dispatch(&mut acc, reason, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers, &mut waiting);
                         }
                     }
                 }
 
-                // Below `recv_many` on purpose: chunks already queued at
-                // shutdown are consumed before the deadline is considered
-                // (biased select polls in order), so a graceful drain still
-                // flushes everything the drivers handed over.
+                // Below `recv_many` on purpose: while intake is ungated,
+                // chunks already queued at shutdown are consumed before the
+                // deadline is considered (biased select polls in order). When
+                // `waiting` has gated intake off this arm wins instead, and
+                // the drain phase below drains the queue itself — either way
+                // nothing the drivers handed over is dropped unsealed.
                 changed = drain_deadline.changed(), if deadline_watch_live => {
                     match changed {
                         // A deadline published while intake is still open:
@@ -213,67 +274,70 @@ impl<W: ShardWriter> ShardWorker<W> {
                     }
                 }
 
-                () = tokio::time::sleep_until(linger_at.unwrap_or_else(Instant::now)), if linger_at.is_some() => {
-                    self.dispatch(&mut acc, FlushReason::Linger, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers)
-                        .await;
+                () = tokio::time::sleep_until(linger_at.unwrap_or_else(Instant::now)), if linger_at.is_some() && waiting.is_empty() => {
+                    self.dispatch(&mut acc, FlushReason::Linger, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers, &mut waiting);
                 }
             }
         }
 
         // ---- Drain (DESIGN.md § Shutdown) ----
-        // Force-seal the partial batch, then resolve in-flight writes under
-        // the drain deadline. The force-seal must NOT block on the in-flight
-        // semaphore: with every permit held by a hung write it would park
-        // here — before the deadline loop is reached — and deadlock
-        // shutdown. Instead the sealed batch waits in `waiting` (its
-        // `Pending` already registered in the ledger) and is launched as
-        // soon as a permit frees; the deadline sweep abandons it like any
-        // other pending batch, dropping the sealed frames unspawned.
-        // The third element is the stamp its permit wait is measured from, so
-        // the force-sealed batch lands in the same histogram as every other —
-        // a drain that queues behind a slow write is exactly the case an
-        // operator reading `drain_timeout` wants to see.
-        let mut waiting: Option<(u64, SealedBatch, Instant)> = None;
-        if !acc.is_empty() {
-            let (this_seq, batch) = self.seal(&mut acc, FlushReason::Drain, &mut seq, &mut ledger);
-            let queued_at = Instant::now();
-            match Arc::clone(&semaphore).try_acquire_owned() {
-                Ok(permit) => {
-                    self.metrics.permit_waited(queued_at.elapsed());
-                    self.spawn_write(
-                        batch,
-                        this_seq,
-                        permit,
-                        &mut tasks,
-                        &breakers,
-                        &mut ledger.ids,
-                    );
-                }
-                Err(_) => waiting = Some((this_seq, batch, queued_at)),
+        // Intake is gated on `waiting`, and the deadline arm can win while it
+        // is gated off, so the queue may still hold chunks the drivers handed
+        // over — closed but not empty. Consume them here. A chunk dropped
+        // unsealed with the receiver fails its acknowledgements with no
+        // `abandoned` count, no log and no `DrainReport` entry: the one way
+        // this worker could lose work silently.
+        while let Ok(chunk) = self.rx.try_recv() {
+            acc.push(chunk, Instant::now());
+            if let Some(reason) = self.seal_reason(&acc) {
+                self.dispatch(
+                    &mut acc,
+                    reason,
+                    &mut seq,
+                    &mut ledger,
+                    &mut tasks,
+                    &semaphore,
+                    &breakers,
+                    &mut waiting,
+                );
             }
         }
 
+        // Force-seal whatever is left. `dispatch` parks the batch in
+        // `waiting` when no permit is free, so this needs no special case.
+        self.dispatch(
+            &mut acc,
+            FlushReason::Drain,
+            &mut seq,
+            &mut ledger,
+            &mut tasks,
+            &semaphore,
+            &breakers,
+            &mut waiting,
+        );
+
         loop {
-            // Launch the waiting batch the moment a permit is available.
-            if waiting.is_some()
-                && let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned()
-            {
-                let (this_seq, batch, queued_at) = waiting.take().expect("just checked is_some");
-                self.metrics.permit_waited(queued_at.elapsed());
-                self.spawn_write(
-                    batch,
-                    this_seq,
-                    permit,
-                    &mut tasks,
-                    &breakers,
-                    &mut ledger.ids,
-                );
+            // Launch waiting batches, oldest first, while permits are free.
+            while !waiting.is_empty() {
+                let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                    break;
+                };
+                self.launch_waiting(permit, &mut waiting, &mut tasks, &breakers, &mut ledger);
             }
-            if tasks.is_empty() && waiting.is_none() {
+            if tasks.is_empty() && waiting.is_empty() {
                 break;
             }
 
             let deadline = *drain_deadline.borrow();
+            // No deadline was ever published and the sender is gone: the pool
+            // was dropped without draining, so nobody will ever ask us to stop
+            // and nobody is waiting for our report. Abandon now rather than
+            // waiting on writes that may never finish.
+            if deadline.is_none() && !deadline_watch_live {
+                self.sweep(&mut tasks, &mut waiting, &mut ledger).await;
+                break;
+            }
+
             tokio::select! {
                 biased;
 
@@ -289,21 +353,77 @@ impl<W: ShardWriter> ShardWorker<W> {
                 }
 
                 () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                    // Deadline exceeded: abort every write still in flight and
-                    // fail those batches loudly. Their data replays after
-                    // restart — at-least-once holds.
-                    tasks.shutdown().await;
-                    drop(waiting.take()); // unspawned sealed batch; its Pending is swept below
-                    let stranded: Vec<u64> = ledger.pending.keys().copied().collect();
-                    for s in stranded {
-                        self.abandon(s, &mut ledger);
-                    }
-                    ledger.ids.clear();
+                    self.sweep(&mut tasks, &mut waiting, &mut ledger).await;
                     break;
                 }
             }
         }
         ledger.report
+    }
+
+    /// Which seal threshold, if any, the accumulated batch has crossed.
+    fn seal_reason(&self, acc: &Accumulator) -> Option<FlushReason> {
+        if acc.rows >= self.cfg.batch.max_rows {
+            Some(FlushReason::Rows)
+        } else if acc.bytes >= self.cfg.batch.max_bytes {
+            Some(FlushReason::Bytes)
+        } else {
+            None
+        }
+    }
+
+    /// Start writing the oldest waiting batch with a permit the caller has
+    /// already taken.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `waiting` is empty; both call sites guard on that.
+    fn launch_waiting(
+        &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
+        tasks: &mut JoinSet<WriteDone>,
+        breakers: &Arc<Mutex<BreakerSet>>,
+        ledger: &mut Ledger,
+    ) {
+        let (this_seq, batch, queued_at) = waiting
+            .pop_front()
+            .expect("callers guard on a non-empty `waiting`");
+        self.metrics.permit_waited(queued_at.elapsed());
+        self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
+    }
+
+    /// Deadline reached: abort every write still in flight and fail every
+    /// batch this worker still holds, loudly. Their data replays after
+    /// restart — at-least-once holds.
+    async fn sweep(
+        &self,
+        tasks: &mut JoinSet<WriteDone>,
+        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
+        ledger: &mut Ledger,
+    ) {
+        // An abort only lands at a yield point, so a writer that blocks its
+        // thread would hold us here indefinitely — and `SinkPool::drain`'s
+        // backstop would then force-abort this worker and lose its report.
+        // Bound the wait instead: dropping the `JoinSet` when `run` returns
+        // finishes the aborts, and the accounting below still happens.
+        if tokio::time::timeout(ABORT_GRACE, tasks.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                shard = self.shard,
+                grace = ?ABORT_GRACE,
+                "sink write tasks did not abort within the grace period; abandoning without them"
+            );
+        }
+        // Sealed but never spawned; their `Pending`s are swept below.
+        waiting.clear();
+        let stranded: Vec<u64> = ledger.pending.keys().copied().collect();
+        for s in stranded {
+            self.abandon(s, ledger);
+        }
+        ledger.ids.clear();
     }
 
     fn handle_join(
@@ -369,9 +489,9 @@ impl<W: ShardWriter> ShardWorker<W> {
     }
 
     /// Assign a seq to the accumulated batch, seal it, and register its
-    /// `Pending` in the ledger. Shared by the normal dispatch path and the
-    /// drain force-seal; the caller then obtains a permit (blocking on the
-    /// normal path, non-blocking during drain) and calls [`spawn_write`].
+    /// `Pending` in the ledger. Registering before the batch has a permit is
+    /// what lets the deadline sweep abandon a batch parked in `waiting`
+    /// without a special case of its own.
     fn seal(
         &self,
         acc: &mut Accumulator,
@@ -510,8 +630,25 @@ impl<W: ShardWriter> ShardWorker<W> {
         ids.insert(handle.id(), this_seq);
     }
 
+    /// Seal the accumulated batch and start writing it, or — when the
+    /// in-flight window is full — park it in `waiting` for the permit arm of
+    /// whichever loop is running.
+    ///
+    /// **Deliberately not `async`.** Blocking on the semaphore here would
+    /// suspend `run` outside both of its `select!`s, where neither the drain
+    /// deadline nor finished write tasks are polled; with every permit held by
+    /// a write that does not return, nothing would ever wake it and shutdown
+    /// would deadlock (#83). The permit wait belongs in a `select!` arm, and
+    /// the arm's guard on `waiting` reproduces the backpressure blocking here
+    /// used to provide.
+    ///
+    /// The permit wait is timed because it is what `flush_duration` folds in
+    /// that is neither the sink's own speed nor a sleep of ours: a shard
+    /// queueing behind its in-flight cap and one talking to a slow server
+    /// produce the same flush histogram, which is how a healthy cluster reads
+    /// as a slow one.
     #[allow(clippy::too_many_arguments)]
-    async fn dispatch(
+    fn dispatch(
         &self,
         acc: &mut Accumulator,
         reason: FlushReason,
@@ -520,32 +657,26 @@ impl<W: ShardWriter> ShardWorker<W> {
         tasks: &mut JoinSet<WriteDone>,
         semaphore: &Arc<Semaphore>,
         breakers: &Arc<Mutex<BreakerSet>>,
+        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
     ) {
         if acc.is_empty() {
             return;
         }
         let (this_seq, batch) = self.seal(acc, reason, seq, ledger);
-
-        // Waiting for a permit intentionally stops intake: the shard queue
-        // fills and backpressure propagates. Permits release on task end,
-        // including aborts. (This is backpressure by design — the drain
-        // phase, which cannot afford to block, uses `try_acquire_owned`.)
-        //
-        // Timed because this wait is what `flush_duration` folds in that is
-        // neither the sink's own speed nor a sleep of ours: a shard queueing
-        // behind its in-flight cap and one talking to a slow server produce
-        // the same flush histogram, which is how a healthy cluster reads as a
-        // slow one. Note it is *bounded* — only one sealed batch can be here
-        // at a time, since this await parks the whole intake loop — so it
-        // cannot exceed the earliest in-flight write's remaining time. The
-        // unbounded legs are the retry backoff and the probe wait.
         let queued_at = Instant::now();
-        let permit = Arc::clone(semaphore)
-            .acquire_owned()
-            .await
-            .expect("sink semaphore closed");
-        self.metrics.permit_waited(queued_at.elapsed());
-        self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
+        // Strict FIFO. Taking a permit while an older batch is parked would
+        // let this one overtake it — harmless for delivery (batches of a
+        // shard already settle out of order) but it charges the overtaken
+        // batch's `permit_wait` observation for a queue it was at the front
+        // of.
+        if waiting.is_empty()
+            && let Ok(permit) = Arc::clone(semaphore).try_acquire_owned()
+        {
+            self.metrics.permit_waited(queued_at.elapsed());
+            self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
+        } else {
+            waiting.push_back((this_seq, batch, queued_at));
+        }
     }
 }
 

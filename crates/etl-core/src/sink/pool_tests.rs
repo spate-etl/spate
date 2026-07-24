@@ -19,6 +19,9 @@ enum Outcome {
     Hang,
     /// Panic the write task (simulates a writer bug / poisoned lock).
     Panic,
+    /// Block the runtime thread outright, so an abort cannot land until it
+    /// returns (simulates a writer doing synchronous work between awaits).
+    BlockThread(Duration),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +44,9 @@ struct MockWriter {
     log: Mutex<Vec<Call>>,
     concurrent: AtomicUsize,
     max_concurrent: AtomicUsize,
+    /// Cuts an `Outcome::BlockThread` short, so a test that has proved its
+    /// point does not pay for the rest of the block at runtime teardown.
+    release: std::sync::atomic::AtomicBool,
 }
 
 impl MockWriter {
@@ -51,7 +57,13 @@ impl MockWriter {
             log: Mutex::new(Vec::new()),
             concurrent: AtomicUsize::new(0),
             max_concurrent: AtomicUsize::new(0),
+            release: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Let any in-progress [`Outcome::BlockThread`] return early.
+    fn release_blocked(&self) {
+        self.release.store(true, Ordering::SeqCst);
     }
 
     fn script(&self, shard: usize, replica: usize, outcomes: impl IntoIterator<Item = Outcome>) {
@@ -106,6 +118,15 @@ impl ShardWriter for MockWriter {
                 // Held "concurrent" on purpose; aborted at drain deadline.
                 std::future::pending::<()>().await;
                 unreachable!()
+            }
+            Outcome::BlockThread(d) => {
+                // A blocking loop, not an await: the task never reaches a
+                // yield point, so `abort` cannot land on it.
+                let until = std::time::Instant::now() + d;
+                while std::time::Instant::now() < until && !self.release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(())
             }
             Outcome::Panic => panic!("scripted sink write panic"),
         };
@@ -682,6 +703,384 @@ async fn drain_force_seal_does_not_block_on_a_held_permit() {
     assert_eq!(a_rx.try_recv().unwrap().status, AckStatus::Failed);
     assert_eq!(b_rx.try_recv().unwrap().status, AckStatus::Failed);
     assert_eq!(f.budget.usage(), 0);
+}
+
+/// The same hazard as the force-seal above, on the *intake* path (#83).
+/// Chunk B reaches `max_bytes` and so dispatches rather than sitting partial
+/// in the accumulator. `dispatch` used to await `acquire_owned()`, which
+/// parked the whole worker future outside both `select!`s: the drain deadline
+/// was never polled, `tasks.shutdown()` never ran, no permit was ever
+/// released, and `drain` waited forever with `drain_timeout` having no effect.
+#[tokio::test(start_paused = true)]
+async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer.set_default(Outcome::Hang);
+
+    let (a_ack, a_rx) = AckRef::test_pair();
+    let (b_ack, b_rx) = AckRef::test_pair();
+    // A: seals on max_bytes, takes the only permit, hangs.
+    f.queues.try_send(0, chunk(4, 8, &a_ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // B: also reaches max_bytes, so it dispatches with no permit free.
+    f.queues.try_send(0, chunk(4, 8, &b_ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(a_ack);
+    drop(b_ack);
+    drop(f.queues);
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(120),
+        f.pool.drain(Duration::from_millis(200)),
+    )
+    .await
+    .expect("drain must honour its deadline, not wait on the held permit");
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 2
+        },
+        "the hung batch and the one that never got a permit both abandon"
+    );
+    assert_eq!(a_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(b_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// Intake is gated off while a sealed batch waits for a permit, so the drain
+/// can begin with the shard queue **closed but not empty**. Those chunks must
+/// still be sealed and accounted: dropped unsealed with the receiver they
+/// would fail their acknowledgements with no `abandoned` count, no log and no
+/// `DrainReport` entry — a silent loss of work, and the one regression the
+/// `waiting` gate introduced.
+#[tokio::test(start_paused = true)]
+async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer.set_default(Outcome::Hang);
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    // A: takes the only permit and hangs.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // B: seals with no permit free, so it parks in `waiting` — which is what
+    // gates intake off from here on.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // C and D therefore sit unread in the queue across the whole drain.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(ack);
+    drop(f.queues);
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(120),
+        f.pool.drain(Duration::from_millis(200)),
+    )
+    .await
+    .expect("drain must return");
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 4
+        },
+        "every chunk handed over must be accounted, including the two the \
+         gated intake never read"
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// The routine reachability of #83, with no hung write anywhere: the default
+/// `retry.max_attempts` is 0 (unbounded), so against a sink that is merely
+/// *down* every write task retries forever and never releases its permit.
+/// A shutdown during a sink outage — the case the guide names explicitly —
+/// therefore hit the same wedge, on the default configuration.
+#[tokio::test(start_paused = true)]
+async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        // Retry policy left at its default: unbounded attempts.
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    assert_eq!(
+        cfg.retry.max_attempts, 0,
+        "the default is what is under test"
+    );
+    let f = fixture(1, 1, cfg, 16);
+    f.writer
+        .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(ack);
+    drop(f.queues);
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(120),
+        f.pool.drain(Duration::from_millis(200)),
+    )
+    .await
+    .expect("drain must honour its deadline against an endlessly retrying sink");
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 2
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// The third way into `dispatch`: the linger timer rather than a size
+/// threshold. Same wedge, same fix — the sealed batch parks instead of
+/// blocking.
+#[tokio::test(start_paused = true)]
+async fn a_held_permit_does_not_wedge_the_linger_dispatch() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_millis(50),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer.set_default(Outcome::Hang);
+
+    let (a_ack, a_rx) = AckRef::test_pair();
+    let (b_ack, b_rx) = AckRef::test_pair();
+    // A: seals on max_bytes, takes the only permit, hangs.
+    f.queues.try_send(0, chunk(4, 8, &a_ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // B: stays under max_bytes, so only the linger timer can seal it.
+    f.queues.try_send(0, chunk(1, 8, &b_ack)).unwrap();
+    f.budget.add(8);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(a_ack);
+    drop(b_ack);
+    drop(f.queues);
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(120),
+        f.pool.drain(Duration::from_millis(200)),
+    )
+    .await
+    .expect("a linger-sealed batch must not block the worker on the semaphore");
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 2
+        }
+    );
+    assert_eq!(a_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(b_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// The general property the three tests above are instances of: whatever the
+/// sink is doing and however the in-flight window is saturated, `drain`
+/// returns and every reservation is released. Asserted over a matrix rather
+/// than a single scenario so the next unbounded await on this path is caught
+/// as a class, not left for the next reviewer to notice.
+#[tokio::test(start_paused = true)]
+async fn drain_returns_under_any_permit_pressure() {
+    let deadline = Duration::from_millis(200);
+    for permits in [1usize, 2] {
+        for shards in [1usize, 2] {
+            for outcome in [
+                Outcome::Hang,
+                Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                Outcome::Write(Duration::from_secs(60)),
+            ] {
+                let mut cfg = SinkPoolConfig {
+                    batch: BatchConfig {
+                        max_rows: u64::MAX,
+                        max_bytes: 32,
+                        linger: Duration::from_secs(3600),
+                    },
+                    ..SinkPoolConfig::default()
+                };
+                cfg.inflight.max_per_shard = permits;
+                let f = fixture(shards, 1, cfg, 64);
+                f.writer.set_default(outcome.clone());
+
+                let (ack, _rx) = AckRef::test_pair();
+                for s in 0..shards {
+                    // Saturate every permit, then one more sealing batch with
+                    // nowhere to go, then a partial for the drain force-seal.
+                    for _ in 0..=permits {
+                        f.queues.try_send(s, chunk(4, 8, &ack)).unwrap();
+                        f.budget.add(32);
+                    }
+                    f.queues.try_send(s, chunk(1, 8, &ack)).unwrap();
+                    f.budget.add(8);
+                }
+                drop(ack);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                drop(f.queues);
+
+                let case = format!("permits={permits} shards={shards} outcome={outcome:?}");
+                tokio::time::timeout(deadline + Duration::from_secs(60), f.pool.drain(deadline))
+                    .await
+                    .unwrap_or_else(|_| panic!("drain never returned: {case}"));
+                assert_eq!(f.budget.usage(), 0, "reservations leaked: {case}");
+            }
+        }
+    }
+}
+
+/// A write that blocks its runtime thread cannot be aborted — `abort` only
+/// lands at a yield point. The drain sweep bounds that wait rather than
+/// inheriting it, so the worker still runs its abandon accounting and still
+/// returns its own report instead of being force-aborted by the pool.
+///
+/// Real time and a multi-threaded runtime on purpose: `std::thread::sleep`
+/// does not participate in paused time, and the worker needs a thread of its
+/// own while the write task holds one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: 1,
+            max_bytes: u64::MAX,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    // Far longer than the sweep's abort grace, so the test fails loudly if the
+    // sweep ever waits this out instead of bounding it.
+    f.writer
+        .set_default(Outcome::BlockThread(Duration::from_secs(30)));
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    f.budget.add(8);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(ack);
+    drop(f.queues);
+
+    let started = std::time::Instant::now();
+    let report = tokio::time::timeout(
+        Duration::from_secs(20),
+        f.pool.drain(Duration::from_millis(100)),
+    )
+    .await
+    .expect("the sweep must bound its wait for aborts it cannot land");
+    let elapsed = started.elapsed();
+    // The point is proved; don't pay the rest of the block at teardown.
+    f.writer.release_blocked();
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        },
+        "the unabortable batch is abandoned by the worker itself"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "drain took {elapsed:?}; it should return about one abort grace after \
+         the deadline, not wait out the blocking write"
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// The pool's backstop under the cooperative deadline. A real worker cannot
+/// reach this any more — that is the whole point of the restructured intake
+/// loop — so the wedge is injected directly: `drain` must still return, and
+/// must say so on `etl_sink_drain_overrun_total` rather than only in a log.
+#[test]
+fn a_worker_that_ignores_the_deadline_is_force_aborted() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let labels = ComponentLabels::new("test", next_component(), "mock");
+            let metrics = vec![Arc::new(SinkShardMetrics::new(
+                &labels,
+                0,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            ))];
+            let (drain_tx, _drain_rx) = tokio::sync::watch::channel(None);
+            let wedged = tokio::spawn(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            });
+            let pool = SinkPool::from_workers(MockWriter::new(), vec![wedged], drain_tx, metrics);
+
+            let report = tokio::time::timeout(
+                Duration::from_secs(600),
+                pool.drain(Duration::from_millis(200)),
+            )
+            .await
+            .expect("the backstop must make drain return regardless");
+            assert_eq!(
+                report,
+                DrainReport::default(),
+                "a force-aborted worker contributes no counts"
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    assert_eq!(
+        metric_value(&rendered, "etl_sink_drain_overrun_total", "shard=\"0\""),
+        1.0
+    );
 }
 
 #[test]

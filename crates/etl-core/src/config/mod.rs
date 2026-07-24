@@ -53,6 +53,7 @@
 //! assert_eq!(cfg.source.type_tag(), "memory");
 //! ```
 
+mod chunk;
 mod component;
 mod error;
 mod interpolate;
@@ -390,6 +391,42 @@ impl PipelineConfig {
                 }
             }
         }
+        self.reject_stray_chunk()?;
+        // Resolve every declared sink's `chunk:` block now, so a malformed
+        // block is rejected at load — including for a `sinks:` entry this
+        // binary never installs (nothing later would resolve it).
+        if let Some(sink) = &self.sink {
+            sink.resolved_chunk()?;
+        }
+        if let Some(sinks) = &self.sinks {
+            for (name, sink) in sinks {
+                sink.resolved_chunk()
+                    .map_err(|e| name_sinks_entry_error(name, e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject the framework-reserved `chunk:` key on a non-sink section.
+    /// `chunk:` configures the chain terminal, which only sinks have; the
+    /// framework peels the key indiscriminately, so a stray `chunk:` under
+    /// `source`/`deserializer` would otherwise be silently swallowed. Split
+    /// out of [`validate`](Self::validate) so `Pipeline::from_config` — which
+    /// deliberately skips full validation for minimal programmatic configs —
+    /// can still enforce it.
+    pub(crate) fn reject_stray_chunk(&self) -> Result<(), ConfigError> {
+        if self.source.resolved_chunk()?.is_some() {
+            return Err(ConfigError::Validation(
+                "`chunk:` is only valid on a sink section, not `source`".into(),
+            ));
+        }
+        if let Some(deser) = &self.deserializer
+            && deser.resolved_chunk()?.is_some()
+        {
+            return Err(ConfigError::Validation(
+                "`chunk:` is only valid on a sink section, not `deserializer`".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -429,6 +466,23 @@ impl PipelineConfig {
     }
 }
 
+/// Re-anchor a `sinks:` entry's chunk error onto its map key. The entry's
+/// section prefix is the shared `sink.<type>`, which cannot distinguish two
+/// entries of the same connector type — `sinks.<name>.<...>` can.
+fn name_sinks_entry_error(name: &str, e: ConfigError) -> ConfigError {
+    match e {
+        ConfigError::Validation(m) => ConfigError::Validation(format!("sinks.{name}: {m}")),
+        ConfigError::Component { context, message } => ConfigError::Component {
+            context: match context.strip_prefix("sink.") {
+                Some(rest) => format!("sinks.{name}.{rest}"),
+                None => format!("sinks.{name}.{context}"),
+            },
+            message,
+        },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +513,84 @@ sink: { memory: {} }
         assert!(!cfg.metrics.per_partition_detail);
         assert_eq!(cfg.metrics.e2e_basis, E2eBasis::Ingest);
         assert!(cfg.deserializer.is_none());
+    }
+
+    #[test]
+    fn sink_chunk_block_parses_and_resolves() {
+        let yaml = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sink:
+  memory:
+    chunk: { target_bytes: 512KiB, encode_policy: fail }
+"#;
+        let cfg = PipelineConfig::from_str(yaml).unwrap();
+        let chunk = cfg
+            .sink_config("default")
+            .unwrap()
+            .resolved_chunk()
+            .unwrap()
+            .expect("chunk present");
+        assert_eq!(chunk.target_bytes, 512 * 1024);
+        assert_eq!(chunk.encode_policy, crate::error::ErrorPolicy::Fail);
+    }
+
+    #[test]
+    fn chunk_on_a_source_section_is_rejected() {
+        let yaml = r#"
+pipeline: { name: demo }
+source:
+  memory:
+    chunk: { target_bytes: 64KiB }
+sink: { memory: {} }
+"#;
+        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
+        assert!(err.contains("chunk"), "{err}");
+        assert!(err.contains("source"), "{err}");
+    }
+
+    #[test]
+    fn zero_target_bytes_in_yaml_is_rejected_at_load() {
+        let yaml = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sink:
+  memory:
+    chunk: { target_bytes: 0B }
+"#;
+        // `validate` resolves every declared sink chunk, so the loader itself
+        // rejects it — "rejected at load" in the reference docs is literal.
+        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
+        assert!(err.contains("chunk.target_bytes"), "{err}");
+    }
+
+    #[test]
+    fn malformed_chunk_on_a_sinks_entry_is_rejected_at_load_naming_the_entry() {
+        // Two entries of the same connector type share the dotted path
+        // `sink.memory.…`, so the error must be re-anchored on the map key —
+        // and an entry must fail at load even if no binary ever installs it.
+        let yaml = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  hot: { memory: {} }
+  cold:
+    memory:
+      chunk: { encode_policy: retry }
+"#;
+        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
+        assert!(err.contains("sinks.cold"), "{err}");
+        let yaml = r#"
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  cold:
+    memory:
+      chunk: { target_bytes: 0B }
+"#;
+        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
+        assert!(err.contains("sinks.cold"), "{err}");
+        assert!(err.contains("chunk.target_bytes"), "{err}");
     }
 
     #[test]

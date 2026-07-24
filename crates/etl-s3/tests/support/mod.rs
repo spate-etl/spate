@@ -9,7 +9,7 @@ use etl_coordination::store::memory::MemoryStore;
 use etl_coordination::{CoordinationConfig, StoreCoordinator};
 use etl_core::config::PipelineConfig;
 use etl_core::framing::RecordFramer;
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, RuntimeOptions, ShutdownHandle};
 use etl_core::sink::KeyHashRouter;
 use etl_s3::S3Source;
@@ -207,11 +207,12 @@ pub(crate) fn launch_customized(
         .sink(sink)
         .expect("sink installs")
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

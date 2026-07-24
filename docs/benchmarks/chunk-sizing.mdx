@@ -201,7 +201,7 @@ falls from most of the per-record budget to about 2%.
 
 **So the seal size is not a production lever.** Its apparent effect is queued
 bytes wearing a disguise, and the residue that is genuinely seal frequency is
-only visible on a rig that does no work. Leave `ChunkConfig::target_bytes` at
+only visible on a rig that does no work. Leave `chunk.target_bytes` at
 64 KiB; if you need more buffer, `queue_capacity` buys it without the cache
 penalty that 4–8 MiB chunks carry.
 

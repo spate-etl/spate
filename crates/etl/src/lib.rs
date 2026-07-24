@@ -71,10 +71,13 @@
 //! let runtime = Pipeline::from_config(config)?
 //!     .sink(sink)?
 //!     .chains(|ctx| {
+//!         // The sink's YAML `chunk:` block (or the default), bound before
+//!         // `with_metrics` moves `ctx.pipeline`.
+//!         let chunk_cfg = ctx.chunk();
 //!         chain_owned::<Vec<u8>, _>(BytesPassthrough)
 //!             .with_metrics(ctx.pipeline, "main")
 //!             .filter(|payload: &Vec<u8>| !payload.is_empty())
-//!             .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(),
+//!             .sink(TestEncoder, KeyHashRouter, chunk_cfg,
 //!                   ctx.queues, ctx.budget)
 //!             .build()
 //!     })

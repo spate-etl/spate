@@ -8,7 +8,7 @@
 
 use etl_core::config::PipelineConfig;
 use etl_core::metrics::{Exporter, MetricsSettings, install};
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, RuntimeOptions};
 use etl_core::record::PartitionId;
 use etl_core::sink::KeyHashRouter;
@@ -36,12 +36,13 @@ fn source_and_sink_receive_role_scoped_meters() {
         .sink(sink)
         .expect("sink")
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics(ctx.pipeline, "main")
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

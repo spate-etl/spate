@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chains(move |ctx| {
             let mut split = chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics(ctx.pipeline.clone(), "main")
-                .split(ChunkConfig::default(), ErrorPolicy::Skip);
+                .split(ErrorPolicy::Skip);
             let eu =
                 split.add::<Owned<Vec<u8>>, _, _>(eu_enc.clone(), KeyHashRouter, ctx.sink("eu"));
             let us =

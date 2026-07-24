@@ -38,10 +38,12 @@ Declare each destination with `add`, which returns a `Copy`, typed handle, then
 // Two destinations with genuinely different columns.
 let mut split = chain::<SampleFam, _>(deserializer.clone())
     .with_metrics(ctx.pipeline.clone(), "main")
-    .split(ChunkConfig::default(), ErrorPolicy::Skip);
+    .split(ErrorPolicy::Skip);
 
-// `ctx.sink("<name>")` resolves the sink installed with that name; `add`
-// returns a typed handle. Declaration order fixes the handle indices.
+// `ctx.sink("<name>")` resolves the sink installed with that name — its queues
+// **and** its own resolved chunking (from that sink's `chunk:` block, so each
+// branch tunes independently). `add` returns a typed handle; declaration order
+// fixes the handle indices.
 let gauge = split.add::<GaugeFam, _, _>(gauge_enc.clone(), gauge_router.clone(), ctx.sink("gauge"));
 let text  = split.add::<TextFam,  _, _>(text_enc.clone(),  text_router.clone(),  ctx.sink("text"));
 

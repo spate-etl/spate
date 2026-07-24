@@ -20,7 +20,7 @@
 use etl_core::config::PipelineConfig;
 use etl_core::deser::Owned;
 use etl_core::error::ErrorPolicy;
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, PipelineRuntime, RuntimeOptions};
 use etl_core::record::PartitionId;
 use etl_core::sink::KeyHashRouter;
@@ -128,7 +128,7 @@ fn build_pipeline(
             let mut split = chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics(ctx.pipeline.clone(), "main")
                 // The default 64 KiB chunk target — unchanged on purpose.
-                .split(ChunkConfig::default(), ErrorPolicy::Skip);
+                .split(ErrorPolicy::Skip);
             let hot =
                 split.add::<Owned<Vec<u8>>, _, _>(TestEncoder, KeyHashRouter, ctx.sink("hot"));
             let rare =

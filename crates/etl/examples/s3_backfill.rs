@@ -82,6 +82,7 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let report = pipeline
         .sink(sink)?
         .chains(move |ctx| {
+            let chunk_cfg = ctx.chunk();
             // The S3 lane already frames NDJSON (one line = one payload), so
             // `for_source_framing` derives `single` from the source and would
             // reject a `framing:` that double-frames it.
@@ -97,7 +98,7 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

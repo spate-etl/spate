@@ -43,21 +43,39 @@ use std::time::Duration;
 /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink). Bundling the name in
 /// keeps [`SplitBuilder::add`](super::ChainBuilder) from repeating it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SinkCtx {
     pub(crate) name: String,
     pub(crate) queues: ShardQueues,
     pub(crate) budget: Arc<InflightBudget>,
+    /// This branch's resolved terminal-stage chunking (its per-sink YAML
+    /// `chunk:` block, `SinkOptions::with_chunk`, or the default), applied by
+    /// [`SplitBuilder::add`](super::ChainBuilder).
+    pub(crate) chunk: ChunkConfig,
 }
 
 impl SinkCtx {
-    /// Bundle a named sink's queues and the shared in-flight budget.
+    /// Bundle a named sink's queues and the shared in-flight budget. Chunking
+    /// starts at [`ChunkConfig::default`]; override it with
+    /// [`with_chunk`](Self::with_chunk). (Builder pipelines never call this —
+    /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink) hands out a fully
+    /// resolved `SinkCtx`.)
     #[must_use]
     pub fn new(name: String, queues: ShardQueues, budget: Arc<InflightBudget>) -> Self {
         SinkCtx {
             name,
             queues,
             budget,
+            chunk: ChunkConfig::default(),
         }
+    }
+
+    /// Set this branch's terminal-stage chunking — the manual-assembly
+    /// counterpart to the per-sink YAML `chunk:` block.
+    #[must_use]
+    pub fn with_chunk(mut self, chunk: ChunkConfig) -> Self {
+        self.chunk = chunk;
+        self
     }
 }
 

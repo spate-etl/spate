@@ -28,7 +28,7 @@ the blocking `run` on a thread. From `crates/etl-test/tests/bundle.rs`:
 
 ```rust
 use etl_core::config::PipelineConfig;
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, RuntimeOptions};
 use etl_core::record::PartitionId;
 use etl_core::sink::KeyHashRouter;
@@ -48,9 +48,10 @@ let (sink, script) = capture_sink(1, 1);
 let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?
     .sink(sink)?
     .chains(|ctx| {
+        let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
         chain_owned::<Vec<u8>, _>(BytesPassthrough)
             .with_metrics(ctx.pipeline, "main")
-            .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(),
+            .sink(TestEncoder, KeyHashRouter, chunk_cfg,
                   ctx.queues, ctx.budget)
             .build()
     })

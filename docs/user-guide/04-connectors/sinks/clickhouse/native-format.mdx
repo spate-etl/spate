@@ -60,10 +60,11 @@ The type parameter is the record *family*, not the row type: an owned row
 struct is wrapped as `Owned<MyRow>` (a zero-copy borrowed row uses its own
 family type). `MyRow` is otherwise the same `serde::Serialize` struct
 RowBinary uses — its field order must match the configured `columns`. Because
-Native blocks are larger
-per unit of work, set a larger terminal-stage chunk target
-(`ChunkConfig::target_bytes`, e.g. 512 KiB) so each block is substantial; the
-sink still merges blocks up to `batch.max_bytes` per insert.
+Native blocks are larger per unit of work, set a larger terminal-stage chunk
+target (the sink's YAML
+[`chunk.target_bytes`](../../../07-reference/configuration.mdx#chunk), e.g.
+512 KiB) so each block is substantial; the sink still merges blocks up to
+`batch.max_bytes` per insert.
 
 ## Supported column types
 

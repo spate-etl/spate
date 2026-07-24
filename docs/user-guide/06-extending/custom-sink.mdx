@@ -161,6 +161,12 @@ never appear in framework APIs (the dependency policy in
 cannot name — like ClickHouse's `validate_schema` producing the encoder's
 row schema — stay concrete pre-steps in your factory, before `into_parts`.
 
+If your connector deserializes a YAML body, don't name a field `chunk`: that
+key is **framework-reserved** inside every component body (it carries the
+chain terminal's chunking) and is peeled out before your config ever sees it —
+a `chunk` field of your own would never receive a value. See
+[the configuration reference](../07-reference/configuration.mdx#chunk).
+
 ## Testing
 
 `etl-test` drives chains end to end against capturing sinks, and the

@@ -514,15 +514,17 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
     /// Terminate the chain into a **split sink**: route each record to exactly
     /// one of several typed sink branches (each its own table/schema/encoder),
     /// declared with [`SplitBuilder::add`] and dispatched by the closure passed
-    /// to [`SplitBuilder::route`]. `cfg` is the per-branch chunking; `unmatched`
-    /// is the policy for a record that reaches no branch — [`ErrorPolicy::Fail`]
-    /// (the operator default) stops the pipeline, [`ErrorPolicy::Skip`] drops it
-    /// and counts `etl_operator_records_dropped_total{reason="unrouted"}`.
+    /// to [`SplitBuilder::route`]. Each branch's chunking comes from its own
+    /// [`SinkCtx`](crate::ops::SinkCtx) (resolved from that sink's per-name YAML
+    /// `chunk:` block, or `SinkOptions::with_chunk`, or the default), so a split
+    /// tunes each destination independently. `unmatched` is the policy for a
+    /// record that reaches no branch — [`ErrorPolicy::Fail`] (the operator
+    /// default) stops the pipeline, [`ErrorPolicy::Skip`] drops it and counts
+    /// `etl_operator_records_dropped_total{reason="unrouted"}`.
     #[must_use]
-    pub fn split(self, cfg: ChunkConfig, unmatched: ErrorPolicy) -> SplitBuilder<DF, CurF, D, P> {
+    pub fn split(self, unmatched: ErrorPolicy) -> SplitBuilder<DF, CurF, D, P> {
         SplitBuilder {
             builder: self,
-            cfg,
             unmatched,
             branches: Vec::new(),
             next_idx: 0,
@@ -717,7 +719,6 @@ where
 /// takes the closure that dispatches to them.
 pub struct SplitBuilder<DF: RecFamily, CurF: RecFamily, D, P> {
     builder: ChainBuilder<DF, CurF, D, P>,
-    cfg: ChunkConfig,
     unmatched: ErrorPolicy,
     branches: Vec<Box<dyn ErasedBranch>>,
     next_idx: usize,
@@ -764,7 +765,7 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
             router,
             sink.queues,
             sink.budget,
-            self.cfg,
+            sink.chunk,
             meter,
             component,
         );

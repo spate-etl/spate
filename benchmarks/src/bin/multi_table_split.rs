@@ -400,7 +400,7 @@ fn run_one() {
             let mut split = chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics("mts", "main")
                 .map(move |p: Vec<u8>| to_row(p, &lut_map))
-                .split(ChunkConfig::default(), ErrorPolicy::Fail);
+                .split(ErrorPolicy::Fail);
             let handles: Vec<_> = (0..types as usize)
                 .map(|k| {
                     let enc = NativeEncoder::<Owned<BenchRow>>::new(Arc::clone(&schemas[k]));

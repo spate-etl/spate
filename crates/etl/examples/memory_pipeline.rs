@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = pipeline
         .sink(sink)?
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
                 .with_metrics(ctx.pipeline, "main")
                 .filter(|word: &Vec<u8>| !word.is_empty())
@@ -74,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

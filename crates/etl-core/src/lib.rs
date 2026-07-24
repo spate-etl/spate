@@ -23,6 +23,9 @@ pub use bytes;
 
 pub mod backpressure;
 pub mod checkpoint;
+// Resolves the reserved `chunk:` block into `ops::ChunkConfig`, so it follows
+// `ops` out of loom model builds (nothing loom-modelled reads config).
+#[cfg(not(loom))]
 pub mod config;
 // References `source` types, so it shares the source module's loom gate.
 #[cfg(not(loom))]

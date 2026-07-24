@@ -154,6 +154,44 @@ Connectors add their own keys on top of these — e.g. ClickHouse's
 `timeouts.{send,end}` (its HTTP client, **not** the shared pool) and Kafka's
 top-level `delivery_timeout`. Those live on the respective connector pages.
 
+## Chunk handoff (`chunk`) {#chunk}
+
+`chunk:` tunes the chain terminal's per-shard chunking — the granularity at
+which encoded rows are sealed and handed to the shard workers. Like the sink
+pool above it is **framework-owned and identical across sinks**, and it sits
+inside the sink body (`sink.<type>.chunk`, or per branch as
+`sinks.<name>.chunk`), but it configures the *chain terminal*, not the sink
+worker, so the framework reads it directly — connectors neither declare nor see
+it. It is purely performance-shaping and never affects delivery correctness:
+a below-target chunk is sealed on every `checkpoint.interval` tick regardless,
+so the most a larger target can do is defer a commit by roughly one tick — it
+can never hold offsets back indefinitely. See
+[Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
+
+```yaml
+sink:
+  clickhouse:
+    chunk: { target_bytes: 512KiB, encode_policy: skip }
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `target_bytes` | bytes | `64KiB` | Seal and send a chunk once its frame reaches this size. Workers merge chunks into full batches, so this does **not** bound insert sizes — it governs handoff rate. Must be `> 0` (rejected at load, naming `chunk.target_bytes`). |
+| `encode_policy` | `skip` \| `fail` | `skip` | Policy for record-level encoder failures ([Error handling](../02-concepts/04-error-handling.mdx)). `skip` drops the record (metrics-counted); `fail` stops the pipeline. A fatal encoder error stops the pipeline regardless. |
+
+Each `sinks.<name>.chunk` is independent, so a split tunes every destination
+separately. The knob can instead be set in code via `SinkOptions::with_chunk`
+(the install-time counterpart to the [code-level knobs](#code-level-knobs-not-yaml)
+below); setting **both** the YAML `chunk:` block and `with_chunk` on one sink is
+a load error — it is declared in exactly one place.
+
+:::note
+`chunk` is a **framework-reserved key** inside any sink body: the framework
+strips it before the connector sees the body. A custom connector must not define
+its own `chunk` field (it would be shadowed on a sink section, and the reserved
+key is rejected on a `source`/`deserializer` section).
+:::
+
 ## `source:`, `deserializer:`, `sink:`
 
 Each is a single-key mapping — the key selects the component, the body belongs
@@ -192,7 +230,7 @@ and [multi-sink split](../02-concepts/06-multi-sink.mdx);
 [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) shows the
 connector end-to-end.
 
-## Code-level knobs (not YAML)
+## Code-level knobs (not YAML) {#code-level-knobs-not-yaml}
 
 These knobs live in the assembly code rather than the file, because they
 are properties of the program you write, not the deployment.
@@ -200,8 +238,11 @@ are properties of the program you write, not the deployment.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `SinkOptions::queue_capacity` | integer | `8` | Bounded chunk-queue depth between pipeline threads and each shard worker (`Pipeline::sink_with`). Must be non-zero. |
-| `ChunkConfig::target_bytes` | integer | `65536` (64 KiB) | Chunk seal size at the chain's terminal stage. Workers merge chunks into full batches, so this does not bound insert sizes. A below-target chunk is sealed anyway on every `checkpoint.interval` tick (and on idle), so while the pipeline is unblocked its buffer holds acknowledgements for at most ~one interval; the acks themselves resolve through the sink's batch `linger` and write. |
-| `ChunkConfig::encode_policy` | `Skip` \| `Fail` | `Skip` | Policy for record-level encoder failures ([Error handling](../02-concepts/04-error-handling.mdx)). |
+
+The chain-terminal chunking (`target_bytes`, `encode_policy`) moved to the
+per-sink YAML [`chunk:` block](#chunk); `SinkOptions::with_chunk` is its
+install-time equivalent for pipelines assembled in code (mutually exclusive with
+the YAML block on the same sink).
 
 **Coordination is assembly wiring, not source YAML.** A coordinated
 source takes a fully built coordinator through its `with_coordinator`

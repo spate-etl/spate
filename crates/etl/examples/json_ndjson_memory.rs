@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = pipeline
         .sink(sink)?
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
                 framing: JsonFraming::Ndjson,
                 on_error: OnError::Skip,
@@ -67,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

@@ -123,6 +123,12 @@ dotted path from the file root (`source.kafka.brokers: missing field ...`).
 This is what keeps connectors fully decoupled from the framework schema; the
 single-key shape is what lets every typed struct keep `deny_unknown_fields`.
 
+One key inside the body is the exception: **`chunk` is framework-reserved**
+([reference](../07-reference/configuration.mdx#chunk)). The framework peels it
+out before the connector sees the body, so a connector schema must not declare
+its own `chunk` field — on a sink it would never receive a value, and on a
+`source`/`deserializer` the key is rejected at load.
+
 Each connector's body schema is documented on its page:
 [Kafka](../04-connectors/sources/kafka/README.mdx) ·
 [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx) ·

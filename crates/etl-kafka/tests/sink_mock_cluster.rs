@@ -19,7 +19,7 @@ use etl_core::checkpoint::AckRef;
 use etl_core::config::PipelineConfig;
 use etl_core::deser::{BytesPassthrough, Owned};
 use etl_core::error::{ErrorClass, SinkError};
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, RuntimeOptions};
 use etl_core::record::{PartitionId, Record, RecordMeta};
 use etl_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter};
@@ -229,12 +229,13 @@ fn spawn_pipeline(
             .sink(sink)
             .expect("sink")
             .chains(move |ctx| {
+                let chunk_cfg = ctx.chunk();
                 chain_owned::<Vec<u8>, _>(BytesPassthrough)
                     .with_metrics(ctx.pipeline, "main")
                     .sink(
                         encoder.clone(),
                         KeyHashRouter,
-                        ChunkConfig::default(),
+                        chunk_cfg,
                         ctx.queues,
                         ctx.budget,
                     )

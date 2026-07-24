@@ -88,6 +88,10 @@ carries that thread's plumbing (queues, byte budget, pipeline name):
 let runtime = pipeline
     .sink(sink)?
     .chains(|ctx| {
+        // Resolve the sink's chunking up front — the per-sink YAML `chunk:`
+        // block, or the 64 KiB default. Bind it before `with_metrics` moves
+        // `ctx.pipeline`, so the later `ctx.chunk()` doesn't borrow a moved ctx.
+        let chunk_cfg = ctx.chunk();
         chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
             .with_metrics(ctx.pipeline, "main")
             .filter(|word: &Vec<u8>| !word.is_empty())
@@ -95,7 +99,7 @@ let runtime = pipeline
             .sink(
                 TestEncoder,
                 KeyHashRouter,
-                ChunkConfig::default(),
+                chunk_cfg,
                 ctx.queues,
                 ctx.budget,
             )

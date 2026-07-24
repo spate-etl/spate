@@ -72,7 +72,10 @@ let report = pipeline
     .chains(move |ctx| {
         let mut split = chain::<SampleFam, _>(deserializer.clone())
             .with_metrics(ctx.pipeline.clone(), "main")
-            .split(ChunkConfig::default(), ErrorPolicy::Skip);
+            // Each branch's chunking comes from its own `ctx.sink(name)` below
+            // (that sink's `chunk:` block); the split itself takes only the
+            // unmatched-record policy.
+            .split(ErrorPolicy::Skip);
         let gauge = split.add::<GaugeFam, _, _>(gauge_enc.clone(), gauge_router.clone(), ctx.sink("gauge"));
         let text  = split.add::<TextFam,  _, _>(text_enc.clone(),  text_router.clone(),  ctx.sink("text"));
         split.route(move |s: Sample<'_>, out| match s.kind {

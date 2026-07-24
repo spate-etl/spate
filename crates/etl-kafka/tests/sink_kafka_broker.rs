@@ -9,7 +9,7 @@
 use etl_core::config::PipelineConfig;
 use etl_core::deser::{BytesPassthrough, Owned};
 use etl_core::error::ErrorPolicy;
-use etl_core::ops::{ChunkConfig, chain_owned};
+use etl_core::ops::chain_owned;
 use etl_core::pipeline::{Pipeline, RuntimeOptions};
 use etl_core::sink::KeyHashRouter;
 use etl_kafka::sink::KafkaSinkConfig;
@@ -139,7 +139,7 @@ fn kafka_to_kafka_split_round_trip() {
         .chains(move |ctx| {
             let mut split = chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics(ctx.pipeline.clone(), "main")
-                .split(ChunkConfig::default(), ErrorPolicy::Skip);
+                .split(ErrorPolicy::Skip);
             let a = split.add::<Owned<Vec<u8>>, _, _>(enc_a.clone(), KeyHashRouter, ctx.sink("a"));
             let b = split.add::<Owned<Vec<u8>>, _, _>(enc_b.clone(), KeyHashRouter, ctx.sink("b"));
             split

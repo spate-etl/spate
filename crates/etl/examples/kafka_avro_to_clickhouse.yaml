@@ -63,3 +63,12 @@ sink:
       linger: 1s
     inflight:
       max_per_shard: 2
+    # Chain-terminal handoff granularity — purely performance-shaping; it never
+    # affects delivery correctness (a partial chunk is sealed on every commit
+    # tick, so at most it defers a commit by ~one checkpoint interval).
+    # Framework-owned; the connector never sees it.
+    # Defaults to 64KiB / skip; raise target_bytes toward 512KiB for larger
+    # Native blocks if the chain outruns the shard workers. See the tuning guide.
+    # chunk:
+    #   target_bytes: 64KiB
+    #   encode_policy: skip

@@ -18,9 +18,10 @@
 //! let report = pipeline
 //!     .sink(sink)?
 //!     .chains(move |ctx| {
+//!         let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
 //!         chain_owned::<Row, _>(deserializer.clone())
 //!             .with_metrics(ctx.pipeline, "main")
-//!             .sink(encoder.clone(), KeyHashRouter, ChunkConfig::default(),
+//!             .sink(encoder.clone(), KeyHashRouter, chunk_cfg,
 //!                   ctx.queues, ctx.budget)
 //!             .build()
 //!     })
@@ -37,7 +38,7 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::new`](crate::metrics::SinkShardMetrics::new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::new`](crate::metrics::SinkShardMetrics::new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`] — the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!
@@ -62,7 +63,7 @@ use crate::framing::FramingContract;
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
 };
-use crate::ops::{RunnableChain, SinkCtx};
+use crate::ops::{ChunkConfig, RunnableChain, SinkCtx};
 use crate::pipeline::ExitReport;
 use crate::sink::{
     DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn,
@@ -160,11 +161,17 @@ pub struct ChainCtx {
     /// coordinating the source's framing with the deserializer's `framing:`
     /// by hand.
     pub source_framing: FramingContract,
-    /// This thread's clone of every installed sink's queues, keyed by the
-    /// name passed to [`Pipeline::add_sink`]. Resolved through
-    /// [`sink`](Self::sink); private so the drop-ordering contract (the
+    /// The **first** installed sink's resolved terminal-stage chunking — the
+    /// back-compat handle for single-sink pipelines, mirroring [`queues`](Self::queues).
+    /// Pass it to the chain's [`.sink(...)`](crate::ops::ChainBuilder::sink)
+    /// terminal via [`chunk`](Self::chunk); split pipelines resolve each
+    /// branch's chunk by name through [`sink`](Self::sink) instead.
+    chunk: ChunkConfig,
+    /// This thread's clone of every installed sink's queues and resolved
+    /// chunking, keyed by the name passed to [`Pipeline::add_sink`]. Resolved
+    /// through [`sink`](Self::sink); private so the drop-ordering contract (the
     /// clones die with the driver) stays enforced by construction.
-    named: Vec<(String, ShardQueues)>,
+    named: Vec<(String, ShardQueues, ChunkConfig)>,
 }
 
 impl ChainCtx {
@@ -180,17 +187,33 @@ impl ChainCtx {
     /// before any data flows), surfaced the same way a bad sink topology is.
     #[must_use]
     pub fn sink(&self, name: &str) -> SinkCtx {
-        let queues = self
+        let (_, queues, chunk) = self
             .named
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _, _)| n == name)
             .unwrap_or_else(|| {
-                let known: Vec<&str> = self.named.iter().map(|(n, _)| n.as_str()).collect();
+                let known: Vec<&str> = self.named.iter().map(|(n, _, _)| n.as_str()).collect();
                 panic!("ChainCtx::sink: no sink named {name:?} (installed sinks: {known:?})")
-            })
-            .1
-            .clone();
-        SinkCtx::new(name.to_string(), queues, Arc::clone(&self.budget))
+            });
+        SinkCtx::new(name.to_string(), queues.clone(), Arc::clone(&self.budget)).with_chunk(*chunk)
+    }
+
+    /// The **first** installed sink's resolved terminal-stage chunking — the
+    /// single-sink counterpart to [`queues`](Self::queues), fed straight to the
+    /// chain's [`.sink(...)`](crate::ops::ChainBuilder::sink) terminal:
+    ///
+    /// ```ignore
+    /// let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
+    /// // ...
+    /// .sink(encoder, KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
+    /// ```
+    ///
+    /// It resolves the per-sink YAML `chunk:` block (or `SinkOptions::with_chunk`,
+    /// or the 64 KiB default) at assembly time. Split pipelines take each
+    /// branch's chunk from [`sink`](Self::sink) instead.
+    #[must_use]
+    pub fn chunk(&self) -> ChunkConfig {
+        self.chunk
     }
 
     /// A [`Meter`] for a pipeline author's own metrics, pre-labelled with the
@@ -230,6 +253,14 @@ pub struct SinkOptions {
     /// Per-shard chunk queue capacity, in chunks. The default suits most
     /// pipelines; see `docs/DESIGN.md` § Backpressure for the sizing rule.
     pub queue_capacity: usize,
+    /// Programmatic override for this sink's terminal-stage chunking. `None`
+    /// (the default) defers to the per-sink YAML `chunk:` block, or to
+    /// [`ChunkConfig::default`] if that is absent too. Setting it **and** a
+    /// YAML `chunk:` block on the same sink is a decl-once
+    /// [`ConfigError`](crate::config::ConfigError) at install — the knob is
+    /// declared in exactly one place. The resolved value reaches the chain
+    /// terminal via [`ChainCtx::chunk`] / [`ChainCtx::sink`].
+    pub chunk: Option<ChunkConfig>,
 }
 
 impl SinkOptions {
@@ -240,11 +271,23 @@ impl SinkOptions {
         self.queue_capacity = capacity;
         self
     }
+
+    /// Set this sink's chunking programmatically, instead of via the YAML
+    /// `chunk:` block. Providing both on the same sink is a load error — see
+    /// [`chunk`](Self::chunk).
+    #[must_use]
+    pub fn with_chunk(mut self, chunk: ChunkConfig) -> Self {
+        self.chunk = Some(chunk);
+        self
+    }
 }
 
 impl Default for SinkOptions {
     fn default() -> Self {
-        SinkOptions { queue_capacity: 8 }
+        SinkOptions {
+            queue_capacity: 8,
+            chunk: None,
+        }
     }
 }
 
@@ -252,6 +295,10 @@ struct SinkAssembly {
     queues: ShardQueues,
     drain: SinkDrainFn,
     probe: Option<SinkProbeFn>,
+    /// This sink's resolved terminal-stage chunking, threaded into every
+    /// per-thread [`ChainCtx`] (the default sink's becomes [`ChainCtx::chunk`];
+    /// named sinks reach it through [`ChainCtx::sink`]).
+    chunk: ChunkConfig,
 }
 
 type ChainFactoryFn = Box<dyn FnMut(ChainCtx) -> Box<dyn RunnableChain> + Send>;
@@ -316,6 +363,13 @@ impl Pipeline {
                 "pipeline.io_threads must be non-zero".into(),
             )));
         }
+        // The YAML loaders run the full `PipelineConfig::validate`; a
+        // programmatically built config deliberately skips it (minimal test
+        // fixtures). But `ComponentConfig::new` peels the reserved `chunk` key
+        // before the connector's `deny_unknown_fields` could reject it, so
+        // without this check a stray `chunk:` on a source/deserializer body
+        // would be silently swallowed here.
+        config.reject_stray_chunk().map_err(BuildError::Config)?;
         telemetry::init(LogFormat::Json, "info");
         let metrics = install_or_reuse(&metrics_settings(&config)).map_err(|e| match e {
             StartError::Metrics(m) => BuildError::Metrics(m),
@@ -441,6 +495,56 @@ impl Pipeline {
         if options.queue_capacity == 0 {
             return Err(BuildError::Sink("queue_capacity must be non-zero".into()));
         }
+        // Resolve the terminal-stage chunking BEFORE any I/O worker spawns, so
+        // a config error can't leak a running SinkPool. Decl-once: the per-sink
+        // YAML `chunk:` block and `SinkOptions::with_chunk` are mutually
+        // exclusive.
+        let yaml_chunk = match self.config.sink_config(&sink_name) {
+            // Prefix the sink name onto the error so a multi-sink pipeline
+            // says *which* sink is misconfigured (the dotted Component path
+            // alone is `sink.<type>.…`, identical for same-typed sinks).
+            Ok(cc) => cc.resolved_chunk().map_err(|e| {
+                BuildError::Config(match e {
+                    ConfigError::Validation(m) => {
+                        ConfigError::Validation(format!("sink {sink_name:?}: {m}"))
+                    }
+                    ConfigError::Component { context, message } => ConfigError::Component {
+                        context: format!("sink {sink_name:?}: {context}"),
+                        message,
+                    },
+                    other => other,
+                })
+            })?,
+            // No YAML section under this name — the sink is configured purely
+            // in code, which is legitimate (capture sinks in tests, named
+            // programmatic sinks beside a placeholder `sink:`). The one real
+            // hazard — a declared `chunk:` block that nothing ever installs —
+            // is warned about at `into_runtime`, where the installed-name set
+            // is complete.
+            Err(_) => None,
+        };
+        let chunk = match (yaml_chunk, options.chunk) {
+            (Some(_), Some(_)) => {
+                return Err(BuildError::Config(ConfigError::Validation(format!(
+                    "sink {sink_name:?}: set the chunk config in exactly one place — the \
+                     YAML `chunk:` block or `SinkOptions::with_chunk`, not both"
+                ))));
+            }
+            (Some(c), None) | (None, Some(c)) => c,
+            (None, None) => ChunkConfig::default(),
+        };
+        // The YAML path already checked `> 0` in `ChunkSection::resolve`; the
+        // programmatic `with_chunk` path skips that, so enforce parity here
+        // (naming the sink). No upper bound: the in-flight budget can be
+        // legitimately smaller than one chunk on a throttled config — that is
+        // just heavy backpressure, not a misconfiguration — so there is no
+        // budget-relative ceiling to enforce. `target_bytes` is a per-shard
+        // pre-allocation; sizing it is the operator's call (see the tuning docs).
+        if chunk.target_bytes == 0 {
+            return Err(BuildError::Config(ConfigError::Validation(format!(
+                "sink {sink_name:?}: chunk.target_bytes must be greater than zero"
+            ))));
+        }
         let parts = bundle.into_parts();
         let num_shards = parts.shard_endpoints.len();
         if num_shards == 0 {
@@ -524,6 +628,7 @@ impl Pipeline {
                     Box::pin(async move { pool.drain(deadline).await })
                 }),
                 probe: parts.probe,
+                chunk,
             },
         ));
         Ok(self)
@@ -578,13 +683,33 @@ impl Pipeline {
         let mut named = Vec::with_capacity(self.sinks.len());
         for (sink_name, assembly) in std::mem::take(&mut self.sinks) {
             intro_queues.push(assembly.queues.clone());
-            named.push((sink_name, assembly.queues));
+            named.push((sink_name, assembly.queues, assembly.chunk));
             drains.push(assembly.drain);
             if let Some(probe) = assembly.probe {
                 probes.push(probe);
             }
         }
+        // A declared sink section whose name nothing installed can carry a
+        // `chunk:` block that no install-time resolution will ever read — the
+        // one mismatch invisible to `add_sink_with`. (A *malformed* block is
+        // already rejected by `PipelineConfig::validate` on the YAML loaders.)
+        for config_name in self.config.sink_names() {
+            if !named.iter().any(|(n, _, _)| *n == config_name)
+                && self
+                    .config
+                    .sink_config(&config_name)
+                    .is_ok_and(crate::config::ComponentConfig::has_chunk)
+            {
+                tracing::warn!(
+                    sink = %config_name,
+                    "config declares a `chunk:` block for this sink, but no sink was \
+                     installed under that name — the block is ignored (name mismatch \
+                     between the config and add_sink)"
+                );
+            }
+        }
         let default_queues = named[0].1.clone();
+        let default_chunk = named[0].2;
         let budget = Arc::clone(&self.budget);
         let name = self.config.pipeline.name.clone();
         // Read the source's framing contract once, before it moves into the
@@ -599,6 +724,7 @@ impl Pipeline {
                 budget: Arc::clone(&budget),
                 pipeline: name.clone(),
                 source_framing,
+                chunk: default_chunk,
                 named: named.clone(),
             })
         };
@@ -679,6 +805,7 @@ fn combine_probes(probes: Vec<SinkProbeFn>) -> Option<SinkProbeFn> {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use crate::config::ComponentConfig;
     use crate::error::SinkError;
     use crate::pipeline::ExitState;
     use crate::pipeline::fakes::{
@@ -853,7 +980,7 @@ mod tests {
 
         let p = Pipeline::from_config(test_config(1)).expect("builder");
         assert!(matches!(
-            p.sink_with(null_sink(1), SinkOptions { queue_capacity: 0 })
+            p.sink_with(null_sink(1), SinkOptions::default().with_queue_capacity(0))
                 .err(),
             Some(BuildError::Sink(_))
         ));
@@ -929,6 +1056,197 @@ mod tests {
         let mut threads = seen_threads.lock().unwrap().clone();
         threads.sort_unstable();
         assert_eq!(threads, vec![0, 1], "one ChainCtx per pipeline thread");
+    }
+
+    /// A `chunk:` body peeled onto a `ComponentConfig` — the shape the framework
+    /// resolves at install without the connector ever seeing the key.
+    fn chunk_body(yaml: &str) -> ComponentConfig {
+        ComponentConfig::new("fake", serde_yaml::from_str(yaml).expect("chunk yaml"))
+    }
+
+    #[test]
+    fn yaml_and_programmatic_chunk_on_one_sink_collide() {
+        // Decl-once: setting the YAML `chunk:` block AND `SinkOptions::with_chunk`
+        // on the same sink is a config error, not a silent override.
+        let mut config = test_config(1);
+        config.sink = Some(chunk_body("chunk: { target_bytes: 128KiB }"));
+        let err = Pipeline::from_config(config)
+            .expect("builder")
+            .sink_with(
+                null_sink(1),
+                SinkOptions::default().with_chunk(ChunkConfig::default()),
+            )
+            .err();
+        assert!(
+            matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if m.contains("exactly one place")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn programmatic_zero_target_bytes_is_rejected_at_install() {
+        let err = Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .sink_with(
+                null_sink(1),
+                SinkOptions::default().with_chunk(ChunkConfig {
+                    target_bytes: 0,
+                    encode_policy: crate::error::ErrorPolicy::Skip,
+                }),
+            )
+            .err();
+        assert!(
+            matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if m.contains("chunk.target_bytes")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn each_split_branch_resolves_its_own_chunk() {
+        let (source, shared, script) = FakeSource::new();
+        script
+            .lock()
+            .unwrap()
+            .push_back(Script::Assign(vec![LaneSpec {
+                id: LaneId(0),
+                partition: PartitionId(0),
+                batches: batches(&[0..1, 1..2]),
+            }]));
+
+        let mut config = test_config(1);
+        config.sink = None;
+        let mut sinks = std::collections::BTreeMap::new();
+        sinks.insert(
+            "a".to_string(),
+            chunk_body("chunk: { target_bytes: 128KiB }"),
+        );
+        sinks.insert(
+            "b".to_string(),
+            chunk_body("chunk: { target_bytes: 512KiB }"),
+        );
+        config.sinks = Some(sinks);
+
+        let captured: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let chain_shared = Arc::new(ChainShared::default());
+        let cs = Arc::clone(&chain_shared);
+        let log = Arc::clone(&shared);
+        let runtime = Pipeline::from_config(config)
+            .expect("builder")
+            .add_sink("a", null_sink(1))
+            .expect("sink a")
+            .add_sink("b", null_sink(1))
+            .expect("sink b")
+            .chains(move |ctx| {
+                cap.lock().unwrap().push((
+                    ctx.sink("a").chunk.target_bytes,
+                    ctx.sink("b").chunk.target_bytes,
+                ));
+                fake_chain(&cs, &log)
+            })
+            .runtime_options(test_options())
+            .into_runtime(source)
+            .expect("into_runtime");
+
+        let shutdown = runtime.shutdown_handle();
+        let join = std::thread::spawn(move || runtime.run());
+        wait_for("chain factory ran", Duration::from_secs(5), || {
+            !captured.lock().unwrap().is_empty()
+        });
+        shutdown.trigger();
+        let _ = join.join().unwrap();
+
+        assert_eq!(
+            captured.lock().unwrap()[0],
+            (128 * 1024, 512 * 1024),
+            "each branch resolves its own per-sink chunk"
+        );
+    }
+
+    /// Drive a capture of `ctx.chunk()` through a full assembly — shared by
+    /// the YAML-block and `with_chunk` propagation tests below.
+    fn captured_default_chunk(
+        build: impl FnOnce(Pipeline) -> Result<Pipeline, BuildError>,
+        config: PipelineConfig,
+    ) -> usize {
+        let (source, shared, script) = FakeSource::new();
+        script
+            .lock()
+            .unwrap()
+            .push_back(Script::Assign(vec![LaneSpec {
+                id: LaneId(0),
+                partition: PartitionId(0),
+                batches: batches(&[0..1, 1..2]),
+            }]));
+        let captured: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let chain_shared = Arc::new(ChainShared::default());
+        let cs = Arc::clone(&chain_shared);
+        let log = Arc::clone(&shared);
+        let runtime = build(Pipeline::from_config(config).expect("builder"))
+            .expect("sink install")
+            .chains(move |ctx| {
+                cap.lock().unwrap().push(ctx.chunk().target_bytes);
+                fake_chain(&cs, &log)
+            })
+            .runtime_options(test_options())
+            .into_runtime(source)
+            .expect("into_runtime");
+
+        let shutdown = runtime.shutdown_handle();
+        let join = std::thread::spawn(move || runtime.run());
+        wait_for("chain factory ran", Duration::from_secs(5), || {
+            !captured.lock().unwrap().is_empty()
+        });
+        shutdown.trigger();
+        let _ = join.join().unwrap();
+        let captured = captured.lock().unwrap();
+        captured[0]
+    }
+
+    #[test]
+    fn default_sink_yaml_chunk_reaches_ctx_chunk() {
+        // The headline single-sink path: `sink.<type>.chunk` must arrive at
+        // the chain factory via `ctx.chunk()`, not silently stay the default.
+        let mut config = test_config(1);
+        config.sink = Some(chunk_body("chunk: { target_bytes: 128KiB }"));
+        let bytes = captured_default_chunk(|p| p.sink(null_sink(1)), config);
+        assert_eq!(bytes, 128 * 1024, "YAML chunk block reaches ctx.chunk()");
+    }
+
+    #[test]
+    fn with_chunk_reaches_ctx_chunk() {
+        let bytes = captured_default_chunk(
+            |p| {
+                p.sink_with(
+                    null_sink(1),
+                    SinkOptions::default().with_chunk(ChunkConfig {
+                        target_bytes: 96 * 1024,
+                        encode_policy: crate::error::ErrorPolicy::Skip,
+                    }),
+                )
+            },
+            test_config(1),
+        );
+        assert_eq!(bytes, 96 * 1024, "with_chunk reaches ctx.chunk()");
+    }
+
+    #[test]
+    fn stray_chunk_on_a_source_body_is_rejected_by_from_config() {
+        // `ComponentConfig::new` peels the reserved key before the connector's
+        // `deny_unknown_fields` could reject it, so `from_config` must reject
+        // it itself — a stray `chunk:` on a source is an error, not a silent
+        // no-op, even on the programmatic path that skips `validate`.
+        let mut config = test_config(1);
+        config.source = ComponentConfig::new(
+            "fake",
+            serde_yaml::from_str("chunk: { target_bytes: 64KiB }").expect("yaml"),
+        );
+        let err = Pipeline::from_config(config).err();
+        assert!(
+            matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if m.contains("source")),
+            "{err:?}"
+        );
     }
 
     /// Regression: the runtime must hand the source the framework's

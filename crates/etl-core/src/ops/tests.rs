@@ -1012,7 +1012,7 @@ fn split_routes_records_to_their_typed_branch() {
     let (key_q, mut key_rx) = shard_queues(1, 64);
     let budget = Arc::new(InflightBudget::new());
 
-    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Skip);
+    let mut split = chain(LogDeser).split(ErrorPolicy::Skip);
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
@@ -1066,7 +1066,7 @@ fn split_unmatched_fail_stops_the_pipeline() {
     let (sub_q, _rx) = shard_queues(1, 64);
     let budget = Arc::new(InflightBudget::new());
 
-    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let mut split = chain(LogDeser).split(ErrorPolicy::Fail);
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
@@ -1100,7 +1100,7 @@ fn split_holds_watermark_until_every_branch_is_written() {
     let (key_q, mut key_rx) = shard_queues(1, 64);
     let budget = Arc::new(InflightBudget::new());
 
-    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let mut split = chain(LogDeser).split(ErrorPolicy::Fail);
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
@@ -1164,7 +1164,7 @@ fn split_one_branch_failure_fails_the_whole_batch() {
     let (key_q, mut key_rx) = shard_queues(1, 64);
     let budget = Arc::new(InflightBudget::new());
 
-    let mut split = chain(LogDeser).split(ChunkConfig::default(), ErrorPolicy::Fail);
+    let mut split = chain(LogDeser).split(ErrorPolicy::Fail);
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,

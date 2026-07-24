@@ -178,6 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = pipeline
         .sink(sink)?
         .chains(move |ctx| {
+            let chunk_cfg = ctx.chunk();
             chain::<Owned<SensorBatch>, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
                 .flat_map::<Owned<SensorEvent>, _>(|batch, out| {
@@ -196,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sink(
                     encoder.clone(),
                     router.clone(), // Clone, not Copy: one router per chain lane
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

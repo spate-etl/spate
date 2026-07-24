@@ -26,9 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = pipeline
         .sink(sink)?
         .chains(move |ctx| {
+            let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
             chain_owned::<Order, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
-                .sink(encoder.clone(), KeyHashRouter, ChunkConfig::default(),
+                .sink(encoder.clone(), KeyHashRouter, chunk_cfg,
                       ctx.queues, ctx.budget)
                 .build()
         })
@@ -106,8 +107,11 @@ per-shard chunk queues, registers per-shard metrics, spawns the sink workers
 (`SinkPool`) on the I/O runtime, and wires the drain hook and the readiness
 probe that drives `/readyz`.
 
-`sink_with` adds `SinkOptions`, currently one knob: `queue_capacity`, the
-per-shard chunk queue depth in chunks (default 8). It participates in the
+`sink_with` adds `SinkOptions`, two knobs: `queue_capacity`, the per-shard
+chunk queue depth in chunks (default 8), and `with_chunk`, the install-time
+equivalent of the per-sink YAML
+[`chunk:` block](../07-reference/configuration.mdx#chunk) (set the chunking in
+exactly one of the two places, not both). `queue_capacity` participates in the
 backpressure sizing rule — see
 [Backpressure](../02-concepts/03-backpressure.mdx) and
 [docs/DESIGN.md](../../DESIGN.md) § Backpressure before raising it.
@@ -140,12 +144,13 @@ Move the fields into the chain you build:
 
 ```rust
 .chains(move |ctx| {
+    let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
     chain_owned::<Order, _>(deserializer.clone())
         .with_metrics(ctx.pipeline, "main")
         .try_map(|order: Order| {
             if order.amount_cents >= 0 { Ok(order) } else { Err("negative amount") }
         }, ErrorPolicy::Skip)
-        .sink(encoder.clone(), KeyHashRouter, ChunkConfig::default(),
+        .sink(encoder.clone(), KeyHashRouter, chunk_cfg,
               ctx.queues, ctx.budget)
         .build()
 })

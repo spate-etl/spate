@@ -104,6 +104,12 @@ where
         meter: OpMeterSlot,
         component: Arc<str>,
     ) -> Self {
+        // Defense-in-depth on the cold per-thread build path. The friendly,
+        // field-named rejection now lives at load time (`chunk.target_bytes` in
+        // the YAML/`SinkOptions` paths — `config::chunk::ChunkSection::resolve`
+        // and `Pipeline::add_sink_with`); this only catches a direct
+        // construction bug, where a zero would break `BytesMut::with_capacity`
+        // and the seal check below.
         assert!(cfg.target_bytes > 0, "chunk target must be non-zero");
         let shards = (0..queues.num_shards())
             .map(|_| ShardBuf {

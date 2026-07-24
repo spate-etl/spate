@@ -149,7 +149,15 @@ before you do — prefetch depth is the largest throughput term there is for a
 backlogged consumer, and lowering the byte cap also shrinks `fetch.max.bytes`
 unless you set it explicitly.
 
-## Chunk sizing: `ChunkConfig::target_bytes`
+## Chunk sizing: `chunk.target_bytes` {#chunk-sizing}
+
+Set per sink in YAML — `sink.<type>.chunk.target_bytes`, or per branch as
+`sinks.<name>.chunk.target_bytes` ([configuration reference](../07-reference/configuration.mdx#chunk)).
+Because it never affects delivery correctness — a partial chunk is sealed on
+every commit tick, so at most it defers a commit by ~one interval — it is a
+deploy-time knob you can retune without a rebuild; `SinkOptions::with_chunk` is
+the code-level equivalent for pipelines assembled programmatically (one or the
+other, not both).
 
 The chain terminal encodes rows into a per-shard buffer and seals a **chunk**
 once it reaches `target_bytes` (default **64 KiB**), then hands it to that
@@ -177,10 +185,11 @@ tick is what bounds that hold to the checkpoint period.
 ## Queues: `SinkOptions::queue_capacity`
 
 The bounded chunk queue between pipeline threads and each shard worker,
-default **8** chunks (chunks target 64 KiB — `ChunkConfig::target_bytes`).
+default **8** chunks (chunks target 64 KiB — [`chunk.target_bytes`](#chunk-sizing)).
 This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
-[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)), not YAML.
-It exists to signal, not to buffer: a full queue is the per-shard
+[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)), not YAML —
+unlike `chunk`, it stays in code for now (deploy-time exposure is a possible
+follow-up). It exists to signal, not to buffer: a full queue is the per-shard
 backpressure trigger (`etl_queue_full_events_total`). Keep it small; the
 global byte budget, not the queue, is the intended smoothing buffer.
 
@@ -238,7 +247,7 @@ capacity-driven*, and told you to reach for chunk size when pauses were high
 while the sink was idle. Both were wrong. An iso-buffer re-run — same queued
 bytes, different seal size — put the pause count at zero for the small-chunk
 arm, so the trigger tracks **queued bytes**, and `queue_capacity` is the lever,
-not `ChunkConfig::target_bytes`.
+not `chunk.target_bytes`.
 :::
 
 ## Checkpointing: `checkpoint.*`

@@ -123,6 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = pipeline
         .sink(sink)?
         .chains(move |ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b'\n'))
                 .with_metrics(ctx.pipeline, "main")
                 .try_map(
@@ -132,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sink(
                     encoder.clone(),
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

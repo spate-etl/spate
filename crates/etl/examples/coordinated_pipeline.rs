@@ -331,12 +331,13 @@ fn run_instance(
     let report = pipeline
         .sink(sink.with_pool_config(pool_cfg))?
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
                 .with_metrics(ctx.pipeline, "main")
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

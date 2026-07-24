@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                 })
-                .split(ChunkConfig::default(), ErrorPolicy::Skip);
+                .split(ErrorPolicy::Skip);
 
             // Declare the branches; each `add` returns a Copy, typed handle.
             let gauge = split.add::<Owned<GaugeRow>, _, _>(

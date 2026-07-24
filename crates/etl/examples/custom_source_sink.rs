@@ -261,12 +261,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = pipeline
         .sink(sink)?
         .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(etl::deser::BytesPassthrough)
                 .with_metrics(ctx.pipeline, "main")
                 .sink(
                     JsonLinesEncoder,
                     KeyHashRouter,
-                    ChunkConfig::default(),
+                    chunk_cfg,
                     ctx.queues,
                     ctx.budget,
                 )

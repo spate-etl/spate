@@ -459,8 +459,8 @@ impl CoordinationError {
         }
     }
 
-    /// Map to the framework error taxonomy. [`Fenced`]
-    /// (CoordinationErrorKind::Fenced) maps to [`Fatal`](ErrorClass::Fatal)
+    /// Map to the framework error taxonomy.
+    /// [`Fenced`](CoordinationErrorKind::Fenced) maps to [`Fatal`](ErrorClass::Fatal)
     /// only as a backstop — callers are expected to intercept it before
     /// classification and handle the split loss instead of failing.
     #[must_use]

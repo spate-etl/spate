@@ -144,6 +144,23 @@ impl ComponentLabels {
         )
     }
 
+    pub(crate) fn histogram2(
+        &self,
+        name: &'static str,
+        k1: &'static str,
+        v1: impl Into<SharedString>,
+        k2: &'static str,
+        v2: impl Into<SharedString>,
+    ) -> Histogram {
+        histogram!(name,
+            names::L_PIPELINE => self.pipeline.clone(),
+            names::L_COMPONENT => self.component.clone(),
+            names::L_COMPONENT_TYPE => self.component_type.clone(),
+            k1 => v1.into(),
+            k2 => v2.into(),
+        )
+    }
+
     /// Build the metric key for a dynamic-arity family: the three standard
     /// labels first (so every family joins cleanly against the framework's
     /// series), then the caller's `extra` labels in order.

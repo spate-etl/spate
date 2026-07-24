@@ -35,6 +35,28 @@ impl FlushReason {
     }
 }
 
+/// Outcome of one sink write attempt (the `outcome` label on
+/// `etl_sink_write_duration_seconds`).
+///
+/// One family with a label rather than two names, which is the opposite of
+/// the call made for the two coordination latencies — the distinction is
+/// that those measure different things on different clocks with different
+/// denominators, so a shared family would assert a composition that does not
+/// exist. These two are the same measurement (time inside `write_batch`)
+/// over the same population (attempts), so the aggregate is well-defined; it
+/// is merely the wrong *diagnostic*, which a label documents and a split name
+/// would over-state. It also matches `outcome` on the three counter families
+/// that already use it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub(crate) enum AttemptOutcome {
+    /// The write was accepted.
+    Ok,
+    /// The write failed; its taxonomy class goes to
+    /// [`SinkShardMetrics::errors`].
+    Error,
+}
+
 /// Per-replica handles inside one shard.
 #[derive(Debug)]
 struct ReplicaMetrics {
@@ -55,6 +77,9 @@ pub struct SinkShardMetrics {
     flush_linger: Counter,
     flush_drain: Counter,
     flush_duration: Histogram,
+    write_ok: Histogram,
+    write_err: Histogram,
+    permit_wait: Histogram,
     retries: Counter,
     retry_backoff: OwnedGauge,
     /// Current backoff step, in seconds, of every batch of this shard that is
@@ -223,6 +248,25 @@ impl SinkShardMetrics {
                 names::L_SHARD,
                 shard.clone(),
             ),
+            write_ok: labels.histogram2(
+                names::SINK_WRITE_DURATION_SECONDS,
+                names::L_SHARD,
+                shard.clone(),
+                names::L_OUTCOME,
+                "ok",
+            ),
+            write_err: labels.histogram2(
+                names::SINK_WRITE_DURATION_SECONDS,
+                names::L_SHARD,
+                shard.clone(),
+                names::L_OUTCOME,
+                "error",
+            ),
+            permit_wait: labels.histogram1(
+                names::SINK_PERMIT_WAIT_DURATION_SECONDS,
+                names::L_SHARD,
+                shard.clone(),
+            ),
             retries: labels.counter1(names::SINK_RETRIES_TOTAL, names::L_SHARD, shard.clone()),
             retry_backoff,
             backoff_steps: Mutex::new(HashMap::new()),
@@ -281,6 +325,21 @@ impl SinkShardMetrics {
     }
 
     /// Record one durably acknowledged flush.
+    ///
+    /// `d` is the batch's **seal-to-settle** time, and contains everything
+    /// that stood between the two: the wait for an `inflight.max_per_shard`
+    /// permit, every failed attempt, every retry-backoff sleep and
+    /// all-replicas-quarantined probe wait, and the write that finally
+    /// succeeded. It is the right input for a commit-lag budget and the wrong
+    /// one for "how fast is the sink" — [`write_attempt`](Self::write_attempt)
+    /// answers that, and [`permit_waited`](Self::permit_waited) the queueing
+    /// share.
+    ///
+    /// Only settled batches are observed. An abandoned one never reaches
+    /// here — whether it was aborted at the drain deadline, rejected with a
+    /// fatal class, exhausted `retry.max_attempts`, or died with a panicking
+    /// write task. All four are counted by [`abandoned`](Self::abandoned),
+    /// and the last three happen in steady state with no drain in sight.
     #[inline]
     pub fn flushed(&self, reason: FlushReason, rows: u64, bytes: u64, d: Duration) {
         self.records.increment(rows);
@@ -294,6 +353,59 @@ impl SinkShardMetrics {
             FlushReason::Linger => self.flush_linger.increment(1),
             FlushReason::Drain => self.flush_drain.increment(1),
         }
+    }
+
+    /// Observe one write attempt: the time inside
+    /// [`ShardWriter::write_batch`](crate::sink::ShardWriter::write_batch) and
+    /// nothing else *of the framework's own*. Every attempt is observed,
+    /// retries included, so this is the sink system's round-trip distribution
+    /// — the signal `etl_sink_flush_duration_seconds` cannot give, because it
+    /// also carries the permit wait and the sleeps between attempts.
+    ///
+    /// "Nothing else" is bounded by the writer's own implementation: a
+    /// connector that sleeps *inside* `write_batch` puts that sleep in here.
+    /// The Kafka sink does exactly this when the producer queue is full, and
+    /// the wall-clock also charges whatever the sink's I/O runtime was busy
+    /// with at each await point. What is excluded is the framework's
+    /// scheduling around the call — the permit wait, the retry backoff, and
+    /// the all-replicas-quarantined probe wait.
+    ///
+    /// `outcome` splits the family: a batch rejected fatally in a millisecond
+    /// and one that times out after thirty seconds are both attempts, and
+    /// mixing them moves the distribution in opposite directions. The error's
+    /// taxonomy class stays on [`errors`](Self::errors).
+    ///
+    /// An attempt aborted at the drain deadline is never observed — the write
+    /// task is dropped mid-call, and a histogram observation is a point event
+    /// with nothing to strand (contrast
+    /// [`backing_off`](Self::backing_off), whose guard exists precisely to
+    /// survive that abort). Attempts that *completed* before the abort are
+    /// observed as usual, so an abandoned batch can leave `error`
+    /// observations here with no matching flush.
+    #[inline]
+    pub(crate) fn write_attempt(&self, outcome: AttemptOutcome, d: Duration) {
+        let h = match outcome {
+            AttemptOutcome::Ok => &self.write_ok,
+            AttemptOutcome::Error => &self.write_err,
+        };
+        h.record(d.as_secs_f64());
+    }
+
+    /// Observe how long a sealed batch waited for one of its shard's
+    /// `inflight.max_per_shard` slots before its first write attempt — the
+    /// queueing share of a flush, and the reading that tells a healthy-but-slow
+    /// dashboard apart from a saturated one.
+    ///
+    /// Observed for every sealed batch that starts a write, including the
+    /// healthy case where the permit is free and the observation is ~0: a
+    /// family that appeared only under contention would read as absent
+    /// precisely when an operator wants to confirm there is none. A batch the
+    /// drain deadline drops before it ever gets a permit is not observed
+    /// (there is no wait that ended), and is counted by
+    /// [`abandoned`](Self::abandoned).
+    #[inline]
+    pub(crate) fn permit_waited(&self, d: Duration) {
+        self.permit_wait.record(d.as_secs_f64());
     }
 
     /// Count flush attempts beyond the first.

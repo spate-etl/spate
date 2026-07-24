@@ -117,8 +117,29 @@ pub const SINK_BATCH_ROWS: &str = "etl_sink_batch_rows";
 pub const SINK_BATCH_BYTES: &str = "etl_sink_batch_bytes";
 /// Flushes by trigger, by [`L_SHARD`] and [`L_REASON`].
 pub const SINK_FLUSHES_TOTAL: &str = "etl_sink_flushes_total";
-/// Write round-trip per flush including retries, by [`L_SHARD`].
+/// Seal-to-settle time of one durably written batch, by [`L_SHARD`]: the
+/// in-flight permit wait, every attempt, every backoff sleep and probe wait,
+/// and the write that finally succeeded. The commit-lag input, **not** a
+/// measure of how fast the sink is — that is
+/// [`SINK_WRITE_DURATION_SECONDS`], and the queueing component is
+/// [`SINK_PERMIT_WAIT_DURATION_SECONDS`]. Only settled batches are observed;
+/// an abandoned one — at the drain deadline or, with no drain in sight, on a
+/// fatal class, exhausted attempts or a panicking write task — is counted by
+/// [`SINK_ABANDONED_BATCHES_TOTAL`].
 pub const SINK_FLUSH_DURATION_SECONDS: &str = "etl_sink_flush_duration_seconds";
+/// One write attempt, by [`L_SHARD`] and [`L_OUTCOME`] (`ok`, `error`) — the
+/// sink system's round-trip, with the framework's own scheduling around the
+/// call (the permit wait, the retry backoff, the probe wait) left out.
+/// A connector that sleeps *inside* its write puts that sleep in here.
+/// Labelled by outcome because a fast fatal reject and a slow timeout are
+/// both attempts; the error *class* stays on [`SINK_ERRORS_TOTAL`].
+pub const SINK_WRITE_DURATION_SECONDS: &str = "etl_sink_write_duration_seconds";
+/// Time a sealed batch waited for one of its shard's `inflight.max_per_shard`
+/// slots before its first write attempt, by [`L_SHARD`] — the queueing
+/// component of [`SINK_FLUSH_DURATION_SECONDS`]. Observed for every sealed
+/// batch that starts a write, the healthy near-zero case included; a batch
+/// the drain deadline drops before it ever gets a permit is not.
+pub const SINK_PERMIT_WAIT_DURATION_SECONDS: &str = "etl_sink_permit_wait_duration_seconds";
 /// Flush attempts beyond the first, by [`L_SHARD`].
 pub const SINK_RETRIES_TOTAL: &str = "etl_sink_retries_total";
 /// Current retry backoff step of the shard's longest-sleeping in-flight
@@ -307,6 +328,8 @@ pub const HISTOGRAMS: &[&str] = &[
     SINK_BATCH_ROWS,
     SINK_BATCH_BYTES,
     SINK_FLUSH_DURATION_SECONDS,
+    SINK_WRITE_DURATION_SECONDS,
+    SINK_PERMIT_WAIT_DURATION_SECONDS,
     CHECKPOINT_COMMIT_DURATION_SECONDS,
     COORDINATION_WRITE_DURATION_SECONDS,
     COORDINATION_REPLAN_DURATION_SECONDS,

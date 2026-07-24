@@ -16,7 +16,7 @@ use super::{EncodedChunk, SealedBatch, ShardWriter};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::error::{ErrorClass, SinkError};
-use crate::metrics::{FlushReason, SinkShardMetrics};
+use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -47,6 +47,13 @@ struct Pending {
     rows: u64,
     bytes: u64,
     reason: FlushReason,
+    /// Stamped at **seal**, before the batch has even asked for an in-flight
+    /// permit. `settle` reports its elapsed time as
+    /// `etl_sink_flush_duration_seconds`, so that histogram is seal-to-settle
+    /// and carries the permit wait, every attempt and every backoff sleep —
+    /// not the sink's round-trip, which is
+    /// `etl_sink_write_duration_seconds`. Do not narrow this stamp to recover
+    /// a write time; the two are separate families on purpose.
     started: Instant,
     /// Ingest time of the oldest record in the batch (e2e latency, ingest
     /// basis).
@@ -222,11 +229,17 @@ impl<W: ShardWriter> ShardWorker<W> {
         // `Pending` already registered in the ledger) and is launched as
         // soon as a permit frees; the deadline sweep abandons it like any
         // other pending batch, dropping the sealed frames unspawned.
-        let mut waiting: Option<(u64, SealedBatch)> = None;
+        // The third element is the stamp its permit wait is measured from, so
+        // the force-sealed batch lands in the same histogram as every other —
+        // a drain that queues behind a slow write is exactly the case an
+        // operator reading `drain_timeout` wants to see.
+        let mut waiting: Option<(u64, SealedBatch, Instant)> = None;
         if !acc.is_empty() {
             let (this_seq, batch) = self.seal(&mut acc, FlushReason::Drain, &mut seq, &mut ledger);
+            let queued_at = Instant::now();
             match Arc::clone(&semaphore).try_acquire_owned() {
                 Ok(permit) => {
+                    self.metrics.permit_waited(queued_at.elapsed());
                     self.spawn_write(
                         batch,
                         this_seq,
@@ -236,7 +249,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                         &mut ledger.ids,
                     );
                 }
-                Err(_) => waiting = Some((this_seq, batch)),
+                Err(_) => waiting = Some((this_seq, batch, queued_at)),
             }
         }
 
@@ -245,7 +258,8 @@ impl<W: ShardWriter> ShardWorker<W> {
             if waiting.is_some()
                 && let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned()
             {
-                let (this_seq, batch) = waiting.take().expect("just checked is_some");
+                let (this_seq, batch, queued_at) = waiting.take().expect("just checked is_some");
+                self.metrics.permit_waited(queued_at.elapsed());
                 self.spawn_write(
                     batch,
                     this_seq,
@@ -433,7 +447,22 @@ impl<W: ShardWriter> ShardWorker<W> {
                 };
 
                 attempts += 1;
-                match writer.write_batch(&endpoints[replica], &batch).await {
+                // Timed around `write_batch` alone: the replica pick and the
+                // probe wait above, and the backoff sleep below, are
+                // deliberately outside it. This histogram answers "how fast is
+                // the sink system" — the question `flush_duration`, which spans
+                // seal to settle, cannot.
+                let attempt_at = Instant::now();
+                let outcome = writer.write_batch(&endpoints[replica], &batch).await;
+                metrics.write_attempt(
+                    if outcome.is_ok() {
+                        AttemptOutcome::Ok
+                    } else {
+                        AttemptOutcome::Error
+                    },
+                    attempt_at.elapsed(),
+                );
+                match outcome {
                     Ok(()) => {
                         let transition = breakers.lock().expect("breaker lock").on_success(replica);
                         if let Some(t) = transition {
@@ -501,10 +530,21 @@ impl<W: ShardWriter> ShardWorker<W> {
         // fills and backpressure propagates. Permits release on task end,
         // including aborts. (This is backpressure by design — the drain
         // phase, which cannot afford to block, uses `try_acquire_owned`.)
+        //
+        // Timed because this wait is what `flush_duration` folds in that is
+        // neither the sink's own speed nor a sleep of ours: a shard queueing
+        // behind its in-flight cap and one talking to a slow server produce
+        // the same flush histogram, which is how a healthy cluster reads as a
+        // slow one. Note it is *bounded* — only one sealed batch can be here
+        // at a time, since this await parks the whole intake loop — so it
+        // cannot exceed the earliest in-flight write's remaining time. The
+        // unbounded legs are the retry backoff and the probe wait.
+        let queued_at = Instant::now();
         let permit = Arc::clone(semaphore)
             .acquire_owned()
             .await
             .expect("sink semaphore closed");
+        self.metrics.permit_waited(queued_at.elapsed());
         self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
     }
 }

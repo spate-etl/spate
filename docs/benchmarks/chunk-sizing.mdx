@@ -290,11 +290,20 @@ slow sink behind a buffer. But that is a defensive choice, not a free one — if
 you are throughput-dominant, the measurements above say you are leaving a lot on
 the table.
 
-**Which regime am I in?** Compare `sink_flush_p99` against pause events. Pauses
-high *and* flush p99 high means the sink is genuinely behind — depth will cost
-you latency. Pauses high with flush p99 flat and low means the queue is
-throttling a sink that has room: raise `queue_capacity` and watch the pauses go
-to zero.
+**Which regime am I in?** Compare pause events against
+`etl_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
+the `sink_flush_p99` these arms report. Flush duration spans seal to settle, so
+it carries the wait for an `inflight.max_per_shard` slot and rises under
+queueing whether or not the sink slowed down; that ambiguity sends this exact
+diagnosis the wrong way (see [What a flush
+contains](../METRICS.md#what-a-flush-contains)). Pauses high *and* write p99
+high means the sink is genuinely behind — depth will cost you latency. Pauses
+high with write p99 flat and low means the queue is throttling a sink that has
+room: raise `queue_capacity` and watch the pauses go to zero.
+
+The arms below were recorded before the split families existed, so they report
+flush p99 only — the correct family for *what depth costs*, which is the
+question this page asks, and the wrong one for *is my sink slow*.
 
 :::note[Batch fullness is downstream of this]
 A queue too shallow to keep the batcher fed can starve it into hitting `linger`
@@ -316,8 +325,8 @@ whether that is healthy depends on what was throttling it.
 
 | Symptom | Likely cause | Lever |
 |---|---|---|
-| Pauses high, sink flush p99 **flat and low** | queue too shallow for a sink that has headroom | raise `SinkOptions::queue_capacity` |
-| Pauses high, sink flush p99 **high** | sink genuinely behind | more shards / `inflight.max_per_shard` / a faster sink |
+| Pauses high, sink **write** p99 flat and low | queue too shallow for a sink that has headroom | raise `SinkOptions::queue_capacity` |
+| Pauses high, sink **write** p99 high | sink genuinely behind | more shards / `inflight.max_per_shard` / a faster sink |
 | Pauses high, neither of the above, budget near the cap | budget undersized | apply the sizing rule |
 
 The first row previously named `chunk.target_bytes` as the lever. That was

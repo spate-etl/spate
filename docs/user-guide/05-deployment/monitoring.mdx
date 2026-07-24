@@ -114,6 +114,26 @@ of [docs/METRICS.md](../../METRICS.md).
   that is still available — when every replica is quarantined the shard sleeps
   waiting for a probe window instead, and `etl_sink_shard_healthy == 0` is the
   signal for that.
+- **A slow sink** — the p99 of
+  `etl_sink_write_duration_seconds{outcome="ok"}` above your write budget.
+  Reach for this one, not `etl_sink_flush_duration_seconds`: flush spans seal
+  to settle and carries the wait for an `inflight.max_per_shard` slot and every
+  backoff sleep on top of the write, so it fires on a saturated pipeline as
+  readily as on a slow server. The sink-latency families each answer a
+  different question — permit wait says *queued*
+  (`etl_sink_permit_wait_duration_seconds`), backoff says *asleep between
+  attempts* (`etl_sink_retry_backoff_seconds`), shard health says *asleep
+  waiting for a probe window* (`etl_sink_shard_healthy == 0`, where the backoff
+  gauge reads `0`), write says *slow* — and `etl_sink_flush_duration_seconds`
+  is all of them at once, which makes it a commit-lag budget rather than a
+  diagnosis. See [What a flush
+  contains](../../METRICS.md#what-a-flush-contains).
+
+  Before escalating a high write p99 to whoever runs the server, rule out the
+  sink's own I/O runtime: the measurement is wall-clock across the write call,
+  so it charges time the runtime spent elsewhere. For the ClickHouse sink that
+  runtime also does request compression, and at high byte rates it can be the
+  limit rather than the server — `io_threads` is the lever there.
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,

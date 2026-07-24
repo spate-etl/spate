@@ -232,9 +232,12 @@ estimates over the last statistics interval that **cannot be aggregated**
 across brokers or processes (`max()` is the only defensible cross-series
 operator). Windows that sampled nothing are absent rather than `0`.
 Batch-level write latency is framework-side
-(`etl_sink_flush_duration_seconds`); these families add the producer's
-internal view. Per-partition transmit-queue detail is deferred (see the
-decision log) — the aggregate queue gauges below cover saturation.
+(`etl_sink_write_duration_seconds` — the family comparable with the
+producer's own round-trip; `etl_sink_flush_duration_seconds` spans seal to
+settle and would fold this sink's queueing in on top); these families add
+the producer's internal view. Per-partition transmit-queue detail is
+deferred (see the decision log) — the aggregate queue gauges below cover
+saturation.
 
 | Metric | Type | Extra labels | Meaning |
 |---|---|---|---|
@@ -323,7 +326,9 @@ series carry its name as the `component` label (a single sink uses
 | `etl_sink_batch_rows` | histogram | | Rows per sealed batch. |
 | `etl_sink_batch_bytes` | histogram | | Bytes per sealed batch. |
 | `etl_sink_flushes_total` | counter | `shard`, `reason` (`rows`\|`bytes`\|`linger`\|`drain`) | Flushes by trigger. |
-| `etl_sink_flush_duration_seconds` | histogram | `shard` | Write round-trip per flush (including retries). |
+| `etl_sink_flush_duration_seconds` | histogram | `shard` | **Seal→settle** per durably written batch: the wait for an `inflight.max_per_shard` slot, every attempt, every retry-backoff sleep and quarantine probe wait, and the write that finally succeeded. The right input for a commit-lag budget and the **wrong** first reach for "is the sink slow" — see [What a flush contains](#what-a-flush-contains). Only settled batches are observed; an abandoned one is counted by `etl_sink_abandoned_batches_total` instead. |
+| `etl_sink_write_duration_seconds` | histogram | `shard`, `outcome` (`ok`\|`error`) | One **attempt**, wrapping the sink write and nothing else *of the framework's* — no permit wait, no retry backoff, no probe wait. This is the "how fast is the sink system" signal. Note what that does include: a connector that sleeps *inside* its write puts that sleep here (the Kafka sink does, on a full producer queue), and the wall-clock charges whatever the sink's I/O runtime was busy with at each await point. Every attempt is observed, retries included, so the count is per attempt rather than per batch. Split by outcome because a fatal reject in a millisecond and a timeout after thirty seconds are both attempts, and mixing them moves the distribution in opposite directions; the error's taxonomy class stays on `etl_sink_errors_total{error_type}`. An attempt aborted at the drain deadline is never observed — but attempts that completed before the abort are. |
+| `etl_sink_permit_wait_duration_seconds` | histogram | `shard` | Time a sealed batch waited for one of its shard's `inflight.max_per_shard` slots before its first write attempt — the queueing share of a flush. Observed for every sealed batch **that starts a write**, the healthy near-zero case included: a family that appeared only under contention would read as absent exactly when you want to confirm there is none. A batch the drain deadline drops before it ever gets a permit is not observed, so during a rough shutdown this count runs *below* the number of batches sealed. Bounded by construction: only one sealed batch per shard can be waiting at a time (the wait parks the whole intake loop), so this cannot exceed the earliest in-flight write's remaining time. |
 | `etl_sink_retries_total` | counter | `shard` | Flush attempts beyond the first. |
 | `etl_sink_retry_backoff_seconds` | gauge | `shard` | Retry backoff the shard is currently sleeping between write attempts **on an available replica**; `0` when no write is backing off. The step being served, **not** the time left in it — it does not count down, and jitter puts it in `[(1 - retry.jitter) × step, step]`. A shard writes up to `inflight.max_per_shard` batches at once, each backing off independently, so this is the max across them: it answers "is this shard asleep right now, and for how long", which the counters cannot (`etl_sink_retries_total` only moves on an *attempt*, so a shard parked in a long backoff looks flat and idle). A shard whose every replica is quarantined also sleeps — waiting for the earliest probe window — and reads `0` here, because no attempt is being backed off; `etl_sink_shard_healthy == 0` is that state's signal and is exactly coincident with it. |
 | `etl_sink_errors_total` | counter | `shard`, `error_type` | Write errors by taxonomy class. |
@@ -333,6 +338,84 @@ series carry its name as the `component` label (a single sink uses
 | `etl_sink_replica_errors_total` | counter | `shard`, `replica` | Failed write attempts attributed to a replica — which endpoint is erroring (`etl_sink_errors_total` gives the class breakdown per shard). |
 | `etl_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing each `open_for` window. |
 | `etl_sink_abandoned_batches_total` | counter | `shard` | Batches abandoned at drain deadline (will replay after restart). |
+
+### What a flush contains
+
+A flush is a batch's whole journey from the moment it was sealed to the moment
+it settled, and only the last leg of that is the sink actually writing:
+
+```
+seal ────────────────────────────────────────────────────────► settle
+└──────────────── etl_sink_flush_duration_seconds ─────────────────┘
+
+  waiting for an inflight slot  etl_sink_permit_wait_duration_seconds
+  attempt 1, failed             etl_sink_write_duration_seconds{outcome="error"}
+  sleeping before the retry     etl_sink_retry_backoff_seconds  (gauge)
+  every replica quarantined,
+    waiting for a probe window  etl_sink_shard_healthy == 0     (gauge)
+  attempt 2, succeeded          etl_sink_write_duration_seconds{outcome="ok"}
+```
+
+Note where the span starts. `linger` and the chunk's time in the shard queue
+both elapse *before* the seal, so neither is in this histogram — if you are
+budgeting end-to-end freshness rather than commit lag, `etl_e2e_latency_seconds`
+is the family that spans them.
+
+So a rising flush p99 is not evidence about the sink. It is equally consistent
+with a sink that has not slowed down at all while the shard queues behind its
+`inflight.max_per_shard` cap — which is how a healthy ClickHouse cluster
+(40% CPU, merges keeping up) came to be investigated as a slow one. Ask the
+three questions separately:
+
+```promql
+# Is the sink slow? Successful attempts only, so a fast fatal reject cannot
+# flatter it and a timeout cannot wreck it.
+histogram_quantile(0.99, sum by (le, pipeline, component) (
+  rate(etl_sink_write_duration_seconds_bucket{outcome="ok"}[5m])))
+
+# Am I queueing? If this carries the flush p99, the answer is more shards or
+# a larger inflight.max_per_shard — not a faster sink.
+histogram_quantile(0.99, sum by (le, pipeline, component) (
+  rate(etl_sink_permit_wait_duration_seconds_bucket[5m])))
+
+# What is my commit-lag budget? The whole journey, which is what a watermark
+# actually waits on.
+histogram_quantile(0.99, sum by (le, pipeline, component) (
+  rate(etl_sink_flush_duration_seconds_bucket[5m])))
+```
+
+Keep `component` in the `by` clause. A pipeline with several sinks puts them
+all on these families, distinguished only by that label, and aggregating it
+away blends a fast sink's distribution with a slow one's — the tail you are
+looking for gets diluted below the threshold, and the quantile cannot tell you
+*which* sink it came from. Aggregating `shard` away is fine: those are one
+population.
+
+The two legs with no histogram are both sleeps, and deliberately so: a shard
+parked is a *level*, not an event. They are published by different gauges,
+and reading the wrong one is how the residual becomes a mystery:
+
+- **Backing off between attempts on an available replica** —
+  `etl_sink_retry_backoff_seconds` publishes the step live.
+- **Every replica quarantined, waiting for a probe window** —
+  `etl_sink_retry_backoff_seconds` reads **`0`** here, because no attempt is
+  being backed off. `etl_sink_shard_healthy == 0` is this state's signal and is
+  exactly coincident with it.
+
+So a flush p99 that exceeds write + permit wait is a shard sleeping rather than
+a shard writing — but check `etl_sink_shard_healthy` before you check the
+backoff gauge. A quarantined shard can hold a flush open for a whole `open_for`
+window with the backoff gauge flat at zero throughout.
+
+Three asymmetries worth knowing before you subtract one family from another.
+Flush is observed once per **batch** and only for batches that settled. Write
+is observed once per **attempt**, so a batch that retried contributes several
+observations — including a batch that is later abandoned, whose completed
+attempts stay in `{outcome="error"}` with no matching flush. And "abandoned" is
+not only a drain-deadline event: a fatal class, exhausted `retry.max_attempts`,
+or a panicking write task all abandon in steady state with no drain in sight
+(`etl_sink_abandoned_batches_total` counts all four). The decomposition is a
+way to reason about where a flush went, not an identity to compute.
 
 ## Checkpointing (`etl_checkpoint_*`)
 
@@ -469,6 +552,17 @@ config section):
   backed off. `etl_sink_shard_healthy == 0` is that state's signal, and the two
   are exactly coincident — the write loop waits for a probe window precisely
   when no replica is circuit-closed. Alert on both to cover every parked state.
+- `histogram_quantile(0.99, sum by (le, pipeline, component) (rate(etl_sink_write_duration_seconds_bucket{outcome="ok"}[5m])))`
+  above your write budget — the sink itself is slow. Alert on this rather than
+  on `etl_sink_flush_duration_seconds`, which also carries the permit wait and
+  the backoff sleeps and so fires on a saturated *pipeline* as readily as on a
+  slow *sink* ([What a flush contains](#what-a-flush-contains)). If write
+  duration is flat while flush p99 climbs, read
+  `etl_sink_permit_wait_duration_seconds` next, and `etl_sink_shard_healthy`
+  after it: the answer is shards, `inflight.max_per_shard`, or a quarantined
+  replica set — not the server. Keep a flush-duration alert too if you have a
+  commit-lag SLO — that is the family the watermark waits on — but do not read
+  it as sink latency.
 - `etl_kafka_source_group_healthy == 0` sustained — the consumer-group member
   is stuck joining/rebalancing; pair with
   `rate(etl_kafka_source_group_rebalances_total[15m])` to distinguish churn
@@ -479,4 +573,6 @@ config section):
 - `etl_kafka_sink_produce_queue_messages` sustained near
   `queue.buffering.max.messages` (default 100k) — the producer cannot drain
   to the brokers; batch writes are absorbing queue-full backoff and
-  `etl_sink_flush_duration_seconds` will rise before the source pauses.
+  `etl_sink_write_duration_seconds{outcome="ok"}` will rise before the source
+  pauses — the backoff is inside the produce call, so it lands in the write
+  histogram rather than in `etl_sink_retry_backoff_seconds`.

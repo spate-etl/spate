@@ -847,6 +847,12 @@ fn sink_records_metric_matches_rows_written_exactly() {
 /// Pull one rendered Prometheus value by metric name plus a distinguishing
 /// label fragment. The value is the last space-separated token of the line
 /// (this exporter renders no trailing timestamp).
+///
+/// This is the **first** matching line, not a sum across series. A family
+/// split by a label the caller does not pin (say `shard`, on a multi-shard
+/// fixture) returns whichever series the exporter happened to emit first, so
+/// pin every label that varies — otherwise the assertion silently covers one
+/// series out of several and passes for the wrong reason.
 fn metric_value(rendered: &str, name: &str, label: &str) -> f64 {
     let line = rendered
         .lines()
@@ -977,6 +983,286 @@ fn replica_errors_attribute_failures_asymmetrically() {
         metric_value(&rendered, "etl_sink_shard_healthy", "shard=\"0\""),
         1.0,
         "a circuit-closed replica remains ⇒ shard_healthy == 1"
+    );
+}
+
+/// The scenario behind #79, reproduced: two batches, one sink speed, two very
+/// different flush durations. `etl_sink_flush_duration_seconds` spans seal to
+/// settle, so the second batch — which sealed at t=0 and could not start until
+/// the first released the shard's only in-flight permit at t=2 — reads twice
+/// what the first did against an identically fast writer. The split families
+/// are what tell the two apart: write duration is flat at 2s across both, and
+/// the whole difference lands in the permit-wait histogram.
+///
+/// Paused time makes every figure exact rather than approximate: the only
+/// timers are the mock's own sleeps, so the runtime advances to them and
+/// nothing else.
+#[test]
+fn permit_wait_separates_queueing_from_a_slow_write() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // One permit: the second batch provably queues behind the first.
+            cfg.inflight.max_per_shard = 1;
+            let fx = fixture(1, 1, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Write(Duration::from_secs(2)));
+
+            let (ack, _rx) = AckRef::test_pair();
+            // max_rows = 1, so each chunk seals its own batch on arrival.
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(600)).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 2,
+                    abandoned: 0
+                }
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+
+    // Both writes took exactly 2s, and the sink never failed one.
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_count", "outcome=\"ok\""),
+        2.0
+    );
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        4.0,
+        "the sink was equally fast for both batches"
+    );
+
+    // The first batch got the permit for free; the second waited out the
+    // first's whole write.
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_count", "shard=\"0\""),
+        2.0,
+        "every sealed batch is observed, including the one that waited 0"
+    );
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        2.0
+    );
+
+    // And the family the issue is about: 2s + 4s, against a writer that never
+    // varied. Reading this as sink latency is the misdiagnosis.
+    assert_eq!(
+        value("etl_sink_flush_duration_seconds_sum", "shard=\"0\""),
+        6.0,
+        "seal-to-settle carries the queueing the write histogram excludes"
+    );
+}
+
+/// The drain's force-sealed partial batch lands in the permit-wait histogram
+/// like any other, so a shutdown that queues behind a slow write is visible to
+/// someone sizing `drain_timeout`. This drives the drain loop's *late*
+/// acquisition: the force-seal cannot block on the semaphore (that would
+/// deadlock shutdown), so it parks in `waiting` with its stamp and is observed
+/// only once a permit frees.
+///
+/// Two rows seal batch A on arrival and it takes the shard's only permit for
+/// 2s; the third row stays partial in the accumulator and is force-sealed at
+/// drain, where it must wait out A's whole write.
+#[test]
+fn drain_force_seal_observes_the_permit_wait_it_queued_for() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            cfg.batch.max_rows = 2;
+            cfg.inflight.max_per_shard = 1;
+            let fx = fixture(1, 1, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Write(Duration::from_secs(2)));
+
+            let (ack, _rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(2, 1, &ack)).expect("send");
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(600)).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 2,
+                    abandoned: 0
+                }
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_count", "shard=\"0\""),
+        2.0,
+        "the dispatched batch and the drain's force-sealed one are both observed"
+    );
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        2.0,
+        "the force-sealed batch waited out the in-flight write; the first waited 0"
+    );
+    // The sink was equally fast for both, so the drain's cost was queueing.
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        4.0
+    );
+}
+
+/// The other drain branch: a partial batch force-sealed with the permit free
+/// is observed too, at ~0. Registering an observation only when the drain
+/// happens to queue would make the family read as absent exactly when an
+/// operator wants to confirm a clean shutdown did not queue at all.
+#[test]
+fn drain_force_seal_observes_a_free_permit_as_no_wait() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // Nothing reaches max_rows, so the only seal is the drain's.
+            cfg.batch.max_rows = 2;
+            let fx = fixture(1, 1, cfg, 16);
+            fx.writer
+                .set_default(Outcome::Write(Duration::from_secs(2)));
+
+            let (ack, _rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(600)).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 1,
+                    abandoned: 0
+                }
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_count", "shard=\"0\""),
+        1.0,
+        "the force-sealed batch is observed even though it never waited"
+    );
+    assert_eq!(
+        value("etl_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        0.0
+    );
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        2.0,
+        "the write itself is unaffected by the drain path"
+    );
+}
+
+/// A failed attempt and a successful one are both attempts, and they are
+/// separated by the `outcome` label rather than averaged together — a fast
+/// reject would otherwise flatter the distribution and a slow timeout wreck
+/// it. Retries are observed like any other attempt, so the counts here are
+/// per attempt, not per batch.
+#[test]
+fn write_duration_separates_failed_attempts_from_successful_ones() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            // Keep the breaker closed, so the second attempt follows the
+            // ordinary retry backoff and not an all-replicas-quarantined
+            // probe wait (which is outside both new families).
+            cfg.breaker.failure_threshold = u32::MAX;
+            let fx = fixture(1, 1, cfg, 16);
+            // A slow failure, then a fast success.
+            fx.writer.script(
+                0,
+                0,
+                [
+                    Outcome::Fail(ErrorClass::Retryable, Duration::from_secs(1)),
+                    Outcome::Write(Duration::from_millis(100)),
+                ],
+            );
+
+            let (ack, _rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(600)).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    flushed: 1,
+                    abandoned: 0
+                }
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_count", "outcome=\"error\""),
+        1.0
+    );
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_sum", "outcome=\"error\""),
+        1.0,
+        "the attempt that failed took a second to do it"
+    );
+    assert_eq!(
+        value("etl_sink_write_duration_seconds_count", "outcome=\"ok\""),
+        1.0
+    );
+    assert!(
+        (value("etl_sink_write_duration_seconds_sum", "outcome=\"ok\"") - 0.1).abs() < 1e-6,
+        "the successful attempt is 100ms, not the 1.1s the batch spent flushing"
+    );
+    // One batch, one flush observation — spanning both attempts and the 1ms
+    // backoff between them.
+    assert_eq!(
+        value("etl_sink_flush_duration_seconds_count", "shard=\"0\""),
+        1.0
+    );
+    assert!(
+        (value("etl_sink_flush_duration_seconds_sum", "shard=\"0\"") - 1.101).abs() < 1e-6,
+        "seal-to-settle is both attempts plus the backoff between them"
     );
 }
 

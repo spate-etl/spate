@@ -195,6 +195,13 @@ What changes is what you pay for it:
 | **Saturated** — it is the bottleneck | +46% at capacity 1024 | ~10× |
 | **Has headroom** — something upstream limits you | +86% by capacity 64 | none measured |
 
+The flush p99 in that table is `etl_sink_flush_duration_seconds`, seal to
+settle — the right family for this question, because what depth costs you *is*
+the extra time a batch spends waiting before it is durable. It is the wrong
+family for "did my sink get slower": these arms were recorded before the split
+families existed, so the 10× is a seal-to-settle figure and nothing here
+decomposes it into queueing versus write time.
+
 Against a saturated sink the curve is **not** smooth, so choose an end of it
 rather than a middle: the first step up costs nearly all of the latency for
 almost none of the throughput, while the deepest settings recover the throughput
@@ -209,11 +216,18 @@ behind a buffer. That is a defensive choice, not a free one.
 
 :::note[Which regime am I in?]
 Read `etl_backpressure_pause_events_total` **together with**
-`etl_sink_flush_duration_seconds`:
+`etl_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
+`etl_sink_flush_duration_seconds`. Flush duration spans seal to settle and
+carries the wait for an `inflight.max_per_shard` slot, so it rises under
+queueing whether or not the sink slowed down; that ambiguity is exactly what
+sends this diagnosis the wrong way (see [What a flush
+contains](../../METRICS.md#what-a-flush-contains)).
 
-- **Pauses high, flush p99 flat and low** → the queue is throttling a sink that
+- **Pauses high, write p99 flat and low** → the queue is throttling a sink that
   has headroom. Raise `queue_capacity` and watch the pauses reach zero.
-- **Pauses high, flush p99 high** → the sink is genuinely behind. Depth will buy
+  `etl_sink_permit_wait_duration_seconds` confirms it: if the flush p99 you are
+  worried about is mostly permit wait, no amount of server tuning will move it.
+- **Pauses high, write p99 high** → the sink is genuinely behind. Depth will buy
   throughput but cost latency; add shards or `inflight.max_per_shard` instead.
 
 **A high pause count is not by itself a misconfiguration.** Against a saturated

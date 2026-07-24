@@ -71,6 +71,9 @@ pub use operator::OperatorMetrics;
 pub use pipeline::{PipelineMetrics, PipelineState};
 pub use queue::QueueMetrics;
 pub use sink::{BackoffGuard, FlushReason, SinkShardMetrics};
+// Labels a family the sink worker alone observes; no connector can produce a
+// write attempt of its own, so this stays crate-internal like `MetricRole`.
+pub(crate) use sink::AttemptOutcome;
 pub use source::SourceMetrics;
 
 // The framework's instrumentation API *is* the `metrics` facade, so its

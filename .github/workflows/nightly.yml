@@ -122,6 +122,94 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
+  minimal-versions:
+    name: Declared version floors build
+    runs-on: ubuntu-latest
+    # Every version requirement in [workspace.dependencies] is a promise to
+    # consumers: "this crate works with anything from here up". Nothing checked
+    # that promise, and it was false for 19 of them — `bytes = "1"` could never
+    # have worked, because our own tree already required 1.11.1, and
+    # `metrics = "0.24"` named a release that does not compile at all.
+    #
+    # `-Z direct-minimal-versions` resolves our *direct* dependencies to the
+    # lowest version each requirement admits, leaving transitives at their
+    # normal resolution, and then builds. A green run means the floors are
+    # honest; a red one means a floor is fiction and should be raised to
+    # whatever actually builds — never lowered back to make this pass.
+    #
+    # Nightly-only: the flag is unstable. It also rewrites Cargo.lock, which is
+    # why this job generates a throwaway lockfile rather than using `--locked`
+    # against the committed one.
+    #
+    # Two limits worth knowing, so nobody reads this job as proving more than it
+    # does. `--all-targets` does not include doctests, so a floor-version break
+    # reachable only from a doc example would pass here. And the minimal graph is
+    # only ever built on nightly — the MSRV job checks 1.94 against the committed
+    # lockfile, so "oldest dependencies on the oldest compiler" is untested.
+    #
+    # Note it only catches a floor that is too *low*. A needlessly high floor
+    # still builds, and narrows the range consumers can resolve against, which no
+    # gate can detect — that one is on review.
+    permissions:
+      contents: read
+      # For the tracking issue below.
+      issues: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Resolve every direct dependency to its declared floor
+        id: resolve
+        run: cargo generate-lockfile -Z direct-minimal-versions
+      # `--all-targets` so dev-dependency floors are held to the same standard.
+      # They do not reach consumers, but a floor that cannot build is still a
+      # false statement — `divan = "0.1"` resolves to a release whose
+      # `__private::EntryMeta` layout the `#[divan::bench]` macro cannot expand
+      # against.
+      #
+      # Deliberately not `-D warnings`: the minimal graph surfaces upstream
+      # deprecations (chrono's `TimeDelta::seconds`, since reverted upstream)
+      # that say nothing about whether our floors are honest. Denying them would
+      # make this job hostage to other people's deprecation churn.
+      - id: check
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      # Same reasoning as the advisories job: nobody is watching Actions at
+      # 03:17, and a silent red here means the floors have drifted back into
+      # fiction without anyone hearing about it. Drift detection is this job's
+      # entire purpose, so silence is the one failure it cannot afford.
+      - name: Report the failure as an issue
+        if: failure() && (steps.resolve.conclusion == 'failure' || steps.check.conclusion == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Declared version floors no longer build'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              'The workspace no longer builds when every direct dependency is' \
+              'resolved to the lowest version its requirement admits.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'Raise the offending floor in [workspace.dependencies] to a version' \
+              'that actually builds. Do not lower it back to make this pass — the' \
+              'floor is a promise to consumers, and a green run is the only thing' \
+              'that makes it a true one.'
+          )"
+
   miri:
     name: Miri (etl-core)
     runs-on: ubuntu-latest

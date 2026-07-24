@@ -33,13 +33,13 @@ etl-kafka = { workspace = true }
 etl-s3 = { workspace = true }
 flate2 = { workspace = true }
 tempfile = { workspace = true }
-lz4_flex = "0.11"
+lz4_flex = { workspace = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
-zstd = "0.13"
+zstd = { workspace = true }
 
 [lints]
 workspace = true

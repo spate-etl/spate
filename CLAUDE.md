@@ -185,6 +185,11 @@ comma-separated for several (`feat(etl-kafka,etl-core): ...`); use
 `workspace`, `ci`, `docs`, `examples`, `benchmarks` for non-crate areas.
 Messages must make sense to outsiders — no plan/phase references.
 
+Dependabot raises dependency bumps as `chore`, scoped by area —
+`chore(workspace)` for Cargo, `chore(ci)` for Actions, `chore(docs)` for the
+website's npm tree, `chore(examples)` for the Docker base images. Prefer `fix`
+or `feat` for your own commits, so `chore` reads as "a bot bumped a version".
+
 ## Testing layout
 
 Unit tests inline (`#[cfg(test)]`), integration tests per-crate in `tests/`,

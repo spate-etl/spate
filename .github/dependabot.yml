@@ -1,0 +1,185 @@
+# Dependency update automation.
+#
+# The lockfiles are what actually pin this repo (Cargo.lock, package-lock.json,
+# both committed and both enforced in CI with --locked / npm ci). This file
+# governs the other half: when a new version is allowed to *enter* those
+# lockfiles, and through a reviewed pull request rather than a manual sweep.
+#
+# Cooldown is the grace period. A release must have been on the registry for a
+# week before Dependabot will propose it, which is the window in which a
+# compromised or simply broken publish usually gets caught and yanked. Security
+# updates deliberately ignore cooldown — a fix for a known CVE should not wait.
+#
+# Nothing auto-merges. Every bump is reviewed.
+version: 2
+
+updates:
+  # ---------------------------------------------------------------- Rust ----
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    # Higher than the other three because the grouped pull request and the
+    # individual major ones share this budget, and most of this graph is 0.x
+    # (see below) where breaking releases arrive one PR at a time.
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "rust"]
+    commit-message:
+      prefix: "chore(workspace)"
+
+    cooldown:
+      default-days: 7
+      # Both keys are set, and semver-minor-days is the one doing the work here.
+      #
+      # Cooldown classifies a bump *positionally* — see `cooldown_days_for` in
+      # dependabot-core: a bump is "major" only when the leading integer moves.
+      # It is not Cargo-aware, unlike the grouping logic, which does understand
+      # that under Cargo's caret rules 0.39 -> 0.40 is a breaking change.
+      #
+      # So for the 0.x crates listed further down — where a *minor* is the
+      # breaking release — only semver-minor-days reaches them. Without it they
+      # would soak the 7-day default while a 1.x major soaked 14, which is
+      # backwards: it would give the shorter grace period to the breaking
+      # changes we most want a second pair of eyes on.
+      #
+      # The cost is that genuinely-compatible 1.x minors also wait 14 days.
+      # That is a week of slower feature uptake and nothing more; security
+      # updates bypass cooldown entirely.
+      semver-minor-days: 14
+      semver-major-days: 14
+
+    # No `versioning-strategy`, so this takes Cargo's default — which is
+    # `increase-if-necessary` (internally BumpVersionsIfNecessary). That is
+    # exactly the right behaviour for a workspace of publishable libraries, and
+    # it is worth being precise about why, because the two obvious alternatives
+    # are both wrong.
+    #
+    # The default edits Cargo.toml *only* when the new version falls outside the
+    # existing requirement, and updates Cargo.lock alone otherwise. Upstream's
+    # own comment on that choice: "a bare version is a caret-equivalent
+    # (compatible) requirement, so only raise the requirement when it doesn't
+    # already allow the new version. Avoids needless churn and MSRV bumps."
+    # (Cargo gained this in dependabot-core#4009, closed 2026-06-10.)
+    #
+    # Consequences worth knowing before reviewing these pull requests:
+    #
+    #   * tokio 1.52 -> 1.53 does NOT touch Cargo.toml. `tokio = "1.52"` is
+    #     ^1.52, which already admits 1.53, so only the lockfile moves. There
+    #     are no "floor-only" pull requests to close.
+    #   * rdkafka 0.39 -> 0.40 DOES edit Cargo.toml, because ^0.39 excludes
+    #     0.40. Any manifest edit you see is a necessary one — it is the signal
+    #     that a dependency moved outside its declared range, not churn.
+    #
+    # `lockfile-only` would have been the wrong choice despite looking safer for
+    # a library: it never edits the manifest at all, which means it silently
+    # skips every semver-incompatible update. Most of the interesting surface
+    # here is 0.x — rdkafka, clickhouse, object_store, async-nats, apache-avro,
+    # metrics — where a minor is a breaking release outside the caret. Under
+    # that strategy rdkafka 0.39 -> 0.40 would never open a pull request at all,
+    # including when the reason for it is a security fix.
+    groups:
+      # One pull request for everything semver-compatible, since those are
+      # reviewed as a batch anyway. Majors are deliberately left out of the
+      # group so each arrives on its own and can be read on its own.
+      #
+      # Grouping *is* Cargo-aware (`cargo_pre_1_0_type`): for a 0.x crate it
+      # returns only "major" or "patch", never "minor". So 0.39 -> 0.40 counts
+      # as major and correctly arrives as its own pull request, and the "minor"
+      # entry below only ever matches dependencies at 1.0 or above.
+      cargo-compatible:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ------------------------------------------------------- GitHub Actions ----
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: "chore(ci)"
+    # `default-days` only: GitHub does not support the semver-*-days keys for
+    # this ecosystem or for docker. (Not for want of version information —
+    # Dependabot resolves a pinned SHA back to its semver tag via
+    # `version_for_pinned_sha`, which is exactly what lets the group below
+    # classify minor/patch and what keeps the trailing `# v4.4.0` comments
+    # current.)
+    cooldown:
+      default-days: 7
+    # Every ref is pinned to a full commit SHA (see the workflows). Dependabot
+    # keeping both the SHA and its version comment current is the only reason
+    # SHA pinning is maintainable — otherwise the pins rot and we sit on
+    # known-bad versions, which is the failure mode the zizmor job's
+    # known-vulnerable-actions audit exists to catch.
+    groups:
+      actions-compatible:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # -------------------------------------------- npm (documentation site) ----
+  - package-ecosystem: npm
+    directory: "/website"
+    schedule:
+      interval: weekly
+      day: wednesday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "javascript"]
+    commit-message:
+      prefix: "chore(docs)"
+    cooldown:
+      default-days: 7
+      # Same reasoning as the cargo entry: cooldown classifies positionally, and
+      # this tree has 0.x packages too (@easyops-cn/docusaurus-search-local is
+      # 0.55.x), so semver-minor-days is what gives their breaking releases the
+      # longer soak.
+      semver-minor-days: 14
+      semver-major-days: 14
+    # This is the largest dependency graph in the repo by package count (~1400
+    # against Cargo's ~500) and the ecosystem where mass-compromise events
+    # actually happen, so the cooldown earns its keep here more than anywhere.
+    # Lifecycle scripts are off at install time via website/.npmrc; the cooldown
+    # is the other half, governing what reaches the lockfile in the first place.
+    groups:
+      # Docusaurus ships as a matched set — core, the preset, the theme, and
+      # anything registered as a plugin all move together, and updating one
+      # without the others breaks the build. Majors included, deliberately.
+      #
+      # @easyops-cn/docusaurus-search-local is in this group despite the
+      # unrelated scope: it is a Docusaurus plugin and its peer range is
+      # "@docusaurus/theme-common": "^2 || ^3". Left out, a Docusaurus 4 bump
+      # would move @docusaurus/* alone, strand the plugin at a peer range that
+      # no longer resolves, and fail `npm ci` with ERESOLVE.
+      docusaurus:
+        patterns:
+          - "@docusaurus/*"
+          - "@mdx-js/*"
+          - "@easyops-cn/*"
+      npm-compatible:
+        patterns: ["*"]
+        exclude-patterns:
+          - "@docusaurus/*"
+          - "@mdx-js/*"
+          - "@easyops-cn/*"
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------- Docker (example image) ----
+  - package-ecosystem: docker
+    directory: "/examples/docker"
+    schedule:
+      interval: weekly
+      day: thursday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "chore(examples)"
+    # `default-days` only — semver-*-days is unsupported here, as for
+    # github-actions above.
+    cooldown:
+      default-days: 7
+    # Covers the flagship example image's base layers. Note the runtime stage
+    # is `gcr.io/distroless/cc-debian12:nonroot`, a tag carrying no version for
+    # Dependabot to compare, so expect updates for the `rust:` builder stage
+    # and little else here.

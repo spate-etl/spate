@@ -109,28 +109,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The `cli` feature is NOT default; without it cargo installs the library
-      # and `cargo about` is simply not a command.
+      # and `cargo about` is simply not a command. Pinned because this step
+      # feeds a byte-exact diff gate: a release that changes how the generator
+      # groups or orders crates would fail the gate on an unrelated PR.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.1
 
-      # `--fail` is the real gate: non-zero if any crate's licence cannot be
-      # determined. `--locked`, not `--frozen`: offline mode drops the
-      # clearlydefined.io clarifications and silently degrades accuracy. If
-      # curation drift ever makes the diff below flaky, `--frozen` is the
-      # fallback — the committed file holds licence *ids*, which are
-      # metadata-derived and stable, precisely so that stays unlikely.
+      # The script wraps `cargo about generate` and canonicalises the row order
+      # — see its header, and about.toml, for why the raw output is not
+      # reproducible across machines (#87).
       - name: Regenerate the attribution inventory
-        run: |
-          cargo about generate --workspace --all-features --locked --fail \
-            -o THIRD-PARTY.md about-md.hbs
+        run: ./scripts/attribution.sh
 
       - name: THIRD-PARTY.md is up to date
         run: |
           if ! git diff --exit-code THIRD-PARTY.md; then
             echo "::error::THIRD-PARTY.md is stale. Regenerate and commit it:"
-            echo "  cargo install cargo-about --locked --features cli"
-            echo "  cargo about generate --workspace --all-features --locked --fail -o THIRD-PARTY.md about-md.hbs"
+            echo "  cargo install cargo-about --locked --features cli --version 0.9.1"
+            echo "  ./scripts/attribution.sh"
             exit 1
           fi
 

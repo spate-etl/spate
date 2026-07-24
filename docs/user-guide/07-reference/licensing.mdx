@@ -84,15 +84,28 @@ crate you receive carries the repository's terms.
 ### Regenerating locally
 
 ```sh
-cargo install cargo-about --locked --features cli   # `cli` is not a default feature
+cargo install cargo-about --locked --features cli --version 0.9.1  # `cli` is not a default feature
 
-cargo about generate --workspace --all-features --locked --fail \
-  -o THIRD-PARTY.md about-md.hbs
+./scripts/attribution.sh
 ```
 
-`--fail` exits non-zero if any crate's licence cannot be determined. Use
-`--locked` rather than `--frozen`: offline mode silently drops the
-clearlydefined.io clarifications and degrades accuracy.
+The script runs `cargo about generate --workspace --all-features --locked
+--fail` and then canonicalises the tables. `--fail` exits non-zero if any
+crate's licence cannot be determined. `--locked` rather than `--frozen`: offline
+mode silently drops the clearlydefined.io clarifications and degrades accuracy.
+
+That post-processing is what makes the file reproducible. `cargo-about` groups
+crates by licence *text* — each crate's copyright line makes its text distinct —
+and a crate that ships several files scanning as the same licence at the same
+confidence gets one picked by directory-read order, which differs from machine
+to machine. The elected licence id is unaffected, but the crate's row moves, so
+without the sort the diff gate fails on ordering alone.
+
+A crate can also carry more than one notice under a single licence: `bnum`
+vendors code from `num-bigint` and `rand` and ships all three MIT notices, which
+`about.toml` names explicitly so that all three are reproduced. The site page
+has a section for each; `THIRD-PARTY.md` collapses them to the one row per crate
+it promises, and its summary counts are recomputed from those rows.
 
 ## Related
 

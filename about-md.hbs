@@ -3,7 +3,7 @@
 **Generated file — do not edit.** Regenerate with:
 
 ```sh
-cargo about generate --workspace --all-features --locked --fail -o THIRD-PARTY.md about-md.hbs
+./scripts/attribution.sh
 ```
 
 CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
@@ -45,9 +45,19 @@ project carries the same terms as the repository.
 
 ## Crates
 
-One row per crate, grouped by the licence elected for it. `cargo-about` records
-each crate's own licence text separately (the copyright lines differ), so the
-full texts live on the site rather than here.
+One row per crate, grouped by the licence elected for it and sorted by name
+within each group. `cargo-about` records each crate's own licence text
+separately — the copyright lines differ — so the full texts live on the site
+rather than here.
+
+That is also why this table is post-processed. `cargo-about` emits one row per
+licence *text*, grouping crates by which text they share, and a crate that
+ships several files scanning as the same licence has its text chosen by the
+order those files are read off disk. Group membership, and so each row's
+position, then varies from machine to machine. `scripts/attribution.sh` sorts
+the rows, collapses the duplicates a crate with several notices produces, and
+recomputes the counts above from what is left, which is what makes this file
+reproducible. The elected licence ids are unaffected either way.
 
 | Crate | Version | Licence |
 |---|---|---|

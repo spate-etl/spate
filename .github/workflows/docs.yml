@@ -72,7 +72,7 @@ jobs:
       # ~300KB, regenerated per deploy rather than committed.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.1
 
       - name: Build third-party licence texts
         run: |

@@ -1,9 +1,12 @@
 # cargo-about: generates the dependency attribution artifacts.
 #
-#   cargo about generate --workspace --all-features --locked --fail \
-#     -o THIRD-PARTY.md about-md.hbs          # committed, diff-gated in CI
+#   ./scripts/attribution.sh                  # THIRD-PARTY.md, diff-gated in CI
 #   cargo about generate --workspace --all-features --locked --fail \
 #     -o website/static/licenses/index.html about-html.hbs   # docs site, CI-built
+#
+# The committed inventory goes through the script rather than cargo-about
+# directly, because its row order has to be canonicalised — see the
+# clarifications at the bottom of this file for what goes wrong otherwise.
 #
 # This file and `deny.toml` answer different questions and deliberately differ.
 # `deny.toml` **gates**: it fails the build on a licence we will not accept.
@@ -25,9 +28,11 @@
 #    no attribution — while deny.toml deliberately *does* scan them, which is why
 #    it carries a RUSTSEC ignore for `paste` (a `clickhouse` dev-dep).
 #
-# 3. There are no per-crate carve-outs, because there is nothing left to carve
-#    out: dropping the `serde_avro_fast` backend removed the only LGPL crates in
-#    the graph, and `deny.toml`'s `exceptions` block went with them.
+# 3. The per-crate entries at the bottom are not licence carve-outs — there are
+#    none left to make, since dropping the `serde_avro_fast` backend removed the
+#    only LGPL crates in the graph and `deny.toml`'s `exceptions` block went with
+#    them. They pin *which file* a licence text is read from, and change no
+#    licence id.
 
 # Priority-ordered — see note 1 above.
 accepted = [
@@ -69,3 +74,84 @@ private = { ignore = true }
 # licences in a form no machine reader can resolve. Both are in our graph (ring
 # and rustls, plus aws-lc-rs/webpki-roots alongside them).
 workarounds = ["ring", "rustls"]
+
+# Per-crate clarifications. Both crates below ship more than one file that scans
+# as the *same* licence at confidence 1.0, and cargo-about keeps exactly one
+# file per licence id: it sorts the scanned files on (expression, confidence)
+# and takes the first. Equal confidence makes that a total tie, and the sort is
+# stable, so the winner is whichever file the directory walk yielded first —
+# readdir order. That is fixed on one machine and varies across them, which is
+# what made the THIRD-PARTY.md diff gate alternate between CI runs (#87): the
+# elected id never moved, but the crate hopped between licence-*text* groups
+# and its row moved with it. Naming the files removes the tie.
+#
+# Three things to know before editing an entry:
+#
+# - Checksums are of the whole file (`shasum -a 256`). Regenerate them when a
+#   clarified crate is bumped: a stale checksum is only a warning, the
+#   clarification is dropped and the scan silently takes over again. That is why
+#   `scripts/attribution.sh` canonicalises the generated rows — the gate must
+#   not depend on this list being exhaustive or current.
+# - `license` here *replaces* the crate's declared expression rather than being
+#   checked against it, and nothing warns if the two drift. Both match the
+#   crate's own Cargo.toml today; re-check on a version bump. `deny.toml` does
+#   not read this file, so a drift affects attribution only, not the gate on
+#   which licences we accept.
+# - Listing several files for one licence id publishes all of their texts: the
+#   clarification path does not condense to one file per id the way the scan
+#   does. The site reproduces each, and `attribution.sh` collapses the duplicate
+#   rows that would otherwise appear in THIRD-PARTY.md.
+#
+# These two are the only crates in the graph whose *elected* licence has a tie;
+# every crate carrying two or more licence files was scanned to establish that.
+# Nothing re-checks it when a dependency is added — see #88.
+
+# bnum vendors modified code from num-bigint and rand and ships their notices
+# under `licenses/` alongside its own — see its COPYRIGHT. All three are listed
+# so all three are reproduced; left to the scan, exactly one wins, and the row
+# order showed it was not reliably bnum's own.
+[bnum.clarify]
+license = "MIT OR Apache-2.0"
+
+[[bnum.clarify.files]]
+path = "LICENSE-MIT"
+checksum = "d584283c484685cbd9a881194fb2192d103819b783ad1a286ad989c3735918f3"
+license = "MIT"
+
+[[bnum.clarify.files]]
+path = "licenses/LICENSE-num-bigint"
+checksum = "14435fbcd271e2783f721b57b7bf4f6502c1379249a4300e0e5bb774686c2d90"
+license = "MIT"
+
+[[bnum.clarify.files]]
+path = "licenses/LICENSE-rand"
+checksum = "cc367a7134c2b07d995a2f8dea591094a1d100e49c68513f729fdf3eaf580a21"
+license = "MIT"
+
+[[bnum.clarify.files]]
+path = "LICENSE-APACHE"
+checksum = "eb1cfebd2a5760e95f672ba77e5e43f047ada1641173a70990a822c6f0c4b873"
+license = "Apache-2.0"
+
+# `LICENSE` and `LICENSE-MIT.md` are the same notice — they differ by one blank
+# line, and both carry all four copyright holders — so which one wins is
+# immaterial to what is published, and this entry exists purely to stop the row
+# moving. Only one is listed, since reproducing the same text twice would say
+# nothing.
+[miniz_oxide.clarify]
+license = "MIT OR Zlib OR Apache-2.0"
+
+[[miniz_oxide.clarify.files]]
+path = "LICENSE-MIT.md"
+checksum = "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
+license = "MIT"
+
+[[miniz_oxide.clarify.files]]
+path = "LICENSE-APACHE.md"
+checksum = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+license = "Apache-2.0"
+
+[[miniz_oxide.clarify.files]]
+path = "LICENSE-ZLIB.md"
+checksum = "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39"
+license = "Zlib"

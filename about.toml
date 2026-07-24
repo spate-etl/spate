@@ -25,14 +25,17 @@
 #    generated attribution to one short licence text for the bulk of the tree.
 #
 # 2. Dev-dependencies are ignored here. They are never distributed, so they need
-#    no attribution — while deny.toml deliberately *does* scan them, which is why
-#    it carries a RUSTSEC ignore for `paste` (a `clickhouse` dev-dep).
+#    no attribution — while deny.toml deliberately *does* scan them.
+#
+#    (An earlier revision of this note cited deny.toml's RUSTSEC ignore for
+#    `paste` as the example, calling it a `clickhouse` dev-dep. It is not: the
+#    whole chain is in the shipped tree, which is why `paste` appears in
+#    THIRD-PARTY.md at all. See the corrected note in deny.toml.)
 #
 # 3. The per-crate entries at the bottom are not licence carve-outs — there are
-#    none left to make, since dropping the `serde_avro_fast` backend removed the
-#    only LGPL crates in the graph and `deny.toml`'s `exceptions` block went with
-#    them. They pin *which file* a licence text is read from, and change no
-#    licence id.
+#    none to make. Every crate in the graph resolves to a licence on the accepted
+#    list, and `deny.toml` carries no `exceptions` block. They pin *which file* a
+#    licence text is read from, and change no licence id.
 
 # Priority-ordered — see note 1 above.
 accepted = [

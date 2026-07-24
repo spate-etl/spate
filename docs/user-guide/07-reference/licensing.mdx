@@ -43,10 +43,15 @@ Two tools run over the same `Cargo.lock`, answering different questions:
 | [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) | *May we use this licence at all?* | **Yes** — on every PR |
 | [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) | *What must we tell users we shipped?* | Yes, if attribution is stale |
 
-`deny.toml` holds the allow list and — since the removal of the optional
-`serde_avro_fast` Avro backend — **no exceptions or carve-outs of any kind**.
+`deny.toml` holds the allow list and **no licence exceptions of any kind**.
 Every dependency resolves to a permissive licence on that list, so anything
 appearing outside it is a genuine finding rather than a known deviation.
+
+That is a claim about licences only. `cargo-deny` also checks security
+advisories, and there the file does carry exceptions — currently three, each with
+a written justification and a stated condition for removing it. See
+[Supply chain](./supply-chain.mdx#accepting-an-advisory) for what it takes to add
+one.
 
 ### The attribution artifacts
 

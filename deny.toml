@@ -16,7 +16,7 @@ ignore = [
     # `paste` is a **proc-macro**, so it runs at compile time only and contributes
     # no runtime or network surface to the artifact. Re-check when clickhouse
     # ships a release that drops it.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained transitive dev-dep of clickhouse; no upgrade path" },
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro under clickhouse; compile-time only, no runtime or network surface; no upgrade path" },
     # quick-xml 0.40.1 (object_store's S3 list-response parser) carries two
     # DoS-class advisories (quadratic duplicate-attribute check; unbounded
     # namespace-declaration allocation). Patched in quick-xml >= 0.41, but

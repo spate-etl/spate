@@ -90,7 +90,12 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
-          tool: zizmor
+          # Version-pinned, not just action-pinned. What this job actually
+          # guarantees rests on zizmor's *default* audit policy — `unpinned-uses`
+          # rejecting anything that is not a hash is a default, not something we
+          # configure. A future release relaxing that would quietly weaken the
+          # gate with nothing here to signal it.
+          tool: zizmor@1.28.0
       # `--persona=regular` is the default; naming it makes the escalation
       # explicit if someone later wants `--persona=pedantic`. Findings are
       # errors, not advisories — a red job is the whole point.

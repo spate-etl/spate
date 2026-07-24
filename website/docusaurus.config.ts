@@ -59,10 +59,12 @@ const config: Config = {
   trailingSlash: false,
 
   // Broken internal links fail the build — a content-hygiene gate that keeps
-  // CI honest as docs change. Anchors stay lenient (cross-doc heading links
-  // are easy to trip on and low-risk).
+  // CI honest as docs change. Anchors are held to the same standard: a link
+  // into a specific heading is a promise that the heading exists, and a
+  // rename breaking it silently is exactly the drift the rest of these gates
+  // exist to stop.
   onBrokenLinks: 'throw',
-  onBrokenAnchors: 'warn',
+  onBrokenAnchors: 'throw',
 
   i18n: {
     defaultLocale: 'en',

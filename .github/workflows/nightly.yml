@@ -15,12 +15,84 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
+# Read-only by default; `advisories` widens it to open its tracking issue.
+permissions:
+  contents: read
+
 jobs:
+  advisories:
+    name: Advisories (RustSec)
+    runs-on: ubuntu-latest
+    # CI's `deny` job answers this on push and pull_request only. An advisory
+    # published against a crate that is *already* in Cargo.lock is therefore
+    # invisible until somebody happens to open a PR — on a quiet week, that is
+    # the whole week. Running it on the schedule bounds disclosure-to-detection
+    # by a day instead of by contributor activity.
+    #
+    # Advisories only, deliberately. Licences, bans and sources are properties
+    # of the tree we committed and cannot change without a commit, so they
+    # belong on the PR path where a human can act on them. The advisory
+    # database changes underneath a static tree, which is what makes this the
+    # one check worth repeating on a timer.
+    permissions:
+      contents: read
+      # For the tracking issue below.
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      # Not cargo-deny-action — it builds a container that curls an unverified
+      # release tarball into /usr/bin. install-action resolves the version from
+      # a manifest baked into the pinned action SHA and enforces a SHA-256.
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-deny
+      # `--locked` so this asks about the graph we ship, not one resolved fresh
+      # at 03:17 — the action's default arguments omit it.
+      - id: deny
+        run: cargo deny --all-features --locked check advisories
+
+      # A red nightly is easy to miss — nobody is watching Actions at 03:17.
+      # Reuse a single open issue rather than filing a new one every night
+      # until the advisory is dealt with.
+      #
+      # Gated on the deny step specifically, not on `failure()`: a checkout or
+      # toolchain-install failure would otherwise file an issue whose body
+      # asserts an advisory was found, which is worse than silence.
+      - name: Report the failure as an issue
+        if: failure() && steps.deny.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Nightly advisory scan is failing'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              '`cargo deny check advisories` failed on the nightly run.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'Triage is one of two things: upgrade the affected crate, or add a' \
+              'dated `ignore` entry to `deny.toml` with a written justification.' \
+              'Closing this issue without doing one of them just reopens it tomorrow.'
+          )"
+
   features:
     name: Feature powerset (exhaustive)
     runs-on: ubuntu-latest
-    # The exhaustive check CI's PR path cannot afford: the `etl` facade has 19
-    # features, so this is 2^19 combinations and several build librdkafka or
+    # The exhaustive check CI's PR path cannot afford: the `etl` facade declares
+    # 18 feature keys, so this is 2^18 combinations and several build librdkafka or
     # compile OpenSSL from source. ~48 minutes, which is fine once a night and
     # was not fine on every PR. CI runs `--each-feature` (linear) instead, so a
     # feature that fails alone is still caught in minutes; what lands here is
@@ -29,24 +101,40 @@ jobs:
     # `--no-dev-deps` rewrites each Cargo.toml while it runs and restores it
     # afterwards, so a cancelled run can leave manifests stripped. Harmless on
     # a throwaway runner; worth knowing before running it locally.
+    #
+    # That rewrite is also why this is the one cargo call here without
+    # `--locked`: the stripped manifest makes the lockfile need an update, and
+    # `--locked` fails the run outright. Verified. Lockfile drift is caught on
+    # the same commit by CI's `--locked` jobs (lint, test, deny, msrv) — not by
+    # the `advisories` job above, which checks the advisory database rather than
+    # whether the lockfile resolves.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-hack
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
   miri:
     name: Miri (etl-core)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly
           components: miri
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test -p etl-core --lib
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo miri test -p etl-core --lib --locked
         env:
           # tokio's I/O driver needs isolation off for its epoll shim.
           MIRIFLAGS: -Zmiri-disable-isolation
@@ -55,14 +143,18 @@ jobs:
     name: Loom models (etl-core)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Stays on the built-in harness deliberately: the loom models must run
       # as `--lib` only (doc tests compiled under `--cfg loom` construct
       # loom-typed primitives outside a model and abort), and nextest would
       # buy nothing here. Do not "modernise" this onto nextest.
-      - run: cargo test -p etl-core --release --lib
+      - run: cargo test -p etl-core --release --lib --locked
         env:
           RUSTFLAGS: --cfg loom
 
@@ -70,10 +162,16 @@ jobs:
     name: Container integration suites
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # One run over every container-backed suite. Previously this was four
       # `cargo test` invocations, the first of which named `--test e2e` — a
       # target that does not exist (the facade's are `e2e_happy`,
@@ -87,45 +185,74 @@ jobs:
       - run: >
           cargo nextest run --profile docker
           -p etl -p etl-kafka -p etl-clickhouse -p etl-s3 -p etl-coordination
-          --all-features --run-ignored ignored-only --test-threads 1
+          --all-features --locked --run-ignored ignored-only --test-threads 1
         timeout-minutes: 60
 
   bench:
     name: Criterion + divan micro benches
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Compile every bench target and benchmark rig in the bench (release)
       # profile. CI's clippy `--all-targets` already type-checks all of them on
       # each PR, so what this adds is release-profile-only breakage — a link
       # error, or a `cfg(not(debug_assertions))` path. It lives here because
       # this job needs a release build anyway; on the PR path it was a second
       # full dependency compile and the slowest job in CI.
-      - run: cargo bench --no-run --workspace --all-features
+      - run: cargo bench --no-run --workspace --all-features --locked
       # Alloc-count benches are hard assertions: a per-record allocation on
       # the hot path fails this job.
-      - run: cargo test -p etl-core --release --test chain_alloc
-      - run: cargo bench -p etl-core -- --save-baseline nightly
-      # etl-avro's fast-backend decode variants are `#[cfg(feature = "fast")]`;
-      # bench with the feature so they are compiled and regression-tracked too.
-      - run: cargo bench -p etl-avro --features fast -- --save-baseline nightly
-      - name: Fetch previous baseline
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+      - run: cargo test -p etl-core --release --test chain_alloc --locked
+      # Both bench steps below name their target explicitly. `cargo bench -p X --
+      # --save-baseline` forwards those args to *every* bench target in the
+      # package, including the lib's default libtest harness, which rejects them
+      # with "Unrecognized option: 'save-baseline'" and fails the step.
+      #
+      # etl-core's only bench target is divan, not criterion — divan has no
+      # baseline concept, so it takes no criterion arguments at all.
+      - run: cargo bench -p etl-core --locked --bench chain
+      # etl-avro's `decode` is the criterion bench, and it is what critcmp
+      # compares below. This step previously passed `--features fast`; etl-avro
+      # has no `[features]` table at all since that backend was removed on
+      # 2026-07-22, so cargo rejected it outright and the job aborted here every
+      # night, before the baseline was ever written.
+      - run: cargo bench -p etl-avro --locked --bench decode -- --save-baseline nightly
+
+      # Restore the previous run's criterion data before comparing.
+      #
+      # This used to be `download-artifact` with no `run-id`, which scopes the
+      # lookup to the *current* run — where `criterion-baseline` does not exist
+      # until the upload step below. `continue-on-error` hid the miss, the
+      # directory test was never true, and critcmp never ran. A cache with a
+      # prefix restore-key is the mechanism that actually carries state between
+      # scheduled runs: the exact key never hits, so it always falls back to the
+      # newest previous entry, then saves this run's data under a fresh key.
+      - name: Restore previous criterion baseline
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          name: criterion-baseline
-          path: previous-criterion
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+          restore-keys: criterion-baseline-
+
       - name: Compare against previous baseline
         continue-on-error: true
         run: |
-          cargo install critcmp --locked || true
-          if [ -d previous-criterion ]; then
-            cp -r previous-criterion/* target/criterion/ 2>/dev/null || true
-            critcmp nightly || true
-          fi
-      - uses: actions/upload-artifact@v4
+          # Pinned: `--locked` fixes critcmp's own lockfile, not which version
+          # of critcmp we get, and this is an unattended install on a schedule.
+          cargo install critcmp --locked --version 0.1.8 || true
+          critcmp nightly || true
+
+      # `always()` so a failed or cancelled bench still publishes whatever
+      # criterion produced — without it, the run that most needs inspecting is
+      # the one that uploads nothing.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
         with:
           name: criterion-baseline
           path: target/criterion
@@ -134,12 +261,16 @@ jobs:
     name: pipeline_synthetic trend run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p benchmarks
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo build --release -p benchmarks --locked
       - run: RUN_ONE=1 THREADS=2 DURATION_S=60 RESULTS=synthetic-trend.jsonl ./target/release/pipeline_synthetic
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: synthetic-trend-${{ github.run_id }}
           path: synthetic-trend.jsonl

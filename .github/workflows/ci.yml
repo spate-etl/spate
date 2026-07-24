@@ -51,11 +51,14 @@ jobs:
     name: Format and lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
       # `--all-targets` is doing the work of three steps: it compiles every
       # lib, bin, test, bench and example in the workspace. The two steps that
@@ -70,13 +73,47 @@ jobs:
       # exists and the marginal cost is nil. What that loses on a PR is
       # release-only breakage — a link error, or a `cfg(not(debug_assertions))`
       # path — which is worth a night's latency, not ~6 minutes per PR.
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  workflows:
+    name: Workflow lint (zizmor)
+    runs-on: ubuntu-latest
+    # Static analysis of these workflow files themselves. It exists to stop the
+    # hardening in this commit from rotting: every action pinned to a SHA,
+    # `persist-credentials: false` on every checkout, and an explicit
+    # `permissions:` block per workflow. Each of those is a one-line omission
+    # away from being silently undone by the next workflow edit, and none of
+    # them fails any other job when it regresses.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: zizmor
+      # `--persona=regular` is the default; naming it makes the escalation
+      # explicit if someone later wants `--persona=pedantic`. Findings are
+      # errors, not advisories — a red job is the whole point.
+      #
+      # GH_TOKEN is load-bearing, not decoration. Without a token zizmor runs
+      # offline and *silently skips* the audits that need the API — including
+      # `known-vulnerable-actions`, which is the one that matters most here:
+      # pinning to a SHA is precisely what stops us picking up an upstream
+      # security fix automatically, so the compensating control is a check that
+      # the pinned versions are not themselves known-bad. Offline it reports
+      # "No findings" and exits 0 even against a known-compromised action.
+      #
+      # Scanning all of `.github/`, not just `workflows/`: zizmor also audits
+      # Dependabot config, and that file is coming.
+      - run: zizmor --persona=regular .github/
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   features:
     name: Feature matrix (each feature)
     runs-on: ubuntu-latest
-    # Linear, not the powerset. The `etl` facade carries 19 features, so a
-    # full powerset is 2^19 combinations and several of them build librdkafka
+    # Linear, not the powerset. The `etl` facade declares 18 feature keys, so a
+    # full powerset is 2^18 combinations and several of them build librdkafka
     # or compile OpenSSL from source — it ran ~48 minutes, on every PR, which
     # is not what that signal is worth.
     #
@@ -88,31 +125,66 @@ jobs:
     #
     # `full` is excluded because it is a superset alias — `--all-features` in
     # the lint and test jobs already covers that shape.
+    #
+    # This is the one dependency-resolving cargo call in the workflow that
+    # deliberately omits `--locked`. `--no-dev-deps` rewrites each Cargo.toml
+    # while cargo-hack runs, which makes the lockfile need an update, and
+    # `--locked` then fails the run outright ("cannot update the lock file ...
+    # because --locked was passed"). Verified, not assumed. Nothing is lost:
+    # `lint`, `test`, `deny` and `msrv` all run `--locked` against the same
+    # commit, so lockfile drift is already caught — this job only answers
+    # "does each feature compile alone".
+    #
+    # (`cargo fmt` is the other bare call, and it resolves nothing.)
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-hack
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
 
   deny:
     name: Licences, advisories and attribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # cargo-deny *gates* (fails on a licence we will not accept); cargo-about
       # *attributes* (reproduces what we ship, for our users' own compliance).
       # Same lockfile, same maintainers, different jobs — see about.toml.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Not cargo-deny-action. That action builds its container on the runner
+      # from a Dockerfile that pipes an unverified release tarball straight into
+      # /usr/bin — a substituted asset would get root in the job that reports
+      # our security verdict. install-action resolves the version from a
+      # manifest baked into the pinned action SHA and enforces a SHA-256.
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-deny
+
+      # `--locked` matters as much here as anywhere: the action's default
+      # arguments omit it, so the gate used to resolve its own graph and could
+      # pass or fail on dependencies we do not ship — a different tree from the
+      # one every other job just built, and from the one THIRD-PARTY.md below
+      # is generated against.
+      - run: cargo deny --all-features --locked check all
       # The `cli` feature is NOT default; without it cargo installs the library
       # and `cargo about` is simply not a command. Pinned because this step
       # feeds a byte-exact diff gate: a release that changes how the generator
       # groups or orders crates would fail the gate on an unrelated PR.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
           tool: cargo-about@0.9.1
 
@@ -155,7 +227,9 @@ jobs:
       # line tables are all it needs.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Reclaims ~25GB of preinstalled SDKs. Cheap next to re-running a build
       # that dies at link time.
       - name: Free disk space
@@ -163,12 +237,17 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           df -h /
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-llvm-cov
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # Test scaffolding is excluded from the denominator so the number
       # reflects shipped code. Note `--all-features` turns on
@@ -177,18 +256,18 @@ jobs:
       # inflates the number slightly rather than hiding anything.
       - name: Coverage
         run: >
-          cargo llvm-cov nextest --profile ci --workspace --all-features
+          cargo llvm-cov nextest --profile ci --workspace --all-features --locked
           --lcov --output-path lcov.info
           --ignore-filename-regex '(/tests/|/benchmarks/)'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: coverage-lcov
           path: lcov.info
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -217,45 +296,57 @@ jobs:
       # exhausts the runner's disk and the linker dies with SIGBUS.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           df -h /
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: cargo-llvm-cov
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # `--no-report` accumulates raw profile data without rendering; the
       # `report` step merges both runs into one lcov file.
       - name: Clean coverage state
-        run: cargo llvm-cov clean --workspace
+        # `--locked` here is not redundant with the two coverage steps below:
+        # `clean` shells out to `cargo metadata`, and it runs *first*. Without
+        # it, a stale lockfile gets quietly repaired by this step and the
+        # `--locked` on the steps that follow can never fire — which is exactly
+        # the case those flags exist to catch.
+        run: cargo llvm-cov clean --workspace --locked
       - name: Coverage — unit and integration
-        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features
+        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features --locked
       # Serial: a hosted runner is 2 cores / ~7 GB and this spans SeaweedFS,
       # NATS, Redpanda and ClickHouse. Concurrency risks an OOM that would
       # read as a flake.
       - name: Coverage — docker suites
         run: >
           cargo llvm-cov --no-report nextest --profile docker
-          --workspace --all-features --run-ignored ignored-only --test-threads 1
+          --workspace --all-features --locked --run-ignored ignored-only --test-threads 1
       - name: Merge coverage
         run: >
-          cargo llvm-cov report --lcov --output-path lcov-full.info
+          cargo llvm-cov report --lcov --locked --output-path lcov-full.info
           --ignore-filename-regex '(/tests/|/benchmarks/)'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: coverage-lcov-full
           path: lcov-full.info
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: lcov-full.info
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -271,20 +362,26 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo nextest run --profile ci --workspace --all-features
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo nextest run --profile ci --workspace --all-features --locked
       # nextest does not run doctests; they stay on the built-in harness.
-      - run: cargo test --workspace --all-features --doc
+      - run: cargo test --workspace --all-features --locked --doc
 
       # The `ci` profile retries once, so a flake passes on the retry and the
       # run goes green. Publishing the JUnit report is what keeps that flake
       # visible — it lands as a check annotation instead of living only in
       # scrolled-past log text. `always()` so a failing run still reports.
       - name: Publish test report
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@3585e9575db828022551b4231f165eb59a0e74e3 # v5.6.2
         if: always()
         with:
           report_paths: target/nextest/ci/junit.xml
@@ -295,7 +392,7 @@ jobs:
           # The job's own exit code already failed the build; this step
           # exists to annotate, not to re-decide.
           fail_on_failure: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: junit-nextest
@@ -305,12 +402,19 @@ jobs:
     name: Check (MSRV 1.94)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # `--locked` matters most here. Without it this job is free to resolve a
+      # *different*, older graph than the one we ship, and would then pass while
+      # the committed Cargo.lock needs a toolchain newer than 1.94. With it, the
+      # job answers the question it claims to: does the dependency set we
+      # actually ship build on the MSRV?
+      - run: cargo check --workspace --all-features --locked
 
   integration:
     name: End-to-end (Docker)
@@ -319,15 +423,21 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # The `docker` profile warns late and never terminates: these boot real
       # containers, so a cold image pull can outlast any per-test kill, and a
       # SIGKILL would report TIMEOUT indistinguishably from a real hang. The
       # job's `timeout-minutes` is the real bound.
       - run: >
-          cargo nextest run --profile docker -p etl --all-features
+          cargo nextest run --profile docker -p etl --all-features --locked
           --run-ignored ignored-only --test-threads 1
         timeout-minutes: 30

@@ -11,34 +11,54 @@ changing engine behavior.
 
 ## Commands
 
+**Pass `--locked` — CI does.** Every dependency-resolving cargo call in CI runs
+`--locked`, so a command run without it here can silently resolve a different
+graph and hide a failure that CI will then find. The one deliberate exception is
+`cargo hack --no-dev-deps`, which rewrites each `Cargo.toml` as it runs and so
+cannot take the flag.
+
 ```sh
-cargo check --workspace --all-features
-cargo nextest run --workspace --all-features   # unit + integration (no docker)
-cargo nextest run -p etl-s3 --all-features     # between edits; --workspace is the final gate
-cargo test --workspace --all-features --doc    # nextest does not run doctests
-cargo nextest run --profile docker --workspace --all-features --run-ignored ignored-only  # container suites
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo check --workspace --all-features --locked
+cargo nextest run --workspace --all-features --locked   # unit + integration (no docker)
+cargo nextest run -p etl-s3 --all-features --locked     # between edits; --workspace is the final gate
+cargo test --workspace --all-features --locked --doc    # nextest does not run doctests
+cargo nextest run --profile docker --workspace --all-features --locked --run-ignored ignored-only  # container suites
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
-cargo bench --no-run --workspace --all-features # the 11 benchmark rigs still compile
-cargo bench -p etl-core                        # criterion + divan micro benches
-RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # loom models
-cargo check -p etl --examples --all-features   # all examples compile
-cargo check -p etl-coordination --no-default-features --tests  # feature-off matrix (CI runs --all-features and misses it)
-cargo check -p etl --no-default-features --features s3     # facade s3 without coordination-nats never links async-nats
+cargo deny --all-features --locked check all   # licences, advisories, bans, sources
+cargo bench --no-run --workspace --all-features --locked # the 11 benchmark rigs still compile
+cargo bench -p etl-core --locked               # criterion + divan micro benches
+RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib --locked   # loom models
+cargo check -p etl --examples --all-features --locked   # all examples compile
+cargo check -p etl-coordination --no-default-features --tests --locked  # feature-off matrix (CI runs --all-features and misses it)
+cargo check -p etl --no-default-features --features s3 --locked     # facade s3 without coordination-nats never links async-nats
+cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full  # no --locked; see above
 ./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; CI diff-gates it
+zizmor .github/                                # workflow lint; needs GH_TOKEN or it silently skips audits
 cargo run -p etl --example memory_pipeline     # runnable without infrastructure
 docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
 ```
 
+GitHub Actions are pinned to full commit SHAs. Use `pinact run .github/workflows/*.yml`
+rather than editing them by hand; note it refuses to pin a *branch* ref
+(`dtolnay/rust-toolchain@stable`) or a tool-alias ref
+(`taiki-e/install-action@nextest`), because in both cases the ref name selects
+behaviour — those carry an explicit `toolchain:`/`tool:` input instead.
+
 The documentation site (Docusaurus) lives in `website/` and renders the
-`docs/` tree in place; deployed to GitHub Pages by `.github/workflows/docs.yml`.
+`docs/` tree in place; deployed to Cloudflare Pages by
+`.github/workflows/docs.yml` (`baseUrl` is `/`).
 
 ```sh
-cd website && npm install       # first-time setup (Node >= 18)
-npm start                       # local preview at http://localhost:3000/etl-rs/
+cd website && npm ci            # first-time setup (CI uses Node 24; engines say >= 18)
+npm start                       # local preview at http://localhost:3000/
 npm run build                   # production build into website/build
 CI=true npm run build           # what CI actually runs — see below
 ```
+
+`website/.npmrc` sets `ignore-scripts=true`, so dependency lifecycle hooks never
+run on install. Prefer `npm ci` over `npm install` — it installs the committed
+lockfile verbatim instead of re-resolving it.
 
 **Verify the site with `CI=true npm run build`.** The client-redirects plugin is
 registered only when `process.env.CI === 'true'`, so a plain `npm run build`

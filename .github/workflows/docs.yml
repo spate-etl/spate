@@ -21,27 +21,44 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only by default; the `deploy` job widens it to what wrangler needs. Set
+# explicitly rather than inherited, so a repo-level default that is more
+# permissive than read-only cannot silently reach the job that runs `npm ci`
+# over ~1400 third-party packages.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build site
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history so Docusaurus can derive per-page "last updated" times.
           fetch-depth: 0
+          # Docusaurus reads git *history* for last-updated; it never pushes.
+          # Leaving the token in .git/config would expose it to every later
+          # step in this job, `npm ci` and the Docusaurus build included.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          # Node 20 went end-of-life in April 2026 — CI was building the
+          # published site on an unsupported runtime. 24 is Active LTS, and is
+          # also what this project is developed against locally, so CI and a
+          # contributor's machine agree.
+          node-version: 24
           cache: npm
           cache-dependency-path: website/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build API reference (rustdoc)
-        run: cargo doc --workspace --exclude benchmarks --no-deps --all-features
+        run: cargo doc --workspace --exclude benchmarks --no-deps --all-features --locked
 
       # Stage rustdoc under the site's static/ dir so Docusaurus copies it into
       # the build at <baseUrl>/api/ (and it's served during local `npm start`).
@@ -70,7 +87,7 @@ jobs:
       # committed THIRD-PARTY.md carries licence ids only (so it stays
       # diffable), while the site carries every crate's full licence text.
       # ~300KB, regenerated per deploy rather than committed.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
           tool: cargo-about@0.9.1
 
@@ -90,7 +107,7 @@ jobs:
         run: npm run build
 
       - name: Upload site artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: docs-site
           path: website/build
@@ -114,13 +131,24 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Download site artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: docs-site
           path: website/build
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        # This step runs its own `npm i wrangler@3.x` on the runner, and it does
+        # so *after* setting CLOUDFLARE_API_TOKEN in the environment. That is a
+        # second, unlockfiled npm install of ~60 packages resolved fresh on
+        # every deploy — and website/.npmrc cannot reach it, because this job
+        # has no checkout, so the install runs in an empty GITHUB_WORKSPACE with
+        # lifecycle scripts on and the production token already in `process.env`.
+        #
+        # NPM_CONFIG_IGNORE_SCRIPTS closes that path the only way available
+        # here: npm reads config from the environment, so this needs no file.
+        env:
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

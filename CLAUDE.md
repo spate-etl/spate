@@ -34,20 +34,107 @@ cargo check -p etl-coordination --no-default-features --tests --locked  # featur
 cargo check -p etl --no-default-features --features s3 --locked     # facade s3 without coordination-nats never links async-nats
 cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full  # no --locked; see above
 ./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; CI diff-gates it
+./scripts/ci-changes.sh --self-test            # the container-suite map still matches the crate graph
 zizmor .github/                                # workflow lint; needs GH_TOKEN or it silently skips audits
+shellcheck scripts/*.sh                        # CI runs this one
+actionlint .github/workflows/*.yml             # LOCAL ONLY — see below. Run it before pushing workflow edits.
 cargo run -p etl --example memory_pipeline     # runnable without infrastructure
 docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
 ```
 
-GitHub Actions are pinned to full commit SHAs. Use `pinact run .github/workflows/*.yml`
-rather than editing them by hand; note it refuses to pin a *branch* ref
+## CI layout
+
+Two workflows, and the split is a rule rather than a habit: **anything whose job
+is to stop a change entering `main` runs on the pull request; the scheduled tier
+is only for detecting the world changing underneath a static tree** (a new
+advisory, a yanked crate, a dependency floor that stopped building). A scheduled
+failure lands after the merge that caused it, which is useless as a gate.
+
+- **`ci.yml`** — `pull_request`, `push` to main, and `merge_group`. Three tiers:
+  a cheap always-run tier (`lint`, `workflows`, `deny`), an expensive tier
+  scoped by `scripts/ci-changes.sh`, and `ci-gate`. The expensive tier
+  `needs: [changes, lint, workflows]` and deliberately **not** `deny` — a lint
+  error should stop the fan-out, but the licence gate is independent of whether
+  the code compiles and would tax every green PR with its ~2 minutes.
+- **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom,
+  allocation assertions, docs build and deploy) and weekly (feature powerset,
+  container coverage, benches), selected by which cron fired. `workflow_dispatch`
+  takes a `tier` input for testing. A `report` job files one tracking issue for
+  any job that fails without its own reporting.
+
+**Miri does not run anywhere, and that is deliberate.** The old nightly ran
+`cargo miri test -p etl-core`, which took six hours and hit the 360-minute cap.
+`etl-core` contains no `unsafe` at all, so there was nothing there for Miri to
+find. The workspace's only `unsafe` is `erase_lifetime` in
+`crates/etl-kafka/src/lane.rs` — a lifetime-only transmute of an rdkafka
+`BorrowedMessage` — and Miri could not check that either: it reaches straight
+into librdkafka, which Miri cannot interpret. So the honest statement is not
+"there is no unsafe" but "the one piece of unsafe we have is outside what Miri
+can see, and the crate Miri *was* pointed at has none". If `unsafe` appears in
+code Miri can actually interpret, that is the trigger to bring it back.
+
+`actionlint` is **not** run in CI, only locally. `taiki-e/install-action` has no
+manifest entry for it, so putting it in CI would mean either a runtime-resolved
+binary or a digest-pinned Docker image — neither worth it yet. It catches real
+problems (it found two in this workflow set), so run it before pushing workflow
+edits. `shellcheck` *is* in CI, over `scripts/*.sh`.
+
+**`ci-gate` is the only job that should ever be a required status check.** It
+carries `if: always()`, `needs:` every other job, and fails on any dependency
+that failed or was *cancelled* while accepting `skipped`. Two traps behind that:
+a workflow skipped by `on: paths:` never reports at all and blocks a required
+check forever (which is why the triggers here are unfiltered and all filtering
+is per-job `if:`), and a *skipped* check reports as success — so a gate without
+`always()` green-lights exactly the runs it exists to stop.
+
+`scripts/ci-changes.sh` decides what runs. Container suites are selected by a
+reverse-dependency closure over the crate graph: a change confined to
+`crates/etl-s3` runs `-p etl-s3` and `-p etl`, because the facade depends on it.
+Note what that does *not* mean — the facade's own e2e suite drives Kafka and
+ClickHouse, so an etl-s3 change still boots those. The closure answers "can this
+break it", not "does this exercise it", and narrowing it by hand would buy back
+those boots at the price of a table `cargo metadata` can no longer verify.
+
+That table is hand-written and `--self-test` checks it two ways: the closure
+against `cargo metadata`, and `CONTAINER_PKGS` against which crates actually
+carry `#[ignore]`d tests. Run it after adding a crate or a dependency edge.
+Classification is an ignore-list, not an allow-list — anything not recognised as
+documentation counts as code, because an allow-list fails open when a new source
+directory appears. The diff is taken against the **merge base** with
+`--no-renames` and `-z`: the base-branch tip would drag in everything `main` has
+gained since the branch last moved, rename detection prints only the
+destination (so moving a `.rs` file out of a crate would look like a docs
+change), and `core.quotePath` C-quotes non-ASCII filenames into matching
+nothing.
+
+GitHub Actions are pinned to full commit SHAs. Use
+`pinact run .github/workflows/*.yml .github/actions/*/action.yml` — note the
+second glob, because the toolchain and tool pins now live in the composite
+action and the first glob alone would miss them. Run it rather than editing
+them by hand; note it refuses to pin a *branch* ref
 (`dtolnay/rust-toolchain@stable`) or a tool-alias ref
 (`taiki-e/install-action@nextest`), because in both cases the ref name selects
-behaviour — those carry an explicit `toolchain:`/`tool:` input instead.
+behaviour. **No workflow currently takes either exception** — both are SHA-pinned
+with the selector moved into an explicit `toolchain:`/`tool:` input, which is
+stronger, and is the pattern to keep. The shared preamble lives in
+`.github/actions/setup-rust` (a composite action, so it runs in the caller's job
+and costs no extra runner); the caller does its own `actions/checkout` first,
+because a `uses: ./...` action cannot check out the tree that contains it.
 
 The documentation site (Docusaurus) lives in `website/` and renders the
-`docs/` tree in place; deployed to Cloudflare Pages by
-`.github/workflows/docs.yml` (`baseUrl` is `/`).
+`docs/` tree in place; built on every docs pull request by `ci.yml`'s `site`
+job and deployed to Cloudflare Pages by the nightly tier of `scheduled.yml`
+(`baseUrl` is `/`). The PR build deliberately stages neither rustdoc nor the
+licence texts — both are deploy-time artifacts, and generating them cost every
+*Rust* pull request a full `cargo doc` plus an `npm ci` it had no other use for.
+
+Two consequences, both deliberate and both worth stating plainly. **The whole
+published site is now up to a day stale**, not just `/api/` — the deleted
+`docs.yml` deployed on every push to `main` (seven deploys on 2026-07-24), and
+this deploys once a night. And `cargo doc` and `about-html.hbs` are no longer
+exercised before merge, so a rustdoc-breaking doc comment or a broken licence
+template merges green and fails that night — which is why `docs-build` failing
+now files an issue rather than going unnoticed.
 
 ```sh
 cd website && npm ci            # first-time setup (CI uses Node 24; engines say >= 18)
@@ -60,15 +147,28 @@ CI=true npm run build           # what CI actually runs — see below
 run on install. Prefer `npm ci` over `npm install` — it installs the committed
 lockfile verbatim instead of re-resolving it.
 
+The site builds under **Docusaurus Faster** (`future.faster`, stable since 3.10
+and the default in v4): Rspack and SWC in place of webpack, Babel and Terser.
+Measured on this site, cold: **10s → 3s**, and 2s with the Rspack persistent
+cache in `website/node_modules/.cache` retained. CI restores that cache *after*
+`npm ci`, which is not stylistic — `npm ci` deletes `node_modules` before
+installing, so a cache restored earlier is thrown away and the step silently
+does nothing. `faster` also requires `future.v4.removeLegacyPostBuildHeadAttribute`,
+which is enabled on its own rather than via `v4: true`; the other v4 flag,
+`useCssCascadeLayers`, changes CSS precedence and wants its own visual check.
+
 **Verify the site with `CI=true npm run build`.** The client-redirects plugin is
 registered only when `process.env.CI === 'true'`, so a plain `npm run build`
 silently skips redirect validation — and a redirect whose target page was deleted
 is a hard build failure. Deleting a docs page means deleting any redirect aimed
 at it; without `CI=true` you will not find out until the PR is red.
 
-The `/api/` rustdoc is generated by CI into `website/static/api/` (gitignored).
-To populate it locally: `cargo doc --workspace --exclude benchmarks --no-deps
---all-features`, then copy `target/doc/.` into `website/static/api/`.
+The `/api/` rustdoc is generated into `website/static/api/` (gitignored) by the
+nightly deploy only, not by the PR build. To populate it locally: `cargo doc
+--workspace --exclude benchmarks --no-deps --all-features`, then copy
+`target/doc/.` into `website/static/api/`. The site builds fine without it —
+the navbar and footer reach rustdoc through `pathname:///api/`, which
+deliberately bypasses Docusaurus's link checker.
 
 Verify gates by **explicit exit codes** (redirect to a log, check `$?`);
 piped `grep`/`tail` chains have masked real failures in this repo.
@@ -103,14 +203,21 @@ indistinguishably from a real hang.
 invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
 `benchmarks::manifest::every_rig_is_declared_as_a_bin` fails if the two diverge.
 Note the rigs are no longer built by `cargo nextest run`; `cargo clippy
---workspace --all-targets` is what compile-checks them (and the examples) on
-every PR. `cargo bench --no-run` adds only release-profile breakage on top of
-that, and costs a second full dependency build, so CI runs it nightly.
+--workspace --all-targets` is what compile-checks them (and the examples) — on
+every PR **that touches Rust**, since that step now carries
+`if: needs.changes.outputs.rust == 'true'`. A docs-only PR compile-checks
+nothing, which is the point, but it does mean the rigs are unguarded on exactly
+those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
+that, and costs a second full dependency build, so it runs in the weekly tier.
 
 Coverage is `cargo llvm-cov`, reported to Codecov under two flags. `unit` runs on
 every PR (docker-free) and is what the 80% **patch** target gates on
-(`codecov.yml`, informational until calibrated). `with-containers` runs only on
-pushes to main and merges the `#[ignore]`d container suites in. Measured before
+(`codecov.yml`, informational until calibrated). It is produced by the same run
+as the tests — `cargo llvm-cov nextest` writes `target/nextest/ci/junit.xml` too,
+so there is one instrumented run per PR rather than the suite executing twice.
+`with-containers` runs in the **weekly** tier and merges the `#[ignore]`d
+container suites in; `codecov.yml` sets `carryforward: true` on that flag
+precisely so it can update on a slower cadence than `unit`. Measured before
 splitting them: docker-free the workspace is at **87.6%** line coverage, etl-s3
 92.2% and etl-kafka 91.5% — the container suites move the total by single digits
 and cost ~an hour of serial docker, so they report rather than gate. Lowest crate

@@ -3,7 +3,8 @@ import type * as Preset from '@docusaurus/preset-classic';
 import { themes as prismThemes } from 'prism-react-renderer';
 
 // The site is deployed to Cloudflare Pages on a dedicated subdomain:
-// https://etl-rs.pages.kainth.net/ (Direct Upload from CI — see docs.yml).
+// https://etl-rs.pages.kainth.net/ (Direct Upload from CI — see the nightly
+// tier of scheduled.yml; pull requests build the site but never publish it).
 // organizationName/projectName below still drive the GitHub source links
 // (githubUrl, editUrl, footer), not the deployed URL.
 const organizationName = 'MarcusKainth';
@@ -73,6 +74,35 @@ const config: Config = {
 
   markdown: {
     mermaid: true,
+    hooks: {
+      // `onBrokenLinks: 'throw'` above governs links Docusaurus has resolved
+      // into routes. A *Markdown* link — `[x](./other.md)` — that resolves to
+      // no file is a separate setting, and its default is only 'warn', so
+      // those were passing CI while rendered broken links failed it. Same
+      // standard for both. (The top-level `onBrokenMarkdownLinks` key this
+      // replaces is deprecated as of 3.9.)
+      onBrokenMarkdownLinks: 'throw',
+    },
+  },
+
+  future: {
+    // Rspack bundler + SWC/Lightning CSS in place of webpack + Babel + Terser.
+    // Stable as of 3.10 and the default in v4; upstream measures 3-4x on cold
+    // builds and, with the Rspack persistent cache preserved between runs,
+    // 6-7x on rebuilds. The site build is on the critical path of every docs
+    // pull request, so this is the largest single saving available here.
+    faster: true,
+    v4: {
+      // Required by `faster`: its `ssgWorkerThreads` refuses to start without
+      // it, because rendering pages off the main thread cannot support the
+      // legacy post-build head attribute.
+      //
+      // Enabled individually rather than as `v4: true`. The other v4 flag,
+      // `useCssCascadeLayers`, changes CSS precedence, and this site carries
+      // custom styles — that one deserves its own change with its own visual
+      // check, not a free ride on a build-speed commit.
+      removeLegacyPostBuildHeadAttribute: true,
+    },
   },
 
   plugins: [

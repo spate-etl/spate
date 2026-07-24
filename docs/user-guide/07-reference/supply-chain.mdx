@@ -95,6 +95,33 @@ action, an unpinned ref, a missing `permissions:` block, or a checkout that
 persists credentials. It runs with a token, because without one it silently
 skips the audits that need the API and reports success.
 
+Pinning the action is only half of it, because an action that installs a tool
+can still move which tool you get. The ones whose *behaviour* a gate rests on
+are therefore pinned by tool version as well: `cargo-deny` (which reports the
+security verdict), `zizmor` (whose default audit policy is the guarantee), and
+`cargo-about` (which feeds a byte-exact diff).
+
+### Scoping never applies to the security gates
+
+CI runs only the jobs a change can affect — a documentation edit does not build
+the workspace, and a change confined to one connector does not boot every
+container. That scoping is deliberately not extended to `cargo deny`, `zizmor`,
+or the `THIRD-PARTY.md` diff gate, and the reason is worth stating because the
+alternative looks reasonable.
+
+A filter keyed on `Cargo.lock` and `deny.toml` would seem to cover
+`cargo deny`, and does not: enabling a feature can pull a new crate into the
+`--all-features` graph through a path no glob sees, and the advisory database
+changes with no file in this repository changing at all. Filtering `zizmor` is
+worse than incomplete — what it guards against is a pull request that edits
+`.github/`, so gating it on `.github/` having changed is circular. Those three
+run on every pull request, unconditionally.
+
+The same rule decides what may move to the scheduled tier: a check whose job is
+to stop something entering `main` has to run before it enters `main`, because a
+scheduled failure arrives after the merge that caused it. The scheduled tier is
+for the opposite case — the world changing underneath a tree that has not.
+
 ### Advisories, on a schedule as well as on pull requests
 
 `cargo deny check advisories` runs on every pull request *and* nightly. The
@@ -135,7 +162,7 @@ are the largest dependency graph in the repository.
 
 An `.npmrc` only covers installs that can see it, which is not all of them. The
 docs deploy step runs a *second* npm install — `cloudflare/wrangler-action`
-shells out to `npm i wrangler@3.x` in a job with no checkout, so no `.npmrc` is
+shells out to `npm i wrangler@4` in a job with no checkout, so no `.npmrc` is
 on disk and the production deploy token is already in the environment. That one
 is covered separately, by setting `NPM_CONFIG_IGNORE_SCRIPTS` on the step, since
 npm reads its configuration from the environment as well as from a file.

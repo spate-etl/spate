@@ -23,7 +23,19 @@ updates:
     # Higher than the other three because the grouped pull request and the
     # individual major ones share this budget, and most of this graph is 0.x
     # (see below) where breaking releases arrive one PR at a time.
-    open-pull-requests-limit: 10
+    #
+    # Lowered from 10 after measuring what it actually costs. Eighteen bot pull
+    # requests opened on a single day (#92-#109) against a combined ceiling of
+    # 25. Three of those were cargo — and a cargo bump is the expensive kind,
+    # because it changes Cargo.lock, which is part of the build cache key, so
+    # each one is a cold build and rebases into another cold build every time a
+    # sibling merges. Four at a time is what one maintainer can review in a
+    # sitting; Dependabot queues the rest rather than dropping them.
+    #
+    # A cargo bump also always fails the THIRD-PARTY.md gate, because that file
+    # carries a Version column and Dependabot does not regenerate it. Run
+    # `./scripts/attribution.sh` and commit the result onto the bot's branch.
+    open-pull-requests-limit: 4
     labels: ["dependencies", "rust"]
     commit-message:
       prefix: "chore(workspace)"
@@ -97,7 +109,7 @@ updates:
     schedule:
       interval: weekly
       day: tuesday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "github-actions"]
     commit-message:
       prefix: "chore(ci)"
@@ -125,7 +137,7 @@ updates:
     schedule:
       interval: weekly
       day: wednesday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "javascript"]
     commit-message:
       prefix: "chore(docs)"
@@ -171,7 +183,7 @@ updates:
     schedule:
       interval: weekly
       day: thursday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     labels: ["dependencies", "docker"]
     commit-message:
       prefix: "chore(examples)"

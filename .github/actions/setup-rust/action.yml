@@ -1,0 +1,68 @@
+name: Set up Rust
+description: >
+  Toolchain, prebuilt cargo tools and a shared build cache — the preamble every
+  Rust job in this repo needs. Callers must run actions/checkout first.
+
+# A composite action, deliberately, rather than a reusable workflow. A composite
+# action's steps run *inside the calling job*, so they share that job's target
+# directory and cost no extra runner and no extra billed minute. A reusable
+# workflow would be a separate job, and would also rename every status check to
+# "caller / job" — which silently breaks branch protection, because the required
+# check name no longer matches what was configured.
+#
+# The checkout deliberately stays with the caller. A `uses: ./...` action is
+# resolved from the workspace on disk, so the repository has to be checked out
+# before this file can be read at all — an action cannot check out the tree that
+# contains it.
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install (stable, nightly, or a version like "1.94").
+    required: false
+    default: stable
+  components:
+    description: Comma-separated rustup components, e.g. "rustfmt, clippy".
+    required: false
+    default: ""
+  tools:
+    description: >
+      Comma-separated tools for taiki-e/install-action, e.g. "nextest,cargo-hack".
+      Pass a version where the tool's *behaviour* is what a gate rests on.
+    required: false
+    default: ""
+  shared-key:
+    description: >
+      Swatinem/rust-cache shared-key. Jobs that build substantially the same
+      dependency graph should pass the same value so they share one cache entry
+      instead of writing one each. Leave empty to skip caching entirely.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    # Prebuilt binaries with a SHA-256 check, resolved from a manifest baked
+    # into the pinned action SHA. `cargo install` would compile each tool and
+    # its whole dependency tree from source, minutes per tool per job.
+    - if: inputs.tools != ''
+      uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+      with:
+        tool: ${{ inputs.tools }}
+
+    # `save-if` restricted to main is about the 10 GB per-repo cache ceiling,
+    # not about time. Left at its default, every job on every PR writes its own
+    # entry; with N cache-writing jobs and M open PRs that is N×M entries
+    # against an LRU budget, which evicts the main baseline and leaves every PR
+    # building cold *while still paying the upload*. Writing only from main
+    # gives one warm baseline that every PR restores from — legal because a run
+    # may read its own branch, the default branch, and its PR base.
+    - if: inputs.shared-key != ''
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}

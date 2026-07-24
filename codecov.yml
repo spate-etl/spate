@@ -2,17 +2,22 @@
 #
 # Two flags, uploaded by two different jobs and meaning different things:
 #
-#   unit            — every PR. The docker-free suite. This is what the
-#                     status checks below gate on, so the PR signal is fast
-#                     and always means the same thing.
-#   with-containers — pushes to main only. Merges the docker-free run with
-#                     the `#[ignore]`d testcontainers suites.
+#   unit            — every PR, from ci.yml's `test` job, which is also the
+#                     job that runs the suite. This is what the status checks
+#                     below gate on, so the PR signal is fast and always means
+#                     the same thing.
+#   with-containers — the weekly tier of scheduled.yml. Merges the docker-free
+#                     run with the `#[ignore]`d testcontainers suites.
 #
 # The container suites were measured before being left off the PR path
 # rather than assumed either way: docker-free the workspace is already at
 # 87.6% line coverage, with etl-s3 at 92.2% and etl-kafka at 91.5%. Merging
 # the container runs in moved the total by single digits and cost ~an hour
-# of serial docker per PR, so it reports on main instead of gating there.
+# of serial docker per PR.
+#
+# Weekly rather than per-push because producing it means a second, fully
+# instrumented run of a suite CI has already run — and the number moves by
+# single digits. `carryforward: true` below is what makes that cadence work.
 
 coverage:
   precision: 1
@@ -64,9 +69,11 @@ flags:
     # run actually produced, not the last value seen on main.
     carryforward: false
   with-containers:
-    # Only uploaded on main, so a PR has none of its own. Carried forward so
-    # the flag keeps its last known value instead of reading as a regression
-    # to zero. It gates nothing — see the flag scoping on the statuses above.
+    # Uploaded weekly, so a PR has none of its own and most pushes to main do
+    # not either. Carried forward so the flag keeps its last known value
+    # instead of reading as a regression to zero — which is exactly what makes
+    # a weekly cadence viable. It gates nothing; see the flag scoping on the
+    # statuses above.
     carryforward: true
 
 ignore:

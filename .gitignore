@@ -10,7 +10,7 @@ website/node_modules
 website/build
 website/.docusaurus
 website/.cache-loader
-# Generated rustdoc, staged into the site by CI (see .github/workflows/docs.yml)
+# Generated rustdoc, staged into the site by the scheduled deploy (see .github/workflows/scheduled.yml)
 website/static/api
 # Generated third-party licence texts, staged into the site by the same workflow.
 # The compact, diffable inventory (THIRD-PARTY.md) IS committed; only the

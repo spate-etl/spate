@@ -1,0 +1,42 @@
+# Ownership for the files that decide what CI proves and what the project ships.
+#
+# Read this as a marker, not as an active control. Two things currently make it
+# inert, and both are worth knowing before anyone relies on it:
+#
+#   * CODEOWNERS only does anything once branch protection requires review from
+#     code owners, which needs a public repository or a paid plan.
+#   * With a single maintainer it cannot bite even then. GitHub will not accept
+#     a pull request author's own approval, so every human pull request here
+#     would be permanently unapprovable, and clearing it by admin bypass voids
+#     the control for bot pull requests at the same time.
+#
+# It is kept because the day a second maintainer appears, these are the paths
+# where a second pair of eyes matters most, and reconstructing that list later
+# is harder than writing it down now.
+#
+# The security argument for these paths specifically: a pull request runs the
+# workflow files *as they exist in that pull request*. A change that deletes the
+# zizmor job, or the licence and advisory gate, disables the very check that
+# would have objected to it. Requiring an owner here is what closes that loop.
+#
+# No `*` catch-all: with one owner it assigns every path to the same person and
+# changes nothing, while making the specific entries below look like they carry
+# weight they do not.
+
+# CI definitions, the composite action, and the changed-path classifier that
+# decides which jobs run at all.
+/.github/               @MarcusKainth
+/scripts/               @MarcusKainth
+
+# Supply-chain surface: the licence/advisory/bans policy, the resolved graph
+# every gate is evaluated against, and the generated attribution inventory.
+/deny.toml              @MarcusKainth
+/about.toml             @MarcusKainth
+/Cargo.lock             @MarcusKainth
+/THIRD-PARTY.md         @MarcusKainth
+
+# Published security claims. These have been wrong before — the nightly they
+# described was disabled for eighteen days — so a change here should be a
+# deliberate one.
+/SECURITY.md            @MarcusKainth
+/docs/user-guide/07-reference/supply-chain.mdx  @MarcusKainth

@@ -122,7 +122,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `bon-macros` | 3.9.3 | `MIT` |
 | `bstr` | 1.12.3 | `MIT` |
 | `byteorder` | 1.5.0 | `MIT` |
-| `bytes` | 1.12.0 | `MIT` |
+| `bytes` | 1.12.1 | `MIT` |
 | `cc` | 1.2.66 | `MIT` |
 | `cexpr` | 0.6.0 | `MIT` |
 | `cfg-if` | 1.0.4 | `MIT` |
@@ -142,7 +142,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `cpufeatures` | 0.3.0 | `MIT` |
 | `crc-fast` | 1.10.0 | `MIT` |
 | `crc32fast` | 1.5.0 | `MIT` |
-| `crossbeam-channel` | 0.5.15 | `MIT` |
+| `crossbeam-channel` | 0.5.16 | `MIT` |
 | `crossbeam-epoch` | 0.9.20 | `MIT` |
 | `crossbeam-utils` | 0.8.21 | `MIT` |
 | `crypto-common` | 0.1.7 | `MIT` |
@@ -195,7 +195,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `higher-kinded-types` | 0.2.1 | `MIT` |
 | `http` | 1.4.2 | `MIT` |
 | `http-body` | 1.0.1 | `MIT` |
-| `http-body-util` | 0.1.3 | `MIT` |
+| `http-body-util` | 0.1.4 | `MIT` |
 | `httparse` | 1.10.1 | `MIT` |
 | `httpdate` | 1.0.3 | `MIT` |
 | `humantime` | 2.4.0 | `MIT` |
@@ -248,7 +248,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `num_cpus` | 1.17.0 | `MIT` |
 | `num_enum` | 0.7.6 | `MIT` |
 | `num_enum_derive` | 0.7.6 | `MIT` |
-| `object_store` | 0.14.0 | `MIT` |
+| `object_store` | 0.14.1 | `MIT` |
 | `once_cell` | 1.21.4 | `MIT` |
 | `openssl-probe` | 0.2.1 | `MIT` |
 | `openssl-src` | 300.6.1+3.6.3 | `MIT` |
@@ -275,7 +275,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `proptest` | 1.11.0 | `MIT` |
 | `quanta` | 0.12.6 | `MIT` |
 | `quick-error` | 1.2.3 | `MIT` |
-| `quick-xml` | 0.40.1 | `MIT` |
+| `quick-xml` | 0.41.0 | `MIT` |
 | `quote` | 1.0.46 | `MIT` |
 | `rand` | 0.10.2 | `MIT` |
 | `rand` | 0.8.6 | `MIT` |
@@ -353,7 +353,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `time` | 0.3.53 | `MIT` |
 | `time-core` | 0.1.9 | `MIT` |
 | `time-macros` | 0.2.31 | `MIT` |
-| `tokio` | 1.52.3 | `MIT` |
+| `tokio` | 1.53.1 | `MIT` |
 | `tokio-macros` | 2.7.0 | `MIT` |
 | `tokio-rustls` | 0.26.4 | `MIT` |
 | `tokio-stream` | 0.1.18 | `MIT` |
@@ -379,7 +379,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `unicode-ident` | 1.0.24 | `MIT` |
 | `url` | 2.5.8 | `MIT` |
 | `utf8_iter` | 1.0.4 | `MIT` |
-| `uuid` | 1.23.4 | `MIT` |
+| `uuid` | 1.24.0 | `MIT` |
 | `value-trait` | 0.12.2 | `MIT` |
 | `vcpkg` | 0.2.15 | `MIT` |
 | `version_check` | 0.9.5 | `MIT` |

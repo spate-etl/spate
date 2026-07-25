@@ -40,7 +40,7 @@ project carries the same terms as the repository.
 
 | Licence | Crates |
 |---|---|
-| `MIT` | 293 |
+| `MIT` | 295 |
 | `Apache-2.0` | 22 |
 | `Unicode-3.0` | 19 |
 | `ISC` | 6 |
@@ -134,6 +134,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `clickhouse-macros` | 0.3.0 | `MIT` |
 | `clickhouse-types` | 0.1.2 | `MIT` |
 | `cmake` | 0.1.58 | `MIT` |
+| `const-oid` | 0.10.2 | `MIT` |
 | `const-oid` | 0.9.6 | `MIT` |
 | `core-foundation` | 0.10.1 | `MIT` |
 | `core-foundation-sys` | 0.8.7 | `MIT` |
@@ -326,6 +327,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `serde_repr` | 0.1.20 | `MIT` |
 | `serde_urlencoded` | 0.7.1 | `MIT` |
 | `sha2` | 0.10.9 | `MIT` |
+| `sha2` | 0.11.0 | `MIT` |
 | `sharded-slab` | 0.1.7 | `MIT` |
 | `shlex` | 1.3.0 | `MIT` |
 | `shlex` | 2.0.1 | `MIT` |

@@ -85,7 +85,7 @@ foldhash = "0.2"
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 # Split identity in etl-s3: ids are persisted, so the digest must hold up
 # even for adversarially-named keys (a collision would silently drop work).
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Connector dependencies. 0.x crates with breaking minors are held to a
 # single minor; Cargo.lock pins exact patches.
@@ -110,6 +110,14 @@ zstd = "0.13"
 # every dependency in the workspace has exactly one declared version. 0.11.6
 # rather than 0.11 because 0.11.0 through 0.11.5 are all yanked — cargo will not
 # select them, so "0.11" was a floor naming no reachable release.
+#
+# Hold this at whatever `clickhouse` pulls, and move it when `clickhouse` moves.
+# It is not free-floating: `etl-clickhouse` enables `clickhouse`'s `lz4` feature
+# and `clickhouse 0.15.1` depends on `lz4_flex 0.11.6`, so raising this alone
+# puts two majors in the graph and — the part that actually matters — makes
+# `ch_native_format`'s `lz4_bytes` describe a compressor the ingest path does not
+# use. That rig exists to model the ClickHouse wire, and its numbers are
+# published. Dependabot proposed 0.13.1 in #105; it was closed for this reason.
 lz4_flex = "0.11.6"
 schema_registry_converter = { version = "4.9", default-features = false }
 

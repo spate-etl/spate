@@ -70,7 +70,7 @@ jobs:
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Both diff endpoints must be present as objects. The repo is small
           # enough that full history costs nothing.
@@ -107,7 +107,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -148,7 +148,7 @@ jobs:
     # on `.github/**` having changed is circular, and gating it on anything else
     # is simply wrong.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
@@ -214,7 +214,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -293,7 +293,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -334,14 +334,14 @@ jobs:
           --lcov --output-path lcov.info
           --ignore-filename-regex '(/tests/|/benchmarks/)'
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: coverage-lcov
           path: lcov.info
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         # Skipped whenever the token is absent rather than whenever the pull
         # request is from a fork. Those are not the same condition, and the
         # difference is not theoretical: **Dependabot** runs resolve `secrets.*`
@@ -383,7 +383,7 @@ jobs:
           # The job's own exit code already failed the build; this step
           # exists to annotate, not to re-decide.
           fail_on_failure: false
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: junit-nextest
@@ -410,7 +410,7 @@ jobs:
     # this one restores the same `dev-allfeatures` cache that lint and features
     # populate, so it starts from warm dependencies.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -452,7 +452,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -471,7 +471,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -497,7 +497,7 @@ jobs:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -543,7 +543,7 @@ jobs:
     if: needs.changes.outputs.site == 'true'
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so Docusaurus can derive per-page "last updated" times.
           fetch-depth: 0
@@ -552,7 +552,7 @@ jobs:
           # step in this job, `npm ci` and the Docusaurus build included.
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # Node 20 went end-of-life in April 2026 — CI was building the
           # published site on an unsupported runtime. 24 is Active LTS, and is
@@ -588,6 +588,15 @@ jobs:
           path: website/node_modules/.cache
           key: docusaurus-${{ runner.os }}-${{ hashFiles('website/package-lock.json') }}
           restore-keys: docusaurus-${{ runner.os }}-
+
+      # `docusaurus build` transpiles TypeScript with SWC, which strips types
+      # without checking them — so until this step existed nothing in CI ran
+      # `tsc` at all, and a type error merged green. Found by a bot bump to
+      # TypeScript 7: it could not have been evaluated on its own pull request
+      # because the only signal, `npm run build`, does not consult tsc.
+      - name: Typecheck the site
+        working-directory: website
+        run: npm run typecheck
 
       # No rustdoc and no licence texts here — both are deploy-time artifacts
       # regenerated by the scheduled deploy, and building them cost every Rust

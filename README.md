@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/spate.svg)](https://crates.io/crates/spate)
 [![docs.rs](https://img.shields.io/docsrs/spate)](https://docs.rs/spate)
 [![CI](https://github.com/spate-etl/spate/actions/workflows/ci.yml/badge.svg)](https://github.com/spate-etl/spate/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/spate-etl/spate/branch/main/graph/badge.svg)](https://codecov.io/gh/spate-etl/spate)
 [![Documentation](https://img.shields.io/badge/docs-spate.kainth.dev-e8590c)](https://spate.kainth.dev/)
 [![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](https://blog.rust-lang.org/)
 [![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)

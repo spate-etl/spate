@@ -22,16 +22,16 @@ use benchmarks::s3data::stage;
 use benchmarks::synthetic::NullWriter;
 use benchmarks::{env_str, env_u64};
 use bytes::BytesMut;
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::PipelineConfig;
-use etl_core::deser::{BytesPassthrough, Owned};
-use etl_core::error::SinkError;
-use etl_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, chain_owned};
-use etl_core::pipeline::{ExitState, PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::record::Record;
-use etl_core::sink::{KeyHashRouter, RowEncoder, SinkPool, SinkPoolConfig, shard_queues};
-use etl_s3::S3Source;
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::PipelineConfig;
+use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::error::SinkError;
+use spate_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, chain_owned};
+use spate_core::pipeline::{ExitState, PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::record::Record;
+use spate_core::sink::{KeyHashRouter, RowEncoder, SinkPool, SinkPoolConfig, shard_queues};
+use spate_s3::S3Source;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -120,7 +120,7 @@ sink: {{ nullsink: {{}} }}
 
     let source = S3Source::from_component_config(&source_section, io.handle().clone())
         .expect("source")
-        .with_framer(|| Box::new(etl_json::NdjsonFramer::new(64 << 20)));
+        .with_framer(|| Box::new(spate_json::NdjsonFramer::new(64 << 20)));
 
     let chain_queues = queues;
     let chain_budget = Arc::clone(&budget);

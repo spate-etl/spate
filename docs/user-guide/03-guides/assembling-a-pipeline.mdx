@@ -1,19 +1,19 @@
 # Assembling a pipeline
 
-`etl::pipeline::Pipeline` is the primary way to turn a config file, a
+`spate::pipeline::Pipeline` is the primary way to turn a config file, a
 source, a sink, and your operator chain into a running process. This guide
 walks the builder end to end; every step is a thin composition of public
 primitives you can drop down to at any point (see
 [Manual assembly](manual-assembly.mdx) for the full desugaring).
 
 The complete, compiling reference for everything below is
-`crates/etl/examples/kafka_avro_to_clickhouse.rs` with its YAML next to it;
-the zero-infrastructure variant is `crates/etl/examples/memory_pipeline.rs`.
+`crates/spate/examples/kafka_avro_to_clickhouse.rs` with its YAML next to it;
+the zero-infrastructure variant is `crates/spate/examples/memory_pipeline.rs`.
 
 ## The shape of an assembly
 
 ```rust
-use etl::prelude::*;
+use spate::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connector construction: yours, one explicit line each.
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
-    let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 
     let report = pipeline
         .sink(sink)?
@@ -47,11 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `Pipeline::from_config`, which initializes the process in a fixed order:
 
 1. **Telemetry** — `telemetry::init(Json, "info")`. Idempotent, first init
-   wins: to customize the log format or filter, call `etl::telemetry::init`
+   wins: to customize the log format or filter, call `spate::telemetry::init`
    yourself *before* building the pipeline (the demos use `Pretty`).
 2. **The metrics exporter** — installed from the config's `metrics` section.
 3. **The I/O runtime** — a tokio runtime with `pipeline.io_threads` workers
-   (thread name `etl-io`) that will host sink workers, the checkpointer,
+   (thread name `spate-io`) that will host sink workers, the checkpointer,
    and the admin server.
 
 Why does a builder do process init? Because **metric handles bind to the
@@ -100,7 +100,7 @@ let encoder = match pipeline.block_on(sink.validate_schema())? {
 
 ## Step 3: `.sink(bundle)` / `.sink_with(bundle, options)`
 
-`sink` accepts anything implementing `etl::sink::SinkBundle` — every
+`sink` accepts anything implementing `spate::sink::SinkBundle` — every
 connector's sink type does, and a hand-rolled `SinkParts` does too, so
 custom sinks need no extra impl. From the bundle the builder derives the
 per-shard chunk queues, registers per-shard metrics, spawns the sink workers
@@ -176,7 +176,7 @@ a graceful drain into a deadline-bounded loud abandon (bounded by
 ## Step 5: `.runtime_options(...)` (optional)
 
 `RuntimeOptions` holds knobs that are deliberately not YAML: signal
-handling, poll loop timings, the version string on `etl_pipeline_info`. The
+handling, poll loop timings, the version string on `spate_pipeline_info`. The
 defaults suit production. The one you will actually touch is
 `handle_signals: false` in tests and demos, where you drive shutdown
 yourself:
@@ -232,7 +232,7 @@ detail.
 - [Configuring pipelines](configuring-pipelines.mdx) — the YAML the builder
   loads.
 - [Testing pipelines](testing-pipelines.mdx) — the `into_runtime` pattern
-  over `etl-test` mocks.
+  over `spate-test` mocks.
 - [Manual assembly](manual-assembly.mdx) — every builder step desugared to
   public primitives.
 - [Architecture](../02-concepts/01-architecture.mdx) — what the assembled

@@ -1,12 +1,12 @@
 ---
 title: ClickHouse permissions
-description: The ClickHouse GRANTs the etl-clickhouse sink machinery needs — minimal, and by feature.
+description: The ClickHouse GRANTs the spate-clickhouse sink machinery needs — minimal, and by feature.
 ---
 
 # ClickHouse permissions
 
 This page lists the ClickHouse privileges the **sink machinery itself**
-(`etl-clickhouse`, feature `clickhouse` on the `etl` facade) needs. The set is
+(`spate-clickhouse`, feature `clickhouse` on the `spate` facade) needs. The set is
 small and mostly conditional: the default configuration needs a single
 `INSERT`, and each extra grant is pulled in only by a specific feature.
 
@@ -28,7 +28,7 @@ no `distributed_check` — the sink issues exactly one kind of statement: the
 per-batch `INSERT`. One grant covers it:
 
 ```sql
-GRANT INSERT ON analytics.orders_local TO etl_writer;
+GRANT INSERT ON analytics.orders_local TO spate_writer;
 ```
 
 :::note Grant the local table, on every node
@@ -64,11 +64,11 @@ Two features each add read access to a system table. The sink only ever
 ```sql
 -- Only if schema validation is on, or format: native (see Schema validation
 -- and Native format).
-GRANT SELECT ON system.columns TO etl_writer;
+GRANT SELECT ON system.columns TO spate_writer;
 
 -- Only if the distributed_check startup guard is enabled (see Distributed parity).
-GRANT SELECT ON system.clusters TO etl_writer;
-GRANT SELECT ON system.tables  TO etl_writer;
+GRANT SELECT ON system.clusters TO spate_writer;
+GRANT SELECT ON system.tables  TO spate_writer;
 ```
 
 :::note System-table reads are already row-filtered
@@ -90,17 +90,17 @@ distributed check enabled). Run as an admin account that has
 `access_management` on each node:
 
 ```sql
-CREATE ROLE IF NOT EXISTS etl_sink;
+CREATE ROLE IF NOT EXISTS spate_sink;
 
-GRANT INSERT ON analytics.orders_local TO etl_sink;   -- on every shard node
-GRANT SELECT ON system.columns         TO etl_sink;   -- schema validation / native
-GRANT SELECT ON system.clusters        TO etl_sink;   -- distributed_check
-GRANT SELECT ON system.tables          TO etl_sink;   -- distributed_check
+GRANT INSERT ON analytics.orders_local TO spate_sink;   -- on every shard node
+GRANT SELECT ON system.columns         TO spate_sink;   -- schema validation / native
+GRANT SELECT ON system.clusters        TO spate_sink;   -- distributed_check
+GRANT SELECT ON system.tables          TO spate_sink;   -- distributed_check
 
-CREATE USER IF NOT EXISTS etl_writer
+CREATE USER IF NOT EXISTS spate_writer
     IDENTIFIED BY '...'
     SETTINGS readonly = 0;                             -- allow the managed insert settings
-GRANT etl_sink TO etl_writer;
+GRANT spate_sink TO spate_writer;
 ```
 
 ## What the sink never does

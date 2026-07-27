@@ -123,9 +123,9 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = "\
-etl_source_records_total{pipeline=\"p\",component=\"a\"} 10\n\
-etl_source_records_total{pipeline=\"p\",component=\"b\"} 5\n\
-etl_source_records_totally_not{pipeline=\"p\"} 100\n\
+spate_source_records_total{pipeline=\"p\",component=\"a\"} 10\n\
+spate_source_records_total{pipeline=\"p\",component=\"b\"} 5\n\
+spate_source_records_totally_not{pipeline=\"p\"} 100\n\
 lat_bucket{le=\"0.1\"} 5\n\
 lat_bucket{le=\"1\"} 9\n\
 lat_bucket{le=\"+Inf\"} 10\n\
@@ -134,9 +134,9 @@ lat_count 10\n";
 
     #[test]
     fn sums_exact_name_matches_only() {
-        assert_eq!(value(SAMPLE, "etl_source_records_total", ""), Some(15.0));
+        assert_eq!(value(SAMPLE, "spate_source_records_total", ""), Some(15.0));
         assert_eq!(
-            value(SAMPLE, "etl_source_records_total", "component=\"a\""),
+            value(SAMPLE, "spate_source_records_total", "component=\"a\""),
             Some(10.0)
         );
         assert_eq!(value(SAMPLE, "missing_metric", ""), None);

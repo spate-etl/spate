@@ -45,7 +45,7 @@ sections), `docs/DESIGN.md` (the sections the diff touches), and `docs/METRICS.m
 Findings are judged against *this repo's* invariants, not generic Rust intuition.
 Note the hard invariants explicitly — at-least-once delivery, source threads
 never block on send, the checkpoint tracker stays sync/tokio-free and loom-clean,
-no connector/0.x types in `etl-core` public bounds, acks never block behind data,
+no connector/0.x types in `spate-core` public bounds, acks never block behind data,
 metrics pre-registered at build time, error policies Skip-or-Fail-only.
 
 ### 2. Scope the diff and extract the claim set
@@ -83,9 +83,9 @@ cargo check --workspace --all-features
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
-cargo bench -p etl-core            # confirms bench claims actually measure
-RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib   # if sync/loom code touched
-cargo check -p etl --examples --all-features
+cargo bench -p spate-core            # confirms bench claims actually measure
+RUSTFLAGS="--cfg loom" cargo test -p spate-core --release --lib   # if sync/loom code touched
+cargo check -p spate --examples --all-features
 # Docker acceptance gate — the delivery-guarantee claims live here:
 #   run the #[ignore]d testcontainers suite explicitly (it is opt-in, ~minutes).
 ```

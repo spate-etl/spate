@@ -26,7 +26,7 @@ struct Order {
 ```
 
 Reordering either the struct fields or the `columns` list is a breaking
-change to the pipeline. The type mapping lives in the `etl-clickhouse`
+change to the pipeline. The type mapping lives in the `spate-clickhouse`
 crate's `rowbinary` module docs.
 
 ## The three modes
@@ -51,10 +51,10 @@ Validation is an async pre-flight step you run on the builder's I/O runtime
 via `pipeline.block_on`, **after** building the sink and **before** handing
 it to `.sink(...)`. A failure exits the process before any pipeline thread
 or sink worker exists. From
-`crates/etl/examples/kafka_avro_to_clickhouse.rs`:
+`crates/spate/examples/kafka_avro_to_clickhouse.rs`:
 
 ```rust
-let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 
 // `off` returns Ok(None) instantly and issues no queries.
 let encoder = match pipeline.block_on(sink.validate_schema())? {

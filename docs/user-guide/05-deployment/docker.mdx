@@ -11,9 +11,9 @@ pipeline you build on the framework.
 Build from the repository root:
 
 ```sh
-docker build -f examples/docker/Dockerfile -t etl-pipeline .
+docker build -f examples/docker/Dockerfile -t spate-pipeline .
 docker run -e KAFKA_BROKERS=broker:9092 -e CLICKHOUSE_URL=http://ch:8123 \
-           -p 9090:9090 etl-pipeline
+           -p 9090:9090 spate-pipeline
 ```
 
 The Dockerfile is two stages (lifted from `examples/docker/Dockerfile`):
@@ -22,15 +22,15 @@ The Dockerfile is two stages (lifted from `examples/docker/Dockerfile`):
 FROM rust:1.96-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p etl --example kafka_avro_to_clickhouse --features full \
+RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features full \
     && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
 
 # Distroless: glibc + libgcc only, no shell, runs as nonroot (65532).
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /build/pipeline /usr/local/bin/pipeline
-COPY --from=builder /build/crates/etl/examples/kafka_avro_to_clickhouse.yaml /etc/etl/pipeline.yaml
+COPY --from=builder /build/crates/spate/examples/kafka_avro_to_clickhouse.yaml /etc/spate/pipeline.yaml
 
-ENV ETL_CONFIG=/etc/etl/pipeline.yaml
+ENV SPATE_CONFIG=/etc/spate/pipeline.yaml
 EXPOSE 9090
 ENTRYPOINT ["/usr/local/bin/pipeline"]
 ```
@@ -49,17 +49,17 @@ Why this shape:
   process running one pipeline; scale by replicas, not by packing pipelines
   into a pod.
 
-## Configuration: `ETL_CONFIG` and mounted YAML
+## Configuration: `SPATE_CONFIG` and mounted YAML
 
-The binary reads a single YAML file from the path in `ETL_CONFIG` (the image
-defaults it to `/etc/etl/pipeline.yaml` and bakes in the example config).
+The binary reads a single YAML file from the path in `SPATE_CONFIG` (the image
+defaults it to `/etc/spate/pipeline.yaml` and bakes in the example config).
 Every `${VAR:-default}` in the file interpolates from the process
 environment at startup — see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the exact
 interpolation semantics. The Kubernetes pattern:
 
-- **ConfigMap** mounted over `/etc/etl/pipeline.yaml` (or anywhere, with
-  `ETL_CONFIG` pointing at it) owns the structure — connectors, tuning,
+- **ConfigMap** mounted over `/etc/spate/pipeline.yaml` (or anywhere, with
+  `SPATE_CONFIG` pointing at it) owns the structure — connectors, tuning,
   topology.
 - **Environment variables** (plain or Secret-backed) own credentials and
   endpoints: `KAFKA_BROKERS`, `CLICKHOUSE_PASSWORD`, and friends land in the
@@ -110,7 +110,7 @@ configured to take.
 :::
 
 If a sink is down when the drain deadline hits, unflushed batches are
-abandoned loudly (`etl_sink_abandoned_batches_total` plus a log line) and
+abandoned loudly (`spate_sink_abandoned_batches_total` plus a log line) and
 replay after restart — delivery stays at-least-once either way.
 
 ## Resources and scaling

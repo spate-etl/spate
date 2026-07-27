@@ -1,4 +1,4 @@
-//! Benchmark harnesses for the `etl-rs` framework.
+//! Benchmark harnesses for the Spate framework.
 //!
 //! System-level benchmarks are release binaries (not `cargo bench`
 //! targets), configured by environment variables and reporting JSON lines:

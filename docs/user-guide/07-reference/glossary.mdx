@@ -39,7 +39,7 @@ mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
 The global cap (`backpressure.max_inflight_bytes`) on bytes admitted into
 the pipeline but not yet durably written. Charged when records enter the
 terminal stage's chunks, released on durable write or failure; current
-usage is `etl_backpressure_inflight_bytes`.
+usage is `spate_backpressure_inflight_bytes`.
 
 ### Chain
 
@@ -124,7 +124,7 @@ to one pipeline thread, yielding borrowed payload batches. For Kafka, a
 lane is a partition queue; lanes map m:n onto pipeline threads. In a
 coordinated source, lanes are purely local: the `CoordinationDriver`
 materializes one lane per in-flight [split](#split) and renumbers them
-per assignment cycle. `etl_source_lanes_active` counts them.
+per assignment cycle. `spate_source_lanes_active` counts them.
 
 ### Lease
 
@@ -183,8 +183,7 @@ boundary, or a drain still running at the deadline, has its release
 **forced** instead: the split goes back anyway and its uncommitted tail
 replays under the next owner, bounded by one commit interval. Forcing is
 what keeps one wedged drain from pinning a rebalance open — the leader's
-revocation is a decision, not a request. Modeled on Kafka's incremental
-cooperative rebalancing (KIP-429) and Flink's stop-with-savepoint.
+revocation is a decision, not a request.
 
 If the leader takes the revocation back mid-drain, it is **cancelled** and
 the deadline no longer applies: nothing is waiting for the split, so a slow
@@ -234,6 +233,6 @@ The per-partition committable position: the offset **one past the last**
 contiguously acknowledged record. Stored on advance, committed to the
 source on `checkpoint.interval`, and committed synchronously on drain. The
 at-least-once invariant is that it never passes unacknowledged data; a
-failed batch stalls it (alert on `etl_checkpoint_watermark_age_seconds`)
+failed batch stalls it (alert on `spate_checkpoint_watermark_age_seconds`)
 rather than being skipped. Distinct from the
 [backpressure watermarks](#backpressure-watermarks-high--low).

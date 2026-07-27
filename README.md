@@ -1,13 +1,14 @@
-# etl-rs
+# Spate
 
-[![Documentation](https://img.shields.io/badge/docs-etl--rs.kainth.dev-e8590c)](https://etl-rs.kainth.dev/)
-[![codecov](https://codecov.io/github/MarcusKainth/etl-rs/graph/badge.svg?token=NZ5RQO6WH3)](https://codecov.io/github/MarcusKainth/etl-rs)
+[![Documentation](https://img.shields.io/badge/docs-spate.kainth.dev-e8590c)](https://spate.kainth.dev/)
+[![codecov](https://codecov.io/github/spate-etl/spate/graph/badge.svg?token=NZ5RQO6WH3)](https://codecov.io/github/spate-etl/spate)
 
 A high-performance, at-least-once ETL pipeline framework for Rust.
 
-`etl-rs` provides the abstractions for streaming Extract-Transform-Load
-pipelines with a chaining operator API in the spirit of Flink or Java
-Streams: CPU-pinned processing threads over zero-copy borrowed records,
+Spate provides the abstractions for streaming Extract-Transform-Load
+pipelines: an operator graph you write in Rust and chain into a single
+monomorphized loop, CPU-pinned processing threads over zero-copy borrowed
+records,
 checkpoint-driven source commits, sharded and replicated asynchronous
 sinks, built-in backpressure, and first-class Prometheus metrics —
 measured at **~9 ns/record with zero per-record allocations** through a
@@ -15,7 +16,7 @@ realistic operator chain (see [docs/benchmarks/](docs/benchmarks/)).
 
 ```toml
 [dependencies]
-etl = { version = "0.1", features = ["kafka", "clickhouse", "avro"] }
+spate = { version = "0.1", features = ["kafka", "clickhouse", "avro"] }
 ```
 
 ## A taste
@@ -36,8 +37,8 @@ let chains = move |_thread| {
 PipelineRuntime::new(config, kafka_source, chains, sink, budget).run()?;
 ```
 
-Start at [`crates/etl/examples`](crates/etl/examples): `memory_pipeline`
-runs with zero infrastructure (`cargo run -p etl --example
+Start at [`crates/spate/examples`](crates/spate/examples): `memory_pipeline`
+runs with zero infrastructure (`cargo run -p spate --example
 memory_pipeline`); `kafka_avro_to_clickhouse` is the fully-commented
 production assembly; `custom_source_sink` is the connector-author
 tutorial. [`examples/docker`](examples/docker) covers containers and
@@ -47,12 +48,12 @@ Kubernetes (probes, drain timeouts, sizing).
 
 | Crate | Description |
 |---|---|
-| `etl` | The facade — the only crate applications depend on. Features: `kafka`, `clickhouse`, `avro`, `full`. |
-| `etl-core` | The engine: records and acknowledgements, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, the pipeline runtime. |
-| `etl-kafka` | Kafka source on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
-| `etl-clickhouse` | ClickHouse sink: RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
-| `etl-avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
-| `etl-test` | In-memory sources/sinks with scripting handles — test your pipelines without infrastructure. |
+| `spate` | The facade — the only crate applications depend on. Features: `kafka`, `clickhouse`, `avro`, `full`. |
+| `spate-core` | The engine: records and acknowledgements, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, the pipeline runtime. |
+| `spate-kafka` | Kafka source on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
+| `spate-clickhouse` | ClickHouse sink: RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
+| `spate-avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
+| `spate-test` | In-memory sources/sinks with scripting handles — test your pipelines without infrastructure. |
 
 ## Delivery semantics, honestly
 
@@ -69,7 +70,7 @@ ClickHouse pattern).
 ## Documentation
 
 The full documentation site — the user guide plus the generated API reference —
-is published at **<https://etl-rs.pages.kainth.net/>** (source in
+is published at **<https://spate.kainth.dev/>** (source in
 [`website/`](website), content in [`docs/`](docs)).
 
 - [docs/DESIGN.md](docs/DESIGN.md) — architecture and the decision log.
@@ -92,7 +93,7 @@ Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
 
 Dependency licences are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md); the full
 texts are published at
-[etl-rs.pages.kainth.net/licenses](https://etl-rs.pages.kainth.net/licenses/).
+[spate.kainth.dev/licenses](https://spate.kainth.dev/licenses/).
 
 Contributions are accepted under the same terms, per Apache-2.0 §5 — there is no
 CLA to sign.

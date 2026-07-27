@@ -7,12 +7,12 @@ checkpointed commits, with backpressure and graceful shutdown. If you have
 the repository checked out, it runs as-is:
 
 ```sh
-cargo run -p etl --example memory_pipeline
+cargo run -p spate --example memory_pipeline
 ```
 
-The full version is `crates/etl/examples/memory_pipeline.rs`; everything
-below is lifted from it. To run it in your own project you need `etl` and
-`etl-test` (here as a regular dependency, since the example uses the mocks
+The full version is `crates/spate/examples/memory_pipeline.rs`; everything
+below is lifted from it. To run it in your own project you need `spate` and
+`spate-test` (here as a regular dependency, since the example uses the mocks
 in `main`) — see [Installation](01-installation.mdx).
 
 ## 1. Configuration
@@ -37,9 +37,9 @@ and the [configuration reference](../07-reference/configuration.mdx).
 ## 2. Construct the builder
 
 ```rust
-use etl::prelude::*;
+use spate::prelude::*;
 
-etl::telemetry::init(etl::telemetry::LogFormat::Pretty, "info");
+spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
 let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
 ```
 
@@ -47,18 +47,18 @@ let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
 metrics exporter *before any metric handle can exist* (so nothing records
 into the void) and builds the shared tokio I/O runtime the sink workers run
 on. Telemetry init is idempotent and first-call-wins — call
-`etl::telemetry::init` yourself first if you want pretty logs instead of
+`spate::telemetry::init` yourself first if you want pretty logs instead of
 the builder's JSON default. The why behind this ordering is in
 [Architecture](../02-concepts/01-architecture.mdx).
 
 ## 3. Source and sink
 
-The `etl-test` mocks come paired with scripting handles — the source handle
+The `spate-test` mocks come paired with scripting handles — the source handle
 pushes records and reads back committed watermarks, the sink script reads
 back every durable write:
 
 ```rust
-use etl_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
+use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
 use std::time::Duration;
 
 let (source, handle) = memory_source();
@@ -131,7 +131,7 @@ Assign a lane, push three payloads (nine words, one empty), and wait for the
 committed watermark to cover the last offset:
 
 ```rust
-use etl::source::LaneId;
+use spate::source::LaneId;
 
 let p0 = PartitionId(0);
 handle.assign_lanes(&[(LaneId(0), p0)]);
@@ -163,7 +163,7 @@ Finally, read back what the sink captured:
 let rows: Vec<String> = script
     .writes()
     .iter()
-    .flat_map(|w| etl_test::decode_rows(&w.payload))
+    .flat_map(|w| spate_test::decode_rows(&w.payload))
     .map(|r| String::from_utf8_lossy(&r).into_owned())
     .collect();
 assert_eq!(rows.len(), 8, "nine words minus one filtered empty");

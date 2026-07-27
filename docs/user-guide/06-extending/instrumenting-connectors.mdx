@@ -13,8 +13,8 @@ The taxonomy every framework series belongs to is [docs/METRICS.md](../../METRIC
 the operator's-eye view of the model is
 [Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
 second for the hot-path rules. This page mirrors
-`crates/etl/examples/custom_metrics.rs`
-(`cargo run -p etl --example custom_metrics`).
+`crates/spate/examples/custom_metrics.rs`
+(`cargo run -p spate --example custom_metrics`).
 
 ## What you get for free
 
@@ -23,7 +23,7 @@ records and bytes are counted as the driver polls it; a sink's flushes, batch
 sizes, retries, and errors are counted by the sink worker as it drains and
 writes; the checkpointer owns commit and watermark metrics. A hand-rolled
 `Source`/`RowEncoder`/`ShardWriter` inherits all of it the moment it is wired
-into a pipeline. So the question is never "how do I emit `etl_sink_records_total`" —
+into a pipeline. So the question is never "how do I emit `spate_sink_records_total`" —
 the framework does — but "what does my connector know that the framework can't
 measure from the outside?"
 
@@ -36,7 +36,7 @@ drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
 through a builder of your own:
 
 ```rust
-// crates/etl-kafka/src/source.rs
+// crates/spate-kafka/src/source.rs
 fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
     // The runtime shares the same handles it uses itself.
     self.metrics = ctx.stage_metrics.clone();
@@ -61,9 +61,9 @@ that also increments `rebalance_assigned` makes the counter read double.
 :::danger[Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose]
 All three of these are scar tissue.
 
-`etl-kafka` once exposed a `with_metrics` builder instead. Nothing in the tree
+`spate-kafka` once exposed a `with_metrics` builder instead. Nothing in the tree
 called it and the runtime had no path to call it, so the runtime registered
-`etl_source_lag_records` and the connector never wrote it — the gauge rendered a
+`spate_source_lag_records` and the connector never wrote it — the gauge rendered a
 permanent `0` on every Kafka pipeline. A maximally backlogged consumer reported
 no lag and every alert keyed on it stayed green. A builder the runtime cannot
 reach is dead code, not an option.
@@ -72,14 +72,14 @@ The second half: publish a value only when you have really measured it. A
 registered-but-unwritten gauge renders `0`, and for lag a `0` is
 indistinguishable from "caught up". `SourceMetrics::set_partition_lag`
 registers a partition's series on first call, so *not calling it* is how you
-say "unknown" — which is why `etl-kafka` skips partitions whose librdkafka
+say "unknown" — which is why `spate-kafka` skips partitions whose librdkafka
 `consumer_lag` is `-1` rather than publishing them as zero.
 
 The third half: a per-partition series you stop owning does not go away. The
 exporter has no deletion and no idle timeout is configured, so dropping your
 handle is invisible — the series renders its last value for the life of the
 process, and a reader summing across members counts a partition twice. Two
-things are needed, and `etl-kafka` does both: filter publication to the live
+things are needed, and `spate-kafka` does both: filter publication to the live
 assignment (a stale snapshot still lists partitions you have lost), and call
 `SourceMetrics::retain_partitions` with the **new** assignment once a rebalance
 settles, which zeroes what you lost. Do not prune on revocation: an eager
@@ -123,16 +123,16 @@ repeat the plumbing. The rule to internalize: pick a stable, low-cardinality
 When the taxonomy genuinely lacks something your connector or pipeline needs,
 register it through a [`Meter`](../07-reference/README.mdx). A `Meter` is a
 small, cloneable scope bound to one component's three standard labels: every
-handle it mints inherits them, and its name is **auto-prefixed under the `etl_`
+handle it mints inherits them, and its name is **auto-prefixed under the `spate_`
 umbrella**, so your series sit right alongside the framework's and an operator
-finds the whole pipeline's telemetry under one greppable `etl_` root.
+finds the whole pipeline's telemetry under one greppable `spate_` root.
 
 ```rust
-use etl_core::metrics::Meter;
+use spate_core::metrics::Meter;
 
 // A connector claims its namespace; a pipeline author uses `Meter::new`.
 let meter = Meter::with_namespace("kafka", "orders", "orders_kafka", "kafka");
-// Pass the LOCAL name — the Meter prepends `etl_kafka_` for you.
+// Pass the LOCAL name — the Meter prepends `spate_kafka_` for you.
 let schema_fetches = meter.counter("schema_fetches_total", &[("registry", "prod".into())]);
 let fetch_seconds = meter.histogram("fetch_duration_seconds", &[]);
 
@@ -142,32 +142,32 @@ fetch_seconds.record(elapsed);
 ```
 
 This renders
-`etl_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}`.
+`spate_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}`.
 The rules the `Meter` enforces so you don't have to think about them:
 
 - **You never type the prefix.** `Meter::new(...)` uses the `custom` namespace
-  (`etl_custom_*`) — the bucket for pipeline-author metrics;
+  (`spate_custom_*`) — the bucket for pipeline-author metrics;
   `Meter::with_namespace("kafka", ...)` claims a connector segment
-  (`etl_kafka_*`). The namespace is validated once at construction and **cannot
+  (`spate_kafka_*`). The namespace is validated once at construction and **cannot
   be a reserved framework stage root** (`source`, `sink`, `deser`, …), so a
   custom family can never collide with a current or future framework metric.
-  This is the industry-standard shape — a single application prefix
-  (Prometheus's `namespace_subsystem_name`), exactly what Flink (`flink_…`) and
-  Envoy (reserved `envoy` root) do.
+  This is the shape Prometheus's own `namespace_subsystem_name` convention
+  describes: a single application prefix, with everything below it owned by
+  the application.
 - **Standard labels are automatic.** The `extra` slice is `&[]` for none;
   values are `SharedString`, so `"prod".into()` and an owned `String` from
   config both work. Push per-instance identity (a topic, a shard) into `extra`
   labels, not the name, keeping the name low-cardinality.
 - **Store the handles** (`Counter` / `Gauge` / `Histogram`, re-exported from
-  `etl_core::metrics`) in your own struct — no direct `metrics` dependency.
+  `spate_core::metrics`) in your own struct — no direct `metrics` dependency.
 
 A connector that can appear as **both a source and a sink** in one pipeline (a
 Kafka source alongside a future Kafka sink) is separated by the runtime, not by
 you: when it injects a component's `Meter` it derives the end from the
-source-vs-sink position and scopes the family `etl_kafka_source_*` /
-`etl_kafka_sink_*`, so its source `bytes_total` and its sink `bytes_total` land
-under distinct names (`etl_kafka_source_bytes_total` vs
-`etl_kafka_sink_bytes_total`). Your connector code is identical at either end —
+source-vs-sink position and scopes the family `spate_kafka_source_*` /
+`spate_kafka_sink_*`, so its source `bytes_total` and its sink `bytes_total` land
+under distinct names (`spate_kafka_source_bytes_total` vs
+`spate_kafka_sink_bytes_total`). Your connector code is identical at either end —
 you never name the role, and a `Meter` local name may not itself begin with a
 role segment (`source_` / `sink_`), which is reserved for exactly this scoping.
 (Instance identity — two Kafka sinks — stays in the `component` label, where
@@ -184,7 +184,7 @@ component_type)` there (it uses the `custom` namespace):
 
 ```rust
 .chains(move |ctx| {
-    // Registers `etl_custom_enrich_hits_total` — you pass the local name.
+    // Registers `spate_custom_enrich_hits_total` — you pass the local name.
     let hits = ctx.meter("enrich", "map").counter("enrich_hits_total", &[]);
     chain(deser)
         .with_metrics(ctx.pipeline, "enrich")
@@ -201,11 +201,11 @@ series.
 
 ## Dropping to the raw facade
 
-If you need a metric **outside** the governed `etl_` namespace — mirroring a
+If you need a metric **outside** the governed `spate_` namespace — mirroring a
 third-party library's own naming, say — record it straight onto the
 [`metrics`](https://crates.io/crates/metrics) facade. You get no standard labels
 and no namespace enforcement, so the collision-avoidance is yours: prefix with
-your own name, **not** `etl_` (that umbrella belongs to the `Meter`).
+your own name, **not** `spate_` (that umbrella belongs to the `Meter`).
 
 ```rust
 // Pre-register once, at build time; you own the whole name.
@@ -215,7 +215,7 @@ schema_fetches.increment(n);
 
 [Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx) and the
 `custom_metrics.rs` example own this pattern in full. Prefer the `Meter` above
-unless you specifically want to live outside the `etl_` taxonomy.
+unless you specifically want to live outside the `spate_` taxonomy.
 
 ## Contracts
 
@@ -231,16 +231,16 @@ handle method shapes exist to make them the path of least resistance:
   granularity would matter), never per record.
 - **Follow the naming rules.** `_total` on counters, a unit suffix
   (`_seconds` / `_bytes` / `_rows`) on anything measured in a unit. Through a
-  `Meter` the `etl_<namespace>_` prefix is added for you (you pass the local
+  `Meter` the `spate_<namespace>_` prefix is added for you (you pass the local
   name); only a raw-facade metric needs a prefix you choose yourself, and that
-  one must **not** be `etl_`. Name a latency histogram `*_duration_seconds`
+  one must **not** be `spate_`. Name a latency histogram `*_duration_seconds`
   specifically: the exporter's default bucket layout is matched by that suffix,
   so a bare `*_seconds` histogram renders as a summary instead (see
   [Metrics § Histogram buckets](../../METRICS.md)).
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
   `metrics.per_partition_detail` (default off) precisely because it is unbounded
-  — with the single exception of `etl_source_lag_records`, which is ungated
+  — with the single exception of `spate_source_lag_records`, which is ungated
   because it has no aggregate series to fall back to (see the box above).
   Don't attach an unbounded label (a key, an offset) to any series.
 
@@ -260,7 +260,7 @@ Assert your instrumentation the way the framework tests its own: build a
 rendered exposition — no global install, so tests stay isolated and parallel.
 `metrics::with_local_recorder(&recorder, || { /* drive the connector */ })` then
 `handle.render()` gives you the scrape text to `assert!(...contains(...))`
-against, exactly as `crates/etl/examples/custom_metrics.rs` and the `metrics`
+against, exactly as `crates/spate/examples/custom_metrics.rs` and the `metrics`
 module's own tests do.
 
 ## From a built-in source or sink
@@ -282,7 +282,7 @@ connector never wires the pipeline name, the labels, or the prefix.
   `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before the
   writer is shared). The runtime scopes it by **role** — `source`/`sink` derived
   from the wiring position — so a Kafka source's families land under
-  `etl_kafka_source_*` and a Kafka sink's under `etl_kafka_sink_*`; its source
+  `spate_kafka_source_*` and a Kafka sink's under `spate_kafka_sink_*`; its source
   and sink families therefore land under distinct names. The connector's code is
   identical at either end.
 
@@ -291,7 +291,7 @@ connector never wires the pipeline name, the labels, or the prefix.
 fn component_type(&self) -> &str { "kafka" }
 fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
     if let Some(m) = &ctx.meter {
-        self.queued = Some(m.gauge("fetch_queue_messages", &[])); // etl_kafka_source_fetch_queue_messages
+        self.queued = Some(m.gauge("fetch_queue_messages", &[])); // spate_kafka_source_fetch_queue_messages
     }
     // ...
 }
@@ -299,8 +299,8 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 
 `SourceCtx` also carries `per_partition_detail` (the `metrics` config flag), so
 a connector's own per-partition families honour the operator's cardinality
-choice. It gates your families and the framework's `etl_checkpoint_*` detail;
-it does **not** gate `etl_source_lag_records`, which is ungated by design.
+choice. It gates your families and the framework's `spate_checkpoint_*` detail;
+it does **not** gate `spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
@@ -308,9 +308,9 @@ root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
 illegal metric-name segment (e.g. `"clickhouse-v2"`) is logged at `warn` and
 also yields `None` — so a component only gets a scope once it declares a
 distinct, well-formed `component_type`. The **Kafka source is the production
-worked example**: `crates/etl-kafka/src/metrics.rs` translates the librdkafka
-statistics snapshot into the `etl_kafka_source_*` families documented in
+worked example**: `crates/spate-kafka/src/metrics.rs` translates the librdkafka
+statistics snapshot into the `spate_kafka_source_*` families documented in
 [Metrics](../../METRICS.md), including lazily-registered per-broker series and
-detail-gated per-partition series. For a minimal template see `crates/etl-test`'s
+detail-gated per-partition series. For a minimal template see `crates/spate-test`'s
 `MemorySource` / `CaptureWriter`, exercised end-to-end in
-`crates/etl-test/tests/component_metrics.rs`.
+`crates/spate-test/tests/component_metrics.rs`.

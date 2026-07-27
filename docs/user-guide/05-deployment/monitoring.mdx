@@ -35,7 +35,7 @@ builder. If you assemble manually, call `metrics::install` first — see
 
 ## Conventions you can rely on
 
-- **Prefix**: all framework metrics start with `etl_`; process metrics
+- **Prefix**: all framework metrics start with `spate_`; process metrics
   (`process_*`) follow their own standard. Counters end in `_total`; units
   get suffixes (`_seconds`, `_bytes`, `_rows`).
 - **Standard labels on every framework metric**:
@@ -46,7 +46,7 @@ builder. If you assemble manually, call `metrics::install` first — see
 - **Cardinality is mostly opt-in**: `partition`-labelled series appear only
   with `metrics.per_partition_detail: true` (default `false`), because their
   cardinality grows with the assignment. The one exception is
-  `etl_source_lag_records`, which is always per partition — consumer lag has
+  `spate_source_lag_records`, which is always per partition — consumer lag has
   no aggregate series to fall back to, so a cardinality knob is not allowed to
   delete it. Budget one series per assigned partition per member for that
   family even on the default config. `shard` and `replica` labels are bounded
@@ -66,7 +66,7 @@ custom metrics as much as the framework's:
    (duration divided by n), never per record.
 
 The runnable pattern — custom handles side by side with a framework stage
-handle — is `crates/etl/examples/custom_metrics.rs`:
+handle — is `crates/spate/examples/custom_metrics.rs`:
 
 ```rust
 // Pre-register once, at build time.
@@ -85,8 +85,8 @@ against your latency budget. The full list of starting points is at the end
 of [docs/METRICS.md](../../METRICS.md).
 
 - **Stuck pipeline (watermark stall)** —
-  `etl_checkpoint_watermark_age_seconds > 300` while
-  `rate(etl_source_records_total[5m]) > 0`. The watermark age is the age of
+  `spate_checkpoint_watermark_age_seconds > 300` while
+  `rate(spate_source_records_total[5m]) > 0`. The watermark age is the age of
   the oldest unacknowledged batch; a failed batch stalls its partition's
   watermark rather than silently advancing (the at-least-once invariant),
   so this is the primary "data is flowing but nothing is committing"
@@ -95,16 +95,16 @@ of [docs/METRICS.md](../../METRICS.md).
   failed batch, but you want the alert regardless — restarts that don't
   clear the cause will loop.
 - **Abandoned sink batches** —
-  `increase(etl_sink_abandoned_batches_total[10m]) > 0`. A batch is
+  `increase(spate_sink_abandoned_batches_total[10m]) > 0`. A batch is
   abandoned when a drain deadline expires with the sink still down; its
   data replays after restart, so this is a duplicates-incoming and
   sink-health signal, not data loss.
-- **Sustained backpressure** — `etl_backpressure_paused == 1` sustained
-  (e.g. `avg_over_time(etl_backpressure_paused[10m]) > 0.9`). The source is
+- **Sustained backpressure** — `spate_backpressure_paused == 1` sustained
+  (e.g. `avg_over_time(spate_backpressure_paused[10m]) > 0.9`). The source is
   paused because the in-flight budget is above its high watermark: the sink
   cannot keep up, or the budget is undersized for the batch settings — see
   the sizing rule in [Tuning](tuning.mdx).
-- **A shard asleep between retries** — `etl_sink_retry_backoff_seconds`
+- **A shard asleep between retries** — `spate_sink_retry_backoff_seconds`
   sustained above `(1 - retry.jitter) * retry.max`. The shard is not idle, it
   is parked between write attempts; with an unbounded `retry.max_attempts` it
   will stay there. The retry *counter* goes flat while this happens (it only
@@ -112,19 +112,19 @@ of [docs/METRICS.md](../../METRICS.md).
   the ceiling rather than at it: jitter only shortens a delay, so the published
   step never sits exactly on `retry.max`. This covers backoff against a replica
   that is still available — when every replica is quarantined the shard sleeps
-  waiting for a probe window instead, and `etl_sink_shard_healthy == 0` is the
+  waiting for a probe window instead, and `spate_sink_shard_healthy == 0` is the
   signal for that.
 - **A slow sink** — the p99 of
-  `etl_sink_write_duration_seconds{outcome="ok"}` above your write budget.
-  Reach for this one, not `etl_sink_flush_duration_seconds`: flush spans seal
+  `spate_sink_write_duration_seconds{outcome="ok"}` above your write budget.
+  Reach for this one, not `spate_sink_flush_duration_seconds`: flush spans seal
   to settle and carries the wait for an `inflight.max_per_shard` slot and every
   backoff sleep on top of the write, so it fires on a saturated pipeline as
   readily as on a slow server. The sink-latency families each answer a
   different question — permit wait says *queued*
-  (`etl_sink_permit_wait_duration_seconds`), backoff says *asleep between
-  attempts* (`etl_sink_retry_backoff_seconds`), shard health says *asleep
-  waiting for a probe window* (`etl_sink_shard_healthy == 0`, where the backoff
-  gauge reads `0`), write says *slow* — and `etl_sink_flush_duration_seconds`
+  (`spate_sink_permit_wait_duration_seconds`), backoff says *asleep between
+  attempts* (`spate_sink_retry_backoff_seconds`), shard health says *asleep
+  waiting for a probe window* (`spate_sink_shard_healthy == 0`, where the backoff
+  gauge reads `0`), write says *slow* — and `spate_sink_flush_duration_seconds`
   is all of them at once, which makes it a commit-lag budget rather than a
   diagnosis. See [What a flush
   contains](../../METRICS.md#what-a-flush-contains).
@@ -137,10 +137,10 @@ of [docs/METRICS.md](../../METRICS.md).
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,
-`etl_sink_replica_healthy`, `etl_sink_shard_healthy` (0 = no circuit-closed
+`spate_sink_replica_healthy`, `spate_sink_shard_healthy` (0 = no circuit-closed
 replica left in the shard — the whole-shard outage escalation, with
-`etl_sink_replica_errors_total` attributing the failures per endpoint), and
-`etl_queue_full_events_total` series described in
+`spate_sink_replica_errors_total` attributing the failures per endpoint), and
+`spate_queue_full_events_total` series described in
 [docs/METRICS.md](../../METRICS.md).
 
 ## Related
@@ -148,6 +148,6 @@ replica left in the shard — the whole-shard outage escalation, with
 - [Error handling](../02-concepts/04-error-handling.mdx) — how Skip/Fail
   policies surface in the `*_dropped_total` and `*_errors_total` series.
 - [Backpressure](../02-concepts/03-backpressure.mdx) — what the
-  `etl_backpressure_*` gauges are measuring.
+  `spate_backpressure_*` gauges are measuring.
 - [Tuning](tuning.mdx) — turning what you see on dashboards into config
   changes.

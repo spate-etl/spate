@@ -57,8 +57,8 @@ single-sink wiring, N times:
 
 ```rust
 // One sink per table, from the `sinks:` map.
-let gauge_sink = etl::clickhouse::config::from_component_config(pipeline.config().sink_config("gauge")?)?;
-let text_sink  = etl::clickhouse::config::from_component_config(pipeline.config().sink_config("text")?)?;
+let gauge_sink = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("gauge")?)?;
+let text_sink  = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("text")?)?;
 
 // Each table's own columnar encoder (its Native schema) and shard router.
 let gauge_router = gauge_sink.router::<GaugeFam>(host_key);
@@ -87,7 +87,7 @@ let report = pipeline
     .run(source)?;
 ```
 
-The complete, compiling program is `crates/etl/examples/multi_table_split.rs`
+The complete, compiling program is `crates/spate/examples/multi_table_split.rs`
 (`--features full`). See the concept page for the
 [routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
@@ -108,8 +108,8 @@ Each branch is a full ClickHouse sink, so everything on the
   or retries duplicate silently.
 - **Replica rotation, circuit breaker, readiness probe** per table. `/readyz`
   reports connected only when every table's replicas probe healthy.
-- **Metrics per table**: each sink's `etl_sink_*` series carry the sink name as
-  their `component` label, so `etl_sink_records_total{component="gauge"}` and
+- **Metrics per table**: each sink's `spate_sink_*` series carry the sink name as
+  their `component` label, so `spate_sink_records_total{component="gauge"}` and
   `{component="text"}` are distinct.
 
 ## Per-table part tuning — and the checkpoint-lag cost

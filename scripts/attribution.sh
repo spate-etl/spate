@@ -73,8 +73,8 @@ trailing=$(sed -n "$((crate_rule + 1)),\$p" "$tmp" | grep -v -e '^| ' -e '^$' | 
 
 # Rows look like: | `crate` | version | `LICENCE` |
 # Splitting on the backtick rather than the pipe means field 2 is the bare crate
-# name, so names sort as names — with the pipe, the trailing backtick of `etl`
-# would sort it after `etl-test`. Field 4 is the licence id (the grouping) and
+# name, so names sort as names — with the pipe, the trailing backtick of `spate`
+# would sort it after `spate-test`. Field 4 is the licence id (the grouping) and
 # field 3 carries the version, which separates two versions of one crate. Rows
 # tying on all three are byte-identical: one crate, one licence, several
 # notices, which `uniq` then collapses to the single row this table promises.

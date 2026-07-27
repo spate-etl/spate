@@ -10,7 +10,7 @@ sources of truth it defers to are listed here.
   connector's own section.
 - [Glossary](glossary.mdx) — precise definitions of the terms used
   throughout the guide (lane, epoch, watermark, sealed batch, ...).
-- [Licensing](licensing.mdx) — what etl-rs and its dependencies are licensed
+- [Licensing](licensing.mdx) — what Spate and its dependencies are licensed
   under, and where to find the attribution a legal review will ask for.
 - [Supply chain](supply-chain.mdx) — what the version numbers promise, and
   what stops a compromised or broken dependency release reaching a build.
@@ -21,14 +21,14 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 
 | Crate | Role |
 |---|---|
-| [etl](https://docs.rs/etl) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `avro`, `full`). |
-| [etl-core](https://docs.rs/etl-core) | The engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline builder and runtime, config, metrics, admin server. |
-| [etl-kafka](https://docs.rs/etl-kafka) | Kafka source (single consumer, split partition queues). |
-| [etl-clickhouse](https://docs.rs/etl-clickhouse) | ClickHouse `ShardWriter` and RowBinary encoder. |
-| [etl-avro](https://docs.rs/etl-avro) | Avro deserializer: Confluent wire format, schema-registry client. |
-| [etl-test](https://docs.rs/etl-test) | In-memory source/sink mocks with scripting handles, for testing pipelines. |
+| [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `avro`, `full`). |
+| [spate-core](https://docs.rs/spate-core) | The engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline builder and runtime, config, metrics, admin server. |
+| [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues). |
+| [spate-clickhouse](https://docs.rs/spate-clickhouse) | ClickHouse `ShardWriter` and RowBinary encoder. |
+| [spate-avro](https://docs.rs/spate-avro) | Avro deserializer: Confluent wire format, schema-registry client. |
+| [spate-test](https://docs.rs/spate-test) | In-memory source/sink mocks with scripting handles, for testing pipelines. |
 
-Applications should import through `etl` (which re-exports the connector
+Applications should import through `spate` (which re-exports the connector
 crates behind features); the per-crate docs matter mostly to connector
 authors — see [Extending](../06-extending/README.mdx).
 

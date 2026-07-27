@@ -106,7 +106,7 @@ more than typed (384 vs 212 ns/record): use it only when the schema is unknown a
 compile time. For **Avro** the ordering reverses — the dynamic path is ~**1.6×**
 *cheaper* than typed (251 vs 409 ns/record), because `AvroValue` is exactly the
 intermediate the typed path already builds before re-decoding it into `T`. The
-typed path is therefore a convenience, not an optimization: `etl-avro`'s API docs
+typed path is therefore a convenience, not an optimization: `spate-avro`'s API docs
 say so, and this is the measurement behind that claim.
 
 And on the dynamic path Avro's compact binary format does win — 251 ns/record
@@ -159,7 +159,7 @@ twice. Avro's `value` path lands at ~605 ns, back under JSON's own dynamic path
 
 Everything above decodes with `serde_json`, the default backend. The byte-slice
 → value step sits behind an internal seam, so the opt-in **`simd`** Cargo feature
-(`json-simd` on the `etl` facade) swaps in
+(`json-simd` on the `spate` facade) swaps in
 [`simd-json`](https://github.com/simd-lite/simd-json) — a SIMD-accelerated parser
 — with no API change. Same 50 readings, same typed decode; only the parser
 differs.
@@ -282,6 +282,6 @@ done
 ```
 
 Per-format micro-benchmarks (criterion) live in each format crate —
-`crates/etl-json/benches/decode.rs` and `crates/etl-avro/benches/decode.rs`. See
+`crates/spate-json/benches/decode.rs` and `crates/spate-avro/benches/decode.rs`. See
 [Methodology](methodology.mdx) for the harness and the Report schema the charts
 read.

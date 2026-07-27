@@ -1,6 +1,6 @@
 [package]
 name = "benchmarks"
-description = "Benchmark harnesses for the etl-rs framework (not published)."
+description = "Benchmark harnesses for the Spate framework (not published)."
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -16,21 +16,21 @@ autobins = false
 [features]
 # Pass-through selector for the deser_formats simd-json arm. Rebuild the rig
 # with this feature; the emitted `backend` variant tracks the compiled seam.
-json-simd = ["etl-json/simd"]
+json-simd = ["spate-json/simd"]
 
 [dependencies]
 apache-avro = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
-etl-avro = { workspace = true }
-etl-clickhouse = { workspace = true }
+spate-avro = { workspace = true }
+spate-clickhouse = { workspace = true }
 # `default-features = false` (from the workspace entry) drops the NATS backend:
 # the coordinated rig runs over the in-memory store, no broker.
-etl-coordination = { workspace = true }
-etl-core = { workspace = true }
-etl-json = { workspace = true }
-etl-kafka = { workspace = true }
-etl-s3 = { workspace = true }
+spate-coordination = { workspace = true }
+spate-core = { workspace = true }
+spate-json = { workspace = true }
+spate-kafka = { workspace = true }
+spate-s3 = { workspace = true }
 flate2 = { workspace = true }
 tempfile = { workspace = true }
 lz4_flex = { workspace = true }

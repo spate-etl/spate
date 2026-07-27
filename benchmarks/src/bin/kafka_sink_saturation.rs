@@ -23,13 +23,13 @@
 //! framework's own backpressure + checkpoint signals — is the source being
 //! pushed as hard as it can produce?) and `downstream` (`client`/`broker`,
 //! from the producer-queue depth + broker RTT/latency the sink already
-//! publishes as `etl_kafka_*` statistics, cross-checked against the raw
+//! publishes as `spate_kafka_*` statistics, cross-checked against the raw
 //! baseline via `RAW_BASELINE_RPS`). Only `upstream=sink, downstream=client`
 //! arms back a client-path claim. The default in-flight budget is derived from
 //! the sink's batch/queue sizing so the framework never self-throttles below
 //! the producer queue (the sink-saturation `budget` lesson).
 //!
-//! Throughput is read from `etl_sink_records_total` (durable acks: the sink
+//! Throughput is read from `spate_sink_records_total` (durable acks: the sink
 //! returns `Ok` only after every delivery report under `acks=all`) over a
 //! steady-state window — the client-path durable throughput.
 //!
@@ -54,19 +54,19 @@
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::SyntheticSource;
 use benchmarks::{docker, ensure_topic_with, env_str, env_u64, prom};
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::{ComponentConfig, PipelineConfig};
-use etl_core::deser::BytesPassthrough;
-use etl_core::metrics::{ComponentLabels, E2eBasis, Meter, MetricsHandle, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, RunnableChain, chain_owned};
-use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::record::RecordMeta;
-use etl_core::sink::{ShardRouter, ShardWriter, SinkPool, shard_queues};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::message::DeliveryResult;
 use rdkafka::producer::{BaseRecord, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::types::RDKafkaErrorCode;
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::{ComponentConfig, PipelineConfig};
+use spate_core::deser::BytesPassthrough;
+use spate_core::metrics::{ComponentLabels, E2eBasis, Meter, MetricsHandle, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, RunnableChain, chain_owned};
+use spate_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::record::RecordMeta;
+use spate_core::sink::{ShardRouter, ShardWriter, SinkPool, shard_queues};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -196,8 +196,8 @@ fn ensure_bench_topic(bootstrap: &str, topic: &str, partitions: i32) {
 }
 
 fn install_metrics() -> MetricsHandle {
-    etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
-        exporter: etl_core::metrics::Exporter::Prometheus,
+    spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
         ..Default::default()
     })
     .expect("install metrics recorder")
@@ -271,7 +271,7 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
         qbm = cfg.queue_buffering,
     );
     let section: ComponentConfig = serde_yaml::from_str(&sink_yaml).expect("sink section");
-    let k = etl_kafka::sink::from_component_config(&section).expect("kafka sink");
+    let k = spate_kafka::sink::from_component_config(&section).expect("kafka sink");
     assert_eq!(k.endpoints.len(), cfg.shards, "one endpoint per shard");
     // Encoder must be built while the sink bundle is whole (borrows &self).
     let enc = k.encoder_bytes();
@@ -281,8 +281,8 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
 
     // Wire the sink's librdkafka statistics into the global recorder. The manual
     // SinkPool::spawn path does not call attach_metrics (the pipeline builder
-    // does), so we do it here — names render as etl_kafka_* (production's
-    // role-scoped scope would be etl_kafka_sink_*; the translation is identical).
+    // does), so we do it here — names render as spate_kafka_* (production's
+    // role-scoped scope would be spate_kafka_sink_*; the translation is identical).
     let stats_meter = Meter::with_namespace("kafka", PIPELINE_NAME, "sink", "kafka");
     writer.attach_metrics(Some(stats_meter));
 
@@ -346,29 +346,29 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
     // Warm up, then measure a steady-state window.
     std::thread::sleep(cfg.warmup);
     let text0 = metrics_handle.render();
-    let sink0 = prom::value(&text0, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses0 = prom::value(&text0, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused0 = prom::value(&text0, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend0 = prom::value(&text0, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
-    let queue0 = prom::value(&text0, "etl_kafka_produce_queue_messages", "").unwrap_or(0.0);
+    let sink0 = prom::value(&text0, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses0 = prom::value(&text0, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused0 = prom::value(&text0, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend0 = prom::value(&text0, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let queue0 = prom::value(&text0, "spate_kafka_produce_queue_messages", "").unwrap_or(0.0);
     let c0 = produced.load(Ordering::Relaxed);
     let t0 = Instant::now();
     std::thread::sleep(cfg.duration);
     let text1 = metrics_handle.render();
     let window = t0.elapsed().as_secs_f64();
-    let sink1 = prom::value(&text1, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses1 = prom::value(&text1, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused1 = prom::value(&text1, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend1 = prom::value(&text1, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
-    let queue1 = prom::value(&text1, "etl_kafka_produce_queue_messages", "").unwrap_or(0.0);
+    let sink1 = prom::value(&text1, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses1 = prom::value(&text1, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused1 = prom::value(&text1, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend1 = prom::value(&text1, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let queue1 = prom::value(&text1, "spate_kafka_produce_queue_messages", "").unwrap_or(0.0);
     let c1 = produced.load(Ordering::Relaxed);
 
     // Producer/broker telemetry at window end (gauges reflect the last interval).
-    let queue_bytes = prom::value(&text1, "etl_kafka_produce_queue_bytes", "").unwrap_or(0.0);
-    let rtt_p99 = prom::value(&text1, "etl_kafka_broker_rtt_p99_seconds", "");
-    let outbuf_p99 = prom::value(&text1, "etl_kafka_broker_outbuf_latency_p99_seconds", "");
-    let int_p99 = prom::value(&text1, "etl_kafka_broker_int_latency_p99_seconds", "");
-    let tx_messages = prom::value(&text1, "etl_kafka_tx_messages_total", "").unwrap_or(0.0);
+    let queue_bytes = prom::value(&text1, "spate_kafka_produce_queue_bytes", "").unwrap_or(0.0);
+    let rtt_p99 = prom::value(&text1, "spate_kafka_broker_rtt_p99_seconds", "");
+    let outbuf_p99 = prom::value(&text1, "spate_kafka_broker_outbuf_latency_p99_seconds", "");
+    let int_p99 = prom::value(&text1, "spate_kafka_broker_int_latency_p99_seconds", "");
+    let tx_messages = prom::value(&text1, "spate_kafka_tx_messages_total", "").unwrap_or(0.0);
     let queue_peak = queue0.max(queue1);
     let queue_full_ratio = if cfg.queue_buffering > 0 {
         queue_peak / cfg.queue_buffering as f64
@@ -479,18 +479,18 @@ fn run_framework(bootstrap: &str, cfg: &Cfg) {
         rep = rep.metric("broker_int_latency_p99", Metric::minimize(v, "s"));
     }
     if let Some(p50) =
-        prom::histogram_quantile_delta(&text0, &text1, "etl_e2e_latency_seconds", 0.5)
+        prom::histogram_quantile_delta(&text0, &text1, "spate_e2e_latency_seconds", 0.5)
     {
         rep = rep.metric("e2e_p50", Metric::minimize(p50, "s"));
     }
     if let Some(p99) =
-        prom::histogram_quantile_delta(&text0, &text1, "etl_e2e_latency_seconds", 0.99)
+        prom::histogram_quantile_delta(&text0, &text1, "spate_e2e_latency_seconds", 0.99)
     {
         rep = rep.metric("e2e_p99", Metric::minimize(p99, "s"));
     }
     rep.note(format!(
         "producer-sink saturation: memory source -> Kafka; rps = \
-         etl_sink_records_total delta / window; upstream={upstream} \
+         spate_sink_records_total delta / window; upstream={upstream} \
          (pauses={pauses}, paused_edge={paused_edge}, pend_max={pend_max}); \
          downstream={downstream} (queue_peak={queue_peak:.0}/{qbm} \
          ratio={queue_full_ratio:.2}, outbuf_p99={outbuf:?}, over_raw={over:?}); \
@@ -633,7 +633,7 @@ fn run_one(bootstrap: &str) {
 }
 
 fn main() {
-    etl_core::telemetry::init(etl_core::telemetry::LogFormat::Pretty, "info");
+    spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
 
     // Resolve the broker: external BOOTSTRAP, else the local bench container
     // (honouring scalar KAFKA_CPUS + FRESH). The parent owns the broker; children

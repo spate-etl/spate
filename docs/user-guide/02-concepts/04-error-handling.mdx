@@ -1,6 +1,6 @@
 # Error handling
 
-etl-rs sorts every failure into one of three classes, gives you exactly two
+Spate sorts every failure into one of three classes, gives you exactly two
 policies for the record-level class, and surfaces all of it through
 metrics. There are no dead-letter queues and no silent drops.
 
@@ -8,7 +8,7 @@ metrics. There are no dead-letter queues and no silent drops.
 
 | Class | Examples | What happens |
 |---|---|---|
-| **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `etl_sink_retries_total` and `etl_sink_replica_healthy`, with `etl_sink_replica_errors_total` to pin the failing endpoint and `etl_sink_shard_healthy` for the whole-shard escalation. The retry counter only moves on an *attempt*, so pair it with `etl_sink_retry_backoff_seconds` — the gauge that says whether the shard is asleep between attempts on an available replica right now, and for how long. |
+| **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `spate_sink_retries_total` and `spate_sink_replica_healthy`, with `spate_sink_replica_errors_total` to pin the failing endpoint and `spate_sink_shard_healthy` for the whole-shard escalation. The retry counter only moves on an *attempt*, so pair it with `spate_sink_retry_backoff_seconds` — the gauge that says whether the shard is asleep between attempts on an available replica right now, and for how long. |
 | **Record-level** | A payload that won't deserialize, a `try_map` closure returning `Err` | Subject to the per-stage policy: **Skip** or **Fail** (below). |
 | **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. |
 
@@ -38,7 +38,7 @@ want to see immediately). Both are overridable per stage:
 )
 ```
 
-(From `crates/etl/examples/kafka_avro_to_clickhouse.rs`; see
+(From `crates/spate/examples/kafka_avro_to_clickhouse.rs`; see
 [Your first pipeline](../01-getting-started/03-first-pipeline.mdx).)
 
 There is deliberately no dead-letter queue in v1: the target environments
@@ -55,13 +55,13 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `etl_deser_records_dropped_total` | `reason` (`skip_policy`) | Payloads dropped by the deserializer's Skip policy. |
-| `etl_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |
-| `etl_operator_errors_total` | `error_type` | User-code errors by taxonomy class. |
-| `etl_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
+| `spate_deser_records_dropped_total` | `reason` (`skip_policy`) | Payloads dropped by the deserializer's Skip policy. |
+| `spate_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |
+| `spate_operator_errors_total` | `error_type` | User-code errors by taxonomy class. |
+| `spate_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
 
 A useful alert from [docs/METRICS.md](../../METRICS.md): a non-zero
-`rate(etl_deser_records_dropped_total[5m])` means schema drift or poison
+`rate(spate_deser_records_dropped_total[5m])` means schema drift or poison
 messages are being skipped — Skip keeps you up, not uninformed. See
 [Monitoring](../05-deployment/monitoring.mdx) for the full alerting story.
 
@@ -80,7 +80,7 @@ messages are being skipped — Skip keeps you up, not uninformed. See
   `checkpoint.stalled_fail_after` (default 120s), the controller fails the
   whole pipeline — restarting and replaying beats running indefinitely
   while committing nothing for that partition. Alert on
-  `etl_checkpoint_watermark_age_seconds` well before that deadline.
+  `spate_checkpoint_watermark_age_seconds` well before that deadline.
 - **Exit codes are the contract with the orchestrator**: `run` returns an
   exit report; `report.exit_code()` is non-zero for any failed state. Wire
   it through `std::process::exit` as the examples do.

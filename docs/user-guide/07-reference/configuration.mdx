@@ -18,20 +18,20 @@ checkpoint: { interval: 5s, max_pending_batches: 1024 }
 backpressure: { max_inflight_bytes: 256MiB }
 metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
 source:
-  kafka: { ... }          # body owned by etl-kafka
+  kafka: { ... }          # body owned by spate-kafka
 deserializer:
-  avro: { ... }           # body owned by etl-avro (or json: { ... } — optional section)
+  avro: { ... }           # body owned by spate-avro (or json: { ... } — optional section)
 sink:
-  clickhouse: { ... }     # body owned by etl-clickhouse
+  clickhouse: { ... }     # body owned by spate-clickhouse
 ```
 
 **Conventions used in this appendix.** Keys are shown in `backticks`; a blank
 default (`—`) means the key is **required**. Durations use humantime syntax
 (`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`, `1GiB`) or a
 plain integer for bytes. Framework-section defaults are the exact values from
-`crates/etl-core/src/config/mod.rs`; the sink-pool and code-level defaults come
-from `crates/etl-core/src/sink/config.rs` and
-`crates/etl-core/src/pipeline/builder.rs`.
+`crates/spate-core/src/config/mod.rs`; the sink-pool and code-level defaults come
+from `crates/spate-core/src/sink/config.rs` and
+`crates/spate-core/src/pipeline/builder.rs`.
 
 :::note
 This appendix is **non-exhaustive**: each connector owns the keys inside its
@@ -96,13 +96,13 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 |---|---|---|---|
 | `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` records to a no-op recorder. |
 | `listen` | socket address | `0.0.0.0:9090` | Admin server bind address (`/metrics`, `/healthz`, `/readyz`). |
-| `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `etl_source_lag_records`, which is always per partition. |
-| `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `etl_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
+| `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `spate_source_lag_records`, which is always per partition. |
+| `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `spate_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
 
 ## Sink pool (`batch` / `inflight` / `retry`) {#sink-pool}
 
 Every sink connector maps its `batch`, `inflight`, `retry`, and `breaker`
-sub-sections onto the framework's `SinkPoolConfig` (`crates/etl-core/src/sink/config.rs`).
+sub-sections onto the framework's `SinkPoolConfig` (`crates/spate-core/src/sink/config.rs`).
 The keys and defaults are **framework-owned and identical across sinks** — this
 table is their single source of truth; each connector page shows only the keys
 it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
@@ -140,14 +140,14 @@ shard is indistinguishable from a healthy idle one. Bound it with
 unaffected either way — the drain deadline aborts an in-flight write at
 shutdown, and its data replays.
 
-If you *did* mean it, `etl_sink_retry_backoff_seconds{shard}` is the live
+If you *did* mean it, `spate_sink_retry_backoff_seconds{shard}` is the live
 counterpart to that startup warning: it reads the backoff a shard is currently
 sleeping between attempts on an available replica (`0` when it is not backing
 off), so a patient policy stays legible on a dashboard instead of looking like
 an idle shard. Alert above `(1 - jitter) × retry.max` rather than at
 `retry.max` — the sleep is jittered downwards, so the gauge never sits exactly
 on the ceiling. When every replica is quarantined the shard sleeps waiting for
-a probe window and this gauge reads `0`; `etl_sink_shard_healthy` covers that
+a probe window and this gauge reads `0`; `spate_sink_shard_healthy` covers that
 state.
 
 Connectors add their own keys on top of these — e.g. ClickHouse's
@@ -220,7 +220,7 @@ configuration.
 | Rule | Behavior |
 |---|---|
 | Selection | The chain's [split terminal](../02-concepts/06-multi-sink.mdx) resolves each branch by name (`ctx.sink("type_a")`). |
-| Metric label | The entry name is the `component` label on that sink's `etl_sink_*` metrics. |
+| Metric label | The entry name is the `component` label on that sink's `spate_sink_*` metrics. |
 | `sink:` equivalence | A single `sink:` equals a one-entry `sinks:` map under the reserved name `"default"`, which keeps the historical label `component="sink"`. |
 | Reserved names | `sink` and the empty string are rejected at load, so no two sinks can share a label. |
 

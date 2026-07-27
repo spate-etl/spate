@@ -13,8 +13,8 @@ Everything between is the framework's: chunking, per-shard batching to
 retries, acknowledgements, backpressure. You write the two edges.
 
 This page mirrors the sink half of
-`crates/etl/examples/custom_source_sink.rs` (a JSON-lines-to-stdout sink)
-and the bundle seam in `crates/etl-core/src/sink/bundle.rs`.
+`crates/spate/examples/custom_source_sink.rs` (a JSON-lines-to-stdout sink)
+and the bundle seam in `crates/spate-core/src/sink/bundle.rs`.
 
 ## The CPU half: `RowEncoder`
 
@@ -137,7 +137,7 @@ pipeline threads and shard workers is the builder's knob, not the bundle's:
 
 ## The connector pattern: implementing `SinkBundle`
 
-A reusable connector (the etl-clickhouse pattern) exposes a config-built
+A reusable connector (the spate-clickhouse pattern) exposes a config-built
 sink type and implements `SinkBundle` on it, so applications write one
 line:
 
@@ -169,7 +169,7 @@ a `chunk` field of your own would never receive a value. See
 
 ## Testing
 
-`etl-test` drives chains end to end against capturing sinks, and the
+`spate-test` drives chains end to end against capturing sinks, and the
 assertions in `custom_source_sink.rs` (observe commits, then trigger
 shutdown) are the template for verifying your durable-ack point actually
 gates the watermark — see

@@ -25,8 +25,8 @@ the job fingerprint and must match byte-exactly), plus a coordinator over
 the shared store:
 
 ```rust
-use etl::coordination::store::nats::{NatsConfig, NatsStore};
-use etl::coordination::{CoordinationConfig, StoreCoordinator};
+use spate::coordination::store::nats::{NatsConfig, NatsStore};
+use spate::coordination::{CoordinationConfig, StoreCoordinator};
 
 let pipeline = Pipeline::from_config(config)?;
 let tuning = CoordinationConfig {
@@ -43,10 +43,10 @@ let source = S3Source::from_component_config(&pipeline.config().source, pipeline
     .with_coordinator(Box::new(coordinator));
 ```
 
-(The `etl` facade needs the `coordination-nats` feature for the NATS
+(The `spate` facade needs the `coordination-nats` feature for the NATS
 store; `coordination` alone gives the in-memory store and the seam.
 Runnable two-instance version:
-`crates/etl/examples/s3_coordinated_backfill.rs`.)
+`crates/spate/examples/s3_coordinated_backfill.rs`.)
 
 ## NATS: the coordination store
 
@@ -62,7 +62,7 @@ Requirements:
   shipped in 2.11 — the worker verifies the version at startup and fails
   actionably against an older server.
 - One **job name** per coordinated job (the `job` field): it suffixes the
-  two KV buckets (`etl_coordination_{job}_state` / `..._lease`). Two
+  two KV buckets (`spate_coordination_{job}_state` / `..._lease`). Two
   different jobs must never share one; a fingerprint check rejects
   misconfigured workers before they can touch anything.
 
@@ -192,8 +192,8 @@ this path at all — it is the failover timer, not the rebalance timer.
 The drain is usually the larger term, and it is set by how fast the losing
 worker's sink can absorb what it has already read, not by anything in the
 coordination layer. Measure before reaching for a knob:
-`etl_coordination_drain_duration_seconds` on the losing side and
-`etl_coordination_assignment_latency_seconds` on the gaining side. Those
+`spate_coordination_drain_duration_seconds` on the losing side and
+`spate_coordination_assignment_latency_seconds` on the gaining side. Those
 are **two families on purpose** — they are recorded in different processes
 against separately-observed assignment records, so they neither nest nor
 add; read each on the worker that reports it. A drain p99 approaching
@@ -244,15 +244,15 @@ because object sizes vary wildly between prefixes.
 | Zombie resumes after takeover | Its next commit loses the record CAS: nothing written, split reported lost locally. The duplicate window is at most one commit interval. |
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. |
 | NATS unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
-| Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `etl_coordination_splits_quarantined`. |
+| Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `spate_coordination_splits_quarantined`. |
 | Scale-up | The leader folds the new replicas into the next assignment and moves splits toward weight balance. Each move is a cooperative revocation — the losing worker drains and commits before releasing, so it replays nothing; a drain that is declined or outruns `drain_deadline` is forced instead, at a cost of up to one commit interval of duplicates. See [rebalance cost](#what-a-rebalance-costs). |
 | Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
 | Duplicate `instance_id` | Two live twins would ping-pong reclaims forever; the protocol detects the foreign process on the shared id and stops with a fatal, actionable error. |
 
 ## Observability
 
-The `etl_coordination_*` families (see
-[METRICS.md](https://github.com/marcuskainth/etl-rs/blob/main/docs/METRICS.md))
+The `spate_coordination_*` families (see
+[METRICS.md](https://github.com/spate-etl/spate/blob/main/docs/METRICS.md))
 carry the whole story: `splits_owned` per worker, `live_workers` for the
 fleet view, `leader` for who plans, `acquisitions_total` by reason
 (`create`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
@@ -272,7 +272,7 @@ Time to balance reads from two separate families, one per side:
 in different processes and do not compose — do not add or subtract them.
 `splits_draining` shows whether a worker is stuck mid-drain while the
 fleet is visibly uneven — it counts drains, so a drain left behind by a
-cancelled revocation keeps showing until it lands. `etl_coordination_writes_total{outcome="conflict"}`
+cancelled revocation keeps showing until it lands. `spate_coordination_writes_total{outcome="conflict"}`
 is fencing working as designed — alarming only in bulk.
 
 Two families were renamed when coordination moved to leader-assigned
@@ -317,10 +317,10 @@ be at least `op_timeout`, and both default to 10s. If you raised
 
 | Was | Now |
 |---|---|
-| `etl_coordination_handoffs_total{outcome}` | `etl_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`/`cancelled`) |
-| `etl_coordination_revocations_total{reason}` | `etl_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
-| `etl_coordination_handoff_duration_seconds{phase}` | `etl_coordination_drain_duration_seconds` and `etl_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-two-coordination-latencies-do-not-compose) |
-| `etl_coordination_handoffs_in_flight` | `etl_coordination_splits_draining` |
+| `spate_coordination_handoffs_total{outcome}` | `spate_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`/`cancelled`) |
+| `spate_coordination_revocations_total{reason}` | `spate_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
+| `spate_coordination_handoff_duration_seconds{phase}` | `spate_coordination_drain_duration_seconds` and `spate_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-two-coordination-latencies-do-not-compose) |
+| `spate_coordination_handoffs_in_flight` | `spate_coordination_splits_draining` |
 | `acquisitions_total{reason="stolen"}` | gone — there is no steal path |
 | `acquisitions_total{reason="handoff"}` | `acquisitions_total{reason="reassigned"}` |
 | `acquisitions_total{reason="released"}` | folded into `reassigned` — a claiming worker cannot tell a drained revocation from a shutdown hand-back, and a label it cannot populate is a series that reads zero |

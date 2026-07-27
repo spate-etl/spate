@@ -3,7 +3,7 @@
 What this project depends on, what it promises about those dependencies, and
 what stops a compromised or broken release from reaching a build. If you are
 reporting a vulnerability rather than reading about dependencies, start at
-[SECURITY.md](https://github.com/marcuskainth/etl-rs/blob/main/SECURITY.md).
+[SECURITY.md](https://github.com/spate-etl/spate/blob/main/SECURITY.md).
 
 ## The two kinds of version number
 
@@ -17,7 +17,7 @@ Rust projects carry two, and confusing them is the usual source of bad advice.
 `Cargo.lock` is committed and every CI build passes `--locked`, so a build here
 cannot silently resolve a different graph than the one that was reviewed. But
 the lockfile is **not** published and plays no part in a consumer's resolution.
-When you add `etl` to your project, your resolver reads our *requirements* and
+When you add `spate` to your project, your resolver reads our *requirements* and
 picks versions itself.
 
 That is why nothing in `[workspace.dependencies]` is exact-pinned. An `=1.2.3`
@@ -45,23 +45,23 @@ committed lockfile.
 The full rule and its rationale are in
 [docs/DESIGN.md](../../DESIGN.md) under *Dependency policy*. In short: no
 rdkafka, clickhouse, or apache-avro type appears in a public trait bound or
-public struct **of `etl-core`**, because those are 0.x crates and their breaking
-releases must not become ours. The single exception inside `etl-core` is the
+public struct **of `spate-core`**, because those are 0.x crates and their breaking
+releases must not become ours. The single exception inside `spate-core` is the
 `metrics` facade, whose handle types *are* the instrumentation API, re-exported
 so exactly one version of it lives in the tree.
 
 The scope matters. **Connector crates may deliberately re-export their
-underlying crate**, and some do — `etl-avro` exposes
+underlying crate**, and some do — `spate-avro` exposes
 
 ```rust
 pub type AvroValue = apache_avro::types::Value;
 ```
 
-reachable as `etl::avro::AvroValue`, so an `apache-avro` 0.x release can break
+reachable as `spate::avro::AvroValue`, so an `apache-avro` 0.x release can break
 code written against it. Those re-exports are marked in the rustdoc as exempt
 from our stability promises, and they are the one place where a 0.x dependency's
 breaking change becomes yours. If you are doing semver due diligence, that is the
-surface to look at — not `etl-core`.
+surface to look at — not `spate-core`.
 
 ## The controls
 
@@ -224,5 +224,5 @@ Stated plainly, so it is not mistaken for coverage:
   artifacts `THIRD-PARTY.md` and the full licence texts.
 - [Installation](../01-getting-started/01-installation.mdx) — the feature flags
   that decide which dependencies your build actually links.
-- [SECURITY.md](https://github.com/marcuskainth/etl-rs/blob/main/SECURITY.md) —
+- [SECURITY.md](https://github.com/spate-etl/spate/blob/main/SECURITY.md) —
   how to report a vulnerability privately.

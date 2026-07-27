@@ -1,6 +1,6 @@
 # Custom operators
 
-There is no `Operator` trait to implement. Operators in etl-rs are
+There is no `Operator` trait to implement. Operators in Spate are
 **stateful closures** over the chain builder's combinators — `map`,
 `filter`, `try_map`, `flat_map` — and a closure capturing its own state is
 a full-blown custom operator. The combinators compose **statically**: the
@@ -9,11 +9,11 @@ whole chain monomorphizes into one loop, with a single virtual call per
 an inlined function call, not a dispatch. Rationale in
 [docs/DESIGN.md](../../DESIGN.md) (§ Operator chain).
 
-This page mirrors `crates/etl/examples/custom_operator.rs`, which drives a
+This page mirrors `crates/spate/examples/custom_operator.rs`, which drives a
 chain by hand exactly the way a pipeline thread does. Run it:
 
 ```sh
-cargo run -p etl --example custom_operator
+cargo run -p spate --example custom_operator
 ```
 
 ## A stateful operator: deduplication with `flat_map`
@@ -75,7 +75,7 @@ its children do.
 stage:
 
 - `ErrorPolicy::Skip` — drop the failing record, count it on
-  `etl_operator_records_dropped_total{reason="skip_policy"}`, continue.
+  `spate_operator_records_dropped_total{reason="skip_policy"}`, continue.
 - `ErrorPolicy::Fail` — stop the pipeline. This is the right default for
   bugs: operators default to Fail in the framework's taxonomy (the
   deserializer stage defaults to Skip — malformed input is the outside
@@ -96,7 +96,7 @@ chains (like the example above) infer everywhere.
 
 ## When closures aren't enough: `Collector` and `StageLifecycle`
 
-The traits underneath the combinators are public in `etl::ops` for advanced
+The traits underneath the combinators are public in `spate::ops` for advanced
 stages — an operator that must observe batch flush/drain boundaries, park
 state across pushes, or integrate with the chain's lifecycle implements
 `Collector` (the push interface, `push(Record<T>) -> Flow`) and
@@ -105,7 +105,7 @@ cannot express the behavior: the closures *are* the intended API, and the
 terminal stage's lifecycle contracts (fail-on-teardown for parked data) are
 easy to get wrong. Read the trait docs on
 [docs.rs](../07-reference/README.mdx) and the framework's own stages in
-`crates/etl-core/src/ops/` before going there.
+`crates/spate-core/src/ops/` before going there.
 
 ## Wiring it in
 

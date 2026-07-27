@@ -6,7 +6,7 @@ APIs that are themselves public, semver-committed, and documented. Nothing
 in the builder is magic or privileged; this page desugars every step into
 the primitives it calls, so you can drop below the builder at any point —
 for exotic wiring, for embedding, or just to understand what you are
-running. The rustdoc on `etl::pipeline::Pipeline` carries the same mapping
+running. The rustdoc on `spate::pipeline::Pipeline` carries the same mapping
 and is kept in lockstep with the code; rationale in
 [docs/DESIGN.md](../../DESIGN.md) § Assembly.
 
@@ -25,25 +25,25 @@ runtimes, leaked queue clones. Use it when you need it, not by default.
 | `.chains(f)` | the chain factory handed to `PipelineRuntime::new`, with queue/budget/name plumbing pre-threaded per call |
 | `.into_runtime(source)` / `.run(source)` | `PipelineRuntime::new(config, source, factory, SinkRuntime, budget)` + `with_options` + `with_io_runtime` + `run` |
 
-Module paths (all under the `etl` facade, which re-exports `etl_core` at
-the root): `etl::telemetry`, `etl::metrics`, `etl::pipeline`
+Module paths (all under the `spate` facade, which re-exports `spate_core` at
+the root): `spate::telemetry`, `spate::metrics`, `spate::pipeline`
 (`PipelineRuntime`, `SinkRuntime`, `metrics_settings`, `RuntimeOptions`),
-`etl::sink` (`shard_queues`, `SinkPool`, `SinkBundle`, `SinkParts`), and
-`etl::backpressure` (`InflightBudget`).
+`spate::sink` (`shard_queues`, `SinkPool`, `SinkBundle`, `SinkParts`), and
+`spate::backpressure` (`InflightBudget`).
 
 ## Step by step
 
 The sketch below mirrors what the builder's own implementation does
-(`crates/etl-core/src/pipeline/builder.rs`); construction of your
+(`crates/spate-core/src/pipeline/builder.rs`); construction of your
 connectors and chain is elided.
 
 ### 1. Process init (what `from_config` does)
 
 ```rust
-use etl::config::PipelineConfig;
-use etl::pipeline::metrics_settings;
-use etl::telemetry::{self, LogFormat};
-use etl::backpressure::InflightBudget;
+use spate::config::PipelineConfig;
+use spate::pipeline::metrics_settings;
+use spate::telemetry::{self, LogFormat};
+use spate::backpressure::InflightBudget;
 use std::sync::Arc;
 
 let config = PipelineConfig::from_path(std::path::Path::new("pipeline.yaml"))?;
@@ -53,13 +53,13 @@ telemetry::init(LogFormat::Json, "info");            // idempotent, first init w
 
 // Exporter BEFORE any metric handle exists — handles bind to the recorder
 // present at construction; one built earlier records into the void.
-let metrics = etl::metrics::install(&metrics_settings(&config))?;
+let metrics = spate::metrics::install(&metrics_settings(&config))?;
 
 // ONE I/O runtime for the whole process. run() adopts it later via
 // with_io_runtime; building a second one doubles io_threads silently.
 let io = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(config.pipeline.io_threads)
-    .thread_name("etl-io")
+    .thread_name("spate-io")
     .enable_all()
     .build()?;
 
@@ -78,8 +78,8 @@ directly — that is all `Pipeline::io_handle`/`block_on` forward to.
 ### 3. The sink (what `.sink(bundle)` does)
 
 ```rust
-use etl::metrics::{ComponentLabels, SinkShardMetrics};
-use etl::sink::{SinkBundle, SinkPool, shard_queues};
+use spate::metrics::{ComponentLabels, SinkShardMetrics};
+use spate::sink::{SinkBundle, SinkPool, shard_queues};
 
 let parts = bundle.into_parts();                 // SinkParts { writer, shard_endpoints, pool, ... }
 let num_shards = parts.shard_endpoints.len();
@@ -123,7 +123,7 @@ matching endpoint shape) — manual assemblies get panics from
 ### 4. The runtime (what `.chains` + `.into_runtime` do)
 
 ```rust
-use etl::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
 
 let sink_runtime = SinkRuntime {
     queues: queues.clone(),

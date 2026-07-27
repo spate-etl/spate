@@ -128,8 +128,8 @@ impl Broker {
 
     fn container(self) -> &'static str {
         match self {
-            Broker::Redpanda => "etl-bench-redpanda",
-            Broker::Kafka => "etl-bench-kafka",
+            Broker::Redpanda => "spate-bench-redpanda",
+            Broker::Kafka => "spate-bench-kafka",
         }
     }
 
@@ -188,8 +188,8 @@ pub fn ensure_broker() -> (String, Broker) {
     );
     // Both names are cleared: switching BROKER between runs otherwise leaves
     // the other implementation holding the port.
-    remove_container("etl-bench-redpanda");
-    remove_container("etl-bench-kafka");
+    remove_container("spate-bench-redpanda");
+    remove_container("spate-bench-kafka");
 
     let cpus = std::env::var("KAFKA_CPUS").ok();
     let cpus_arg = cpus.as_ref().map(|c| format!("--cpus={c}"));
@@ -246,7 +246,7 @@ pub fn ensure_broker() -> (String, Broker) {
 
 /// Ensure a ClickHouse server on `localhost:18123` (HTTP), starting a
 /// `$CLICKHOUSE_IMAGE` container (default the 26.3 LTS line, capped at
-/// `$CLICKHOUSE_CPUS` cores; `etl-bench-clickhouse`, password `bench`) if
+/// `$CLICKHOUSE_CPUS` cores; `spate-bench-clickhouse`, password `bench`) if
 /// nothing answers `/ping`. Returns (host, port, user, password).
 pub fn ensure_clickhouse() -> (String, u16, String, String) {
     let (host, port) = ("localhost".to_owned(), 18123u16);
@@ -269,22 +269,22 @@ pub fn ensure_clickhouse() -> (String, u16, String, String) {
             .map(|v| v.trim().to_owned())
             .unwrap_or_default();
         eprintln!(
-            "reusing running etl-bench-clickhouse (server version {version}); \
+            "reusing running spate-bench-clickhouse (server version {version}); \
              CLICKHOUSE_IMAGE/CLICKHOUSE_CPUS are ignored for a reused container"
         );
         return (host, port, creds.0, creds.1);
     }
-    remove_container("etl-bench-clickhouse");
+    remove_container("spate-bench-clickhouse");
     let image = std::env::var("CLICKHOUSE_IMAGE")
         .unwrap_or_else(|_| "clickhouse/clickhouse-server:26.3".to_owned());
     let cpus = std::env::var("CLICKHOUSE_CPUS").unwrap_or_else(|_| "8".to_owned());
     let cpus_arg = format!("--cpus={cpus}");
-    eprintln!("starting etl-bench-clickhouse ({image}, --cpus={cpus}) ...");
+    eprintln!("starting spate-bench-clickhouse ({image}, --cpus={cpus}) ...");
     docker(&[
         "run",
         "-d",
         "--name",
-        "etl-bench-clickhouse",
+        "spate-bench-clickhouse",
         "-p",
         "18123:8123", // HTTP
         "-p",

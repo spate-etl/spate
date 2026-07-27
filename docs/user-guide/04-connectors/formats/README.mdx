@@ -8,7 +8,7 @@ emits ready-made records needs none. Configure one with a single-key
 | Format | Config tag | Summary |
 |---|---|---|
 | [Avro](avro/README.mdx) | `deserializer: { avro: ... }` | Confluent/schema-registry and single-object Avro; non-blocking schema fetches, Skip/Fail on undecodable payloads. |
-| [JSON](json/README.mdx) | `deserializer: { json: ... }` | `serde_json`-backed single-document, NDJSON, and top-level-array framings; typed or dynamic records, per-record Skip/Fail with `etl_json_deser_*` metrics. |
+| [JSON](json/README.mdx) | `deserializer: { json: ... }` | `serde_json`-backed single-document, NDJSON, and top-level-array framings; typed or dynamic records, per-record Skip/Fail with `spate_json_deser_*` metrics. |
 
 ## Framing vs deserialization
 
@@ -19,7 +19,7 @@ Two distinct steps turn source bytes into records:
   (an S3 backfill runs the format's framer over each object so it can checkpoint
   mid-object). A message source like Kafka does no framing — the message
   boundary is the record boundary. Framing is a *format* concern, so the framer
-  is owned by the format crate (`etl-json`'s `NdjsonFramer`, ...) and wired into
+  is owned by the format crate (`spate-json`'s `NdjsonFramer`, ...) and wired into
   a streaming source in code — the source stays format-agnostic.
 - **Deserialization** — decoding one framed payload into a typed record. This is
   also the *format*, and it is identical whatever the source: the same JSON or

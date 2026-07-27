@@ -17,17 +17,17 @@ Connectors are grouped by role:
 
 ## The matrix
 
-| Connector | Role | Crate | Feature on `etl` | Config tag |
+| Connector | Role | Crate | Feature on `spate` | Config tag |
 |---|---|---|---|---|
-| [Kafka](sources/kafka/README.mdx) | Source | `etl-kafka` | `kafka` | `source: { kafka: ... }` |
-| [S3 (object storage)](sources/s3/README.mdx) | Source (bounded backfill) | `etl-s3` | `s3` | `source: { s3: ... }` |
-| [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `etl-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
-| [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `etl-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
-| [Avro](formats/avro/README.mdx) | Format (deserializer) | `etl-avro` | `avro` | `deserializer: { avro: ... }` |
-| [JSON](formats/json/README.mdx) | Format (deserializer) | `etl-json` | `json` | `deserializer: { json: ... }` |
-| [Memory / Capture](memory.mdx) | Test source + sink | `etl-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
+| [Kafka](sources/kafka/README.mdx) | Source | `spate-kafka` | `kafka` | `source: { kafka: ... }` |
+| [S3 (object storage)](sources/s3/README.mdx) | Source (bounded backfill) | `spate-s3` | `s3` | `source: { s3: ... }` |
+| [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `spate-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
+| [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `spate-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
+| [Avro](formats/avro/README.mdx) | Format (deserializer) | `spate-avro` | `avro` | `deserializer: { avro: ... }` |
+| [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
+| [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
-`features = ["full"]` on the `etl` facade enables all production
+`features = ["full"]` on the `spate` facade enables all production
 connectors. Memory / Capture is a dual-role test connector — it is neither a
 production source nor sink, so it lives at the connectors root rather than
 under `sources/` or `sinks/`.
@@ -71,7 +71,7 @@ under `sources/` or `sinks/`.
   single-document, NDJSON, and array framings; every derived record shares the
   payload's ack, so the source offset commits only after all of them are
   durably written. A malformed record follows the per-record Skip/Fail policy
-  (surfaced in `etl_json_deser_records_dropped_total`); NDJSON isolates errors
+  (surfaced in `spate_json_deser_records_dropped_total`); NDJSON isolates errors
   per line.
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so

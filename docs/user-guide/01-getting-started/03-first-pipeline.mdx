@@ -3,8 +3,8 @@
 This tutorial builds the flagship shape: consume Confluent-framed Avro from
 Kafka, validate and transform records in an operator chain, and write them
 to ClickHouse in large batches — at-least-once, drained gracefully on
-SIGTERM. It mirrors `crates/etl/examples/kafka_avro_to_clickhouse.rs` and
-its YAML (`crates/etl/examples/kafka_avro_to_clickhouse.yaml`); every
+SIGTERM. It mirrors `crates/spate/examples/kafka_avro_to_clickhouse.rs` and
+its YAML (`crates/spate/examples/kafka_avro_to_clickhouse.yaml`); every
 snippet below is lifted from those files.
 
 You need Kafka, a Confluent-compatible schema registry, and ClickHouse, plus
@@ -12,7 +12,7 @@ the `full` feature (see [Installation](01-installation.mdx)). From the
 repository:
 
 ```sh
-cargo run --release -p etl --example kafka_avro_to_clickhouse --features full
+cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
 ```
 
 ## 1. Create the target table
@@ -144,14 +144,14 @@ is only what is genuinely *this* pipeline's: connector construction, schema
 validation, and the chain.
 
 ```rust
-use etl::avro::AvroDeserializerBuilder;
-use etl::clickhouse::ClickHouseEncoder;
-use etl::kafka::KafkaSource;
-use etl::prelude::*;
+use spate::avro::AvroDeserializerBuilder;
+use spate::clickhouse::ClickHouseEncoder;
+use spate::kafka::KafkaSource;
+use spate::prelude::*;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = std::env::var("ETL_CONFIG")
+    let config_path = std::env::var("SPATE_CONFIG")
         .unwrap_or_else(|_| "pipeline.yaml".to_string());
     let pipeline = Pipeline::from_path(Path::new(&config_path))?;
 
@@ -174,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sink: the connector turns its YAML section into everything the
     // builder needs — writer, per-shard replica endpoints, pool tuning,
     // readiness probe.
-    let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 
     // Opt-in fail-fast schema validation (validate_schema: names|full):
     // checks the configured columns against every replica's live table
@@ -222,9 +222,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Walking the assembly:
 
 - **`Pipeline::from_path`** loads the YAML and owns init: JSON logs
-  (`RUST_LOG` overrides the filter; call `etl::telemetry::init` first to
+  (`RUST_LOG` overrides the filter; call `spate::telemetry::init` first to
   customize), the metrics exporter — installed before any handle can exist —
-  and the shared I/O runtime. Point `ETL_CONFIG` elsewhere to reconfigure
+  and the shared I/O runtime. Point `SPATE_CONFIG` elsewhere to reconfigure
   without recompiling.
 - **`pipeline.io_handle()` / `pipeline.block_on(..)`** give connectors the
   I/O runtime *before* `run` — the schema-registry fetcher and the
@@ -233,13 +233,13 @@ Walking the assembly:
   the `/readyz` probe.
 - **`.chains(..)`** installs the per-thread chain factory. The `try_map`
   with `ErrorPolicy::Skip` drops bad records, counts them on
-  `etl_operator_records_dropped_total`, and keeps going — see
+  `spate_operator_records_dropped_total`, and keeps going — see
   [Error handling](../02-concepts/04-error-handling.mdx).
 - **`.run(source)`** blocks until SIGTERM/SIGINT (drain) or a fatal error,
   then returns an exit report.
 
 Each step is a thin composition of public primitives you can drop down to —
-the full mapping is in the `etl::pipeline::Pipeline` module docs and in
+the full mapping is in the `spate::pipeline::Pipeline` module docs and in
 [Manual assembly](../03-guides/manual-assembly.mdx).
 
 ## 5. Run it, watch it, stop it
@@ -248,7 +248,7 @@ the full mapping is in the `etl::pipeline::Pipeline` module docs and in
 export KAFKA_BROKERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 export CLICKHOUSE_URL=http://localhost:8123
-cargo run --release -p etl --example kafka_avro_to_clickhouse --features full
+cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
 ```
 
 Probes and metrics are on the admin listener from the YAML:

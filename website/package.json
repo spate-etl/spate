@@ -1,8 +1,8 @@
 {
-  "name": "etl-rs-website",
+  "name": "spate-website",
   "version": "0.0.0",
   "private": true,
-  "description": "Documentation site for etl-rs",
+  "description": "Documentation site for Spate",
   "scripts": {
     "docusaurus": "docusaurus",
     "start": "docusaurus start",

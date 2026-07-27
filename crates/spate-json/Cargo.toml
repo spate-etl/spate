@@ -1,0 +1,54 @@
+[package]
+name = "spate-json"
+description = "JSON deserialization for the Spate framework: single-document, NDJSON, and top-level-array framings decoded into serde types or dynamically-typed values. Applications should depend on the `spate` facade crate with the `json` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# Fidelity knobs passed straight through to serde_json. Each is a deliberate,
+# documented trade-off (see the crate docs); `arbitrary-precision` in particular
+# unifies crate-wide across the dependency graph and interacts with
+# flatten/untagged/RawValue.
+float-roundtrip = ["serde_json/float_roundtrip"]
+arbitrary-precision = ["serde_json/arbitrary_precision"]
+raw-value = ["serde_json/raw_value"]
+# Opt-in SIMD decode backend behind the byte-slice → value seam (`backend.rs`).
+# Off by default; when on, `decode_one` parses with simd-json instead of
+# serde_json. The dup-key structural guard always stays on serde_json. See the
+# deserialization-formats benchmark study for the serde_json/simd-json A/B.
+simd = ["dep:simd-json"]
+
+[dependencies]
+spate-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dev-dependencies]
+spate-test = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+serde_yaml = { workspace = true }
+criterion = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "decode"
+harness = false
+
+[lints]
+workspace = true

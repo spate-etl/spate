@@ -146,7 +146,7 @@ sweep does.** Raise `queued.min.messages`, re-measure, and see whether
 throughput moves. Two series are still worth reading, with their limits
 understood:
 
-`etl_kafka_source_fetch_queue_messages` is the local queue depth. A value at or
+`spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at or
 near **zero** means the pipeline is draining the queue as fast as the broker
 refills it, i.e. the source is **broker-bound** rather than chain- or
 sink-bound. It does *not* separate "prefetch is too shallow" from "prefetch is
@@ -155,7 +155,7 @@ at the shallow depth that runs 22x slow *and* at the depth we recommend. Use it
 to decide whether the bottleneck is upstream or downstream of the source, not
 to size the queue.
 
-`sum(etl_source_lag_records)` is the total consumer lag across the partitions
+`sum(spate_source_lag_records)` is the total consumer lag across the partitions
 this member owns — the family is per-partition, so it must be aggregated in the
 query. A lag that is large and not shrinking is the signal that catching up
 matters at all: prefetch depth is only worth tuning when there is a backlog to

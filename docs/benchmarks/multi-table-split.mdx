@@ -30,7 +30,7 @@ the *same* stream through the real chain, sink pool, and runtime:
   directly, via the split terminal. No views run.
 
 The two storage arms write the same rows to the same per-type tables; only *who*
-fans out differs. Throughput is read from `etl_sink_records_total` (durably-acked
+fans out differs. Throughput is read from `spate_sink_records_total` (durably-acked
 rows, summed across sinks and shards) over a 20 s window;
 `chstats::capture_multi` reads the whole-server INSERT CPU (which folds in MV
 execution for the MV arm), the views' own CPU, and part/merge shape across every

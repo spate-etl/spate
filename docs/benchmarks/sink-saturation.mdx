@@ -33,7 +33,7 @@ that contention and raises the ceiling. Harness:
 99 records) is in [Methodology](./methodology.mdx), raw JSONL in
 `benchmarks/results/`.
 
-Throughput is read from `etl_sink_records_total` (durably-acked rows, summed
+Throughput is read from `spate_sink_records_total` (durably-acked rows, summed
 across shards) over a steady-state 15 s window — it works for `ENGINE = Null`,
 where `SELECT count()` is 0 because the server discards rows after parsing.
 
@@ -90,8 +90,8 @@ dimension — verdicts can differ across the three reps of one arm). The rule re
 only signals the rig already has:
 
 - **`sink`** — the source was paused for backpressure at least once during the
-  window (`etl_backpressure_pause_events_total` delta > 0, or the
-  `etl_backpressure_paused` gauge caught mid-pause). The framework wanted to push
+  window (`spate_backpressure_pause_events_total` delta > 0, or the
+  `spate_backpressure_paused` gauge caught mid-pause). The framework wanted to push
   faster and the sink pushed back: the sink is the limiter.
 - **`generator`** — no pauses at all. The sink was never the constraint; the
   in-process source simply could not produce rows fast enough. A `generator` arm

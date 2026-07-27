@@ -1,6 +1,6 @@
 # Delivery guarantees
 
-etl-rs delivers **at-least-once**: a source offset is committed only after
+Spate delivers **at-least-once**: a source offset is committed only after
 every record derived from it has been durably written to the sink or
 intentionally dropped. This page explains the machinery that enforces it,
 what happens at the hard moments (rebalances, shutdown, crashes), and —
@@ -24,7 +24,7 @@ When the last clone drops, `(partition, seq, status)` flows over an
 behind data, by construction.
 
 **The contiguity tracker.** The checkpointer (a synchronous, tokio-free,
-loom-tested module — `etl::checkpoint`) keeps, per partition, a ring of
+loom-tested module — `spate::checkpoint`) keeps, per partition, a ring of
 outstanding batch sequence numbers. It pops the contiguous *acknowledged
 prefix* and advances that partition's committable watermark. Out-of-order
 acks are fine; the watermark only ever covers a gap-free prefix of
@@ -34,7 +34,7 @@ acknowledged data.
 source on an interval (`checkpoint.interval`, default 5s). The invariant:
 **never commit past unacknowledged data.** A failed batch stalls its
 partition's watermark rather than being skipped — watch
-`etl_checkpoint_watermark_age_seconds`, the primary "stuck pipeline" alert
+`spate_checkpoint_watermark_age_seconds`, the primary "stuck pipeline" alert
 (see [Monitoring](../05-deployment/monitoring.mdx) and
 [docs/METRICS.md](../../METRICS.md)).
 
@@ -78,7 +78,7 @@ choreography are in the [Kafka connector](../04-connectors/sources/kafka/README.
 stop, chains flush, sinks force-seal and drain in-flight batches under
 `checkpoint.drain_timeout` (default 25s), then a final synchronous commit.
 If a sink is down at the deadline, the remaining batches are abandoned
-loudly (`etl_sink_abandoned_batches_total` plus a log line) and their
+loudly (`spate_sink_abandoned_batches_total` plus a log line) and their
 offsets are *not* committed — they replay on restart. See
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 
@@ -128,7 +128,7 @@ live server; see [docs/DESIGN.md](../../DESIGN.md) § Sink.
 :::
 
 :::info
-Nothing in etl-rs is exactly-once, and no configuration makes it so.
+Nothing in Spate is exactly-once, and no configuration makes it so.
 If a downstream consumer cannot tolerate duplicates, deduplicate at the
 table engine or query layer.
 :::
@@ -141,4 +141,4 @@ table engine or query layer.
 - [Error handling](04-error-handling.mdx) — what happens to the watermark
   when records fail.
 - [Testing pipelines](../03-guides/testing-pipelines.mdx) — asserting on
-  committed watermarks with the `etl-test` handles.
+  committed watermarks with the `spate-test` handles.

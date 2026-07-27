@@ -72,7 +72,7 @@ throughput claim.
 ## Tiers
 
 1. **Micro** — `cargo bench` (criterion + divan `AllocProfiler`) in
-   `crates/etl-core/benches` and `crates/etl-avro/benches`.
+   `crates/spate-core/benches` and `crates/spate-avro/benches`.
 2. **Framework overhead** — `benchmarks/pipeline_synthetic` (release binary,
    JSON report): in-memory source → chain → null sink; no broker in the loop.
 3. **At scale** — `benchmarks/e2e_kafka_clickhouse` + `benchmarks/loadgen`

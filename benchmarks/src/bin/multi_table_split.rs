@@ -36,16 +36,18 @@
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::SyntheticSource;
 use benchmarks::{chstats, docker, env_str, env_u64, prom};
-use etl_clickhouse::NativeEncoder;
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::{ComponentConfig, PipelineConfig};
-use etl_core::deser::{BytesPassthrough, Owned};
-use etl_core::error::ErrorPolicy;
-use etl_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, RunnableChain, SinkCtx, chain_owned};
-use etl_core::pipeline::{DrainReport, PipelineRuntime, RuntimeOptions, SinkDrainFn, SinkRuntime};
-use etl_core::record::RecordMeta;
-use etl_core::sink::{ShardRouter, SinkPool, shard_queues};
+use spate_clickhouse::NativeEncoder;
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::{ComponentConfig, PipelineConfig};
+use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::error::ErrorPolicy;
+use spate_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, RunnableChain, SinkCtx, chain_owned};
+use spate_core::pipeline::{
+    DrainReport, PipelineRuntime, RuntimeOptions, SinkDrainFn, SinkRuntime,
+};
+use spate_core::record::RecordMeta;
+use spate_core::sink::{ShardRouter, SinkPool, shard_queues};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -149,8 +151,8 @@ fn resolve_conn() -> Conn {
 }
 
 fn install_metrics() -> MetricsHandle {
-    etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
-        exporter: etl_core::metrics::Exporter::Prometheus,
+    spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
         ..Default::default()
     })
     .expect("install metrics recorder")
@@ -183,9 +185,9 @@ fn compose_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
 /// Build a ClickHouse sink for one table plus its Native schema and a spawned
 /// pool; returns the sender queues and drain hook for the runtime.
 struct TablePool {
-    queues: etl_core::sink::ShardQueues,
+    queues: spate_core::sink::ShardQueues,
     drain: SinkDrainFn,
-    schema: Arc<etl_clickhouse::NativeSchema>,
+    schema: Arc<spate_clickhouse::NativeSchema>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -220,7 +222,7 @@ fn spawn_table_pool(
         password = conn.password,
     );
     let section: ComponentConfig = serde_yaml::from_str(&sink_yaml).expect("sink section");
-    let ch = etl_clickhouse::from_component_config(&section).expect("clickhouse sink");
+    let ch = spate_clickhouse::from_component_config(&section).expect("clickhouse sink");
     assert_eq!(ch.endpoints.len(), shards, "one endpoint per shard");
     let schema = io.block_on(ch.native_schema()).expect("native schema");
     let (queues, receivers) = shard_queues(shards, queue_cap);
@@ -475,18 +477,18 @@ fn run_one() {
     std::thread::sleep(warmup);
     let since = chstats::now(&conn.host, conn.port, &conn.user, &conn.password);
     let text0 = metrics_handle.render();
-    let sink0 = prom::value(&text0, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses0 = prom::value(&text0, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused0 = prom::value(&text0, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend0 = prom::value(&text0, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let sink0 = prom::value(&text0, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses0 = prom::value(&text0, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused0 = prom::value(&text0, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend0 = prom::value(&text0, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
     let t0 = Instant::now();
     std::thread::sleep(duration);
     let text1 = metrics_handle.render();
     let window = t0.elapsed().as_secs_f64();
-    let sink1 = prom::value(&text1, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses1 = prom::value(&text1, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused1 = prom::value(&text1, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend1 = prom::value(&text1, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let sink1 = prom::value(&text1, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses1 = prom::value(&text1, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused1 = prom::value(&text1, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend1 = prom::value(&text1, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
 
     let pauses = (pauses1 - pauses0).max(0.0);
     let paused_edge = paused0 > 0.0 || paused1 > 0.0;
@@ -583,7 +585,7 @@ fn run_one() {
         rep = rep.variant("clickhouse_cpus", env_u64("CLICKHOUSE_CPUS", 8));
     }
     rep.note(format!(
-        "arm={arm}; rows_per_s = etl_sink_records_total delta / window; \
+        "arm={arm}; rows_per_s = spate_sink_records_total delta / window; \
          limiter={limiter} (pauses={pauses}, paused_edge={paused_edge}); \
          server_insert_cpu_us={:.0} target_rows={:.0} mv_cpu_us={:.0} mv_execs={:.0}; \
          budget_mb={max_inflight_mb} derived_mb={derived_mb}; window_s={window:.1}; \
@@ -599,7 +601,7 @@ fn run_one() {
 }
 
 fn main() {
-    etl_core::telemetry::init(etl_core::telemetry::LogFormat::Pretty, "info");
+    spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
     if env_u64("RUN_ONE", 0) != 0 {
         run_one();
         return;

@@ -282,18 +282,18 @@ dependencies = [
  "apache-avro",
  "bytes",
  "crossbeam-channel",
- "etl-avro",
- "etl-clickhouse",
- "etl-coordination",
- "etl-core",
- "etl-json",
- "etl-kafka",
- "etl-s3",
  "flate2",
  "lz4_flex",
  "rdkafka",
  "serde",
  "serde_json",
+ "spate-avro",
+ "spate-clickhouse",
+ "spate-coordination",
+ "spate-core",
+ "spate-json",
+ "spate-kafka",
+ "spate-s3",
  "tempfile",
  "tokio",
  "yaml_serde",
@@ -1202,218 +1202,6 @@ checksum = "de48cc4d1c1d97a20fd819def54b890cadde72ed3ad0c614822a0a433361be96"
 dependencies = [
  "cfg-if",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "etl"
-version = "0.1.0"
-dependencies = [
- "apache-avro",
- "bytes",
- "clickhouse",
- "etl-avro",
- "etl-clickhouse",
- "etl-coordination",
- "etl-core",
- "etl-json",
- "etl-kafka",
- "etl-s3",
- "etl-test",
- "flate2",
- "http-body-util",
- "hyper",
- "hyper-util",
- "metrics",
- "rdkafka",
- "serde",
- "serde_json",
- "tempfile",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "etl-avro"
-version = "0.1.0"
-dependencies = [
- "apache-avro",
- "bytes",
- "criterion",
- "etl-core",
- "etl-test",
- "http-body-util",
- "humantime-serde",
- "hyper",
- "hyper-util",
- "schema_registry_converter",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-clickhouse"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "bytesize",
- "chrono",
- "clickhouse",
- "crossbeam-channel",
- "etl-core",
- "etl-test",
- "foldhash",
- "humantime-serde",
- "hyper",
- "proptest",
- "rust_decimal",
- "serde",
- "serde_repr",
- "testcontainers-modules",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "twox-hash",
- "uuid",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-coordination"
-version = "0.1.0"
-dependencies = [
- "async-nats",
- "base64",
- "etl-coordination",
- "etl-core",
- "foldhash",
- "futures-util",
- "humantime-serde",
- "proptest",
- "serde",
- "serde_json",
- "testcontainers",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "bytesize",
- "core_affinity",
- "criterion",
- "crossbeam-channel",
- "divan",
- "http-body-util",
- "humantime-serde",
- "hyper",
- "hyper-util",
- "loom",
- "metrics",
- "metrics-exporter-prometheus",
- "metrics-process",
- "proptest",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-json"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "etl-core",
- "etl-test",
- "metrics",
- "metrics-exporter-prometheus",
- "proptest",
- "serde",
- "serde_json",
- "simd-json",
- "thiserror",
- "tokio",
- "tracing",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-kafka"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "bytesize",
- "etl-core",
- "etl-test",
- "humantime-serde",
- "metrics",
- "metrics-exporter-prometheus",
- "rdkafka",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tracing",
- "yaml_serde",
-]
-
-[[package]]
-name = "etl-s3"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "bytesize",
- "etl-coordination",
- "etl-core",
- "etl-s3",
- "etl-test",
- "flate2",
- "futures-util",
- "object_store",
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "testcontainers",
- "tokio",
- "tracing",
- "url",
- "yaml_serde",
- "zstd",
-]
-
-[[package]]
-name = "etl-test"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "crossbeam-channel",
- "etl-core",
- "proptest",
- "tokio",
 ]
 
 [[package]]
@@ -4057,6 +3845,218 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spate"
+version = "0.1.0"
+dependencies = [
+ "apache-avro",
+ "bytes",
+ "clickhouse",
+ "flate2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "spate-avro",
+ "spate-clickhouse",
+ "spate-coordination",
+ "spate-core",
+ "spate-json",
+ "spate-kafka",
+ "spate-s3",
+ "spate-test",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "spate-avro"
+version = "0.1.0"
+dependencies = [
+ "apache-avro",
+ "bytes",
+ "criterion",
+ "http-body-util",
+ "humantime-serde",
+ "hyper",
+ "hyper-util",
+ "schema_registry_converter",
+ "serde",
+ "serde_json",
+ "spate-core",
+ "spate-test",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-clickhouse"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "chrono",
+ "clickhouse",
+ "crossbeam-channel",
+ "foldhash",
+ "humantime-serde",
+ "hyper",
+ "proptest",
+ "rust_decimal",
+ "serde",
+ "serde_repr",
+ "spate-core",
+ "spate-test",
+ "testcontainers-modules",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "twox-hash",
+ "uuid",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-coordination"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "base64",
+ "foldhash",
+ "futures-util",
+ "humantime-serde",
+ "proptest",
+ "serde",
+ "serde_json",
+ "spate-coordination",
+ "spate-core",
+ "testcontainers",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "core_affinity",
+ "criterion",
+ "crossbeam-channel",
+ "divan",
+ "http-body-util",
+ "humantime-serde",
+ "hyper",
+ "hyper-util",
+ "loom",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "metrics-process",
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-json"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "proptest",
+ "serde",
+ "serde_json",
+ "simd-json",
+ "spate-core",
+ "spate-test",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-kafka"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "bytesize",
+ "humantime-serde",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "spate-core",
+ "spate-test",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+ "yaml_serde",
+]
+
+[[package]]
+name = "spate-s3"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "bytesize",
+ "flate2",
+ "futures-util",
+ "object_store",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "spate-coordination",
+ "spate-core",
+ "spate-s3",
+ "spate-test",
+ "tempfile",
+ "testcontainers",
+ "tokio",
+ "tracing",
+ "url",
+ "yaml_serde",
+ "zstd",
+]
+
+[[package]]
+name = "spate-test"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crossbeam-channel",
+ "proptest",
+ "spate-core",
+ "tokio",
 ]
 
 [[package]]

@@ -63,20 +63,20 @@ use benchmarks::s3data::stage;
 use benchmarks::synthetic::ThrottledNullWriter;
 use benchmarks::{env_str, env_u64, prom};
 use bytes::BytesMut;
-use etl_coordination::store::memory::MemoryStore;
-use etl_coordination::{CoordinationConfig, StoreCoordinator};
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::PipelineConfig;
-use etl_core::deser::{BytesPassthrough, Owned};
-use etl_core::error::SinkError;
-use etl_core::metrics::{
+use spate_coordination::store::memory::MemoryStore;
+use spate_coordination::{CoordinationConfig, StoreCoordinator};
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::PipelineConfig;
+use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::error::SinkError;
+use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, E2eBasis, Exporter, MetricsSettings, SinkShardMetrics,
 };
-use etl_core::ops::{ChunkConfig, chain_owned};
-use etl_core::pipeline::{ExitState, PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::record::Record;
-use etl_core::sink::{KeyHashRouter, RowEncoder, SinkPool, SinkPoolConfig, shard_queues};
-use etl_s3::S3Source;
+use spate_core::ops::{ChunkConfig, chain_owned};
+use spate_core::pipeline::{ExitState, PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::record::Record;
+use spate_core::sink::{KeyHashRouter, RowEncoder, SinkPool, SinkPoolConfig, shard_queues};
+use spate_s3::S3Source;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -188,7 +188,7 @@ fn run_instance(i: usize, yaml: &str, store: MemoryStore, t: Tuning) -> Instance
 
     let source = S3Source::from_component_config(&source_section, io.handle().clone())
         .expect("source")
-        .with_framer(|| Box::new(etl_json::NdjsonFramer::new(64 << 20)))
+        .with_framer(|| Box::new(spate_json::NdjsonFramer::new(64 << 20)))
         .with_coordinator(Box::new(coordinator));
 
     let chain_queues = queues;
@@ -219,8 +219,8 @@ fn run_instance(i: usize, yaml: &str, store: MemoryStore, t: Tuning) -> Instance
 }
 
 fn main() {
-    etl_core::telemetry::init(
-        etl_core::telemetry::LogFormat::Pretty,
+    spate_core::telemetry::init(
+        spate_core::telemetry::LogFormat::Pretty,
         &env_str("LOG", "warn"),
     );
 
@@ -228,7 +228,7 @@ fn main() {
     // handles bind to the recorder present at construction. The pipeline YAML
     // keeps `exporter: none`, which installs no recorder and never claims the
     // once-per-process global slot, so this handle stays authoritative.
-    let metrics = etl_core::metrics::install(&MetricsSettings {
+    let metrics = spate_core::metrics::install(&MetricsSettings {
         exporter: Exporter::Prometheus,
         listen: SocketAddr::from(([127, 0, 0, 1], 0)),
         ..MetricsSettings::default()
@@ -373,7 +373,7 @@ sink: {{ nullsink: {{}} }}
     // owner's split only moves through a revocation.
     let steals_total = prom::value(
         &text,
-        "etl_coordination_acquisitions_total",
+        "spate_coordination_acquisitions_total",
         r#"reason="stolen""#,
     )
     .unwrap_or(0.0);
@@ -384,13 +384,13 @@ sink: {{ nullsink: {{}} }}
     // counted as a clean one.
     let handoffs_total = prom::value(
         &text,
-        "etl_coordination_handoffs_total",
+        "spate_coordination_handoffs_total",
         r#"outcome="granted""#,
     )
     .unwrap_or(0.0)
         + prom::value(
             &text,
-            "etl_coordination_revocations_total",
+            "spate_coordination_revocations_total",
             r#"outcome="drained""#,
         )
         .unwrap_or(0.0);
@@ -400,7 +400,7 @@ sink: {{ nullsink: {{}} }}
     // a steal, which is counted above.
     let forced_total = prom::value(
         &text,
-        "etl_coordination_revocations_total",
+        "spate_coordination_revocations_total",
         r#"outcome="forced""#,
     )
     .unwrap_or(0.0);
@@ -423,20 +423,22 @@ sink: {{ nullsink: {{}} }}
     // latency on the GAINING worker rather than a negotiation round trip.
     let handoff_request_p50 = prom::histogram_quantile_labeled(
         &text,
-        "etl_coordination_handoff_duration_seconds",
+        "spate_coordination_handoff_duration_seconds",
         r#"phase="request""#,
         0.5,
     )
-    .or_else(|| prom::histogram_quantile(&text, "etl_coordination_assignment_latency_seconds", 0.5))
+    .or_else(|| {
+        prom::histogram_quantile(&text, "spate_coordination_assignment_latency_seconds", 0.5)
+    })
     .unwrap_or(0.0);
     // The releasing worker's stop-commit-release, in both models.
     let handoff_drain_p50 = prom::histogram_quantile_labeled(
         &text,
-        "etl_coordination_handoff_duration_seconds",
+        "spate_coordination_handoff_duration_seconds",
         r#"phase="drain""#,
         0.5,
     )
-    .or_else(|| prom::histogram_quantile(&text, "etl_coordination_drain_duration_seconds", 0.5))
+    .or_else(|| prom::histogram_quantile(&text, "spate_coordination_drain_duration_seconds", 0.5))
     .unwrap_or(0.0);
 
     let duplicate_rows = rows_written - total_records;

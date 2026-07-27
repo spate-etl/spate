@@ -3,12 +3,12 @@
 //! pool, and runtime to measure the framework's own ceiling.
 
 use bytes::BytesMut;
-use etl_core::checkpoint::{AckIssuer, AckRef};
-use etl_core::deser::{Deserializer, EmitRecord, RecFamily};
-use etl_core::error::{DeserError, SinkError, SourceError};
-use etl_core::record::{PartitionId, RawPayload, Record};
-use etl_core::sink::{RowEncoder, SealedBatch, ShardWriter};
-use etl_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::checkpoint::{AckIssuer, AckRef};
+use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
+use spate_core::error::{DeserError, SinkError, SourceError};
+use spate_core::record::{PartitionId, RawPayload, Record};
+use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
+use spate_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};

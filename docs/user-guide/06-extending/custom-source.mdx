@@ -13,14 +13,14 @@ source clients (librdkafka) already own their network I/O on their own
 threads, and a Stream wrapper only adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
 [docs/DESIGN.md](../../DESIGN.md) (§ Source abstraction); trait docs in
-`crates/etl-core/src/source/mod.rs` and on
+`crates/spate-core/src/source/mod.rs` and on
 [docs.rs](../07-reference/README.mdx).
 
-This page mirrors `crates/etl/examples/custom_source_sink.rs` — a generator
+This page mirrors `crates/spate/examples/custom_source_sink.rs` — a generator
 source counting to a limit per partition. Run it:
 
 ```sh
-cargo run -p etl --example custom_source_sink
+cargo run -p spate --example custom_source_sink
 ```
 
 ## The data plane: `SourceLane` and `PayloadBatch`
@@ -159,7 +159,7 @@ nothing extra is needed. For a **streaming** source — an object-storage
 backfill, an HTTP chunked body, a WebSocket stream — one transfer is a large
 byte stream that must be cut into records *before* the deserializer sees them.
 That cutting is **framing**. The *seam* is transport-agnostic and lives in
-`etl_core::framing`, but the concrete framer is a property of the **format**, so
+`spate_core::framing`, but the concrete framer is a property of the **format**, so
 it is owned by the format crate and handed to a source at assembly time:
 
 ```rust
@@ -173,10 +173,10 @@ pub trait RecordFramer: Send {
 
 A framer **must be a pure function of the byte stream** — the record sequence
 must not depend on how bytes arrive in chunks — so a source that resumes by
-record index replays deterministically. `etl-json` ships `NdjsonFramer` (NDJSON
-line framing) as the format's impl; a future `etl-avro` would ship a container
+record index replays deterministically. `spate-json` ships `NdjsonFramer` (NDJSON
+line framing) as the format's impl; a future `spate-avro` would ship a container
 framer. `FramerWriter` bridges a `Write`-based decompressor to a framer so
-compression stays orthogonal. The `etl-s3` source drives this seam and takes the
+compression stays orthogonal. The `spate-s3` source drives this seam and takes the
 framer via `S3Source::with_framer` — so the source stays format-agnostic and any
 streaming source reuses the same framer.
 
@@ -245,9 +245,9 @@ toward it.
 Drive your source without a full pipeline: construct a `Checkpointer`, call
 `open` with `SourceCtx::new(cp.handle())`, poll events, poll lanes, and
 assert on committed watermarks — the bottom half of
-`crates/etl/examples/custom_operator.rs` does exactly this with the memory
+`crates/spate/examples/custom_operator.rs` does exactly this with the memory
 source, and [Testing pipelines](../03-guides/testing-pipelines.mdx) covers
-the `etl-test` harness. To run it for real, hand it to the builder:
+the `spate-test` harness. To run it for real, hand it to the builder:
 `pipeline.sink(...)?.chains(...).run(source)` — the source stays a terminal
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
@@ -260,7 +260,7 @@ You implement two small traits — *what the work is* and *how to read one
 piece of it* — and embed the framework's `CoordinationDriver`, which owns
 all of the assignment choreography, fencing bookkeeping, and completion
 tracking. Everything below is the complete wiring; the runnable version
-is `crates/etl/examples/coordinated_pipeline.rs`.
+is `crates/spate/examples/coordinated_pipeline.rs`.
 
 ### 1. Plan the work: `SplitPlanner`
 
@@ -269,7 +269,7 @@ deterministic ids. It runs only on the fleet's elected leader; workers
 receive the descriptors and never re-enumerate.
 
 ```rust
-use etl::coordination::{
+use spate::coordination::{
     CoordinationError, PlanContext, PlanFinality, PlannedSplit, SplitId,
     SplitPlan, SplitPlanner, SplitSpec,
 };
@@ -315,10 +315,10 @@ Two practicalities the signatures don't show:
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle — capture both at construction. `plan` runs on the
   blocking pool, so `Handle::block_on(async_listing())` inside it is the
-  intended shape (this is how `etl-s3`'s planner runs its LIST).
+  intended shape (this is how `spate-s3`'s planner runs its LIST).
 - **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
   names (S3 keys, table names) rarely qualify — never embed them. Digest
-  them instead: `etl-s3` hashes the sorted member keys *and their ETags*
+  them instead: `spate-s3` hashes the sorted member keys *and their ETags*
   plus a packing-version constant (truncated SHA-256, base64url), so
   replans are id-stable, an overwritten object becomes *new* work rather
   than silently matching stale progress, and a packing change retires old
@@ -331,8 +331,8 @@ sub-struct holding what lane construction needs — not on the source
 itself, so the driver (a sibling field) and the context borrow disjointly:
 
 ```rust
-use etl::coordination::driver::{SplitOpening, SplitSource};
-use etl::coordination::{SplitId, SplitProgress, SplitSpec};
+use spate::coordination::driver::{SplitOpening, SplitSource};
+use spate::coordination::{SplitId, SplitProgress, SplitSpec};
 
 impl SplitSource for MyCtx {
     type Lane = MyLane;
@@ -403,7 +403,7 @@ impl SplitSource for MyCtx {
 ```
 
 Progress must be **split-relative**: a watermark encodes a position
-*within the split's own descriptor* (`etl-s3`: member ordinal + record
+*within the split's own descriptor* (`spate-s3`: member ordinal + record
 index), never a position in some whole-input enumeration — the next owner
 has only the descriptor to interpret it against. State is per-tenancy:
 `close_split` ends one (nothing can follow it, so drop the split's state
@@ -424,8 +424,8 @@ way.
 ### 3. Delegate the choreography: `CoordinationDriver`
 
 ```rust
-use etl::coordination::driver::CoordinationDriver;
-use etl::coordination::SplitCoordinator;
+use spate::coordination::driver::CoordinationDriver;
+use spate::coordination::SplitCoordinator;
 
 struct MySource {
     driver: CoordinationDriver,
@@ -510,7 +510,7 @@ an object-level failure (a deleted or corrupt input) must not surface as
 a poll error: the lane sends a report over a channel (`std::sync::mpsc`
 works; the lane goes quiescent, returning empty polls), and the source
 drains that channel at the top of `poll_events`, calling `driver.fail`
-for each report before delegating to `driver.poll_events`. `etl-s3`'s
+for each report before delegating to `driver.poll_events`. `spate-s3`'s
 lane/context pair is the production reference.
 
 **Signal the waker on the edges the control plane cannot see.** The
@@ -552,8 +552,8 @@ The coordinator is injected at assembly time, exactly like the framer
 seam. Production (NATS, feature `coordination-nats`, server ≥ 2.11):
 
 ```rust
-use etl::coordination::store::nats::{NatsConfig, NatsStore};
-use etl::coordination::{CoordinationConfig, StoreCoordinator};
+use spate::coordination::store::nats::{NatsConfig, NatsStore};
+use spate::coordination::{CoordinationConfig, StoreCoordinator};
 
 // One value drives the store's TTL and the coordinator's lease_duration.
 // They must match — StoreCoordinator::new fails fast on a divergence
@@ -583,7 +583,7 @@ Tests and single-process runs swap the store — nothing else changes, and
 the `coordination` feature alone suffices (no NATS dependency tree):
 
 ```rust
-use etl::coordination::store::memory::MemoryStore;
+use spate::coordination::store::memory::MemoryStore;
 let store = MemoryStore::new(coordination.lease_duration);
 ```
 
@@ -598,7 +598,7 @@ actionable message. Credentials never appear in `Debug` output.
 
 A source that already implements `Source` with its own lane dealing and a
 whole-source checkpoint retrofits in three moves (this is exactly how
-`etl-s3` was converted — read it as the reference):
+`spate-s3` was converted — read it as the reference):
 
 1. **Extract the lane assembly** out of the source into the sibling
    context struct: everything `open_split` needs to spawn a fetcher and
@@ -613,14 +613,14 @@ whole-source checkpoint retrofits in three moves (this is exactly how
    coordination store replaces the whole-source checkpoint; they cannot
    coexist as two sources of truth. If old progress maps cleanly onto
    splits, seed it (`PlannedSplit::with_seed`); if the old layout is
-   keyed by something splits don't preserve (as etl-s3's per-lane
+   keyed by something splits don't preserve (as spate-s3's per-lane
    round-robin manifest was), make a clean cutover — delete the legacy
    path, and let the job fingerprint refuse any config that could
    misread old state.
 
 ### Metrics
 
-The `etl_coordination_*` families are framework-owned and pre-registered:
+The `spate_coordination_*` families are framework-owned and pre-registered:
 build `CoordinationMetrics::new(&labels)` and pass it to
 `StoreCoordinator::new` (metrics are a constructor parameter; there is no
 later hook). The `labels` are `ComponentLabels` — at assembly time build
@@ -632,11 +632,11 @@ per-record.
 
 ### Testing
 
-`etl-test`'s `scripted_coordinator()` drives your driver choreography
+`spate-test`'s `scripted_coordinator()` drives your driver choreography
 without a store or clock: script gains/losses/quarantines and commit
 outcomes (`Fenced`/`Retryable`/`Fatal`), assert on observed commits,
 failure reports, and releases; `take_planner()` hands back the planner
 your source registered so a test can run it directly and feed its plan
 back through `gain(...)`. For the real protocol end to end, run two
 sources over one shared `MemoryStore` in a test — the pattern of
-`crates/etl/examples/coordinated_pipeline.rs`.
+`crates/spate/examples/coordinated_pipeline.rs`.

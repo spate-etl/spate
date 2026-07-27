@@ -98,7 +98,7 @@ that sits a **hard backstop** — a worker that has not returned two seconds
 past the deadline is force-aborted by the pool. The backstop should never
 fire; it exists so that an unforeseen stall degrades shutdown to a lost
 drain report rather than an unbounded hang, and it says so on
-`etl_sink_drain_overrun_total`. A non-zero reading there is a framework
+`spate_sink_drain_overrun_total`. A non-zero reading there is a framework
 bug worth reporting.
 
 One thing the framework cannot do for you: a `write_batch` that blocks its

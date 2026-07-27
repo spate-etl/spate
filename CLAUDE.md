@@ -1,4 +1,4 @@
-# etl-rs
+# Spate
 
 High-performance, at-least-once ETL pipeline framework in Rust. Workspace of
 publishable crates under `crates/` plus an unpublished `benchmarks/` crate.
@@ -20,26 +20,26 @@ cannot take the flag.
 ```sh
 cargo check --workspace --all-features --locked
 cargo nextest run --workspace --all-features --locked   # unit + integration (no docker)
-cargo nextest run -p etl-s3 --all-features --locked     # between edits; --workspace is the final gate
+cargo nextest run -p spate-s3 --all-features --locked     # between edits; --workspace is the final gate
 cargo test --workspace --all-features --locked --doc    # nextest does not run doctests
 cargo nextest run --profile docker --workspace --all-features --locked --run-ignored ignored-only  # container suites
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
 cargo deny --all-features --locked check all   # licences, advisories, bans, sources
 cargo bench --no-run --workspace --all-features --locked # the 11 benchmark rigs still compile
-cargo bench -p etl-core --locked               # criterion + divan micro benches
-RUSTFLAGS="--cfg loom" cargo test -p etl-core --release --lib --locked   # loom models
-cargo check -p etl --examples --all-features --locked   # all examples compile
-cargo check -p etl-coordination --no-default-features --tests --locked  # feature-off matrix (CI runs --all-features and misses it)
-cargo check -p etl --no-default-features --features s3 --locked     # facade s3 without coordination-nats never links async-nats
+cargo bench -p spate-core --locked               # criterion + divan micro benches
+RUSTFLAGS="--cfg loom" cargo test -p spate-core --release --lib --locked   # loom models
+cargo check -p spate --examples --all-features --locked   # all examples compile
+cargo check -p spate-coordination --no-default-features --tests --locked  # feature-off matrix (CI runs --all-features and misses it)
+cargo check -p spate --no-default-features --features s3 --locked     # facade s3 without coordination-nats never links async-nats
 cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full  # no --locked; see above
 ./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; CI diff-gates it
 ./scripts/ci-changes.sh --self-test            # the container-suite map still matches the crate graph
 zizmor .github/                                # workflow lint; needs GH_TOKEN or it silently skips audits
 shellcheck scripts/*.sh                        # CI runs this one
 actionlint .github/workflows/*.yml             # LOCAL ONLY — see below. Run it before pushing workflow edits.
-cargo run -p etl --example memory_pipeline     # runnable without infrastructure
-docker build -f examples/docker/Dockerfile -t etl-pipeline .    # flagship image
+cargo run -p spate --example memory_pipeline     # runnable without infrastructure
+docker build -f examples/docker/Dockerfile -t spate-pipeline .    # flagship image
 ```
 
 ## CI layout
@@ -63,10 +63,10 @@ failure lands after the merge that caused it, which is useless as a gate.
   any job that fails without its own reporting.
 
 **Miri does not run anywhere, and that is deliberate.** The old nightly ran
-`cargo miri test -p etl-core`, which took six hours and hit the 360-minute cap.
-`etl-core` contains no `unsafe` at all, so there was nothing there for Miri to
+`cargo miri test -p spate-core`, which took six hours and hit the 360-minute cap.
+`spate-core` contains no `unsafe` at all, so there was nothing there for Miri to
 find. The workspace's only `unsafe` is `erase_lifetime` in
-`crates/etl-kafka/src/lane.rs` — a lifetime-only transmute of an rdkafka
+`crates/spate-kafka/src/lane.rs` — a lifetime-only transmute of an rdkafka
 `BorrowedMessage` — and Miri could not check that either: it reaches straight
 into librdkafka, which Miri cannot interpret. So the honest statement is not
 "there is no unsafe" but "the one piece of unsafe we have is outside what Miri
@@ -89,9 +89,9 @@ is per-job `if:`), and a *skipped* check reports as success — so a gate withou
 
 `scripts/ci-changes.sh` decides what runs. Container suites are selected by a
 reverse-dependency closure over the crate graph: a change confined to
-`crates/etl-s3` runs `-p etl-s3` and `-p etl`, because the facade depends on it.
+`crates/spate-s3` runs `-p spate-s3` and `-p spate`, because the facade depends on it.
 Note what that does *not* mean — the facade's own e2e suite drives Kafka and
-ClickHouse, so an etl-s3 change still boots those. The closure answers "can this
+ClickHouse, so a spate-s3 change still boots those. The closure answers "can this
 break it", not "does this exercise it", and narrowing it by hand would buy back
 those boots at the price of a table `cargo metadata` can no longer verify.
 
@@ -188,10 +188,10 @@ hides, both measured on this workspace:
   exempt it; verify with
   `cp target/debug/deps/<bin> /tmp/probe && time /tmp/probe --list`.
 
-`--all-features` enables `etl-kafka/tls` → `rdkafka/ssl-vendored`, which compiles
+`--all-features` enables `spate-kafka/tls` → `rdkafka/ssl-vendored`, which compiles
 OpenSSL from source. Drop it when you don't need the TLS surface. It also enables
-`etl-coordination/testing`, which exposes `clock::TestClock` — that feature is off
-by default and must never be enabled by the `etl` facade: a `TestClock` in
+`spate-coordination/testing`, which exposes `clock::TestClock` — that feature is off
+by default and must never be enabled by the `spate` facade: a `TestClock` in
 production stops the coordination control loop dead.
 
 Three nextest profiles: `default` (local), `ci`, and `docker`. Use `--profile
@@ -218,10 +218,10 @@ so there is one instrumented run per PR rather than the suite executing twice.
 `with-containers` runs in the **weekly** tier and merges the `#[ignore]`d
 container suites in; `codecov.yml` sets `carryforward: true` on that flag
 precisely so it can update on a slower cadence than `unit`. Measured before
-splitting them: docker-free the workspace is at **87.6%** line coverage, etl-s3
-92.2% and etl-kafka 91.5% — the container suites move the total by single digits
+splitting them: docker-free the workspace is at **87.6%** line coverage, spate-s3
+92.2% and spate-kafka 91.5% — the container suites move the total by single digits
 and cost ~an hour of serial docker, so they report rather than gate. Lowest crate
-is etl-clickhouse at 77.6%; that is the one a patch target can realistically bite
+is spate-clickhouse at 77.6%; that is the one a patch target can realistically bite
 on. Reproduce locally with:
 
 ```sh
@@ -246,15 +246,15 @@ run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.
 - **Source threads never block on a channel send.** Backpressure is
   `try_send` + `Source::pause` + keep polling. A blocked poll loop gets the
   consumer evicted from its group (`max.poll.interval.ms`).
-- **The checkpoint tracker stays synchronous and tokio-free** (`etl-core`'s
+- **The checkpoint tracker stays synchronous and tokio-free** (`spate-core`'s
   `checkpoint` module) — it is loom-tested and must remain so.
-- **No connector-crate types in `etl-core` public APIs**, and no
+- **No connector-crate types in `spate-core` public APIs**, and no
   rdkafka/clickhouse/apache-avro types in any public trait bounds — those are
   0.x dependencies and must not leak into our semver surface. The **one
   sanctioned exception is the `metrics` facade**: `Meter`, `ComponentLabels`,
   and the re-exported `Counter`/`Gauge`/`Histogram`/`SharedString` are public
   because the framework's instrumentation API *is* that facade. It is
-  re-exported from `etl-core` (never depended on directly by connectors) so a
+  re-exported from `spate-core` (never depended on directly by connectors) so a
   breaking `metrics` bump is one coordinated change, not per-crate drift.
 - **Acks can never block behind data.** The ack path is unbounded/atomic.
 - **The sink worker's intake path never awaits outside a `select!` arm.**
@@ -276,19 +276,19 @@ run them explicitly. MSRV is 1.94 — CI checks it; don't use newer features.
   `docs/METRICS.md`. A corollary for tests: `cargo test` runs a binary's tests
   in one process, so fixtures must carry per-test `pipeline`/`component` labels
   — a local recorder does not isolate the process-wide claim.
-- **All metrics live under the `etl_` umbrella.** The framework owns the
-  reserved stage roots (`etl_source_`, `etl_sink_`, …); connector/user families
-  register through a `Meter`, which auto-prefixes `etl_<namespace>_` (default
+- **All metrics live under the `spate_` umbrella.** The framework owns the
+  reserved stage roots (`spate_source_`, `spate_sink_`, …); connector/user families
+  register through a `Meter`, which auto-prefixes `spate_<namespace>_` (default
   `custom`) and rejects a namespace that shadows a reserved root — so custom
   series never collide with the taxonomy. Raw-facade metrics are the opt-out for
-  names deliberately outside `etl_`.
+  names deliberately outside `spate_`.
 - Delivery is at-least-once: never commit a source watermark past
   unacknowledged data, including across rebalances and shutdown.
 
 ## Commit conventions
 
-Conventional Commits. Scope = crate touched (`etl-core`, `etl-kafka`, ...),
-comma-separated for several (`feat(etl-kafka,etl-core): ...`); use
+Conventional Commits. Scope = crate touched (`spate-core`, `spate-kafka`, ...),
+comma-separated for several (`feat(spate-kafka,spate-core): ...`); use
 `workspace`, `ci`, `docs`, `examples`, `benchmarks` for non-crate areas.
 Messages must make sense to outsiders — no plan/phase references.
 
@@ -303,4 +303,4 @@ Unit tests inline (`#[cfg(test)]`), integration tests per-crate in `tests/`,
 doc tests on public APIs. proptest for tracker/codec invariants, loom for the
 sync concurrency primitives, rdkafka MockCluster and clickhouse mocks in
 default CI, testcontainers behind the Docker job. Framework users test with
-`etl-test` mocks — keep those first-class.
+`spate-test` mocks — keep those first-class.

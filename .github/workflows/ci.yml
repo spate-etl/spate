@@ -18,7 +18,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # Debug info, not code, is what fills a hosted runner's disk here: the
-  # workspace links ~44 test binaries, and the `etl` end-to-end ones each pull
+  # workspace links ~44 test binaries, and the `spate` end-to-end ones each pull
   # rdkafka (with vendored OpenSSL), ClickHouse and Avro into a single
   # statically linked artifact. A full-DWARF build of that set exhausted the
   # runner outright — `rustc-LLVM ERROR: IO failure on output stream: No space
@@ -27,7 +27,7 @@ env:
   # `line-tables-only` keeps exactly what CI needs — `file:line` in a
   # backtrace, which is the whole story when a failure reproduces only here —
   # and drops the type and variable records nothing in a headless run can use.
-  # Measured on the etl-test slice alone: 27% off the target directory, 63%
+  # Measured on the spate-test slice alone: 27% off the target directory, 63%
   # off the emitted debug info. Local builds are untouched, so interactive
   # debugging keeps full DWARF; setting this in `[profile.dev]` instead would
   # degrade every contributor's machine to fix a problem only CI has.
@@ -118,10 +118,10 @@ jobs:
       - run: cargo fmt --all --check
       # `--all-targets` is doing the work of three steps: it compiles every
       # lib, bin, test, bench and example in the workspace. The two steps that
-      # used to follow it — `cargo check -p etl --examples` and
+      # used to follow it — `cargo check -p spate --examples` and
       # `cargo bench --no-run --workspace` — were subsets of it, verified by
       # planting a type error in `benchmarks/src/bin/loadgen.rs` and in
-      # `crates/etl/examples/`, both of which this line catches.
+      # `crates/spate/examples/`, both of which this line catches.
       #
       # `cargo bench --no-run` also built the whole dependency tree a second
       # time in the bench (release) profile, which made this the slowest job
@@ -319,13 +319,13 @@ jobs:
       # suites out would make the connector crates under-report and push
       # contributors toward shallow unit tests to clear the patch target. It
       # was measured instead of assumed, and it does not hold: docker-free the
-      # workspace is at 87.6% line coverage, with etl-s3 at 92.2% and
-      # etl-kafka at 91.5% — their mock-cluster and in-memory-store tests
+      # workspace is at 87.6% line coverage, with spate-s3 at 92.2% and
+      # spate-kafka at 91.5% — their mock-cluster and in-memory-store tests
       # already carry it.
       #
       # Test scaffolding is excluded from the denominator so the number
       # reflects shipped code. Note `--all-features` turns on
-      # etl-coordination's `testing` feature, so `TestClock` is counted as
+      # spate-coordination's `testing` feature, so `TestClock` is counted as
       # library code; it is exercised hard by the suites that drive it, so it
       # inflates the number slightly rather than hiding anything.
       - name: Test and coverage
@@ -423,7 +423,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
     if: needs.changes.outputs.rust == 'true'
-    # Linear, not the powerset. The `etl` facade declares 18 feature keys, so a
+    # Linear, not the powerset. The `spate` facade declares 18 feature keys, so a
     # full powerset is 2^18 combinations and several of them build librdkafka
     # or compile OpenSSL from source — it ran ~48 minutes, on every PR, which
     # is not what that signal is worth.
@@ -507,13 +507,13 @@ jobs:
           # `test` job never links. Separate key, or the two evict each other.
           shared-key: docker
       # Scoped by reverse-dependency closure over the crate graph: a change
-      # confined to crates/etl-s3 runs `-p etl-s3` and `-p etl`, while a change
-      # to etl-core — which everything depends on — runs all five. On push and
+      # confined to crates/spate-s3 runs `-p spate-s3` and `-p spate`, while a change
+      # to spate-core — which everything depends on — runs all five. On push and
       # merge_group, ci-changes.sh forces the full set.
       #
       # Note the closure answers "can this break it", not "does this exercise
       # it". The facade's own e2e suite drives Kafka and ClickHouse, so an
-      # etl-s3 change still boots those through `-p etl` even though no facade
+      # spate-s3 change still boots those through `-p spate` even though no facade
       # test touches S3. That is the cost of a table cargo can verify.
       #
       # Serial: a hosted runner is 2 cores / ~7 GB and these span SeaweedFS,

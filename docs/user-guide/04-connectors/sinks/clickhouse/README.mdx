@@ -1,6 +1,6 @@
 # ClickHouse sink
 
-The ClickHouse sink (`etl-clickhouse`, feature `clickhouse` on the `etl`
+The ClickHouse sink (`spate-clickhouse`, feature `clickhouse` on the `spate`
 facade) writes **directly to shard-local tables** over HTTP: rows are
 encoded to RowBinary on the pipeline threads, shipped to sink workers as
 pre-formatted frames, and inserted one `INSERT ... FORMAT RowBinary` per
@@ -10,7 +10,7 @@ Construct it from the pipeline's opaque section; the result is a
 `SinkBundle` that drops straight into the builder:
 
 ```rust
-let sink = etl::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
+let sink = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
 // optional pre-flight — see the schema validation guide
 let schema = pipeline.block_on(sink.validate_schema())?;
 let pipeline = pipeline.sink(sink)?;
@@ -22,7 +22,7 @@ To write to **several tables** from one pipeline (one per record kind), see
 ## Configuration
 
 The `sink: { clickhouse: ... }` section deserializes into
-`ClickHouseSinkConfig` (`crates/etl-clickhouse/src/config.rs`); unknown
+`ClickHouseSinkConfig` (`crates/spate-clickhouse/src/config.rs`); unknown
 fields are rejected with the offending key, and the retry/breaker values
 are validated at load (a bad multiplier or zero threshold fails startup
 instead of the write loop).
@@ -71,7 +71,7 @@ sink:
   clickhouse:
     shards:
       - replicas: ["https://ch-1.internal:8443", "https://ch-2.internal:8443"]
-    user: etl
+    user: spate
     password: "${CLICKHOUSE_PASSWORD}"
 ```
 
@@ -180,8 +180,8 @@ With the default unbounded `retry.max_attempts` this holds indefinitely;
 with a bounded one, exhausted batches fail their acks and replay after
 restart instead — the watermark stalls either way. Recovery is automatic
 once any probe succeeds. This whole-shard condition is surfaced distinctly
-as `etl_sink_shard_healthy == 0` (with per-replica
-`etl_sink_replica_errors_total` to attribute the failures); see
+as `spate_sink_shard_healthy == 0` (with per-replica
+`spate_sink_replica_errors_total` to attribute the failures); see
 [docs/METRICS.md](../../../../METRICS.md).
 
 ## Why direct-to-shard, not a Distributed table

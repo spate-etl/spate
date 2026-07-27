@@ -291,7 +291,7 @@ you are throughput-dominant, the measurements above say you are leaving a lot on
 the table.
 
 **Which regime am I in?** Compare pause events against
-`etl_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
+`spate_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
 the `sink_flush_p99` these arms report. Flush duration spans seal to settle, so
 it carries the wait for an `inflight.max_per_shard` slot and rises under
 queueing whether or not the sink slowed down; that ambiguity sends this exact
@@ -318,7 +318,7 @@ reach the target you set.
 
 ## Reading the pause counter
 
-`etl_backpressure_pause_events_total` is **not** on its own a misconfiguration
+`spate_backpressure_pause_events_total` is **not** on its own a misconfiguration
 signal. In the queue-capacity arms above, the configuration with the best
 latency also recorded the *most* pauses. Pauses mean the source was throttled;
 whether that is healthy depends on what was throttling it.
@@ -334,7 +334,7 @@ wrong: the iso-buffer arms show the seal size is not what those pauses respond
 to. Queued bytes is, and `queue_capacity` buys them without the cache penalty
 large chunks carry.
 
-:::warning[`etl_backpressure_inflight_bytes` cannot answer the third row today]
+:::warning[`spate_backpressure_inflight_bytes` cannot answer the third row today]
 The family is registered, but nothing in the runtime ever calls its setter —
 `BackpressureMetrics::set_inflight_bytes` has no production caller, so the
 series renders `0` forever rather than being absent. That is worse than a
@@ -343,7 +343,7 @@ Until it is wired, diagnose the budget from `max_inflight_bytes` against the
 [sizing rule](../DESIGN.md) arithmetic rather than from the gauge.
 :::
 
-:::note[`etl_queue_full_events_total` is blind in these rigs]
+:::note[`spate_queue_full_events_total` is blind in these rigs]
 That counter is registered by `ShardQueues::attach_metrics`, which is only
 reached through the pipeline **builder**. Every benchmark rig assembles the
 runtime directly, so the series is structurally always zero there and cannot be

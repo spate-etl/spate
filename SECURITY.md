@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 **Report privately, through
-[GitHub's private vulnerability reporting](https://github.com/marcuskainth/etl-rs/security/advisories/new).**
+[GitHub's private vulnerability reporting](https://github.com/spate-etl/spate/security/advisories/new).**
 That opens a draft advisory visible only to the maintainers.
 
 Please do not open a public issue, a pull request, or a discussion for something
@@ -17,7 +17,7 @@ A report is easier to act on with:
 - the version or commit, and which features were enabled (`kafka`, `s3`,
   `coordination-nats`, …) — the feature set decides which code is even linked;
 - what an attacker gains, and what they need in order to reach it;
-- the smallest reproduction you have. A failing test against `etl-test`'s mocks
+- the smallest reproduction you have. A failing test against `spate-test`'s mocks
   is ideal, but a description of the sequence is enough.
 
 You do not need a working exploit, and you do not need to be sure. A report that

@@ -6,14 +6,14 @@
 
 use apache_avro::types::{Record as AvroRecord, Value as AvroValue};
 use apache_avro::{Schema, to_avro_datum};
-use etl_clickhouse::NativeSchema;
-use etl_core::deser::Owned;
-use etl_core::ops::Emitter;
 use serde::{Deserialize, Serialize};
+use spate_clickhouse::NativeSchema;
+use spate_core::deser::Owned;
+use spate_core::ops::Emitter;
 use std::sync::Arc;
 
 /// The writer schema replayed on every payload. Neutral "sensor batch"
-/// naming, matching the `etl-avro` decode microbench, with a `batch_ts_ms`
+/// naming, matching the `spate-avro` decode microbench, with a `batch_ts_ms`
 /// timestamp field added.
 pub const BATCH_SCHEMA: &str = r#"{"type":"record","name":"SensorBatch","fields":[
   {"name":"sensor","type":"string"},

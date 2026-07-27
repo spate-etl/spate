@@ -1,6 +1,6 @@
-# etl-rs Design
+# Spate Design
 
-This document records the architecture of `etl-rs` and the reasoning behind
+This document records the architecture of Spate and the reasoning behind
 its decisions. It is the source of truth when code and intuition disagree.
 
 ## Goals
@@ -12,8 +12,9 @@ its decisions. It is the source of truth when code and intuition disagree.
   concurrency at the edges.
 - Small, stable abstractions so technology-specific connectors (Kafka,
   ClickHouse, ...) are thin and third parties can implement their own.
-- A chaining pipeline API in the spirit of Flink / Java Streams, defined in
-  Rust code; YAML configures connectors and tuning, never the operator graph.
+- A chaining pipeline API defined in Rust code, where each operator is a
+  stateful closure and a chain compiles to one loop; YAML configures
+  connectors and tuning, never the operator graph.
 - Kubernetes-native operations: one pipeline per process, scrape-based
   metrics, health probes, drain-on-SIGTERM.
 
@@ -88,12 +89,12 @@ Split into a control plane and a data plane:
 
 **Framing.** Sources emit `RawPayload` bytes; a deserializer decodes one
 payload. Streaming sources must first cut a byte stream into records — that
-step is *framing*. `etl_core::framing` owns only the **seam** — the
+step is *framing*. `spate_core::framing` owns only the **seam** — the
 `RecordFramer` trait, the `FramerWriter` decompressor shim, and the
 `FramingContract` handshake — because how a byte stream splits into records is
 a property of the format, not the transport. The concrete framers are owned by
-the **format** crates: `etl-json` provides the newline-delimited `NdjsonFramer`,
-a future `etl-avro` an object-container block framer, and so on. A source stays
+the **format** crates: `spate-json` provides the newline-delimited `NdjsonFramer`,
+a future `spate-avro` an object-container block framer, and so on. A source stays
 format-agnostic and receives its framer at pipeline-assembly time
 (`S3Source::with_framer`), so one framer serves every streaming source (S3
 today, HTTP/WebSocket tomorrow) and no source hard-codes a format. A framer
@@ -131,7 +132,7 @@ group liveness never depends on the controller; at realistic per-record work
 the throughput delta vs per-thread consumers is ~3%; a per-thread-consumer
 fallback remains a documented escape hatch behind the same traits.
 
-Proven choreography etl-kafka must implement (spike-verified):
+Proven choreography spate-kafka must implement (spike-verified):
 
 - **Assign**: `post_rebalance(Assign)` runs on the controller's main-queue
   poll and only gets `&BaseConsumer` — `pause()` all assigned partitions
@@ -223,7 +224,7 @@ Deltas applied over the spike code at freeze time: `PushOutcome::Blocked`
 carries a `BlockReason` — `Capacity` (sink pressure: engages the
 backpressure controller) vs `NotReady` (an upstream dependency such as a
 schema fetch: retried without pausing the source, counted on
-`etl_deser_not_ready_total`); `push_batch` returns a
+`spate_deser_not_ready_total`); `push_batch` returns a
 `PushOutcome` carrying a resume cursor (partial-batch backpressure: never
 re-run operators for already-pushed records) instead of the spike's
 `Result<usize, _>`; the boundary trait gains flush/drain hooks;
@@ -260,7 +261,7 @@ idle-flush path when the pipeline goes quiet.
 
 At-least-once invariant: **never commit past unacknowledged data.** A failed
 batch stalls its partition's watermark (alert on
-`etl_checkpoint_watermark_age_seconds`), it never silently advances.
+`spate_checkpoint_watermark_age_seconds`), it never silently advances.
 
 Two contracts guard the drop-resolves-Delivered convention:
 
@@ -308,8 +309,8 @@ interface and calls its downstream inline; `flat_map` emits through a
 stack-borrowed emitter, so fan-out allocates nothing. Within a chain,
 composition is fully static and monomorphized — the whole chain compiles to
 one loop. Type erasure happens exactly once, at the chain boundary, with one
-virtual call **per batch** (the Arroyo/DataFusion pattern) — per-record dyn
-dispatch would defeat cross-operator inlining and vectorization.
+virtual call **per batch** — per-record dyn dispatch would defeat
+cross-operator inlining and vectorization.
 
 Partial-push handling: if the terminal router's `try_send` fails mid-batch,
 the boundary records the exact resume index; already-pushed records are never
@@ -398,7 +399,7 @@ than per-replica) keeps batches full-sized — ClickHouse wants few big inserts
 — while `max_inflight` still provides replica parallelism. When no replica of
 a shard is circuit-closed, new write attempts park until the next half-open
 probe window while their in-flight permits stay held, so intake stalls and
-the shard back-pressures the source (surfaced as `etl_sink_shard_healthy ==
+the shard back-pressures the source (surfaced as `spate_sink_shard_healthy ==
 0`; with a bounded `retry.max_attempts` a batch instead fails and replays
 after restart — the watermark stalls either way). Records are never rerouted
 to another shard, which would break placement parity and the dedup tokens.
@@ -415,7 +416,7 @@ propagates is lost — the edge of the sink's at-least-once guarantee, closable
 per-sink via an operator-supplied `insert_quorum` at the cost of shard write
 availability (the connector guide documents the verified quorum-plus-dedup
 retry semantics). Rows are
-encoded **on the pipeline threads** by etl-clickhouse's own serializer (the
+encoded **on the pipeline threads** by spate-clickhouse's own serializer (the
 crate's is private — a semver win, verified round-tripping against a live
 server) and shipped as pre-formatted frames through
 `Client::insert_formatted_with` + `InsertFormatted::send(Bytes)` — the same
@@ -439,18 +440,18 @@ durable-ack point.
 ⚠ Dedup sharp edge (verified live): on plain `MergeTree`, deduplication
 **silently no-ops** unless the table sets
 `non_replicated_deduplication_window > 0` (server default 0).
-`Replicated*MergeTree` defaults to a window of 100. etl-clickhouse
+`Replicated*MergeTree` defaults to a window of 100. spate-clickhouse
 documentation must state this prominently.
 
 Kafka specifics (the second consumer of the seam): the produce unit is
-(key, headers, payload), not a row frame, so etl-kafka's encoder writes a
+(key, headers, payload), not a row frame, so spate-kafka's encoder writes a
 connector-internal length-delimited message framing into the opaque chunk
 frames and its writer parses them back — the frozen contracts carry it
 unchanged. One `ThreadedProducer` per sink instance (librdkafka owns broker
 routing/batching, and the absolute-mapped statistics counters are only
 sound with a single client); framework shards are worker parallelism over
 clones of it, one replica each — rotation degenerates to a no-op while the
-breaker still provides quarantine and the `etl_sink_shard_healthy`
+breaker still provides quarantine and the `spate_sink_shard_healthy`
 backpressure signal. `write_batch` produces every message of the sealed
 batch and awaits a per-batch delivery-report countdown (an `Arc` carried as
 each message's librdkafka opaque; the callback never blocks) before
@@ -499,7 +500,7 @@ exactly-once.
   twice: cooperatively (workers watch it and abandon under their own power)
   and then by a hard backstop 2s later that force-aborts a worker which has
   not returned, so a stall costs a lost drain report
-  (`etl_sink_drain_overrun_total`) rather than a hang. The cooperative layer
+  (`spate_sink_drain_overrun_total`) rather than a hang. The cooperative layer
   is only sound if nothing on the worker's intake path can block outside its
   deadline-armed `select!` — which is why `dispatch` parks batches for a
   permit instead of awaiting one. A bounded source's
@@ -555,9 +556,9 @@ Design points, each earned by a footgun in the manual assembly:
   you cannot hold a builder without a live recorder, so the
   silent-dead-handles ordering bug (§ Metrics) is unconstructible, and
   connectors get `io_handle()`/`block_on()` for pre-`run` edge work
-  (schema fetchers, `validate_schema`). Coarse typestate in the
-  DataFusion `SessionState` style; no state-parameter generics, the
-  builder stays nameable and storable. It refuses to be constructed
+  (schema fetchers, `validate_schema`). Coarse typestate — one session-like
+  state object rather than state-parameter generics, so the builder stays
+  nameable and storable. It refuses to be constructed
   inside an async runtime (it owns a blocking one).
 - **One I/O runtime.** The builder's runtime moves into
   `PipelineRuntime` (`with_io_runtime`) instead of `run()` building a
@@ -600,18 +601,18 @@ Design points, each earned by a footgun in the manual assembly:
 ## Dependency policy
 
 No rdkafka / clickhouse / apache-avro types appear in public trait bounds or
-public structs of `etl-core` — all are 0.x crates whose breaking releases
+public structs of `spate-core` — all are 0.x crates whose breaking releases
 must not become our breaking releases. Connector crates may re-export their
 underlying crate for advanced use, clearly documented as exempt from our
 stability promises.
 
 The **one deliberate exception is the `metrics` facade** (also 0.x): its
 `Counter` / `Gauge` / `Histogram` / `SharedString` handle types are part of
-`etl-core`'s public surface, alongside the `Meter` scope and `ComponentLabels`
+`spate-core`'s public surface, alongside the `Meter` scope and `ComponentLabels`
 that mint them. This is intentional — the framework's instrumentation API *is*
 the `metrics` facade, so a connector or pipeline author registering its own
-metric family speaks in those types. The mitigation is that `etl-core`
-re-exports the handle types (`etl_core::metrics::{Counter, ...}`); connectors
+metric family speaks in those types. The mitigation is that `spate-core`
+re-exports the handle types (`spate_core::metrics::{Counter, ...}`); connectors
 never take a direct `metrics` dependency, so exactly one facade version lives
 in the tree and a breaking `metrics` release is upgraded in a single edit.
 
@@ -619,15 +620,15 @@ in the tree and a breaking `metrics` release is upgraded in a single edit.
 
 | Crate | Role |
 |---|---|
-| `etl` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `json`, `s3`, `full`, plus opt-in backend/TLS/type features — see its `Cargo.toml`). The only crate applications depend on. |
-| `etl-core` | Engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline runtime, config, metrics, admin server, telemetry. |
-| `etl-kafka` | Kafka source (single consumer + partition queues) and producer sink. |
-| `etl-clickhouse` | ClickHouse `ShardWriter`. |
-| `etl-json` | JSON deserializer: single/ndjson/array framings; opt-in `simd` backend. |
-| `etl-s3` | Coordinated S3/object-storage backfill source: leader-planned splits (listing-order packing, digest-identified descriptors carrying member keys+ETags), one lane per leased split with composite split-relative offsets, per-split fenced progress as the only checkpoint, object-level poison → quarantine, self-terminating via `AllComplete` → `SourceEvent::Drained`. No coordination backend appears in its public API or its cargo features — the coordinator is injected at assembly (`with_coordinator`); solo runs fall back to `etl-coordination`'s in-process `MemoryStore`, which is linked unconditionally (ephemeral progress). |
-| `etl-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. |
-| `etl-coordination` | Multi-instance coordination backend for broker-less sources: leader-elected planning and work assignment, TTL'd split leases with heartbeats, cooperative revocation, epoch-fenced resumable commits — over a public six-primitive store trait with an in-memory store (tests, embedding) and a NATS JetStream KV store (server ≥ 2.11, default `nats` feature). The seam it implements (`SplitPlanner`/`SplitCoordinator`) and the reusable source-side `CoordinationDriver` live in `etl-core::coordination` — synchronous and tokio-free (no async runtime in etl-core). |
-| `etl-test` | Public in-memory source/sink mocks with scripting handles, plus a scripted `SplitCoordinator` for coordinated-source tests. |
+| `spate` | Facade; feature-forwards connectors (`kafka`, `clickhouse`, `avro`, `json`, `s3`, `full`, plus opt-in backend/TLS/type features — see its `Cargo.toml`). The only crate applications depend on. |
+| `spate-core` | Engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline runtime, config, metrics, admin server, telemetry. |
+| `spate-kafka` | Kafka source (single consumer + partition queues) and producer sink. |
+| `spate-clickhouse` | ClickHouse `ShardWriter`. |
+| `spate-json` | JSON deserializer: single/ndjson/array framings; opt-in `simd` backend. |
+| `spate-s3` | Coordinated S3/object-storage backfill source: leader-planned splits (listing-order packing, digest-identified descriptors carrying member keys+ETags), one lane per leased split with composite split-relative offsets, per-split fenced progress as the only checkpoint, object-level poison → quarantine, self-terminating via `AllComplete` → `SourceEvent::Drained`. No coordination backend appears in its public API or its cargo features — the coordinator is injected at assembly (`with_coordinator`); solo runs fall back to `spate-coordination`'s in-process `MemoryStore`, which is linked unconditionally (ephemeral progress). |
+| `spate-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. |
+| `spate-coordination` | Multi-instance coordination backend for broker-less sources: leader-elected planning and work assignment, TTL'd split leases with heartbeats, cooperative revocation, epoch-fenced resumable commits — over a public six-primitive store trait with an in-memory store (tests, embedding) and a NATS JetStream KV store (server ≥ 2.11, default `nats` feature). The seam it implements (`SplitPlanner`/`SplitCoordinator`) and the reusable source-side `CoordinationDriver` live in `spate-core::coordination` — synchronous and tokio-free (no async runtime in spate-core). |
+| `spate-test` | Public in-memory source/sink mocks with scripting handles, plus a scripted `SplitCoordinator` for coordinated-source tests. |
 | `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |
 
 ## Decision log
@@ -663,15 +664,15 @@ in the tree and a breaking `metrics` release is upgraded in a single edit.
 | Kafka sink retry-duplicates stance | report failures classify retryable unless provably permanent; `NotEnoughReplicasAfterAppend` retries knowingly duplicate | at-least-once: replay over loss, idempotent-producer fatal states fail fast instead of spinning to `stalled_fail_after` |
 | Kafka producer teardown | rely on rdkafka's `Drop` (purge queue+inflight, 500ms flush, poll thread joined) | bounded ≤ ~600ms; purged messages' reports reclaim the countdown opaques — no custom Drop to maintain |
 | Kafka sink per-partition stats | deferred: aggregate produce-queue gauges only | `attach_metrics` has no `per_partition_detail` channel today (a `SourceCtx` concept); additive later |
-| Source coordination model | **leader-computed sticky assignment**: the leader-elected worker runs the source's planner *and* publishes a desired assignment per instance (`assign.{instance}`); workers reconcile toward it — claim what is named, cooperatively drain what is not. Balance is on split *weight*, sticky, and converges by strictly-improving moves. Supersedes the dynamic work-stealing model this row used to describe | the reversal is recorded honestly, as the store reversal below was. Work-stealing distributed the *decision* along with the work, so each worker negotiated pairwise from a partial view — and every defect found in five days was the same shape: state visible to neither side of the negotiation (splits promised but not yet leased, grant acks lost on a CAS, annotations nothing retired). Reference implementations are unanimous the other way: Kafka consumer groups (client leader, and KIP-848 moved it further in, to the broker), Kafka Connect (KIP-415, leader worker), Flink FLIP-27 (one `SplitEnumerator` on the JobManager), Elasticsearch (elected master). The one system that was genuinely peer-to-peer — KCL 2.x lease stealing — was replaced by AWS with a leader in KCL 3.0 (2024-11-06), having accumulated exactly our symptoms: a per-victim steal cap that could not be raised usefully (awslabs/amazon-kinesis-client#708) and a documented "stable disbalance". Centralising the decision costs nothing in safety because the assignment is not a fence (see below), and it moves the balance logic out of the async task and into a pure, property-tested function. Normative spec: `docs/user-guide/02-concepts/08-work-assignment.mdx` |
+| Source coordination model | **leader-computed sticky assignment**: the leader-elected worker runs the source's planner *and* publishes a desired assignment per instance (`assign.{instance}`); workers reconcile toward it — claim what is named, cooperatively drain what is not. Balance is on split *weight*, sticky, and converges by strictly-improving moves. Supersedes the dynamic work-stealing model this row used to describe | the reversal is recorded honestly, as the store reversal below was. Work-stealing distributed the *decision* along with the work, so each worker negotiated pairwise from a partial view — and every defect found in five days was the same shape: state visible to neither side of the negotiation (splits promised but not yet leased, grant acks lost on a CAS, annotations nothing retired). Mature implementations of this shape are unanimous the other way: planning is centralised in an elected leader. The designs that were genuinely peer-to-peer have since moved to one, having accumulated exactly our symptoms — a per-victim steal cap that could not usefully be raised, and a stable disbalance that nothing corrected. Centralising the decision costs nothing in safety because the assignment is not a fence (see below), and it moves the balance logic out of the async task and into a pure, property-tested function. Normative spec: `docs/user-guide/02-concepts/08-work-assignment.mdx` |
 | Coordination store | **external low-latency KV (NATS JetStream) behind a public 6-primitive trait** — supersedes the earlier object-store CAS-lease design (PR #34, closed unmerged) | the reversal is recorded honestly: coordinating over the checkpoint store needed zero extra infrastructure, but made an object store the substrate for *every* coordinated source and its poll-based ~10–100 ms round-trips capped distribution speed. The requirement changed — from "coordinate one S3 backfill" to "a general work-distribution seam" — and with it the trade. Correctness still lives in our fencing protocol (the store supplies latency and watch, never safety); the trait (CAS + TTL keyspace + watch + list) keeps Redis/etcd backends one impl away |
 | Embedded consensus (Raft) | still rejected — and centralising *assignment* does not reopen it | no worker framework embeds consensus for work distribution; a voter set fights autoscaling (stable membership, per-node state); the problem needs linearizability only at the per-split commit — exactly what one CAS provides. The leader that now computes assignments needs no consensus either, because an assignment carries no correctness: a stale, split-brained, or simply wrong leader can produce bad balance but never two owners, since the durable record CAS still decides ownership. Consensus would be buying a guarantee the fence already provides |
 | Coordination fencing | the durable split record's CAS revision is the *only* correctness mechanism; epoch per ownership change; a fenced commit writes nothing and is followed by a `Lost` event; leaders are fenced the same way — a new leader's generation bump moves the plan record's revision, so a deposed leader's plan write loses its CAS | lease TTLs and watch events buy latency and may be late or lost; making them safety-relevant would put the store's clock in the correctness path (Kleppmann's fencing argument) |
 | Split delivery attempts | increment only on non-graceful tenancy ends (expiry takeover, reclaim, explicit `fail`); quarantine at the cap; quarantined splits block `AllComplete` → the job ends `Stalled` | graceful releases and rebalance revocations are not poison evidence; completing a bounded job over unprocessed planned data would dress loss up as a green exit |
-| Split revocation | cooperative first, forced second: the leader stops assigning a split, the owner stops intake at a safe boundary, chases its tail to a final fenced commit and releases (replaying nothing); a source that declines, or whose drain outruns `drain_deadline`, has the release forced and its uncommitted tail replays under the next owner; a revocation the leader takes back — it names the split for its current owner again while that owner still holds it — is cancelled instead, dropping the pending forced release, and the drain it leaves behind is bounded by silence (`drain_deadline` with no commit landing) rather than by the deadline | fencing a live owner mid-read costs up to a commit interval of duplicates per move, so consent is worth asking for. But a leader's revocation is a *decision*, not a proposal — under the previous peer-negotiated design an owner could simply ignore a request and the requester waited out a round budget, whereas here refusing must not be able to pin a rebalance open, hence the deadline. This deliberately reverses the "no driver-side deadline" decision taken with the negotiated handoff, which was correct while the request was advisory. The deadline serves the *rebalance*, so once the leader withdraws the move there is nothing left for it to protect and forcing would charge a replay for a handoff nobody is waiting on — hence the cancel, whose only effect is on a drain slower than the deadline, since a faster one was never going to be forced. It ends the revocation, not necessarily the drain: resuming intake a source has already stopped is a seam `SplitSource` deliberately lacks, so a drain in flight still hands the split back and the same worker re-claims it replay-free. What the cancel must NOT drop is the obligation to keep the split readable — a wedged drain with no deadline over it would leave the split owned, leased, and read by nobody forever, and a bounded job containing it could never finish — so the deadline stays over a cancelled drain in a weaker form, as a no-progress timeout: committed nothing for `drain_deadline`, release it and let the same worker re-claim with a fresh lane. A live drain commits as its tail acks, so only a wedged one trips it. Precedent: KIP-429's `onPartitionsRevoked` vs `onPartitionsLost`, and KCL 3.x's `gracefulLeaseHandoffTimeoutMillis` (30s, then force) |
-| Rebalance delay | a departed instance's splits are withheld for `rebalance_delay` (default 20s), cancelled the moment it reappears; `0` takes a distinct code path meaning "immediately" | a rolling restart should not churn the fleet. The default is far below Kafka Connect's 5-minute `scheduled.rebalance.max.delay.ms` because a split starts by reading a descriptor and spawning a fetcher, not by rebuilding a connector's clients — when starting is cheap, idle work costs more than movement. Zero is a distinct path because Connect's knob read zero as "withhold indefinitely" and shipped that way from 2.3.0 through 3.7.0 (KAFKA-15693); the code shape here is chosen so that bug is not expressible, and a regression test asserts it |
+| Split revocation | cooperative first, forced second: the leader stops assigning a split, the owner stops intake at a safe boundary, chases its tail to a final fenced commit and releases (replaying nothing); a source that declines, or whose drain outruns `drain_deadline`, has the release forced and its uncommitted tail replays under the next owner; a revocation the leader takes back — it names the split for its current owner again while that owner still holds it — is cancelled instead, dropping the pending forced release, and the drain it leaves behind is bounded by silence (`drain_deadline` with no commit landing) rather than by the deadline | fencing a live owner mid-read costs up to a commit interval of duplicates per move, so consent is worth asking for. But a leader's revocation is a *decision*, not a proposal — under the previous peer-negotiated design an owner could simply ignore a request and the requester waited out a round budget, whereas here refusing must not be able to pin a rebalance open, hence the deadline. This deliberately reverses the "no driver-side deadline" decision taken with the negotiated handoff, which was correct while the request was advisory. The deadline serves the *rebalance*, so once the leader withdraws the move there is nothing left for it to protect and forcing would charge a replay for a handoff nobody is waiting on — hence the cancel, whose only effect is on a drain slower than the deadline, since a faster one was never going to be forced. It ends the revocation, not necessarily the drain: resuming intake a source has already stopped is a seam `SplitSource` deliberately lacks, so a drain in flight still hands the split back and the same worker re-claims it replay-free. What the cancel must NOT drop is the obligation to keep the split readable — a wedged drain with no deadline over it would leave the split owned, leased, and read by nobody forever, and a bounded job containing it could never finish — so the deadline stays over a cancelled drain in a weaker form, as a no-progress timeout: committed nothing for `drain_deadline`, release it and let the same worker re-claim with a fresh lane. A live drain commits as its tail acks, so only a wedged one trips it. Graceful-then-forced, with a bounded wait between the two, is the shape mature rebalancing protocols converge on |
+| Rebalance delay | a departed instance's splits are withheld for `rebalance_delay` (default 20s), cancelled the moment it reappears; `0` takes a distinct code path meaning "immediately" | a rolling restart should not churn the fleet. The default is deliberately short, because a split starts by reading a descriptor and spawning a fetcher rather than by rebuilding a connector's clients — when starting is cheap, idle work costs more than movement. Zero is a distinct path because a delay knob whose zero flows through the general path as just another value is how "reassign at once" silently becomes "withhold indefinitely"; the code shape here is chosen so that bug is not expressible, and a regression test asserts it |
 | Split ids | deterministic, planner-derived, `[A-Za-z0-9_-]{1,128}` | replans and leader failovers become create-if-absent no-ops; ids embed in store keys on any backend |
-| Coordinated source DX | seam traits + a framework-owned `CoordinationDriver` in `etl-core` (sync, tokio-free); backends injected at assembly like the framer seam | the event↔assignment choreography (tenancy partitions, fenced quarantine, completion sweep) is source-generic and where the subtle bugs live — one audited implementation instead of one per connector |
+| Coordinated source DX | seam traits + a framework-owned `CoordinationDriver` in `spate-core` (sync, tokio-free); backends injected at assembly like the framer seam | the event↔assignment choreography (tenancy partitions, fenced quarantine, completion sweep) is source-generic and where the subtle bugs live — one audited implementation instead of one per connector |
 | Coordinated gains & completion latency | additive gains: a gain mints a fresh, never-reused lane per tenancy (`LanesAdded`, `extend_epoch`) — no revoke-then-reassign cycle; eager terminal commit: end-of-input lanes surface as `CommitReady` (`SplitSource::take_finishing`) and the runtime chases their final acks within one commit interval; completed splits leave barrier-less via `LanesRetired` (terminal commit already proved nothing is in flight) | a split's completion must not cost a commit-tick quantum (~ interval / max_in_flight of wall time), and a routine gain must never drain flowing lanes — the drain-and-reassign cycle both crashed mid-flow commits and cost O(splits) re-reads of uncommitted tails |
 | Split record layout | two durable records per split: an immutable spec record (descriptor, written once at planning) and a small progress record (owner, epoch, attempts, watermark) that is the CAS target for every claim, fence, and commit; `planned` is recounted from an authoritative listing at every publish | commit cost must not scale with descriptor size (a bin-packed object list can be hundreds of KiB, rewritten on every commit under a one-record layout); the recount makes a leader crash or failed publish between seeding and publishing self-heal instead of desynchronizing terminal detection forever |
 | S3 scale-out | always-coordinated single path: solo = one instance over an internal in-process store (ephemeral progress, WARNed); the manifest checkpoint is deleted | two checkpoint mechanisms means two commit paths, two resume validators, and a lane/split impedance mismatch; at 0.1.x the dual path was pure liability — durable solo resume is delegated to a durable coordination store |

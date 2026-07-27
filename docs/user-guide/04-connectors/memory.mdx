@@ -1,6 +1,6 @@
-# Memory connectors (etl-test)
+# Memory connectors (spate-test)
 
-The `etl-test` crate ships in-memory connectors that run a **complete,
+The `spate-test` crate ships in-memory connectors that run a **complete,
 real pipeline** — checkpointing, backpressure, graceful drain, the actual
 `SinkPool` — with no external infrastructure. They are not stubs of the
 engine; they are real `Source` and `SinkBundle` implementations whose I/O
@@ -10,13 +10,13 @@ Add it as a dev-dependency (or a regular one for demo binaries):
 
 ```toml
 [dev-dependencies]
-etl-test = { version = "...", path = "..." }   # same workspace/registry as etl
+spate-test = { version = "...", path = "..." }   # same workspace/registry as spate
 ```
 
 ## When to use them
 
 - **Demos and local development** — run the full assembly on a laptop with
-  zero setup: `cargo run -p etl --example memory_pipeline` is exactly this.
+  zero setup: `cargo run -p spate --example memory_pipeline` is exactly this.
 - **CI** — deterministic whole-pipeline tests with no Docker; this is the
   default test tier for the framework itself.
 - **Testing your pipelines** — the first-class path for framework users to
@@ -29,7 +29,7 @@ driven entirely by your code.
 ## The source: `memory_source()` + `SourceHandle`
 
 ```rust
-use etl_test::memory_source;
+use spate_test::memory_source;
 
 let (source, handle) = memory_source();      // source goes to the pipeline,
                                              // handle stays with the test
@@ -54,7 +54,7 @@ panics with a clear message instead of passing silently.
 ## The sink: `capture_sink(shards, replicas)` + `SinkScript`
 
 ```rust
-use etl_test::capture_sink;
+use spate_test::capture_sink;
 
 let (sink, script) = capture_sink(2, 2);     // 2 shards x 2 replicas
 let pipeline = pipeline.sink(sink)?;          // it's a real SinkBundle

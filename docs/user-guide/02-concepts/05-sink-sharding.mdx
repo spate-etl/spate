@@ -70,8 +70,8 @@ family whose row is `Event<'buf>`; an owned family would read
 `Record<Event>`):
 
 ```rust
-use etl::record::Record;
-use etl::sink::RecordRouter;
+use spate::record::Record;
+use spate::sink::RecordRouter;
 
 struct BySensor;
 
@@ -126,7 +126,7 @@ What you can do:
   values. A key with many roughly-even values spreads naturally; a low-
   cardinality key (a region code, a status flag) concentrates.
 - **Watch the skew.** It is already observable per shard via
-  `etl_sink_records_total{shard}` and `etl_sink_bytes_total{shard}` — a
+  `spate_sink_records_total{shard}` and `spate_sink_bytes_total{shard}` — a
   persistent imbalance across shard labels is a hot shard (see
   [docs/METRICS.md](../../METRICS.md)).
 - **Reshard deliberately.** Adding or removing shards changes `num_shards`

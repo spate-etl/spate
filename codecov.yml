@@ -11,7 +11,7 @@
 #
 # The container suites were measured before being left off the PR path
 # rather than assumed either way: docker-free the workspace is already at
-# 87.6% line coverage, with etl-s3 at 92.2% and etl-kafka at 91.5%. Merging
+# 87.6% line coverage, with spate-s3 at 92.2% and spate-kafka at 91.5%. Merging
 # the container runs in moved the total by single digits and cost ~an hour
 # of serial docker per PR.
 #
@@ -41,7 +41,7 @@ coverage:
         # Informational while the target is calibrated: it posts the check
         # and annotates the diff, but does not block the merge. The repo
         # sits at ~87.6% docker-free, so 80% should be comfortable — the
-        # crate to watch is etl-clickhouse at 77.6%. Flip to `false` once a
+        # crate to watch is spate-clickhouse at 77.6%. Flip to `false` once a
         # few real PRs confirm it behaves.
         informational: true
 
@@ -79,30 +79,30 @@ flags:
 ignore:
   - "benchmarks/**"
   - "**/tests/**"
-  - "crates/etl-test/**" # the mock/test-harness crate shipped for users
+  - "crates/spate-test/**" # the mock/test-harness crate shipped for users
   - "examples/**"
 
 # Per-crate visibility, so a regression is attributable rather than diffuse.
 component_management:
   individual_components:
     - component_id: core
-      name: etl-core
-      paths: ["crates/etl-core/**"]
+      name: spate-core
+      paths: ["crates/spate-core/**"]
     - component_id: coordination
-      name: etl-coordination
-      paths: ["crates/etl-coordination/**"]
+      name: spate-coordination
+      paths: ["crates/spate-coordination/**"]
     - component_id: kafka
-      name: etl-kafka
-      paths: ["crates/etl-kafka/**"]
+      name: spate-kafka
+      paths: ["crates/spate-kafka/**"]
     - component_id: s3
-      name: etl-s3
-      paths: ["crates/etl-s3/**"]
+      name: spate-s3
+      paths: ["crates/spate-s3/**"]
     - component_id: clickhouse
-      name: etl-clickhouse
-      paths: ["crates/etl-clickhouse/**"]
+      name: spate-clickhouse
+      paths: ["crates/spate-clickhouse/**"]
     - component_id: codecs
       name: codecs (avro, json)
-      paths: ["crates/etl-avro/**", "crates/etl-json/**"]
+      paths: ["crates/spate-avro/**", "crates/spate-json/**"]
     - component_id: facade
-      name: etl
-      paths: ["crates/etl/**"]
+      name: spate
+      paths: ["crates/spate/**"]

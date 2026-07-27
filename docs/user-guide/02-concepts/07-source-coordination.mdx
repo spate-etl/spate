@@ -77,7 +77,7 @@ replays, exactly as for a restart.
 A split that keeps killing its owners (or that the source explicitly
 reports as unprocessable) consumes a delivery attempt per failed tenancy.
 At the attempt cap it is **quarantined**: parked, visible in the store
-and in `etl_coordination_splits_quarantined`, and never re-offered.
+and in `spate_coordination_splits_quarantined`, and never re-offered.
 Graceful releases and revocations — cooperative or forced — consume no
 attempts — only non-graceful ends are poison evidence.
 

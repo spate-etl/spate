@@ -26,14 +26,14 @@
 use benchmarks::report::{Metric, Report};
 use benchmarks::{docker, env_u64, http_post_bytes, percentile};
 use bytes::BytesMut;
-use etl_clickhouse::{
+use serde::Serialize;
+use spate_clickhouse::{
     ClickHouseEncoder, DateTime64Millis, Decimal64, NativeEncoder, NativeSchema, serialize_row,
 };
-use etl_core::checkpoint::AckRef;
-use etl_core::deser::Owned;
-use etl_core::record::{PartitionId, Record, RecordMeta};
-use etl_core::sink::RowEncoder;
-use serde::Serialize;
+use spate_core::checkpoint::AckRef;
+use spate_core::deser::Owned;
+use spate_core::record::{PartitionId, Record, RecordMeta};
+use spate_core::sink::RowEncoder;
 use std::sync::Arc;
 use std::time::Instant;
 

@@ -85,7 +85,7 @@ A record that reaches no branch (the closure emits to none) follows the
   means your classifier is wrong and you'd rather halt than lose data.
 - **`Skip`**: the record is dropped, its ack share released as success (exactly
   like a [`filter`](../03-guides/assembling-a-pipeline.mdx) drop), and counted on
-  `etl_operator_records_dropped_total{reason="unrouted"}`. Use it when unknown
+  `spate_operator_records_dropped_total{reason="unrouted"}`. Use it when unknown
   kinds are expected and discardable.
 
 There is **no built-in catch-all**. A catch-all *table* is just another branch

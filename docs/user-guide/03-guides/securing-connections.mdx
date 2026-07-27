@@ -1,6 +1,6 @@
 # Securing connections (TLS, mTLS, SASL)
 
-etl-rs has no framework-wide security layer: **transport security is a property
+Spate has no framework-wide security layer: **transport security is a property
 of each connector**, because every connector talks to its system over that
 system's own client (librdkafka for Kafka, an HTTP client for ClickHouse) with
 that client's own TLS/auth knobs. This page is the hub — it covers what *is*

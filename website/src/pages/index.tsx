@@ -80,9 +80,10 @@ function Hero() {
         <h1 className={styles.heroTitle}>{siteConfig.title}</h1>
         <p className={styles.heroTagline}>{siteConfig.tagline}</p>
         <p className={styles.heroPitch}>
-          Streaming Extract-Transform-Load pipelines with a chaining operator
-          API in the spirit of Flink or Java Streams: CPU-pinned processing
-          threads over zero-copy borrowed records, checkpoint-driven source
+          Streaming Extract-Transform-Load pipelines: an operator graph you
+          write in Rust and chain into a single monomorphized loop, CPU-pinned
+          processing threads over zero-copy borrowed records, checkpoint-driven
+          source
           commits, sharded and replicated asynchronous sinks, built-in
           backpressure, and first-class Prometheus metrics.
         </p>

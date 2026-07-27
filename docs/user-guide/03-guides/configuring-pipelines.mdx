@@ -14,7 +14,7 @@ type and default lives in the
 ## Layout
 
 A trimmed version of the flagship example
-(`crates/etl/examples/kafka_avro_to_clickhouse.yaml`):
+(`crates/spate/examples/kafka_avro_to_clickhouse.yaml`):
 
 ```yaml
 pipeline:
@@ -152,7 +152,7 @@ sinks:
 
 The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)
 resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on
-that sink's `etl_sink_*` metrics. A single `sink:` is exactly equivalent to a
+that sink's `spate_sink_*` metrics. A single `sink:` is exactly equivalent to a
 one-entry `sinks:` map under the reserved name `"default"` (which keeps the
 historical label `component="sink"`). The precise rules — reserved names, label
 equivalence — are tabulated in the

@@ -1,14 +1,14 @@
 # Testing pipelines
 
-The `etl-test` crate is the first-class way to test pipelines you build
+The `spate-test` crate is the first-class way to test pipelines you build
 with this framework: deterministic in-memory mocks, no Docker, no external
 infrastructure. Every mock pairs with a scripting/observation handle (the
 `tower-test` philosophy) — you drive the source side, script the sink side,
 and assert on what actually got written and committed.
 
 The two canonical references this guide mirrors are
-`crates/etl-test/tests/bundle.rs` (a whole-assembly test) and
-`crates/etl/examples/memory_pipeline.rs` (the same pattern as a runnable
+`crates/spate-test/tests/bundle.rs` (a whole-assembly test) and
+`crates/spate/examples/memory_pipeline.rs` (the same pattern as a runnable
 demo).
 
 ## The pieces
@@ -24,16 +24,16 @@ demo).
 
 Build with the ordinary `Pipeline` builder, but finish with
 `into_runtime` instead of `run` so you hold the shutdown handle, then spawn
-the blocking `run` on a thread. From `crates/etl-test/tests/bundle.rs`:
+the blocking `run` on a thread. From `crates/spate-test/tests/bundle.rs`:
 
 ```rust
-use etl_core::config::PipelineConfig;
-use etl_core::ops::chain_owned;
-use etl_core::pipeline::{Pipeline, RuntimeOptions};
-use etl_core::record::PartitionId;
-use etl_core::sink::KeyHashRouter;
-use etl_core::source::LaneId;
-use etl_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
+use spate_core::config::PipelineConfig;
+use spate_core::ops::chain_owned;
+use spate_core::pipeline::{Pipeline, RuntimeOptions};
+use spate_core::record::PartitionId;
+use spate_core::sink::KeyHashRouter;
+use spate_core::source::LaneId;
+use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
 
 const CONFIG: &str = r#"
 pipeline: { name: bundle-test, threads: 1, io_threads: 1 }
@@ -162,7 +162,7 @@ let sink = sink.with_pool_config(cfg);
 
 You do not need a whole pipeline to test a deserializer or encoder:
 `TestDeserializer`, `TestEncoder`, and `EmitCollector` exercise single
-stages, and the `etl-test` crate docs walk the full life of one record —
+stages, and the `spate-test` crate docs walk the full life of one record —
 poll, deserialize, encode, acknowledge, commit — against a real
 `Checkpointer` with no runtime at all. For property tests, the `proptest`
 feature adds ready-made `strategies`.

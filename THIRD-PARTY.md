@@ -8,7 +8,7 @@
 
 CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
 
-etl-rs itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
+Spate itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
 inventories the **dependencies** it links, and the terms each is used under.
 Where a dependency offers a choice (`MIT OR Apache-2.0` and similar), the term
 listed here is the one elected — the priority order in `about.toml` decides,
@@ -21,7 +21,7 @@ Two things to know when reading it:
   features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
   more than you distribute is safe, so this file is deliberately the superset.
 - **Full licence texts are not reproduced here**, to keep the file diffable.
-  They are published at <https://etl-rs.pages.kainth.net/licenses/>, generated
+  They are published at <https://spate.kainth.dev/licenses/>, generated
   from the same lockfile by the same tool.
 
 Dev-dependencies are excluded: they are never distributed and so require no
@@ -29,7 +29,7 @@ attribution. Build-dependencies are included, since a build script can
 contribute generated code to the shipped artifact — as can a proc-macro, which
 is why compile-time-only crates are listed.
 
-etl-rs's **own** crates (`etl`, `etl-core`, …) appear in the table too, each
+Spate's **own** crates (`spate`, `spate-core`, …) appear in the table too, each
 under Apache-2.0. `cargo-about` only omits workspace members that are
 unpublished (which is why `benchmarks` is absent), and leaving the published
 ones in is useful: it shows at a glance that every crate you receive from this
@@ -72,21 +72,21 @@ reproducible. The elected licence ids are unaffected either way.
 | `bytesize` | 2.4.2 | `Apache-2.0` |
 | `clang-sys` | 1.8.1 | `Apache-2.0` |
 | `dunce` | 1.0.5 | `Apache-2.0` |
-| `etl` | 0.1.0 | `Apache-2.0` |
-| `etl-avro` | 0.1.0 | `Apache-2.0` |
-| `etl-clickhouse` | 0.1.0 | `Apache-2.0` |
-| `etl-coordination` | 0.1.0 | `Apache-2.0` |
-| `etl-core` | 0.1.0 | `Apache-2.0` |
-| `etl-json` | 0.1.0 | `Apache-2.0` |
-| `etl-kafka` | 0.1.0 | `Apache-2.0` |
-| `etl-s3` | 0.1.0 | `Apache-2.0` |
-| `etl-test` | 0.1.0 | `Apache-2.0` |
 | `metrics-exporter-prometheus` | 0.18.3 | `Apache-2.0` |
 | `nkeys` | 0.4.5 | `Apache-2.0` |
 | `nuid` | 0.5.0 | `Apache-2.0` |
 | `ring` | 0.17.14 | `Apache-2.0` |
 | `ryu` | 1.0.23 | `Apache-2.0` |
 | `sketches-ddsketch` | 0.3.1 | `Apache-2.0` |
+| `spate` | 0.1.0 | `Apache-2.0` |
+| `spate-avro` | 0.1.0 | `Apache-2.0` |
+| `spate-clickhouse` | 0.1.0 | `Apache-2.0` |
+| `spate-coordination` | 0.1.0 | `Apache-2.0` |
+| `spate-core` | 0.1.0 | `Apache-2.0` |
+| `spate-json` | 0.1.0 | `Apache-2.0` |
+| `spate-kafka` | 0.1.0 | `Apache-2.0` |
+| `spate-s3` | 0.1.0 | `Apache-2.0` |
+| `spate-test` | 0.1.0 | `Apache-2.0` |
 | `sync_wrapper` | 1.0.2 | `Apache-2.0` |
 | `aws-lc-sys` | 0.42.0 | `BSD-3-Clause` |
 | `bindgen` | 0.72.1 | `BSD-3-Clause` |

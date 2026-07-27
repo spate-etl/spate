@@ -12,7 +12,7 @@
 //!                   concurrent Fetch pipelines.
 //!   MODE=split      INSTANCES consumers whose partition queues are split off
 //!                   and drained by THREADS threads. With INSTANCES=1 this is
-//!                   the *single-instance* arm — the shape `etl-kafka` itself
+//!                   the *single-instance* arm — the shape `spate-kafka` itself
 //!                   uses.
 //!
 //! Usage:
@@ -27,7 +27,7 @@
 //! FETCH_MESSAGE_MAX_BYTES, FETCH_WAIT_MAX_MS.
 //!
 //! `QUEUED_MIN_MESSAGES=0` means **leave the property unset**, which is what
-//! `etl-kafka` ships and therefore what an unqualified run should measure; any
+//! `spate-kafka` ships and therefore what an unqualified run should measure; any
 //! other value is passed through verbatim. `e2e_kafka_clickhouse` reads the
 //! same variable with the same meaning, so a sweep can drive both rigs.
 //!
@@ -57,7 +57,7 @@ use rdkafka::error::KafkaError;
 use rdkafka::message::BorrowedMessage;
 use rdkafka::{Offset, TopicPartitionList};
 
-/// Mirrors the framework's driver defaults (`etl-core` `runtime.rs`) so the
+/// Mirrors the framework's driver defaults (`spate-core` `runtime.rs`) so the
 /// harness polls on the same cadence the real pipeline does.
 const MAX_RECORDS: usize = 512;
 const POLL_TIMEOUT: Duration = Duration::from_millis(10);
@@ -124,7 +124,7 @@ impl Config {
             duration: Duration::from_secs(env_u64("DURATION_S", 30)),
             mode,
             gap_sampling: env_u64("GAP_SAMPLING", 0) != 0,
-            // 0 means "set nothing", which is what `etl-kafka` ships: the
+            // 0 means "set nothing", which is what `spate-kafka` ships: the
             // connector pins no prefetch depth, so librdkafka's own default
             // applies. Defaulting to any number here would make an
             // unqualified run measure a depth production never uses — which
@@ -210,7 +210,7 @@ struct ThreadStat {
 }
 
 /// Drives one thread's lanes until `deadline`, mirroring the framework driver's
-/// cadence (`etl-core` `pipeline/driver.rs`): round-robin across lanes, and
+/// cadence (`spate-core` `pipeline/driver.rs`): round-robin across lanes, and
 /// block for `POLL_TIMEOUT` only once a full pass over every lane came back
 /// empty. While any lane is producing, polls are non-blocking, so one cold lane
 /// can never park a thread that has ready data elsewhere.

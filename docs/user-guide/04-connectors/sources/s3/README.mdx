@@ -1,6 +1,6 @@
 # S3 (object storage) source
 
-The S3 source (`etl-s3`, feature `s3` on the `etl` facade) runs a
+The S3 source (`spate-s3`, feature `s3` on the `spate` facade) runs a
 **coordinated, bounded backfill**: point it at a bucket prefix and it
 streams every object's records through the pipeline and terminates the
 pipeline itself — `run()` returns `ExitState::Completed` — once every
@@ -40,12 +40,12 @@ build one over a durable store and inject it, and every replica of the
 same pipeline shares the backfill — splits are leased, moved between live
 instances by the elected leader, and taken over from dead ones, with
 per-split fenced commits making revocations replay-safe. (The NATS store below needs the
-`etl` facade's `coordination-nats` feature; `etl-s3` itself carries no
+`spate` facade's `coordination-nats` feature; `spate-s3` itself carries no
 backend feature at all — see [Scaling out](../../../05-deployment/scaling-out.mdx).)
 
 ```rust
-use etl::coordination::store::nats::{NatsConfig, NatsStore};
-use etl::coordination::{CoordinationConfig, StoreCoordinator};
+use spate::coordination::store::nats::{NatsConfig, NatsStore};
+use spate::coordination::{CoordinationConfig, StoreCoordinator};
 
 let tuning = CoordinationConfig {
     instance_id: std::env::var("POD_NAME").ok(), // unique per replica
@@ -63,7 +63,7 @@ let source = S3Source::from_component_config(&source_section, pipeline.io_handle
 
 Deployment shape, tuning, and failure modes: [Scaling out](../../../05-deployment/scaling-out.mdx).
 The runnable two-instance version is
-`crates/etl/examples/s3_coordinated_backfill.rs`.
+`crates/spate/examples/s3_coordinated_backfill.rs`.
 
 :::warning No coordinator ⇒ solo, with **ephemeral** progress
 
@@ -102,7 +102,7 @@ never self-terminates — stop it with a signal drain).
 ## Configuration
 
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
-(`crates/etl-s3/src/config.rs`); unknown fields are rejected with the
+(`crates/spate-s3/src/config.rs`); unknown fields are rejected with the
 offending key. Coordination is deliberately **not** here — see above.
 
 ```yaml
@@ -236,7 +236,7 @@ The source frames records but is **format-agnostic** — it streams object
 bytes through a [`RecordFramer`](../../../06-extending/custom-source.mdx#framing-turning-bytes-into-records)
 *you supply*, and **deserialization stays in the operator chain**, exactly as
 with Kafka. Framing a byte stream is a format concern, so the framer is owned
-by the format crate: for NDJSON, wire in `etl-json`'s `NdjsonFramer` when you
+by the format crate: for NDJSON, wire in `spate-json`'s `NdjsonFramer` when you
 build the source.
 
 ```rust
@@ -269,10 +269,10 @@ re-reads pinned to the ETag). Anything object-terminal — a key deleted
 after planning, an overwrite tripping the `If-Match` pin, corrupt or
 truncated content, an exhausted retry budget — **poisons the split**: the
 split is handed back to the coordinator (counted in
-`etl_s3_source_objects_failed_total{reason}`), retried on another
+`spate_s3_source_objects_failed_total{reason}`), retried on another
 delivery attempt, and **quarantined** at the attempt cap. A bounded job
 with quarantined splits ends **failed** (`Stalled`), never as a silently
-partial `Completed` — alert on `etl_coordination_splits_quarantined > 0`.
+partial `Completed` — alert on `spate_coordination_splits_quarantined > 0`.
 Credentials, permission, and client-configuration errors still fail the
 pipeline immediately (no peer would fare better). There is still no
 skip-an-object mode: losing a whole object silently is not a policy, it's
@@ -281,22 +281,22 @@ backfill finish first.
 
 ## Metrics
 
-Framework stage families (`etl_source_*`) work as for any source. The
-connector's own families live under `etl_s3_source_*` — objects
+Framework stage families (`spate_source_*`) work as for any source. The
+connector's own families live under `spate_s3_source_*` — objects
 listed (leader-only)/completed/remaining, object failures by reason,
 bytes read/decoded, GET retries — and a coordinated run adds the
-`etl_coordination_*` families; see
+`spate_coordination_*` families; see
 [docs/METRICS.md](../../../../METRICS.md).
 
 ## Testing
 
 The whole coordinated lifecycle runs against `file://` URLs with no
-infrastructure: solo (`crates/etl/examples/s3_backfill.rs`) and
-two-instance (`crates/etl/examples/s3_coordinated_backfill.rs`, over a
+infrastructure: solo (`crates/spate/examples/s3_backfill.rs`) and
+two-instance (`crates/spate/examples/s3_coordinated_backfill.rs`, over a
 shared in-process store). The Docker-gated suites run against a
 **SeaweedFS** S3 gateway, and — for durable resume and multi-instance
 over the production backend — SeaweedFS plus a NATS 2.11 container
-(`cargo test -p etl-s3 -- --ignored --test-threads=1`).
+(`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 ## Related
 

@@ -9,7 +9,7 @@ it, and sizing it.
 
 Packaging a pipeline binary into a minimal, non-root image, using the
 flagship image (`examples/docker/Dockerfile`) as the template: the
-`ETL_CONFIG` mount pattern, the `/readyz`, `/healthz`, and `/metrics`
+`SPATE_CONFIG` mount pattern, the `/readyz`, `/healthz`, and `/metrics`
 endpoints on the admin server, and aligning the SIGTERM grace period with
 the drain timeout.
 

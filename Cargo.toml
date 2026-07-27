@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/etl",
-    "crates/etl-core",
-    "crates/etl-avro",
-    "crates/etl-json",
-    "crates/etl-kafka",
-    "crates/etl-clickhouse",
-    "crates/etl-coordination",
-    "crates/etl-s3",
-    "crates/etl-test",
+    "crates/spate",
+    "crates/spate-core",
+    "crates/spate-avro",
+    "crates/spate-json",
+    "crates/spate-kafka",
+    "crates/spate-clickhouse",
+    "crates/spate-coordination",
+    "crates/spate-s3",
+    "crates/spate-test",
     "benchmarks",
 ]
 
@@ -19,23 +19,27 @@ edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
 authors = ["Marcus Kainth <marcus@kainth.dev>"]
-repository = "https://github.com/marcuskainth/etl-rs"
+repository = "https://github.com/spate-etl/spate"
+homepage = "https://spate.kainth.dev"
+# `etl` earns its slot: it is how someone looking for this finds it. The crate
+# name is already indexed by crates.io, so "spate" here would be a wasted one
+# of the five.
 keywords = ["etl", "pipeline", "streaming", "kafka", "clickhouse"]
 categories = ["asynchronous", "data-structures"]
 
 [workspace.dependencies]
 # Internal crates — exact pins, versions move in lockstep via workspace.package.
-etl-core = { version = "=0.1.0", path = "crates/etl-core" }
-etl-avro = { version = "=0.1.0", path = "crates/etl-avro" }
-etl-json = { version = "=0.1.0", path = "crates/etl-json" }
-etl-kafka = { version = "=0.1.0", path = "crates/etl-kafka" }
-etl-clickhouse = { version = "=0.1.0", path = "crates/etl-clickhouse" }
-# default-features = false so the etl facade can gate the NATS tree
+spate-core = { version = "=0.1.0", path = "crates/spate-core" }
+spate-avro = { version = "=0.1.0", path = "crates/spate-avro" }
+spate-json = { version = "=0.1.0", path = "crates/spate-json" }
+spate-kafka = { version = "=0.1.0", path = "crates/spate-kafka" }
+spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
+# default-features = false so the spate facade can gate the NATS tree
 # behind its own `coordination-nats` feature (memory-only embedding must
 # not drag async-nats in).
-etl-coordination = { version = "=0.1.0", path = "crates/etl-coordination", default-features = false }
-etl-s3 = { version = "=0.1.0", path = "crates/etl-s3" }
-etl-test = { version = "=0.1.0", path = "crates/etl-test" }
+spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
+spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
+spate-test = { version = "=0.1.0", path = "crates/spate-test" }
 
 # Async runtime and I/O edge.
 tokio = { version = "1.52", default-features = false }
@@ -46,7 +50,7 @@ http-body-util = "0.1.2"
 # Serialization and config.
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-# Opt-in SIMD JSON decode backend behind etl-json's `simd` feature (off by
+# Opt-in SIMD JSON decode backend behind spate-json's `simd` feature (off by
 # default, excluded from `full`). The deserialization-formats study measured it
 # faster than serde_json on the single-document and array paths (the
 # Kafka-message default). Apache-2.0 / MIT with a clean transitive tree, so no
@@ -83,7 +87,7 @@ bytes = "1.11.1"
 core_affinity = "0.8"
 foldhash = "0.2"
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
-# Split identity in etl-s3: ids are persisted, so the digest must hold up
+# Split identity in spate-s3: ids are persisted, so the digest must hold up
 # even for adversarially-named keys (a collision would silently drop work).
 sha2 = "0.11"
 
@@ -92,10 +96,10 @@ sha2 = "0.11"
 rdkafka = "0.39"
 clickhouse = "0.15"
 apache-avro = "0.21"
-# Object-storage client for etl-s3. 0.x like rdkafka/clickhouse: internal
+# Object-storage client for spate-s3. 0.x like rdkafka/clickhouse: internal
 # only, no types in public APIs (dependency policy in docs/DESIGN.md).
 object_store = "0.14"
-# NATS client for etl-coordination's JetStream KV backend. 0.x policy as
+# NATS client for spate-coordination's JetStream KV backend. 0.x policy as
 # above: single minor, internal only, never in public signatures. The
 # `server_2_11` feature (in defaults) gates the limit-marker KV config the
 # lease buckets depend on; the paired server version floor is asserted at
@@ -112,7 +116,7 @@ zstd = "0.13"
 # select them, so "0.11" was a floor naming no reachable release.
 #
 # Hold this at whatever `clickhouse` pulls, and move it when `clickhouse` moves.
-# It is not free-floating: `etl-clickhouse` enables `clickhouse`'s `lz4` feature
+# It is not free-floating: `spate-clickhouse` enables `clickhouse`'s `lz4` feature
 # and `clickhouse 0.15.1` depends on `lz4_flex 0.11.6`, so raising this alone
 # puts two majors in the graph and — the part that actually matters — makes
 # `ch_native_format`'s `lz4_bytes` describe a compressor the ingest path does not

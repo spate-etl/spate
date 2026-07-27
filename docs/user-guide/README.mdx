@@ -1,11 +1,11 @@
-# etl-rs User Guide
+# Spate User Guide
 
-etl-rs is a high-performance, at-least-once ETL pipeline framework in Rust.
+Spate is a high-performance, at-least-once ETL pipeline framework in Rust.
 Its flagship shape is Kafka in, Avro decoding, a chain of operators you write
 in Rust, and sharded ClickHouse out — but every piece behind that shape is a
 small, stable trait, so you can swap in your own sources, sinks, and
-deserializers. You define the operator graph in code (Flink / Java Streams
-style); YAML configures connectors and tuning, never the topology.
+deserializers. You define the operator graph in code; YAML configures
+connectors and tuning, never the topology.
 
 One process runs one pipeline. CPU work (polling, deserialization, the
 operator chain) runs on pinned threads with zero per-record allocations on
@@ -30,7 +30,7 @@ disagree.
 
 ## Where to start
 
-- Never used etl-rs? [Getting started](01-getting-started/README.mdx) has a
+- Never used Spate? [Getting started](01-getting-started/README.mdx) has a
   five-minute in-memory pipeline and a full Kafka-to-ClickHouse tutorial.
 - Want the mental model first? Read [Concepts](02-concepts/README.mdx).
 - Building or operating a real pipeline? Jump to the
@@ -40,7 +40,7 @@ disagree.
 
 ### [1. Getting started](01-getting-started/README.mdx)
 
-- [Installation](01-getting-started/01-installation.mdx) — the `etl` facade
+- [Installation](01-getting-started/01-installation.mdx) — the `spate` facade
   crate, feature flags, MSRV.
 - [Quickstart](01-getting-started/02-quickstart.mdx) — a zero-infrastructure
   pipeline in five minutes.
@@ -95,4 +95,4 @@ disagree.
 - [docs/METRICS.md](../METRICS.md) — the full metric taxonomy and alerting
   starting points.
 - API reference on docs.rs — this guide teaches concepts and contracts;
-  signatures and per-item docs live in the rustdoc for the `etl` crate.
+  signatures and per-item docs live in the rustdoc for the `spate` crate.

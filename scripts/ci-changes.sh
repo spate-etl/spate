@@ -55,34 +55,34 @@ set -euo pipefail
 # Workspace packages that own `#[ignore]`d container tests. Everything else in
 # the workspace has no container suite to run. `--self-test` derives this same
 # set from the source tree and fails if the two disagree.
-CONTAINER_PKGS="etl etl-kafka etl-clickhouse etl-s3 etl-coordination"
+CONTAINER_PKGS="spate spate-kafka spate-clickhouse spate-s3 spate-coordination"
 
 # Reverse-dependency closure: given a changed crate, which container suites can
 # its change possibly break? Derived from the path dependencies in each
 # crates/*/Cargo.toml — `--self-test` checks this against `cargo metadata`, so
 # it cannot drift silently.
 #
-#   etl-core         is depended on by every crate
-#   etl-test         is a dev-dependency of avro, json, kafka, clickhouse, s3, etl
+#   spate-core         is depended on by every crate
+#   spate-test         is a dev-dependency of avro, json, kafka, clickhouse, s3, spate
 #                    (note: NOT coordination, which uses its own `testing` feature)
-#   etl-coordination is depended on by s3 and the facade
+#   spate-coordination is depended on by s3 and the facade
 #   the connectors   are optional dependencies of the facade only
 #
 # Note this answers "can it break", not "does it exercise". The facade's own
 # container tests drive Kafka and ClickHouse, so a change confined to
-# `crates/etl-s3` still boots those via `-p etl` even though no facade test
+# `crates/spate-s3` still boots those via `-p spate` even though no facade test
 # touches S3. Keeping the honest closure costs those boots; narrowing it by hand
 # would buy them back at the price of a table `cargo metadata` can no longer
 # verify. The closure wins — but do not describe this as running "nothing else".
 container_suites_for() {
     case "$1" in
-        etl-core) echo "$CONTAINER_PKGS" ;;
-        etl-test) echo "etl etl-kafka etl-clickhouse etl-s3" ;;
-        etl-coordination) echo "etl etl-coordination etl-s3" ;;
-        etl-s3) echo "etl etl-s3" ;;
-        etl-kafka) echo "etl etl-kafka" ;;
-        etl-clickhouse) echo "etl etl-clickhouse" ;;
-        etl-avro | etl-json | etl) echo "etl" ;;
+        spate-core) echo "$CONTAINER_PKGS" ;;
+        spate-test) echo "spate spate-kafka spate-clickhouse spate-s3" ;;
+        spate-coordination) echo "spate spate-coordination spate-s3" ;;
+        spate-s3) echo "spate spate-s3" ;;
+        spate-kafka) echo "spate spate-kafka" ;;
+        spate-clickhouse) echo "spate spate-clickhouse" ;;
+        spate-avro | spate-json | spate) echo "spate" ;;
         *) echo "" ;;
     esac
 }
@@ -192,7 +192,7 @@ pull_request)
     # the scoping quietly stops applying.
     #
     # `--no-renames` because rename detection prints only the destination path:
-    # `git mv crates/etl-s3/src/foo.rs docs/foo.rs` would otherwise look like a
+    # `git mv crates/spate-s3/src/foo.rs docs/foo.rs` would otherwise look like a
     # docs-only change while deleting compiled source. That is a fail-*open*,
     # which is the one failure mode this classifier is built to avoid.
     #
@@ -235,7 +235,7 @@ else
 
         # First match wins, and the order is load-bearing. In a bash `case`
         # pattern `*` matches `/` as well, so a bare `*.md` arm would also
-        # swallow crates/etl/README.md — and a crate README can be compiled
+        # swallow crates/spate/README.md — and a crate README can be compiled
         # into the library with `#![doc = include_str!(...)]`. Claiming the
         # source trees first is what keeps the prose arm honest.
         case "$file" in

@@ -20,7 +20,7 @@
 //! 95% CI. Sweep the matrix by running it repeatedly.
 //!
 //! JSON arms are tagged with a `backend` variant from the compiled-in
-//! [`etl_json::BACKEND_ID`] (`serde_json`, or `simd-json` when the crate is
+//! [`spate_json::BACKEND_ID`] (`serde_json`, or `simd-json` when the crate is
 //! built with the `simd` feature) so the same rig, rebuilt per backend, sweeps
 //! the JSON-backend comparison. `COPY_ONLY=1` measures a memcpy-only baseline
 //! (`backend=memcpy_baseline`) that isolates the mandatory owned-copy cost a
@@ -44,11 +44,11 @@
 use benchmarks::deser_sample::{self, Order, Reading, SensorBatch};
 use benchmarks::report::{Metric, Report};
 use benchmarks::{env_str, env_u64};
-use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
-use etl_core::checkpoint::AckRef;
-use etl_core::deser::{Deserializer, EmitRecord, RecFamily};
-use etl_core::record::{Flow, PartitionId, RawPayload, Record};
-use etl_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
+use spate_core::checkpoint::AckRef;
+use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
+use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -380,12 +380,12 @@ fn main() {
 
     // JSON arms are tagged with the compiled-in backend; the memcpy baseline is
     // tagged `memcpy_baseline`. Avro carries no `backend` key (it is not a JSON
-    // backend, and the running binary's `BACKEND_ID` reflects only how etl-json
+    // backend, and the running binary's `BACKEND_ID` reflects only how spate-json
     // was compiled, not how the Avro arm decoded).
     let backend: Option<&str> = if copy_only {
         Some("memcpy_baseline")
     } else if format == "json" {
-        Some(etl_json::BACKEND_ID)
+        Some(spate_json::BACKEND_ID)
     } else {
         None
     };

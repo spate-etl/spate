@@ -297,12 +297,12 @@ jobs:
           <html lang="en">
             <head>
               <meta charset="utf-8" />
-              <meta http-equiv="refresh" content="0; url=etl/index.html" />
-              <link rel="canonical" href="etl/index.html" />
-              <title>etl-rs API reference</title>
+              <meta http-equiv="refresh" content="0; url=spate/index.html" />
+              <link rel="canonical" href="spate/index.html" />
+              <title>Spate API reference</title>
             </head>
             <body>
-              <a href="etl/index.html">Redirecting to the etl crate API reference…</a>
+              <a href="spate/index.html">Redirecting to the spate crate API reference…</a>
             </body>
           </html>
           EOF
@@ -367,7 +367,7 @@ jobs:
       deployments: write
     environment:
       name: cloudflare-pages
-      url: https://etl-rs.pages.kainth.net
+      url: https://spate.kainth.dev
     # Serialize production deploys; don't cancel an in-progress publish.
     concurrency:
       group: cloudflare-pages
@@ -410,7 +410,7 @@ jobs:
           wranglerVersion: "4"
           # --branch=main matches the project's production branch, so this
           # registers as a production deployment (not a preview).
-          command: pages deploy website/build --project-name=etl-rs --branch=main
+          command: pages deploy website/build --project-name=Spate --branch=main
 
   # ===========================================================================
   # WEEKLY
@@ -420,7 +420,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: plan
     if: needs.plan.outputs.weekly == 'true'
-    # The exhaustive check the pull-request path cannot afford: the `etl` facade
+    # The exhaustive check the pull-request path cannot afford: the `spate` facade
     # declares 18 feature keys, so this is 2^18 combinations and several build
     # librdkafka or compile OpenSSL from source. ~48 minutes, which is fine once
     # a week and was not fine on every PR. ci.yml runs `--each-feature` (linear)
@@ -451,7 +451,7 @@ jobs:
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
   alloc-assertions:
-    name: Allocation assertions (etl-core)
+    name: Allocation assertions (spate-core)
     runs-on: ubuntu-latest
     needs: plan
     # Nightly, and its own job rather than a step inside the weekly bench run.
@@ -470,10 +470,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: release
-      - run: cargo test -p etl-core --release --test chain_alloc --locked
+      - run: cargo test -p spate-core --release --test chain_alloc --locked
 
   loom:
-    name: Loom models (etl-core)
+    name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: plan
     # Nightly, not weekly. CLAUDE.md states as an invariant that the checkpoint
@@ -496,7 +496,7 @@ jobs:
       # as `--lib` only (doc tests compiled under `--cfg loom` construct
       # loom-typed primitives outside a model and abort), and nextest would
       # buy nothing here. Do not "modernise" this onto nextest.
-      - run: cargo test -p etl-core --release --lib --locked
+      - run: cargo test -p spate-core --release --lib --locked
         env:
           RUSTFLAGS: --cfg loom
 
@@ -617,16 +617,16 @@ jobs:
       # with "Unrecognized option: 'save-baseline'" and fails the step. That is
       # exactly how the 2026-07-06 run died.
       #
-      # etl-core's only bench target is divan, not criterion — divan has no
+      # spate-core's only bench target is divan, not criterion — divan has no
       # baseline concept, so it takes no criterion arguments at all.
-      - run: cargo bench -p etl-core --locked --bench chain
-      # etl-avro's `decode` is the criterion bench, and it is what critcmp
+      - run: cargo bench -p spate-core --locked --bench chain
+      # spate-avro's `decode` is the criterion bench, and it is what critcmp
       # compares below. Saved as `current`, against last week's `previous`:
       # critcmp needs *two* named baselines to compare anything. Given one it
       # prints a single column of 1.00 ratios and exits 0, which reads exactly
       # like a clean comparison and is how this step used to pass every week
       # while measuring nothing.
-      - run: cargo bench -p etl-avro --locked --bench decode -- --save-baseline current
+      - run: cargo bench -p spate-avro --locked --bench decode -- --save-baseline current
 
       # Version-pinned, but still built from source — critcmp is not in
       # install-action's manifest, so there is no checksummed prebuilt binary to

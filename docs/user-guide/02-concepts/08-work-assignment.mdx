@@ -42,9 +42,9 @@ take the split until the previous owner's lease key has disappeared, which
 it observes directly through its watch. An assignment is permission to try,
 not a promise the split is free yet.
 
-Kafka's KIP-848 resolves the same dependency inside the group coordinator
-("a partition is only assigned to its new owner after the old owner
-acknowledges the revocation"). We do not need that acknowledgement, because
+Other designs resolve the same dependency with an explicit acknowledgement:
+a unit of work is only assigned to its new owner once the old owner has
+confirmed the revocation. We do not need that acknowledgement, because
 the store already publishes the fact one would have carried: the lease key
 is either there or it is not. That is the single property that removes the
 entire class of state which is visible to neither side of a negotiation —
@@ -56,12 +56,11 @@ Workers converge independently and at their own pace. There are no
 rebalance rounds and no global pause; a worker whose assignment did not
 change never stops processing.
 
-This follows KIP-848 rather than Kafka Connect's round-based KIP-415
-deliberately. Connect's assignor assumed the member count would not change
-between its revoking round and its assigning round, and a worker that
-joined in between left work stranded in a skew that never self-corrected
-(KAFKA-12495, unfixed until Kafka 3.4.0). Having no rounds means there is
-nothing to fall between.
+Continuous reconciliation rather than a round-based assignor is deliberate.
+A round-based design computes revocations in one round and assignments in
+the next, which assumes the member count does not change in between; a
+worker that joins between the two leaves work stranded in a skew that never
+self-corrects. Having no rounds means there is nothing to fall between.
 
 ## Contract
 
@@ -101,7 +100,7 @@ correctness.
 ## Invariants
 
 Each is enforced by a property test in
-`crates/etl-coordination/src/protocol.rs`, named here so a deleted or
+`crates/spate-coordination/src/protocol.rs`, named here so a deleted or
 weakened test is visible as a divergence from this page.
 
 1. **Deterministic.** The same `(members, splits, ownership, reserved,
@@ -144,11 +143,10 @@ alternative — a leader assuming its own value — strands work permanently: a
 smaller worker looks least-loaded, keeps being assigned splits, and keeps
 refusing to claim them.
 
-This is the lesson AWS drew when replacing the Kinesis Client Library's
-decentralised lease-stealing with a leader in KCL 3.0: balancing lease
-*counts* forced the whole fleet to be provisioned for its worst-loaded
-member. We use bytes rather than measured CPU because bytes are already
-known at planning time and cost nothing to collect.
+It is also why balancing on *counts* rather than weight is a trap: equal
+counts of unequal work force the whole fleet to be provisioned for its
+worst-loaded member. We use bytes rather than measured CPU because bytes are
+already known at planning time and cost nothing to collect.
 
 The three passes:
 
@@ -174,18 +172,18 @@ inside the window reclaims its own work and nothing moves. The window is
 cancelled the moment the instance reappears, so a fast restart pays
 nothing at all.
 
-The default is far below Kafka Connect's equivalent
-(`scheduled.rebalance.max.delay.ms`, 5 minutes) on purpose. Connect's is
-sized for connectors whose tasks are expensive to start; a split here
-starts by reading a descriptor and spawning a fetcher. When starting is
-cheap, idle work costs more than movement does.
+The default is deliberately short. A long window suits systems whose work
+units are expensive to start; a split here starts by reading a descriptor
+and spawning a fetcher. When starting is cheap, idle work costs more than
+movement does.
 
 **`rebalance_delay: 0` means reassign immediately.** It is a supported
 configuration, not a disabled feature, and it takes a distinct code path
 rather than flowing through the delay logic with a zero comparison.
-Connect's knob read zero as "withhold indefinitely" and shipped that way
-from 2.3.0 through 3.7.0 (KAFKA-15693); the shape of the code here is
-chosen so that bug is not expressible. Enforced by
+A delay knob whose zero flows through the general path as just another
+value is how "reassign at once" silently becomes "withhold indefinitely";
+the shape of the code here is chosen so that bug is not expressible.
+Enforced by
 `a_zero_rebalance_delay_reassigns_immediately`.
 
 ## Revocation
@@ -202,9 +200,9 @@ A source that declines, or whose drain outruns `drain_deadline` (default
 uncommitted tail simply replays under the next owner, bounded by one commit
 interval. Declining is safe, but it is the expensive way to comply.
 
-This is the distinction Kafka draws between `onPartitionsRevoked` (clean —
-flush and commit) and `onPartitionsLost` (fenced — discard), and the same
-shape as KCL 3.x's graceful lease handoff with its timeout.
+It is the same distinction any rebalancing protocol has to draw: a clean
+release, where the owner flushes and commits, versus a fenced one, where it
+has already lost the right to write and must discard.
 
 **A revocation the leader takes back is cancelled.** If membership changes
 again mid-drain and the leader names the split for its current owner once
@@ -285,10 +283,10 @@ land.
 
 | Concern | Location |
 |---|---|
-| The assignment function and its property tests | `crates/etl-coordination/src/protocol.rs` (`desired_assignment`) |
-| Publishing, and the delay window | `crates/etl-coordination/src/task.rs` (`publish_assignments`, `reserved_splits`) |
-| Worker reconciliation and revocation | `crates/etl-coordination/src/task.rs` (`reconcile_assignment`, `service_revocations`) |
-| The record on the store | `crates/etl-coordination/src/records.rs` (`AssignmentVal`) |
-| Tuning knobs | `crates/etl-coordination/src/config.rs` |
+| The assignment function and its property tests | `crates/spate-coordination/src/protocol.rs` (`desired_assignment`) |
+| Publishing, and the delay window | `crates/spate-coordination/src/task.rs` (`publish_assignments`, `reserved_splits`) |
+| Worker reconciliation and revocation | `crates/spate-coordination/src/task.rs` (`reconcile_assignment`, `service_revocations`) |
+| The record on the store | `crates/spate-coordination/src/records.rs` (`AssignmentVal`) |
+| Tuning knobs | `crates/spate-coordination/src/config.rs` |
 
 See [Scaling out](../05-deployment/scaling-out.mdx) for operational tuning.

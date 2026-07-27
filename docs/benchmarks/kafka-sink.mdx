@@ -18,7 +18,7 @@ sink](../user-guide/04-connectors/sinks/kafka/README.mdx), and **what does the f
 cost over librdkafka itself**? This rig isolates the client path: an in-process
 generator source (no source broker) drives the real chain, sink pool, and
 runtime into one `ThreadedProducer` at full tilt. Throughput is read from
-`etl_sink_records_total` (durable acks — the sink returns `Ok` only after every
+`spate_sink_records_total` (durable acks — the sink returns `Ok` only after every
 message's delivery report under `acks=all`) over a steady-state window, so the
 number is the durable client-path rate.
 
@@ -185,7 +185,7 @@ not shards.
 
 At saturation the end-to-end latency is queueing-dominated and should be read as
 such: with the source running full-tilt against a sink that backpressures, records
-sit in framework queues before egress. At the default arm `etl_e2e_latency_seconds`
+sit in framework queues before egress. At the default arm `spate_e2e_latency_seconds`
 is **p50 ≈ 1.1 s, p99 ≈ 2.5 s** — a backlog-at-saturation figure, not a
 lightly-loaded serving latency. A rate-limited arm (not run here) would report the
 low-load latency; the [Kafka topology](./kafka-topology.mdx) page characterises the

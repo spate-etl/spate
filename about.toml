@@ -17,7 +17,7 @@
 #    For a dual-licensed `MIT OR Apache-2.0` dependency the first satisfiable
 #    entry wins, so ordering is a compliance choice, not cosmetics.
 #
-#    MIT is first even though etl-rs itself is now Apache-2.0. That looks
+#    MIT is first even though Spate itself is now Apache-2.0. That looks
 #    inconsistent and is not: our outbound licence does not constrain which
 #    branch of a dependency's `OR` we elect, and electing MIT avoids inheriting
 #    Apache-2.0 section 4(d) NOTICE-propagation obligations from several hundred
@@ -54,7 +54,7 @@ accepted = [
     "Unlicense",
 ]
 
-# The platforms etl-rs is built and shipped for. Crates reachable only through
+# The platforms Spate is built and shipped for. Crates reachable only through
 # `cfg()` predicates that match no target here (Windows, wasm, redox) are left
 # out, so the attribution reflects what a real deployment links rather than the
 # union of every platform cargo knows about.

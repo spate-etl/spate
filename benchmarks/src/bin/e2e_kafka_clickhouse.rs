@@ -13,7 +13,7 @@
 //!
 //! Profiles:
 //! - **Local** (default): starts/reuses the bench broker (`BROKER`, default
-//!   Redpanda) and `etl-bench-clickhouse` containers, generates load itself.
+//!   Redpanda) and `spate-bench-clickhouse` containers, generates load itself.
 //! - **External**: set KAFKA_BROKERS and CLICKHOUSE_URL (http://host:port)
 //!   [+ CLICKHOUSE_USER/CLICKHOUSE_PASSWORD] — pure env config, runnable
 //!   in Kubernetes against real clusters.
@@ -74,18 +74,18 @@
 use benchmarks::avro_batch::{self, SensorBatchOwned, SensorEventOwned, explode_owned, keep_owned};
 use benchmarks::report::{Metric, Report};
 use benchmarks::{docker, ensure_topic, env_str, env_u64, prom};
-use etl_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
-use etl_clickhouse::{ClickHouseEncoder, ClickHouseSink, NativeEncoder};
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::{ComponentConfig, PipelineConfig};
-use etl_core::deser::{BytesPassthrough, Owned};
-use etl_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, RunnableChain, chain, chain_owned};
-use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::sink::{KeyHashRouter, ShardQueues, SinkPool, shard_queues};
-use etl_kafka::{KafkaSource, KafkaSourceConfig};
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
+use spate_clickhouse::{ClickHouseEncoder, ClickHouseSink, NativeEncoder};
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::{ComponentConfig, PipelineConfig};
+use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, RunnableChain, chain, chain_owned};
+use spate_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::sink::{KeyHashRouter, ShardQueues, SinkPool, shard_queues};
+use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -422,8 +422,8 @@ fn ensure_prefill(brokers: &str, topic: &str, partitions: i32, target: u64, payl
 }
 
 fn install_metrics() -> MetricsHandle {
-    etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
-        exporter: etl_core::metrics::Exporter::Prometheus,
+    spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
         ..Default::default()
     })
     .expect("install metrics recorder")
@@ -500,7 +500,7 @@ fn spawn_and_measure<MK>(
     // fine here. The reported figures are cross-checked below against
     // ClickHouse's own server-side accounting.
     let progress = || {
-        prom::value(&metrics_handle.render(), "etl_sink_records_total", "").unwrap_or(0.0) as u64
+        prom::value(&metrics_handle.render(), "spate_sink_records_total", "").unwrap_or(0.0) as u64
     };
 
     let ready = Instant::now() + Duration::from_secs(60);
@@ -526,15 +526,15 @@ fn spawn_and_measure<MK>(
     let text0 = metrics_handle.render();
     let window_start = Instant::now();
     let (sink0, source0) = (
-        counter(&text0, "etl_sink_records_total"),
-        counter(&text0, "etl_source_records_total"),
+        counter(&text0, "spate_sink_records_total"),
+        counter(&text0, "spate_source_records_total"),
     );
     std::thread::sleep(meta.duration);
     let metrics_text = metrics_handle.render();
     let window = window_start.elapsed().as_secs_f64();
     let (sink1, source1) = (
-        counter(&metrics_text, "etl_sink_records_total"),
-        counter(&metrics_text, "etl_source_records_total"),
+        counter(&metrics_text, "spate_sink_records_total"),
+        counter(&metrics_text, "spate_source_records_total"),
     );
 
     stop.store(true, Ordering::Relaxed);
@@ -622,19 +622,19 @@ fn spawn_and_measure<MK>(
     }
     // Windowed, not lifetime: the lifetime quantiles included warmup.
     if let Some(v) =
-        prom::histogram_quantile_delta(&text0, &metrics_text, "etl_e2e_latency_seconds", 0.5)
+        prom::histogram_quantile_delta(&text0, &metrics_text, "spate_e2e_latency_seconds", 0.5)
     {
         rep = rep.metric("e2e_p50_s", Metric::minimize(v, "s"));
     }
     if let Some(v) =
-        prom::histogram_quantile_delta(&text0, &metrics_text, "etl_e2e_latency_seconds", 0.99)
+        prom::histogram_quantile_delta(&text0, &metrics_text, "spate_e2e_latency_seconds", 0.99)
     {
         rep = rep.metric("e2e_p99_s", Metric::minimize(v, "s"));
     }
     if let Some(v) = prom::histogram_quantile_delta(
         &text0,
         &metrics_text,
-        "etl_sink_flush_duration_seconds",
+        "spate_sink_flush_duration_seconds",
         0.99,
     ) {
         rep = rep.metric("sink_flush_p99", Metric::minimize(v, "s"));
@@ -646,7 +646,7 @@ fn spawn_and_measure<MK>(
     };
     rep = rep.metric(
         "backpressure_pauses",
-        Metric::minimize(delta("etl_backpressure_pause_events_total"), "events"),
+        Metric::minimize(delta("spate_backpressure_pause_events_total"), "events"),
     );
 
     // Attribution, recorded for inspection rather than used as a gate. A fetch
@@ -657,17 +657,17 @@ fn spawn_and_measure<MK>(
     // distinguishes "source-bound" from "sink-bound", not "starved" from
     // "healthy".
     //
-    // `etl_source_lag_records` is per-partition only, so `prom::value`'s sum
+    // `spate_source_lag_records` is per-partition only, so `prom::value`'s sum
     // across every matching series is this member's whole backlog — directly
     // comparable with the broker's group-lag figure. `None` means no
     // partition has reported a measured lag yet; note that a *partially*
     // measured assignment sums only what it has, so a small number early in a
     // run is not evidence of a small backlog.
-    let fetch_queue = prom::value(&metrics_text, "etl_kafka_source_fetch_queue_messages", "");
-    let lag = prom::value(&metrics_text, "etl_source_lag_records", "");
+    let fetch_queue = prom::value(&metrics_text, "spate_kafka_source_fetch_queue_messages", "");
+    let lag = prom::value(&metrics_text, "spate_source_lag_records", "");
 
-    let measure = "rows_per_s = windowed etl_sink_records_total delta / window; \
-                   source_records_per_s = windowed etl_source_records_total delta";
+    let measure = "rows_per_s = windowed spate_sink_records_total delta / window; \
+                   source_records_per_s = windowed spate_source_records_total delta";
     let ch_version = &meta.ch_version;
     let mut note = format!(
         "{measure}; window={elapsed:.1}s; sink_records={sink_records} \
@@ -784,7 +784,7 @@ fn run_raw(conn: &Conn, topic: &str, partitions: i32, threads: usize, meta: Meta
         conn.user, conn.password
     );
     let section: ComponentConfig = serde_yaml::from_str(&sink_yaml).expect("sink section");
-    let ch = etl_clickhouse::from_component_config(&section).expect("clickhouse sink");
+    let ch = spate_clickhouse::from_component_config(&section).expect("clickhouse sink");
     let enc = ClickHouseEncoder::<Owned<BenchRow>>::new();
     let count_rows = || {
         sql("SELECT count() FROM bench_events")
@@ -890,7 +890,7 @@ fn run_avro(
         conn.user, conn.password
     );
     let section: ComponentConfig = serde_yaml::from_str(&sink_yaml).expect("sink section");
-    let ch = etl_clickhouse::from_component_config(&section).expect("clickhouse sink");
+    let ch = spate_clickhouse::from_component_config(&section).expect("clickhouse sink");
     let builder = avro_builder(io.handle());
     let count_rows = || {
         sql("SELECT count() FROM sensor_events")
@@ -961,7 +961,7 @@ fn run_owned_native<D>(
     loadgen: Option<std::thread::JoinHandle<()>>,
     count_rows: impl Fn() -> u64,
 ) where
-    D: etl_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
+    D: spate_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
 {
     let e = NativeEncoder::<Owned<SensorEventOwned>>::new(avro_batch::native_schema());
     let chunk_cfg = meta.chunk_config();
@@ -1002,7 +1002,7 @@ fn run_owned_rowbinary<D>(
     loadgen: Option<std::thread::JoinHandle<()>>,
     count_rows: impl Fn() -> u64,
 ) where
-    D: etl_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
+    D: spate_core::deser::Deserializer<Owned<SensorBatchOwned>> + Clone + Send + 'static,
 {
     let e = ClickHouseEncoder::<Owned<SensorEventOwned>>::new();
     let chunk_cfg = meta.chunk_config();
@@ -1029,7 +1029,7 @@ fn run_owned_rowbinary<D>(
 }
 
 fn main() {
-    etl_core::telemetry::init(etl_core::telemetry::LogFormat::Pretty, "info");
+    spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
     let duration = Duration::from_secs(env_u64("DURATION_S", 60));
     let rate = env_u64("RATE", 100_000);
     let partitions = env_u64("PARTITIONS", 4) as i32;
@@ -1054,7 +1054,7 @@ fn main() {
          conditional chunk_kib variant would mislabel arms"
     );
     let chunk_kib = env_u64("CHUNK_KIB", DEFAULT_CHUNK_KIB);
-    // 0 = set nothing, which is what the connector ships: `etl-kafka` pins no
+    // 0 = set nothing, which is what the connector ships: `spate-kafka` pins no
     // prefetch depth, so librdkafka's default applies. Defaulting to a number
     // would make every unqualified arm measure a depth production never uses.
     // `kafka_topology` reads the same variable with the same meaning.

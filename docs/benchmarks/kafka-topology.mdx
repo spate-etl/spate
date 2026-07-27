@@ -24,7 +24,7 @@ Re-measured 2026-07 on a corrected harness. Two problems with the table:
 
 **It ran at a prefetch depth the framework did not use.** The v1 harness never
 set `queued.min.messages`, so it inherited librdkafka's default of 100000,
-while `etl-kafka` pinned 1000. That one difference is worth **22–76x** on a
+while `spate-kafka` pinned 1000. That one difference is worth **22–76x** on a
 backlogged consumer, so the "~3.3–3.7M single-instance ceiling" was never a
 measurement of this connector — it was a measurement of librdkafka's defaults.
 The framework override has since been removed (the two now agree), and the
@@ -59,7 +59,7 @@ reduce throughput). Mode A's headline is 4 independent instances, not a better
 polling model. With ≥ ~1.1 µs/record of real work at 4 threads, per-record cost
 dominates and both modes run at 93–96% of theoretical.
 
-**Decision: single consumer + split partition queues confirmed** for etl-kafka.
+**Decision: single consumer + split partition queues confirmed** for spate-kafka.
 Caveats recorded: re-measure the per-instance ceiling against multi-broker
 clusters (fetchers parallelize per broker); very-high-throughput trivial
 pipelines with many threads remain the one shape favouring per-thread consumers

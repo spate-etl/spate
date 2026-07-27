@@ -1,6 +1,6 @@
 //! ClickHouse-side observability for the sink-saturation rig.
 //!
-//! Throughput measured at the ETL boundary (`etl_sink_records_total`) tells us
+//! Throughput measured at the ETL boundary (`spate_sink_records_total`) tells us
 //! how fast we *pushed* rows; it can't tell us whether the server wrote them at
 //! a healthy *shape*. ClickHouse wants large parts, so a sink that inserts fast
 //! but produces many tiny parts is quietly storing up merge pressure. These

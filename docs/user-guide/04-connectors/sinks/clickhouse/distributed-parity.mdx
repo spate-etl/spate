@@ -133,7 +133,7 @@ higher-ranked over the payload lifetime) — returning a `ShardKey`. The
 router owns the `xxHash64(seed 0)` and the weight-interval selection:
 
 ```rust
-use etl::clickhouse::ShardKey;
+use spate::clickhouse::ShardKey;
 
 /// Sharding key: the `sensor` column. One sensor always lands on one shard,
 /// matching the Distributed DDL's `xxHash64(sensor)`.
@@ -143,7 +143,7 @@ fn sensor_key<'a>(row: &'a SensorEvent<'_>) -> ShardKey<'a> {
 ```
 
 ```rust
-let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 // No-op unless the YAML opts into `distributed_check`; with it, startup fails
 // fast if the sink topology drifts from the cluster + DDL.
 pipeline.block_on(sink.validate_distributed())?;

@@ -121,7 +121,7 @@ done; done
 
 # ClickHouse sink saturation → ch-sink-saturation.jsonl (Docker ClickHouse 26.3)
 # In-process generator (no broker) → real chain → sharded ClickHouse sink at full
-# tilt. Throughput = etl_sink_records_total delta / window (works for ENGINE=Null,
+# tilt. Throughput = spate_sink_records_total delta / window (works for ENGINE=Null,
 # where SELECT count() is 0). The committed sweep is 33 arms × 3 reps = 99 records
 # on ClickHouse 26.3.17.4 (the current default image — no CLICKHOUSE_IMAGE pin
 # needed). Each record's `variant` is self-describing: it now carries the
@@ -187,10 +187,10 @@ rig at an external cluster instead of the local container:
 **Kafka producer sink saturation** ([study](./kafka-sink.mdx)) — an in-process
 generator (no source broker) drives the real chain into the Kafka producer sink
 at full tilt against `apache/kafka:4.1.0` in Docker. Throughput =
-`etl_sink_records_total` delta / window (durable acks). The broker is capped at
+`spate_sink_records_total` delta / window (durable acks). The broker is capped at
 `KAFKA_CPUS` cores; each framework arm records a two-axis verdict in its note —
 `upstream` (`sink`/`budget`/`generator`/`checkpoint`) and `downstream`
-(`client`/`broker`, from the raw baseline and the sink's `etl_kafka_*` broker
+(`client`/`broker`, from the raw baseline and the sink's `spate_kafka_*` broker
 statistics). The rig sweeps one env dimension (`SWEEP` over `SWEEP_LIST`), `REPS`
 each; children re-exec with `RUN_ONE=1` and reuse the warm broker via `BOOTSTRAP`.
 
@@ -254,10 +254,10 @@ Superseded reference point: an earlier rate-limited E2E smoke (100k rec/s target
 above (`RATE=0`), which measures the pipeline ceiling instead of a throttled
 target.
 
-The micro-benchmarks are separate: `cargo bench -p etl-core` and
-`cargo bench -p etl-avro` (criterion + divan). Divan's `AllocProfiler`
+The micro-benchmarks are separate: `cargo bench -p spate-core` and
+`cargo bench -p spate-avro` (criterion + divan). Divan's `AllocProfiler`
 allocation assertions are hard failures in CI, and the counting-allocator
-integration test (`crates/etl-core/tests/chain_alloc.rs`) hard-fails if
+integration test (`crates/spate-core/tests/chain_alloc.rs`) hard-fails if
 per-iteration allocations scale with record count.
 
 A recurring harness lesson, now encoded in the binaries: metric handles created
@@ -274,7 +274,7 @@ exceeding records by ~10%. The harness now reports `produced_total` alongside
 and asserts conservation; a quiet-machine re-run shows `sink_rows_total ==
 produced_total` exactly (1,297,595,392 == 1,297,595,392 @ 1 thread) and healthy
 1→2 thread scaling (39.4M → 74.6M records/s). The metric itself is proven exact
-by `sink_records_metric_matches_rows_written_exactly` in `etl-core`.
+by `sink_records_metric_matches_rows_written_exactly` in `spate-core`.
 
 ## E2E rate accounting (2026-07 correction) {#e2e-rate-accounting}
 

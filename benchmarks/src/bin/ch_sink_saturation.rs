@@ -6,7 +6,7 @@
 //! - `Null` (default): rows are discarded after parse — no part write, fsync,
 //!   merge, or async-buffer flush. This is the *ceiling*: framework egress +
 //!   HTTP transport + server-side parse/block-form. `SELECT count()` is 0 here,
-//!   so throughput is read from `etl_sink_records_total` (durable acks) over a
+//!   so throughput is read from `spate_sink_records_total` (durable acks) over a
 //!   steady-state window, not from the table.
 //! - `MergeTree`: the real sink — part writes and merges. The `Null → MergeTree`
 //!   throughput gap is the flush/part-write cost, and `chstats` reads the
@@ -21,7 +21,7 @@
 //! batch/queue sizing so the rig doesn't self-throttle below sink capacity.
 //!
 //! Profiles:
-//! - **Local** (default): starts/reuses the `etl-bench-clickhouse` container
+//! - **Local** (default): starts/reuses the `spate-bench-clickhouse` container
 //!   (`CLICKHOUSE_IMAGE`, `CLICKHOUSE_CPUS`), so the client and server share
 //!   this host — a shared-host ceiling. The parent process creates the server
 //!   once; children reuse it warm.
@@ -50,15 +50,15 @@
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::SyntheticSource;
 use benchmarks::{chstats, docker, env_str, env_u64, prom};
-use etl_clickhouse::{ClickHouseEncoder, NativeEncoder};
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::{ComponentConfig, PipelineConfig};
-use etl_core::deser::{BytesPassthrough, Owned};
-use etl_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, RunnableChain, chain_owned};
-use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::record::RecordMeta;
-use etl_core::sink::{ShardRouter, SinkPool, shard_queues};
+use spate_clickhouse::{ClickHouseEncoder, NativeEncoder};
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::{ComponentConfig, PipelineConfig};
+use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::metrics::{ComponentLabels, E2eBasis, MetricsHandle, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, RunnableChain, chain_owned};
+use spate_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::record::RecordMeta;
+use spate_core::sink::{ShardRouter, SinkPool, shard_queues};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -135,8 +135,8 @@ fn resolve_conn() -> Conn {
 }
 
 fn install_metrics() -> MetricsHandle {
-    etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
-        exporter: etl_core::metrics::Exporter::Prometheus,
+    spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
         ..Default::default()
     })
     .expect("install metrics recorder")
@@ -159,7 +159,7 @@ fn run_one() {
     // Default inflight budget from the deployment sizing rule (docs/user-guide/
     // 05-deployment/tuning.md): `max_inflight_bytes × low_ratio` must cover the
     // fully-formed in-flight batches plus the queued 64 KiB chunks admitted to
-    // the budget at chunk-seal (etl-core handoff). Use BATCH_MAX_MB (the config
+    // the budget at chunk-seal (spate-core handoff). Use BATCH_MAX_MB (the config
     // bound) not observed batch size — the part-size arms seal on max_bytes and
     // would otherwise under-provision. low_ratio is 0.5 (config default); an
     // undersized budget self-throttles the rig below the sink's real capacity.
@@ -275,7 +275,7 @@ fn run_one() {
         password = conn.password,
     );
     let section: ComponentConfig = serde_yaml::from_str(&sink_yaml).expect("sink section");
-    let ch = etl_clickhouse::from_component_config(&section).expect("clickhouse sink");
+    let ch = spate_clickhouse::from_component_config(&section).expect("clickhouse sink");
     assert_eq!(ch.endpoints.len(), shards, "one endpoint per shard");
 
     // Native is type-driven: fetch the column schema once, before the pool
@@ -375,7 +375,7 @@ fn run_one() {
     let pipeline = std::thread::spawn(move || runtime.run());
 
     // ── Warm up, then measure a steady-state window ──────────────────────
-    // Throughput = the delta of `etl_sink_records_total` (durable acks, summed
+    // Throughput = the delta of `spate_sink_records_total` (durable acks, summed
     // across shards) over the window; works even for Null, where the table
     // count is 0. `since` scopes the ClickHouse-side accounting to the window.
     std::thread::sleep(warmup);
@@ -384,19 +384,19 @@ fn run_one() {
     // serves both the pause/gauge baselines and the flush-histogram delta.
     let since = chstats::now(&conn.host, conn.port, &conn.user, &conn.password);
     let text0 = metrics_handle.render();
-    let sink0 = prom::value(&text0, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses0 = prom::value(&text0, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused0 = prom::value(&text0, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend0 = prom::value(&text0, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let sink0 = prom::value(&text0, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses0 = prom::value(&text0, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused0 = prom::value(&text0, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend0 = prom::value(&text0, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
     let c0 = produced.load(Ordering::Relaxed);
     let t0 = Instant::now();
     std::thread::sleep(duration);
     let text1 = metrics_handle.render();
     let window = t0.elapsed().as_secs_f64();
-    let sink1 = prom::value(&text1, "etl_sink_records_total", "").unwrap_or(0.0);
-    let pauses1 = prom::value(&text1, "etl_backpressure_pause_events_total", "").unwrap_or(0.0);
-    let paused1 = prom::value(&text1, "etl_backpressure_paused", "").unwrap_or(0.0);
-    let pend1 = prom::value(&text1, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
+    let sink1 = prom::value(&text1, "spate_sink_records_total", "").unwrap_or(0.0);
+    let pauses1 = prom::value(&text1, "spate_backpressure_pause_events_total", "").unwrap_or(0.0);
+    let paused1 = prom::value(&text1, "spate_backpressure_paused", "").unwrap_or(0.0);
+    let pend1 = prom::value(&text1, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
     let c1 = produced.load(Ordering::Relaxed);
 
     // Limiter verdict (a note token, never a variant key — reps of one arm can
@@ -516,7 +516,7 @@ fn run_one() {
     }
     // Flush latency over the window only: quantile of the per-`le` bucket delta.
     if let Some(p99) =
-        prom::histogram_quantile_delta(&text0, &text1, "etl_sink_flush_duration_seconds", 0.99)
+        prom::histogram_quantile_delta(&text0, &text1, "spate_sink_flush_duration_seconds", 0.99)
     {
         rep = rep.metric("sink_flush_p99", Metric::minimize(p99, "s"));
     }
@@ -529,7 +529,7 @@ fn run_one() {
     }
     rep.note(format!(
         "ceiling rig: memory source -> ClickHouse {engine}; rows_per_s = \
-         etl_sink_records_total delta / window; limiter={limiter} \
+         spate_sink_records_total delta / window; limiter={limiter} \
          (pauses={pauses}, paused_edge={paused_edge}, pend_max={pend_max}); \
          budget_mb={max_inflight_mb} derived_mb={derived_mb}; \
          low-entropy synthetic body; window_s={window:.1}; \
@@ -543,7 +543,7 @@ fn run_one() {
 }
 
 fn main() {
-    etl_core::telemetry::init(etl_core::telemetry::LogFormat::Pretty, "info");
+    spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
     if env_u64("RUN_ONE", 0) != 0 {
         run_one();
         return;

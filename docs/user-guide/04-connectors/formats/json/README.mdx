@@ -1,6 +1,6 @@
 # JSON format
 
-The JSON deserializer (`etl-json`, feature `json` on the `etl` facade) decodes
+The JSON deserializer (`spate-json`, feature `json` on the `spate` facade) decodes
 JSON payloads carried by a source into records — either your own serde types or
 dynamically-typed values. Three framings map onto the framework's "one payload →
 0..N records" contract, and `serde_json` (stable 1.x) does the parsing.
@@ -16,7 +16,7 @@ let deserializer = JsonDeserializerBuilder::from_component(deser_section)?
 ## Configuration
 
 The `deserializer: { json: ... }` section deserializes into `JsonSettings`
-(`crates/etl-json/src/config.rs`); unknown fields are rejected.
+(`crates/spate-json/src/config.rs`); unknown fields are rejected.
 
 ```yaml
 deserializer:
@@ -50,7 +50,7 @@ deserializer:
 - `build_serde::<T>()` — decodes each document into your own
   `T: serde::de::DeserializeOwned` struct. No `serde_json` types leak into your
   pipeline. This is the flagship path — see
-  `crates/etl/examples/json_ndjson_memory.rs`.
+  `crates/spate/examples/json_ndjson_memory.rs`.
 - `build_value()` — decodes into dynamically-typed `serde_json::Value` records,
   for pipelines that inspect or route on structure not known at compile time.
 
@@ -60,7 +60,7 @@ A document that does not parse (or does not match the target type) is a
 record-level error, handled by `on_error`:
 
 - **`skip`** (default) — drop the record, count it in
-  `etl_json_deser_records_dropped_total{reason}`, and continue. Under `ndjson`
+  `spate_json_deser_records_dropped_total{reason}`, and continue. Under `ndjson`
   the good lines around a bad one still flow.
 - **`fail`** — surface a decode error on the first bad record.
 
@@ -72,9 +72,9 @@ pipeline or **drops the payload** is then the chain's deserializer error policy
 The common case — per-record **skip** — needs no chain-side change.
 :::
 
-The connector-owned `etl_json_deser_*` families are minted when the builder is
+The connector-owned `spate_json_deser_*` families are minted when the builder is
 given a metrics scope with `.with_metrics(pipeline, component)`; they sit
-alongside the framework's generic `etl_deser_*` stage metrics, which wrap every
+alongside the framework's generic `spate_deser_*` stage metrics, which wrap every
 decoder. Undecodable data that stops the pipeline replays under at-least-once —
 replay never loses records.
 
@@ -103,7 +103,7 @@ rejected.
 
 Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value step
 sits behind an internal seam, so the opt-in **`simd`** Cargo feature (`json-simd`
-on the `etl` facade) swaps in [`simd-json`](https://github.com/simd-lite/simd-json),
+on the `spate` facade) swaps in [`simd-json`](https://github.com/simd-lite/simd-json),
 a SIMD-accelerated parser, with no change to the builder API — `build_serde` and
 `build_value` are identical either way. `from_reader` is never used on the hot
 path — decoding always operates on the in-memory payload slice, which is both

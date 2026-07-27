@@ -50,9 +50,9 @@ ClickHouse type to lay bytes out columnar, so selecting it always fetches
 encoder from the fetched schema:
 
 ```rust
-let sink = etl::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
 let native_schema = pipeline.block_on(sink.native_schema())?; // Arc<NativeSchema>
-let encoder = etl::clickhouse::NativeEncoder::<Owned<MyRow>>::new(native_schema);
+let encoder = spate::clickhouse::NativeEncoder::<Owned<MyRow>>::new(native_schema);
 // hand `encoder` to the chain's terminal `.sink(...)` stage
 ```
 

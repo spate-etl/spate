@@ -161,8 +161,8 @@ rows — so it is not comparable on a rows/s axis. Each record carries its explo
 factor in `variant.events` (the raw arm records `variant.payload` instead), so
 that caveat is machine-visible rather than prose-only.
 
-`etl_e2e_latency_seconds` **is** wired — observed on the sink ack path
-(`crates/etl-core/src/sink/worker.rs`, via `SinkShardMetrics::e2e_observed`) —
+`spate_e2e_latency_seconds` **is** wired — observed on the sink ack path
+(`crates/spate-core/src/sink/worker.rs`, via `SinkShardMetrics::e2e_observed`) —
 and every arm reports e2e p50/p99, also bucket-interpolated and so not to be
 read to three decimals. A related harness lesson, now encoded in the binaries:
 metric handles created before `metrics::install` bind to the no-op recorder and
@@ -175,7 +175,7 @@ are kept as a table.
 
 Environment: dev laptop, ClickHouse 25.6 in Docker, 2M rows (~30 MB), clickhouse
 crate 0.15.1. Source: spike branch `worktree-agent-a01a4cdccd8d0ab10`
-(`crates/etl-clickhouse/examples/rowbinary_spike.rs`).
+(`crates/spate-clickhouse/examples/rowbinary_spike.rs`).
 
 | Path | Time |
 |---|---|

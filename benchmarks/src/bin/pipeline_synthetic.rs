@@ -25,12 +25,12 @@
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, SyntheticSource};
 use benchmarks::{busy_work, env_str, env_u64, prom};
-use etl_core::backpressure::InflightBudget;
-use etl_core::config::PipelineConfig;
-use etl_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
-use etl_core::ops::{ChunkConfig, chain};
-use etl_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
-use etl_core::sink::{KeyHashRouter, SinkPool, SinkPoolConfig, shard_queues};
+use spate_core::backpressure::InflightBudget;
+use spate_core::config::PipelineConfig;
+use spate_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
+use spate_core::ops::{ChunkConfig, chain};
+use spate_core::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+use spate_core::sink::{KeyHashRouter, SinkPool, SinkPoolConfig, shard_queues};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -103,8 +103,8 @@ fn run_one() {
     // created before install bind to the noop recorder and render nothing.
     // The pipeline config uses `exporter: none` so the runtime doesn't
     // fight over the global recorder; we render our own handle directly.
-    let metrics_handle = etl_core::metrics::install(&etl_core::metrics::MetricsSettings {
-        exporter: etl_core::metrics::Exporter::Prometheus,
+    let metrics_handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
         ..Default::default()
     })
     .expect("install metrics recorder");
@@ -230,11 +230,11 @@ sink: {{ nullsink: {{}} }}
         let b = prom::value(&metrics_text, name, "").unwrap_or(0.0);
         (b - a).max(0.0)
     };
-    let queue_full = delta("etl_queue_full_events_total");
-    let pause_events = delta("etl_backpressure_pause_events_total");
-    let paused_seconds = delta("etl_backpressure_paused_seconds_total");
+    let queue_full = delta("spate_queue_full_events_total");
+    let pause_events = delta("spate_backpressure_pause_events_total");
+    let paused_seconds = delta("spate_backpressure_paused_seconds_total");
     let pending_batches =
-        prom::value(&metrics_text, "etl_checkpoint_pending_batches", "").unwrap_or(0.0);
+        prom::value(&metrics_text, "spate_checkpoint_pending_batches", "").unwrap_or(0.0);
     let sink_limited = queue_full > 0.0 || pause_events > 0.0;
     shutdown.trigger();
     let exit = pipeline.join().expect("pipeline thread").expect("run");
@@ -313,10 +313,10 @@ sink: {{ nullsink: {{}} }}
         );
     // e2e latency is only populated when the exporter has histogram samples;
     // omit the metric entirely rather than emitting a null.
-    if let Some(p50) = prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.5) {
+    if let Some(p50) = prom::histogram_quantile(&metrics_text, "spate_e2e_latency_seconds", 0.5) {
         rep = rep.metric("e2e_p50_s", Metric::minimize(p50, "s"));
     }
-    if let Some(p99) = prom::histogram_quantile(&metrics_text, "etl_e2e_latency_seconds", 0.99) {
+    if let Some(p99) = prom::histogram_quantile(&metrics_text, "spate_e2e_latency_seconds", 0.99) {
         rep = rep.metric("e2e_p99_s", Metric::minimize(p99, "s"));
     }
     // Oversubscription check: pipeline threads + I/O workers + controller

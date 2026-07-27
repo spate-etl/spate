@@ -1,22 +1,22 @@
-# Running etl-rs pipelines on Kubernetes
+# Running Spate pipelines on Kubernetes
 
 The `Dockerfile` here builds the flagship example
 (`kafka_avro_to_clickhouse`) into a distroless, non-root image — the
 template for any pipeline binary you build on the framework.
 
 ```sh
-docker build -f examples/docker/Dockerfile -t etl-pipeline .
+docker build -f examples/docker/Dockerfile -t spate-pipeline .
 docker run -e KAFKA_BROKERS=broker:9092 -e CLICKHOUSE_URL=http://ch:8123 \
-           -p 9090:9090 etl-pipeline
+           -p 9090:9090 spate-pipeline
 ```
 
 ## Configuration
 
-The pipeline reads one YAML file (`ETL_CONFIG`, default
-`/etc/etl/pipeline.yaml`). Every `${VAR:-default}` in it interpolates from
+The pipeline reads one YAML file (`SPATE_CONFIG`, default
+`/etc/spate/pipeline.yaml`). Every `${VAR:-default}` in it interpolates from
 the environment at startup, so the Kubernetes pattern is:
 
-- **ConfigMap** mounted over `/etc/etl/pipeline.yaml` for structure;
+- **ConfigMap** mounted over `/etc/spate/pipeline.yaml` for structure;
 - **env / Secret-backed env** for credentials and endpoints
   (`KAFKA_BROKERS`, `CLICKHOUSE_PASSWORD`, ...).
 

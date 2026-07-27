@@ -38,6 +38,18 @@ semver_check = true
 
 pr_labels = ["release"]
 
+# Pinned rather than left to the default, because release.yml matches on it to
+# decide whether a push to `main` is a release. The default varies with the
+# workspace's shape — it is `chore: release` when packages carry different
+# versions and `chore: release v{{ version }}` when they agree — and since
+# these nine always agree, a change in that logic upstream would silently stop
+# the publish job from recognising its own release. Setting it makes both sides
+# of the match this repository's decision.
+#
+# The repository merges pull requests with the title as the squash subject, so
+# this string is what lands on `main`.
+pr_name = "chore: release v{{ version }}"
+
 # One tag and one GitHub release per version, not nine of each. The defaults
 # are per-package (`spate-core-v0.1.0`, …), which is right for a workspace whose
 # crates version independently and pure noise for one that does not.

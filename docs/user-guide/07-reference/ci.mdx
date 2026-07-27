@@ -80,13 +80,45 @@ destination (so moving a `.rs` file out of a crate would look like a docs
 change), and `core.quotePath` C-quotes non-ASCII filenames into matching
 nothing.
 
+## The Actions allowlist
+
+The organisation permits GitHub-owned actions, verified-publisher actions, and
+an explicit list of patterns; everything else is refused. Two things about that
+are worth knowing before adding an action, because neither is discoverable from
+this repository.
+
+**A refused action does not fail the job — the run never starts.** It reports
+`startup_failure` with no annotation naming the action, and the reason appears
+only in the run's error text. A `startup_failure` also cannot be re-run: it
+needs a fresh event, so reopening the pull request is the way to retry.
+
+**The allowlist applies to actions your actions use.** `release-plz/action`
+calls `cargo-bins/cargo-binstall` and `release-plz/git-config` internally, and
+both had to be listed. No grep over this repository finds them — they live
+inside a third-party composite action. Listing every direct `uses:` is
+necessary and not sufficient:
+
+```sh
+grep -rhoE 'uses: [^ ]+' .github/workflows/*.yml .github/actions/*/action.yml \
+  | sed 's/uses: //' | grep -v '^\./' | sed 's/@.*//' | sort -u
+```
+
+So after adding a third-party action, run the workflow once and read the
+failure if there is one. That is the only way a transitive dependency surfaces.
+
 ## Action pinning and the shared preamble
 
 GitHub Actions are pinned to full commit SHAs. Use
 `pinact run .github/workflows/*.yml .github/actions/*/action.yml` — note the
 second glob, because the toolchain and tool pins now live in the composite
 action and the first glob alone would miss them. Run it rather than editing
-them by hand; note it refuses to pin a *branch* ref
+them by hand. It is not a complete check, though: `pinact` accepted a pin that
+was an annotated *tag object* rather than the commit it points at — a SHA
+GitHub answers `No commit found` for, so the workflow could never have resolved
+it — and it accepted a real SHA carrying a version comment three majors out of
+date. `zizmor` caught both, through its `ref-version-mismatch` audit. Run both.
+
+Note `pinact` refuses to pin a *branch* ref
 (`dtolnay/rust-toolchain@stable`) or a tool-alias ref
 (`taiki-e/install-action@nextest`), because in both cases the ref name selects
 behaviour. **No workflow currently takes either exception** — both are SHA-pinned

@@ -151,6 +151,21 @@ updates:
       # longer soak.
       semver-minor-days: 14
       semver-major-days: 14
+    # TypeScript's major is not this repository's to take. `website/tsconfig.json`
+    # extends `@docusaurus/tsconfig`, which sets `baseUrl` and `paths` — and
+    # TypeScript 7 removed `baseUrl`. So the major lands as a typecheck failure
+    # rather than as a choice, and it stays that way until Docusaurus moves the
+    # line it supports. `package.json` already pins `~5.6.2`, so taking it would
+    # also mean widening a range somebody else controls.
+    #
+    # Scoped to typescript, and to majors, deliberately. A blanket non-major
+    # rule on the npm group would freeze the patch and minor bumps that carry
+    # the security fixes, which is the opposite of what this file is for. Delete
+    # this when Docusaurus supports the newer line, and take the major on its
+    # own.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     # This is the largest dependency graph in the repo by package count (~1400
     # against Cargo's ~500) and the ecosystem where mass-compromise events
     # actually happen, so the cooldown earns its keep here more than anywhere.

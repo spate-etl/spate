@@ -481,7 +481,7 @@ jobs:
           wranglerVersion: "4"
           # --branch=main matches the project's production branch, so this
           # registers as a production deployment (not a preview).
-          command: pages deploy website/build --project-name=Spate --branch=main
+          command: pages deploy website/build --project-name=spate --branch=main
 
   # ===========================================================================
   # WEEKLY

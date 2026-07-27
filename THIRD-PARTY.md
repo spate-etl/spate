@@ -40,7 +40,7 @@ project carries the same terms as the repository.
 
 | Licence | Crates |
 |---|---|
-| `MIT` | 295 |
+| `MIT` | 296 |
 | `Apache-2.0` | 22 |
 | `Unicode-3.0` | 19 |
 | `ISC` | 6 |
@@ -105,7 +105,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `aho-corasick` | 1.1.4 | `MIT` |
 | `allocator-api2` | 0.2.21 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
-| `async-trait` | 0.1.89 | `MIT` |
+| `async-trait` | 0.1.91 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
 | `autocfg` | 1.5.1 | `MIT` |
 | `aws-lc-sys` | 0.42.0 | `MIT` |
@@ -311,20 +311,20 @@ reproducible. The elected licence ids are unaffected either way.
 | `rustversion` | 1.0.22 | `MIT` |
 | `rusty-fork` | 0.3.1 | `MIT` |
 | `same-file` | 1.0.6 | `MIT` |
-| `schema_registry_converter` | 4.9.0 | `MIT` |
+| `schema_registry_converter` | 4.10.0 | `MIT` |
 | `scopeguard` | 1.2.0 | `MIT` |
 | `security-framework` | 3.7.0 | `MIT` |
 | `security-framework-sys` | 2.17.0 | `MIT` |
 | `semver` | 1.0.28 | `MIT` |
-| `serde` | 1.0.228 | `MIT` |
+| `serde` | 1.0.229 | `MIT` |
 | `serde_bytes` | 0.11.19 | `MIT` |
-| `serde_core` | 1.0.228 | `MIT` |
-| `serde_derive` | 1.0.228 | `MIT` |
+| `serde_core` | 1.0.229 | `MIT` |
+| `serde_derive` | 1.0.229 | `MIT` |
 | `serde_derive_internals` | 0.29.1 | `MIT` |
-| `serde_json` | 1.0.150 | `MIT` |
+| `serde_json` | 1.0.151 | `MIT` |
 | `serde_nanos` | 0.1.4 | `MIT` |
 | `serde_path_to_error` | 0.1.20 | `MIT` |
-| `serde_repr` | 0.1.20 | `MIT` |
+| `serde_repr` | 0.1.21 | `MIT` |
 | `serde_urlencoded` | 0.7.1 | `MIT` |
 | `sha2` | 0.10.9 | `MIT` |
 | `sha2` | 0.11.0 | `MIT` |
@@ -347,14 +347,15 @@ reproducible. The elected licence ids are unaffected either way.
 | `strum` | 0.27.2 | `MIT` |
 | `strum_macros` | 0.27.2 | `MIT` |
 | `syn` | 2.0.118 | `MIT` |
+| `syn` | 3.0.3 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
 | `tempfile` | 3.27.0 | `MIT` |
-| `thiserror` | 2.0.18 | `MIT` |
-| `thiserror-impl` | 2.0.18 | `MIT` |
+| `thiserror` | 2.0.19 | `MIT` |
+| `thiserror-impl` | 2.0.19 | `MIT` |
 | `thread_local` | 1.1.9 | `MIT` |
-| `time` | 0.3.53 | `MIT` |
+| `time` | 0.3.54 | `MIT` |
 | `time-core` | 0.1.9 | `MIT` |
-| `time-macros` | 0.2.31 | `MIT` |
+| `time-macros` | 0.2.32 | `MIT` |
 | `tokio` | 1.53.1 | `MIT` |
 | `tokio-macros` | 2.7.0 | `MIT` |
 | `tokio-rustls` | 0.26.4 | `MIT` |
@@ -375,7 +376,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `tracing-subscriber` | 0.3.23 | `MIT` |
 | `try-lock` | 0.2.5 | `MIT` |
 | `tryhard` | 0.5.2 | `MIT` |
-| `twox-hash` | 2.1.2 | `MIT` |
+| `twox-hash` | 2.1.3 | `MIT` |
 | `typenum` | 1.20.1 | `MIT` |
 | `unarray` | 0.1.4 | `MIT` |
 | `unicode-ident` | 1.0.24 | `MIT` |

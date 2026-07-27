@@ -109,7 +109,8 @@ pub struct RunMeta {
     /// Short git commit of the working tree, when discoverable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// Host name of the machine that produced the record.
+    /// Label for the machine that produced the record: `BENCH_HOST`, or
+    /// `local` when unset. See `detect_host`.
     pub host: String,
     /// CPU brand string, e.g. `Apple M5 Max`.
     pub cpu: String,
@@ -159,12 +160,16 @@ fn detect_commit() -> Option<String> {
     trimmed_stdout("git", &["rev-parse", "--short=12", "HEAD"])
 }
 
+// Opt-in, and deliberately not `hostname`. Every record here is committed and
+// published, and a machine's own name is a poor description of it as well as a
+// personal one — `cpu` and `cores` already say what a reader needs to compare
+// two runs. Set `BENCH_HOST` when a run's machine identity is itself part of
+// the provenance, such as a named CI runner or a second box in an A/B.
 fn detect_host() -> String {
-    std::env::var("HOSTNAME")
+    std::env::var("BENCH_HOST")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| trimmed_stdout("hostname", &[]))
-        .unwrap_or_else(|| "unknown".to_owned())
+        .unwrap_or_else(|| "local".to_owned())
 }
 
 fn detect_cpu() -> String {

@@ -120,8 +120,18 @@ Publishing by hand, if the automation is the thing that is broken, in this
 order:
 
 ```
-spate-core → spate-test → spate-avro → spate-json → spate-coordination
-           → spate-kafka → spate-clickhouse → spate-s3 → spate
+spate-core → spate-test → spate-avro → spate-clickhouse → spate-coordination
+           → spate-json → spate-kafka → spate-s3 → spate
+```
+
+Prefer `cargo publish --workspace --locked`, which derives that order from the
+manifests rather than trusting the list above; the list is for the case where
+you are publishing one crate at a time because something went wrong mid-run.
+Regenerate it rather than trusting it if the graph has changed since:
+
+```sh
+cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.publish != []) | .name'
 ```
 
 `cargo publish --dry-run --locked -p <crate>` first, every time. Note that a

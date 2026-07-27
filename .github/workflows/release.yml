@@ -36,6 +36,16 @@ jobs:
     name: Release pull request
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Skipped entirely when the release app is not configured. Without this the
+    # workflow fails on every push to `main` for want of a credential — and it
+    # fails that way in every fork too, where the secret cannot exist at all and
+    # nobody can do anything about it.
+    #
+    # Keyed on the variable rather than the private key because `secrets` is not
+    # available in a job-level `if:` and `vars` is. The two are configured
+    # together, so the variable's presence stands for the pair — and if only one
+    # were set, failing loudly at the token step is the right outcome anyway.
+    if: vars.RELEASE_APP_ID != ''
     steps:
       # A GitHub App token, not GITHUB_TOKEN, and this is the whole reason the
       # app exists: events raised by GITHUB_TOKEN do not trigger workflows, so a
@@ -90,8 +100,9 @@ jobs:
     # string on the other side of this comparison, and the repository's squash
     # subject is the pull request title, so the two meet.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.head_commit.message, 'chore: release v')
+      vars.RELEASE_APP_ID != '' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'chore: release v'))
     permissions:
       contents: read
       # crates.io Trusted Publishing. release-plz exchanges this OIDC token for

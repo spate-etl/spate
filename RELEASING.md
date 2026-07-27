@@ -34,6 +34,14 @@ Maintainer reference. Contributors want
 Nothing releases without a human merging something. `release_always = false`
 is what guarantees that.
 
+The `release` job is also *skipped* on ordinary merges rather than allowed to
+run and no-op, because it enters the `crates-io` environment and would
+otherwise write a deployment record for every commit reaching `main`. It
+recognises a release by the commit subject, which is why `pr_name` is pinned in
+`release-plz.toml` and why the repository squashes with the pull request title
+as the subject. If you ever need to force it, the workflow takes a
+`workflow_dispatch`.
+
 ## Versioning
 
 All nine crates move together, and this needs no configuration: they inherit

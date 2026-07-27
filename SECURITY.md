@@ -71,15 +71,24 @@ what is in scope.
 
 ## Supported versions
 
-The project is pre-1.0 and nothing is published to crates.io yet.
+**The newest `0.x` minor.** One row, and that is the whole policy.
 
 | Version | Supported |
 |---|---|
-| `main` | Yes |
-| Published releases | None yet |
+| Newest `0.x` minor | Yes |
+| Anything older | No |
 
-While pre-1.0, fixes land on `main` and there are no backports. Once releases
-begin, this table becomes the record of what still receives them.
+A fix lands on `main` and ships as the next patch of that minor. There are no
+maintenance branches and no backports by default, because a support matrix
+nobody can staff is worse than a short one honestly stated — it reads as a
+promise while behaving like nothing at all.
+
+If a specific older version genuinely blocks you, say so on the advisory and a
+branch can be cut from its tag. That is a conversation, not a standing
+commitment.
+
+All nine crates version in lockstep, so "the newest minor" means the same thing
+for every one of them.
 
 ## How the project defends itself
 

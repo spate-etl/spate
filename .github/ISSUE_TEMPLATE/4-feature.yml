@@ -1,0 +1,85 @@
+name: Propose an API change or a connector
+description: Something the framework should be able to do and cannot.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The framework's abstractions are deliberately small, and the useful
+        form of this proposal is usually "here is what I could not express",
+        not "here is the API I want". A connector often needs no framework
+        change at all — `Source`, `SourceLane`, `RowEncoder` and `ShardWriter`
+        are public precisely so a third party can implement one without
+        touching the engine.
+
+        A proposal that names the invariant it strains is far more likely to
+        land than one that does not, because that is the conversation either
+        way.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind
+      options:
+        - A new connector (source, sink, or deserializer)
+        - A change to an existing connector
+        - An engine or operator API change
+        - A configuration or observability change
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do, and what stops you
+      description: >-
+        The pipeline you are building and the point at which the current API
+        does not reach. Concrete beats general here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What the API might look like
+      description: >-
+        Optional. A sketch is fine — it does not need to compile.
+      render: rust
+
+  - type: dropdown
+    id: semver
+    attributes:
+      label: Semver impact, as best you can tell
+      options:
+        - Additive — nothing existing changes
+        - Breaking — an existing signature or behaviour changes
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Does this touch any of these?
+      description: >-
+        The engine's load-bearing invariants. Ticking one is not a problem —
+        it just means the proposal needs to say how the invariant still holds.
+      options:
+        - label: Delivery semantics — anything that could commit a watermark past unacknowledged data
+        - label: The source poll loop, which must never block on a channel send
+        - label: The checkpoint tracker, which is synchronous and free of async runtimes
+        - label: The sink intake path, which must not await outside its `select!`
+        - label: Metric naming or cardinality
+        - label: Adding a connector type to a public signature in `spate-core`
+
+  - type: dropdown
+    id: implement
+    attributes:
+      label: Would you want to implement it?
+      options:
+        - Yes, if the design is agreed
+        - Maybe, with guidance
+        - No — proposing only
+    validations:
+      required: true

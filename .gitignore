@@ -5,6 +5,24 @@
 /.claude/*
 !/.claude/commands/
 
+# Credentials. Nothing here has ever been committed and push protection is on,
+# but neither of those helps somebody who drops a local .env next to a compose
+# file and runs `git add -A`. This is the net under that.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.netrc
+credentials
+secrets/
+
 # Docusaurus docs site (website/)
 website/node_modules
 website/build

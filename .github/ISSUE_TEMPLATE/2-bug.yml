@@ -1,0 +1,96 @@
+name: Something else does the wrong thing
+description: A crash, a wrong result, a configuration that will not load, a metric that reads wrong.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything touching delivery guarantees — records lost, duplicated, or
+        a watermark advancing past unacknowledged data — please use the
+        **delivery-correctness** form instead. It asks the questions that class
+        of bug needs.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Engine (operators, checkpointing, sinks, backpressure, runtime)
+        - Kafka connector
+        - ClickHouse connector
+        - S3 connector
+        - Avro or JSON deserializer
+        - Coordination (multi-instance work assignment)
+        - Metrics or the admin endpoint
+        - Configuration loading
+        - Documentation
+        - Build, CI, or the examples
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `spate` version, or the commit if building from source.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: features
+    attributes:
+      label: Cargo features
+      description: >-
+        Which features are enabled. This matters more than it looks — most of
+        the crate is behind one.
+      placeholder: 'kafka, clickhouse, avro'
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Rust version and platform
+      description: >-
+        `rustc --version` and your OS/architecture. The MSRV is 1.94.
+      placeholder: "rustc 1.97.0, macOS aarch64"
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, and what it did.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        The smallest thing that shows it. `spate-test`'s in-memory source and
+        capture sink will reproduce most engine behaviour with no
+        infrastructure at all, and a test written against them is the most
+        useful reproduction there is.
+      render: rust
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant YAML, with credentials removed.
+      render: yaml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Errors, panics, or relevant log lines. Long output is fine.
+      render: shell

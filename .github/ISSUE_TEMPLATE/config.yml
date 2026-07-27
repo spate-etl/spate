@@ -1,0 +1,20 @@
+# Forms only. Every report here has a first question someone would have to ask
+# anyway — which connector, which version, whether a rebalance was involved —
+# and a form asks it once instead of costing a round-trip.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/spate-etl/spate/security/advisories/new
+    about: >-
+      Privately, through GitHub's advisory flow. Anything that could let a
+      pipeline lose or leak data belongs here rather than in a public issue.
+  - name: Read the documentation
+    url: https://spate.kainth.dev/
+    about: >-
+      The user guide, the design rationale, and every metric with its labels.
+      The delivery-semantics page is the one to read before reporting data loss.
+  - name: Benchmarks and methodology
+    url: https://github.com/spate-etl/spate-benchmark
+    about: >-
+      Published performance comparisons, the measurement protocol, and the
+      harness that produces them. Throughput claims are settled there.

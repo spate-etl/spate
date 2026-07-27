@@ -14,6 +14,8 @@ sources of truth it defers to are listed here.
   under, and where to find the attribution a legal review will ask for.
 - [Supply chain](supply-chain.mdx) — what the version numbers promise, and
   what stops a compromised or broken dependency release reaching a build.
+- [Continuous integration](ci.mdx) — what runs on a pull request, what only
+  runs nightly, and which single job the branch rules require.
 
 ## API reference (docs.rs)
 
@@ -21,11 +23,14 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 
 | Crate | Role |
 |---|---|
-| [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `avro`, `full`). |
+| [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `s3`, `avro`, `json`, `coordination`, `full`). |
 | [spate-core](https://docs.rs/spate-core) | The engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline builder and runtime, config, metrics, admin server. |
-| [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues). |
-| [spate-clickhouse](https://docs.rs/spate-clickhouse) | ClickHouse `ShardWriter` and RowBinary encoder. |
+| [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues) and producer sink. |
+| [spate-clickhouse](https://docs.rs/spate-clickhouse) | ClickHouse `ShardWriter` with Native and RowBinary encoders. |
+| [spate-s3](https://docs.rs/spate-s3) | Coordinated object-storage backfill source: planned splits, fenced per-split progress. |
 | [spate-avro](https://docs.rs/spate-avro) | Avro deserializer: Confluent wire format, schema-registry client. |
+| [spate-json](https://docs.rs/spate-json) | JSON deserializer: single, NDJSON and array framings, optional SIMD backend. |
+| [spate-coordination](https://docs.rs/spate-coordination) | Distributed work assignment: leader-elected planner, leases and fenced commits over a pluggable store. |
 | [spate-test](https://docs.rs/spate-test) | In-memory source/sink mocks with scripting handles, for testing pipelines. |
 
 Applications should import through `spate` (which re-exports the connector

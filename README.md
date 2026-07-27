@@ -1,23 +1,29 @@
 # Spate
 
+[![crates.io](https://img.shields.io/crates/v/spate.svg)](https://crates.io/crates/spate)
+[![docs.rs](https://img.shields.io/docsrs/spate)](https://docs.rs/spate)
+[![CI](https://github.com/spate-etl/spate/actions/workflows/ci.yml/badge.svg)](https://github.com/spate-etl/spate/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-spate.kainth.dev-e8590c)](https://spate.kainth.dev/)
-[![codecov](https://codecov.io/github/spate-etl/spate/graph/badge.svg?token=NZ5RQO6WH3)](https://codecov.io/github/spate-etl/spate)
+[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](https://blog.rust-lang.org/)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
 
 A high-performance, at-least-once ETL pipeline framework for Rust.
 
-Spate provides the abstractions for streaming Extract-Transform-Load
-pipelines: an operator graph you write in Rust and chain into a single
-monomorphized loop, CPU-pinned processing threads over zero-copy borrowed
-records,
-checkpoint-driven source commits, sharded and replicated asynchronous
-sinks, built-in backpressure, and first-class Prometheus metrics —
-measured at **~9 ns/record with zero per-record allocations** through a
-realistic operator chain (see [docs/benchmarks/](docs/benchmarks/)).
+Spate provides the abstractions for streaming Extract-Transform-Load pipelines:
+an operator graph you write in Rust and chain into a single monomorphized loop,
+CPU-pinned processing threads over zero-copy borrowed records, checkpoint-driven
+source commits, sharded and replicated asynchronous sinks, built-in
+backpressure, and first-class Prometheus metrics — measured at **~9 ns/record
+with zero per-record allocations** through a realistic operator chain (see
+[docs/benchmarks/](docs/benchmarks/)).
 
 ```toml
 [dependencies]
 spate = { version = "0.1", features = ["kafka", "clickhouse", "avro"] }
 ```
+
+Nothing is enabled by default. A pipeline that only writes to ClickHouse never
+compiles the Kafka tree and never resolves `rdkafka` into its lockfile.
 
 ## A taste
 
@@ -46,14 +52,17 @@ Kubernetes (probes, drain timeouts, sizing).
 
 ## Crates
 
-| Crate | Description |
-|---|---|
-| `spate` | The facade — the only crate applications depend on. Features: `kafka`, `clickhouse`, `avro`, `full`. |
-| `spate-core` | The engine: records and acknowledgements, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, the pipeline runtime. |
-| `spate-kafka` | Kafka source on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
-| `spate-clickhouse` | ClickHouse sink: RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
-| `spate-avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
-| `spate-test` | In-memory sources/sinks with scripting handles — test your pipelines without infrastructure. |
+| Crate | Feature | Description |
+|---|---|---|
+| [`spate`](https://crates.io/crates/spate) | — | The facade — the only crate applications depend on. |
+| [`spate-core`](https://crates.io/crates/spate-core) | — | The engine: records and acknowledgements, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, the pipeline runtime. |
+| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source and sink on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
+| [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
+| [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Coordinated object-storage backfill source: a leader plans a prefix into splits, workers lease them with fenced progress. |
+| [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
+| [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |
+| [`spate-coordination`](https://crates.io/crates/spate-coordination) | `coordination`, `coordination-nats` | Multi-instance work assignment: leader-computed sticky assignment over a pluggable store. |
+| [`spate-test`](https://crates.io/crates/spate-test) | — | In-memory sources and sinks with scripting handles — test your pipelines without infrastructure. |
 
 ## Delivery semantics, honestly
 
@@ -83,7 +92,19 @@ is published at **<https://spate.kainth.dev/>** (source in
 
 ## Status
 
-Under active initial development — APIs are not yet stable (0.x).
+Under active initial development — APIs are not yet stable (0.x). Breaking
+changes ship in a minor bump and are called out in
+[CHANGELOG.md](CHANGELOG.md). The newest `0.x` minor is the supported one.
+
+## Contributing
+
+The most useful contribution is one that proves a delivery guarantee wrong.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the invariants, the gates, and how
+changes land; the [Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
+
+Vulnerabilities go through
+[GitHub's private advisory flow](https://github.com/spate-etl/spate/security/advisories/new),
+never a public issue — see [SECURITY.md](SECURITY.md).
 
 ## License
 

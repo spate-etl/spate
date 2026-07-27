@@ -1,0 +1,85 @@
+name: Throughput or latency below expectation
+description: The pipeline is slower than it should be, or slower than it was.
+title: "[perf] "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you spend time on this: the most common cause is
+        not the framework. Sink egress concurrency, partition count, and the
+        chunk-sealing cadence each bound throughput independently, and a
+        pipeline can sit at a fraction of one core while none of them is the
+        framework's doing. The connector tuning pages walk through which is
+        which.
+
+        **Numbers are re-measured before they are acted on**, on reference
+        hardware under the published protocol — a number from a busy laptop is
+        not comparable to one from a quiet host, and run-to-run spread on
+        throughput is wider than people expect. That is not distrust; it is the
+        only way two numbers mean the same thing. The methodology lives in the
+        [benchmark repository](https://github.com/spate-etl/spate-benchmark).
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind
+      options:
+        - Throughput lower than expected
+        - Latency higher than expected
+        - A regression — it was faster on an earlier version
+        - CPU or memory higher than expected
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >-
+        For a regression, both versions — the one that was fast and the one
+        that is not.
+      placeholder: "0.1.0 (was fine on 0.1.0-rc)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The numbers
+      description: >-
+        What you measured, and what you expected. Rows or records per second,
+        or a latency percentile — please say which.
+    validations:
+      required: true
+
+  - type: textarea
+    id: envelope
+    attributes:
+      label: The envelope
+      description: >-
+        CPU cores and memory available to the process, and whether it is
+        containerised with a limit. Also the shape of the work: partition
+        count, sink shard count, in-flight budget, batch sizes.
+      placeholder: |
+        4 CPU / 4 GiB container
+        8 partitions, 1 sink shard, inflight 2, max_rows 262144
+    validations:
+      required: true
+
+  - type: textarea
+    id: saturation
+    attributes:
+      label: What is saturated
+      description: >-
+        Optional but decisive. Is the process CPU-bound? Is it throttled? Are
+        the sink queues full or empty? `spate_queue_*`, `spate_backpressure_*`
+        and `spate_sink_*` answer this directly, and the answer usually names
+        the bottleneck outright.
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Your YAML, with credentials removed.
+      render: yaml

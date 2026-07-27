@@ -1,0 +1,107 @@
+name: Records were lost, duplicated, or committed early
+description: A delivery-guarantee failure — the one class of bug this project most wants to hear about.
+title: "[delivery] "
+labels: ["delivery-correctness"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        At-least-once is the promise the whole design is arranged around: a
+        source watermark is never committed past unacknowledged data, including
+        across rebalances and shutdown. **If that broke, everything else is
+        secondary.**
+
+        Two things worth checking first, because they are the common answers
+        and neither is a bug:
+
+        - **Duplicates after a crash are expected.** Crash replay re-batches
+          with new boundaries, so rows can land twice. Sinks need to tolerate
+          that — see the delivery-semantics guide.
+        - **Records dropped by `ErrorPolicy::Skip` are counted, not silent.**
+          Check `spate_*_dropped_total{reason}` before concluding they vanished.
+
+        If it is neither of those, please do open this.
+
+  - type: dropdown
+    id: guarantee
+    attributes:
+      label: What broke
+      options:
+        - Records were lost — never reached the sink, and the watermark advanced past them
+        - The watermark advanced past data that was not acknowledged
+        - Duplicates appeared without a crash or restart
+        - A shutdown or drain lost in-flight data
+        - Not sure — something is missing and I cannot account for it
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `spate` version, or the commit if building from source.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connectors
+    attributes:
+      label: Which connectors
+      multiple: true
+      options:
+        - Kafka source
+        - Kafka sink
+        - ClickHouse sink
+        - S3 source
+        - Avro deserializer
+        - JSON deserializer
+        - Coordination (multi-instance)
+        - A connector I wrote
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: circumstances
+    attributes:
+      label: Was any of this happening at the time?
+      description: >-
+        These are the boundaries where the guarantee is hardest to hold, so
+        knowing which one applies narrows it enormously.
+      options:
+        - label: A consumer-group rebalance, or an instance joining or leaving
+        - label: A graceful shutdown (SIGTERM, drain)
+        - label: A hard kill (SIGKILL, OOM, node loss)
+        - label: A sink was failing or retrying
+        - label: Backpressure was engaged
+        - label: None of these — steady state
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How you know
+      description: >-
+        The counts that do not reconcile, and how you measured them. Source
+        offsets against rows landed is the usual shape. If you have the
+        `spate_source_*`, `spate_sink_*` and `spate_checkpoint_*` series across
+        the window, they are the single most useful thing here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Pipeline configuration
+      description: Your YAML, with credentials removed.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        Anything around the window, especially commit, drain and rebalance
+        lines. Long output is fine.
+      render: shell

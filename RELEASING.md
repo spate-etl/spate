@@ -134,6 +134,22 @@ cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.publish != []) | .name'
 ```
 
+### What `--dry-run` does not check
+
+It packages and compiles, then stops before the upload request. So it never
+reaches the endpoint that enforces the registry's *acceptance* rules, and a
+green dry run says nothing about them. Both of these were only discovered by
+the real run:
+
+- **A verified email address is required.** An unverified one fails the first
+  upload with `400 Bad Request` and publishes nothing.
+- **Rate limits.** See the table above. A dry run of nine crates completes in
+  minutes; the real thing takes about forty-five.
+
+Neither is a reason to skip the dry run — it catches missing metadata,
+oversized payloads and compilation failures, which are the expensive ones. Just
+do not read "the dry run was green" as "the publish will succeed".
+
 `cargo publish --dry-run --locked -p <crate>` first, every time. Note that a
 manual publish needs a token, and token publishing is disabled on these crates
 — re-enabling it is a deliberate act, and it should be turned off again

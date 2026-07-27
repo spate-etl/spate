@@ -39,6 +39,22 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # terminate: CI already bounds these with `timeout-minutes`.
 [profile.docker]
 slow-timeout = { period = "120s" }
+# Same single retry as `ci`, and for the same reason — with more force here.
+# These tests boot real containers over a real docker network, so their flakes
+# are infrastructure flakes: a cold image pull, a node that took longer than 60s
+# to accept connections, a port that was not listening yet. That is not a defect
+# in the code under test and it is not reproducible by fixing anything.
+#
+# It stopped being tolerable when the merge queue became a required check. A
+# single container hiccup does not just redden a run, it *dequeues* the pull
+# request, and somebody has to notice and re-queue it by hand. One retry costs
+# a few minutes of runner; not having it costs a human.
+#
+# This does not hide anything: `[profile.docker.junit]` below reports through
+# the same JUnit pipeline as the fast suite, so a retried test is surfaced as
+# flaky in a check annotation rather than vanishing into a green run. That
+# reporting is what makes a retry honest, and it is already in place.
+retries = 1
 
 [profile.ci]
 # `fail-fast` is inherited from `[profile.default]`; restating it here would

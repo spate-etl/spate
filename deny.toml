@@ -17,16 +17,6 @@ ignore = [
     # no runtime or network surface to the artifact. Re-check when clickhouse
     # ships a release that drops it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro under clickhouse; compile-time only, no runtime or network surface; no upgrade path" },
-    # quick-xml 0.40.1 (object_store's S3 list-response parser) carries two
-    # DoS-class advisories (quadratic duplicate-attribute check; unbounded
-    # namespace-declaration allocation). Patched in quick-xml >= 0.41, but
-    # object_store 0.14.0 pins the 0.40 minor and no released object_store
-    # depends on 0.41 yet. Exposure is bounded: the XML parsed is the
-    # operator's own object store's list responses, not attacker-controlled
-    # input, and the worst case is denial of service of the backfill job
-    # itself. Remove both when object_store releases against quick-xml 0.41.
-    { id = "RUSTSEC-2026-0194", reason = "DoS-class; XML source is the operator's own object store; fixed upstream, waiting on an object_store release" },
-    { id = "RUSTSEC-2026-0195", reason = "DoS-class; XML source is the operator's own object store; fixed upstream, waiting on an object_store release" },
 ]
 
 [licenses]

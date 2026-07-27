@@ -1,0 +1,59 @@
+# Release automation.
+#
+# The loop is: release-plz watches `main`, opens a release pull request that
+# bumps versions, and merging that pull request publishes and tags. Nothing
+# releases without a human merging something.
+
+[workspace]
+# All nine crates move together. This needs no configuration: release-plz
+# collects the next version of every package that inherits
+# `[workspace.package] version`, takes the highest, and writes that back — and
+# it preserves the `=` operator, so the exact internal pins in
+# `[workspace.dependencies]` follow. `version_group` exists for workspaces that
+# do not inherit; using it here would be worse than nothing, because it only
+# applies to packages that themselves contain changes.
+
+# The changelog is written by hand, drafted from `git cliff --unreleased`.
+#
+# Two reasons, and only the second is about release-plz. The first is that the
+# crates release in lockstep, so a per-crate changelog is actively misleading:
+# a reader of spate-kafka's would see only kafka-scoped commits and miss the
+# engine fix that shipped in the same version. One changelog at the root is the
+# honest shape. The second is that pointing several packages at one
+# `changelog_path` is the configuration release-plz is least happy with, so
+# taking it out of the changelog path entirely removes a class of problem.
+#
+# It also suits the commit style here. The bodies argue; a generated list of
+# subjects would read worse than the summary a person writes.
+changelog_update = false
+
+# A release happens when the release pull request is merged, not on every push
+# to `main`. Without this, any commit that lands outside that flow publishes.
+release_always = false
+
+# Diffs the public API against the published baseline. Inert until 0.1.0 exists
+# on crates.io, and the thing that makes the wide caret requirements in
+# `[workspace.dependencies]` safe to keep once it does.
+semver_check = true
+
+pr_labels = ["release"]
+
+# One tag and one GitHub release per version, not nine of each. The defaults
+# are per-package (`spate-core-v0.1.0`, …), which is right for a workspace whose
+# crates version independently and pure noise for one that does not.
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "spate"
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+# `{{ changelog }}` would be empty here — nothing generates one. Point at the
+# written record instead.
+git_release_body = """
+[CHANGELOG.md](https://github.com/spate-etl/spate/blob/main/CHANGELOG.md) has what changed and why.
+
+All nine crates release together at this version.
+"""

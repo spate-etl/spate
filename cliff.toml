@@ -1,0 +1,47 @@
+# git-cliff, used to *draft* a changelog section, not to publish one.
+#
+# `git cliff --unreleased` prints what has landed since the last tag, grouped by
+# type and with the crate scope kept. That output is the starting point for a
+# hand-written entry in CHANGELOG.md, not the entry itself — commit subjects
+# describe a change, a release note describes what it means for somebody
+# upgrading, and those are different sentences.
+#
+# Deliberately not wired into release-plz. See release-plz.toml.
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | upper_first }}\
+{% if commit.breaking %} — **breaking**{% endif %}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+protect_breaking_commits = true
+sort_commits = "oldest"
+
+# Types that describe a change somebody upgrading would care about come first.
+# `chore` is dropped: a dependency bump is not a release note, and the ones that
+# matter (a floor moving, an advisory) get a `fix` of their own.
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^style", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^Relicense", group = "Changed" },
+]
+
+# Tags are `v0.1.0`; the per-package form is disabled in release-plz.toml.
+tag_pattern = "v[0-9]*"

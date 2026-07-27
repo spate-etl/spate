@@ -15,7 +15,20 @@ Maintainer reference. Contributors want
    `fix` shows up here as a version that is one step too high.
 3. Move the `## [Unreleased]` heading to the new version number and date in the
    same pull request.
-4. Merge it. The `release` job publishes all nine crates in dependency order,
+4. **Regenerate the attribution inventory onto the release branch:**
+
+   ```sh
+   cargo install cargo-about --locked --features cli --version 0.9.1
+   ./scripts/attribution.sh
+   ```
+
+   `THIRD-PARTY.md` is not gated on ordinary pull requests — it would fail every
+   dependency bump, since Dependabot cannot regenerate it — so by release time
+   it is usually stale by however many bumps have landed. This is the point at
+   which it has to be exact, because it is what somebody's legal review reads
+   against the version they are actually consuming. The nightly `attribution`
+   job will have said so already if it drifted.
+5. Merge it. The `release` job publishes all nine crates in dependency order,
    tags `vX.Y.Z`, and opens the GitHub release.
 
 Nothing releases without a human merging something. `release_always = false`

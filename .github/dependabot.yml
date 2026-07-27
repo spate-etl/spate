@@ -32,9 +32,11 @@ updates:
     # sibling merges. Four at a time is what one maintainer can review in a
     # sitting; Dependabot queues the rest rather than dropping them.
     #
-    # A cargo bump also always fails the THIRD-PARTY.md gate, because that file
-    # carries a Version column and Dependabot does not regenerate it. Run
-    # `./scripts/attribution.sh` and commit the result onto the bot's branch.
+    # A cargo bump leaves THIRD-PARTY.md stale, because that file carries a
+    # Version column and Dependabot does not regenerate it. That used to fail
+    # the pull request; it no longer does. The inventory is checked nightly and
+    # regenerated at release, so a bump can merge and the file catches up —
+    # see the `attribution` job in scheduled.yml for why it moved.
     open-pull-requests-limit: 4
     labels: ["dependencies", "rust"]
     commit-message:

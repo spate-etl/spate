@@ -86,7 +86,7 @@ If you changed dependencies:
 
 ```sh
 cargo deny --all-features --locked check all   # licences, advisories, bans, sources
-./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; CI diff-gates it
+./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; nightly + release check it
 ```
 
 If you changed the docs site or any page under `docs/`:

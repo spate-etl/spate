@@ -97,10 +97,10 @@ summary=$(printf '%s\n' "$rows" |
     printf '%s\n' "$rows"
 } >"$staged"
 
-# The rebuild reorders and rewrites two tables, and a silent loss would still
-# pass the diff gate on the next run. Check the outcome rather than trust the
-# pipeline: no licence id may disappear from the summary, and no crate may
-# disappear from the table.
+# The rebuild reorders and rewrites two tables, and a silent loss would look
+# identical to a legitimate removal on the next run. Check the outcome rather
+# than trust the pipeline: no licence id may disappear from the summary, and no
+# crate may disappear from the table.
 ids_before=$(sed -n "$((summary_rule + 1)),${summary_end}p" "$tmp" | cut -d"$bt" -f2 | LC_ALL=C sort)
 ids_after=$(printf '%s\n' "$summary" | cut -d"$bt" -f2 | LC_ALL=C sort)
 [ "$ids_before" = "$ids_after" ] || fail "licence ids changed while rebuilding the summary"

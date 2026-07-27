@@ -253,7 +253,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Marcus Kainth. etl-rs is dual-licensed MIT OR Apache-2.0.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Marcus Kainth. etl-rs is licensed under Apache-2.0.`,
     },
     prism: {
       theme: prismThemes.github,

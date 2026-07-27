@@ -764,6 +764,55 @@ jobs:
   # site — a silent failure there freezes the published documentation
   # indefinitely, and the first symptom is someone noticing the site is stale.
   # ===========================================================================
+  scorecard:
+    name: OSSF Scorecard
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.weekly == 'true'
+    timeout-minutes: 20
+    # Scores this repository against the OpenSSF checks — branch protection,
+    # pinned dependencies, token permissions, dangerous workflow patterns,
+    # signed releases, and so on. Most of what it looks for is already in place;
+    # the value is that it keeps being true. A ruleset relaxed, an action
+    # unpinned, or a `permissions:` block widened shows up here rather than
+    # going unnoticed.
+    #
+    # Weekly rather than nightly: it grades a configuration, and a configuration
+    # does not change most days.
+    permissions:
+      contents: read
+      # Reads workflow run metadata for the checks that grade CI configuration.
+      actions: read
+      # `publish_results` signs its output with an OIDC token so the OpenSSF
+      # API can attest that the score came from this repository rather than
+      # from anyone who cared to POST one.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        id: scorecard
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          # Publishes to the public OpenSSF API, which is what makes the README
+          # badge resolve and the findings readable without downloading an
+          # artifact. The repository is public and so is everything scored, so
+          # this discloses nothing that is not already visible.
+          publish_results: true
+
+      # Kept for the run itself: the published result is a score, and this is
+      # the detail behind it when a check regresses and the question is which
+      # file caused it.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: scorecard-sarif
+          path: scorecard.sarif
+          retention-days: 30
+
   report:
     name: Report scheduled failures
     runs-on: ubuntu-latest

@@ -6,6 +6,7 @@
 [![Documentation](https://img.shields.io/badge/docs-spate.kainth.dev-e8590c)](https://spate.kainth.dev/)
 [![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](https://blog.rust-lang.org/)
 [![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/spate-etl/spate/badge)](https://scorecard.dev/viewer/?uri=github.com/spate-etl/spate)
 
 A high-performance, at-least-once ETL pipeline framework for Rust.
 

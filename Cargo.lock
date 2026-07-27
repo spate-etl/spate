@@ -283,7 +283,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "flate2",
- "lz4_flex",
+ "lz4_flex 0.13.1",
  "rdkafka",
  "serde",
  "serde_json",
@@ -732,7 +732,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "lz4_flex",
+ "lz4_flex 0.11.6",
  "polonius-the-crab",
  "rustls",
  "serde",
@@ -2134,6 +2134,12 @@ name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+
+[[package]]
+name = "lz4_flex"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash",
 ]

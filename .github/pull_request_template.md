@@ -53,8 +53,10 @@ They are documented in CONTRIBUTING.md and in docs/DESIGN.md.
       `cargo test --workspace --all-features --locked --doc` if you touched a
       doc example
 - [ ] Every cargo command run with `--locked`, as CI does
-- [ ] Dependency changes: `cargo deny --all-features --locked check all` and
-      `./scripts/attribution.sh` (CI diff-gates `THIRD-PARTY.md`)
+- [ ] Dependency changes: `cargo deny --all-features --locked check all`.
+      `THIRD-PARTY.md` is *not* required to be current on a pull request — it is
+      checked nightly and regenerated at release — but `./scripts/attribution.sh`
+      is welcome if you are adding a dependency rather than bumping one
 - [ ] Docs changed: `CI=true npm run build` in `website/` — without `CI=true`
       the redirect validation does not run
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),

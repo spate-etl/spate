@@ -183,7 +183,7 @@ jobs:
       - run: shellcheck scripts/*.sh
 
   deny:
-    name: Licences, advisories and attribution
+    name: Licences and advisories
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Never path-filtered, and never moved to the scheduled tier. Its inputs are
@@ -194,9 +194,13 @@ jobs:
     # next morning. The scheduled `check advisories` run exists *in addition*
     # to this, for the case where the world moves under a static tree.
     steps:
-      # cargo-deny *gates* (fails on a licence we will not accept); cargo-about
-      # *attributes* (reproduces what we ship, for our users' own compliance).
-      # Same lockfile, same maintainers, different jobs — see about.toml.
+      # cargo-deny *gates* (fails on a licence we will not accept). cargo-about
+      # *attributes* (reproduces what we ship, for our users' own compliance),
+      # and it runs in the nightly tier and at release rather than here — see
+      # the note on that job in scheduled.yml. THIRD-PARTY.md is derived from
+      # the same lockfile this job already checks, so a diff gate over it adds
+      # nothing to the licence verdict and fails on every dependency bump,
+      # which is precisely where its diff is a column of version numbers.
       #
       # Not cargo-deny-action. That action builds its container on the runner
       # from a Dockerfile that pipes an unverified release tarball straight into
@@ -206,11 +210,7 @@ jobs:
       #
       # cargo-deny is version-pinned for the same reason zizmor is: this is the
       # job that reports the security verdict, and a release that changed a
-      # default would move the gate with nothing here to signal it. cargo-about
-      # is pinned because it feeds a byte-exact diff gate — a release that
-      # changed how the generator groups or orders crates would fail that gate
-      # on an unrelated PR. (The `cli` feature is not default; without it cargo
-      # installs the library and `cargo about` is simply not a command.)
+      # default would move the gate with nothing here to signal it.
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
       # action inside it can be read.
@@ -219,7 +219,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2,cargo-about@0.9.1
+          tools: cargo-deny@0.20.2
           # No cache: this job compiles nothing, so an entry here would only
           # consume the repo's 10 GB budget and evict one that earns its place.
 
@@ -235,21 +235,6 @@ jobs:
       # so a new crate or a new edge cannot silently narrow what CI runs.
       # `--no-deps` reads manifests only; it resolves nothing.
       - run: ./scripts/ci-changes.sh --self-test
-
-      # The script wraps `cargo about generate` and canonicalises the row order
-      # — see its header, and about.toml, for why the raw output is not
-      # reproducible across machines (#87).
-      - name: Regenerate the attribution inventory
-        run: ./scripts/attribution.sh
-
-      - name: THIRD-PARTY.md is up to date
-        run: |
-          if ! git diff --exit-code THIRD-PARTY.md; then
-            echo "::error::THIRD-PARTY.md is stale. Regenerate and commit it:"
-            echo "  cargo install cargo-about --locked --features cli --version 0.9.1"
-            echo "  ./scripts/attribution.sh"
-            exit 1
-          fi
 
   # ---------------------------------------------------------------------------
   # Tier 2 — gated on tier 1, and scoped to what changed.

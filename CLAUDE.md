@@ -39,7 +39,7 @@ cargo check -p spate --examples --all-features --locked   # all examples compile
 cargo check -p spate-coordination --no-default-features --tests --locked  # feature-off matrix (CI runs --all-features and misses it)
 cargo check -p spate --no-default-features --features s3 --locked     # facade s3 without coordination-nats never links async-nats
 cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full  # no --locked; see above
-./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; CI diff-gates it
+./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; nightly + release check it
 ./scripts/ci-changes.sh --self-test            # the container-suite map still matches the crate graph
 zizmor .github/                                # workflow lint; needs GH_TOKEN or it silently skips audits
 shellcheck scripts/*.sh                        # CI runs this one

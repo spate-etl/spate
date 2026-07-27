@@ -88,6 +88,77 @@ jobs:
   # ===========================================================================
   # NIGHTLY
   # ===========================================================================
+  attribution:
+    name: Attribution inventory
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    timeout-minutes: 20
+    # THIRD-PARTY.md is derived from Cargo.lock, and it used to be diff-gated on
+    # every pull request. That was the wrong place for it. The licence *verdict*
+    # is `cargo deny check licenses`, which still runs on every pull request and
+    # is unaffected by any of this; the inventory is documentation generated
+    # from the same lockfile. Gating documentation staleness on a pull request
+    # meant every dependency bump failed by construction — Dependabot cannot
+    # regenerate the file — so a bot that exists to reduce toil produced a red
+    # check on every one of its own pull requests, on exactly the changes where
+    # the diff is a column of version numbers.
+    #
+    # Here it is bounded by a day, and at release it is regenerated outright, so
+    # a published version's attribution is exact at the moment somebody's legal
+    # review reads it. That is when it matters.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Version-pinned: the script canonicalises row order on top of `cargo
+      # about generate`, so a release that changed how the generator groups or
+      # orders crates would show up here as spurious drift.
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-about@0.9.1
+      - id: regen
+        run: ./scripts/attribution.sh
+      - id: drift
+        run: git diff --exit-code THIRD-PARTY.md
+
+      - name: Report the drift as an issue
+        if: failure() && steps.drift.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='THIRD-PARTY.md is out of date'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still drifted: ${RUN_URL}"
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              'The committed attribution inventory no longer matches `Cargo.lock`.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'This is expected after a dependency bump and is not a licence' \
+              'problem — `cargo deny check licenses` gates that on every pull' \
+              'request and is green. Regenerate and commit:' \
+              '' \
+              '```sh' \
+              'cargo install cargo-about --locked --features cli --version 0.9.1' \
+              './scripts/attribution.sh' \
+              '```' \
+              '' \
+              'The release flow regenerates it too, so this can also just wait' \
+              'for the next release rather than being fixed on its own.'
+          )"
+
   advisories:
     name: Advisories (RustSec)
     runs-on: ubuntu-latest

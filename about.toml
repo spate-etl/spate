@@ -1,6 +1,6 @@
 # cargo-about: generates the dependency attribution artifacts.
 #
-#   ./scripts/attribution.sh                  # THIRD-PARTY.md, diff-gated in CI
+#   ./scripts/attribution.sh                  # THIRD-PARTY.md, checked nightly
 #   cargo about generate --workspace --all-features --locked --fail \
 #     -o website/static/licenses/index.html about-html.hbs   # docs site, CI-built
 #
@@ -84,7 +84,7 @@ workarounds = ["ring", "rustls"]
 # and takes the first. Equal confidence makes that a total tie, and the sort is
 # stable, so the winner is whichever file the directory walk yielded first —
 # readdir order. That is fixed on one machine and varies across them, which is
-# what made the THIRD-PARTY.md diff gate alternate between CI runs (#87): the
+# what made THIRD-PARTY.md alternate between machines (#87): the
 # elected id never moved, but the crate hopped between licence-*text* groups
 # and its row moved with it. Naming the files removes the tie.
 #

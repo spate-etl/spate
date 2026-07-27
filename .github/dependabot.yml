@@ -32,9 +32,11 @@ updates:
     # sibling merges. Four at a time is what one maintainer can review in a
     # sitting; Dependabot queues the rest rather than dropping them.
     #
-    # A cargo bump also always fails the THIRD-PARTY.md gate, because that file
-    # carries a Version column and Dependabot does not regenerate it. Run
-    # `./scripts/attribution.sh` and commit the result onto the bot's branch.
+    # A cargo bump leaves THIRD-PARTY.md stale, because that file carries a
+    # Version column and Dependabot does not regenerate it. That used to fail
+    # the pull request; it no longer does. The inventory is checked nightly and
+    # regenerated at release, so a bump can merge and the file catches up —
+    # see the `attribution` job in scheduled.yml for why it moved.
     open-pull-requests-limit: 4
     labels: ["dependencies", "rust"]
     commit-message:
@@ -149,6 +151,21 @@ updates:
       # longer soak.
       semver-minor-days: 14
       semver-major-days: 14
+    # TypeScript's major is not this repository's to take. `website/tsconfig.json`
+    # extends `@docusaurus/tsconfig`, which sets `baseUrl` and `paths` — and
+    # TypeScript 7 removed `baseUrl`. So the major lands as a typecheck failure
+    # rather than as a choice, and it stays that way until Docusaurus moves the
+    # line it supports. `package.json` already pins `~5.6.2`, so taking it would
+    # also mean widening a range somebody else controls.
+    #
+    # Scoped to typescript, and to majors, deliberately. A blanket non-major
+    # rule on the npm group would freeze the patch and minor bumps that carry
+    # the security fixes, which is the opposite of what this file is for. Delete
+    # this when Docusaurus supports the newer line, and take the major on its
+    # own.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     # This is the largest dependency graph in the repo by package count (~1400
     # against Cargo's ~500) and the ecosystem where mass-compromise events
     # actually happen, so the cooldown earns its keep here more than anywhere.

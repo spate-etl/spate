@@ -23,47 +23,156 @@ client (internal only — no `object_store` types in the public API), so
 `s3://`, and `file://` for infrastructure-free runs and tests, work out of
 the box.
 
-Construct it with the pipeline's I/O runtime handle:
+Construct it from the pipeline's opaque section, with the pipeline's I/O
+runtime handle and a framer (the framer is **required** — see
+[Decoding records](#decoding-records)):
 
 ```rust
 let pipeline = Pipeline::from_config(config)?;
-let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?
+let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
     .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
 let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
 // report.state == ExitState::Completed ⇒ the backfill is done and committed.
 ```
 
+## Configuration
+
+The `source: { s3: ... }` section deserializes into `S3SourceConfig`
+(`crates/spate-s3/src/config.rs`); unknown fields are rejected with the
+offending key. Coordination is deliberately **not** here — it is assembly
+wiring ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
+covered under [Scaling out](#scaling-out--and-the-solo-default).
+
+```yaml
+source:
+  s3:
+    url: "s3://my-bucket/exports/2026-07/"
+    compression: auto
+    split_target_bytes: 64MiB
+    store:
+      region: ${AWS_REGION:-eu-west-2}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. Part of the job fingerprint — byte-identical across every instance of a coordinated job. |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
+| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. |
+| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment — see [below](#the-store-passthrough-and-the-denylist). |
+
+Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
+different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
+`split_target_bytes` enters the job fingerprint as its **decoded byte
+count** — so a replica spelling it `64MB` is refused at startup against a
+fleet on the `64MiB` default. Spellings that decode to the same number of
+bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
+match across replicas, not the text.
+
+The record **format is not a config key** — the S3 source is a transport and
+owns no framing. The format's framer is wired into the source in code (see
+[Decoding records](#decoding-records)); the per-record size bound lives on the
+framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
+
+Removed in the coordinated rework (a stale config fails at load with the
+offending key): `lanes` (read parallelism is the coordinator's
+`max_in_flight` — one data lane per in-flight split) and the entire
+`checkpoint:` section (progress lives in the coordination store).
+
+### Sizing splits against `pipeline.threads`
+
+A split is read by one lane, and a lane is pinned to the pipeline thread it
+was handed to — there is no work stealing between threads. So the split
+count, not just the split size, sets how evenly the work divides: a plan
+yielding five equal splits across two threads gives one thread three and the
+other two, and the job finishes when the loaded thread does.
+
+Aim for a split count that is a multiple of `pipeline.threads`, or large
+enough that one extra split is a small share of the total. Prefixes of many
+small objects get this for free (packing coalesces them); a handful of large
+objects is where it bites, since an object at or above the target always
+gets a split of its own and the count is then fixed by the data. Raising
+`split_target_bytes` coarsens the split set and can make imbalance *worse* —
+check the resulting count rather than assuming bigger is better.
+
+## The `store` passthrough and the denylist
+
+`store` reaches any `object_store` client option without waiting for a typed
+field — `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
+values are applied **on top of the environment** when the client is built from
+`url`, so anything set here overrides what the environment resolved.
+
+Bucket keys are rejected in any case spelling: the bucket comes from `url`, and
+two sources of truth for it would be a silent misroute.
+
+## Security (credentials and region)
+
+For `s3://` URLs, credentials and region resolve from the **standard AWS
+environment variables** automatically — the source seeds the client with
+`AmazonS3Builder::from_env()`. That covers **EKS Pod Identity**
+(`AWS_CONTAINER_CREDENTIALS_FULL_URI` +
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), **IRSA**
+(`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), ECS task roles, EC2 IMDS,
+static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_SESSION_TOKEN`), and `AWS_REGION` / `AWS_DEFAULT_REGION`. A correctly
+configured EKS pod (Pod Identity or IRSA) needs **no** `store` credentials at
+all.
+
+Only **environment variables** are read — **not** file-based profiles
+(`AWS_PROFILE`, `~/.aws/credentials`, `~/.aws/config`) or SSO token caches;
+`object_store` carries no AWS SDK, so it resolves neither. To authenticate
+locally with a named profile or `aws sso login`, materialize that profile's
+credentials into the environment first. The AWS CLI v2 resolves the profile
+(SSO included) and prints ready-to-eval exports:
+
+```sh
+eval "$(aws configure export-credentials --profile my-profile --format env)"
+```
+
+That sets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`,
+all of which `from_env` picks up (run `aws sso login` first if the session has
+expired). The alternatives are static keys under `store`, or a `file://` URL to
+skip AWS entirely for local runs.
+
+Credentials can also be pinned explicitly through `store` (values interpolate
+from the environment):
+
+```yaml
+    store:
+      # Usually unnecessary — EKS injects these and from_env picks them up;
+      # shown for when they need pinning explicitly.
+      aws_container_credentials_full_uri: "${AWS_CONTAINER_CREDENTIALS_FULL_URI}"
+      aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
+```
+
+Credential, permission and client-configuration errors fail the pipeline
+immediately — no peer would fare better. Non-S3 schemes (`file://`) do not read
+the AWS environment. See
+[Securing connections](../../../03-guides/securing-connections.mdx) for the
+generic model.
+
 ## Scaling out — and the solo default
 
-The coordinator is **assembly wiring** ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
-build one over a durable store and inject it, and every replica of the
-same pipeline shares the backfill — splits are leased, moved between live
-instances by the elected leader, and taken over from dead ones, with
-per-split fenced commits making revocations replay-safe. (The NATS store below needs the
-`spate` facade's `coordination-nats` feature; `spate-s3` itself carries no
-backend feature at all — see [Scaling out](../../../05-deployment/scaling-out.mdx).)
+The coordinator is **assembly wiring**: build one over a durable
+[coordination store](../../coordination/README.mdx) and inject it, and every
+replica of the same pipeline shares the backfill — splits are leased, moved
+between live instances by the elected leader, and taken over from dead ones,
+with per-split fenced commits making revocations replay-safe.
 
 ```rust
-use spate::coordination::store::nats::{NatsConfig, NatsStore};
-use spate::coordination::{CoordinationConfig, StoreCoordinator};
-
-let tuning = CoordinationConfig {
-    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
-    ..CoordinationConfig::default()
-};
-let store = NatsStore::new(
-    NatsConfig::new(vec!["nats://nats:4222".into()], "exports-backfill"),
-    tuning.lease_duration,
-)?;
 let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
 let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?
     .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)))
     .with_coordinator(Box::new(coordinator));
 ```
 
-Deployment shape, tuning, and failure modes: [Scaling out](../../../05-deployment/scaling-out.mdx).
-The runnable two-instance version is
-`crates/spate/examples/s3_coordinated_backfill.rs`.
+Building the `store` and `tuning` values is the store's business — see
+[NATS JetStream](../../coordination/nats/README.mdx) for the production
+backend. Deployment shape, tuning, and failure modes are in
+[Scaling out](../../../05-deployment/scaling-out.mdx). The runnable
+two-instance version is `crates/spate/examples/s3_coordinated_backfill.rs`.
 
 :::warning No coordinator ⇒ solo, with **ephemeral** progress
 
@@ -72,8 +181,7 @@ path over an internal in-process store. That is correct and
 self-terminating — but the store dies with the process, so **a restart
 replays the whole prefix** (at-least-once: wasteful, never lossy). A
 startup WARN says exactly this. Durable resume requires a durable
-coordination store (the NATS wiring above); there is no manifest
-checkpoint anymore.
+coordination store; there is no manifest checkpoint anymore.
 
 :::
 
@@ -92,116 +200,12 @@ descriptor's ETag. What that buys:
   match against stale progress.
 - **A deleted object** poisons only the splits that still needed it.
 
-Prefer an **append-only prefix** for the lifetime of a backfill. By
-default the listing is taken once (`refresh_listing: false`), so keys
+An **append-only prefix** is the right shape for the lifetime of a backfill.
+By default the listing is taken once (`refresh_listing: false`), so keys
 that arrive later are simply not part of the job; with
 `refresh_listing: true` the leader re-lists on the coordinator's replan
 interval and plans new objects as additional splits (an **open** job that
 never self-terminates — stop it with a signal drain).
-
-## Configuration
-
-The `source: { s3: ... }` section deserializes into `S3SourceConfig`
-(`crates/spate-s3/src/config.rs`); unknown fields are rejected with the
-offending key. Coordination is deliberately **not** here — see above.
-
-```yaml
-source:
-  s3:
-    url: "s3://my-bucket/exports/2026-07/"
-    compression: auto
-    split_target_bytes: 64MiB
-    store:
-      region: ${AWS_REGION:-eu-west-2}
-```
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `url` | string | required | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. Part of the job fingerprint — byte-identical across every instance of a coordinated job. |
-| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
-| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
-| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. |
-| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
-| `store` | string map | `{}` | Raw `object_store` options applied **on top of the environment** when building the store from `url` — override `region`, `endpoint`, credentials, `allow_http`, timeouts. See [Credentials & region](#credentials--region). Bucket keys are rejected in any case spelling (the bucket comes from `url`). |
-
-Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
-different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
-`split_target_bytes` enters the job fingerprint as its **decoded byte
-count** — so a replica spelling it `64MB` is refused at startup against a
-fleet on the `64MiB` default. Spellings that decode to the same number of
-bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
-match across replicas, not the text.
-
-### Sizing splits against `pipeline.threads`
-
-A split is read by one lane, and a lane is pinned to the pipeline thread it
-was handed to — there is no work stealing between threads. So the split
-count, not just the split size, sets how evenly the work divides: a plan
-yielding five equal splits across two threads gives one thread three and the
-other two, and the job finishes when the loaded thread does.
-
-Aim for a split count that is a multiple of `pipeline.threads`, or large
-enough that one extra split is a small share of the total. Prefixes of many
-small objects get this for free (packing coalesces them); a handful of large
-objects is where it bites, since an object at or above the target always
-gets a split of its own and the count is then fixed by the data. Raising
-`split_target_bytes` coarsens the split set and can make imbalance *worse* —
-check the resulting count rather than assuming bigger is better.
-
-Removed in the coordinated rework (a stale config fails at load with the
-offending key): `lanes` (read parallelism is the coordinator's
-`max_in_flight` — one data lane per in-flight split) and the entire
-`checkpoint:` section (progress lives in the coordination store).
-
-The record **format is not a config key** — the S3 source is a transport and
-owns no framing. You wire the format's framer into the source in code (see
-[Decoding records](#decoding-records)); the per-record size bound lives on the
-framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
-
-### Credentials & region
-
-For S3 URLs, credentials and region resolve from the **standard AWS
-environment variables** automatically: the source seeds the client with
-`AmazonS3Builder::from_env()`. That covers **EKS Pod Identity**
-(`AWS_CONTAINER_CREDENTIALS_FULL_URI` +
-`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), **IRSA**
-(`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), ECS task roles, EC2 IMDS,
-static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-`AWS_SESSION_TOKEN`), and `AWS_REGION` / `AWS_DEFAULT_REGION`. In a correctly
-configured EKS pod (Pod Identity or IRSA) you typically need **no** `store`
-credentials at all.
-
-Only **environment variables** are read — **not** file-based profiles
-(`AWS_PROFILE`, `~/.aws/credentials`, `~/.aws/config`) or SSO token caches
-(object_store carries no AWS SDK, so it resolves neither). If you authenticate
-locally with a named profile or `aws sso login`, materialize that profile's
-credentials into the environment first — the AWS CLI v2 resolves the profile
-(SSO included) and prints ready-to-eval exports:
-
-```sh
-eval "$(aws configure export-credentials --profile my-profile --format env)"
-```
-
-That sets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`,
-all of which `from_env` picks up (run `aws sso login` first if the session has
-expired). Alternatively, set the keys under `store`, or use a `file://` URL to
-skip AWS entirely for local runs.
-
-Anything under `store` overrides the environment — pin a `region`, point at a
-custom `endpoint`, or supply static keys explicitly. You can also force a
-provider by passing its keys through `store` (values interpolate from the
-environment):
-
-```yaml
-    store:
-      # Usually unnecessary — EKS injects these and from_env picks them up;
-      # shown for when you want to pin them explicitly.
-      aws_container_credentials_full_uri: "${AWS_CONTAINER_CREDENTIALS_FULL_URI}"
-      aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
-```
-
-Non-S3 schemes (`file://`) do not read the AWS environment.
 
 ## Offsets, progress, resume
 
@@ -234,10 +238,10 @@ memory once per plan; budget roughly 100 bytes per key.
 
 The source frames records but is **format-agnostic** — it streams object
 bytes through a [`RecordFramer`](../../../06-extending/custom-source.mdx#framing-turning-bytes-into-records)
-*you supply*, and **deserialization stays in the operator chain**, exactly as
-with Kafka. Framing a byte stream is a format concern, so the framer is owned
-by the format crate: for NDJSON, wire in `spate-json`'s `NdjsonFramer` when you
-build the source.
+supplied by the caller, and **deserialization stays in the operator chain**.
+Framing a byte stream is a format concern, so the framer is owned by the format
+crate: for NDJSON, that is
+[`spate-json`](../../formats/json/README.mdx)'s `NdjsonFramer`.
 
 ```rust
 let source = S3Source::from_component_config(source_section, io)?
@@ -256,37 +260,25 @@ let deser = JsonDeserializerBuilder::from_component(deser_section)?
     .build_serde::<MyRecord>();
 ```
 
-For a different object layout, supply a different `RecordFramer` — a custom one
-via `S3Source::with_framer`, or another format's framer — no fork required. The
+A different object layout needs a different `RecordFramer` — a custom one via
+`S3Source::with_framer`, or another format's framer — no fork required. The
 framer is **required**: a source built without one refuses to start.
 
 ## Errors: poison splits, not skipped objects
 
-Object-level read problems are not record errors, and (new in the
-coordinated rework) they are not instant pipeline failures either.
-Transient failures are retried inside the source (capped backoff, ranged
-re-reads pinned to the ETag). Anything object-terminal — a key deleted
-after planning, an overwrite tripping the `If-Match` pin, corrupt or
-truncated content, an exhausted retry budget — **poisons the split**: the
-split is handed back to the coordinator (counted in
+Object-level read problems are not record errors, and they are not instant
+pipeline failures either. Transient failures are retried inside the source
+(capped backoff, ranged re-reads pinned to the ETag). Anything
+object-terminal — a key deleted after planning, an overwrite tripping the
+`If-Match` pin, corrupt or truncated content, an exhausted retry budget —
+**poisons the split**: the split is handed back to the coordinator (counted in
 `spate_s3_source_objects_failed_total{reason}`), retried on another
 delivery attempt, and **quarantined** at the attempt cap. A bounded job
 with quarantined splits ends **failed** (`Stalled`), never as a silently
 partial `Completed` — alert on `spate_coordination_splits_quarantined > 0`.
-Credentials, permission, and client-configuration errors still fail the
-pipeline immediately (no peer would fare better). There is still no
-skip-an-object mode: losing a whole object silently is not a policy, it's
-an incident — quarantine keeps it loud *and* lets the rest of the
+There is no skip-an-object mode: losing a whole object silently is not a
+policy, it's an incident — quarantine keeps it loud *and* lets the rest of the
 backfill finish first.
-
-## Metrics
-
-Framework stage families (`spate_source_*`) work as for any source. The
-connector's own families live under `spate_s3_source_*` — objects
-listed (leader-only)/completed/remaining, object failures by reason,
-bytes read/decoded, GET retries — and a coordinated run adds the
-`spate_coordination_*` families; see
-[docs/METRICS.md](../../../../METRICS.md).
 
 ## Testing
 
@@ -298,10 +290,39 @@ shared in-process store). The Docker-gated suites run against a
 over the production backend — SeaweedFS plus a NATS 2.11 container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
+## Metrics
+
+Registered through this source's `Meter` (namespace `s3`, role `source`), so
+every family is prefixed `spate_s3_source_`. All handles are resolved once at
+`open`, and counters are incremented at object/chunk/batch boundaries — never
+per record. The framework's `spate_source_records_total` /
+`spate_source_bytes_total` count framed records as for any source; these
+families add the object-level view of a bounded backfill.
+
+| Metric | Type | Extra labels | Description |
+|---|---|---|---|
+| `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the instance that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
+| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this instance. |
+| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this instance's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
+| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
+| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
+| `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
+| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects that poisoned their split: `not_found` (deleted after planning), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
+
+A coordinated run adds the framework's `spate_coordination_*` families. See
+[Metrics](../../../../METRICS.md).
+
 ## Related
 
-- [Scaling out](../../../05-deployment/scaling-out.mdx)
-- [Source coordination](../../../02-concepts/07-source-coordination.mdx)
-- [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx)
-- [JSON format](../../formats/json/README.mdx)
+- [Coordination stores](../../coordination/README.mdx) — what a durable
+  backfill needs behind it, and the shipped backends.
+- [Scaling out](../../../05-deployment/scaling-out.mdx) — running a fleet:
+  deployment shape, tuning knobs and failure modes.
+- [Source coordination](../../../02-concepts/07-source-coordination.mdx) — why a
+  broker-less source coordinates at all.
+- [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — where
+  the fenced per-split commits sit in the at-least-once story.
+- [JSON format](../../formats/json/README.mdx) — the `NdjsonFramer` this source
+  takes, and the deserializer behind it.
 - [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)
+  — how the families above are registered.

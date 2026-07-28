@@ -42,9 +42,28 @@ a metric you deliberately want *outside* the `spate_` namespace. See
   histograms are observed per batch (duration ÷ n reported as batch means),
   never per record.
 
+## Connector families
+
+This file documents the framework's taxonomy and its own families. A
+connector's families are documented **on that connector's page**, under its
+`## Metrics` heading — the same split the `Meter` API enforces in code, where
+the framework owns the reserved stage roots and a connector claims a namespace
+beneath `spate_`.
+
+| Prefix | Documented in |
+|---|---|
+| `spate_kafka_source_*` | [Kafka source](user-guide/04-connectors/sources/kafka/README.mdx#metrics) |
+| `spate_kafka_sink_*` | [Kafka sink](user-guide/04-connectors/sinks/kafka/README.mdx#metrics) |
+| `spate_s3_source_*` | [S3 source](user-guide/04-connectors/sources/s3/README.mdx#metrics) |
+| `spate_json_deser_*` | [JSON format](user-guide/04-connectors/formats/json/README.mdx#metrics) |
+| `spate_custom_*` | Whatever registered it — the default namespace for pipeline-author metrics. |
+
+A connector that registers no families of its own is fully described by the
+framework families below, labelled with its `component_type`.
+
 ## Source (`spate_source_*`)
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_source_records_total` | counter | | Records emitted by the source (post-poll, pre-deserialization). |
 | `spate_source_bytes_total` | counter | | Payload bytes emitted. |
@@ -150,142 +169,18 @@ Two consequences worth stating outright:
   `instance` — a Pushgateway with `honor_labels`, or a recording rule / remote
   write relabeling that drops it — which is outside the framework's reach.
 
-## Kafka source (`spate_kafka_source_*`)
-
-Connector-owned families registered through the Kafka source's `Meter`
-(namespace `kafka`, role `source`). They translate the librdkafka statistics
-snapshot, emitted every `statistics_interval` (default 5s; `0s` disables the
-whole family) and drained on the controller thread — never on the record path.
-
-Counters are **absolute-mapped librdkafka totals** scoped to one consumer
-lifetime: the handles mirror the client's cumulative values (idempotent under
-duplicate delivery; `rate()`/`increase()` work natively), and after a process
-restart the series restart from the new consumer's totals — an ordinary
-counter reset to PromQL. The `broker` label is the librdkafka broker name
-(`host:port/id`), bounded by cluster topology and always on. The `rtt`/
-`throttle` gauges are librdkafka's HDR-histogram rolling-window estimates,
-converted to seconds; they are per-broker sampled quantiles and **cannot be
-aggregated** across brokers or processes (`max()` is the only defensible
-cross-series operator). Series backed by data librdkafka hasn't produced yet
-(an empty latency window, an unknown lag) are absent rather than `0`.
-
-| Metric | Type | Extra labels | Meaning |
-|---|---|---|---|
-| `spate_kafka_source_tx_requests_total` | counter | | Requests sent to brokers. |
-| `spate_kafka_source_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
-| `spate_kafka_source_rx_responses_total` | counter | | Responses received from brokers. |
-| `spate_kafka_source_rx_bytes_total` | counter | | Protocol bytes received. |
-| `spate_kafka_source_rx_messages_total` | counter | | Messages consumed (excluding ignored). |
-| `spate_kafka_source_rx_message_bytes_total` | counter | | Message bytes consumed (including framing). |
-| `spate_kafka_source_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
-| `spate_kafka_source_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
-| `spate_kafka_source_broker_connects_total` | counter | | Connection attempts (including failed), summed across brokers. |
-| `spate_kafka_source_broker_disconnects_total` | counter | | Disconnections (broker, network, or otherwise), summed across brokers. |
-| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
-| `spate_kafka_source_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
-| `spate_kafka_source_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
-| `spate_kafka_source_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
-| `spate_kafka_source_broker_throttle_avg_seconds` | gauge | `broker` | Mean broker throttle time over the last window. |
-| `spate_kafka_source_broker_throttle_p99_seconds` | gauge | `broker` | p99 broker throttle time over the last window (non-aggregatable). |
-| `spate_kafka_source_fetch_queue_messages` | gauge | | Prefetched messages queued client-side for the pipeline's topic. |
-| `spate_kafka_source_fetch_queue_bytes` | gauge | | Prefetched bytes queued client-side. |
-| `spate_kafka_source_reply_queue_depth` | gauge | | librdkafka ops awaiting `poll()` service (poll starvation indicator). |
-| `spate_kafka_source_group_rebalances_total` | counter | | Rebalances counted by librdkafka (`spate_source_rebalances_total` counts the callback events the framework observed). |
-| `spate_kafka_source_group_assignment_size` | gauge | | Partitions in the current group assignment. |
-| `spate_kafka_source_group_healthy` | gauge | | 1 while the member is settled (`up` + `steady`); 0 during joins/rebalances (state detail goes to debug logs). |
-| `spate_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
-| `spate_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `spate_source_lag_records` is the committed-basis view. Unlike that one, this series *is* gated by `per_partition_detail`. |
-
-## S3 source (`spate_s3_source_*`)
-
-Connector-owned families registered through the S3 source's `Meter`
-(namespace `s3`, role `source`). All handles are resolved once at `open`;
-counters are incremented at object/chunk/batch boundaries — never per
-record. `spate_source_records_total` / `spate_source_bytes_total` count framed
-records as for any source; these families add the object-level view of a
-bounded backfill.
-
-| Metric | Type | Extra labels | Meaning |
-|---|---|---|---|
-| `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the instance that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
-| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this instance. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this instance's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
-| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
-| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
-| `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
-| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects that poisoned their split: `not_found` (deleted after planning), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
-
-## Kafka sink (`spate_kafka_sink_*`)
-
-Connector-owned families registered through the Kafka sink's `Meter`
-(namespace `kafka`, role `sink`). They translate the producer's librdkafka
-statistics snapshot, emitted every `statistics_interval` (default 5s; `0s`
-disables the whole family) and published from the producer's poll thread —
-never on the record path.
-
-The conventions match the Kafka source's families: counters are
-**absolute-mapped librdkafka totals** scoped to one producer lifetime
-(sound because a sink builds exactly one producer; restarts read as
-ordinary counter resets to PromQL), the `broker` label is bounded by
-cluster topology, and the latency gauges are per-broker rolling-window
-estimates over the last statistics interval that **cannot be aggregated**
-across brokers or processes (`max()` is the only defensible cross-series
-operator). Windows that sampled nothing are absent rather than `0`.
-Batch-level write latency is framework-side
-(`spate_sink_write_duration_seconds` — the family comparable with the
-producer's own round-trip; `spate_sink_flush_duration_seconds` spans seal to
-settle and would fold this sink's queueing in on top); these families add
-the producer's internal view. Per-partition transmit-queue detail is
-deferred (see the decision log) — the aggregate queue gauges below cover
-saturation.
-
-| Metric | Type | Extra labels | Meaning |
-|---|---|---|---|
-| `spate_kafka_sink_tx_requests_total` | counter | | Requests sent to brokers. |
-| `spate_kafka_sink_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
-| `spate_kafka_sink_rx_responses_total` | counter | | Responses received from brokers. |
-| `spate_kafka_sink_rx_bytes_total` | counter | | Protocol bytes received. |
-| `spate_kafka_sink_tx_messages_total` | counter | | Messages produced (delivery-confirmed by librdkafka's accounting). |
-| `spate_kafka_sink_tx_message_bytes_total` | counter | | Message bytes produced (including framing). |
-| `spate_kafka_sink_produce_queue_messages` | gauge | | Messages waiting in the producer's client-side queue (queue-full pressure indicator). |
-| `spate_kafka_sink_produce_queue_bytes` | gauge | | Bytes waiting in the producer's client-side queue. |
-| `spate_kafka_sink_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
-| `spate_kafka_sink_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
-| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
-| `spate_kafka_sink_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
-| `spate_kafka_sink_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
-| `spate_kafka_sink_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
-| `spate_kafka_sink_broker_int_latency_avg_seconds` | gauge | `broker` | Mean time messages spent in the producer queue before transmission, last window. |
-| `spate_kafka_sink_broker_int_latency_p99_seconds` | gauge | `broker` | p99 producer-queue latency over the last window (non-aggregatable). |
-| `spate_kafka_sink_broker_outbuf_latency_avg_seconds` | gauge | `broker` | Mean time in the transmit buffer before the socket, last window. |
-| `spate_kafka_sink_broker_outbuf_latency_p99_seconds` | gauge | `broker` | p99 transmit-buffer latency over the last window (non-aggregatable). |
-
 ## Deserializer (`spate_deser_*`)
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_deser_records_total` | counter | `outcome` (`ok`\|`error`) | Deserialization attempts by outcome. One input payload may yield 0..N records; this counts outputs, plus one `error` per failed payload. |
 | `spate_deser_records_dropped_total` | counter | `reason` (`skip_policy`) | Payloads dropped by the Skip error policy. |
 | `spate_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
 | `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch. |
 
-## JSON deserializer (`spate_json_deser_*`)
-
-Connector-owned family registered through the JSON deserializer's `Meter`
-(namespace `json_deser`), minted when the builder is given a metrics scope with
-`.with_metrics(pipeline, component)`. It surfaces per-record drops the
-payload-granular `spate_deser_*` stage metrics above cannot see: under `ndjson`
-(or `array`) with `on_error: skip`, an individual bad record is dropped while the
-good records around it are emitted, so the `deserialize` call returns `Ok` and no
-`spate_deser_records_total{outcome=error}` is counted.
-
-| Metric | Type | Extra labels | Meaning |
-|---|---|---|---|
-| `spate_json_deser_records_dropped_total` | counter | `reason` (`malformed`\|`duplicate_key`) | Records dropped by `on_error: skip` because they did not parse / match the target type (`malformed`) or contained a duplicate object key under `reject_duplicate_keys` (`duplicate_key`). |
-
 ## Operators (`spate_operator_*`)
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_operator_records_in_total` | counter | | Records entering the operator. |
 | `spate_operator_records_out_total` | counter | | Records emitted downstream (filter drops and flat_map fan-out make this differ from in). |
@@ -298,7 +193,7 @@ good records around it are emitted, so the `deserialize` call returns `Ok` and n
 Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 `chain->sink/shard-3`).
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_queue_depth` | gauge | `queue` | Items currently queued, sampled on each send. It only advances *on a send*, so while the source is paused (or flow otherwise stalls) it freezes at its last sample — typically `capacity` — even as the workers drain the queue. The live resume decision uses the channel directly, not this gauge. |
 | `spate_queue_capacity` | gauge | `queue` | Configured bound. |
@@ -306,7 +201,7 @@ Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 
 ## Backpressure (`spate_backpressure_*`)
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_backpressure_paused` | gauge | | 1 while the source is paused by the watermark controller. |
 | `spate_backpressure_paused_seconds_total` | gauge (monotonic) | | Cumulative paused time. Exported as a gauge because the `metrics` facade's counter is integer-only; treat as a counter in queries (`rate()` works). |
@@ -319,7 +214,7 @@ In a [multi-sink](user-guide/02-concepts/06-multi-sink.mdx) pipeline each sink's
 series carry its name as the `component` label (a single sink uses
 `component="sink"`), so per-table sink metrics never collide.
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_sink_records_total` | counter | `shard` | Records durably written (acknowledged flushes only). |
 | `spate_sink_bytes_total` | counter | `shard` | Bytes durably written. |
@@ -420,7 +315,7 @@ way to reason about where a flush went, not an identity to compute.
 
 ## Checkpointing (`spate_checkpoint_*`)
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabelled series is the max across partitions. |
 | `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. |
@@ -434,7 +329,7 @@ Registered only when a source runs with multi-instance split coordination
 handed a `CoordinationMetrics`). They fire alongside the source's own
 `spate_source_rebalances_total` / `spate_source_lanes_active`.
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_coordination_splits_owned` | gauge | | Splits this worker currently leases (its working set). |
 | `spate_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). |
@@ -497,13 +392,13 @@ the S3 source publishes no lag), but a new connector must not.
 
 ## End-to-end
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_e2e_latency_seconds` | histogram | | Source-to-durable-write latency, observed by the sink worker at each durable flush from the batch's **oldest** record. Time basis is `metrics.e2e_basis`: `ingest` (default, skew-free: time since the record entered the terminal stage) or `event` (against the record's event time; clock-skew sensitive, falls back to ingest when no event time exists). |
 
 ## Pipeline / process
 
-| Metric | Type | Extra labels | Meaning |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_pipeline_info` | gauge | `version` | Constant 1; carries build metadata. |
 | `spate_pipeline_state` | gauge | `state` (`starting`\|`running`\|`draining`\|`failed`) | 1 for the current state, 0 otherwise. |
@@ -564,16 +459,6 @@ config section):
   replica set — not the server. Keep a flush-duration alert too if you have a
   commit-lag SLO — that is the family the watermark waits on — but do not read
   it as sink latency.
-- `spate_kafka_source_group_healthy == 0` sustained — the consumer-group member
-  is stuck joining/rebalancing; pair with
-  `rate(spate_kafka_source_group_rebalances_total[15m])` to distinguish churn
-  from a wedged join.
-- `rate(spate_kafka_source_broker_tx_errors_total[5m]) > 0` or
-  `spate_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
-  by the `broker` label.
-- `spate_kafka_sink_produce_queue_messages` sustained near
-  `queue.buffering.max.messages` (default 100k) — the producer cannot drain
-  to the brokers; batch writes are absorbing queue-full backoff and
-  `spate_sink_write_duration_seconds{outcome="ok"}` will rise before the source
-  pauses — the backoff is inside the produce call, so it lands in the write
-  histogram rather than in `spate_sink_retry_backoff_seconds`.
+Each connector adds alerts over its own families; those live in the
+connector's `## Metrics` section, indexed under
+[Connector families](#connector-families).

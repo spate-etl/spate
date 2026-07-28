@@ -53,7 +53,7 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 `*_dropped_total{reason}` for intentional removals and
 `*_errors_total{error_type}` for failures:
 
-| Metric | Labels | Meaning |
+| Metric | Labels | Description |
 |---|---|---|
 | `spate_deser_records_dropped_total` | `reason` (`skip_policy`) | Payloads dropped by the deserializer's Skip policy. |
 | `spate_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |

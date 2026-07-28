@@ -34,17 +34,17 @@ up leaves batches sealing on **`linger`** — the pipeline emits small writes on
 timer regardless of how little it has accumulated. Fix the source and the same
 batches seal on **size** instead: fewer, larger writes.
 
-For ClickHouse that difference is the whole ballgame. Large infrequent inserts
-mean large parts and little merge pressure; a stream of small `linger`-sealed
-inserts means many small parts and a background merge load that competes with
-ingestion. Two pods each writing half-size parts are strictly worse for the
-server than one pod writing full-size ones, even at identical total throughput.
-The same logic applies to any sink with a per-write cost — object stores
-billing per PUT, or a warehouse with a commit overhead.
+That difference is the whole ballgame for any sink with a per-write cost — a
+columnar store where each write becomes a part to merge, an object store
+billing per PUT, a warehouse with a commit overhead. Two pods each writing
+half-size batches are strictly worse for the destination than one pod writing
+full-size ones, even at identical total throughput. How steep that curve is
+depends on the sink, and its page says so.
 
 The corollary: **horizontal scaling has a real cost**, not just a bill. Each
-replica is another consumer-group member, another set of connections, and
-another participant in every rebalance. Extract the vertical throughput first.
+replica is another member of the source's assignment, another set of
+connections, and another participant in every rebalance. Extract the vertical
+throughput first.
 
 ## Threads: `pipeline.threads` vs `pipeline.io_threads`
 
@@ -79,9 +79,8 @@ as **any** threshold trips (defaults: `max_rows: 500000`,
 `max_bytes: 128MiB`, `linger: 1s`; a sealed batch may overshoot by at most
 one chunk, since chunks arrive whole):
 
-- **Bigger batches** amortize per-insert cost — ClickHouse in particular
-  wants few, large inserts (less merge pressure). `max_rows`/`max_bytes`
-  bound the ceiling.
+- **Bigger batches** amortize per-write cost, which for most sinks is the
+  dominant term. `max_rows`/`max_bytes` bound the ceiling.
 - **`linger`** bounds latency at low throughput: a non-empty batch seals
   this long after its first chunk even if the size thresholds never trip.
   Lower it for latency-sensitive pipelines; raise it if a trickle of tiny
@@ -109,8 +108,8 @@ directly into the budget rule below).
 A global cap on bytes admitted into the pipeline but not yet durably
 written (default **256MiB**), with pause/resume hysteresis: sources pause
 above `high_ratio` (default **0.8**) and may resume below `low_ratio`
-(default **0.5**) after at least `min_pause` (default **500ms** — pausing a
-Kafka partition purges its prefetch, so resuming isn't free). See
+(default **0.5**) after at least `min_pause` (default **500ms**; pausing a
+lane is not free for every source, which is what the hysteresis is for). See
 [Backpressure](../02-concepts/03-backpressure.mdx) for the model.
 
 **The sizing rule** (from [docs/DESIGN.md](../../DESIGN.md) § Backpressure,
@@ -135,19 +134,21 @@ for a saturated source, either raise the budget or cap `batch.max_bytes`
 near `budget × low_ratio / (2 × shards × max_per_shard)`.
 
 Memory sizing follows: set the container memory limit above
-`max_inflight_bytes` **plus the Kafka source's prefetch**, with headroom for
-batches held during retries.
+`max_inflight_bytes` **plus whatever the source client buffers on its own**,
+with headroom for batches held during retries.
 
-That second term is easy to under-count. The framework sets no prefetch cap, so
-`queued.max.messages.kbytes` sits at librdkafka's default of 65536 — 65.5 MB —
-and this connector splits partition queues, so it is charged **per assigned
-partition**, not once per process. A 100-partition assignment can therefore hold
-~6.6 GB outside the in-flight budget entirely. Cap it through the Kafka
-section's `rdkafka` map, and read
-[Kafka source performance tuning](../04-connectors/sources/kafka/performance-tuning.mdx#prefetch)
-before you do — prefetch depth is the largest throughput term there is for a
-backlogged consumer, and lowering the byte cap also shrinks `fetch.max.bytes`
-unless you set it explicitly.
+That second term is easy to under-count and it is not a framework number. A
+source client with its own read-ahead holds that data before the framework sees
+it, so it sits outside the in-flight budget entirely — and where the buffer is
+charged per assignment unit rather than per process, it can be an order of
+magnitude larger than the budget. Size it from the source's own page before
+setting a memory limit.
+
+:::note Connector specifics
+Read-ahead buffering and how to cap it:
+[Kafka source](../04-connectors/sources/kafka/performance-tuning.mdx#prefetch)
+· [S3 source](../04-connectors/sources/s3/README.mdx#configuration).
+:::
 
 ## Chunk sizing: `chunk.target_bytes` {#chunk-sizing}
 
@@ -284,8 +285,15 @@ scheduler. Leave it `off` unless you run that setup.
 
 ## Where parallelism actually comes from
 
-Kafka consumption parallelism is bounded by partition count, not thread
-count — lanes map m:n onto pipeline threads. If the pipeline is
-CPU-saturated, more threads help; if it's partition-starved, only more
-partitions (or fewer replicas per consumer group) do. Scale horizontally by
-replicas: one pod is one consumer-group member.
+Read parallelism is bounded by **lane count**, not thread count — lanes map
+m:n onto pipeline threads, so threads cannot manufacture concurrency a source
+did not hand out. If the pipeline is CPU-saturated, more threads help; if it is
+lane-starved, only more lanes do, and how a source decides its lane count is
+its own affair. Scale horizontally by replicas, and see
+[Scaling out](scaling-out.mdx) for how each source divides work across them.
+
+:::note Connector specifics
+What a lane is, and what bounds how many there are:
+[Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
+· [S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads).
+:::

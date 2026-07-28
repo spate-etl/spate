@@ -149,8 +149,8 @@ replays. Two guarantees depend on it:
   means a reprocessed record lands again, and it lands with new batch
   boundaries and a new dedup token — no dedup window catches it (see
   [Delivery guarantees](02-delivery-guarantees.mdx)). What absorbs those
-  duplicates is a destination-side collapse pattern
-  (`ReplacingMergeTree`-style last-write-wins), and collapse works **within
+  duplicates is a destination-side collapse pattern — last-write-wins on a key
+  — and collapse works **within
   one shard's table**: it can only absorb a duplicate that lands on the same
   shard as the original. A nondeterministic router scatters a key's
   duplicates across shards, where nothing ever collapses them.
@@ -181,8 +181,8 @@ absorbs them.
 ## Further reading
 
 - [ClickHouse Distributed parity](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
-  — making the router's placement bit-for-bit identical to a ClickHouse
-  `Distributed` table's sharding expression, so cluster reads can prune shards.
+  — making the router's placement bit-for-bit identical to the destination
+  cluster's own sharding expression, so cluster reads can prune shards.
 - [docs/DESIGN.md](../../DESIGN.md) § Sink — the canonical treatment of the
   routing seam, the two tiers, and the shard-worker model.
 - [docs/METRICS.md](../../METRICS.md) — the shard-labeled sink metrics that

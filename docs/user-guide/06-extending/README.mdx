@@ -1,8 +1,8 @@
 # Extending
 
 This section is for library users building their own components: connector
-authors and anyone whose pipeline needs more than the shipped Kafka, Avro,
-and ClickHouse pieces. The framework's abstractions were sized for exactly
+authors and anyone whose pipeline needs more than the shipped connectors.
+The framework's abstractions were sized for exactly
 this — small, stable traits at the edges, with batching, retries,
 acknowledgements, checkpointing, and backpressure all owned by the engine so
 your component doesn't have to be.
@@ -37,7 +37,7 @@ fan-out, and when to drop down to the `Collector`/`StageLifecycle` traits.
 
 Every stage is pre-instrumented by the engine; this page covers where a
 connector *adds* to that — feeding a framework handle with signals only it can
-see (a Kafka source driving `SourceMetrics` for consumer lag), carrying the
+see (a source driving `SourceMetrics` for consumer lag), carrying the
 standard labels via `with_component_type` / `with_replica_labels`, and
 registering your own metric on the same `metrics` facade when the taxonomy
 doesn't cover it.

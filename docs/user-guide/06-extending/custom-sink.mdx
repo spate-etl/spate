@@ -46,8 +46,9 @@ Contracts:
   lane on that thread.
 - **Frames must concatenate.** Chunks encoded on different pipeline threads
   are merged by shard workers into one batch, so your wire format must be
-  valid as a plain concatenation of row encodings (RowBinary and NDJSON
-  are; a format needing a global header belongs in the writer).
+  valid as a plain concatenation of row encodings (a row-wise binary format
+  or newline-delimited text is; a format needing a global header belongs in
+  the writer).
 - **Errors are record-level by default**, subject to the sink stage's
   `ErrorPolicy` (`ChunkConfig::encode_policy`, default `Skip` — counted in
   metrics). Return an error classed **`Fatal`** to stop the pipeline
@@ -78,8 +79,8 @@ impl ShardWriter for StdoutWriter {
 ```
 
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
-  system has durably accepted the batch (for ClickHouse, the successful
-  server ack; here, after printing). The framework releases the batch's
+  system has durably accepted the batch — a synchronous server ack, a
+  delivery confirmation, or here, after printing. The framework releases the batch's
   acknowledgements on `Ok`, which is what lets the source watermark advance
   past that data — return `Ok` early and a crash loses records, violating
   at-least-once.
@@ -137,9 +138,9 @@ pipeline threads and shard workers is the builder's knob, not the bundle's:
 
 ## The connector pattern: implementing `SinkBundle`
 
-A reusable connector (the spate-clickhouse pattern) exposes a config-built
-sink type and implements `SinkBundle` on it, so applications write one
-line:
+A reusable connector exposes a config-built sink type and implements
+`SinkBundle` on it, so applications write one line (worked reference:
+`crates/spate-clickhouse`):
 
 ```rust
 impl SinkBundle for MySink {
@@ -158,8 +159,8 @@ itself implements it, which is why hand-rolled sinks skip the impl. The
 only bound anywhere is `ShardWriter`, so your connector's client types
 never appear in framework APIs (the dependency policy in
 [docs/DESIGN.md](../../DESIGN.md)). Connector-specific flows the framework
-cannot name — like ClickHouse's `validate_schema` producing the encoder's
-row schema — stay concrete pre-steps in your factory, before `into_parts`.
+cannot name — a pre-flight schema check that produces the encoder's row
+schema, say — stay concrete pre-steps in your factory, before `into_parts`.
 
 If your connector deserializes a YAML body, don't name a field `chunk`: that
 key is **framework-reserved** inside every component body (it carries the

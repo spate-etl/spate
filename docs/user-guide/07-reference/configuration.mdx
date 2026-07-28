@@ -25,8 +25,9 @@ sink:
   clickhouse: { ... }     # body owned by spate-clickhouse
 ```
 
-**Conventions used in this appendix.** Keys are shown in `backticks`; a blank
-default (`—`) means the key is **required**. Durations use humantime syntax
+**Conventions used in this appendix.** Keys are shown in `backticks`. A Default
+cell is one of exactly three forms (`docs/STYLE.md` § 3): `required`, a
+backticked literal, or `none` for optional-and-unset. Durations use humantime syntax
 (`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`, `1GiB`) or a
 plain integer for bytes. Framework-section defaults are the exact values from
 `crates/spate-core/src/config/mod.rs`; the sink-pool and code-level defaults come
@@ -61,8 +62,8 @@ for the parsing caveats.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | — | Pipeline identity; the `pipeline` label on every metric. Must be non-blank. |
-| `threads` | integer | derived | Pinned pipeline thread count. Unset: `available_parallelism` minus the I/O reserve (`io_threads` + 1 controller), at least 1. Cgroup-aware — set explicitly on pods without CPU limits ([Tuning](../05-deployment/tuning.mdx)). Must be ≥ 1 when set. |
+| `name` | string | `required` | Pipeline identity; the `pipeline` label on every metric. Must be non-blank. |
+| `threads` | integer | `none` | Pinned pipeline thread count. Unset: `available_parallelism` minus the I/O reserve (`io_threads` + 1 controller), at least 1. Cgroup-aware — set explicitly on pods without CPU limits ([Tuning](../05-deployment/tuning.mdx)). Must be ≥ 1 when set. |
 | `io_threads` | integer | `2` | Worker threads for the I/O runtime (sink workers, checkpointer, admin server). Must be ≥ 1. |
 | `pinning` | `off` \| `compact` | `off` | Core pinning for pipeline threads. `compact` pins thread *i* to core *i* — only useful with exclusive cores (Kubernetes static CPU manager + Guaranteed QoS). |
 
@@ -86,7 +87,7 @@ sink batch settings.
 | `max_inflight_bytes` | bytes | `256MiB` | Global cap on bytes admitted into the pipeline but not yet durably written. Must be `> 0`. |
 | `high_ratio` | float | `0.8` | Fraction of the budget at which sources are paused. |
 | `low_ratio` | float | `0.5` | Fraction of the budget below which sources may resume. Ratios must satisfy `0 < low_ratio < high_ratio <= 1`. |
-| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping (pausing a Kafka partition purges its prefetch, so resume is not free). |
+| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. |
 
 ## `metrics:`
 
@@ -150,9 +151,9 @@ on the ceiling. When every replica is quarantined the shard sleeps waiting for
 a probe window and this gauge reads `0`; `spate_sink_shard_healthy` covers that
 state.
 
-Connectors add their own keys on top of these — e.g. ClickHouse's
-`timeouts.{send,end}` (its HTTP client, **not** the shared pool) and Kafka's
-top-level `delivery_timeout`. Those live on the respective connector pages.
+Connectors add their own keys on top of these — a client-level timeout, for
+instance, is the connector's own and not the shared pool's. Those live on the
+respective connector pages, indexed [below](#source-deserializer-sink).
 
 ## Chunk handoff (`chunk`) {#chunk}
 
@@ -200,14 +201,13 @@ to it. The framework requires exactly one `source`, exactly one of `sink` **or**
 
 | Section | Required | Body documented in |
 |---|---|---|
-| `source` | yes | [Kafka](../04-connectors/sources/kafka/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sources](../06-extending/custom-source.mdx)) |
+| `source` | yes | [Kafka](../04-connectors/sources/kafka/README.mdx), [S3](../04-connectors/sources/s3/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sources](../06-extending/custom-source.mdx)) |
 | `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/formats/avro/README.mdx), [JSON](../04-connectors/formats/json/README.mdx) |
 | `sink` **or** `sinks` | yes (exactly one) | [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx), [Kafka](../04-connectors/sinks/kafka/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sinks](../06-extending/custom-sink.mdx)) |
 
-**TLS & SASL.** Kafka security (TLS, mTLS, SASL SCRAM/PLAIN) is configured
-through the Kafka connector's `rdkafka:` passthrough, gated behind the opt-in
-`kafka-tls` **build feature** (not a YAML key); ClickHouse encrypts over
-`https://` replica URLs with no feature flag. See
+**Security is per connector, and some of it is a build feature rather than a
+key.** Each connector's page carries its own auth and TLS section; the matrix
+of which is which is in
 [Securing connections](../03-guides/securing-connections.mdx).
 
 ### `sinks:` — multiple named sinks {#sinks}
@@ -246,16 +246,17 @@ the YAML block on the same sink).
 
 **Coordination is assembly wiring, not source YAML.** A coordinated
 source takes a fully built coordinator through its `with_coordinator`
-builder (e.g. `StoreCoordinator` over the NATS store, with a
-`CoordinationConfig` for `lease_duration`, `instance_id`,
-`max_in_flight`, …) — no connector grows per-backend config keys or
-compile-time features, and new store backends need no connector changes.
+builder — a `StoreCoordinator` over a
+[coordination store](../04-connectors/coordination/README.mdx), with a
+`CoordinationConfig` for `lease_duration`, `instance_id`, `max_in_flight`
+and the rest. No connector grows per-backend config keys or compile-time
+features, and a new store backend needs no connector changes.
+
 The wiring recipe lives in
 [Coordination-aware sources](../06-extending/custom-source.mdx#coordination-aware-sources)
 and the deployment shape in [Scaling out](../05-deployment/scaling-out.mdx);
 what stays in the source YAML is the work and how this instance reads it.
-For S3 the two are worth telling apart: `url`, `compression`,
-`split_target_bytes` and `refresh_listing` shape the *work itself*, form
-the job fingerprint, and must be byte-equal across every instance, while
-`prefetch_bytes`, `chunk_bytes` and `store` are local read tuning and may
-differ per replica.
+Those two are worth telling apart, because they behave differently across a
+fleet: keys that shape the *work itself* form the job fingerprint and must be
+byte-equal on every instance, while local read tuning may differ per replica.
+Each coordinated source's page marks which of its keys are fingerprinted.

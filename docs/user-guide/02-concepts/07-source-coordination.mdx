@@ -1,7 +1,7 @@
 # Source coordination
 
-Brokered sources bring their own coordination: a Kafka consumer group
-assigns partitions across processes, and running a second replica Just
+Brokered sources bring their own coordination: the broker's group protocol
+assigns work across processes, and running a second replica Just
 Works. Broker-less sources — object-store backfills, database range
 scans, file tails — have no group protocol. Two processes pointed at the
 same input each see *all* of it, so scaling out means duplicating every
@@ -11,7 +11,9 @@ The coordination layer closes that gap with a **leader-assigned
 coordinator–worker model**. It is not a data path — records never flow
 through it — and it is not a new deployable: every pipeline replica runs
 the same binary, and the only added infrastructure is a small,
-low-latency key-value store (NATS JetStream in the shipped backend).
+low-latency key-value store — see
+[Coordination stores](../04-connectors/coordination/README.mdx) for the shipped
+backends.
 
 ## The model
 
@@ -99,12 +101,12 @@ line.
 ## Why an external store
 
 An earlier design coordinated instances over the checkpoint object store
-itself (S3 conditional writes), trading latency for zero extra
+itself, using its conditional writes, trading latency for zero extra
 infrastructure. It was rejected on review before merging: it made an
 object store the required substrate for *every* coordinated source — a
-database source would deploy S3 just to coordinate — and object-store
+database source would have deployed one purely to coordinate — and object-store
 round-trips are poll-based and slow, which caps how fast work can be
-distributed and stolen. The full record of that reversal lives in the
+distributed. The full record of that reversal lives in the
 design log (`docs/DESIGN.md`). The store dependency is deliberately
 narrow: six primitives (create-if-absent, compare-and-swap, guarded
 delete, point read, prefix watch, listing) behind a public trait, so

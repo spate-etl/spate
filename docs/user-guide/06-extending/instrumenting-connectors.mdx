@@ -29,8 +29,9 @@ measure from the outside?"
 
 ## Feeding a framework handle
 
-Some signals live inside the connector: a Kafka consumer's per-partition lag, a
-rebalance callback firing. The framework defines the handle
+Some signals live inside the connector and nowhere else: per-partition lag that
+only the client can compute, an assignment callback firing. The framework
+defines the handle
 ([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
 drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
 through a builder of your own:
@@ -61,30 +62,33 @@ that also increments `rebalance_assigned` makes the counter read double.
 :::danger[Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose]
 All three of these are scar tissue.
 
-`spate-kafka` once exposed a `with_metrics` builder instead. Nothing in the tree
-called it and the runtime had no path to call it, so the runtime registered
-`spate_source_lag_records` and the connector never wrote it — the gauge rendered a
-permanent `0` on every Kafka pipeline. A maximally backlogged consumer reported
-no lag and every alert keyed on it stayed green. A builder the runtime cannot
-reach is dead code, not an option.
+**Take the handle from `SourceCtx`.** A builder the runtime cannot reach is
+dead code, not an option: the runtime registers the series either way, so a
+connector that never receives its handle leaves the gauge rendering a permanent
+`0`. For lag that is the worst possible failure — a maximally backlogged source
+reports nothing wrong and every alert keyed on it stays green.
 
-The second half: publish a value only when you have really measured it. A
+**Publish a value only once you have really measured it.** A
 registered-but-unwritten gauge renders `0`, and for lag a `0` is
 indistinguishable from "caught up". `SourceMetrics::set_partition_lag`
 registers a partition's series on first call, so *not calling it* is how you
-say "unknown" — which is why `spate-kafka` skips partitions whose librdkafka
-`consumer_lag` is `-1` rather than publishing them as zero.
+say "unknown". A client that reports "I don't know this partition's lag" must
+be passed through as silence, never flattened to zero.
 
-The third half: a per-partition series you stop owning does not go away. The
-exporter has no deletion and no idle timeout is configured, so dropping your
-handle is invisible — the series renders its last value for the life of the
-process, and a reader summing across members counts a partition twice. Two
-things are needed, and `spate-kafka` does both: filter publication to the live
-assignment (a stale snapshot still lists partitions you have lost), and call
-`SourceMetrics::retain_partitions` with the **new** assignment once a rebalance
-settles, which zeroes what you lost. Do not prune on revocation: an eager
-rebalance revokes everything before handing most of it back, so pruning there
-blanks partitions you still own and are still draining.
+**Clean up the series you stop owning.** A per-partition series does not go
+away when you lose the partition: the exporter has no deletion and no idle
+timeout is configured, so dropping your handle is invisible — the series
+renders its last value for the life of the process, and a reader summing across
+members counts that partition twice. Two things are needed. Filter publication
+to the live assignment, since a stale client snapshot still lists partitions
+you have lost; and call `SourceMetrics::retain_partitions` with the **new**
+assignment once the assignment change settles, which zeroes what you lost. Do
+not prune on revocation: a source whose protocol revokes everything before
+handing most of it back would blank partitions you still own and are still
+draining.
+
+Worked reference for all three: `crates/spate-kafka/src/source.rs` and
+`crates/spate-kafka/src/metrics.rs`.
 
 Test the wiring, not the registration: assert a **value** arrives end to end.
 A test that only asserts the family appears in the exposition passes happily
@@ -107,8 +111,8 @@ Every framework series carries three standard labels — `pipeline`, `component`
 assembly. The two you set as a connector author are on the sink builder:
 
 - `SinkParts::with_component_type("...")` sets `component_type`
-  (default `"custom"`) on every sink series, so ClickHouse series read
-  `component_type="clickhouse"` and yours read whatever names your
+  (default `"custom"`) on every sink series. Every shipped sink sets it to the
+  system it writes to, and yours should read as whatever names your
   implementation.
 - `SinkParts::with_replica_labels(...)` supplies the display names bound to the
   `replica` label, so per-replica health and error series identify the right
@@ -141,14 +145,18 @@ schema_fetches.increment(n);
 fetch_seconds.record(elapsed);
 ```
 
-This renders
-`spate_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}`.
+This renders:
+
+```text
+spate_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}
+```
+
 The rules the `Meter` enforces so you don't have to think about them:
 
 - **You never type the prefix.** `Meter::new(...)` uses the `custom` namespace
   (`spate_custom_*`) — the bucket for pipeline-author metrics;
-  `Meter::with_namespace("kafka", ...)` claims a connector segment
-  (`spate_kafka_*`). The namespace is validated once at construction and **cannot
+  `Meter::with_namespace(...)` claims a connector segment
+  (`spate_<namespace>_*`). The namespace is validated once at construction and **cannot
   be a reserved framework stage root** (`source`, `sink`, `deser`, …), so a
   custom family can never collide with a current or future framework metric.
   This is the shape Prometheus's own `namespace_subsystem_name` convention
@@ -161,17 +169,16 @@ The rules the `Meter` enforces so you don't have to think about them:
 - **Store the handles** (`Counter` / `Gauge` / `Histogram`, re-exported from
   `spate_core::metrics`) in your own struct — no direct `metrics` dependency.
 
-A connector that can appear as **both a source and a sink** in one pipeline (a
-Kafka source alongside a future Kafka sink) is separated by the runtime, not by
-you: when it injects a component's `Meter` it derives the end from the
-source-vs-sink position and scopes the family `spate_kafka_source_*` /
-`spate_kafka_sink_*`, so its source `bytes_total` and its sink `bytes_total` land
-under distinct names (`spate_kafka_source_bytes_total` vs
-`spate_kafka_sink_bytes_total`). Your connector code is identical at either end —
-you never name the role, and a `Meter` local name may not itself begin with a
-role segment (`source_` / `sink_`), which is reserved for exactly this scoping.
-(Instance identity — two Kafka sinks — stays in the `component` label, where
-same-meaning series belong.)
+A crate that provides **both a source and a sink**, appearing at both ends of
+one pipeline, is separated by the runtime, not by you: when it injects a
+component's `Meter` it derives the end from the source-vs-sink position and
+scopes the family `spate_<namespace>_source_*` / `spate_<namespace>_sink_*`, so
+its source `bytes_total` and its sink `bytes_total` land under distinct names.
+Your connector code is identical at either end — you never name the role, and a
+`Meter` local name may not itself begin with a role segment (`source_` /
+`sink_`), which is reserved for exactly this scoping. Instance identity — two
+sinks of the same type — stays in the `component` label, where same-meaning
+series belong.
 
 ### From a pipeline author's operators
 
@@ -281,9 +288,9 @@ connector never wires the pipeline name, the labels, or the prefix.
   `SourceCtx` in `open`; a sink's writer overrides
   `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before the
   writer is shared). The runtime scopes it by **role** — `source`/`sink` derived
-  from the wiring position — so a Kafka source's families land under
-  `spate_kafka_source_*` and a Kafka sink's under `spate_kafka_sink_*`; its source
-  and sink families therefore land under distinct names. The connector's code is
+  from the wiring position — so one crate's source families land under
+  `spate_<namespace>_source_*` and its sink families under
+  `spate_<namespace>_sink_*`, under distinct names. The connector's code is
   identical at either end.
 
 ```rust
@@ -305,12 +312,13 @@ it does **not** gate `spate_source_lag_records`, which is ungated by design.
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
 (a sink's default) opts out silently, and a value that is a legal label but an
-illegal metric-name segment (e.g. `"clickhouse-v2"`) is logged at `warn` and
+illegal metric-name segment (a hyphen, say) is logged at `warn` and
 also yields `None` — so a component only gets a scope once it declares a
-distinct, well-formed `component_type`. The **Kafka source is the production
-worked example**: `crates/spate-kafka/src/metrics.rs` translates the librdkafka
-statistics snapshot into the `spate_kafka_source_*` families documented in
-[Metrics](../../METRICS.md), including lazily-registered per-broker series and
-detail-gated per-partition series. For a minimal template see `crates/spate-test`'s
-`MemorySource` / `CaptureWriter`, exercised end-to-end in
-`crates/spate-test/tests/component_metrics.rs`.
+distinct, well-formed `component_type`.
+
+Worked reference for the full production shape, including lazily-registered
+per-endpoint series and detail-gated per-partition series:
+`crates/spate-kafka/src/metrics.rs`, whose families are documented on the
+[Kafka source](../04-connectors/sources/kafka/README.mdx#metrics) page. For a
+minimal template see `crates/spate-test`'s `MemorySource` / `CaptureWriter`,
+exercised end-to-end in `crates/spate-test/tests/component_metrics.rs`.

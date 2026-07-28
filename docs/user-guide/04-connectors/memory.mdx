@@ -19,12 +19,12 @@ spate-test = { version = "...", path = "..." }   # same workspace/registry as sp
   zero setup: `cargo run -p spate --example memory_pipeline` is exactly this.
 - **CI** — deterministic whole-pipeline tests with no Docker; this is the
   default test tier for the framework itself.
-- **Testing your pipelines** — the first-class path for framework users to
+- **Testing a pipeline** — the first-class path for framework users to
   test their own chains, covered step by step in
   [Testing pipelines](../03-guides/testing-pipelines.mdx).
 
 They are not production connectors: nothing is durable, and the source is
-driven entirely by your code.
+driven entirely by the test that owns it.
 
 ## The source: `memory_source()` + `SourceHandle`
 
@@ -73,7 +73,7 @@ no scripting; the `SinkScript` handle drives everything else:
 
 Scripting a `retryable` outcome exercises the framework's real retry and
 replica-rotation machinery; a `fatal` outcome abandons the batch and stalls
-the watermark — letting you test the at-least-once failure modes
+the watermark, so the at-least-once failure modes are testable
 themselves. `sink.with_pool_config(...)` overrides pool tuning; tests
 usually shrink `batch.linger` so flushes are fast.
 
@@ -104,5 +104,5 @@ sink: { capture: {} }
 - [Testing pipelines](../03-guides/testing-pipelines.mdx) — the full
   `into_runtime` + `shutdown_handle` pattern over these mocks.
 - [Quickstart](../01-getting-started/02-quickstart.mdx) — the memory
-  pipeline as your first run.
+  pipeline as a first run.
 - [Connector matrix](README.mdx) — the production counterparts.

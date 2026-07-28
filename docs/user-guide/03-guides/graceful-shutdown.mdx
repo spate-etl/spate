@@ -76,7 +76,7 @@ prefers `?`.
 
 ## Abandoned batches: replay, not loss
 
-If the sink cannot flush everything by the deadline — a ClickHouse outage
+If the sink cannot flush everything by the deadline — a destination outage
 mid-shutdown, say — the remaining batches are **abandoned loudly**: a log
 line and a metric, their acknowledgements are failed, and their partitions'
 watermarks never advance past them. The final commit therefore commits only

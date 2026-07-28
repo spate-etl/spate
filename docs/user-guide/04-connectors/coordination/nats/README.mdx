@@ -1,0 +1,157 @@
+# NATS JetStream (coordination store)
+
+The NATS JetStream store (`spate-coordination`, feature `coordination-nats` on
+the `spate` facade) is the production coordination backend. Coordinated
+instances of one job meet in it to agree who holds which
+[split](../../../07-reference/glossary.mdx#split). Records never flow through
+it — it carries split records, leases, and the plan, at roughly one small write
+per held split per third of a lease, so a handful of writes per second per
+worker.
+
+Construct it and hand it to a `StoreCoordinator`, which the source takes as
+assembly wiring — there is no `coordination:` section in the pipeline YAML
+([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
+
+```rust
+use spate::coordination::store::nats::{NatsConfig, NatsStore};
+use spate::coordination::{CoordinationConfig, StoreCoordinator};
+
+let tuning = CoordinationConfig {
+    instance_id: std::env::var("POD_NAME").ok(), // unique per live replica
+    ..CoordinationConfig::default()              // lease 30s, max_in_flight 8, …
+};
+let store = NatsStore::new(
+    NatsConfig::new(vec![std::env::var("NATS_URL")?], "exports-backfill"),
+    tuning.lease_duration, // one value drives store TTL and lease — must match
+)?;
+let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
+```
+
+Construction is synchronous and lazy: the connection and bucket provisioning
+happen on the first store operation, which is the coordinator's startup probe.
+Connect failures therefore ride the startup retry budget, and misconfiguration
+is fatal at startup with an actionable message rather than surfacing later.
+
+## Configuration
+
+`NatsConfig` is built in code, not deserialized from the pipeline file.
+Construct it with `NatsConfig::new(servers, job)` and set the optional fields;
+the struct is `#[non_exhaustive]`, so new knobs are added without breaking
+callers. `Debug` is safe to log — every secret field redacts itself.
+
+```rust
+let mut cfg = NatsConfig::new(vec!["nats://nats:4222".into()], "exports-backfill");
+cfg.replicas = 3;
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`). At least one. |
+| `job` | `String` | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
+| `credentials` | `NatsCredentials` | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
+| `tls` | `Option<NatsTls>` | `none` | TLS material. Its presence requires TLS on every server. |
+| `replicas` | `usize` | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
+
+The second argument to `NatsStore::new` is the lease TTL. It must be the same
+value as the coordinator's `lease_duration` — one drives the bucket's age limit
+and the other drives the lease protocol, and they only agree if you pass the
+same number. The floor is 2s, because expiry-marker precision is one second.
+
+Values are capped at 512 KiB, well below the NATS 1 MiB message ceiling, so a
+split descriptor cannot grow into an unwritable record.
+
+## Security (authentication and TLS)
+
+`NatsCredentials` selects the mechanism:
+
+| Variant | Use |
+|---|---|
+| `None` | Anonymous. Development clusters only. |
+| `UserPassword { username, password }` | Username and password. The password is a `Secret` and renders `<redacted>` in all `Debug` output. |
+| `Token(Secret)` | A bearer token. |
+| `CredsFile(PathBuf)` | A `.creds` file (NKey + JWT) — the NATS-native mechanism, and the right choice for a managed cluster. |
+
+`NatsTls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
+`client_key` for mutual TLS. Setting the `tls` field at all requires TLS on
+every server in `servers`.
+
+Auth failure is fatal at startup, not retried — see
+[Securing connections](../../../03-guides/securing-connections.mdx) for the
+generic model.
+
+## The two buckets
+
+One job means two KV buckets, split by durability:
+
+- **`spate_coordination_{job}_state`** — durable, no age limit. Split records
+  and the plan record survive the death of whoever wrote them.
+- **`spate_coordination_{job}_lease`** — ephemeral, with a bucket-level
+  `max_age` equal to the lease TTL.
+
+The lease bucket is where the server version floor comes from. NATS KV cannot
+re-arm a per-key TTL on update, but `max_age` applies per *message* — so every
+compare-and-swap rewrite restarts that key's clock, which **is** the heartbeat.
+An untouched key expires on its own, and the expiry surfaces to watchers as a
+limit marker (a graceful delete surfaces differently, which is what lets a
+worker distinguish "released" from "died").
+
+## Requirements
+
+- **NATS server ≥ 2.11**, with JetStream enabled (`-js`). Per-message age
+  limits and limit markers shipped in 2.11; the worker verifies the version at
+  startup and fails actionably against anything older.
+- **One job name per coordinated job.** A fingerprint check rejects
+  misconfigured workers before they can touch anything.
+
+Development and CI need nothing more than a single container:
+
+```yaml
+# docker-compose.yml
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js"]
+    ports: ["4222:4222"]
+
+  pipeline:
+    image: your-pipeline
+    deploy: { replicas: 2 }
+    environment:
+      NATS_URL: nats://nats:4222
+      # instance_id from the container hostname — unique per replica
+```
+
+For production, run a 3-node cluster with JetStream and set `replicas: 3` on
+`NatsConfig` so the buckets survive losing a node.
+
+## What an outage does
+
+Heartbeats fail, and workers **self-fence** after one full lease without a
+successful write — they stop their splits rather than run unfenced. Commits
+surface as retryable. Everything resumes where it left off when the store
+returns: degraded, never corrupted.
+
+This is the store being unavailable, not the store lying. Correctness does not
+rest on the store staying up; it rests on the compare-and-swap, which a
+partitioned worker cannot win.
+
+## Metrics
+
+This store registers no families of its own. Its round-trips appear in the
+framework's coordination families — `spate_coordination_store_op_duration_seconds`
+by `op`, and `spate_coordination_writes_total{outcome="conflict"}` for lost
+compare-and-swaps, which is fencing working as designed and alarming only in
+bulk. See [Metrics](../../../../METRICS.md) § Coordination.
+
+## Related
+
+- [Source coordination](../../../02-concepts/07-source-coordination.mdx) — why a
+  broker-less source needs a store at all.
+- [Work assignment](../../../02-concepts/08-work-assignment.mdx) — the normative
+  spec for leases, fencing and the leader's assignment pass.
+- [Scaling out](../../../05-deployment/scaling-out.mdx) — running a coordinated
+  fleet, its tuning knobs and its failure modes.
+- [S3 source](../../sources/s3/README.mdx) — the shipped source that needs a
+  store.
+- [Custom sources](../../../06-extending/custom-source.mdx#coordination-aware-sources)
+  — wiring the seam into a source of your own.

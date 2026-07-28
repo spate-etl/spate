@@ -173,12 +173,12 @@ which is exactly when throughput matters.
 Once the queue thresholds are not the limiter, the per-request sizing is what
 caps how much a single round trip can return.
 
-| property | default | raise it when |
+| Property | Default | Raise it when |
 |---|---|---|
-| `fetch.message.max.bytes` | 1 MB | messages or per-partition batches exceed ~1 MB, or you have few partitions and want bigger per-partition reads |
-| `fetch.max.bytes` | 50 MB | many partitions on one broker — this caps the *whole* response, so it is divided across them |
-| `fetch.min.bytes` | 1 | see below |
-| `fetch.wait.max.ms` | 500 | see below |
+| `fetch.message.max.bytes` | `1 MB` | messages or per-partition batches exceed ~1 MB, or you have few partitions and want bigger per-partition reads |
+| `fetch.max.bytes` | `50 MB` | many partitions on one broker — this caps the *whole* response, so it is divided across them |
+| `fetch.min.bytes` | `1` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
+| `fetch.wait.max.ms` | `500` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
 
 Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
 `fetch.max.bytes`, but only while you leave it unset — pinning it is a

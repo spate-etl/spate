@@ -84,12 +84,12 @@ Some connectors need async edge work before the pipeline runs. The builder's
 I/O runtime is already alive, so:
 
 - `pipeline.io_handle()` — a `tokio::runtime::Handle` for background tasks
-  that must start before `run` (the Avro schema-registry fetcher takes one;
-  see [Avro](../04-connectors/formats/avro/README.mdx)).
+  that must start before `run` — a schema-registry fetcher, say. A connector
+  that needs one says so on its page.
 - `pipeline.block_on(future)` — run an async pre-flight step to completion
-  on the I/O runtime, blocking the current thread. The canonical use is
-  ClickHouse schema validation
-  (see [Schema validation](schema-validation.mdx)):
+  on the I/O runtime, blocking the current thread. The canonical use is a
+  sink's pre-flight schema check
+  (see [Schema validation](../04-connectors/sinks/clickhouse/schema-validation.mdx)):
 
 ```rust
 let encoder = match pipeline.block_on(sink.validate_schema())? {

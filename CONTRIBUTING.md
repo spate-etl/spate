@@ -155,16 +155,37 @@ metric series ownership is process-wide. Test fixtures therefore need per-test
 ## Documentation
 
 Documentation lives in `docs/` and the site renders that tree in place, so a
-docs change is a change to the published site. The structure rules are in
-[`docs/STYLE.md`](docs/STYLE.md).
+docs change is a change to the published site. The structure, prose and voice
+rules are in [`docs/STYLE.md`](docs/STYLE.md).
+
+**The one rule to know before writing a line:** framework pages
+(`docs/user-guide/`, everything outside `04-connectors/`) are vendor-neutral
+prose. A connector name belongs in a link, a `## Related` entry, or a
+`:::note Connector specifics` pointer block — never in the explanation itself,
+which is stated in framework vocabulary and belongs to every connector equally.
+Vendor mechanisms, setting keys and tuning numbers live on the connector's own
+page, once. Code and YAML blocks are exempt: a config example has to name a
+real tag. `docs/STYLE.md` § 1 has the full rule and its exemptions.
+
+The boundary is enforced in review — the rule has judgement at its edges, so
+there is no lint gate for it. Before you push, run
+`cd website && npm run build`: that one *is* gated, and it is what catches a
+link you broke by moving a page.
 
 **Benchmark numbers are never hand-written into the docs.** They come from a
 versioned record emitted by the rigs in `benchmarks/`, and the site reads those
 records. If a change makes something faster, say so in the pull request and it
 gets measured — on reference hardware, under the published protocol, because a
 number from a busy laptop is not comparable to the ones already published. The
-methodology lives in the
-[benchmark repository](https://github.com/spate-etl/spate-benchmark).
+methodology lives in
+[`docs/benchmarks/methodology.mdx`](docs/benchmarks/methodology.mdx) and the
+[benchmark repository](https://github.com/spate-etl/benchmark).
+
+## Releases
+
+Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md) —
+contributors never need it, but that is where the version, tag and changelog
+mechanics live.
 
 ## Reporting a vulnerability
 

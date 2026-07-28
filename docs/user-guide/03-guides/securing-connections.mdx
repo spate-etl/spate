@@ -2,24 +2,24 @@
 
 Spate has no framework-wide security layer: **transport security is a property
 of each connector**, because every connector talks to its system over that
-system's own client (librdkafka for Kafka, an HTTP client for ClickHouse) with
-that client's own TLS/auth knobs. This page is the hub — it covers what *is*
-framework-wide (how secrets reach the config, and what happens when auth fails)
-and points at each connector's own security section for the concrete matrix.
+system's own client, with that client's own TLS and auth knobs. This page is
+the hub. It covers what *is* framework-wide — how secrets reach the config, and
+what happens when authentication fails — and points at each connector for the
+concrete mechanism.
 
 ## Where each connector documents its security
 
-| Connector | Transport | Auth methods | Build gate | Details |
-|---|---|---|---|---|
-| Kafka source | TLS / mTLS over librdkafka | client cert, SASL SCRAM/PLAIN | opt-in `kafka-tls` feature | [Kafka source → Security](../04-connectors/sources/kafka/README.mdx#security-tls-mtls-sasl) |
-| Kafka sink | TLS / mTLS over librdkafka | client cert, SASL SCRAM/PLAIN | opt-in `kafka-tls` feature | [Kafka sink → Security](../04-connectors/sinks/kafka/README.mdx#security-tls-mtls-sasl) |
-| ClickHouse sink | TLS over `https://` (rustls) | `user` / `password` | none (always available) | [ClickHouse → Security](../04-connectors/sinks/clickhouse/README.mdx#security-tls) |
+| Connector | Authenticates with | Build gate | Details |
+|---|---|---|---|
+| Kafka source | TLS, mTLS, SASL | opt-in `kafka-tls` feature | [Kafka source → Security](../04-connectors/sources/kafka/README.mdx#security-tls-mtls-sasl) |
+| Kafka sink | TLS, mTLS, SASL | opt-in `kafka-tls` feature | [Kafka sink → Security](../04-connectors/sinks/kafka/README.mdx#security-tls-mtls-sasl) |
+| ClickHouse sink | TLS, user/password | none | [ClickHouse → Security](../04-connectors/sinks/clickhouse/README.mdx#security-tls) |
+| S3 source | Ambient cloud credentials, or static keys | none | [S3 source → Security](../04-connectors/sources/s3/README.mdx#security-credentials-and-region) |
+| Avro format | Registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-registry-credentials) |
+| NATS JetStream store | TLS, mTLS, token, creds file | opt-in `coordination-nats` feature | [NATS → Security](../04-connectors/coordination/nats/README.mdx#security-authentication-and-tls) |
 
-The Kafka source and sink share one security matrix (the `rdkafka:` passthrough
-is identical for both). ClickHouse needs no feature flag — an `https://` replica
-URL is encrypted out of the box; client-certificate (mTLS) auth to ClickHouse is
-a tracked follow-up. Kerberos/GSSAPI for Kafka is a separate, heavier build and
-is also a tracked follow-up.
+Two connectors that share a client share a matrix — the Kafka source and sink
+render the same one, from the same partial.
 
 ## Secrets stay out of the file
 
@@ -40,23 +40,26 @@ may contain YAML-significant characters. The four `${...}` forms and the
 quoting rules are in
 [Configuring pipelines](configuring-pipelines.mdx#environment-interpolation).
 
+Secrets that never enter the config file at all are better still: a connector
+that resolves ambient cloud credentials, or reads a mounted credentials file,
+gives you nothing to leak.
+
 ## A bad credential stops the pipeline loudly
 
 Authentication and TLS failures are a **fatal error class**, not a retryable
 one: a wrong password, an untrusted CA, or a rejected client certificate fails
 the pipeline fast with an actionable message rather than silently stalling or
 looping. That is deliberate — a security misconfiguration should surface at
-startup (or at the first connection), not degrade into a stuck consumer. See
+startup (or at the first connection), not degrade into a stuck pipeline. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for how fatal
 error classes propagate, and [Error handling](../02-concepts/04-error-handling.mdx)
 for the Skip/Fail taxonomy they sit outside of.
 
 ## Related
 
-- [Kafka source](../04-connectors/sources/kafka/README.mdx) ·
-  [Kafka sink](../04-connectors/sinks/kafka/README.mdx) — the `rdkafka:`
-  passthrough these properties ride through, and the denylist they must avoid.
-- [ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx) — the
-  `https://` replica model and `user`/`password` auth.
-- [Configuration reference](../07-reference/configuration.mdx) — every key,
-  including the `kafka-tls` build feature and the interpolation forms.
+- [Connectors](../04-connectors/README.mdx) — every connector, and the section
+  of each page that carries its security matrix.
+- [Configuring pipelines](configuring-pipelines.mdx) — the interpolation forms
+  and their quoting rules.
+- [Configuration reference](../07-reference/configuration.mdx) — every key, and
+  which build features gate the security-related ones.

@@ -30,8 +30,8 @@ per topic — see the `kafka_to_kafka_split` example.
 The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
 (`crates/spate-kafka/src/sink/config.rs`); unknown fields are rejected with
 the offending key, and the retry/breaker values are validated at load
-against the same framework rules the ClickHouse sink uses (a bad multiplier
-or zero threshold fails startup, naming the key).
+against the framework's [sink-pool rules](../../../07-reference/configuration.mdx#sink-pool)
+(a bad multiplier or zero threshold fails startup, naming the key).
 
 ```yaml
 sink:
@@ -47,25 +47,25 @@ sink:
       linger.ms: "20"
 ```
 
-| Key | Type | Default | Meaning |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `brokers` | string | required | Comma-separated bootstrap servers. |
-| `topic` | string | required | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
+| `brokers` | string | `required` | Comma-separated bootstrap servers. |
+| `topic` | string | `required` | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
 | `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever ([benchmark](../../../../benchmarks/kafka-sink.mdx)). |
 | `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing retryably. |
-| `max_message_bytes` | bytes | `1MB` (1,000,000) | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
+| `max_message_bytes` | bytes | `1MB` | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. `1MB` decodes to 1,000,000 bytes. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `spate_kafka_sink_*` families; `0s` disables statistics and those families with it. |
-| `compression` | `none\|gzip\|snappy\|lz4\|zstd` | unset | Producer compression (`compression.codec`). `zstd` needs an rdkafka build with zstd support — an unavailable codec fails at startup, never mid-stream. |
-| `batch` / `inflight` / `retry` / `breaker` | sections | framework defaults | Sink pool tuning — keys, defaults and validation rules in the [reference](../../../07-reference/configuration.mdx#sink-pool). |
+| `compression` | `none\|gzip\|snappy\|lz4\|zstd` | `none` | Producer compression (`compression.codec`). `zstd` needs an rdkafka build with zstd support — an unavailable codec fails at startup, never mid-stream. |
+| `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Sink pool tuning. Unset means the framework's defaults apply — keys, defaults and validation rules are in the [reference](../../../07-reference/configuration.mdx#sink-pool). |
 | `rdkafka` | string map | `{}` | Raw librdkafka producer properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist
 
-Tune anything librdkafka exposes (client-side batching via `linger.ms` /
-`batch.num.messages`, buffer sizing, security) without waiting for a typed
-field. Properties the sink owns for correctness are **rejected at load
-time with an explanation**; aliases are denied alongside canonical names
-(passthrough and framework values apply in unspecified order).
+The passthrough exists to reach anything librdkafka exposes (client-side
+batching via `linger.ms` / `batch.num.messages`, buffer sizing, security)
+without waiting for a typed field. Properties the sink owns for correctness are
+**rejected at load time with an explanation**; aliases are denied alongside
+canonical names (passthrough and framework values apply in unspecified order).
 
 | Denied property | Why |
 |---|---|
@@ -83,6 +83,10 @@ The producer is created **at startup**, so a passthrough that conflicts
 with the forced durability settings (e.g. `max.in.flight` > 5 or
 `retries=0`, which idempotence rejects) fails as a config error before
 anything runs.
+
+## Security (TLS, mTLS, SASL)
+
+<SecuringKafka />
 
 ## How a batch becomes durable
 
@@ -120,14 +124,14 @@ At-least-once with three distinct duplicate windows — none of them loss:
   watermark and everything re-batches. Duplicates possible.
 
 The framework's `dedup_token` has no Kafka equivalent (there is no
-server-side dedup window to hand it to), so it is unused here. Design
-downstream consumers to tolerate duplicates — idempotent handling keyed on
-a payload identity, or compacted topics keyed on the message key.
+server-side dedup window to hand it to), so it is unused here. Downstream
+consumers must tolerate duplicates — idempotent handling keyed on a payload
+identity, or compacted topics keyed on the message key.
 
 :::info
 Nothing in Spate is exactly-once, and no configuration makes it so. In
 particular, `enable.idempotence` does **not** mean exactly-once delivery
-of your stream — it only dedupes librdkafka's own in-session retries.
+of the stream — it only dedupes librdkafka's own in-session retries.
 :::
 
 ## Keys, headers, tombstones
@@ -154,15 +158,69 @@ is down at the deadline, remaining batches are abandoned loudly
 Producer teardown is bounded: rdkafka's own drop purges queued and
 in-flight messages and joins its poll thread (≲1s).
 
-## Security (TLS, mTLS, SASL)
-
-<SecuringKafka />
-
 ## Dependency note
 
 `spate-kafka` deliberately re-exports nothing from `rdkafka`: its types stay out
 of public signatures so `rdkafka` major bumps are not breaking changes here (see
 [docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
+
+## Metrics
+
+Registered through this sink's `Meter` (namespace `kafka`, role `sink`), so
+every family is prefixed `spate_kafka_sink_`. They translate the producer's
+librdkafka statistics snapshot, emitted every `statistics_interval` (default
+`5s`; `0s` disables the whole family) and published from the producer's poll
+thread — never on the record path.
+
+The conventions match the Kafka source's families: counters are
+**absolute-mapped librdkafka totals** scoped to one producer lifetime
+(sound because a sink builds exactly one producer; restarts read as
+ordinary counter resets to PromQL), the `broker` label is bounded by
+cluster topology, and the latency gauges are per-broker rolling-window
+estimates over the last statistics interval that **cannot be aggregated**
+across brokers or processes (`max()` is the only defensible cross-series
+operator). Windows that sampled nothing are absent rather than `0`.
+
+Batch-level write latency is framework-side
+(`spate_sink_write_duration_seconds` — the family comparable with the
+producer's own round-trip; `spate_sink_flush_duration_seconds` spans seal to
+settle and would fold this sink's queueing in on top); these families add
+the producer's internal view. Per-partition transmit-queue detail is
+deferred (see the decision log) — the aggregate queue gauges below cover
+saturation.
+
+| Metric | Type | Extra labels | Description |
+|---|---|---|---|
+| `spate_kafka_sink_tx_requests_total` | counter | | Requests sent to brokers. |
+| `spate_kafka_sink_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
+| `spate_kafka_sink_rx_responses_total` | counter | | Responses received from brokers. |
+| `spate_kafka_sink_rx_bytes_total` | counter | | Protocol bytes received. |
+| `spate_kafka_sink_tx_messages_total` | counter | | Messages produced (delivery-confirmed by librdkafka's accounting). |
+| `spate_kafka_sink_tx_message_bytes_total` | counter | | Message bytes produced (including framing). |
+| `spate_kafka_sink_produce_queue_messages` | gauge | | Messages waiting in the producer's client-side queue (queue-full pressure indicator). |
+| `spate_kafka_sink_produce_queue_bytes` | gauge | | Bytes waiting in the producer's client-side queue. |
+| `spate_kafka_sink_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
+| `spate_kafka_sink_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
+| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `spate_kafka_sink_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
+| `spate_kafka_sink_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
+| `spate_kafka_sink_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
+| `spate_kafka_sink_broker_int_latency_avg_seconds` | gauge | `broker` | Mean time messages spent in the producer queue before transmission, last window. |
+| `spate_kafka_sink_broker_int_latency_p99_seconds` | gauge | `broker` | p99 producer-queue latency over the last window (non-aggregatable). |
+| `spate_kafka_sink_broker_outbuf_latency_avg_seconds` | gauge | `broker` | Mean time in the transmit buffer before the socket, last window. |
+| `spate_kafka_sink_broker_outbuf_latency_p99_seconds` | gauge | `broker` | p99 transmit-buffer latency over the last window (non-aggregatable). |
+
+### Alerting
+
+`spate_kafka_sink_produce_queue_messages` sustained near
+`queue.buffering.max.messages` (default 100k) means the producer cannot drain
+to the brokers. Batch writes are absorbing queue-full backoff, so
+`spate_sink_write_duration_seconds{outcome="ok"}` rises before the source
+pauses — the backoff happens inside the produce call, so it lands in the write
+histogram rather than in `spate_sink_retry_backoff_seconds`.
+
+See [Metrics](../../../../METRICS.md) for the taxonomy, the reserved roots and
+the series-ownership rules.
 
 ## Related
 
@@ -171,6 +229,7 @@ of public signatures so `rdkafka` major bumps are not breaking changes here (see
   example.
 - [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — the
   ack chain the delivery reports plug into.
-- [Monitoring](../../../05-deployment/monitoring.mdx) — the framework `spate_sink_*`
-  families; the connector's producer-statistics families
-  (`spate_kafka_sink_*`) are documented in [Metrics](../../../../METRICS.md).
+- [Monitoring](../../../05-deployment/monitoring.mdx) — the framework
+  `spate_sink_*` families and what to alert on across a whole pipeline.
+- [Kafka sink benchmark](../../../../benchmarks/kafka-sink.mdx) — where the
+  throughput actually comes from, and why `shards` is not the lever.

@@ -37,7 +37,7 @@ let source = S3Source::from_component_config(section, io)?
 
 ```yaml
 source:
-  s3: { url: "s3://bucket/exports/", checkpoint: { ... } }
+  s3: { url: "s3://bucket/exports/" }
 deserializer:
   json: {}          # granularity derived from the source → single
 ```

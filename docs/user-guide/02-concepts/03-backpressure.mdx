@@ -10,13 +10,18 @@ with `try_send` — never a blocking `send`. When a queue rejects (or the
 byte budget crosses its high watermark), the source loop **pauses the
 offending lanes and keeps polling**.
 
-Why this is non-negotiable for Kafka: a poll loop parked in `send()` stops
-calling `poll()`. After `max.poll.interval.ms` without a poll, the broker
-evicts the consumer from its group and triggers a rebalance — which pauses
-*other* consumers, reassigns partitions, and generally converts "the sink
-is slow" into a rebalance storm across the whole group. Pausing lanes while
-continuing to poll keeps the consumer alive, keeps rebalance callbacks
-serviced, and confines the slowdown to exactly where it belongs.
+The reason this is non-negotiable rather than a tuning choice: the source
+loop is what services the assignment protocol, and a loop parked inside
+`send()` stops servicing it. For a source whose liveness proof rides the
+read loop itself, the proof lapses and the assignment is withdrawn. For a
+source whose liveness runs in the background, the leases stay healthy but
+the parked loop cannot answer a reassignment request, so the handoff
+stalls to its deadline and the work is revoked forcibly — and replayed by
+the next owner. Either way the damage is fleet-wide, not local: peers
+absorb the moved work, they pause in turn, and "the sink is slow" has been
+converted into a churning fleet. Pausing lanes while keeping the loop
+running keeps the protocol serviced and confines the slowdown to exactly
+where it belongs.
 
 The same reasoning protects the ack path: acknowledgements travel over an
 unbounded channel and atomic counters, so a full data path can never block
@@ -36,28 +41,30 @@ a completion signal (see
 ## Layer 2 — active: pause with hysteresis
 
 When a queue rejects or the budget crosses its **high watermark**, the
-source pauses the offending lanes (for Kafka: `pause()` on those
-partitions) and keeps polling. It resumes under hysteresis — the budget
-must fall below the **low watermark** and a minimum pause must elapse — so
-the controller doesn't flap at the boundary. Observe it via
-`spate_backpressure_paused`, `spate_backpressure_pause_events_total`
-(a flapping indicator when high), and `spate_backpressure_inflight_bytes`
-(see [docs/METRICS.md](../../METRICS.md)).
+source pauses the offending lanes and keeps polling. It resumes under
+hysteresis — the budget must fall below the **low watermark** and a minimum
+pause must elapse — so the controller doesn't flap at the boundary. Observe
+it via `spate_backpressure_paused`,
+`spate_backpressure_pause_events_total` (a flapping indicator when high),
+and `spate_backpressure_inflight_bytes` (see
+[docs/METRICS.md](../../METRICS.md)).
 
 Backpressure is resumable mid-batch: if `try_send` fails partway through a
 batch, the chain records the exact resume point — already-processed records
 are never re-run through the operators.
 
-Note that the in-flight budget does **not** bound librdkafka's prefetch. The
-Kafka source sets no prefetch cap of its own, so `queued.min.messages` and
-`queued.max.messages.kbytes` sit at librdkafka's defaults (100000 messages /
-65.5 MB, whichever binds first) and are charged **per assigned partition** —
-a 100-partition assignment can hold ~6.6 GB of prefetched messages outside
-the budget entirely. Cap it through the source's `rdkafka` map if that
-matters, and read
-[Kafka source performance tuning](../04-connectors/sources/kafka/performance-tuning.mdx#prefetch)
-first: prefetch depth is the single largest throughput term for a backlogged
-consumer — measured at 22–76x — and cutting it is expensive.
+:::note Connector specifics
+What "pause a lane" costs, and whether a source holds prefetched data
+outside the budget, is the connector's business:
+[Kafka source](../04-connectors/sources/kafka/README.mdx#backpressure-pause-and-resume)
+· [S3 source](../04-connectors/sources/s3/README.mdx).
+:::
+
+The budget bounds what the *framework* holds. A source client with its own
+read-ahead buffer holds that data before the framework ever sees it, so it
+sits outside the budget entirely — which is a connector-sizing question,
+not a framework one, and can dominate a process's memory footprint. The
+source's own page is the reference when sizing a container.
 
 ## Sizing the budget
 
@@ -89,7 +96,7 @@ wrong for saturated ones. For a saturated pipeline, either:
 
 The flagship example's YAML
 (`crates/spate/examples/kafka_avro_to_clickhouse.yaml`) carries this rule as
-a comment next to the knobs; keep it there in your configs too. See
+a comment next to the knobs — a convention worth copying. See
 [Tuning](../05-deployment/tuning.mdx) for the wider performance picture and
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the
 config section itself.
@@ -102,13 +109,14 @@ sizes, and throughput far below what the sink can absorb — while
 is being duty-cycled.
 :::
 
-## What you'll see when backpressure engages
+## What backpressure looks like when it engages
 
 Sustained `spate_backpressure_paused == 1` means the sink genuinely can't
 keep up (a capacity problem: add replicas or shards, or tune batching) —
-or the budget is undersized as above. For Kafka, paused lanes translate to
-growing consumer lag (`sum(spate_source_lag_records)`), which is the correct,
-bounded failure mode: data waits in the broker, not in process memory.
+or the budget is undersized as above. Paused lanes translate into a growing
+backlog at the source, visible as `sum(spate_source_lag_records)` for
+sources that publish lag. That is the correct, bounded failure mode: data
+waits at the source, not in process memory.
 
 ## Further reading
 

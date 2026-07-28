@@ -116,10 +116,10 @@ source:
 ```
 
 The framework records the tag and hands the raw body to your connector
-factory (`KafkaSource::from_component_config(&pipeline.config().source)`),
+factory's `from_component_config`,
 which deserializes it into its own typed config — with its own
 `deny_unknown_fields` and its own validation. Errors still carry the full
-dotted path from the file root (`source.kafka.brokers: missing field ...`).
+dotted path from the file root (`source.<tag>.<key>: missing field ...`).
 This is what keeps connectors fully decoupled from the framework schema; the
 single-key shape is what lets every typed struct keep `deny_unknown_fields`.
 

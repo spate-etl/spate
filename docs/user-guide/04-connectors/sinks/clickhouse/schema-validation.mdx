@@ -1,7 +1,7 @@
-# Schema validation
+# ClickHouse schema validation
 
 A ClickHouse pipeline has three descriptions of the same row: the `columns`
-list in your YAML, the field order of your Rust row struct, and the live
+list in the YAML, the field order of the Rust row struct, and the live
 table's schema. RowBinary — the wire format — carries **no column names**,
 so nothing catches a disagreement at the protocol level: misaligned columns
 are silent data corruption, not an error. Opt-in schema validation closes
@@ -10,9 +10,9 @@ can be sent.
 
 ## The wire contract
 
-The sink sends `INSERT INTO t (col1, col2, ...) FORMAT RowBinary` with rows
-your struct serialized field by field, in declaration order. The server
-maps bytes to columns purely by position:
+The sink sends `INSERT INTO t (col1, col2, ...) FORMAT RowBinary` with each
+row serialized field by field, in declaration order. The server maps bytes to
+columns purely by position:
 
 ```rust
 /// Field order here MUST match `columns: [id, customer, amount_cents, ts_ms]`.
@@ -47,7 +47,7 @@ not a judgment call.
 
 ## Wiring it up
 
-Validation is an async pre-flight step you run on the builder's I/O runtime
+Validation is an async pre-flight step that runs on the builder's I/O runtime
 via `pipeline.block_on`, **after** building the sink and **before** handing
 it to `.sink(...)`. A failure exits the process before any pipeline thread
 or sink worker exists. From
@@ -101,15 +101,17 @@ drift — a replica whose table was altered out of step with the others.
 :::warning
 `validate_schema: off` preserves the historical behavior: nothing is
 checked, and a wrong column order writes garbage that ClickHouse may
-happily accept. Turn on at least `names` for any table you did not create
-in the same commit as the pipeline.
+happily accept. Turn on at least `names` for any table not created in the
+same commit as the pipeline.
 :::
 
 ## Related
 
-- [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx) — the full sink
-  configuration, including the deduplication window warning.
-- [Assembling a pipeline](assembling-a-pipeline.mdx) — where `block_on`
-  pre-steps fit in the builder flow.
-- [Error handling](../02-concepts/04-error-handling.mdx) — how fatal errors
+- [ClickHouse sink](./README.mdx) — the full sink configuration, including the
+  deduplication window warning.
+- [Permissions](./permissions.mdx) — validation reads `system.columns`, which
+  needs a grant beyond the minimal `INSERT`-only role.
+- [Assembling a pipeline](../../../03-guides/assembling-a-pipeline.mdx) — where
+  `block_on` pre-steps fit in the builder flow.
+- [Error handling](../../../02-concepts/04-error-handling.mdx) — how fatal errors
   stop a pipeline.

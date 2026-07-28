@@ -5,93 +5,38 @@ One process runs one pipeline. Scaling *up* means threads and shards
 identical replicas dividing one source's work. How that division happens
 depends on the source:
 
-| Source | Scale-out story |
+| Source kind | Scale-out story |
 |---|---|
-| Kafka | Native: run N replicas in one consumer group; the broker assigns partitions. Nothing extra to deploy. |
-| S3 backfill | Native via the coordination seam: the elected leader lists the prefix once and packs it into splits; replicas lease the splits the leader assigns them, hand them back on
-reassignment, and take over dead workers' splits, all with fenced per-split commits. Wire a coordinator into the source (below) and run N replicas. |
-| Custom broker-less sources | The [coordination seam](../02-concepts/07-source-coordination.mdx): a planner, the `CoordinationDriver`, and a coordinator backend. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
+| Brokered | Native: the source's own group protocol divides the work across replicas. Nothing extra to deploy. |
+| Coordinated | Native via the [coordination seam](../02-concepts/07-source-coordination.mdx): the elected leader plans the work into splits once, and replicas lease the splits it assigns them, hand them back on reassignment, and take over dead workers' splits — all with fenced per-split commits. Deploy a [coordination store](../04-connectors/coordination/README.mdx) and run N replicas. |
+| Custom | Bring a planner and hand the source a coordinator. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
 
-The rest of this page covers deploying the coordination backend that
-broker-less sources share.
+:::note Connector specifics
+Which kind each shipped source is, and how to wire it:
+[Kafka source](../04-connectors/sources/kafka/README.mdx) (brokered) ·
+[S3 source](../04-connectors/sources/s3/README.mdx#scaling-out--and-the-solo-default)
+(coordinated).
+:::
 
-## Wiring the S3 source
+The rest of this page is about the coordinated case: what a fleet does, what it
+costs, and how it fails. The store itself is a connector with its own page —
+requirements, provisioning, and outage behaviour live there, not here.
 
-The coordinator is assembly wiring — no `coordination:` YAML on the
+## Deploying the fleet
+
+The coordinator is assembly wiring — there is no `coordination:` YAML on the
 source ([why](../07-reference/configuration.mdx#code-level-knobs-not-yaml)).
-Every replica runs the same binary with the same source config (`url`,
-`compression`, `split_target_bytes`, and `refresh_listing` are part of
-the job fingerprint and must match byte-exactly), plus a coordinator over
-the shared store:
+What deployment has to guarantee is narrower than it looks:
 
-```rust
-use spate::coordination::store::nats::{NatsConfig, NatsStore};
-use spate::coordination::{CoordinationConfig, StoreCoordinator};
-
-let pipeline = Pipeline::from_config(config)?;
-let tuning = CoordinationConfig {
-    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
-    ..CoordinationConfig::default()              // lease 30s, max_in_flight 8, …
-};
-let store = NatsStore::new(
-    NatsConfig::new(vec![std::env::var("NATS_URL")?], "exports-backfill"),
-    tuning.lease_duration, // one value drives store TTL and lease — must match
-)?;
-let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
-let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)))
-    .with_coordinator(Box::new(coordinator));
-```
-
-(The `spate` facade needs the `coordination-nats` feature for the NATS
-store; `coordination` alone gives the in-memory store and the seam.
-Runnable two-instance version:
-`crates/spate/examples/s3_coordinated_backfill.rs`.)
-
-## NATS: the coordination store
-
-Coordinated instances meet in a NATS JetStream key-value store. Records
-never flow through it — it carries split records, leases, and the plan,
-at a request rate of roughly one small write per held split per third of
-a lease (a handful of writes per second per worker).
-
-Requirements:
-
-- **NATS server ≥ 2.11** with JetStream enabled (`-js`). The lease
-  protocol rides on per-message age limits and KV limit markers, which
-  shipped in 2.11 — the worker verifies the version at startup and fails
-  actionably against an older server.
-- One **job name** per coordinated job (the `job` field): it suffixes the
-  two KV buckets (`spate_coordination_{job}_state` / `..._lease`). Two
-  different jobs must never share one; a fingerprint check rejects
-  misconfigured workers before they can touch anything.
-
-Development and CI: a single `nats:2.11` container is enough —
-
-```yaml
-# docker-compose.yml
-services:
-  nats:
-    image: nats:2.11-alpine
-    command: ["-js"]
-    ports: ["4222:4222"]
-
-  pipeline:
-    image: your-pipeline
-    deploy: { replicas: 2 }
-    environment:
-      NATS_URL: nats://nats:4222
-      # instance_id from the container hostname — unique per replica
-```
-
-Production HA: a 3-node NATS cluster with JetStream and `replicas: 3` on
-the NATS store config (`NatsConfig`, not the `coordination:` tuning
-section below), so the buckets survive a NATS node loss. What a
-full NATS outage does to the pipeline: heartbeats fail, workers
-**self-fence** after one lease without a successful write (they stop
-their splits rather than run unfenced), commits surface as retryable, and
-everything resumes where it left off when the store returns — degraded,
-never corrupted.
+- **Every replica runs the same binary with the same source config.** A
+  coordinated source folds its identity-bearing settings into a **job
+  fingerprint**, and a worker whose fingerprint differs is rejected at startup
+  with both fingerprints in the message. That is a feature: a half-upgraded
+  fleet cannot quietly plan the job two different ways.
+- **Every replica points at the same store, under the same job name.** The job
+  name is what separates two coordinated jobs sharing one store.
+- **Every live replica has a distinct `instance_id`.** Two live processes
+  sharing one is detected and fatal.
 
 ## Kubernetes
 
@@ -101,19 +46,19 @@ per-replica configuration:
 - **`instance_id` from the pod name.** It must be unique per live
   replica; a stable identity lets a restarted pod reclaim its own splits
   instantly instead of waiting out the lease. Two live processes sharing
-  an id is detected and fatal. (Pod names contain dots' worth of
-  uniqueness already; the id charset is `[A-Za-z0-9_-]` — substitute any
-  dots.)
+  an id is detected and fatal. (A pod name is already unique per live
+  replica; the id charset is `[A-Za-z0-9_-]`, 1–128 bytes, so a name
+  containing dots is rejected — substitute them, e.g. with `-`.)
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and releases its splits on the way out, so
   peers pick them up immediately; a SIGKILL'd one is covered by lease
   expiry instead.
 - Readiness/liveness probes are unchanged (the admin server's endpoints).
 
-Scaling events behave like Kafka's *cooperative* rebalances, but the
-decision is central rather than pairwise. The elected leader computes a
+Scaling events are *cooperative* rebalances, but the decision is central
+rather than pairwise. The elected leader computes a
 desired assignment for the whole fleet — balanced on split **weight**, not
-split count, since one large object can outweigh several small ones — and
+split count, since one large unit of work can outweigh several small ones — and
 publishes it as one `assign.{instance}` record per live worker. Every
 worker then reconciles toward its own record: claim what is named and not
 yet held, revoke what is held and no longer named. Workers never choose
@@ -129,13 +74,13 @@ nothing.
 ### What a rebalance costs {#what-a-rebalance-costs}
 
 A rebalance move is a **cooperative revocation**. The split leaves one
-worker's assignment, and that worker stops intake for it (at an object
-boundary, for S3), lets everything it already emitted reach the sink and
+worker's assignment, and that worker stops intake for it at a safe boundary of
+the source's choosing, lets everything it already emitted reach the sink and
 acknowledge, commits the final watermark, and releases the split. The new
 owner resumes from exactly that commit — **a cooperative revocation
 replays nothing**. Its cost is latency, not rows: the drain is bounded by
-the split's in-flight depth (the remainder of the object being read plus
-queued-but-unacked records).
+the split's in-flight depth — whatever the source had already read past the
+boundary, plus queued-but-unacked records.
 
 `drain_deadline` (default 10s) is what stops one wedged drain from pinning
 a rebalance open. A source that declines to stop at a safe boundary, or a
@@ -218,7 +163,7 @@ irreducible at-least-once replay.
 
 ## Tuning
 
-| Knob | Default | Meaning |
+| Knob | Default | Description |
 |---|---|---|
 | `lease_duration` | 30s | Takeover latency after an ungraceful death. Heartbeats run at a third of it. Lower = faster failover, more store traffic, more sensitivity to pauses. |
 | `max_in_flight` | 8 | The working set: splits a worker holds (and processes) at once — also its data-lane count. Size it like a thread pool. |
@@ -231,9 +176,9 @@ irreducible at-least-once replay.
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
 ~128 MB range (or the row-count equivalent) — big enough that lease
 traffic is noise, small enough that takeovers and reassignments move
-useful quanta of work. For most sources that is the planner's design, not
-a knob; the S3 source exposes it as `split_target_bytes` (default 64 MiB)
-because object sizes vary wildly between prefixes.
+useful quanta of work. For most sources that is the planner's design rather
+than a knob; a source whose input sizes vary widely may expose a target, in
+which case its own page documents it.
 
 ## Failure modes
 
@@ -243,7 +188,7 @@ because object sizes vary wildly between prefixes.
 | Replica drained (SIGTERM) | Final commit, then release: peers claim immediately, no lease wait, no attempt consumed. |
 | Zombie resumes after takeover | Its next commit loses the record CAS: nothing written, split reported lost locally. The duplicate window is at most one commit interval. |
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. |
-| NATS unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
+| Coordination store unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |
 | Poison split | Consumes one delivery attempt per failing tenancy; quarantined at the cap. A bounded job with quarantined splits ends **stalled** (fatal by default), never falsely complete. Watch `spate_coordination_splits_quarantined`. |
 | Scale-up | The leader folds the new replicas into the next assignment and moves splits toward weight balance. Each move is a cooperative revocation — the losing worker drains and commits before releasing, so it replays nothing; a drain that is declined or outruns `drain_deadline` is forced instead, at a cost of up to one commit interval of duplicates. See [rebalance cost](#what-a-rebalance-costs). |
 | Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
@@ -252,7 +197,7 @@ because object sizes vary wildly between prefixes.
 ## Observability
 
 The `spate_coordination_*` families (see
-[METRICS.md](https://github.com/spate-etl/spate/blob/main/docs/METRICS.md))
+[docs/METRICS.md](../../METRICS.md))
 carry the whole story: `splits_owned` per worker, `live_workers` for the
 fleet view, `leader` for who plans, `acquisitions_total` by reason
 (`create`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
@@ -264,7 +209,7 @@ health and `drain_deadline`, and `cancelled` is the leader taking a move
 back, which is only worth chasing if it is sustained: membership is
 flapping faster than a drain takes), `split_losses_total`
 (`fenced`/`starved`/`revoked`), `splits_quarantined` for poison, and
-store-op latency histograms for the NATS round-trips.
+store-op latency histograms for the round-trips to the store.
 
 Time to balance reads from two separate families, one per side:
 `drain_duration_seconds` on the worker losing a split and
@@ -296,7 +241,7 @@ version, and exits fatally with `upgrade or isolate the store prefix`. The
 same pin covers every `spec.` and `split.` record.
 
 So "stop the fleet, restart it on the new build" is *not* sufficient: point
-the new fleet at a fresh bucket or a fresh key prefix. That discards
+the new fleet at a fresh job name, or an empty store. That discards
 committed per-split progress, so an in-flight bounded backfill restarts
 from the beginning. Delivery is at-least-once either way — the re-run
 duplicates, it does not lose — but drain a job to completion before

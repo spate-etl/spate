@@ -1,10 +1,10 @@
 # Avro format
 
 The Avro deserializer (`spate-avro`, feature `avro` on the `spate` facade)
-decodes bare Avro datums as carried by Kafka messages into records — either
-your own serde types or dynamically-typed values. Three framings are
-supported; the framework handles the framing bytes so your schemas and
-structs only ever describe the datum itself.
+decodes bare Avro datums carried by a source into records — either serde types
+or dynamically-typed values. Three framings are supported; the framework
+handles the framing bytes, so schemas and structs only ever describe the datum
+itself.
 
 Construct it from the pipeline's opaque section, handing it the builder's
 I/O runtime handle (the registry fetcher lives there):
@@ -18,7 +18,8 @@ let deserializer =
 ## Configuration
 
 The `deserializer: { avro: ... }` section deserializes into `AvroSettings`
-(`crates/spate-avro/src/config.rs`); unknown fields are rejected.
+(`crates/spate-avro/src/config.rs`); unknown fields are rejected with the
+offending key.
 
 ```yaml
 deserializer:
@@ -35,19 +36,28 @@ deserializer:
     # schema: { inline | path }    # required for raw / single_object
 ```
 
-| Key | Type | Default | Meaning |
+| Key | Type | Default | Description |
 |---|---|---|---|
 | `mode` | string | `confluent` | Payload framing: `confluent`, `raw`, or `single_object`. |
-| `registry.url` | string | — | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. |
-| `registry.username` / `registry.password` | string | none | Optional basic auth (interpolate secrets via `${VAR}`). |
+| `registry.url` | string | `required` | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. |
+| `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
 | `negative_cache_ttl` | duration | `30s` | How long a schema id the registry could not serve stays negatively cached before a refetch is allowed. |
-| `reader_schema` | `{ inline }` or `{ path }` | none | Optional reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
-| `schema` | `{ inline }` or `{ path }` | — | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
+| `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
+| `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
 Mode requirements are validated at construction with explicit messages —
 `confluent` without a `registry`, `raw` without a `schema`, `prewarm_subjects`
 outside `confluent`, and so on, all fail fast at startup.
+
+## Security (registry credentials)
+
+`registry.username` and `registry.password` carry basic auth to the schema
+registry. Interpolate them from the environment (`${SR_USER}` / `${SR_PASSWORD}`)
+rather than committing them; an authentication failure against the registry is
+fatal at startup, not retried indefinitely. See
+[Securing connections](../../../03-guides/securing-connections.mdx) for the
+generic model.
 
 ## The three modes
 
@@ -56,7 +66,7 @@ outside `confluent`, and so on, all fail fast at startup.
   datum. The framework parses the header, resolves the id against the
   registry, and decodes; producers using Confluent-ecosystem serializers
   just work.
-- **`raw`** — bare datums with a fixed schema you configure (`inline` or a
+- **`raw`** — bare datums with a fixed configured schema (`inline` or a
   mounted `.avsc` file).
 - **`single_object`** — Avro single-object encoding (marker plus Rabin
   schema fingerprint), verified against the configured schema's
@@ -66,13 +76,13 @@ outside `confluent`, and so on, all fail fast at startup.
 
 The builder hands out two deserializer flavors:
 
-- `build_serde::<T>()` — decodes each datum into your own
+- `build_serde::<T>()` — decodes each datum into a
   `T: serde::de::DeserializeOwned` struct (field names match the writer
-  schema). This is the flagship path — see
-  `crates/spate/examples/kafka_avro_to_clickhouse.rs`, where the same struct
-  derives `Deserialize` for Avro in and `Serialize` for RowBinary out.
+  schema). This is the flagship path; `crates/spate/examples/kafka_avro_to_clickhouse.rs`
+  is the worked example.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
+
 ## Schema fetching never blocks a pipeline thread
 
 In `confluent` mode, registry schemas are fetched by an **asynchronous task
@@ -83,26 +93,49 @@ source if needed), and **the batch retries once the fetch lands**. Records
 are never dropped or duplicated by this mechanism, and the CPU-pinned
 pipeline threads never perform I/O. Two knobs shape the edge cases:
 
-- `prewarm_subjects` fetches your subjects' latest schemas at startup, so
-  the first batch does not pay the miss.
+- `prewarm_subjects` fetches the configured subjects' latest schemas at
+  startup, so the first batch does not pay the miss.
 - Ids the registry *cannot* serve are negatively cached for
   `negative_cache_ttl` and then handled by the deserializer's
   `ErrorPolicy` (Skip or Fail) like any other poison payload — a permanent
   bad id cannot wedge the pipeline into an infinite retry.
+
+## Error handling
+
+Undecodable payloads follow the deserializer's `ErrorPolicy`, Skip or Fail,
+like any other poison payload: Fail stops the pipeline on the first bad datum;
+Skip drops it and continues. A schema id the registry cannot serve reaches the
+same policy once its negative-cache entry expires, so a permanently bad id is
+an error rather than an infinite retry.
+
+The unit is the payload: one datum is one record here, so there is no partial
+outcome to reason about. Drops surface in the framework's stage families,
+below.
 
 ## Schema evolution
 
 Writer schemas come from the payload (registry id or fingerprint) or
 configuration; an optional `reader_schema` pins the shape records resolve
 into, using Avro's standard schema-resolution rules — field reordering,
-defaults for missing fields, type promotions, aliases. Pin a reader schema
-when your struct must stay stable while producers evolve. Registry schemas
-using schema references are not supported yet and surface as unavailable.
+defaults for missing fields, type promotions, aliases. Pin a reader schema to
+keep a struct stable while producers evolve. Registry schemas using schema
+references are not supported yet and surface as unavailable.
+
+## Metrics
+
+This deserializer registers no families of its own. Decode outcomes surface in
+the framework's stage families: `spate_deser_records_total{outcome}`,
+`spate_deser_records_dropped_total{reason="skip_policy"}`, and — for payloads
+held waiting on a registry fetch — `spate_deser_not_ready_total`, which is
+neither an error nor backpressure. See [Metrics](../../../../METRICS.md).
 
 ## Related
 
-- [Kafka source](../../sources/kafka/README.mdx) — the payloads this format decodes.
+- [Kafka source](../../sources/kafka/README.mdx) — a common source of the
+  payloads this format decodes.
 - [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail for
   undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.
+- [Deserialization formats](../../../../benchmarks/deserialization-formats.mdx)
+  — measured decode throughput against the other shipped formats.

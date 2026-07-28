@@ -159,7 +159,7 @@ Both fan a stream into per-type tables; they differ in **who** does the fan-out.
 
 | | ETL split (this page) | `Null` table + `MATERIALIZED VIEW` |
 |---|---|---|
-| Fan-out CPU | on the scalable ETL tier | on the ClickHouse server, per inserted block |
+| Fan-out CPU | on the scalable ETL tier | on the database server, per inserted block |
 | Per-table part size | tuned per sink (`batch`/`linger`) | coupled to the landing table's INSERT blocks — rare types get tiny parts you can't decouple |
 | Checkpoint cadence | poll-batch, held across tables (see the trade above) | single-cadence (one landing INSERT) |
 | At-least-once | held until all tables + worst-status merge | one INSERT's durability covers the MV targets |

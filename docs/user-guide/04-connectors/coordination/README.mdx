@@ -1,0 +1,24 @@
+# Coordination stores
+
+A **coordination store** is the shared key-value store that a broker-less
+source's replicas meet in. It carries the plan, the split records, and the
+leases — never records. A source that brings its own group protocol needs none
+of this; a source that does not gets its scale-out story from
+[source coordination](../../02-concepts/07-source-coordination.mdx) and one of
+the stores below.
+
+| Store | Crate | Feature on `spate` | Summary |
+|---|---|---|---|
+| [NATS JetStream](nats/README.mdx) | `spate-coordination` | `coordination-nats` | The production backend. Two KV buckets per job; leases ride per-message age limits. |
+| In-memory | `spate-coordination` | `coordination` | The seam plus a process-local store. Correct and self-terminating, but progress dies with the process — development, tests, and single-instance runs only. |
+
+A store is **assembly wiring, not YAML**
+([why](../../07-reference/configuration.mdx#code-level-knobs-not-yaml)): you
+build one and hand it to a `StoreCoordinator`, which you inject into the
+source. Nothing about the store appears in the pipeline config file.
+
+Writing your own is one trait, `CoordinationStore` — the primitives are
+get/put/delete/list/watch with compare-and-swap. The correctness properties the
+framework needs from it (fencing on revision, TTL expiry that surfaces to
+watchers) are specified in
+[Work assignment](../../02-concepts/08-work-assignment.mdx).

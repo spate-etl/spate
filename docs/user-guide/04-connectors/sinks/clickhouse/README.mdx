@@ -51,7 +51,7 @@ sink:
 | `database` | string | `none` | Default database for unqualified tables. |
 | `user` | string | `none` | Username (interpolate secrets via `${VAR}`). |
 | `password` | string | `none` | Password (interpolate secrets via `${VAR}`). |
-| `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough). |
+| `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough-and-the-denylist). |
 | `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply; keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
 | `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
@@ -59,7 +59,7 @@ sink:
 | `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](./schema-validation.mdx). |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
 
-## The `settings` passthrough
+## The `settings` passthrough and the denylist
 
 `settings` reaches any per-insert ClickHouse setting without waiting for a
 typed field — `insert_quorum`, `async_insert`, `max_insert_block_size` and the
@@ -172,7 +172,7 @@ replicates is lost. That window — one confirming replica, no quorum — is the
 explicit edge of the sink's at-least-once guarantee. Pipelines that cannot
 tolerate it can require a write quorum by passing `insert_quorum` (and, if
 wanted, `insert_quorum_parallel` / `insert_quorum_timeout`) through the sink's
-[**`settings` passthrough**](#the-settings-passthrough) — they are not among
+[**`settings` passthrough**](#the-settings-passthrough-and-the-denylist) — they are not among
 the three reserved settings, so
 they work today without framework changes. Quorum composes correctly with
 the deduplication the sink always enables: when a retried batch is

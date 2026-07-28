@@ -28,7 +28,9 @@ In framework **prose**, a connector or vendor name may appear only:
 
 - as a link label,
 - as an entry in a `## Related` list,
-- inside a pointer block (below).
+- inside a pointer block (below),
+- inside a literal repository path (`crates/spate-kafka/src/metrics.rs`) — a
+  path is a pointer to code, like a link, not prose about a vendor.
 
 Never in framework prose: vendor setting keys (`max.poll.interval.ms`), vendor
 tuning numbers, vendor troubleshooting, or vendor client-library behaviour.
@@ -129,7 +131,8 @@ Rules:
   connector in the tree appears in exactly one card index.
 - **Memory / Capture** is the sole exception: it is a dual-role test connector,
   so it is a flat `memory.mdx` at the connectors root, cross-listed (not moved)
-  from the `sources/` and `sinks/` indexes.
+  from the `sources/` and `sinks/` indexes. Its shape is likewise exempt from
+  the § 3 template — one page documents both roles, section per role.
 
 ## 3. Per-connector page template
 

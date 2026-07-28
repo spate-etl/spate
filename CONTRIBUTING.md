@@ -177,8 +177,15 @@ versioned record emitted by the rigs in `benchmarks/`, and the site reads those
 records. If a change makes something faster, say so in the pull request and it
 gets measured — on reference hardware, under the published protocol, because a
 number from a busy laptop is not comparable to the ones already published. The
-methodology lives in the
-[benchmark repository](https://github.com/spate-etl/spate-benchmark).
+methodology lives in
+[`docs/benchmarks/methodology.mdx`](docs/benchmarks/methodology.mdx) and the
+[benchmark repository](https://github.com/spate-etl/benchmark).
+
+## Releases
+
+Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md) —
+contributors never need it, but that is where the version, tag and changelog
+mechanics live.
 
 ## Reporting a vulnerability
 

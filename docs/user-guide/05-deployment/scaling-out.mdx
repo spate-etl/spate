@@ -46,9 +46,9 @@ per-replica configuration:
 - **`instance_id` from the pod name.** It must be unique per live
   replica; a stable identity lets a restarted pod reclaim its own splits
   instantly instead of waiting out the lease. Two live processes sharing
-  an id is detected and fatal. (Pod names contain dots' worth of
-  uniqueness already; the id charset is `[A-Za-z0-9_-]` — substitute any
-  dots.)
+  an id is detected and fatal. (A pod name is already unique per live
+  replica; the id charset is `[A-Za-z0-9_-]`, 1–128 bytes, so a name
+  containing dots is rejected — substitute them, e.g. with `-`.)
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and releases its splits on the way out, so
   peers pick them up immediately; a SIGKILL'd one is covered by lease

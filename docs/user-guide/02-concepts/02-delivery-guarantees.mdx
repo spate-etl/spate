@@ -70,12 +70,13 @@ bulk (encoded chunks, worker ledgers, batch accumulators):
 When work is revoked from this process, the framework drains the owning
 threads, flushes and acks in-flight data, and commits watermarks
 **synchronously before the revocation completes** — so the next owner resumes
-from a correct position. Every assignment change also bumps a per-partition
-*epoch* in the checkpointer, so stale acks issued under an assignment this
-process no longer holds can never advance a watermark that is no longer its
-own.
+from a correct position. The checkpointer also fences staleness: a full
+assignment opens a new per-partition *epoch*, an added partition extends the
+current one, and a revoked partition's tracking is dropped on the spot — so
+a completion issued under an assignment this process no longer holds is
+discarded rather than advancing a watermark that is no longer its own.
 
-That epoch is the reason revocation is safe rather than merely fast: it does
+That fence is the reason revocation is safe rather than merely fast: it does
 not rely on the outgoing owner finishing in time, only on it being unable to
 succeed afterwards. The choreography is in
 [docs/DESIGN.md](../../DESIGN.md) § Source abstraction, and the

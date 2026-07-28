@@ -35,19 +35,19 @@ source:
       fetch.message.max.bytes: "1048576"
 ```
 
-| Key | Type | Default | Meaning |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `brokers` | string | required | Comma-separated bootstrap servers. |
-| `topic` | string | required | The topic to consume. **One topic per pipeline**: the framework's `PartitionId` is the Kafka partition number, unique only within a topic. |
-| `group_id` | string | required | Consumer group id. |
+| `brokers` | string | `required` | Comma-separated bootstrap servers. |
+| `topic` | string | `required` | The topic to consume. **One topic per pipeline**: the framework's `PartitionId` is the Kafka partition number, unique only within a topic. |
+| `group_id` | string | `required` | Consumer group id. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). |
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). |
-| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal; turn statistics off only if you are certain you do not need it. |
+| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal, and disabling statistics gives it up. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist
 
-The passthrough exists so you can tune anything librdkafka exposes
+The passthrough exists to reach anything librdkafka exposes
 (security, fetch sizing, and the prefetch depth `queued.min.messages` /
 `queued.max.messages.kbytes` — which the framework leaves at librdkafka's
 defaults; see [performance tuning](./performance-tuning.mdx#prefetch))
@@ -130,6 +130,70 @@ framework invariant, not a tuning choice — see
 out of public signatures so `rdkafka` major bumps are not breaking changes
 here ([docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
 
+## Metrics
+
+Registered through this source's `Meter` (namespace `kafka`, role `source`), so
+every family is prefixed `spate_kafka_source_`. They translate the librdkafka
+statistics snapshot, emitted every `statistics_interval` (default `5s`; `0s`
+disables the whole family) and drained on the controller thread — never on the
+record path.
+
+Counters are **absolute-mapped librdkafka totals** scoped to one consumer
+lifetime: the handles mirror the client's cumulative values (idempotent under
+duplicate delivery; `rate()`/`increase()` work natively), and after a process
+restart the series restart from the new consumer's totals — an ordinary
+counter reset to PromQL. The `broker` label is the librdkafka broker name
+(`host:port/id`), bounded by cluster topology and always on. The `rtt`/
+`throttle` gauges are librdkafka's HDR-histogram rolling-window estimates,
+converted to seconds; they are per-broker sampled quantiles and **cannot be
+aggregated** across brokers or processes (`max()` is the only defensible
+cross-series operator). Series backed by data librdkafka has not produced yet
+(an empty latency window, an unknown lag) are absent rather than `0`.
+
+| Metric | Type | Extra labels | Description |
+|---|---|---|---|
+| `spate_kafka_source_tx_requests_total` | counter | | Requests sent to brokers. |
+| `spate_kafka_source_tx_bytes_total` | counter | | Bytes transmitted to brokers. |
+| `spate_kafka_source_rx_responses_total` | counter | | Responses received from brokers. |
+| `spate_kafka_source_rx_bytes_total` | counter | | Protocol bytes received. |
+| `spate_kafka_source_rx_messages_total` | counter | | Messages consumed (excluding ignored). |
+| `spate_kafka_source_rx_message_bytes_total` | counter | | Message bytes consumed (including framing). |
+| `spate_kafka_source_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
+| `spate_kafka_source_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
+| `spate_kafka_source_broker_connects_total` | counter | | Connection attempts (including failed), summed across brokers. |
+| `spate_kafka_source_broker_disconnects_total` | counter | | Disconnections (broker, network, or otherwise), summed across brokers. |
+| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `spate_kafka_source_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
+| `spate_kafka_source_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
+| `spate_kafka_source_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
+| `spate_kafka_source_broker_throttle_avg_seconds` | gauge | `broker` | Mean broker throttle time over the last window. |
+| `spate_kafka_source_broker_throttle_p99_seconds` | gauge | `broker` | p99 broker throttle time over the last window (non-aggregatable). |
+| `spate_kafka_source_fetch_queue_messages` | gauge | | Prefetched messages queued client-side for the pipeline's topic. |
+| `spate_kafka_source_fetch_queue_bytes` | gauge | | Prefetched bytes queued client-side. |
+| `spate_kafka_source_reply_queue_depth` | gauge | | librdkafka ops awaiting `poll()` service (poll starvation indicator). |
+| `spate_kafka_source_group_rebalances_total` | counter | | Rebalances counted by librdkafka (`spate_source_rebalances_total` counts the callback events the framework observed). |
+| `spate_kafka_source_group_assignment_size` | gauge | | Partitions in the current group assignment. |
+| `spate_kafka_source_group_healthy` | gauge | | 1 while the member is settled (`up` + `steady`); 0 during joins/rebalances (state detail goes to debug logs). |
+| `spate_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
+| `spate_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `spate_source_lag_records` is the committed-basis view. Unlike that one, this series *is* gated by `per_partition_detail`. |
+
+Labels marked ⚠ are cardinality-sensitive and appear only under
+`metrics.per_partition_detail: true`.
+
+### Alerting
+
+- `spate_kafka_source_group_healthy == 0` sustained — the member is stuck
+  joining or rebalancing. Pair it with
+  `rate(spate_kafka_source_group_rebalances_total[15m])` to tell churn from a
+  wedged join.
+- `rate(spate_kafka_source_broker_tx_errors_total[5m]) > 0` or
+  `spate_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
+  by the `broker` label.
+
+Consumer lag is a framework family (`spate_source_lag_records`) and is alerted
+on separately; see [Metrics](../../../../METRICS.md) for the taxonomy, the
+reserved roots and the series-ownership rules.
+
 ## Related
 
 - [Performance tuning](./performance-tuning.mdx) — prefetch depth (the dominant
@@ -140,5 +204,4 @@ here ([docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
 - [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — the drain
   choreography rebalances share.
 - [Monitoring](../../../05-deployment/monitoring.mdx) — consumer lag and
-  backpressure metrics; the connector's own librdkafka-statistics families
-  (`spate_kafka_source_*`) are documented in [Metrics](../../../../METRICS.md).
+  backpressure metrics, and what to alert on across a whole pipeline.

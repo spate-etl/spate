@@ -9,9 +9,8 @@ them re-explains the architecture — for that, start with
 | [Assembling a pipeline](assembling-a-pipeline.mdx) | Build and run a pipeline with the `Pipeline` builder — the primary assembly path. Read this one first. |
 | [Configuring pipelines](configuring-pipelines.mdx) | Write a pipeline YAML: typed framework sections, environment interpolation, opaque connector sections. |
 | [Testing pipelines](testing-pipelines.mdx) | Test a whole assembly deterministically with `spate-test`'s in-memory source and capturing sink. |
-| [Schema validation](schema-validation.mdx) | Fail fast when your row struct, `columns` list, and the live ClickHouse table disagree. |
 | [Graceful shutdown](graceful-shutdown.mdx) | Drain cleanly on SIGTERM, size `drain_timeout` against Kubernetes, and interpret exit codes. |
-| [Securing connections](securing-connections.mdx) | Connect to a TLS/mTLS/SASL-secured Kafka cluster with the opt-in `kafka-tls` feature; ClickHouse over HTTPS. |
+| [Securing connections](securing-connections.mdx) | Reach a credentialed source or sink: the secret model, where each connector's auth is configured, and what a failure does. |
 | [Manual assembly](manual-assembly.mdx) | Desugar every builder step into the public primitives it composes — the escape hatch. |
 
 Where to go next:

@@ -64,9 +64,10 @@ period. Workers merge chunks into
 ### Component / `component_type` labels
 
 Two of the three standard labels on every framework metric (with
-`pipeline`): `component` identifies the instance (e.g. `orders_kafka`,
-`main.deserializer`), `component_type` the implementation (e.g. `kafka`,
-`clickhouse`, `map`). See [Monitoring](../05-deployment/monitoring.mdx) and
+`pipeline`): `component` identifies the instance (e.g. `orders_source`,
+`main.deserializer`), `component_type` the implementation — for a connector
+the system it talks to, for an operator its kind (`map`, `filter`). See
+[Monitoring](../05-deployment/monitoring.mdx) and
 [docs/METRICS.md](../../METRICS.md).
 
 ### Contiguity tracker
@@ -82,10 +83,16 @@ structural. A synchronous, tokio-free, loom-tested module.
 
 A deterministic string minted per [sealed batch](#sealed-batch)
 (`SealedBatch::dedup_token`) and reused unchanged across retries of that
-batch. Sinks that support insert deduplication (ClickHouse) use it to make
-**same-boundary retries** idempotent. It does not cover crash replay —
-after restart, data re-batches with new boundaries and new tokens
+batch. A sink whose destination supports insert deduplication hands the token
+over to make **same-boundary retries** idempotent. It does not cover crash
+replay — after restart, data re-batches with new boundaries and new tokens
 ([Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)).
+
+*Connector mapping:*
+[ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens--and-the-window-warning)
+— honoured, but silently inert without a server-side dedup window ·
+[Kafka sink](../04-connectors/sinks/kafka/README.mdx#delivery-semantics-honestly)
+— unused; there is no destination-side dedup window to hand it to.
 
 ### Drain
 
@@ -120,11 +127,16 @@ alone cannot provide this — only the store-side check can.
 ### Lane
 
 The data-plane unit of a source (`SourceLane`): one pollable stream pinned
-to one pipeline thread, yielding borrowed payload batches. For Kafka, a
-lane is a partition queue; lanes map m:n onto pipeline threads. In a
-coordinated source, lanes are purely local: the `CoordinationDriver`
-materializes one lane per in-flight [split](#split) and renumbers them
-per assignment cycle. `spate_source_lanes_active` counts them.
+to one pipeline thread, yielding borrowed payload batches. Lanes map m:n
+onto pipeline threads. In a coordinated source, lanes are purely local: the
+`CoordinationDriver` materializes one lane per in-flight [split](#split) and
+renumbers them per assignment cycle. `spate_source_lanes_active` counts them.
+
+*Connector mapping:*
+[Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
+— one partition queue ·
+[S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads)
+— one in-flight split.
 
 ### Lease
 
@@ -145,12 +157,15 @@ bounded job with quarantined work ends stalled, not falsely complete).
 ### Split
 
 The leasable work unit of a coordinated source, enumerated by the
-source's `SplitPlanner` (an object-store source: an object list
-bin-packed by bytes; a database source: an id range). Deterministic id,
-opaque descriptor, weight hint; progress commits are per-split, fenced,
-and resumable — a taken-over split continues from its last committed
-watermark. Distinct from a [lane](#lane) (local execution) and a
-[partition](#partition) (checkpoint bookkeeping).
+source's `SplitPlanner`. Deterministic id, opaque descriptor, weight hint;
+progress commits are per-split, fenced, and resumable — a taken-over split
+continues from its last committed watermark. Distinct from a [lane](#lane)
+(local execution) and a [partition](#partition) (checkpoint bookkeeping).
+
+*Connector mapping:*
+[S3 source](../04-connectors/sources/s3/README.mdx#split-identity-and-drift) —
+a bin-packed batch of whole objects, identified by its members' keys and ETags.
+A database source would instead plan an id range.
 
 ### Assignment
 
@@ -194,9 +209,15 @@ drain cannot leave a split owned with nothing reading it. See
 
 ### Partition
 
-The source-side unit of ordering and checkpointing (`PartitionId`) — for
-Kafka, literally the topic partition. Watermarks, epochs, and the
-contiguity tracker are all per-partition.
+The source-side unit of ordering and checkpointing (`PartitionId`).
+Watermarks, epochs, and the contiguity tracker are all per-partition.
+
+*Connector mapping:*
+[Kafka source](../04-connectors/sources/kafka/README.mdx) — literally the topic
+partition ·
+[S3 source](../04-connectors/sources/s3/README.mdx#offsets-progress-resume) —
+one per [split](#split), with the offset packing member ordinal and record
+index.
 
 ### Pipeline thread
 

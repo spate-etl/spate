@@ -23,8 +23,8 @@ shared tokio runtime, and a control plane coordinating both.
 Pipeline threads are plain `std::thread`s, optionally core-pinned. Their
 count defaults to `available_parallelism` minus an I/O reserve and is always
 overridable in YAML (`pipeline.threads`). Each thread owns a set of source
-**lanes** — pollable data-plane units; for Kafka, a lane is a partition
-queue — and runs the whole hot path single-threaded:
+**lanes** — pollable data-plane units, whatever the source calls them — and
+runs the whole hot path single-threaded:
 
 ```text
 poll → deserialize → operator chain → route to shard queues
@@ -44,8 +44,8 @@ Two decisions define this stage:
   per record in the validation spike (see
   [docs/DESIGN.md](../../DESIGN.md) § Frozen v1 contracts).
 
-The chain's terminal stage encodes records into wire-format frames (for
-ClickHouse: RowBinary, encoded *on the pipeline thread*) and routes them to
+The chain's terminal stage encodes records into the sink's wire format
+(encoding is CPU work, so it happens *on the pipeline thread*) and routes them to
 per-shard bounded queues with `try_send` — never a blocking send. When a
 queue is full, the source lanes pause and the thread keeps polling; see
 [Backpressure](03-backpressure.mdx).
@@ -68,7 +68,7 @@ A single shared multi-thread tokio runtime (default 2 workers,
   concrete sink.
 - **The admin HTTP server** — `/metrics`, `/healthz`, `/readyz`. See
   [Monitoring](../05-deployment/monitoring.mdx).
-- **Async edge work** — e.g. the Avro schema-registry fetcher. Connectors
+- **Async edge work** — a schema-registry fetch, a coordination heartbeat. Connectors
   get a handle to this runtime before `run` via `pipeline.io_handle()` and
   `pipeline.block_on(..)`.
 
@@ -98,8 +98,9 @@ covers that machinery.
 This is a deliberate Kubernetes-native constraint, not a limitation to
 engineer around:
 
-- **Scaling** is `replicas: N` on a Deployment. Each pod is one
-  consumer-group member; Kafka assigns partitions across pods.
+- **Scaling** is `replicas: N` on a Deployment; how the work divides across
+  those pods is the source's business (see
+  [Scaling out](../05-deployment/scaling-out.mdx)).
 - **Isolation**: a fatal error fails the process (non-zero exit), and the
   orchestrator restarts it. There is no thread resurrection or in-process
   supervision to reason about.

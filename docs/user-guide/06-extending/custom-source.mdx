@@ -9,7 +9,7 @@ A source is two pieces, split on purpose:
   thread, yielding payload batches that **borrow** the lane's buffers.
 
 The API is poll-based rather than a `futures::Stream`, deliberately: real
-source clients (librdkafka) already own their network I/O on their own
+source clients typically already own their network I/O on their own
 threads, and a Stream wrapper only adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
 [docs/DESIGN.md](../../DESIGN.md) (§ Source abstraction); trait docs in
@@ -141,9 +141,9 @@ impl Source for CounterSource {
   pauses the control plane, which is how group liveness survives a slow
   sink.
 - **`commit`** receives per-partition committable watermarks. Each is
-  **one past the last acknowledged offset** — store it as-is (this matches
-  Kafka's commit convention). Interval-driven; durability is per your
-  source's own policy.
+  **one past the last acknowledged offset** — store it as-is. This is the
+  framework's convention everywhere, and the industry's. Interval-driven;
+  durability is per your source's own policy.
 - **`flush_commits`** (default no-op) must synchronously flush stored
   positions — the runtime calls it at shutdown and revocation.
 - **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
@@ -154,7 +154,7 @@ impl Source for CounterSource {
 ## Framing: turning bytes into records
 
 A source emits `RawPayload`s; a deserializer decodes one payload into records.
-For a message source (Kafka) the message boundary *is* the record boundary, so
+For a **message** source the message boundary *is* the record boundary, so
 nothing extra is needed. For a **streaming** source — an object-storage
 backfill, an HTTP chunked body, a WebSocket stream — one transfer is a large
 byte stream that must be cut into records *before* the deserializer sees them.
@@ -173,12 +173,13 @@ pub trait RecordFramer: Send {
 
 A framer **must be a pure function of the byte stream** — the record sequence
 must not depend on how bytes arrive in chunks — so a source that resumes by
-record index replays deterministically. `spate-json` ships `NdjsonFramer` (NDJSON
-line framing) as the format's impl; a future `spate-avro` would ship a container
-framer. `FramerWriter` bridges a `Write`-based decompressor to a framer so
-compression stays orthogonal. The `spate-s3` source drives this seam and takes the
-framer via `S3Source::with_framer` — so the source stays format-agnostic and any
-streaming source reuses the same framer.
+record index replays deterministically. The framer is owned by the **format**
+crate, not the source — a newline-delimited format ships a line framer, a
+container format ships a block framer. `FramerWriter` bridges a `Write`-based
+decompressor to a framer so compression stays orthogonal. A streaming source
+takes its framer at construction and stays format-agnostic, so every streaming
+source reuses every format's framer. Worked reference:
+`crates/spate-s3` and its `with_framer`.
 
 Tell the framework how your payloads are framed with **`framing_contract`**, so
 framing is established once (on the source) instead of coordinating it with the
@@ -315,10 +316,11 @@ Two practicalities the signatures don't show:
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle — capture both at construction. `plan` runs on the
   blocking pool, so `Handle::block_on(async_listing())` inside it is the
-  intended shape (this is how `spate-s3`'s planner runs its LIST).
+  intended shape (worked reference: `crates/spate-s3`'s planner).
 - **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
-  names (S3 keys, table names) rarely qualify — never embed them. Digest
-  them instead: `spate-s3` hashes the sorted member keys *and their ETags*
+  names (object keys, table names) rarely qualify — never embed them. Digest
+  them instead. The worked reference (`crates/spate-s3`) hashes the sorted
+  member keys *and their content versions*
   plus a packing-version constant (truncated SHA-256, base64url), so
   replans are id-stable, an overwritten object becomes *new* work rather
   than silently matching stale progress, and a packing change retires old
@@ -403,8 +405,8 @@ impl SplitSource for MyCtx {
 ```
 
 Progress must be **split-relative**: a watermark encodes a position
-*within the split's own descriptor* (`spate-s3`: member ordinal + record
-index), never a position in some whole-input enumeration — the next owner
+*within the split's own descriptor* (a member ordinal plus a record
+index, say), never a position in some whole-input enumeration — the next owner
 has only the descriptor to interpret it against. State is per-tenancy:
 `close_split` ends one (nothing can follow it, so drop the split's state
 there), and a later re-gain is a fresh tenancy — `open_split` rebuilds
@@ -510,8 +512,8 @@ an object-level failure (a deleted or corrupt input) must not surface as
 a poll error: the lane sends a report over a channel (`std::sync::mpsc`
 works; the lane goes quiescent, returning empty polls), and the source
 drains that channel at the top of `poll_events`, calling `driver.fail`
-for each report before delegating to `driver.poll_events`. `spate-s3`'s
-lane/context pair is the production reference.
+for each report before delegating to `driver.poll_events`. Worked reference:
+`crates/spate-s3`'s lane/context pair.
 
 **Signal the waker on the edges the control plane cannot see.** The
 driver — not the backend — owns the control-plane wait, because the two
@@ -549,10 +551,11 @@ signal drain.
 ### 4. Construct a backend
 
 The coordinator is injected at assembly time, exactly like the framer
-seam. Production (NATS, feature `coordination-nats`, server ≥ 2.11):
+seam. Whatever the backend, the shape is the same — build a
+[coordination store](../04-connectors/coordination/README.mdx), wrap it in a
+`StoreCoordinator`, hand that to your source:
 
 ```rust
-use spate::coordination::store::nats::{NatsConfig, NatsStore};
 use spate::coordination::{CoordinationConfig, StoreCoordinator};
 
 // One value drives the store's TTL and the coordinator's lease_duration.
@@ -562,11 +565,7 @@ let coordination = CoordinationConfig {
     instance_id: std::env::var("POD_NAME").ok(), // unique per replica
     ..CoordinationConfig::default()
 };
-let store = NatsStore::new(
-    // `job`: one per coordinated job — it suffixes the KV bucket names.
-    NatsConfig::new(vec!["nats://nats:4222".into()], "orders-backfill"),
-    coordination.lease_duration,
-)?;
+let store = /* a CoordinationStore — see the store's own page */;
 let coordinator = StoreCoordinator::new(
     store,
     coordination,
@@ -576,29 +575,33 @@ let coordinator = StoreCoordinator::new(
 let source = MySource::new(Box::new(coordinator));
 ```
 
-(`NatsConfig::new` gives anonymous plaintext defaults; set `credentials`,
-`tls`, and `replicas` on the value for production clusters.)
-
 Tests and single-process runs swap the store — nothing else changes, and
-the `coordination` feature alone suffices (no NATS dependency tree):
+the `coordination` feature alone suffices, with no backend dependency tree:
 
 ```rust
 use spate::coordination::store::memory::MemoryStore;
 let store = MemoryStore::new(coordination.lease_duration);
 ```
 
-Connection notes: `NatsStore::new` is synchronous — the connection and
-bucket provisioning happen lazily under the coordinator's startup retry
-budget, so a down NATS at boot retries with backoff and a
-misconfiguration (old server, a `lease_duration` changed mid-job, a
-store TTL diverging from the coordination config) fails fast with an
-actionable message. Credentials never appear in `Debug` output.
+Building a durable store is the store's business, not the source's:
+requirements, credentials and outage behaviour are on its page. What matters
+here is that construction is **synchronous and lazy** — connecting and
+provisioning happen under the coordinator's startup retry budget, so a store
+that is down at boot retries with backoff, while a genuine misconfiguration (a
+`lease_duration` changed mid-job, a store TTL diverging from the coordination
+config) fails fast with an actionable message.
+
+:::note Connector specifics
+Shipped stores: [NATS JetStream](../04-connectors/coordination/nats/README.mdx)
+(production) · in-memory (development and tests), listed under
+[Coordination stores](../04-connectors/coordination/README.mdx).
+:::
 
 ### Retrofitting an existing source
 
 A source that already implements `Source` with its own lane dealing and a
-whole-source checkpoint retrofits in three moves (this is exactly how
-`spate-s3` was converted — read it as the reference):
+whole-source checkpoint retrofits in three moves (worked reference:
+`crates/spate-s3`, which was converted exactly this way):
 
 1. **Extract the lane assembly** out of the source into the sibling
    context struct: everything `open_split` needs to spawn a fetcher and
@@ -613,8 +616,8 @@ whole-source checkpoint retrofits in three moves (this is exactly how
    coordination store replaces the whole-source checkpoint; they cannot
    coexist as two sources of truth. If old progress maps cleanly onto
    splits, seed it (`PlannedSplit::with_seed`); if the old layout is
-   keyed by something splits don't preserve (as spate-s3's per-lane
-   round-robin manifest was), make a clean cutover — delete the legacy
+   keyed by something splits don't preserve (a per-lane round-robin manifest,
+   say), make a clean cutover — delete the legacy
    path, and let the job fingerprint refuse any config that could
    misread old state.
 

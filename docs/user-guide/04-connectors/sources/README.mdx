@@ -9,6 +9,7 @@ durably written the data behind them. Configure one with a single-key
 | Source | Config tag | Summary |
 |---|---|---|
 | [Kafka](kafka/README.mdx) | `source: { kafka: ... }` | Consumer-group member on `rdkafka`; per-partition lanes, pause/resume backpressure, at-least-once offset commits. |
+| [S3 (object storage)](s3/README.mdx) | `source: { s3: ... }` | Coordinated, bounded backfill of a bucket prefix; splits leased through a coordination store, per-split fenced progress, self-terminating. |
 
 The [Memory / Capture](../memory.mdx) test connector also acts as a source
 (`source: { memory: {} }`); it is a dual-role dev aid documented at the

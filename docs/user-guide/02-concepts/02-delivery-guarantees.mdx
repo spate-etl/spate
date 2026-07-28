@@ -38,15 +38,19 @@ partition's watermark rather than being skipped — watch
 (see [Monitoring](../05-deployment/monitoring.mdx) and
 [docs/METRICS.md](../../METRICS.md)).
 
-**Durability is the sink's ack.** For ClickHouse, a batch counts as durable
-when the insert completes with `wait_end_of_query=1` — a synchronous server
-acknowledgement, which is exactly why the sink writes directly to shard-local
-tables rather than through a Distributed table. See the
-[ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx). For the
-Kafka sink, a batch counts as durable when **every** message's delivery
-report has confirmed under `acks=all` — the write returns only then, so a
-single failed or timed-out report stalls the watermark and the batch
-replays. See the [Kafka sink](../04-connectors/sinks/kafka/README.mdx).
+**Durability is the sink's ack.** The framework's definition is exactly one
+thing: the `ShardWriter` returned `Ok` for that sealed batch. Everything
+upstream — the watermark, the commit, the at-least-once claim — is anchored on
+that return, so what a sink must prove before returning `Ok` is the sharpest
+contract a sink implementation has. A synchronous end-to-end server
+acknowledgement and a per-message delivery confirmation are both valid answers;
+a fire-and-forget write is not.
+
+:::note Connector specifics
+What each sink proves before it returns `Ok`:
+[ClickHouse](../04-connectors/sinks/clickhouse/README.mdx#why-direct-to-shard-not-a-distributed-table)
+· [Kafka](../04-connectors/sinks/kafka/README.mdx#how-a-batch-becomes-durable).
+:::
 
 ## Teardown can't lose data
 
@@ -61,16 +65,27 @@ bulk (encoded chunks, worker ledgers, batch accumulators):
 - **Over-failing is always safe.** A false failure costs a replay; a false
   success costs data. The framework always chooses replay.
 
-## Rebalances
+## Assignment changes
 
-When Kafka revokes partitions, the framework drains the owning threads,
-flushes and acks in-flight data, and commits watermarks **synchronously
-before the revoke completes** — so the next owner of the partition resumes
-from a correct offset. Every rebalance also bumps a per-partition *epoch*
-in the checkpointer, so stale acks from a revoked assignment can never
-advance a watermark that no longer belongs to this process. Details of the
-choreography are in the [Kafka connector](../04-connectors/sources/kafka/README.mdx) and
-[docs/DESIGN.md](../../DESIGN.md) § Source abstraction.
+When work is revoked from this process, the framework drains the owning
+threads, flushes and acks in-flight data, and commits watermarks
+**synchronously before the revocation completes** — so the next owner resumes
+from a correct position. Every assignment change also bumps a per-partition
+*epoch* in the checkpointer, so stale acks issued under an assignment this
+process no longer holds can never advance a watermark that is no longer its
+own.
+
+That epoch is the reason revocation is safe rather than merely fast: it does
+not rely on the outgoing owner finishing in time, only on it being unable to
+succeed afterwards. The choreography is in
+[docs/DESIGN.md](../../DESIGN.md) § Source abstraction, and the
+fleet-level view in [Work assignment](08-work-assignment.mdx).
+
+:::note Connector specifics
+How each source is told its assignment changed:
+[Kafka source](../04-connectors/sources/kafka/README.mdx#how-offsets-are-committed)
+· [S3 source](../04-connectors/sources/s3/README.mdx#offsets-progress-resume).
+:::
 
 ## Shutdown and crashes
 
@@ -89,48 +104,36 @@ happen. Which brings us to:
 
 ## The honest part: duplicates and deduplication
 
-At-least-once means duplicates *will* occur. The ClickHouse sink attaches a
-deterministic `insert_deduplication_token` to every sealed batch, and it is
-important to understand exactly what that covers:
+At-least-once means duplicates *will* occur. The framework's one contribution
+to narrowing that is the **dedup token**: a deterministic string minted per
+sealed batch and reused unchanged across retries of that batch. A sink whose
+destination supports insert deduplication can hand the token over and make
+same-boundary retries idempotent.
 
-- **Covered — same-batch retries.** A batch that times out on one replica
-  and is retried (on the same or another replica) carries the same token;
-  ClickHouse drops the duplicate insert. In-session retry is idempotent.
-- **NOT covered — crash replay.** After a restart, replayed records are
-  re-batched with different boundaries, producing different tokens. Those
-  rows land twice, and no dedup window will catch them.
+The line the token draws is worth internalising, because it is not the line
+most people assume:
 
-So design the target table for replay. The sanctioned pattern is
-`ReplacingMergeTree` with a version column:
+- **Covered — same-batch retries.** A batch that fails and is retried carries
+  the same token, so the destination can recognise and drop the repeat.
+- **NOT covered — crash replay.** After a restart, replayed records re-batch
+  with different boundaries and therefore different tokens. Those rows land
+  twice, and no deduplication window will catch them.
 
-```sql
-CREATE TABLE orders (
-    id           UInt64,
-    customer     String,
-    amount_cents Int64,
-    ts_ms        Int64
-) ENGINE = ReplacingMergeTree(ts_ms) ORDER BY id;
-```
+So target tables must be designed for replay regardless of what the token
+covers. Whether a destination honours the token at all — and what it must be
+configured to do so — is the sink's business, and at least one shipped sink has
+a silent failure mode here worth reading before going to production.
 
-Replayed rows collapse on merge (use `FINAL` or aggregate around it at
-query time). If your data is append-only observations where rare duplicates
-are tolerable, plain `MergeTree` may be acceptable — that's a product
-decision, but make it consciously.
-
-:::warning
-**The `non_replicated_deduplication_window` footgun.** On plain
-`MergeTree`, insert deduplication **silently no-ops** unless the table
-sets `non_replicated_deduplication_window` greater than 0 — the server
-default is 0, and ClickHouse reports success either way. Without it, even
-the covered case above (same-batch retries) writes duplicates.
-`Replicated*MergeTree` defaults to a window of 100. Verified against a
-live server; see [docs/DESIGN.md](../../DESIGN.md) § Sink.
+:::note Connector specifics
+Dedup support, and the configuration it depends on:
+[ClickHouse](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens--and-the-window-warning)
+· [Kafka](../04-connectors/sinks/kafka/README.mdx#delivery-semantics-honestly).
 :::
 
 :::info
 Nothing in Spate is exactly-once, and no configuration makes it so.
 If a downstream consumer cannot tolerate duplicates, deduplicate at the
-table engine or query layer.
+destination or at the query layer.
 :::
 
 ## Further reading

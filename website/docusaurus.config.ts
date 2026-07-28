@@ -23,6 +23,9 @@ const githubUrl = `https://github.com/${organizationName}/${projectName}`;
 //   - /docs/BENCHMARKS -> /docs/benchmarks (folder was renamed).
 //   - connectors/* -> connectors/{sources,sinks,formats}/* (connectors were
 //     regrouped by role; every page below moved).
+//   - guides/schema-validation -> connectors/sinks/clickhouse/schema-validation
+//     (the page was entirely ClickHouse-specific, so it moved to the connector
+//     it documents; see docs/STYLE.md § the framework/connector boundary).
 //
 // A redirect whose `to` names a page that no longer exists FAILS the build.
 // Deleting a page therefore means deleting any redirect aimed at it — the
@@ -44,6 +47,10 @@ const clientRedirects: PluginConfig = [
       { from: `${chConnector}/clickhouse/performance-tuning`, to: `${chConnector}/sinks/clickhouse/performance-tuning` },
       { from: `${chConnector}/clickhouse/permissions`, to: `${chConnector}/sinks/clickhouse/permissions` },
       { from: `${chConnector}/avro`, to: `${chConnector}/formats/avro` },
+      {
+        from: '/docs/user-guide/guides/schema-validation',
+        to: `${chConnector}/sinks/clickhouse/schema-validation`,
+      },
     ],
   },
 ];

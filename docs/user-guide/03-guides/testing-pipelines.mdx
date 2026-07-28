@@ -87,7 +87,7 @@ for payload in [&b"alpha"[..], b"beta", b"gamma"] {
 }
 ```
 
-- `assign_lanes` queues an assignment event, exactly as a Kafka rebalance
+- `assign_lanes` queues an assignment event, exactly as a real rebalance
   would surface one. Pushing to a partition with no active lane yet is
   allowed — payloads wait.
 - `push` / `push_many` queue payloads and return their offsets;
@@ -103,7 +103,8 @@ for payload in [&b"alpha"[..], b"beta", b"gamma"] {
 Watermarks advance only after the sink durably acknowledged every record —
 that is the at-least-once contract itself, so waiting on the commit is the
 strongest assertion a test can make. **Committed positions are one past the
-last offset** (Kafka convention: "next offset to read"):
+last offset** — the "next position to read", the same convention the
+framework commits everywhere:
 
 ```rust
 let deadline = Instant::now() + Duration::from_secs(10);

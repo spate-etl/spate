@@ -40,9 +40,10 @@ builder. If you assemble manually, call `metrics::install` first — see
   get suffixes (`_seconds`, `_bytes`, `_rows`).
 - **Standard labels on every framework metric**:
   - `pipeline` — the `pipeline.name` from config;
-  - `component` — the instance id (e.g. `orders_kafka`, `main.deserializer`);
-  - `component_type` — the implementation (e.g. `kafka`, `clickhouse`,
-    `map`; custom sinks set it via `SinkParts::with_component_type`).
+  - `component` — the instance id (e.g. `orders_source`, `main.deserializer`);
+  - `component_type` — the implementation, which for a connector is the system
+    it talks to and for an operator is its kind (`map`, `filter`); custom sinks
+    set it via `SinkParts::with_component_type`.
 - **Cardinality is mostly opt-in**: `partition`-labelled series appear only
   with `metrics.per_partition_detail: true` (default `false`), because their
   cardinality grows with the assignment. The one exception is
@@ -131,8 +132,8 @@ of [docs/METRICS.md](../../METRICS.md).
 
   Before escalating a high write p99 to whoever runs the server, rule out the
   sink's own I/O runtime: the measurement is wall-clock across the write call,
-  so it charges time the runtime spent elsewhere. For the ClickHouse sink that
-  runtime also does request compression, and at high byte rates it can be the
+  so it charges time the runtime spent elsewhere. Where a sink does its own
+  request compression on that runtime, high byte rates can make the runtime the
   limit rather than the server — `io_threads` is the lever there.
 
 For alerting on skipped records (schema drift, poison messages), replica and

@@ -14,6 +14,8 @@ Connectors are grouped by role:
 - **[Sources](sources/README.mdx)** — feed the pipeline.
 - **[Sinks](sinks/README.mdx)** — write records out.
 - **[Formats](formats/README.mdx)** — deserialize payloads into records.
+- **[Coordination stores](coordination/README.mdx)** — back the coordination
+  seam a broker-less source scales out through.
 
 ## The matrix
 
@@ -25,6 +27,7 @@ Connectors are grouped by role:
 | [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `spate-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `spate-avro` | `avro` | `deserializer: { avro: ... }` |
 | [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
+| [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | — (assembly wiring, not YAML) |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 `features = ["full"]` on the `spate` facade enables all production
@@ -41,7 +44,7 @@ under `sources/` or `sinks/`.
   partitions without ever blocking the poll loop, so sink slowness cannot
   cause a consumer-group eviction. One topic per pipeline.
 - **S3 (source)** — a coordinated, bounded backfill: the elected leader
-  plans the prefix into splits, replicas lease and steal them, and
+  plans the prefix into splits and assigns them to live replicas, and
   progress lives as per-split fenced commits in the coordination store
   (object storage has no broker-side commit). Resumes drift-check carried
   progress against the split's ETag-pinned descriptor; bad objects

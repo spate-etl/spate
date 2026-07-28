@@ -4,6 +4,7 @@
 .DS_Store
 /.claude/*
 !/.claude/commands/
+!/.claude/skills/
 
 # Credentials. Nothing here has ever been committed and push protection is on,
 # but neither of those helps somebody who drops a local .env next to a compose

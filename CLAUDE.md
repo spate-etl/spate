@@ -121,6 +121,26 @@ Dependabot raises dependency bumps as `chore`, scoped by area —
 website's npm tree, `chore(examples)` for the Docker base images. Prefer `fix`
 or `feat` for your own commits, so `chore` reads as "a bot bumped a version".
 
+## Documentation
+
+`docs/STYLE.md` is normative for everything under `docs/` — structure, the
+connector page template, prose and voice. Read it before editing a docs page.
+
+The rule that is easiest to break by accident: **framework pages are
+vendor-neutral prose.** Everything under `docs/user-guide/` outside
+`04-connectors/` states its rules in framework vocabulary (the glossary is the
+register). A connector name may appear only as a link label, a `## Related`
+entry, or inside a `:::note Connector specifics` pointer block — never carrying
+the explanation. Vendor mechanisms, setting keys and tuning numbers live on the
+connector's own page, and on exactly one page. Fenced code and YAML blocks are
+exempt; their surrounding prose is not. `docs/STYLE.md` § 1 lists the
+exemptions, and the `docs-review` skill is the procedure for applying all of
+this.
+
+`docs/DESIGN.md` and `docs/benchmarks/` sit outside that rule — the first
+records why decisions were made, the second reports measurements of specific
+systems — but neither should grow connector *usage* guidance.
+
 ## Testing layout
 
 Unit tests inline (`#[cfg(test)]`), integration tests per-crate in `tests/`,

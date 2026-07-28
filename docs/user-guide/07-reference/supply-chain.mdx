@@ -166,6 +166,43 @@ on disk and the production deploy token is already in the environment. That one
 is covered separately, by setting `NPM_CONFIG_IGNORE_SCRIPTS` on the step, since
 npm reads its configuration from the environment as well as from a file.
 
+### Pinning a transitive npm version
+
+An advisory against a package nothing depends on *directly* cannot be fixed by
+bumping anything: every parent pins below the patched range, so `npm update`
+reaches nothing and Dependabot has no manifest entry to edit. `website/package.json`
+carries an `overrides` block for those, forcing a resolution the tree would not
+reach on its own.
+
+An override is a stronger claim than a version bump, because it overrules a
+range its author chose. Two things have to hold before one is taken, and both
+have to be checked by hand — nothing verifies them automatically:
+
+1. **The replacement is drop-in for the callers already in the tree.** Module
+   format is the trap, not the version number. A package that moved to ESM, or
+   that moved from a default export to a named one, will install cleanly, pass
+   `npm ci`, and then fail at `require` time in whichever command happens to load
+   it.
+2. **It is scoped no wider than the vulnerable path.** A bare entry rewrites
+   every copy in the tree, including ones that were never affected.
+
+Both current entries were taken for advisories with no other route:
+
+| Entry | Replaces | Reached through | Removable when |
+|---|---|---|---|
+| `serialize-javascript: ^7.0.7` | 6.0.2 | `copy-webpack-plugin`, `css-minimizer-webpack-plugin` | both plugins widen their `^6` ranges |
+| `sockjs` → `uuid: ^11.1.1` | 8.3.2 | `webpack-dev-server` → `sockjs` | `sockjs` widens its `^8.3.2` range |
+
+`serialize-javascript` is unscoped because those two plugins are its only
+consumers and both use it to build webpack cache keys, so the blast radius of
+being wrong is a stale cache. Version 7 keeps the default-function export that
+version 6 had, which is what makes it drop-in.
+
+The `uuid` entry is nested under `sockjs` rather than declared bare, and the
+difference matters: `mermaid` also depends on `uuid` and had already resolved
+14.0.1, a version outside every affected range. A bare entry would have pulled
+it back to 11.1.1 — a downgrade across three majors, fixing nothing.
+
 ### A new dependency cannot arrive unnoticed
 
 **`Cargo.lock` is the control here.** It is committed, every gate runs
@@ -218,6 +255,32 @@ Stated plainly, so it is not mistaken for coverage:
   and will not open a security update for it. Those need the intermediate
   dependency to release, or an explicit `overrides` entry. This affects the
   documentation site only — it is not part of any published crate.
+
+  **One alert is accepted rather than fixed**, on the same three-part argument
+  an `ignore` entry in `deny.toml` requires.
+  [GHSA-mh99-v99m-4gvg](https://github.com/advisories/GHSA-mh99-v99m-4gvg), a
+  denial-of-service advisory against `brace-expansion`, is reached through
+  exactly one chain: `@docusaurus/core` → `serve-handler` → `minimatch@3.1.5` →
+  `brace-expansion@1.1.16`.
+
+  *Not reachable.* `serve-handler` is imported from a single file in
+  `@docusaurus/core`, the one implementing `docusaurus serve` — the local
+  preview command. No workflow and no script in `scripts/` runs it, and it is
+  absent from the built site. The exposure is a maintainer previewing their own
+  build against their own glob patterns.
+
+  *No upgrade.* The advisory is patched in `brace-expansion@5.0.8` and nowhere
+  else — 3.x and 4.x are pure ESM, and there is no 1.x or 2.x backport. Neither
+  override works: 5.0.8 exports `expand` as a *named* CJS export while
+  `minimatch@3.1.5` calls the module itself, and `minimatch@10` is named-only in
+  the same way while `serve-handler` calls *it* directly. Both fail at `require`
+  time with a `TypeError`, and `serve-handler` pins `minimatch` to an exact
+  version besides. The callers are third-party source, which `overrides` cannot
+  rewrite; patching it would take an install hook, and `ignore-scripts=true`
+  above turns those off.
+
+  *Exit condition.* Docusaurus replacing or dropping `serve-handler`. Nothing
+  else moves this short of a fork.
 - **The minimal-version job does not run doctests**, and never builds the
   minimal graph on the MSRV toolchain.
 - **Nothing is published to crates.io yet**, so there is no release provenance,

@@ -144,7 +144,7 @@ const config: Config = {
       {
         docs: {
           // Read the existing repo docs/ tree in place — keeps docs/DESIGN.md,
-          // docs/METRICS.md, etc. at the paths CLAUDE.md and the README rely on.
+          // docs/METRICS.md, etc. at the paths AGENTS.md and the README rely on.
           path: '../docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',

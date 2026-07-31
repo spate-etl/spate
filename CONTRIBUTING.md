@@ -130,9 +130,11 @@ Three things the targets encode that are worth knowing before you run a cargo
 command by hand:
 
 - **Pass `--locked` — CI does.** Without it a command can resolve a different
-  dependency graph and hide a failure CI will then find. Every target passes it.
-- **`cargo hack --no-dev-deps` is the one command that cannot**, because it
-  rewrites each `Cargo.toml` as it runs and a locked build refuses.
+  dependency graph and hide a failure CI will then find. Every target that
+  resolves one passes it.
+- **Two commands do not take it.** `cargo hack --no-dev-deps` rewrites each
+  `Cargo.toml` as it runs and a locked build refuses; `cargo fmt` resolves
+  nothing at all, reading only `.rs` files.
 - **The site build needs `CI=true`.** The client-redirects plugin is only
   registered when it is set, so a plain build silently skips redirect validation
   — and a redirect pointing at a page you deleted is a hard failure. `make docs`

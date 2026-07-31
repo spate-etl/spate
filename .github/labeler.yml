@@ -103,6 +103,5 @@
       - any-glob-to-any-file:
           - Cargo.toml
           - Cargo.lock
-          - rust-toolchain.toml
           - release-plz.toml
           - cliff.toml

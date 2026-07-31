@@ -126,9 +126,9 @@ of [docs/METRICS.md](../../METRICS.md).
   attempts* (`spate_sink_retry_backoff_seconds`), shard health says *no
   replica is usable* (`spate_sink_shard_healthy == 0`, where the backoff gauge
   reads `0`) — which covers both waiting for a probe and writing one, so it is
-  the wider signal rather than an "asleep" one — write says *slow*, and and `spate_sink_flush_duration_seconds`
-  is all of them at once, which makes it a commit-lag budget rather than a
-  diagnosis. See [What a flush
+  the wider signal rather than an "asleep" one — write says *slow*, and
+  `spate_sink_flush_duration_seconds` is all of them at once, which makes it a
+  commit-lag budget rather than a diagnosis. See [What a flush
   contains](../../METRICS.md#what-a-flush-contains).
 
   Before escalating a high write p99 to whoever runs the server, rule out the

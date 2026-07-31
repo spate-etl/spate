@@ -16,6 +16,11 @@
 #   ci:        opt a pull request into a suite its paths would not select.
 #   needs:     what is blocking the issue, not what it is about.
 #
+# There is no `type:` namespace: GitHub's native issue types carry that axis and
+# the forms set them, so a bug arrives typed rather than labelled.
+# `delivery-correctness` and `performance` are not types but classes of bug with
+# their own triage priority, which is why they stay as labels below.
+#
 
 - name: "crate: spate"
   color: "0052cc"

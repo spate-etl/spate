@@ -10,7 +10,11 @@
 #   2. **No pipes.** Make aborts on the first non-zero exit, which is this
 #      repo's "verify by explicit exit code" rule mechanised. A `| grep` or
 #      `| tail` reports the exit status of the last command in the pipeline.
-#   3. **`--locked` everywhere except one place**, called out where it happens.
+#   3. **`--locked` on every target that resolves a dependency graph.** Two do
+#      not take it: `cargo fmt`, which resolves nothing and reads only `.rs`
+#      files, and `cargo hack --no-dev-deps`, which rewrites each manifest as it
+#      runs and fails outright with the flag. Both are called out where they
+#      happen.
 #
 # `make help` lists everything. `make gates` is what a pull request must pass.
 

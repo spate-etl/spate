@@ -46,8 +46,9 @@ means the change has to say how the property still holds.
   drain-deadline branch, or the deadline is not polled while it waits and
   shutdown deadlocks. `ShardWorker::dispatch` is deliberately not `async`: it
   parks a sealed batch for a permit instead of awaiting one. `SinkPool::drain`
-  force-aborts a worker 2s past the deadline as a backstop, but that loses the
-  worker's drain report — it is not a licence to add a blocking await.
+  force-aborts a worker `BACKSTOP_GRACE` (1s) past the deadline as a backstop,
+  but that loses the worker's drain report — it is not a licence to add a
+  blocking await.
 - **INV-6 — no connector-crate types in `spate-core` public APIs**, and no
   rdkafka/clickhouse/apache-avro types in any public trait bounds — those are
   0.x dependencies and must not leak into our semver surface. The **one

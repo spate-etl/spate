@@ -690,7 +690,7 @@ jobs:
       #
       # spate-core's only bench target is divan, not criterion — divan has no
       # baseline concept, so it takes no criterion arguments at all.
-      - run: cargo bench -p spate-core --locked --bench chain
+      - run: make bench
       # spate-avro's `decode` is the criterion bench, and it is what critcmp
       # compares below. Saved as `current`, against last week's `previous`:
       # critcmp needs *two* named baselines to compare anything. Given one it

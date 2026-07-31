@@ -8,9 +8,6 @@
 //! - `pipeline_synthetic` — the framework-overhead ceiling: an in-process
 //!   generator source through the real chain, sink pool, and runtime into
 //!   a null writer; no broker or network in the loop.
-//! - `avro_pipeline` — the Avro decode-backend A/B: one datum holding an
-//!   array of events, exploded with `flat_map` into the ClickHouse encoder.
-//!   CPU-bound by construction; no broker or server in the loop.
 //! - `loadgen` — Kafka producer at a target rate (raw payloads or
 //!   Confluent-framed Avro).
 //! - `e2e_kafka_clickhouse` — the full pipeline against local containers

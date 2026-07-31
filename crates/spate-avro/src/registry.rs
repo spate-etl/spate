@@ -13,10 +13,8 @@
 //!
 //! Only a *permanent* verdict about an id — the registry answering `404`
 //! (unknown id/subject/version), a schema that uses unsupported references,
-//! or a schema **no enabled backend** can parse — is negatively cached. A
-//! schema only one backend accepts is not a negative verdict: it is
-//! published `Ready` with the rejecting backend's reason stored per-backend
-//! inside the entry (see `CompiledSchema`). A *transient* outage
+//! or a schema the parser rejects (`CompiledSchema` pre-renders the reason)
+//! — is negatively cached. A *transient* outage
 //! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
 //! leaves the id **absent** so the deserializer's next replay refetches it:
 //! poisoning a transient blip would drop (and ack) perfectly decodable
@@ -202,15 +200,11 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
                 );
                 return FetchOutcome::Resolved;
             }
-            // Each backend compiles independently (`CompiledSchema::compile`,
-            // which also catches apache-avro 0.21's parse *panics* on
-            // malformed names like `"my-record"`): a schema only one backend
-            // accepts is published `Ready` and stays fully usable there,
-            // while the rejecting backend surfaces its stored reason per
-            // record. Only a schema **no** enabled backend accepts is
-            // negative-cached — a poison payload for every pipeline. Either
-            // way the id resolves; a bad schema can never stall it at
-            // NotReady forever.
+            // `CompiledSchema::compile` catches apache-avro 0.21's parse
+            // *panics* on malformed names (like `"my-record"`), so a schema
+            // the parser rejects negative-caches as an ordinary failure — a
+            // poison payload for every pipeline. Either way the id resolves;
+            // a bad schema can never stall it at NotReady forever.
             let compiled = CompiledSchema::compile(id, &registered.schema);
             match compiled.unusable_reason() {
                 None => {

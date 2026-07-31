@@ -16,6 +16,7 @@ Schema evolution follows Avro resolution rules via an optional
 `reader_schema` (field reordering, defaults, promotions, aliases).
 
 Key types: `AvroDeserializerBuilder` (from the
-`deserializer: { avro: ... }` section), `AvroSerdeDeserializer<T>`,
-`AvroValueDeserializer`, and — behind the `fast` feature —
-`AvroSerdeDeserializer<T>`.
+`deserializer: { avro: ... }` section), `AvroDatumDeserializer<F>`
+(single-pass typed decode, optionally zero-copy), `AvroSerdeDeserializer<T>`
+(typed decode with Avro schema resolution), and `AvroValueDeserializer`
+(dynamically-typed records).

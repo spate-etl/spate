@@ -71,7 +71,10 @@ impl DecoderCore {
     /// framing, and schema resolution. The returned datum slice borrows the
     /// payload buffer (`'buf`), so a borrowed-record backend can decode
     /// straight out of it.
-    fn resolve<'buf>(&mut self, raw: &RawPayload<'buf>) -> Result<Resolved<'buf>, DeserError> {
+    pub(crate) fn resolve<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+    ) -> Result<Resolved<'buf>, DeserError> {
         if raw.bytes.is_empty() {
             return Ok(None);
         }
@@ -136,10 +139,11 @@ impl DecoderCore {
 }
 
 /// Dynamically-typed deserializer: emits [`AvroValue`] records. Use when
-/// the schema is only known at runtime, or as the lower-allocation path —
-/// it decodes each datum exactly once. The typed [`AvroSerdeDeserializer`]
-/// keeps `apache-avro` types out of your pipeline, but it is **not** faster:
-/// it decodes to an [`AvroValue`] and then re-decodes that into `T`.
+/// the schema is only known at runtime — pipelines that inspect or route
+/// on structure they cannot name at compile time. When the record type
+/// *is* known, [`crate::AvroDatumDeserializer`] decodes it in a single
+/// pass without materialising the [`AvroValue`] tree at all, and is the
+/// faster choice.
 #[derive(Clone, Debug)]
 pub struct AvroValueDeserializer {
     core: DecoderCore,
@@ -174,12 +178,14 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 ///
 /// # Performance
 ///
-/// This path is **not** faster than [`AvroValueDeserializer`]. `apache-avro`
-/// 0.21 exposes no single-pass datum-to-`T` decode, so each record is decoded
-/// twice — once into an intermediate [`AvroValue`] via `from_avro_datum`,
-/// then again into `T` via `from_value` — roughly doubling the per-record
-/// allocations and CPU of the dynamically-typed path. Choose it for the clean
-/// typed API (no `apache-avro` types in your pipeline), not for throughput.
+/// This path decodes each record **twice** — once into an intermediate
+/// [`AvroValue`] via `from_avro_datum`, then again into `T` via
+/// `from_value` — roughly doubling the per-record allocations and CPU of
+/// the dynamically-typed path. Choose it when you need Avro's full
+/// schema-resolution rules (a configured `reader_schema`: field
+/// reordering, type promotions, defaults, aliases). When you don't,
+/// [`crate::AvroDatumDeserializer`] decodes the same `T` in a single pass
+/// and is substantially cheaper.
 pub struct AvroSerdeDeserializer<T> {
     core: DecoderCore,
     _t: PhantomData<fn() -> T>,

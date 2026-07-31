@@ -27,6 +27,7 @@ all-features = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = { workspace = true }
 spate-test = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }

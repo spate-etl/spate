@@ -74,12 +74,30 @@ generic model.
 
 ## Typed or dynamic records
 
-The builder hands out two deserializer flavors:
+The builder hands out three deserializer flavors:
 
+- `build_serde_datum::<T>()` (and the record-family form `build_datum::<F>()`)
+  — decodes each datum **directly** into `T` in a single pass, driven by the
+  writer schema, never materialising an intermediate value tree. This is the
+  throughput path — see the
+  [deserialization benchmarks](../../../../benchmarks/deserialization-formats.mdx)
+  for measured numbers. With a borrowed record family, string and bytes
+  fields point straight into the payload buffer (zero-copy;
+  `crates/spate-avro/tests/zero_copy_flat_map.rs` is the worked example).
+  Two constraints: no `reader_schema` (rejected at build time — records
+  decode in the writer schema's shape; additive evolution works through
+  `#[serde(default)]`/`#[serde(alias)]`, and unknown fields are skipped),
+  and no `duration`/`big-decimal` logical types. A fixed schema breaks the
+  logical-type rule at build time; in registry mode the writer schema only
+  arrives at runtime, so an incompatible schema id surfaces **per record**
+  as `SchemaUnavailable` — dropped and counted under the Skip policy, fatal
+  under Fail — while the same id stays fully decodable on the two paths
+  below.
 - `build_serde::<T>()` — decodes each datum into a
-  `T: serde::de::DeserializeOwned` struct (field names match the writer
-  schema). This is the flagship path; `crates/spate/examples/kafka_avro_to_clickhouse.rs`
-  is the worked example.
+  `T: serde::de::DeserializeOwned` struct via an intermediate `AvroValue`,
+  applying Avro's full schema-resolution rules when a `reader_schema` is
+  configured (field reordering, type promotions, defaults, aliases).
+  `crates/spate/examples/kafka_avro_to_clickhouse.rs` is the worked example.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
 
@@ -138,4 +156,4 @@ neither an error nor backpressure. See [Metrics](../../../../METRICS.md).
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.
 - [Deserialization formats](../../../../benchmarks/deserialization-formats.mdx)
-  — measured decode throughput against the other shipped formats.
+  — measured decode throughput against the other formats.

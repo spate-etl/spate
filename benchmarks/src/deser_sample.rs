@@ -121,6 +121,57 @@ pub fn json_order() -> Vec<u8> {
     serde_json::to_vec(&sample_order()).expect("order json")
 }
 
+/// The [`Order`] shape borrowed: every string field points into the payload
+/// buffer — the zero-copy target for the single-pass Avro datum path.
+#[derive(Debug, Deserialize)]
+pub struct OrderRef<'a> {
+    /// Order id.
+    pub id: i64,
+    /// Stock-keeping unit.
+    #[serde(borrow)]
+    pub sku: &'a str,
+    /// Customer id.
+    #[serde(borrow)]
+    pub customer: &'a str,
+    /// Quantity ordered.
+    pub qty: i32,
+    /// Unit price.
+    pub price: f64,
+    /// ISO currency code.
+    #[serde(borrow)]
+    pub currency: &'a str,
+    /// Order timestamp, epoch milliseconds.
+    pub ts_ms: i64,
+    /// Fulfilment region.
+    #[serde(borrow)]
+    pub region: &'a str,
+    /// Fulfilment priority.
+    pub priority: i32,
+    /// Applied discount fraction.
+    pub discount: f64,
+    /// Free-text notes.
+    #[serde(borrow)]
+    pub notes: &'a str,
+    /// Whether the order is paid.
+    pub paid: bool,
+    /// Sales channel.
+    #[serde(borrow)]
+    pub channel: &'a str,
+    /// Warehouse id.
+    #[serde(borrow)]
+    pub warehouse: &'a str,
+    /// Coupon code (empty when none).
+    #[serde(borrow)]
+    pub coupon: &'a str,
+}
+
+/// The borrowed [`OrderRef`] record family.
+#[derive(Debug)]
+pub struct OrderRefFam;
+impl spate_core::deser::RecFamily for OrderRefFam {
+    type Rec<'buf> = OrderRef<'buf>;
+}
+
 // ---- batch: a nested n-reading batch ---------------------------------------
 
 /// Avro writer schema for [`SensorBatch`].
@@ -169,6 +220,51 @@ pub struct SensorBatch {
     pub region: String,
     /// The readings carried in this batch.
     pub readings: Vec<Reading>,
+}
+
+/// The [`Reading`] shape borrowed.
+#[derive(Debug, Deserialize)]
+pub struct ReadingRef<'a> {
+    /// Metric name.
+    #[serde(borrow)]
+    pub name: &'a str,
+    /// Metric value.
+    pub value: i64,
+    /// Metric unit.
+    #[serde(borrow)]
+    pub unit: &'a str,
+    /// Reading timestamp, epoch milliseconds.
+    pub ts_ms: i64,
+    /// Whether the reading passed validation.
+    pub ok: bool,
+    /// A normalized ratio.
+    pub ratio: f64,
+    /// Free-form tags.
+    #[serde(borrow)]
+    pub tags: Vec<&'a str>,
+}
+
+/// The [`SensorBatch`] shape borrowed: the zero-copy target for the
+/// single-pass Avro datum path.
+#[derive(Debug, Deserialize)]
+pub struct SensorBatchRef<'a> {
+    /// Sensor id.
+    #[serde(borrow)]
+    pub sensor: &'a str,
+    /// Batch timestamp, epoch milliseconds.
+    pub batch_ts_ms: i64,
+    /// Sensor region.
+    #[serde(borrow)]
+    pub region: &'a str,
+    /// The readings carried in this batch.
+    pub readings: Vec<ReadingRef<'a>>,
+}
+
+/// The borrowed [`SensorBatchRef`] record family.
+#[derive(Debug)]
+pub struct BatchRefFam;
+impl spate_core::deser::RecFamily for BatchRefFam {
+    type Rec<'buf> = SensorBatchRef<'buf>;
 }
 
 /// `n` representative readings.

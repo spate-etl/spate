@@ -47,8 +47,8 @@ float, and a small nested string array each) and a **single flat 15-field
 record**. Both formats are measured on their `typed` (into your own structs) and
 `value` (a dynamic tree) paths — and Avro additionally on its **single-pass
 `datum` path**, owned and borrowed — because, as the numbers below show, which
-path is cheapest is *not* the same answer for both formats, and for Avro the
-answer changed when the datum path shipped.
+path is cheapest is *not* the same answer for both formats — and for Avro the
+single-pass datum path beats both tree paths outright.
 
 ## Batch — per-record decode cost
 
@@ -88,8 +88,8 @@ or as NDJSON (one reading per line). Throughput is normalized per reading.
   />
 </StatRow>
 
-On the **typed** path JSON is the cheaper format — Avro costs ~**409 ns/record**
-against JSON's ~212 (nested document), a **1.9×** gap, even though Avro's wire
+On the **typed** path JSON is the cheaper format — Avro costs ~**408 ns/record**
+against JSON's ~213 (nested document), a **1.9×** gap, even though Avro's wire
 format is compact binary and JSON pays to parse text, unescape strings, and
 re-parse numbers. The reason is not the format but the decoder: `apache-avro`
 0.21 exposes no single-pass datum→`T` decode, so the typed path decodes **twice**
@@ -113,7 +113,7 @@ in **opposite directions** for the two formats.
 
 For **JSON**, the dynamic path allocates a node per field and costs ~**1.8×**
 more than typed (388 vs 213 ns/record): use it only when the schema is unknown at
-compile time. For **Avro's two shipped tree paths** the ordering reverses — the
+compile time. For **Avro's two tree paths** the ordering reverses — the
 dynamic path is ~**1.7×** *cheaper* than two-pass typed (245 vs 408 ns/record),
 because `AvroValue` is exactly the intermediate that typed path already builds
 before re-decoding it into `T`. Between those two, typed is a convenience, not
@@ -125,13 +125,12 @@ against JSON's 388, a **1.6×** margin, the reverse of the typed chart. The same
 reversal holds on the flat record below (606 vs 776 ns).
 
 :::tip Choosing an Avro decode path
-If decode CPU matters, use the single-pass path: `build_serde_datum::<T>()`
-(or `build_datum::<F>()` with a borrowed record family) — see
-[below](#avro-single-pass). Keep `build_serde::<T>()` when you need Avro's
-schema-resolution rules (a `reader_schema`), and `build_value()` when the
-structure is unknown at compile time. Whether a decode difference of this size
-reaches an end-to-end pipeline's measured rate depends on where the pipeline
-is bound: a sink-bound pipeline hides it, a CPU-bound one pays it directly.
+The single-pass datum path is the throughput choice; the
+[Avro format page](../user-guide/04-connectors/formats/avro/README.mdx#typed-or-dynamic-records)
+covers choosing between the three deserializer flavors and their constraints.
+Whether a decode difference of this size reaches an end-to-end pipeline's
+measured rate depends on where the pipeline is bound: a sink-bound pipeline
+hides it, a CPU-bound one pays it directly.
 :::
 
 <BenchBars
@@ -186,11 +185,15 @@ that point into the payload buffer instead of copying out of it.
 
 On the batch, the owned single-pass decode is ~**1.6×** cheaper than the
 dynamic tree and ~**2.6×** cheaper than the two-pass typed path; borrowed
-records stretch those to ~**2.4×** and ~**3.9×**. And with the tree gone,
-Avro's compact binary finally beats JSON **on the typed path too**: ~158
-ns/reading owned (vs serde_json's ~213 single-document typed), ~104 borrowed.
-The flat 15-field record below shows the same ordering more starkly, because
-per-field costs are all it measures.
+records stretch those to ~**2.4×** and ~**3.9×**. With no tree in the way,
+Avro's owned decode (~158 ns/reading) sits below serde_json's typed arms
+(~213 single-document) and level with simd-json's fastest (~156 — inside that
+backend's wider error bar, below), and borrowed records (~104) are cheaper
+than every JSON arm. One asymmetry to keep in mind reading the borrowed bars:
+the JSON arms decode to owned records throughout — the JSON deserializer has
+no borrowed record shapes — so a borrowed-Avro bar carries a zero-copy
+advantage no JSON bar can. The flat 15-field record below shows the same
+ordering more starkly, because per-field costs are all it measures.
 
 ## Single record — a flat 15-field row
 
@@ -270,10 +273,9 @@ Both are per-message allocations a production integration avoids; the
 reading**, under 1% of the decode.
 
 :::caution simd-json is more machine-sensitive than serde_json
-This dataset has now been re-recorded in full twice (once when the fast Avro
-backend was removed, once when the single-pass datum path was added). Both
-times nearly every scalar arm reproduced within about **±2%** while the four
-`simd-json` arms moved **4–8%** — first slower, then faster — on the same host,
+Two full re-records of this dataset exist, and in both, nearly every scalar
+arm reproduced within about **±2%** while the four `simd-json` arms moved
+**4–8%** — in both directions across the two re-records — on the same host,
 the same pinned `simd-json 0.17.3`, with no change to any crate in its
 dependency subtree. Treat the simd ratios as having a wider error bar than the
 scalar ones, and re-measure on your own hardware before sizing a deployment on

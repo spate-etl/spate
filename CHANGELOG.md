@@ -15,6 +15,63 @@ upgrading, and the second is what belongs here.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-31
+
+### Added
+
+- **Typed Avro datum decoding** (`spate-avro`) — `AvroDeserializerBuilder::build_datum`
+  and `build_serde_datum` return an `AvroDatumDeserializer` that decodes a datum
+  straight into a typed record in a single pass, rather than materialising a
+  dynamic `Value` first. Reach for it when the record shape is known at compile
+  time; the `Value`-based path is unchanged and remains the one to use when it is
+  not. ([#31])
+
+### Changed
+
+- **Breaking:** **`breaker.open_for` is validated at load** (`spate-core`,
+  `spate-kafka`, `spate-clickhouse`). `breaker.open_for: 0s`, and any value above a
+  year, now fail startup. Both previously loaded and ran degenerately — a zero
+  quarantine re-probed on the very next check — because the connectors validated
+  only `failure_threshold` and `half_open_probes`. A pipeline relying on either has
+  to set a real duration.
+
+  `half_open_probes: 0` is unaffected in practice: both connectors already rejected
+  it, and what changes is the framework's own normalisation of it. The rules now
+  live on `BreakerConfig::validate` beside `RetryConfig::validate`, with
+  `BreakerConfig::MAX_OPEN_FOR` as the bound and `BreakerConfigError` naming the
+  failure — `open_for` is stamped into a deadline, and `Instant + Duration` panics
+  rather than saturating, so it needed a load-time limit it had nowhere. ([#35])
+
+### Fixed
+
+- **A sink shard can no longer be left unwritable by a writer that panicked
+  mid-probe** (`spate-core`). A replica's half-open probe budget was returned only
+  by leaving `HalfOpen`, so a panic during a probe consumed the slot permanently
+  and pinned the replica half-open for the life of the process — every later batch
+  for that shard had nowhere to go. Picks now report whether they spent a slot, and
+  the write task holds a guard that returns it if no outcome is ever reported. A
+  related case let a slot released against an already-ended half-open run credit
+  the current one, admitting `half_open_probes + 1` concurrent writes to the
+  endpoint the breaker exists to shield; a release naming a run that has ended is
+  now discarded. Both are reachable on the default `inflight.max_per_shard: 2`.
+  ([#34])
+- **A sink shard waiting for a circuit-breaker probe no longer consumes its retry
+  ladder** (`spate-core`). With every replica half-open and its probe budget spent,
+  the write loop fell back to the retry backoff — advancing the ladder while
+  publishing no backoff gauge and incrementing no `spate_sink_retries_total`, so
+  two batches contending for one probe ended up on different steps for reasons no
+  metric explained. The wait now selects on a breaker wake alongside any real probe
+  deadline. Reachable on the defaults, where `half_open_probes: 1` and
+  `inflight.max_per_shard: 2` put two batches in exactly that contention. ([#34])
+
+### Contributors
+
+- Marcus Kainth
+
+[#31]: https://github.com/spate-etl/spate/pull/31
+[#34]: https://github.com/spate-etl/spate/pull/34
+[#35]: https://github.com/spate-etl/spate/pull/35
+
 ## [0.1.0] — 2026-07-27
 
 First public release.
@@ -66,5 +123,6 @@ boundaries, so rows can land twice. Design target tables to tolerate that.
 - Connector configuration structs are not yet `#[non_exhaustive]`, so adding a
   field is a breaking change until they are.
 
-[Unreleased]: https://github.com/spate-etl/spate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
 [0.1.0]: https://github.com/spate-etl/spate/releases/tag/v0.1.0

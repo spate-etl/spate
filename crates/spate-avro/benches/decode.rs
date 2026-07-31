@@ -125,6 +125,13 @@ fn bench(c: &mut Criterion) {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
         });
     });
+    group.bench_function("datum_typed", |b| {
+        let mut deser = builder.build_serde_datum::<Order>().expect("datum builder");
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
     group.finish();
 
     bench_batch(c);
@@ -547,6 +554,69 @@ mod comparison_flatten {
         }
     }
 
+    /// The borrowed decode target for the single-pass path: the same
+    /// message shape with string contents pointing into the payload
+    /// buffer (mirrors the harness `SensorBatch`/`Event`, borrowed).
+    #[derive(Debug, serde::Deserialize)]
+    pub(crate) struct SensorBatchRef<'a> {
+        pub(crate) batch_id: i64,
+        #[serde(borrow)]
+        pub(crate) sensor: &'a str,
+        #[serde(borrow)]
+        pub(crate) region: Option<&'a str>,
+        pub(crate) batch_ts_ms: i64,
+        pub(crate) send_ts_us: i64,
+        pub(crate) events: Vec<EventRef<'a>>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    pub(crate) struct EventRef<'a> {
+        pub(crate) seq: i32,
+        #[serde(borrow)]
+        pub(crate) name: &'a str,
+        #[serde(borrow)]
+        pub(crate) unit: &'a str,
+        pub(crate) value: i64,
+        pub(crate) quality: Option<f64>,
+        #[serde(borrow)]
+        pub(crate) tags: Vec<&'a str>,
+    }
+
+    pub(crate) struct BatchRefFam;
+    impl spate_core::deser::RecFamily for BatchRefFam {
+        type Rec<'buf> = SensorBatchRef<'buf>;
+    }
+
+    /// The entrant's flatten over the borrowed typed record instead of the
+    /// `AvroValue` tree: same filters, same `Row`, no positional
+    /// tree-walking — what the comparison entrant's `flat_map` becomes on
+    /// the single-pass path.
+    pub(crate) fn flatten_typed<F: FnMut(Row)>(batch: &SensorBatchRef<'_>, mut emit: F) {
+        let region = batch.region.unwrap_or("");
+        for e in &batch.events {
+            if e.unit == DROP_UNIT {
+                continue;
+            }
+            if matches!(e.quality, Some(q) if q < QUALITY_FLOOR) {
+                continue;
+            }
+            emit(Row {
+                batch_id: u64::try_from(batch.batch_id).expect("batch_id non-negative"),
+                event_seq: u16::try_from(e.seq).expect("seq fits u16"),
+                sensor: batch.sensor.to_owned(),
+                region: region.to_owned(),
+                name_upper: e.name.to_ascii_uppercase(),
+                unit: e.unit.to_owned(),
+                value: e.value,
+                value_scaled: e.value * 1000 / (i64::from(e.seq) + 1),
+                quality: e.quality,
+                tags: e.tags.iter().map(|t| (*t).to_string()).collect(),
+                batch_ts: DateTime64Millis(batch.batch_ts_ms),
+                send_ts: DateTime64Micros(batch.send_ts_us),
+            });
+        }
+    }
+
     pub(crate) fn flatten_value<F: FnMut(Row)>(v: &AvroValue, mut emit: F) {
         let rec = as_record(v);
         let batch_id = u64::try_from(as_long(&rec[0].1)).expect("batch_id non-negative");
@@ -639,6 +709,21 @@ fn bench_sensor_batch(c: &mut Criterion) {
         }
     }
 
+    /// The borrowed-path equivalent: decoded typed batch straight into the
+    /// typed flatten.
+    struct TypedFlattenSink(u64);
+    impl<'buf> EmitRecord<'buf, comparison_flatten::SensorBatchRef<'buf>> for TypedFlattenSink {
+        fn emit(&mut self, rec: Record<comparison_flatten::SensorBatchRef<'buf>>) -> Flow {
+            let mut rows = 0u64;
+            comparison_flatten::flatten_typed(&rec.payload, |row| {
+                black_box(&row);
+                rows += 1;
+            });
+            self.0 += rows;
+            Flow::Continue
+        }
+    }
+
     let schema = Schema::parse_str(COMPARISON_SCHEMA).unwrap();
     comparison_corpus::golden_self_check(&schema);
 
@@ -707,6 +792,39 @@ fn bench_sensor_batch(c: &mut Criterion) {
     group.bench_function("decode_plus_flatten", |b| {
         let mut deser = builder.build_value().expect("value builder");
         let mut sink = FlattenSink(0);
+        b.iter(|| {
+            for raw in &raws {
+                deser.deserialize(black_box(raw), &ack, &mut sink).unwrap();
+            }
+        });
+    });
+    group.bench_function("datum_typed_decode", |b| {
+        let mut deser = builder
+            .build_serde_datum::<SensorBatch>()
+            .expect("datum builder");
+        let mut sink = Sink(0);
+        b.iter(|| {
+            for raw in &raws {
+                deser.deserialize(black_box(raw), &ack, &mut sink).unwrap();
+            }
+        });
+    });
+    group.bench_function("datum_borrowed_decode", |b| {
+        let mut deser = builder
+            .build_datum::<comparison_flatten::BatchRefFam>()
+            .expect("datum builder");
+        let mut sink = Sink(0);
+        b.iter(|| {
+            for raw in &raws {
+                deser.deserialize(black_box(raw), &ack, &mut sink).unwrap();
+            }
+        });
+    });
+    group.bench_function("datum_borrowed_plus_flatten", |b| {
+        let mut deser = builder
+            .build_datum::<comparison_flatten::BatchRefFam>()
+            .expect("datum builder");
+        let mut sink = TypedFlattenSink(0);
         b.iter(|| {
             for raw in &raws {
                 deser.deserialize(black_box(raw), &ack, &mut sink).unwrap();

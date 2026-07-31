@@ -19,7 +19,7 @@ body:
         not comparable to one from a quiet host, and run-to-run spread on
         throughput is wider than people expect. That is not distrust; it is the
         only way two numbers mean the same thing. The methodology lives in the
-        [benchmark repository](https://github.com/spate-etl/spate-benchmark).
+        [benchmark repository](https://github.com/spate-etl/benchmark).
 
   - type: dropdown
     id: kind

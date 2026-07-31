@@ -11,6 +11,28 @@ After that: connectors, because the abstractions exist so third parties can
 write them; and anything that makes the engine measurably faster without
 weakening what it promises.
 
+## Reporting something
+
+There are four forms, and the first one is the point of the list: a delivery
+guarantee that did not hold. The others are an ordinary bug, a performance
+problem, and a proposal. Blank issues are off deliberately — each form asks the
+question somebody would have to ask you anyway, and asking it once beats a
+round-trip.
+
+Two things the delivery form says before you start, because they are the common
+answers and neither is a bug: duplicates after a crash are expected, since replay
+re-batches with new boundaries; and records dropped by `ErrorPolicy::Skip` are
+counted rather than lost, so check `spate_*_dropped_total{reason}` before
+concluding they vanished.
+
+Issues are labelled at triage. `crate:` says where — the same vocabulary as the
+commit scopes, so no translation — and `area:` covers what is not a crate.
+`delivery-correctness` and `performance` mark the two classes with their own
+priority. The whole taxonomy is defined in
+[`.github/labels.yml`](.github/labels.yml) rather than in the web UI, so it is
+reviewable like anything else; pull requests get their `crate:` and `area:`
+labels automatically from the paths they touch.
+
 ## How changes land
 
 Fork the repository and open a pull request against `main`. That is the only
@@ -80,51 +102,45 @@ to the balancer means a change to that page in the same commit.
 
 ## Running the gates
 
-Everything CI runs, you can run. **Pass `--locked` — CI does.** A command
-without it can resolve a different dependency graph and hide a failure that CI
-will then find.
+Everything CI runs, you can run — and it is the same command, because the
+workflows call these targets rather than spelling out invocations of their own.
 
 ```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo nextest run --workspace --all-features --locked    # unit + integration
-cargo test --workspace --all-features --locked --doc     # nextest skips doctests
-cargo check -p spate --examples --all-features --locked
+make gates      # everything a pull request must pass
+make help       # the full list
 ```
 
-If you changed dependencies:
+`make gates` covers formatting, clippy, the type check, the test suite,
+doctests, the feature matrix, licences and advisories, and the repository's own
+consistency checks. A few things sit outside it because they need Docker or
+minutes:
 
 ```sh
-cargo deny --all-features --locked check all   # licences, advisories, bans, sources
-./scripts/attribution.sh                       # regenerates THIRD-PARTY.md; nightly + release check it
+make test-docker   # container-backed suites
+make loom          # the concurrency models
+make docs          # the documentation site
+make bench-check   # every benchmark rig still compiles, in the release profile
 ```
 
-If you changed the docs site or any page under `docs/`:
+If you changed dependencies, add `make attribution` to regenerate
+`THIRD-PARTY.md`. It is checked nightly and regenerated at release rather than
+gated on your pull request, so it is welcome but not required.
 
-```sh
-cd website && npm ci && CI=true npm run build
-```
+Three things the targets encode that are worth knowing before you run a cargo
+command by hand:
 
-**The `CI=true` matters.** The client-redirects plugin is only registered when
-it is set, so a plain build silently skips redirect validation — and a redirect
-pointing at a page you deleted is a hard failure that would otherwise surface
-only on the pull request.
-
-A few more, for the changes that need them:
-
-```sh
-cargo nextest run --profile docker --workspace --all-features --locked --run-ignored ignored-only
-RUSTFLAGS="--cfg loom" cargo test -p spate-core --release --lib --locked
-cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
-```
-
-The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
-construct loom-typed primitives outside a model and abort. `cargo hack
---no-dev-deps` is the one command that cannot take `--locked`, because it
-rewrites each `Cargo.toml` as it runs.
+- **Pass `--locked` — CI does.** Without it a command can resolve a different
+  dependency graph and hide a failure CI will then find. Every target passes it.
+- **`cargo hack --no-dev-deps` is the one command that cannot**, because it
+  rewrites each `Cargo.toml` as it runs and a locked build refuses.
+- **The site build needs `CI=true`.** The client-redirects plugin is only
+  registered when it is set, so a plain build silently skips redirect validation
+  — and a redirect pointing at a page you deleted is a hard failure. `make docs`
+  sets it, and also runs the typecheck that CI runs.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains have masked
-real failures in this repository more than once.
+real failures in this repository more than once, which is why no target contains
+a pipe.
 
 The MSRV is **1.94** and CI checks it, so nothing newer than that.
 
@@ -142,10 +158,16 @@ its first exec** while Gatekeeper scans it. Across this workspace that alone
 costs about half an hour per edit-test cycle. Add your terminal to *System
 Settings → Privacy & Security → Developer Tools* to exempt it.
 
-Docker-backed tests use testcontainers and are `#[ignore]`d by default. Run them
-with `--profile docker`; the default profile hard-kills a test at 120s, which a
-cold image pull can exceed, and the kill reports as a timeout indistinguishable
-from a real hang.
+Docker-backed tests use testcontainers and are `#[ignore]`d by default. `make
+test-docker` selects them and uses the docker nextest profile; the default
+profile hard-kills a test at 120s, which a cold image pull can exceed, and the
+kill reports as a timeout indistinguishable from a real hang.
+
+CI picks the container suites from the paths you changed. If your change is one
+whose reach those paths do not show — a refactor moving code between crates, say
+— a maintainer can label the pull request `ci: docker` to run them all, or
+`ci: loom` for the concurrency models. Both only ever add work; neither can
+switch a suite off.
 
 ## Testing conventions
 

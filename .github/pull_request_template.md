@@ -51,19 +51,19 @@ states the same list with the reasoning attached.
 
 ## Checks
 
-- [ ] `cargo fmt --all` and `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
-- [ ] `cargo nextest run --workspace --all-features --locked`, plus
-      `cargo test --workspace --all-features --locked --doc` if you touched a
-      doc example
-- [ ] Every cargo command run with `--locked`, as CI does
-- [ ] Dependency changes: `cargo deny --all-features --locked check all`.
-      `THIRD-PARTY.md` is *not* required to be current on a pull request — it is
-      checked nightly and regenerated at release — but `./scripts/attribution.sh`
-      is welcome if you are adding a dependency rather than bumping one
-- [ ] Docs changed: `CI=true npm run build` in `website/` — without `CI=true`
-      the redirect validation does not run
+Tick by exit code, not by memory.
+
+- [ ] `make gates` — formatting, clippy, check, tests, doctests, the feature
+      matrix, licences and advisories, and the repository consistency checks
+- [ ] Docs changed: `make docs`. It sets `CI=true`, without which the redirect
+      validation silently does not run
+- [ ] Any ad-hoc cargo command run with `--locked`, as CI does
+- [ ] Dependency changes: covered by `make gates`. `THIRD-PARTY.md` is *not*
+      required to be current here — it is checked nightly and regenerated at
+      release — but `make attribution` is welcome if you are adding a dependency
+      rather than bumping one
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),
-      scoped to the crate touched
+      scoped to the crate touched, and carry no AI attribution trailers
 
 ## Anything else
 

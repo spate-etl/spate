@@ -14,7 +14,7 @@ contact_links:
       The user guide, the design rationale, and every metric with its labels.
       The delivery-semantics page is the one to read before reporting data loss.
   - name: Benchmarks and methodology
-    url: https://github.com/spate-etl/spate-benchmark
+    url: https://github.com/spate-etl/benchmark
     about: >-
       Published performance comparisons, the measurement protocol, and the
       harness that produces them. Throughput claims are settled there.

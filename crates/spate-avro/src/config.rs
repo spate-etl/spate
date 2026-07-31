@@ -71,8 +71,8 @@ impl SchemaSource {
         }
     }
 
-    /// Load the schema's original JSON source (backend compiles need the
-    /// source text, not a re-rendered canonical form).
+    /// Load the schema's original JSON source (`CompiledSchema::compile`
+    /// needs the source text, not a re-rendered canonical form).
     fn load_text(&self) -> Result<String, AvroConfigError> {
         match (&self.inline, &self.path) {
             (Some(s), None) => Ok(s.clone()),
@@ -87,8 +87,8 @@ impl SchemaSource {
         }
     }
 
-    /// Load and parse the schema with `apache-avro` (the reader-schema
-    /// path, which only exists on the apache backend).
+    /// Load and parse the schema with `apache-avro` (used for the optional
+    /// `reader_schema`).
     fn load(&self) -> Result<Schema, AvroConfigError> {
         let text = self.load_text()?;
         Schema::parse_str(&text).map_err(|e| AvroConfigError::SchemaLoad {
@@ -301,10 +301,9 @@ impl AvroDeserializerBuilder {
             });
         }
         let json = source.load_text()?;
-        // Per-backend compile (with apache-avro's parse-panic caught): a
-        // fixed schema only one backend accepts still builds, and each
-        // backend's builder gates on its own side below. Only a schema no
-        // enabled backend accepts is a load error.
+        // Compile once up front (with apache-avro's parse panic caught): a
+        // fixed schema that cannot compile is a load error here, not a
+        // per-record `SchemaUnavailable` stream downstream.
         let compiled = CompiledSchema::compile(0, &json);
         if let Some(reason) = compiled.unusable_reason() {
             return Err(AvroConfigError::SchemaLoad { detail: reason });

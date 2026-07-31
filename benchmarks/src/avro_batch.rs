@@ -37,7 +37,7 @@ pub const EVENT_COLUMNS: &[(&str, &str)] = &[
 
 // ---- owned family ----------------------------------------------------------
 
-/// Owned sensor batch (the `apache_owned` decode target).
+/// Owned sensor batch (the serde-typed decode target).
 /// `Clone` satisfies the serde deserializer's (spurious, `PhantomData`-driven)
 /// `Clone` bound so a per-thread clone is legal.
 #[derive(Debug, Deserialize, Clone)]

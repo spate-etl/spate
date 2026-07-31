@@ -54,21 +54,26 @@
           - docs/**
           - "*.md"
       # Two root markdown files are not documentation in this sense. CHANGELOG
-      # is assembled from changelog.d/ at release time, so it moves on the
-      # release pull request and alongside the changes it describes, never on
-      # its own; THIRD-PARTY is generated and belongs to the supply-chain label
-      # below. Both would otherwise put `area: docs` on pull requests where it
-      # means nothing.
+      # is assembled from changelog.d/ at release time; THIRD-PARTY is generated
+      # and belongs to the supply-chain label below. Both would otherwise put
+      # `area: docs` on the automated pull requests, where it means nothing.
       #
-      # `changelog.d/**` is excluded explicitly rather than left to glob
-      # semantics: `*.md` above does not cross a `/` under minimatch, so a
-      # fragment would not match anyway — but that is a subtlety to depend on,
-      # and a fragment rides along with the change it describes rather than
-      # being documentation in its own right.
+      # This block is `all-globs-to-all-files`, so every pattern is required of
+      # *every* changed file — it is what stops a pull request whose only
+      # markdown is CHANGELOG.md from being called documentation. Nothing that
+      # legitimately accompanies a code change belongs here: `changelog.d/**`
+      # was briefly in this list and, because these are ANDed over every file,
+      # it stripped `area: docs` from any pull request carrying a fragment —
+      # which is the exact shape "Done means" mandates for a crate change that
+      # also touches docs/. With `sync-labels: true` that does not merely fail
+      # to add the label, it removes one already there.
+      #
+      # A fragment needs no rule of its own. It rides along with the change it
+      # describes, and `*.md` does not cross a `/` under minimatch, so
+      # `changelog.d/x.fixed.md` matches nothing above.
       - all-globs-to-all-files:
           - "!CHANGELOG.md"
           - "!THIRD-PARTY.md"
-          - "!changelog.d/**"
 
 "area: website":
   - changed-files:

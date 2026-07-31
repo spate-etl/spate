@@ -20,11 +20,17 @@ building). A scheduled failure lands after the merge that caused it, which is
 useless as a gate.
 
 - **`ci.yml`** — `pull_request`, `push` to main, and `merge_group`. Three tiers:
-  a cheap always-run tier (`lint`, `workflows`, `deny`), an expensive tier
-  scoped by `scripts/ci-changes.sh`, and `ci-gate`. The expensive tier
-  `needs: [changes, lint, workflows]` and deliberately **not** `deny` — a lint
-  error should stop the fan-out, but the licence gate is independent of whether
-  the code compiles and would tax every green PR with its ~2 minutes.
+  a cheap always-run tier (`lint`, `workflows`, `deny`, `changelog`), an
+  expensive tier scoped by `scripts/ci-changes.sh`, and `ci-gate`. The expensive
+  tier `needs: [changes, lint, workflows]` and deliberately **not** `deny` — a
+  lint error should stop the fan-out, but the licence gate is independent of
+  whether the code compiles and would tax every green PR with its ~2 minutes.
+
+  `changelog` is the one tier-1 job nothing `needs:`, and that is deliberate
+  rather than an oversight to tidy up. Folding it into `workflows` would put a
+  missing release note in front of the whole expensive tier, so somebody who
+  forgot one sentence would learn nothing else about their branch. On its own it
+  blocks the merge through `ci-gate` without blocking the feedback.
 - **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom,
   allocation assertions, docs build and deploy) and weekly (feature powerset,
   container coverage, benches), selected by which cron fired. `workflow_dispatch`

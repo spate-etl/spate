@@ -508,7 +508,7 @@ TEMPLATE
 # --build
 # ---------------------------------------------------------------------------
 cmd_build() {
-    local version=${1:-} today previous range
+    local version=${1:-} today previous range explicit n
     local block links contributors type file body pr found=0
 
     [ -n "$version" ] || fail "usage: ./scripts/changelog.sh --build <version>"
@@ -539,19 +539,32 @@ cmd_build() {
                 found=1
             fi
 
-            # The pull request number comes from the subject of the commit that
-            # *added* the fragment — this repository's squash subjects end in
-            # `(#NN)`, and 12 of the 12 commits since v0.1.0 do. A fragment added
-            # by a direct push has no number, and that renders without a link
-            # rather than failing: the entry is still the point.
-            pr=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null |
-                sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p' | head -n 1)
-
             body=$(sed -e 's/[[:space:]]*$//' "$file")
             body=$(printf '%s\n' "$body" | sed -e '/./,$!d')
-            if [ -n "$pr" ]; then
-                body="$body ([#$pr])"
-                printf '[#%s]: %s/pull/%s\n' "$pr" "$repo_url" "$pr" >>"$links"
+
+            # A `([#N])` written into the fragment wins over the derived one,
+            # and only its link definitions are emitted. That is what lets an
+            # entry point at the pull request that actually did the work when
+            # the fragment was written somewhere else — a retroactive entry, or
+            # one restored after a release went out without it.
+            explicit=$(printf '%s' "$body" | grep -oE '\(\[#[0-9]+\]\)' |
+                grep -oE '[0-9]+' || true)
+            if [ -n "$explicit" ]; then
+                while IFS= read -r n; do
+                    [ -n "$n" ] && printf '[#%s]: %s/pull/%s\n' "$n" "$repo_url" "$n" >>"$links"
+                done <<<"$explicit"
+            else
+                # Otherwise the number comes from the subject of the commit that
+                # *added* the fragment — this repository's squash subjects end in
+                # `(#NN)`, and 12 of the 12 commits since v0.1.0 do. A fragment
+                # added by a direct push has no number, and that renders without
+                # a link rather than failing: the entry is still the point.
+                pr=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null |
+                    sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p' | head -n 1)
+                if [ -n "$pr" ]; then
+                    body="$body ([#$pr])"
+                    printf '[#%s]: %s/pull/%s\n' "$pr" "$repo_url" "$pr" >>"$links"
+                fi
             fi
 
             # A fragment is prose, not a list item: the bullet and its

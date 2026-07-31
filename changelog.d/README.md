@@ -100,6 +100,11 @@ different sentence.
 - No pull request number and no author — both are filled in at release time from
   the commit that added the fragment. There is nothing to type.
 
+The exception to that last point is an entry for work that landed somewhere
+else — a note written retroactively, or one restored after a release went out
+without it. Ending the entry with an explicit `([#31])` wins over the derived
+link, and the reference is resolved for you.
+
 A fragment is prose, not a list item: write paragraphs, and the bullet and its
 indentation are applied when the file is assembled.
 

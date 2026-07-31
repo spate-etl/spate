@@ -2,7 +2,7 @@
 #
 #   ./scripts/attribution.sh                  # THIRD-PARTY.md, checked nightly
 #   cargo about generate --workspace --all-features --locked --fail \
-#     -o website/static/licenses/index.html about-html.hbs   # docs site, CI-built
+#     -o website/static/licenses/index.html about/html.hbs   # docs site, CI-built
 #
 # The committed inventory goes through the script rather than cargo-about
 # directly, because its row order has to be canonicalised — see the

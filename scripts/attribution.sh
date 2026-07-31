@@ -20,7 +20,7 @@
 #   2. the summary counts are recomputed from those rows, because cargo-about
 #      counts rows rather than crates and would otherwise disagree with them.
 #
-# The site artifact (about-html.hbs) is unaffected and still reproduces every
+# The site artifact (about/html.hbs) is unaffected and still reproduces every
 # notice, including the several a crate like `bnum` carries.
 #
 # Usage: ./scripts/attribution.sh [output-file]
@@ -44,7 +44,7 @@ fail() {
 # determined. `--locked`, not `--frozen`: offline mode drops the
 # clearlydefined.io clarifications and silently degrades accuracy.
 cargo about generate --workspace --all-features --locked --fail \
-    -o "$tmp" about-md.hbs
+    -o "$tmp" about/md.hbs
 
 # Anchors. `-F -x` matches the whole line, so the summary rule (two columns)
 # cannot match the crate table's (three). `|| true` keeps a missing anchor from

@@ -115,7 +115,7 @@ jobs:
           components: rustfmt, clippy
           shared-key: dev-allfeatures
       # Cheap and unconditional: it resolves nothing and reads only .rs files.
-      - run: cargo fmt --all --check
+      - run: make fmt-check
       # `--all-targets` is doing the work of three steps: it compiles every
       # lib, bin, test, bench and example in the workspace. The two steps that
       # used to follow it — `cargo check -p spate --examples` and
@@ -130,7 +130,7 @@ jobs:
       # release-only breakage — a link error, or a `cfg(not(debug_assertions))`
       # path — which is worth a night's latency, not ~6 minutes per PR.
       - if: needs.changes.outputs.rust == 'true'
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: make clippy
 
   workflows:
     name: Workflow lint (zizmor)
@@ -177,10 +177,19 @@ jobs:
       #
       # Scanning all of `.github/`, not just `workflows/`: zizmor also audits
       # the Dependabot config and the composite action.
-      - run: zizmor --persona=regular .github/
+      - run: make zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: shellcheck scripts/*.sh
+      - run: make shellcheck
+
+      # The repository's own metadata has to stay self-consistent, and both of
+      # these check a class of drift nothing else would notice: a label
+      # referenced by an issue form or by Dependabot that does not exist (GitHub
+      # drops it silently), and the invariant lists in AGENTS.md, CONTRIBUTING.md
+      # and the pull request template falling out of step with docs/DESIGN.md.
+      # Both are pure file reads — no network, no toolchain.
+      - run: make check-labels
+      - run: make check-invariants
 
   deny:
     name: Licences and advisories
@@ -228,13 +237,13 @@ jobs:
       # pass or fail on dependencies we do not ship — a different tree from the
       # one every other job just built, and from the one THIRD-PARTY.md below
       # is generated against.
-      - run: cargo deny --all-features --locked check all
+      - run: make deny
 
       # The container-suite selection in ci-changes.sh is a reverse-dependency
       # closure written by hand. This asserts it still matches the real graph,
       # so a new crate or a new edge cannot silently narrow what CI runs.
       # `--no-deps` reads manifests only; it resolves nothing.
-      - run: ./scripts/ci-changes.sh --self-test
+      - run: make self-test
 
   # ---------------------------------------------------------------------------
   # Tier 2 — gated on tier 1, and scoped to what changed.
@@ -401,7 +410,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: dev-allfeatures
-      - run: cargo test --workspace --all-features --locked --doc
+      - run: make doctest
 
   features:
     name: Feature matrix (each feature)
@@ -432,6 +441,14 @@ jobs:
     # "does each feature compile alone".
     #
     # (`cargo fmt` is the other bare call, and it resolves nothing.)
+    #
+    # `make check-features` also runs two feature-*off* checks that this job did
+    # not, and that no other job can: with `--all-features` on, a crate that
+    # fails to compile *without* one of them still passes everywhere else.
+    # `spate-coordination` without its default features, and the `spate` facade
+    # with `s3` but no coordination backend — the second is what proves the
+    # facade never links async-nats when nothing asked for it. Two cargo checks
+    # against an already-warm cache; the gap they close was a documented one.
     timeout-minutes: 30
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
@@ -444,7 +461,7 @@ jobs:
         with:
           tools: cargo-hack@0.6.45
           shared-key: dev-allfeatures
-      - run: cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
+      - run: make check-features
 
   msrv:
     name: Check (MSRV 1.94)
@@ -470,7 +487,7 @@ jobs:
       # the committed Cargo.lock needs a toolchain newer than 1.94. With it, the
       # job answers the question it claims to: does the dependency set we
       # actually ship build on the MSRV?
-      - run: cargo check --workspace --all-features --locked
+      - run: make check
 
   containers:
     name: Container suites

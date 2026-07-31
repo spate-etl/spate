@@ -66,6 +66,13 @@ right. Steps 1 and 2 are in that order for this reason.
    version heading whose tag link 404s. That window is the cost of writing the
    release note before the tag exists, and it closes on merge.
 
+   If the merge slips past the day step 2 ran, correct the date on the version
+   heading by hand before merging. `--build` stamps `date -u` at assembly, and
+   it will not re-run for a version the changelog already has — deliberately,
+   since a published version can never be replaced. The date is the one field in
+   an assembled block that is a fact about *when* rather than *what*, so it is
+   the one worth a second look.
+
 Nothing releases without a human merging something. `release_always = false`
 is what guarantees that.
 

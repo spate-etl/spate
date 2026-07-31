@@ -59,11 +59,12 @@ is assembled into the changelog at release time:
 make changelog-new TYPE=fixed SLUG=short-description
 ```
 
-In practice that means a `feat`, `fix` or `perf`, or anything carrying `!`.
-Scoping the commit to one of the areas that is not a crate — `ci`, `docs`,
-`examples`, `benchmarks`, `workspace`, `website` — is what earns an exemption;
-leaving the scope off does not, and neither does a type this repository does not
-recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
+In practice that means a `feat`, `fix`, `perf`, `revert` or `build` — and
+anything carrying `!`, whatever its scope, since that is you declaring a breaking
+change. Scoping the commit to one of the areas that is not a crate — `ci`,
+`docs`, `examples`, `benchmarks`, `workspace`, `website` — is what earns an
+exemption; leaving the scope off does not, and neither does a type this
+repository does not recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
 the conventions, `make check-changelog` is the gate, and there is deliberately
 no label to switch it off — the exemption is derived from the type and scope you
 write, so the way out is a subject that is true.

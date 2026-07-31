@@ -32,6 +32,14 @@
 # through the environment and are only ever matched against, never evaluated —
 # same handling as the filenames in ci-changes.sh, for the same reason.
 #
+# What this cannot defend against: a `pull_request` run executes the pull
+# request's *own* copy of this script, so a change here narrows the gate of the
+# very change proposing it. That is inherent to `pull_request` — the
+# alternative, `pull_request_target`, hands a writable token to a job running
+# alongside untrusted code, which is a far worse trade. `scripts/` is a
+# CODEOWNERS path, and reviewing what a diff does to CI is part of reviewing the
+# diff. Same property, same compensating control, as ci-changes.sh.
+#
 # Targets `bash` 3.2, which is what stock macOS ships as /bin/bash: no
 # associative arrays, no `mapfile`, no `${var,,}`, and every array expansion
 # guarded, because `"${arr[@]}"` on an empty array is an unbound-variable error
@@ -151,11 +159,15 @@ needs_entry() {
 
     # --- type axis: would somebody upgrading care? ---
     case "$type" in
-    # Exactly cliff.toml's non-skipped, user-facing groups. `perf` is in because
-    # that file already groups it under a "Performance" heading — the repository
-    # decided perf was release-note-worthy before this script existed.
-    feat | fix | perf) return 0 ;;
-    docs | test | chore | style | ci | build | revert | refactor) return 1 ;;
+    # `revert` and `build` are in with the obvious three. Reverting a released
+    # feature takes something away that people are using, and a `build` scoped to
+    # a crate is where an MSRV floor moves — both are things a reader upgrading
+    # has to be told, and neither is inferable from the version number.
+    feat | fix | perf | revert | build) return 0 ;;
+    # What is left cannot reach a consumer of the published crates: prose, tests,
+    # formatting, a dependency bump the lockfile already records, and a refactor
+    # — which is by definition behaviour-preserving, and carries `!` if it is not.
+    docs | test | chore | style | ci | refactor) return 1 ;;
     *) return 0 ;;
     esac
 }
@@ -193,6 +205,9 @@ chore(spate-core): tidy an import|exempt
 refactor(spate-core): extract a helper|exempt
 style(spate-kafka): rustfmt|exempt
 ci(spate-core): pin an action|exempt
+# --- ...but reverting a release and moving an MSRV floor are not that ---
+revert(spate-core): back out the windowed operator|need
+build(spate-core): raise the MSRV floor to 1.95|need
 # --- a user-visible type, but the scope names no crate ---
 feat(docs): give Spate a mark that works on a square canvas|exempt
 feat(ci): a new job|exempt
@@ -251,8 +266,13 @@ TABLE
             failures=$((failures + 1))
         fi
     done < <(crate_scopes)
-    if [ "$n" -lt 9 ]; then
-        echo "changelog.sh: derived $n crate scope(s) from crates/, expected at least 9" >&2
+    # Zero, not a count. A hard-coded floor would mean retiring a crate fails
+    # `--check` for everybody with "this script is wrong, not your change" — and
+    # the failure this is guarding against is the extractor going blind, which
+    # looks like nothing at all, not like one fewer.
+    if [ "$n" -lt 1 ]; then
+        echo "changelog.sh: no crate scopes derived from crates/ — the extractor has gone" >&2
+        echo "  blind, and every scope is now unrecognised rather than checked." >&2
         failures=$((failures + 1))
     fi
 
@@ -375,7 +395,7 @@ has_changelog_none() {
 # ---------------------------------------------------------------------------
 cmd_check() {
     local base="" head="" mode=structure candidate ref
-    local subjects_file offenders_file empty_file subject origin source file sha
+    local subjects_file offenders_file empty_file subject origin source file sha line
     local offenders=0 added=0 excused=0
 
     [ -d "$fragments" ] || fail "$fragments/ not found — it holds the changelog fragments"
@@ -424,6 +444,25 @@ cmd_check() {
         # ci-gate sees a real success.
         ;;
     esac
+
+    # Structure-only is the honest answer on a laptop with no branch and on the
+    # events that have no pull request to reason about. It must never be the
+    # answer on a pull request, and the way that could happen is a workflow edit:
+    # `ci-lint` and the CI job that runs its members have diverged before, and
+    # collapsing the four steps into `- run: make ci-lint` would call this with
+    # no `EVENT_NAME`, in a shallow checkout, where it would take the laptop arm
+    # and report success having evaluated nothing.
+    #
+    # So: inside Actions, on a pull request, refusing to be inert is the point.
+    if [ "$mode" = structure ] && [ -n "${GITHUB_ACTIONS:-}" ] &&
+        [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        fail "running on a pull request inside GitHub Actions with no EVENT_NAME, so this
+  would have checked nothing and passed.
+
+  The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA, PR_TITLE and
+  PR_BODY through \`env:\`, and its checkout needs \`fetch-depth: 0\`. See the
+  \`changelog\` job in .github/workflows/ci.yml."
+    fi
 
     if [ "$mode" = structure ]; then
         echo "changelog.sh: $fragments/ is present with its README; no base to compare against,"
@@ -521,6 +560,28 @@ cmd_check() {
     done < <(git diff --no-ext-diff --no-textconv --name-only --diff-filter=A \
         "$base" "${head:-HEAD}" -- "$fragments/" 2>/dev/null || true)
 
+    # Locally, a fragment that has been written but not yet committed counts.
+    # `make gates` runs this, and a gate that tells you to create the file you
+    # just created is one people learn to ignore. In CI `head` is a real commit
+    # and the worktree is a clean checkout of it, so this finds nothing new.
+    if [ -z "${head:-}" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            # Only new files: `A ` staged-added and `??` untracked. A modified
+            # fragment is somebody else's note being edited, which is the same
+            # reason the committed side filters on `--diff-filter=A`.
+            case "$line" in
+            'A '* | '??'*) ;;
+            *) continue ;;
+            esac
+            file=${line#???}
+            fragment_type "$file" >/dev/null 2>&1 || continue
+            [ -f "$file" ] || continue
+            fragment_has_prose "$file" || continue
+            added=$((added + 1))
+        done < <(git status --porcelain -- "$fragments/" 2>/dev/null || true)
+    fi
+
     if [ "$added" -eq 0 ] && [ -s "$empty_file" ]; then
         fail "these fragment(s) were added but are empty:
 
@@ -580,12 +641,15 @@ cmd_new() {
     *) fail "'$type' is not a fragment type. The Keep a Changelog six are: $TYPES" ;;
     esac
 
-    case "$slug" in
-    *[!a-z0-9-]* | "" | -* | *-)
-        fail "'$slug' should be lowercase letters, digits and hyphens — it becomes a filename"
-        ;;
-    esac
-
+    # `LC_ALL=C grep`, not a `case` glob. A bracket range in a glob is collated,
+    # and under bash 3.2 — the version this targets, and what stock macOS ships
+    # — `[!a-z0-9-]` in a UTF-8 locale accepts uppercase, so `BarUpper` passed
+    # there and was rejected everywhere else. Nothing dangerous followed from it;
+    # the point is that the check meant different things on different machines.
+    if ! printf '%s' "$slug" | LC_ALL=C grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
+        fail "'$slug' should be lowercase letters, digits and hyphens, starting and ending
+  with one of the first two — it becomes a filename."
+    fi
     path="$fragments/$slug.$type.md"
     [ -e "$path" ] && fail "$path already exists"
 

@@ -23,8 +23,15 @@ practice that is a `feat`, `fix` or `perf` commit, or anything carrying `!`.
 
 You are exempt when the scope names one of the areas that is not a crate —
 `ci`, `docs`, `examples`, `benchmarks`, `workspace`, `website` — or when the
-type says nobody upgrading is affected: `docs`, `test`, `chore`, `style`,
-`refactor`, `build`, `revert`.
+type says nobody upgrading is affected: `docs`, `test`, `chore`, `style`, `ci`,
+`refactor`.
+
+`revert` and `build` are **not** on that list. Reverting a released feature takes
+away something people are using, and a crate-scoped `build` is where an MSRV
+floor moves; both are things a reader upgrading has to be told.
+
+A `!` needs one whatever the scope and type say. It is you declaring a breaking
+change, and that is the one thing a release note cannot omit.
 
 Note which way round that is. **Naming no scope is not an exemption**, and
 neither is a scope this repository does not recognise. An exemption is earned by
@@ -97,13 +104,16 @@ different sentence.
   scan. If it needs a migration, say so and link the page that has it.
 - **Name the settings, types and metrics a reader will search for.** Somebody
   arrives at this file because a gauge moved or a config key stopped working.
-- No pull request number and no author — both are filled in at release time from
-  the commit that added the fragment. There is nothing to type.
+- No pull request number and no author. The number is derived at release time
+  from the commit that added the fragment; contributors are credited in a
+  section of their own, from everyone who committed in the release range rather
+  than only those who left a fragment. There is nothing to type for either.
 
-The exception to that last point is an entry for work that landed somewhere
-else — a note written retroactively, or one restored after a release went out
-without it. Ending the entry with an explicit `([#31])` wins over the derived
-link, and the reference is resolved for you.
+The exception is an entry for work that landed somewhere else — a note written
+retroactively, or one restored after a release went out without it. Ending the
+entry with an explicit `([#31])` wins over the derived link. It has to be the
+**last thing in the file**: a `[#N]` mid-sentence is read as a citation, gets its
+own link definition, and leaves the entry's own reference alone.
 
 A fragment is prose, not a list item: write paragraphs, and the bullet and its
 indentation are applied when the file is assembled.

@@ -227,6 +227,15 @@ fn bench_batch(c: &mut Criterion) {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
         });
     });
+    group.bench_function("datum_typed", |b| {
+        let mut deser = builder
+            .build_serde_datum::<SensorBatch>()
+            .expect("datum builder");
+        let mut sink = Sink(0);
+        b.iter(|| {
+            deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
     group.finish();
 }
 

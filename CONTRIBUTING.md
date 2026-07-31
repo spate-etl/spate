@@ -36,32 +36,36 @@ outbound. There is no CLA and nothing to sign.
 
 These are the properties the engine is built around. Most changes touch none of
 them. A change that does touch one is not automatically wrong — but it needs to
-say how the property still holds, and that is the conversation. The reasoning
-behind each lives in [`docs/DESIGN.md`](docs/DESIGN.md).
+say how the property still holds, and that is the conversation.
 
-- **Delivery is at-least-once.** A source watermark is never committed past
-  unacknowledged data, including across rebalances and shutdown.
-- **Source threads never block on a channel send.** Backpressure is `try_send`
-  plus `Source::pause` plus continuing to poll. A blocked poll loop gets the
-  consumer evicted from its group, which is a worse failure than the one it was
-  avoiding.
-- **The checkpoint tracker stays synchronous and free of async runtimes.** It is
-  loom-tested, and it must stay something loom can model.
-- **Acks can never block behind data.** The ack path is unbounded and atomic.
-- **The sink worker's intake path never awaits outside its `select!`.** Anything
-  it blocks on has to sit in a branch alongside the drain-deadline branch, or
-  the deadline is not polled while it waits and shutdown deadlocks.
-- **No connector types in `spate-core`'s public API**, and no 0.x dependency
-  types in any public trait bound — those cannot be allowed into our semver
-  surface. The `metrics` facade is the one sanctioned exception, because the
-  instrumentation API *is* that facade.
-- **Record error policies are Skip or Fail only**, and both are surfaced through
-  metrics rather than only logged. There is deliberately no third policy that
-  drops a record without counting it.
-- **Metrics handles are pre-registered at build time.** Never resolve a metric
-  name or label on the per-record path.
-- **Every metric lives under the `spate_` umbrella**, and a gauge series has
-  exactly one live owner per process.
+They are numbered, and the numbers are the canonical ones from
+[`docs/DESIGN.md`](docs/DESIGN.md), where the reasoning behind each lives. Cite
+the number in a pull request and everyone is looking at the same property.
+
+- **INV-1 — delivery is at-least-once.** A source watermark is never committed
+  past unacknowledged data, including across rebalances and shutdown.
+- **INV-2 — source threads never block on a channel send.** Backpressure is
+  `try_send` plus `Source::pause` plus continuing to poll. A blocked poll loop
+  gets the consumer evicted from its group, which is a worse failure than the
+  one it was avoiding.
+- **INV-3 — the checkpoint tracker stays synchronous and free of async
+  runtimes.** It is loom-tested, and it must stay something loom can model.
+- **INV-4 — acks can never block behind data.** The ack path is unbounded and
+  atomic.
+- **INV-5 — the sink worker's intake path never awaits outside its `select!`.**
+  Anything it blocks on has to sit in a branch alongside the drain-deadline
+  branch, or the deadline is not polled while it waits and shutdown deadlocks.
+- **INV-6 — no connector types in `spate-core`'s public API**, and no 0.x
+  dependency types in any public trait bound — those cannot be allowed into our
+  semver surface. The `metrics` facade is the one sanctioned exception, because
+  the instrumentation API *is* that facade.
+- **INV-7 — record error policies are Skip or Fail only**, and both are
+  surfaced through metrics rather than only logged. There is deliberately no
+  third policy that drops a record without counting it.
+- **INV-8 — metrics handles are pre-registered at build time.** Never resolve a
+  metric name or label on the per-record path.
+- **INV-9 — every metric lives under the `spate_` umbrella.**
+- **INV-10 — a gauge series has exactly one live owner per process.**
 
 One documentation page is normative rather than descriptive:
 [`docs/user-guide/02-concepts/08-work-assignment.mdx`](docs/user-guide/02-concepts/08-work-assignment.mdx).

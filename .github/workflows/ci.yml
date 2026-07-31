@@ -254,6 +254,47 @@ jobs:
       # `--no-deps` reads manifests only; it resolves nothing.
       - run: make self-test
 
+  changelog:
+    name: Changelog entry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # A job of its own, and nothing `needs:` it.
+    #
+    # It could have been a step in `workflows`, which is where the other
+    # repository-metadata checks live — but every tier-2 job `needs:` that one,
+    # so a missing release note would skip the whole test matrix, and somebody
+    # who forgot one sentence would learn nothing else about their branch. The
+    # least important gate here would become the most blocking one. On its own
+    # it blocks the *merge*, through ci-gate, without blocking the *feedback*.
+    #
+    # No job-level `if:`, per the tier-1 rule above. The script decides what it
+    # can prove from the event it was handed: on `push` and `merge_group` there
+    # is no pull request title and `main` cannot be rewritten anyway, so it
+    # checks the directory's structure, says so, and passes. It always reports,
+    # which is what keeps ci-gate seeing a real result rather than a skip.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The second full-history checkout in this workflow, and the reason
+          # this is a job rather than a step somewhere cheaper: both ends of the
+          # diff have to be present as objects, and no other checkout here has
+          # them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - env:
+          # Through `env:`, never interpolated into the `run:` block. A pull
+          # request title and body are the most attacker-controlled strings in
+          # this workflow — free text somebody else typed, straight off the
+          # event — and splicing them into generated shell is the
+          # template-injection vector zizmor audits for.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: make check-changelog
+
   # ---------------------------------------------------------------------------
   # Tier 2 — gated on tier 1, and scoped to what changed.
   #
@@ -680,7 +721,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, test, doctests, features, msrv, containers, site, loom]
+    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom]
     steps:
       - name: Evaluate dependency results
         env:

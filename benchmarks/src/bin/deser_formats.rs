@@ -217,6 +217,24 @@ fn run_arm(
             threads,
             duration,
         ),
+        ("avro", "order", "datum", _) => run_decode(
+            &avro_builder(deser_sample::ORDER_SCHEMA)
+                .build_serde_datum::<Order>()
+                .expect("avro datum order"),
+            payload,
+            per_call,
+            threads,
+            duration,
+        ),
+        ("avro", "order", "datum_borrowed", _) => run_decode(
+            &avro_builder(deser_sample::ORDER_SCHEMA)
+                .build_datum::<deser_sample::OrderRefFam>()
+                .expect("avro datum_borrowed order"),
+            payload,
+            per_call,
+            threads,
+            duration,
+        ),
         ("avro", "batch", "typed", _) => run_decode(
             &avro_builder(deser_sample::BATCH_SCHEMA)
                 .build_serde::<SensorBatch>()
@@ -230,6 +248,24 @@ fn run_arm(
             &avro_builder(deser_sample::BATCH_SCHEMA)
                 .build_value()
                 .expect("avro value batch"),
+            payload,
+            per_call,
+            threads,
+            duration,
+        ),
+        ("avro", "batch", "datum", _) => run_decode(
+            &avro_builder(deser_sample::BATCH_SCHEMA)
+                .build_serde_datum::<SensorBatch>()
+                .expect("avro datum batch"),
+            payload,
+            per_call,
+            threads,
+            duration,
+        ),
+        ("avro", "batch", "datum_borrowed", _) => run_decode(
+            &avro_builder(deser_sample::BATCH_SCHEMA)
+                .build_datum::<deser_sample::BatchRefFam>()
+                .expect("avro datum_borrowed batch"),
             payload,
             per_call,
             threads,

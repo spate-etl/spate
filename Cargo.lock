@@ -3888,6 +3888,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "hyper-util",
+ "proptest",
  "schema_registry_converter",
  "serde",
  "serde_json",

@@ -1,0 +1,54 @@
+name: Labels
+
+# Applies `.github/labels.yml` to the repository.
+#
+# A pull request touching the file gets a dry run, so a malformed entry or a bad
+# colour fails before merge rather than after, when the only signal would be a
+# label quietly missing. Merging to main applies it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  pull_request:
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  # Applying the file is idempotent, so a manual run is always safe — useful
+  # after a label is changed by hand in the web UI and needs putting back.
+  workflow_dispatch:
+
+concurrency:
+  group: labels-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Labels are an issues-scoped resource even though most of ours end up on
+      # pull requests. On a fork's pull request GitHub downgrades this to read
+      # regardless of what is written here, which is harmless: that path only
+      # ever dry-runs.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: crazy-max/ghaction-github-labeler@548a7c3603594ec17c819e1239f281a3b801ab4d # v6.0.0
+        with:
+          yaml-file: .github/labels.yml
+          # Never delete. Without this the action treats the file as the whole
+          # truth and removes anything absent from it, including GitHub's stock
+          # labels that open issues still carry — and deleting a label destroys
+          # the record that anything was filed under it. Retiring a label is
+          # therefore a manual step.
+          skip-delete: true
+          dry-run: ${{ github.event_name == 'pull_request' }}

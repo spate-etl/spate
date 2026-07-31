@@ -111,9 +111,18 @@ Applying a label re-triggers the workflow, because `labeled` is in the trigger's
 `types:`. Removing one does not, since removing it cannot turn anything off — the
 path-derived baseline simply stands again on the next push.
 
-One deliberate interaction: the override is applied *after* the rule that defers
-container suites on Dependabot pull requests, so labelling one `ci: docker` is a
-maintainer overruling that deferral for a single bump.
+One deliberate interaction: the override is applied *after* the rules that defer
+container suites on the two bot pull requests — a Dependabot bump and the
+release pull request — so labelling one `ci: docker` is a maintainer overruling
+that deferral for a single pull request.
+
+Both defer for the same reason. A version bump touches `Cargo.lock`, which the
+path rules read as moving the whole dependency graph and answer with every
+container suite; the push-to-main run boots them again minutes after the merge
+regardless. The release pull request has the stronger case of the two, because
+release-plz rewrites it on every push to `main` and its source tree is
+byte-identical to the `main` commit that just ran the suites. Both keep the
+whole cheap tier — lint, deny, the full test suite, each-feature and MSRV.
 
 ## The Actions allowlist
 

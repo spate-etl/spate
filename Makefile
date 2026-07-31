@@ -27,7 +27,7 @@
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
         check-features check-examples bench-check bench loom deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-invariants \
-        ci-lint docs docs-serve gates
+        check-changelog changelog-new ci-lint docs docs-serve gates
 
 ##@ Help
 
@@ -138,7 +138,15 @@ check-labels: ## Every referenced label is a defined label
 check-invariants: ## The invariant lists still agree
 	./scripts/check-invariants.sh
 
-ci-lint: zizmor shellcheck self-test check-labels check-invariants ## Every repository-metadata check
+check-changelog: ## A user-visible change carries a changelog fragment
+	./scripts/changelog.sh --check
+
+# TYPE and SLUG rather than positional arguments, because a bare `make
+# changelog-new fixed retry-ladder` reads them as two more targets to build.
+changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
+	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
+
+ci-lint: zizmor shellcheck self-test check-labels check-invariants check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

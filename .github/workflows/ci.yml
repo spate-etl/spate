@@ -6,14 +6,24 @@ name: CI
 on:
   push:
     branches: [main]
-  # `labeled` is in addition to the three defaults, which have to be named once
-  # any `types:` is given. It is what makes `ci: docker` and `ci: loom` take
-  # effect when applied — without it a label only reaches the classifier on the
-  # next push, which is too late to be useful. `unlabeled` is deliberately
-  # absent: removing a label cannot switch a suite off, so re-running for it
-  # would only spend minutes to reach the same verdict.
+  # `labeled` and `edited` are in addition to the three defaults, which have to
+  # be named once any `types:` is given.
+  #
+  # `labeled` is what makes `ci: docker` and `ci: loom` take effect when applied
+  # — without it a label only reaches the classifier on the next push, which is
+  # too late to be useful. `unlabeled` is deliberately absent: removing a label
+  # cannot switch a suite off, so re-running for it would only spend minutes to
+  # reach the same verdict.
+  #
+  # `edited` is for the changelog gate, which reads the pull request *title*:
+  # this repository squashes with the title as the commit subject, so the title
+  # is the authoritative input and it can change after a green run. Retitling
+  # `chore(spate-core):` to `fix(spate-core):` would otherwise land a
+  # crate-scoped fix on `main` with no release note and nothing re-evaluated.
+  # It costs a rerun on a description edit as well as a retitle, since the event
+  # does not distinguish them; `cancel-in-progress` bounds that to one run.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, edited]
   # A merge queue entry is a separate event with its own ref; without this line
   # nothing would report and every queued merge would fail on a missing check.
   merge_group:

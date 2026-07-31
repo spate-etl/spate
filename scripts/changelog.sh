@@ -347,13 +347,36 @@ fragment_has_prose() {
     grep -qE '[^[:space:]]' "$1"
 }
 
+# Does the message this subject came from carry `Changelog: none`?
+#
+# `git interpret-trailers --parse`, never a grep. The commit bodies here are
+# dense prose, and a line like `Tests: the two fault-injection knobs ...` starts
+# a sentence, not a trailer. git's own parser reads only the final block of a
+# message and gets that right.
+#
+# One message at a time, too, and that is not stylistic: interpret-trailers
+# reads *its whole input* as a single message and takes the trailers from the
+# last block of it, so handing it a concatenated log finds only the oldest
+# commit's trailers and silently reports none for every other commit.
+has_changelog_none() {
+    local source=$1 parsed
+    if [ "$source" = body ]; then
+        [ -n "${PR_BODY:-}" ] || return 1
+        parsed=$(printf '%s\n' "$PR_BODY" | git interpret-trailers --parse 2>/dev/null || true)
+    else
+        parsed=$(git log -1 --format='%B' "$source" 2>/dev/null |
+            git interpret-trailers --parse 2>/dev/null || true)
+    fi
+    printf '%s\n' "$parsed" | grep -qiE '^Changelog:[[:space:]]*none[[:space:]]*$'
+}
+
 # ---------------------------------------------------------------------------
 # --check
 # ---------------------------------------------------------------------------
 cmd_check() {
     local base="" head="" mode=structure candidate ref
-    local subjects_file offenders_file empty_file trailers subject origin file sha
-    local offenders=0 added=0
+    local subjects_file offenders_file empty_file subject origin source file sha
+    local offenders=0 added=0 excused=0
 
     [ -d "$fragments" ] || fail "$fragments/ not found — it holds the changelog fragments"
     [ -f "$fragments/README.md" ] ||
@@ -429,21 +452,52 @@ cmd_check() {
     : >"$offenders_file"
     : >"$empty_file"
 
-    [ -n "${PR_TITLE:-}" ] && printf '%s\t%s\n' "$PR_TITLE" "pull request title" >>"$subjects_file"
+    # Third column is what to read a `Changelog: none` trailer from: the pull
+    # request body for the title, the commit's own message for a commit.
+    [ -n "${PR_TITLE:-}" ] &&
+        printf '%s\tpull request title\tbody\n' "$PR_TITLE" >>"$subjects_file"
     while IFS=$'\t' read -r subject sha; do
-        [ -n "$subject" ] && printf '%s\tcommit %s\n' "$subject" "$sha" >>"$subjects_file"
+        [ -n "$subject" ] && printf '%s\tcommit %s\t%s\n' "$subject" "$sha" "$sha" >>"$subjects_file"
     done < <(git log --no-merges --format='%s%x09%h' "$base..${head:-HEAD}" 2>/dev/null || true)
 
     # Collected quietly and reported only if it turns out to matter. Classifying
     # straight to stderr would put an alarming list in front of a contributor
     # whose change goes on to satisfy the gate on the very next line.
-    while IFS=$'\t' read -r subject origin; do
+    #
+    # A trailer excuses the message it is written on, and the scope of that
+    # differs by where it is written.
+    #
+    # In the **pull request body** it excuses the whole pull request, because
+    # the body is what the squash commit carries: it is the author's deliberate,
+    # reviewable statement about the one commit that will exist on `main`.
+    #
+    # On an individual **commit** it excuses only that commit's subject. Any
+    # trailer anywhere used to excuse the whole range, which is wider than the
+    # trailer says — a pull request carrying a genuine feature *and* a
+    # never-released fix was let through on the fix's trailer, and the feature
+    # shipped with no note.
+    if has_changelog_none body; then
+        echo "changelog.sh: the pull request body carries a 'Changelog: none' trailer, which"
+        echo "  is what the squash commit will carry. Taken at its word for this pull request."
+        return 0
+    fi
+
+    while IFS=$'\t' read -r subject origin source; do
         [ -n "$subject" ] || continue
-        if needs_entry "$subject"; then
-            printf '    %-70s (%s)\n' "$subject" "$origin" >>"$offenders_file"
-            offenders=$((offenders + 1))
+        needs_entry "$subject" || continue
+        if [ "$source" != body ] && has_changelog_none "$source"; then
+            excused=$((excused + 1))
+            continue
         fi
+        printf '    %-70s (%s)\n' "$subject" "$origin" >>"$offenders_file"
+        offenders=$((offenders + 1))
     done <"$subjects_file"
+
+    if [ "$offenders" -eq 0 ] && [ "$excused" -gt 0 ]; then
+        echo "changelog.sh: $excused subject(s) would require a changelog fragment, and each"
+        echo "  carries a 'Changelog: none' trailer saying it is not user-visible."
+        return 0
+    fi
 
     if [ "$offenders" -eq 0 ]; then
         echo "changelog.sh: nothing in $base..${head:-HEAD} requires a changelog fragment."
@@ -477,37 +531,6 @@ $(cat "$empty_file")
 
     if [ "$added" -gt 0 ]; then
         echo "changelog.sh: $offenders subject(s) require a changelog fragment, $added added."
-        return 0
-    fi
-
-    # `git interpret-trailers --parse`, never a grep. The commit bodies in this
-    # repository are dense prose, and lines like `Tests: the two fault-injection
-    # knobs ...` start a sentence, not a trailer. git's own parser reads only the
-    # final block of a message and gets this right; a regex does not.
-    #
-    # One message at a time, too, and that is not a stylistic choice:
-    # `interpret-trailers` reads *its whole input* as a single message and takes
-    # the trailers from the last block of it, so handing it a concatenated log
-    # finds only the oldest commit's trailers and silently reports none for
-    # every other commit in the range.
-    trailers=""
-    while IFS= read -r sha; do
-        [ -n "$sha" ] || continue
-        trailers="$trailers
-$(git log -1 --format='%B' "$sha" | git interpret-trailers --parse 2>/dev/null || true)"
-    done < <(git log --no-merges --format='%H' "$base..${head:-HEAD}" 2>/dev/null || true)
-
-    if [ -n "${PR_BODY:-}" ]; then
-        trailers="$trailers
-$(printf '%s\n' "$PR_BODY" | git interpret-trailers --parse 2>/dev/null || true)"
-    fi
-
-    # Whole-pull-request semantics, which is the honest reading: the repository
-    # squashes, so one pull request becomes one commit, and the trailer is a
-    # statement about that commit.
-    if grep -qiE '^Changelog:[[:space:]]*none[[:space:]]*$' <<<"$trailers"; then
-        echo "changelog.sh: $offenders subject(s) would require a changelog fragment, and a"
-        echo "  'Changelog: none' trailer says this one is not user-visible. Taken at its word."
         return 0
     fi
 

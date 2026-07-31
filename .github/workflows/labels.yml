@@ -5,6 +5,12 @@ name: Labels
 # A pull request touching the file gets a dry run, so a malformed entry or a bad
 # colour fails before merge rather than after, when the only signal would be a
 # label quietly missing. Merging to main applies it.
+#
+# The work is a script rather than a labeling action because the organisation
+# allows only GitHub-owned, verified-publisher and explicitly listed actions —
+# see "The Actions allowlist" in docs/user-guide/07-reference/ci.mdx. `gh` is
+# preinstalled on the runners, so this needs no allowlist entry and adds no
+# dependency, and the same script runs locally.
 on:
   push:
     branches: [main]
@@ -42,13 +48,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: crazy-max/ghaction-github-labeler@548a7c3603594ec17c819e1239f281a3b801ab4d # v6.0.0
-        with:
-          yaml-file: .github/labels.yml
-          # Never delete. Without this the action treats the file as the whole
-          # truth and removes anything absent from it, including GitHub's stock
-          # labels that open issues still carry — and deleting a label destroys
-          # the record that anything was filed under it. Retiring a label is
-          # therefore a manual step.
-          skip-delete: true
-          dry-run: ${{ github.event_name == 'pull_request' }}
+      # The script never deletes: pruning would remove GitHub's stock labels
+      # that open issues still carry, and deleting a label destroys the record
+      # that anything was filed under it. Retiring one is a manual step.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'pull_request' }}
+        run: ./scripts/sync-labels.sh

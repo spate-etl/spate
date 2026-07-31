@@ -15,37 +15,6 @@ upgrading, and the second is what belongs here.
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-07-31
-
-### Added
-
-- **Typed Avro datum decoding** (`spate-avro`) — `AvroDatumDeserializer`, built
-  with `AvroConfig::build_datum` or `build_serde_datum`, decodes a datum straight
-  into a typed record in a single pass rather than materialising a dynamic `Value`
-  first. Reach for it when the record shape is known at compile time; the
-  `Value`-based path is unchanged and remains the one to use when it is not.
-  ([#31])
-
-### Fixed
-
-- **A sink shard waiting for a circuit-breaker probe no longer consumes its retry
-  ladder** (`spate-core`). With every replica half-open and its probe budget
-  spent, the write loop fell back to the retry backoff — advancing the ladder
-  while publishing no backoff gauge and incrementing no `spate_sink_retries_total`,
-  so two batches contending for one probe ended up on different steps for reasons
-  no metric explained. Reachable on the defaults, where `half_open_probes: 1` and
-  `inflight.max_per_shard: 2` put two batches in exactly that contention. The wait
-  now selects on a breaker wake alongside any real probe deadline, and
-  `breaker.open_for` and `half_open_probes` are clamped at construction so an
-  unvalidated config cannot produce a zero-length or overflowing wait. ([#34])
-
-### Contributors
-
-- Marcus Kainth
-
-[#31]: https://github.com/spate-etl/spate/pull/31
-[#34]: https://github.com/spate-etl/spate/pull/34
-
 ## [0.1.0] — 2026-07-27
 
 First public release.
@@ -97,6 +66,5 @@ boundaries, so rows can land twice. Design target tables to tolerate that.
 - Connector configuration structs are not yet `#[non_exhaustive]`, so adding a
   field is a breaking change until they are.
 
-[Unreleased]: https://github.com/spate-etl/spate/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/spate-etl/spate/releases/tag/v0.1.0

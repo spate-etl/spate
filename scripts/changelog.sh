@@ -518,6 +518,14 @@ cmd_build() {
         fail "no '## [Unreleased]' heading in $changelog — --build inserts the new release below it,
   so a release that removed it has to put it back, empty, before the next one."
 
+    # Running the same version twice would insert a second section and rewrite
+    # the links to match it, and the result reads like a released version that
+    # has changed. A published version can never be replaced, so the number is
+    # the one thing here that has to be right before anything else happens.
+    grep -qF "## [$version]" "$changelog" &&
+        fail "$changelog already has a '## [$version]' section. Pick the next version,
+  or if the previous attempt failed part-way, undo it before running this again."
+
     today=$(date -u +%Y-%m-%d)
     previous=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
     range="${previous:+$previous..}HEAD"
@@ -611,7 +619,7 @@ cmd_build() {
 
     # Insert the new release directly below the (emptied) Unreleased heading,
     # and rewrite the two link references at the foot of the file.
-    VERSION="$version" TODAY="$today" PREVIOUS="${previous:-}" BLOCK="$block" REPO="$repo_url" \
+    VERSION="$version" TODAY="$today" BLOCK="$block" REPO="$repo_url" \
         awk '
         BEGIN { version = ENVIRON["VERSION"]; today = ENVIRON["TODAY"] }
         /^## \[Unreleased\]$/ {

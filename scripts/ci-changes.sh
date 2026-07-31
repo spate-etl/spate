@@ -360,8 +360,28 @@ if [[ "${PR_AUTHOR:-}" == "dependabot[bot]" && "${EVENT_NAME:-}" == "pull_reques
     suites=""
 fi
 
-# Applied after the deferral above, so labelling a Dependabot pull request
-# `ci: docker` overrides it for that one bump.
+# The release pull request release-plz keeps open against `main` is the same
+# trade at a better price. Its whole diff is `Cargo.toml` and `Cargo.lock`, which
+# the dependency rule above answers with every container suite — so the cheapest
+# diff this classifier ever sees gets the most expensive classification it has.
+# And it gets it repeatedly: release-plz rewrites that branch on every push to
+# `main`, so the boots are paid once per merge, not once per release.
+#
+# The safety argument is stronger here than for Dependabot. A bump changes real
+# dependency code; this branch's source tree is byte-identical to the `main`
+# commit that just ran the container suites on push. What is new is version
+# strings, and what those can break is covered without a container: an
+# inconsistent `=` internal pin or a lock file stale against the manifests fails
+# the lint, test, MSRV and each-feature tiers, all of which run `--locked`, and
+# the public-API diff is `semver_check` in release-plz.toml, which runs while the
+# pull request is composed rather than on it.
+if [[ "${PR_AUTHOR:-}" == "spate-release[bot]" && "${EVENT_NAME:-}" == "pull_request" ]]; then
+    echo "note: release pull request; container suites deferred to push-to-main."
+    suites=""
+fi
+
+# Applied after the deferrals above, so labelling a Dependabot or release pull
+# request `ci: docker` overrides one for that one bump.
 before_labels="$suites"
 suites=$(apply_ci_labels "${PR_LABELS:-}" "$suites")
 if [[ "$suites" != "$before_labels" ]]; then

@@ -632,13 +632,14 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         ));
     }
 
-    // Circuit breaker: a zero failure threshold opens on the first outcome
-    // and zero half-open probes never lets a replica recover.
+    // Circuit breaker: a zero failure threshold opens on the first outcome.
+    // The rest of the breaker rules live in the framework alongside the retry
+    // ones, so every sink enforces the same set.
     if cfg.breaker.failure_threshold == 0 {
         return fail("breaker.failure_threshold must be at least 1".into());
     }
-    if cfg.breaker.half_open_probes == 0 {
-        return fail("breaker.half_open_probes must be at least 1".into());
+    if let Err(why) = cfg.breaker.validate() {
+        return fail(why.to_string());
     }
 
     for reserved in [

@@ -1,0 +1,42 @@
+name: Labeler
+
+# Applies the `crate:` and `area:` labels to a pull request from the paths it
+# changed. The rules are in `.github/labeler.yml`.
+#
+# `pull_request_target`, not `pull_request`: a `pull_request` run from a fork
+# gets a read-only token and cannot label at all.
+#
+# That trigger is dangerous when a workflow checks out the pull request's code,
+# because it runs fork-authored code with a privileged token. This one checks
+# out nothing — the action reads `.github/labeler.yml` from the base ref through
+# the API and looks at the changed-file list. Do not add a checkout step here.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    name: Apply path labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Read the labeler config from the base ref.
+      contents: read
+      # Labels on a pull request are a pull-requests-scoped write.
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          # Remove a label once its paths stop matching, so one applied to an
+          # early revision does not outlive the change that earned it.
+          sync-labels: true
+          # `.github/**` rules would match nothing otherwise. This is the
+          # action's default, named because the CI rules depend on it.
+          dot: true

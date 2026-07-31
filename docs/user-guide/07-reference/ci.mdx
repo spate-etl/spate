@@ -139,7 +139,7 @@ failure if there is one. That is the only way a transitive dependency surfaces.
 
 GitHub Actions are pinned to full commit SHAs. Use
 `pinact run .github/workflows/*.yml .github/actions/*/action.yml` — note the
-second glob, because the toolchain and tool pins now live in the composite
+second glob, because the toolchain and tool pins live in the composite
 action and the first glob alone would miss them. Run it rather than editing
 them by hand. It is not a complete check, though: `pinact` accepted a pin that
 was an annotated *tag object* rather than the commit it points at — a SHA
@@ -150,7 +150,7 @@ date. `zizmor` caught both, through its `ref-version-mismatch` audit. Run both.
 Note `pinact` refuses to pin a *branch* ref
 (`dtolnay/rust-toolchain@stable`) or a tool-alias ref
 (`taiki-e/install-action@nextest`), because in both cases the ref name selects
-behaviour. **No workflow currently takes either exception** — both are SHA-pinned
+behaviour. **No workflow takes either exception** — both are SHA-pinned
 with the selector moved into an explicit `toolchain:`/`tool:` input, which is
 stronger, and is the pattern to keep. The shared preamble lives in
 `.github/actions/setup-rust` (a composite action, so it runs in the caller's job
@@ -167,12 +167,11 @@ licence texts — both are deploy-time artifacts, and generating them cost every
 *Rust* pull request a full `cargo doc` plus an `npm ci` it had no other use for.
 
 Two consequences, both deliberate and both worth stating plainly. **The whole
-published site is now up to a day stale**, not just `/api/` — the deleted
-`docs.yml` deployed on every push to `main` (seven deploys on 2026-07-24), and
-this deploys once a night. And `cargo doc` and `about/html.hbs` are no longer
-exercised before merge, so a rustdoc-breaking doc comment or a broken licence
-template merges green and fails that night — which is why `docs-build` failing
-now files an issue rather than going unnoticed.
+published site trails `main` by up to a day**, not just `/api/`, because the
+deploy is nightly rather than per-push. And `cargo doc` and `about/html.hbs`
+are not exercised before merge, so a rustdoc-breaking doc comment or a broken
+licence template merges green and fails that night — which is why a
+`docs-build` failure files an issue rather than going unnoticed.
 
 ```sh
 cd website && npm ci            # first-time setup (CI uses Node 24; engines say >= 18)
@@ -242,9 +241,9 @@ indistinguishably from a real hang.
 `benchmarks/` sets `autobins = false`, so a new rig in `benchmarks/src/bin/` is
 invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
 `benchmarks::manifest::every_rig_is_declared_as_a_bin` fails if the two diverge.
-Note the rigs are no longer built by `cargo nextest run`; `cargo clippy
+Note the rigs are not built by `cargo nextest run`; `cargo clippy
 --workspace --all-targets` is what compile-checks them (and the examples) — on
-every PR **that touches Rust**, since that step now carries
+every PR **that touches Rust**, since that step carries
 `if: needs.changes.outputs.rust == 'true'`. A docs-only PR compile-checks
 nothing, which is the point, but it does mean the rigs are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of

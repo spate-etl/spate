@@ -32,6 +32,37 @@ use tokio::time::Instant;
 /// Generous for the intended case: a writer parked on I/O aborts at once.
 const ABORT_GRACE: Duration = Duration::from_millis(500);
 
+/// Bounds on the quarantine re-check heartbeat, which is otherwise
+/// `breaker.open_for`.
+///
+/// The floor is because [`BreakerConfig`](super::config::BreakerConfig) has no
+/// validator — only [`RetryConfig`](super::config::RetryConfig) does — so
+/// `open_for: 0s` is expressible both in YAML and through the public `Copy`
+/// struct. It used to be harmless here: the wait fell back to a backoff step,
+/// and a validated retry policy can never yield a zero delay. Driving the wait
+/// from `open_for` instead removes that accidental floor, and `sleep_until(now)`
+/// returns instantly — a spin on the breaker mutex. The floor also absorbs the
+/// `Instant + Duration` overflow panic an absurd `humantime` value would hit.
+///
+/// The ceiling is because `open_for` is a *probe cadence* — how hard to lean on
+/// an endpoint that has been failing — not a statement about how often a task
+/// may re-read state it already shares. An operator asking for an hour between
+/// probes is not asking for a sealed batch to sit that long behind a signal
+/// that never came.
+const QUARANTINE_BACKSTOP_MIN: Duration = Duration::from_millis(100);
+/// Ceiling for the quarantine heartbeat. See [`QUARANTINE_BACKSTOP_MIN`].
+const QUARANTINE_BACKSTOP_MAX: Duration = Duration::from_secs(30);
+
+/// How long a write task parked on a fully-quarantined shard waits before
+/// re-checking on its own initiative.
+///
+/// A heartbeat, not a recovery mechanism: the wake signal is what releases
+/// every state that *can* resolve, and re-picking cannot repair one that
+/// cannot. The identity at every default, where the clamp does not bind.
+fn quarantine_backstop(open_for: Duration) -> Duration {
+    open_for.clamp(QUARANTINE_BACKSTOP_MIN, QUARANTINE_BACKSTOP_MAX)
+}
+
 /// What one shard worker did over its lifetime, for the drain report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkerReport {
@@ -541,30 +572,81 @@ impl<W: ShardWriter> ShardWorker<W> {
         let writer = Arc::clone(&self.writer);
         let endpoints = Arc::clone(&self.endpoints);
         let breakers = Arc::clone(breakers);
+        // Taken from the sender, so the receiver starts level with the
+        // present. Cloning one instead would inherit the source's cursor and
+        // cost every task a spurious first wake on any shard that has ever
+        // had an outcome.
+        let mut wake = breakers.lock().expect("breaker lock").subscribe();
         let metrics = Arc::clone(&self.metrics);
         let retry = self.cfg.retry;
+        let backstop = quarantine_backstop(self.cfg.breaker.open_for);
         let shard = self.shard;
         let handle = tasks.spawn(async move {
             let _permit = permit;
             let mut backoff = Backoff::new(retry, this_seq);
             let mut attempts: u32 = 0;
             loop {
-                // Pick a replica; while every breaker is open, wait for the
-                // earliest probe window (or one backoff step) and re-pick.
-                let replica = loop {
+                // Pick a replica. "Nothing usable" is two conditions, not one,
+                // and they end differently — see the `breaker` module header.
+                //
+                // `backoff` is deliberately untouched here. It is the retry
+                // ladder, and this is not a retry: a step spent on a wait that
+                // publishes no `BackoffGuard` and moves no
+                // `spate_sink_retries_total` is a step nobody can account for,
+                // so the shard climbs towards `retry.max` while quarantined and
+                // then serves that ceiling to the first real retry after
+                // recovery (#23). Nor is waiting an *attempt* — `attempts` is
+                // incremented below this loop, so a quarantine of any length
+                // cannot exhaust `retry.max_attempts`.
+                let pick = loop {
+                    // Re-arm before reading the breakers, never after. A bump
+                    // landing between the read and the await is then still
+                    // observed, so a batch cannot sleep through the recovery it
+                    // is waiting for.
+                    wake.mark_unchanged();
+                    // One timestamp for the whole critical section, and now
+                    // load-bearing beyond lock hygiene: `next_replica` promotes
+                    // any `Open` whose deadline has passed using *this* `now`,
+                    // so a `None` pick proves every surviving deadline is
+                    // strictly in the future. Read the clock twice and
+                    // `sleep_until` can be handed an instant already gone —
+                    // which, with no backoff step underneath it, is a spin.
                     let now = Instant::now();
                     let (pick, probe_at) = {
                         let mut b = breakers.lock().expect("breaker lock");
                         (b.next_replica(now), b.next_probe_at(now))
                     };
                     match pick {
-                        Some(r) => break r,
+                        Some(p) => break p,
                         None => {
-                            let wake = probe_at.unwrap_or_else(|| now + backoff.next_delay());
-                            tokio::time::sleep_until(wake).await;
+                            let heartbeat = now + backstop;
+                            let until = probe_at.map_or(heartbeat, |t| t.min(heartbeat));
+                            tokio::select! {
+                                biased;
+
+                                // `Err` is unreachable: the sender is a field
+                                // of the `BreakerSet` this task holds an `Arc`
+                                // to, so it outlives this receiver. Serve the
+                                // deadline rather than looping on it anyway, so
+                                // a refactor breaking that invariant costs a
+                                // stall and not a spinning core.
+                                changed = wake.changed() => {
+                                    if changed.is_err() {
+                                        tokio::time::sleep_until(until).await;
+                                    }
+                                }
+
+                                () = tokio::time::sleep_until(until) => {}
+                            }
                         }
                     }
                 };
+                let replica = pick.replica;
+                // Armed only for a half-open probe, and disarmed the moment an
+                // outcome is reported. What it covers is the task dying with no
+                // outcome at all — a writer panic — which would otherwise
+                // consume the probe slot for good.
+                let mut probe = pick.probe.then(|| ProbeGuard::new(&breakers, replica));
 
                 attempts += 1;
                 // Timed around `write_batch` alone: the replica pick and the
@@ -582,6 +664,16 @@ impl<W: ShardWriter> ShardWorker<W> {
                     },
                     attempt_at.elapsed(),
                 );
+                // Disarm before reporting, not after: `on_success`/`on_failure`
+                // replace the state outright, so the slot is already gone, and
+                // another batch may have re-promoted this replica to half-open
+                // by the time a stale guard drops. Releasing then would steal
+                // *that* batch's budget, which no state check can distinguish.
+                // There is no `.await` between here and the report, so no abort
+                // can interleave.
+                if let Some(g) = probe.as_mut() {
+                    g.disarm();
+                }
                 match outcome {
                     Ok(()) => {
                         let transition = breakers.lock().expect("breaker lock").on_success(replica);
@@ -680,11 +772,89 @@ impl<W: ShardWriter> ShardWorker<W> {
     }
 }
 
+/// Holds one half-open probe slot for the length of a write attempt, and
+/// hands it back if the attempt never reports an outcome.
+///
+/// `probes_in_flight` is otherwise cleared only by *leaving* `HalfOpen`, which
+/// is what reporting an outcome does. A write task that dies without reporting
+/// — a writer panic, whose `JoinError` reaches `handle_join` carrying a task id
+/// and no replica — would consume the slot for good, and with the default
+/// `half_open_probes: 1` that pins the replica in `HalfOpen` forever: the shard
+/// is unwritable for the life of the process, and no amount of re-picking
+/// repairs it because the budget is genuinely gone.
+///
+/// Disarmed by the write loop before it reports; see the comment there for why
+/// disarming is required rather than relying on `release_probe`'s state check.
+struct ProbeGuard {
+    breakers: Arc<Mutex<BreakerSet>>,
+    replica: usize,
+    armed: bool,
+}
+
+impl ProbeGuard {
+    fn new(breakers: &Arc<Mutex<BreakerSet>>, replica: usize) -> Self {
+        ProbeGuard {
+            breakers: Arc::clone(breakers),
+            replica,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Poison-tolerant, because the case this guard exists for is a writer
+        // panic: an `expect` here would run while already unwinding and abort
+        // the process instead of releasing the slot. The critical section only
+        // decrements a counter, so a poisoned set is not a corrupt one.
+        self.breakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_probe(self.replica);
+    }
+}
+
 fn class_of(err: &SinkError) -> ErrorClass {
     match err {
         SinkError::Client { class, .. } => *class,
         // Non-exhaustive enum: unknown variants are conservatively fatal.
         #[allow(unreachable_patterns)]
         _ => ErrorClass::Fatal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The heartbeat is driven by an operator-set value on a struct with no
+    /// validator, so both ends have to be defended. A zero would make
+    /// `sleep_until` return instantly and spin the pick loop on the breaker
+    /// mutex; an hour would park a sealed batch for an hour behind a signal
+    /// that never came; `Duration::MAX` would overflow `Instant::add`.
+    #[test]
+    fn the_quarantine_heartbeat_is_clamped_at_both_ends() {
+        assert_eq!(
+            quarantine_backstop(Duration::ZERO),
+            QUARANTINE_BACKSTOP_MIN,
+            "a zero heartbeat is a spin, not a wait"
+        );
+        assert_eq!(
+            quarantine_backstop(Duration::from_secs(5)),
+            Duration::from_secs(5),
+            "the default is inside the range, so the clamp is the identity"
+        );
+        assert_eq!(
+            quarantine_backstop(Duration::from_secs(3600)),
+            QUARANTINE_BACKSTOP_MAX
+        );
+        assert_eq!(quarantine_backstop(Duration::MAX), QUARANTINE_BACKSTOP_MAX);
     }
 }

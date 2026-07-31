@@ -434,11 +434,15 @@ impl SinkShardMetrics {
     ///
     /// Scope: the sleep between attempts *on an available replica*. A shard
     /// whose every replica is quarantined also sleeps — waiting for the
-    /// earliest probe window — and reads `0` throughout, because no attempt
-    /// is being backed off. That state has its own signal, and the two are
-    /// exactly coincident: the write loop waits for a probe precisely when
-    /// no replica is circuit-closed, which is the definition of
-    /// `spate_sink_shard_healthy == 0`.
+    /// earliest of a probe window and an in-flight probe reporting — and
+    /// reads `0` throughout, because no attempt is being backed off.
+    /// `spate_sink_shard_healthy == 0` is that state's signal: the write loop
+    /// waits only when no replica is circuit-closed, which is the definition
+    /// of that gauge. The implication runs one way — a shard with no
+    /// circuit-closed replica can still be handing out a half-open probe, and
+    /// so not be waiting at all — so shard health *covers* the wait rather
+    /// than coinciding with it. That is the safe direction: alerting on it
+    /// cannot miss a parked shard.
     ///
     /// Clearing is tied to the guard's `Drop` rather than to a settle/abandon
     /// call because the sleeping task can be *aborted* — the sink's drain

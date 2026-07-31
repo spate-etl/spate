@@ -148,8 +148,8 @@ off), so a patient policy stays legible on a dashboard instead of looking like
 an idle shard. Alert above `(1 - jitter) × retry.max` rather than at
 `retry.max` — the sleep is jittered downwards, so the gauge never sits exactly
 on the ceiling. When every replica is quarantined the shard sleeps waiting for
-a probe window and this gauge reads `0`; `spate_sink_shard_healthy` covers that
-state.
+the earliest of a probe window and an in-flight probe reporting, and this gauge
+reads `0`; `spate_sink_shard_healthy` covers that state.
 
 Connectors add their own keys on top of these — a client-level timeout, for
 instance, is the connector's own and not the shared pool's. Those live on the

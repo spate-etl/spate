@@ -113,7 +113,7 @@ of [docs/METRICS.md](../../METRICS.md).
   the ceiling rather than at it: jitter only shortens a delay, so the published
   step never sits exactly on `retry.max`. This covers backoff against a replica
   that is still available — when every replica is quarantined the shard sleeps
-  waiting for a probe window instead, and `spate_sink_shard_healthy == 0` is the
+  waiting for a probe instead, and `spate_sink_shard_healthy == 0` is the
   signal for that.
 - **A slow sink** — the p99 of
   `spate_sink_write_duration_seconds{outcome="ok"}` above your write budget.
@@ -124,7 +124,7 @@ of [docs/METRICS.md](../../METRICS.md).
   different question — permit wait says *queued*
   (`spate_sink_permit_wait_duration_seconds`), backoff says *asleep between
   attempts* (`spate_sink_retry_backoff_seconds`), shard health says *asleep
-  waiting for a probe window* (`spate_sink_shard_healthy == 0`, where the backoff
+  waiting for a probe* (`spate_sink_shard_healthy == 0`, where the backoff
   gauge reads `0`), write says *slow* — and `spate_sink_flush_duration_seconds`
   is all of them at once, which makes it a commit-lag budget rather than a
   diagnosis. See [What a flush

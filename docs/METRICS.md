@@ -225,7 +225,7 @@ series carry its name as the `component` label (a single sink uses
 | `spate_sink_write_duration_seconds` | histogram | `shard`, `outcome` (`ok`\|`error`) | One **attempt**, wrapping the sink write and nothing else *of the framework's* — no permit wait, no retry backoff, no probe wait. This is the "how fast is the sink system" signal. Note what that does include: a connector that sleeps *inside* its write puts that sleep here (the Kafka sink does, on a full producer queue), and the wall-clock charges whatever the sink's I/O runtime was busy with at each await point. Every attempt is observed, retries included, so the count is per attempt rather than per batch. Split by outcome because a fatal reject in a millisecond and a timeout after thirty seconds are both attempts, and mixing them moves the distribution in opposite directions; the error's taxonomy class stays on `spate_sink_errors_total{error_type}`. An attempt aborted at the drain deadline is never observed — but attempts that completed before the abort are. |
 | `spate_sink_permit_wait_duration_seconds` | histogram | `shard` | Time a sealed batch waited for one of its shard's `inflight.max_per_shard` slots before its first write attempt — the queueing share of a flush. Observed for every sealed batch **that starts a write**, the healthy near-zero case included: a family that appeared only under contention would read as absent exactly when you want to confirm there is none. A batch the drain deadline drops before it ever gets a permit is not observed, so during a rough shutdown this count runs *below* the number of batches sealed. The queue is FIFO and normally holds one batch, in which case the wait is roughly one in-flight write's remaining time; it can hold more — up to one intake pass, plus the drain force-seal — and a batch behind others is then observed with a wait spanning several write completions. Reaching more than one requires a single chunk to cross `batch.max_bytes` on its own, so on a sane `chunk.target_bytes` this stays at one. |
 | `spate_sink_retries_total` | counter | `shard` | Flush attempts beyond the first. |
-| `spate_sink_retry_backoff_seconds` | gauge | `shard` | Retry backoff the shard is currently sleeping between write attempts **on an available replica**; `0` when no write is backing off. The step being served, **not** the time left in it — it does not count down, and jitter puts it in `[(1 - retry.jitter) × step, step]`. A shard writes up to `inflight.max_per_shard` batches at once, each backing off independently, so this is the max across them: it answers "is this shard asleep right now, and for how long", which the counters cannot (`spate_sink_retries_total` only moves on an *attempt*, so a shard parked in a long backoff looks flat and idle). A shard whose every replica is quarantined also sleeps — waiting for the earliest probe window — and reads `0` here, because no attempt is being backed off; `spate_sink_shard_healthy == 0` is that state's signal and is exactly coincident with it. |
+| `spate_sink_retry_backoff_seconds` | gauge | `shard` | Retry backoff the shard is currently sleeping between write attempts **on an available replica**; `0` when no write is backing off. The step being served, **not** the time left in it — it does not count down, and jitter puts it in `[(1 - retry.jitter) × step, step]`. A shard writes up to `inflight.max_per_shard` batches at once, each backing off independently, so this is the max across them: it answers "is this shard asleep right now, and for how long", which the counters cannot (`spate_sink_retries_total` only moves on an *attempt*, so a shard parked in a long backoff looks flat and idle). A shard whose every replica is quarantined also sleeps — waiting for the earliest of a probe window and an in-flight probe reporting — and reads `0` here, because no attempt is being backed off; `spate_sink_shard_healthy == 0` covers that state. The implication runs one way: the write loop waits only when no replica is circuit-closed, but a shard with none can still be handing out a half-open probe rather than waiting. That is the safe direction — alerting on shard health cannot miss a parked shard. |
 | `spate_sink_errors_total` | counter | `shard`, `error_type` | Write errors by taxonomy class. |
 | `spate_sink_inflight_batches` | gauge | `shard` | Sealed batches not yet settled — those being written **plus** any sealed batch still queueing for one of the shard's `inflight.max_per_shard` slots. It can therefore sit one above the cap while a batch waits, and further above it in the pathological case where a single chunk crosses `batch.max_bytes` on its own (see `spate_sink_permit_wait_duration_seconds`). Read it against the cap for saturation, not as an equality. |
 | `spate_sink_replica_healthy` | gauge | `shard`, `replica` | 1 = circuit closed, 0 = open (replica quarantined). |
@@ -248,7 +248,7 @@ seal ─────────────────────────
   attempt 1, failed             spate_sink_write_duration_seconds{outcome="error"}
   sleeping before the retry     spate_sink_retry_backoff_seconds  (gauge)
   every replica quarantined,
-    waiting for a probe window  spate_sink_shard_healthy == 0     (gauge)
+    waiting for a probe         spate_sink_shard_healthy == 0     (gauge)
   attempt 2, succeeded          spate_sink_write_duration_seconds{outcome="ok"}
 ```
 
@@ -293,10 +293,12 @@ and reading the wrong one is how the residual becomes a mystery:
 
 - **Backing off between attempts on an available replica** —
   `spate_sink_retry_backoff_seconds` publishes the step live.
-- **Every replica quarantined, waiting for a probe window** —
+- **Every replica quarantined, waiting for a probe** —
   `spate_sink_retry_backoff_seconds` reads **`0`** here, because no attempt is
-  being backed off. `spate_sink_shard_healthy == 0` is this state's signal and is
-  exactly coincident with it.
+  being backed off. `spate_sink_shard_healthy == 0` covers this state. It is a
+  covering signal, not an equivalent one: the write loop waits only when no
+  replica is circuit-closed, but a shard with none can still be handing out a
+  half-open probe rather than waiting.
 
 So a flush p99 that exceeds write + permit wait is a shard sleeping rather than
 a shard writing — but check `spate_sink_shard_healthy` before you check the
@@ -445,9 +447,10 @@ config section):
   with `spate_sink_errors_total{error_type="retryable"}` for the cause.
   Complementary, not overlapping: a shard whose every replica *is* quarantined
   also sleeps, and this gauge reads `0` there because no attempt is being
-  backed off. `spate_sink_shard_healthy == 0` is that state's signal, and the two
-  are exactly coincident — the write loop waits for a probe window precisely
-  when no replica is circuit-closed. Alert on both to cover every parked state.
+  backed off. `spate_sink_shard_healthy == 0` covers that state — the write loop
+  waits only when no replica is circuit-closed, though a shard with none can
+  still be handing out a half-open probe rather than waiting, so the gauge is
+  the wider of the two. Alert on both to cover every parked state.
 - `histogram_quantile(0.99, sum by (le, pipeline, component) (rate(spate_sink_write_duration_seconds_bucket{outcome="ok"}[5m])))`
   above your write budget — the sink itself is slow. Alert on this rather than
   on `spate_sink_flush_duration_seconds`, which also carries the permit wait and

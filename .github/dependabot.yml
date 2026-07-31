@@ -11,6 +11,8 @@
 # updates deliberately ignore cooldown — a fix for a known CVE should not wait.
 #
 # Nothing auto-merges. Every bump is reviewed.
+#
+# Every label named below must exist in `.github/labels.yml`.
 version: 2
 
 updates:
@@ -38,7 +40,7 @@ updates:
     # regenerated at release, so a bump can merge and the file catches up —
     # see the `attribution` job in scheduled.yml for why it moved.
     open-pull-requests-limit: 4
-    labels: ["dependencies", "rust"]
+    labels: ["dependencies", "area: workspace"]
     # lz4_flex moves with `clickhouse`, never on its own. `spate-clickhouse`
     # enables `clickhouse`'s `lz4` feature and `clickhouse` pins the codec, so a
     # solo bump puts two majors of it in the graph and makes
@@ -125,7 +127,7 @@ updates:
       interval: weekly
       day: tuesday
     open-pull-requests-limit: 3
-    labels: ["dependencies", "github-actions"]
+    labels: ["dependencies", "area: ci"]
     commit-message:
       prefix: "chore(ci)"
     # `default-days` only: GitHub does not support the semver-*-days keys for
@@ -153,7 +155,7 @@ updates:
       interval: weekly
       day: wednesday
     open-pull-requests-limit: 3
-    labels: ["dependencies", "javascript"]
+    labels: ["dependencies", "area: website"]
     commit-message:
       prefix: "chore(docs)"
     cooldown:
@@ -214,7 +216,7 @@ updates:
       interval: weekly
       day: thursday
     open-pull-requests-limit: 3
-    labels: ["dependencies", "docker"]
+    labels: ["dependencies", "area: examples"]
     commit-message:
       prefix: "chore(examples)"
     # `default-days` only — semver-*-days is unsupported here, as for

@@ -1,0 +1,187 @@
+# The label taxonomy.
+#
+# Applied by `.github/workflows/labels.yml` on push to main. That workflow does
+# not prune: labels absent from this file are left alone.
+#
+# ---------------------------------------------------------------------------
+#
+# The namespaces are deliberately few. A taxonomy that grows one label at a time,
+# with no source of truth to read first, ends up with namespaces that overlap —
+# the same concept reachable under two prefixes, and no answer to which one a
+# triager should reach for. Five is enough to sort every issue this repo has had.
+#
+#   crate:     which crate. Reuses the commit scopes verbatim.
+#   area:      the non-crate surfaces.
+#   platform:  where it happens, when that is the point.
+#   ci:        opt a pull request into a suite its paths would not select.
+#   needs:     what is blocking the issue, not what it is about.
+#
+# There is no `type:` namespace: GitHub's native issue types carry that axis and
+# the forms set them, so a bug arrives typed rather than labelled.
+# `delivery-correctness` and `performance` are not types but classes of bug with
+# their own triage priority, which is why they stay as labels below.
+#
+
+- name: "crate: spate"
+  color: "0052cc"
+  description: "The facade crate and its feature flags"
+
+- name: "crate: spate-core"
+  color: "0052cc"
+  description: "The engine — operators, checkpointing, backpressure, runtime"
+
+- name: "crate: spate-kafka"
+  color: "0052cc"
+  description: "The Kafka source and sink"
+
+- name: "crate: spate-clickhouse"
+  color: "0052cc"
+  description: "The ClickHouse sink"
+
+- name: "crate: spate-s3"
+  color: "0052cc"
+  description: "The S3 source"
+
+- name: "crate: spate-json"
+  color: "0052cc"
+  description: "The JSON deserializer"
+
+- name: "crate: spate-avro"
+  color: "0052cc"
+  description: "The Avro deserializer and schema registry"
+
+- name: "crate: spate-coordination"
+  color: "0052cc"
+  description: "Leader election, work assignment, and the store backends"
+
+- name: "crate: spate-test"
+  color: "0052cc"
+  description: "The test doubles framework users build against"
+
+# ------------------------------------------------------------------- area ----
+#
+# Everything that is not a crate. `workspace` covers the root manifest and the
+# lockfile; `supply-chain` covers the licence and advisory surface, which is
+# CODEOWNED and worth seeing separately from the rest of CI.
+
+- name: "area: docs"
+  color: "5319e7"
+  description: "The prose under docs/"
+
+- name: "area: website"
+  color: "5319e7"
+  description: "The Docusaurus site under website/"
+
+- name: "area: ci"
+  color: "5319e7"
+  description: "Workflows, actions, and the scripts they run"
+
+- name: "area: benchmarks"
+  color: "5319e7"
+  description: "The rigs and their recorded results"
+
+- name: "area: examples"
+  color: "5319e7"
+  description: "The runnable examples and the flagship image"
+
+- name: "area: supply-chain"
+  color: "5319e7"
+  description: "Licences, advisories, and the third-party inventory"
+
+- name: "area: workspace"
+  color: "5319e7"
+  description: "The root manifest, the lockfile, and cross-crate plumbing"
+
+# --------------------------------------------------------------- platform ----
+#
+# Only worth applying when the platform is the point rather than incidental.
+# e.g., benchmark question that only appears when the host CPU differs from
+# the reference hardware.
+
+- name: "platform: macos"
+  color: "006b75"
+  description: "Specific to macOS"
+
+- name: "platform: linux"
+  color: "006b75"
+  description: "Specific to Linux"
+
+- name: "platform: windows"
+  color: "006b75"
+  description: "Specific to Windows"
+
+- name: "platform: aarch64"
+  color: "006b75"
+  description: "Specific to 64-bit ARM"
+
+- name: "platform: x86_64"
+  color: "006b75"
+  description: "Specific to 64-bit x86"
+
+- name: "platform: docker"
+  color: "006b75"
+  description: "Specific to running in a container"
+
+- name: "platform: kubernetes"
+  color: "006b75"
+  description: "Specific to running under Kubernetes"
+
+# --------------------------------------------------------------------- ci ----
+#
+# Triggers, not descriptions. `scripts/ci-changes.sh` selects the expensive
+# suites from the changed paths and deliberately fails closed; these labels let
+# a maintainer turn a suite **on** for a pull request whose paths would not have
+# selected it. They can only ever add work. Nothing here can switch off a suite
+# the path classifier chose, because that would turn a fail-closed design into a
+# fail-open one with a checkbox.
+
+- name: "ci: docker"
+  color: "fbca04"
+  description: "Force the container suites to run on this pull request"
+
+- name: "ci: loom"
+  color: "fbca04"
+  description: "Force the loom models to run on this pull request"
+
+# ------------------------------------------------------------------ needs ----
+#
+# What the issue is waiting on. Distinct from what it is about — an issue keeps
+# its `crate:` label for life, and sheds a `needs:` one as soon as it is
+# answered.
+
+- name: "needs: repro"
+  color: "e99695"
+  description: "Waiting on a reproduction"
+
+- name: "needs: decision"
+  color: "e99695"
+  description: "Waiting on a design call before anything can be built"
+
+- name: "needs: more-info"
+  color: "e99695"
+  description: "Waiting on the reporter"
+
+# ------------------------------------------------------------ unnamespaced ----
+#
+# Three of these predate the taxonomy and stay bare deliberately.
+#
+# `delivery-correctness` and `performance` are not issue *types* — the native
+# type for both is Bug. They are classes of bug that carry a triage priority.
+#
+# `dependencies` is the one label `dependabot.yml` requires.
+
+- name: "delivery-correctness"
+  color: "b60205"
+  description: "Records lost, duplicated, or a watermark committed early"
+
+- name: "performance"
+  color: "0e8a16"
+  description: "Throughput or latency below expectation"
+
+- name: "dependencies"
+  color: "0366d6"
+  description: "A dependency version bump"
+
+- name: "release"
+  color: "1d76db"
+  description: "Automated release pull request"

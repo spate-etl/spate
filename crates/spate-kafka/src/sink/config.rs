@@ -276,8 +276,8 @@ impl KafkaSinkConfig {
         if self.breaker.failure_threshold == 0 {
             return fail("breaker.failure_threshold must be at least 1".into());
         }
-        if self.breaker.half_open_probes == 0 {
-            return fail("breaker.half_open_probes must be at least 1".into());
+        if let Err(why) = self.breaker.validate() {
+            return fail(why.to_string());
         }
 
         for (key, why) in DENYLIST {

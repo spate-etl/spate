@@ -35,10 +35,12 @@ const ABORT_GRACE: Duration = Duration::from_millis(500);
 /// Bounds on the quarantine re-check heartbeat, which is otherwise
 /// `breaker.open_for`.
 ///
-/// The floor is because [`BreakerConfig`](super::config::BreakerConfig) has no
-/// validator — only [`RetryConfig`](super::config::RetryConfig) does — so
-/// `open_for: 0s` is expressible both in YAML and through the public `Copy`
-/// struct. It used to be harmless here: the wait fell back to a backoff step,
+/// The floor is because `open_for: 0s` is still expressible through the public
+/// `Copy` [`BreakerConfig`](super::config::BreakerConfig), which `SinkParts`
+/// and `spate-test` can build without going through a loader.
+/// [`BreakerConfig::validate`](super::config::BreakerConfig::validate) rejects
+/// it on the YAML path; this covers the other one. It used to be harmless
+/// here: the wait fell back to a backoff step,
 /// and a *validated* retry policy can never yield a zero delay. Driving the
 /// wait from `open_for` instead removes that accidental floor, and
 /// `sleep_until(now)` returns instantly — a spin on the breaker mutex.
@@ -67,7 +69,14 @@ const QUARANTINE_BACKSTOP_MAX: Duration = Duration::from_secs(30);
 /// wake — the one path that used to leave without publishing was a probe task
 /// dying silently, which `ProbeGuard` now closes. Widening this constant
 /// therefore changes no observable behaviour, and a test claiming otherwise
-/// would be pinning its own scaffolding. What it defends against is a future
+/// would be pinning its own scaffolding.
+///
+/// Narrowing it is a different matter, and the reason to be careful before
+/// treating this as free to move. Two pool tests get their discriminating
+/// power from this ceiling being far longer than the wake they are asserting:
+/// drop it to a few hundred milliseconds and the heartbeat alone carries them,
+/// so they pass whether or not the wake works. What it defends against is a
+/// future
 /// mutation that adds a fourth exit and forgets to publish: the shard stalls
 /// for `open_for` instead of forever. Only [`quarantine_backstop`]'s clamp is
 /// tested, which is the part with a decision in it.
@@ -637,6 +646,13 @@ impl<W: ShardWriter> ShardWorker<W> {
                     match picked {
                         Picked::Replica(p) => break p,
                         Picked::Park(mut wake) => {
+                            // `min`, so the heartbeat still fires when a probe
+                            // window is known but further away — `open_for: 1h`
+                            // wakes this task every 30s to re-read state it
+                            // already shares. That is deliberate: the heartbeat
+                            // only ever shortens a wait, and paying a bounded
+                            // number of cheap wakeups is the price of never
+                            // sleeping through a signal that went missing.
                             let heartbeat = now + backstop;
                             let until = probe_at.map_or(heartbeat, |t| t.min(heartbeat));
                             tokio::select! {
@@ -796,17 +812,6 @@ impl<W: ShardWriter> ShardWorker<W> {
     }
 }
 
-/// Holds one half-open probe slot for the length of a write attempt, and
-/// hands it back if the attempt never reports an outcome.
-///
-/// `probes_in_flight` is otherwise cleared only by *leaving* `HalfOpen`, which
-/// is what reporting an outcome does. A write task that dies without reporting
-/// — a writer panic, whose `JoinError` reaches `handle_join` carrying a task id
-/// and no replica — would consume the slot for good, and with the default
-/// `half_open_probes: 1` that pins the replica in `HalfOpen` forever: the shard
-/// is unwritable for the life of the process, and no amount of re-picking
-/// repairs it because the budget is genuinely gone.
-///
 /// The outcome of one trip round the replica picker: either a replica to write
 /// to, or the wake receiver to park on. Pairing them in one value is what makes
 /// "a receiver is taken exactly when nothing was pickable, in the same critical
@@ -816,11 +821,28 @@ enum Picked {
     Park(watch::Receiver<u64>),
 }
 
+/// Holds one half-open probe slot for the length of a write attempt, and hands
+/// it back if the attempt never reports an outcome.
+///
+/// `probes_in_flight` is otherwise cleared only by *leaving* `HalfOpen`, which
+/// is what reporting an outcome does. A write task that dies without reporting
+/// — a writer panic, whose `JoinError` reaches `handle_join` carrying a task id
+/// and no replica — would consume the slot for good, and with the default
+/// `half_open_probes: 1` that pins the replica in `HalfOpen` forever: the shard
+/// is unwritable for the life of the process, and no amount of re-picking
+/// repairs it because the budget is genuinely gone.
+///
 /// The guard names the half-open *episode* it took its slot from, so a drop
 /// that arrives after the replica has re-opened and started probing again is
 /// discarded rather than granting that later run an extra concurrent probe.
 /// The write loop still disarms on the reporting path — see the comment there
 /// — because the episode check alone would credit a same-episode release.
+///
+/// Note what the episode does *not* bound. It stops a late release crediting
+/// the wrong run; it does not stop the runs themselves overlapping. A failure
+/// reported by an attempt that started before the quarantine re-opens the
+/// replica and ends the episode, so a probe still in flight from that episode
+/// can overlap the next one's. The budget is per episode, not per endpoint.
 struct ProbeGuard {
     breakers: Arc<Mutex<BreakerSet>>,
     replica: usize,

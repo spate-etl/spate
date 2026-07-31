@@ -12,32 +12,35 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 ## Invariants
 
 <!--
-These are the properties the engine is arranged around. Most changes touch
-none of them, and ticking one is not a problem — it means the description
-above should say how the property still holds.
+Tick the ones this change touches. Ticking one is not a problem — it means
+the description above should say how the property still holds.
 
-They are documented in CONTRIBUTING.md and in docs/DESIGN.md.
+The numbers are canonical and defined in docs/DESIGN.md; CONTRIBUTING.md
+states the same list with the reasoning attached.
 -->
 
-- [ ] **Delivery is at-least-once.** A source watermark is never committed past
-      unacknowledged data — including across rebalances and shutdown.
-- [ ] **Source threads never block on a channel send.** Backpressure is
+- [ ] **INV-1 — delivery is at-least-once.** A source watermark is never
+      committed past unacknowledged data, including across rebalances and
+      shutdown.
+- [ ] **INV-2 — source threads never block on a channel send.** Backpressure is
       `try_send` + `Source::pause` + keep polling. A blocked poll loop gets the
       consumer evicted from its group.
-- [ ] **The checkpoint tracker stays synchronous and free of async runtimes.**
-      It is loom-tested and must remain so.
-- [ ] **Acks never block behind data.** The ack path is unbounded and atomic.
-- [ ] **The sink worker's intake path never awaits outside its `select!`.**
-      Anything it blocks on sits in a branch alongside the drain deadline, or
-      shutdown deadlocks.
-- [ ] **No connector types in `spate-core`'s public API**, and no 0.x
+- [ ] **INV-3 — the checkpoint tracker stays synchronous and free of async
+      runtimes.** It is loom-tested and must remain so.
+- [ ] **INV-4 — acks never block behind data.** The ack path is unbounded and
+      atomic.
+- [ ] **INV-5 — the sink worker's intake path never awaits outside its
+      `select!`.** Anything it blocks on sits in a branch alongside the drain
+      deadline, or shutdown deadlocks.
+- [ ] **INV-6 — no connector types in `spate-core`'s public API**, and no 0.x
       dependency types in any public trait bound. The `metrics` facade is the
       one sanctioned exception.
-- [ ] **Record error policies are Skip or Fail only**, and both are surfaced
-      through metrics rather than only logged.
-- [ ] **Metrics handles are pre-registered at build time** — never resolved on
-      the per-record path — and every family lives under the `spate_` umbrella.
-- [ ] **A gauge series has exactly one live owner per process.**
+- [ ] **INV-7 — record error policies are Skip or Fail only**, and both are
+      surfaced through metrics rather than only logged.
+- [ ] **INV-8 — metrics handles are pre-registered at build time** — never
+      resolved on the per-record path.
+- [ ] **INV-9 — every metric family lives under the `spate_` umbrella.**
+- [ ] **INV-10 — a gauge series has exactly one live owner per process.**
 
 ## Semver
 
@@ -48,19 +51,19 @@ They are documented in CONTRIBUTING.md and in docs/DESIGN.md.
 
 ## Checks
 
-- [ ] `cargo fmt --all` and `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
-- [ ] `cargo nextest run --workspace --all-features --locked`, plus
-      `cargo test --workspace --all-features --locked --doc` if you touched a
-      doc example
-- [ ] Every cargo command run with `--locked`, as CI does
-- [ ] Dependency changes: `cargo deny --all-features --locked check all`.
-      `THIRD-PARTY.md` is *not* required to be current on a pull request — it is
-      checked nightly and regenerated at release — but `./scripts/attribution.sh`
-      is welcome if you are adding a dependency rather than bumping one
-- [ ] Docs changed: `CI=true npm run build` in `website/` — without `CI=true`
-      the redirect validation does not run
+Tick by exit code, not by memory.
+
+- [ ] `make gates` — formatting, clippy, check, tests, doctests, the feature
+      matrix, licences and advisories, and the repository consistency checks
+- [ ] Docs changed: `make docs`. It sets `CI=true`, without which the redirect
+      validation silently does not run
+- [ ] Any ad-hoc cargo command run with `--locked`, as CI does
+- [ ] Dependency changes: covered by `make gates`. `THIRD-PARTY.md` is *not*
+      required to be current here — it is checked nightly and regenerated at
+      release — but `make attribution` is welcome if you are adding a dependency
+      rather than bumping one
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),
-      scoped to the crate touched
+      scoped to the crate touched, and carry no AI attribution trailers
 
 ## Anything else
 

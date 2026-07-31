@@ -2,15 +2,18 @@ name: CI
 
 # The trigger list is deliberately unfiltered. A workflow skipped by `on: paths:`
 # never reports its checks, and a required check that never reports blocks the
-# pull request forever — GitHub's own guidance is "do not use path or branch
-# filtering to skip workflow runs if the workflow is required to pass before
-# merging". A skipped *job*, by contrast, reports success. So the workflow always
-# runs and every filtering decision lives in a per-job `if:`, fed by the
-# `changes` job below.
+# pull request forever.
 on:
   push:
     branches: [main]
+  # `labeled` is in addition to the three defaults, which have to be named once
+  # any `types:` is given. It is what makes `ci: docker` and `ci: loom` take
+  # effect when applied — without it a label only reaches the classifier on the
+  # next push, which is too late to be useful. `unlabeled` is deliberately
+  # absent: removing a label cannot switch a suite off, so re-running for it
+  # would only spend minutes to reach the same verdict.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # A merge queue entry is a separate event with its own ref; without this line
   # nothing would report and every queued merge would fail on a missing check.
   merge_group:
@@ -69,6 +72,7 @@ jobs:
       site: ${{ steps.classify.outputs.site }}
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
+      loom: ${{ steps.classify.outputs.loom }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,6 +92,11 @@ jobs:
           # The pull request's author, not `github.actor` — the latter is
           # whoever last triggered the run and changes on a manual re-run.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Comma-joined, and through `env:` for the same injection reason as
+          # the SHAs above — a label name is free text somebody else typed.
+          # The classifier only reads `ci: docker` and `ci: loom` from this, and
+          # can only ever add work on the strength of them.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: ./scripts/ci-changes.sh
 
   # ---------------------------------------------------------------------------
@@ -115,7 +124,7 @@ jobs:
           components: rustfmt, clippy
           shared-key: dev-allfeatures
       # Cheap and unconditional: it resolves nothing and reads only .rs files.
-      - run: cargo fmt --all --check
+      - run: make fmt-check
       # `--all-targets` is doing the work of three steps: it compiles every
       # lib, bin, test, bench and example in the workspace. The two steps that
       # used to follow it — `cargo check -p spate --examples` and
@@ -130,7 +139,7 @@ jobs:
       # release-only breakage — a link error, or a `cfg(not(debug_assertions))`
       # path — which is worth a night's latency, not ~6 minutes per PR.
       - if: needs.changes.outputs.rust == 'true'
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: make clippy
 
   workflows:
     name: Workflow lint (zizmor)
@@ -177,10 +186,19 @@ jobs:
       #
       # Scanning all of `.github/`, not just `workflows/`: zizmor also audits
       # the Dependabot config and the composite action.
-      - run: zizmor --persona=regular .github/
+      - run: make zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: shellcheck scripts/*.sh
+      - run: make shellcheck
+
+      # The repository's own metadata has to stay self-consistent, and both of
+      # these check a class of drift nothing else would notice: a label
+      # referenced by an issue form or by Dependabot that does not exist (GitHub
+      # drops it silently), and the invariant lists in AGENTS.md, CONTRIBUTING.md
+      # and the pull request template falling out of step with docs/DESIGN.md.
+      # Both are pure file reads — no network, no toolchain.
+      - run: make check-labels
+      - run: make check-invariants
 
   deny:
     name: Licences and advisories
@@ -228,13 +246,13 @@ jobs:
       # pass or fail on dependencies we do not ship — a different tree from the
       # one every other job just built, and from the one THIRD-PARTY.md below
       # is generated against.
-      - run: cargo deny --all-features --locked check all
+      - run: make deny
 
       # The container-suite selection in ci-changes.sh is a reverse-dependency
       # closure written by hand. This asserts it still matches the real graph,
       # so a new crate or a new edge cannot silently narrow what CI runs.
       # `--no-deps` reads manifests only; it resolves nothing.
-      - run: ./scripts/ci-changes.sh --self-test
+      - run: make self-test
 
   # ---------------------------------------------------------------------------
   # Tier 2 — gated on tier 1, and scoped to what changed.
@@ -401,7 +419,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: dev-allfeatures
-      - run: cargo test --workspace --all-features --locked --doc
+      - run: make doctest
 
   features:
     name: Feature matrix (each feature)
@@ -432,6 +450,14 @@ jobs:
     # "does each feature compile alone".
     #
     # (`cargo fmt` is the other bare call, and it resolves nothing.)
+    #
+    # `make check-features` also runs two feature-*off* checks that this job did
+    # not, and that no other job can: with `--all-features` on, a crate that
+    # fails to compile *without* one of them still passes everywhere else.
+    # `spate-coordination` without its default features, and the `spate` facade
+    # with `s3` but no coordination backend — the second is what proves the
+    # facade never links async-nats when nothing asked for it. Two cargo checks
+    # against an already-warm cache; the gap they close was a documented one.
     timeout-minutes: 30
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
@@ -444,7 +470,32 @@ jobs:
         with:
           tools: cargo-hack@0.6.45
           shared-key: dev-allfeatures
-      - run: cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
+      - run: make check-features
+
+  loom:
+    name: Loom models (opt-in)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # Opt-in only, via the `ci: loom` label. The models run nightly regardless
+    # (see scheduled.yml); this exists for the case where you have just changed
+    # something under INV-3 and want the answer before merge rather than in the
+    # morning. Skipping is a legitimate outcome and the gate treats it as one.
+    if: needs.changes.outputs.loom == 'true'
+    timeout-minutes: 60
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # `--cfg loom` rebuilds the world against loom-typed primitives, so
+          # this shares nothing with any other job and needs its own cache. Same
+          # key as the scheduled job, so whichever runs first warms the other.
+          shared-key: loom
+      - run: make loom
 
   msrv:
     name: Check (MSRV 1.94)
@@ -470,7 +521,7 @@ jobs:
       # the committed Cargo.lock needs a toolchain newer than 1.94. With it, the
       # job answers the question it claims to: does the dependency set we
       # actually ship build on the MSRV?
-      - run: cargo check --workspace --all-features --locked
+      - run: make check
 
   containers:
     name: Container suites
@@ -629,7 +680,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, test, doctests, features, msrv, containers, site]
+    needs: [changes, lint, workflows, deny, test, doctests, features, msrv, containers, site, loom]
     steps:
       - name: Evaluate dependency results
         env:

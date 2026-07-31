@@ -1,6 +1,7 @@
 name: Records were lost, duplicated, or committed early
 description: A delivery-guarantee failure — the one class of bug this project most wants to hear about.
 title: "[delivery] "
+type: Bug
 labels: ["delivery-correctness"]
 body:
   - type: markdown
@@ -44,19 +45,42 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: connectors
+  - type: input
+    id: features
     attributes:
-      label: Which connectors
+      label: Cargo features
+      description: >-
+        Which features are enabled. This matters more than it looks — most of
+        the crate is behind one, and which ones are on decides which code paths
+        were even compiled in.
+      placeholder: 'kafka, clickhouse, avro'
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Rust version and platform
+      description: >-
+        `rustc --version` and your OS/architecture. The MSRV is 1.94.
+      placeholder: "rustc 1.97.0, macOS aarch64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Which components
       multiple: true
       options:
-        - Kafka source
-        - Kafka sink
-        - ClickHouse sink
-        - S3 source
-        - Avro deserializer
-        - JSON deserializer
-        - Coordination (multi-instance)
+        - Engine (spate-core)
+        - Kafka source (spate-kafka)
+        - Kafka sink (spate-kafka)
+        - ClickHouse sink (spate-clickhouse)
+        - S3 source (spate-s3)
+        - JSON deserializer (spate-json)
+        - Avro deserializer (spate-avro)
+        - Coordination (spate-coordination)
         - A connector I wrote
     validations:
       required: true
@@ -89,10 +113,23 @@ body:
       required: true
 
   - type: textarea
+    id: data
+    attributes:
+      label: A sample record
+      description: >-
+        One record in the shape the pipeline was carrying, with anything
+        sensitive replaced. Framing and field types decide a surprising amount
+        of the decode path, and a real example settles in one line what a
+        description takes several rounds to pin down.
+      placeholder: '{"id": 1, "ts": "2026-07-31T09:00:00Z", "payload": "..."}'
+
+  - type: textarea
     id: config
     attributes:
       label: Pipeline configuration
-      description: Your YAML, with credentials removed.
+      description: >-
+        Your YAML. **Remove credentials, hostnames and anything else you would
+        not publish** — this is a public issue.
       render: yaml
     validations:
       required: true
@@ -103,5 +140,5 @@ body:
       label: Logs
       description: >-
         Anything around the window, especially commit, drain and rebalance
-        lines. Long output is fine.
+        lines. Long output is fine. **Check it for credentials before pasting.**
       render: shell

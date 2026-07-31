@@ -98,8 +98,65 @@ container_suites_for() {
 # the table already knew about — so adding a whole new connector crate left the
 # guard green while its container suite ran nowhere.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Label overrides.
+# ---------------------------------------------------------------------------
+# `ci: docker` and `ci: loom` force a suite on for a pull request whose changed
+# paths would not have selected it.
+#
+# They can only add. `apply_ci_labels` appends to the list it was handed and
+# never assigns over it, so its result is a superset of its input by
+# construction; `--self-test` asserts that. Keep it that way — the classifier
+# fails closed on purpose, and an override able to clear a selection would make
+# it fail open.
+#
+# Removing a label turns nothing off; it stops adding, and the path-derived
+# baseline stands.
+apply_ci_labels() {
+    local labels=",${1:-},"
+    local suites="$2"
+    if [[ "$labels" == *",ci: docker,"* ]]; then
+        suites="$suites $CONTAINER_PKGS"
+    fi
+    echo "$suites"
+}
+
+ci_label_wants_loom() {
+    local labels=",${1:-},"
+    [[ "$labels" == *",ci: loom,"* ]]
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
     repo_root=$(git rev-parse --show-toplevel)
+
+    # Every case asserts that what comes out still contains everything that went
+    # in. `spate-kafka` stands in for "the paths already selected something", so
+    # an override that replaced rather than appended is caught here.
+    for labels in "" "ci: docker" "ci: loom" "ci: docker,ci: loom" \
+        "crate: spate-s3,ci: docker" "area: ci"; do
+        for before in "" "spate-kafka" "$CONTAINER_PKGS"; do
+            after=$(apply_ci_labels "$labels" "$before")
+            for pkg in $before; do
+                if [[ " $after " != *" $pkg "* ]]; then
+                    echo "::error::apply_ci_labels dropped '$pkg' (labels='$labels', before='$before')."
+                    echo "Label overrides must only ever add suites; see the note above the function."
+                    exit 1
+                fi
+            done
+        done
+    done
+
+    # The docker label also has to do something: the guard above would pass on a
+    # function that ignored its input entirely.
+    if [[ " $(apply_ci_labels "ci: docker" "") " != *" spate-kafka "* ]]; then
+        echo "::error::'ci: docker' no longer forces the container suites on."
+        exit 1
+    fi
+    if ! ci_label_wants_loom "ci: loom" || ci_label_wants_loom "ci: docker"; then
+        echo "::error::ci_label_wants_loom no longer recognises exactly the loom label."
+        exit 1
+    fi
 
     # Which crates actually own container tests, according to the source tree?
     derived_pkgs=""
@@ -173,7 +230,8 @@ for crate in sorted(names):
         diff <(echo "$expected") <(echo "$actual") || true
         exit 1
     fi
-    echo "container_suites_for() matches the crate graph, and CONTAINER_PKGS matches the tree."
+    echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
+    echo "and the label overrides are additive."
     exit 0
 fi
 
@@ -279,10 +337,11 @@ else
             suites="$suites $(container_suites_for "$crate")"
             ;;
         # A dependency or lint change moves the whole graph. So does a change to
-        # the workflows, the composite action, or this script — the last one
-        # decides what runs at all, so it has to prove itself against everything.
+        # the workflows, the composite action, the Makefile the workflow steps
+        # call, or this script — the last one decides what runs at all, so it
+        # has to prove itself against everything.
         Cargo.lock | Cargo.toml | deny.toml | rust-toolchain.toml | .config/* | \
-            .github/workflows/* | .github/actions/* | scripts/*)
+            .github/workflows/* | .github/actions/* | scripts/* | Makefile)
             suites="$suites $CONTAINER_PKGS"
             site=true
             ;;
@@ -299,6 +358,20 @@ fi
 if [[ "${PR_AUTHOR:-}" == "dependabot[bot]" && "${EVENT_NAME:-}" == "pull_request" ]]; then
     echo "note: dependabot pull request; container suites deferred to push-to-main."
     suites=""
+fi
+
+# Applied after the deferral above, so labelling a Dependabot pull request
+# `ci: docker` overrides it for that one bump.
+before_labels="$suites"
+suites=$(apply_ci_labels "${PR_LABELS:-}" "$suites")
+if [[ "$suites" != "$before_labels" ]]; then
+    echo "note: 'ci: docker' label present; container suites forced on."
+fi
+
+loom=false
+if ci_label_wants_loom "${PR_LABELS:-}"; then
+    echo "note: 'ci: loom' label present; loom models forced on."
+    loom=true
 fi
 
 # Deduplicate and render as cargo -p arguments.
@@ -318,4 +391,5 @@ fi
     echo "site=$site"
     echo "containers=$([[ -n "$container_args" ]] && echo true || echo false)"
     echo "container-args=$container_args"
+    echo "loom=$loom"
 } | tee -a "${GITHUB_OUTPUT:-/dev/stdout}"

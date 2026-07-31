@@ -216,9 +216,10 @@ pub struct BreakerConfig {
     pub open_for: Duration,
     /// Concurrent probe writes allowed while half-open.
     ///
-    /// `0` is treated as `1`. Taken literally it would mean the replica never
-    /// recovers — the first probe is admitted regardless of the budget, and
-    /// once that slot comes back nothing could re-admit it.
+    /// Must be at least 1; [`validate`](Self::validate) rejects `0`, which
+    /// taken literally would mean the replica never recovers. The breaker also
+    /// floors it at 1 at the point of use, so a config built programmatically
+    /// rather than loaded cannot wedge a replica either.
     pub half_open_probes: u32,
 }
 
@@ -230,6 +231,61 @@ impl Default for BreakerConfig {
             half_open_probes: 1,
         }
     }
+}
+
+impl BreakerConfig {
+    /// Ceiling on [`open_for`](Self::open_for).
+    ///
+    /// It is stamped into a deadline, and `Instant + Duration` panics rather
+    /// than saturating. A year already means "never probe again", so anything
+    /// beyond it is a typo rather than a policy.
+    pub const MAX_OPEN_FOR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+    /// Reject breaker thresholds that would misbehave at runtime.
+    ///
+    /// The companion to [`RetryConfig::validate`], called from the same place
+    /// for the same reason: the rules stay here instead of being mirrored per
+    /// connector.
+    ///
+    /// # Errors
+    ///
+    /// [`BreakerConfigError`], naming the offending key.
+    ///
+    /// ```
+    /// use spate_core::sink::{BreakerConfig, BreakerConfigError};
+    ///
+    /// assert!(BreakerConfig::default().validate().is_ok());
+    ///
+    /// let wedged = BreakerConfig { half_open_probes: 0, ..BreakerConfig::default() };
+    /// assert_eq!(wedged.validate(), Err(BreakerConfigError::ZeroHalfOpenProbes));
+    /// ```
+    pub fn validate(&self) -> Result<(), BreakerConfigError> {
+        if self.half_open_probes == 0 {
+            return Err(BreakerConfigError::ZeroHalfOpenProbes);
+        }
+        if self.open_for.is_zero() {
+            return Err(BreakerConfigError::ZeroOpenFor);
+        }
+        if self.open_for > Self::MAX_OPEN_FOR {
+            return Err(BreakerConfigError::OpenForTooLong(self.open_for));
+        }
+        Ok(())
+    }
+}
+
+/// Why a [`BreakerConfig`] was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BreakerConfigError {
+    /// `half_open_probes` is zero, so no probe budget exists to recover with.
+    #[error("breaker.half_open_probes must be at least 1")]
+    ZeroHalfOpenProbes,
+    /// `open_for` is zero, which is not a quarantine at all.
+    #[error("breaker.open_for must be non-zero")]
+    ZeroOpenFor,
+    /// `open_for` exceeds [`BreakerConfig::MAX_OPEN_FOR`].
+    #[error("breaker.open_for must not exceed a year (got {0:?})")]
+    OpenForTooLong(Duration),
 }
 
 /// Complete sink worker-pool configuration.
@@ -348,5 +404,59 @@ mod tests {
             ..RetryConfig::default()
         };
         assert!(upper.validate().is_ok(), "{upper:?}");
+    }
+
+    fn breaker(mutate: impl FnOnce(&mut BreakerConfig)) -> BreakerConfig {
+        let mut cfg = BreakerConfig::default();
+        mutate(&mut cfg);
+        cfg
+    }
+
+    #[test]
+    fn breaker_validate_rejects_a_budget_no_replica_could_recover_from() {
+        assert_eq!(
+            breaker(|c| c.half_open_probes = 0).validate(),
+            Err(BreakerConfigError::ZeroHalfOpenProbes)
+        );
+        assert_eq!(
+            breaker(|c| c.open_for = Duration::ZERO).validate(),
+            Err(BreakerConfigError::ZeroOpenFor)
+        );
+        let too_long = BreakerConfig::MAX_OPEN_FOR + Duration::from_secs(1);
+        assert_eq!(
+            breaker(|c| c.open_for = too_long).validate(),
+            Err(BreakerConfigError::OpenForTooLong(too_long))
+        );
+    }
+
+    #[test]
+    fn breaker_validate_accepts_the_default_and_the_boundaries() {
+        assert!(BreakerConfig::default().validate().is_ok());
+        // Both ends of every bound, so tightening one shows up here rather
+        // than in a connector's load path.
+        assert!(breaker(|c| c.half_open_probes = 1).validate().is_ok());
+        assert!(
+            breaker(|c| c.open_for = Duration::from_nanos(1))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            breaker(|c| c.open_for = BreakerConfig::MAX_OPEN_FOR)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    /// The cap exists because `on_failure` stamps `now + open_for` and
+    /// `Instant + Duration` panics on overflow. Validation rejects the value,
+    /// but `BreakerConfig` is a public `Copy` struct, so the breaker floors and
+    /// caps at the point of use too — this pins that the two agree on where
+    /// the line is.
+    #[test]
+    fn breaker_cap_matches_what_the_breaker_applies() {
+        assert_eq!(
+            BreakerConfig::MAX_OPEN_FOR,
+            Duration::from_secs(365 * 24 * 60 * 60)
+        );
     }
 }

@@ -121,15 +121,17 @@ it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
 | `retry.max_attempts` | integer | `0` | Attempt cap; `0` = unbounded (retry until the drain deadline — the at-least-once default). |
 | `breaker.failure_threshold` | integer | `3` | Consecutive failures before a shard/replica endpoint is quarantined. |
 | `breaker.open_for` | duration | `5s` | Quarantine duration before a half-open probe. Doubles as the ceiling on how long a batch parked behind a fully-probing shard waits before re-checking of its own accord, clamped to `[100ms, 30s]` — a backstop against a signal that never arrives, never the thing recovery depends on. Values above a year are capped, because `open_for` is stamped into a deadline and a cadence that long already means "never probe again". |
-| `breaker.half_open_probes` | integer | `1` | Probe writes allowed while half-open. `0` is treated as `1`: taken literally it would mean the replica never recovers, since the first probe is admitted regardless and nothing could ever re-admit the slot afterwards. |
+| `breaker.half_open_probes` | integer | `1` | Concurrent probe writes allowed while half-open, per probe episode. Must be at least 1 — `0` fails startup, because taken literally it would mean the replica never recovers: the first probe is admitted regardless and nothing could ever re-admit the slot afterwards. |
 
-The `retry` bounds above are enforced at load by `RetryConfig::validate`, which
-every sink calls, so a bad multiplier or a zero delay fails startup with the
+The `retry` and `breaker` bounds above are enforced at load by
+`RetryConfig::validate` and `BreakerConfig::validate`, which every sink calls,
+so a bad multiplier, a zero delay or a zero probe budget fails startup with the
 offending key rather than surfacing in the write loop. They rule out the
-nonsensical, not the merely aggressive: `initial: 1ns` passes. The backoff
-itself is independently total — it saturates at `retry.max` and never yields a
-zero-delay retry — so a sink assembled in code rather than YAML cannot escape
-those guarantees by skipping validation.
+nonsensical, not the merely aggressive: `initial: 1ns` passes. Both are
+independently total at the point of use — the backoff saturates at `retry.max`
+and never yields a zero-delay retry, and the breaker floors `half_open_probes`
+at 1 and caps `open_for` at a year — so a sink assembled in code rather than
+YAML cannot escape those guarantees by skipping validation.
 
 There is deliberately **no upper bound on `retry.max`** — a sink fronting an
 expensive or rate-limited destination may legitimately want a very patient

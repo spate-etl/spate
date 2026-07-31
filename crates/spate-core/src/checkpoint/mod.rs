@@ -9,7 +9,7 @@
 //! ([`PartitionTracker`]) and hands `Source::commit` its positions on an
 //! interval.
 //!
-//! Invariants (see `docs/DESIGN.md` and `CLAUDE.md`):
+//! Invariants (INV-1, INV-3 and INV-4, stated canonically in `docs/DESIGN.md`):
 //! - the tracker stays synchronous and tokio-free (loom-tested);
 //! - the ack path never blocks (unbounded channels, atomics only);
 //! - a watermark never advances past an unacknowledged or failed batch,

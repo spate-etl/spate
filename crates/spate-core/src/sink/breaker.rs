@@ -17,13 +17,8 @@
 use super::config::BreakerConfig;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
-
-/// Ceiling applied to `breaker.open_for` at construction. See
-/// [`BreakerSet::new`].
-const MAX_OPEN_FOR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -100,23 +95,22 @@ impl BreakerSet {
         metrics: Arc<SinkShardMetrics>,
     ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
-        // `BreakerConfig` has no validator, and `half_open_probes: 0` is
-        // expressible both in YAML and through the public `Copy` struct. Taken
-        // literally it is not "probe cautiously" but "never recover": the
-        // open→half-open promotion admits its first probe unconditionally, and
-        // once that slot is handed back the replica sits in `HalfOpen { 0 }`,
-        // which no budget of `0` can ever re-admit and no deadline covers,
-        // because half-open schedules nothing. One probe is the least a
-        // breaker can do and still be a breaker.
+        // `BreakerConfig::validate` rejects both of these at load, and every
+        // sink calls it. This is the programmatic path's share of the same
+        // rule: `BreakerConfig` is a public `Copy` struct, so `SinkParts` and
+        // `spate-test` can build one that never went through a loader.
+        //
+        // `half_open_probes: 0` taken literally is not "probe cautiously" but
+        // "never recover": the open→half-open promotion admits its first probe
+        // unconditionally, and once that slot is handed back the replica sits
+        // in `HalfOpen { 0 }`, which no budget of `0` can re-admit and no
+        // deadline covers, because half-open schedules nothing.
         cfg.half_open_probes = cfg.half_open_probes.max(1);
-        // Same reason, other key: `on_failure` stamps `now + open_for`, and
-        // `Instant + Duration` *panics* on overflow rather than saturating. A
-        // cadence beyond a year is already indistinguishable from "never probe
-        // again", so capping there costs no expressible intent and keeps an
-        // absurd `humantime` value from taking the shard worker down. The
-        // heartbeat's own clamp does not cover this — it bounds only how long
-        // a parked task waits, never what gets written into the state.
-        cfg.open_for = cfg.open_for.min(MAX_OPEN_FOR);
+        // `on_failure` stamps `now + open_for`, and `Instant + Duration`
+        // *panics* on overflow rather than saturating. The heartbeat's own
+        // clamp does not cover this — it bounds only how long a parked task
+        // waits, never what gets written into the state.
+        cfg.open_for = cfg.open_for.min(BreakerConfig::MAX_OPEN_FOR);
         for r in 0..replicas {
             metrics.set_replica_healthy(r, true);
         }
@@ -251,6 +245,10 @@ impl BreakerSet {
     /// `half_open_probes + 1` concurrent probes against an endpoint the
     /// breaker exists to shield. A release naming a run that has ended is
     /// therefore dropped, and wakes nobody, because it changed nothing.
+    ///
+    /// This bounds accounting, not overlap: two runs can still have probes in
+    /// flight at once, because ending a run does not abort the writes it
+    /// started. See the note on [`ProbeGuard`](super::worker).
     pub(crate) fn release_probe(&mut self, replica: usize, episode: u64) {
         let State::HalfOpen {
             probes_in_flight,

@@ -121,7 +121,7 @@ jobs:
         with:
           tools: cargo-about@0.9.1
       - id: regen
-        run: ./scripts/attribution.sh
+        run: make attribution
       - id: drift
         run: git diff --exit-code THIRD-PARTY.md
 
@@ -547,11 +547,11 @@ jobs:
     name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: plan
-    # Nightly, not weekly. CLAUDE.md states as an invariant that the checkpoint
-    # tracker is loom-tested and "must remain so", and the models were nightly
-    # before this restructure — moving them to weekly would have quietly
-    # widened the window on the one thing the project says it will not let
-    # regress. It is 21 tests and a few minutes.
+    # Nightly, not weekly. INV-3 says the checkpoint tracker stays synchronous
+    # and free of async runtimes precisely so loom can model it, and the models
+    # were nightly before this restructure — moving them to weekly would have
+    # quietly widened the window on the one thing the project says it will not
+    # let regress. It is 21 tests and a few minutes.
     if: needs.plan.outputs.nightly == 'true'
     timeout-minutes: 60
     steps:
@@ -567,9 +567,9 @@ jobs:
       # as `--lib` only (doc tests compiled under `--cfg loom` construct
       # loom-typed primitives outside a model and abort), and nextest would
       # buy nothing here. Do not "modernise" this onto nextest.
-      - run: cargo test -p spate-core --release --lib --locked
-        env:
-          RUSTFLAGS: --cfg loom
+      # The target carries `RUSTFLAGS=--cfg loom` itself, so this and a local
+      # run are the same command rather than two spellings of it.
+      - run: make loom
 
   coverage-containers:
     name: Coverage (with containers)
@@ -681,7 +681,7 @@ jobs:
       # error, or a `cfg(not(debug_assertions))` path. It lives here because
       # this job needs a release build anyway; on the PR path it was a second
       # full dependency compile and the slowest job in CI.
-      - run: cargo bench --no-run --workspace --all-features --locked
+      - run: make bench-check
       # Both bench steps below name their target explicitly. `cargo bench -p X --
       # --save-baseline` forwards those args to *every* bench target in the
       # package, including the lib's default libtest harness, which rejects them
@@ -690,7 +690,7 @@ jobs:
       #
       # spate-core's only bench target is divan, not criterion — divan has no
       # baseline concept, so it takes no criterion arguments at all.
-      - run: cargo bench -p spate-core --locked --bench chain
+      - run: make bench
       # spate-avro's `decode` is the criterion bench, and it is what critcmp
       # compares below. Saved as `current`, against last week's `previous`:
       # critcmp needs *two* named baselines to compare anything. Given one it

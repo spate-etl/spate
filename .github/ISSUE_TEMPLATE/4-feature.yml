@@ -1,7 +1,7 @@
 name: Propose an API change or a connector
 description: Something the framework should be able to do and cannot.
 title: "[feature] "
-labels: ["enhancement"]
+type: Feature
 body:
   - type: markdown
     attributes:
@@ -28,6 +28,25 @@ body:
         - A configuration or observability change
     validations:
       required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Which components
+      description: >-
+        Optional — leave it empty if the proposal is for something that does not
+        exist yet.
+      multiple: true
+      options:
+        - Engine (spate-core)
+        - Kafka source (spate-kafka)
+        - Kafka sink (spate-kafka)
+        - ClickHouse sink (spate-clickhouse)
+        - S3 source (spate-s3)
+        - JSON deserializer (spate-json)
+        - Avro deserializer (spate-avro)
+        - Coordination (spate-coordination)
+        - Test doubles (spate-test)
 
   - type: textarea
     id: problem
@@ -63,15 +82,16 @@ body:
     attributes:
       label: Does this touch any of these?
       description: >-
-        The engine's load-bearing invariants. Ticking one is not a problem —
-        it just means the proposal needs to say how the invariant still holds.
+        The engine's load-bearing invariants, numbered as they are in
+        `docs/DESIGN.md`. Ticking one is not a problem — it just means the
+        proposal needs to say how the invariant still holds.
       options:
-        - label: Delivery semantics — anything that could commit a watermark past unacknowledged data
-        - label: The source poll loop, which must never block on a channel send
-        - label: The checkpoint tracker, which is synchronous and free of async runtimes
-        - label: The sink intake path, which must not await outside its `select!`
-        - label: Metric naming or cardinality
-        - label: Adding a connector type to a public signature in `spate-core`
+        - label: INV-1 — delivery semantics, or anything that could commit a watermark past unacknowledged data
+        - label: INV-2 — the source poll loop, which must never block on a channel send
+        - label: INV-3 — the checkpoint tracker, which is synchronous and free of async runtimes
+        - label: INV-5 — the sink intake path, which must not await outside its `select!`
+        - label: INV-6 — adding a connector or 0.x dependency type to a public signature in `spate-core`
+        - label: INV-8, INV-9 or INV-10 — metric naming, cardinality, or gauge ownership
 
   - type: dropdown
     id: implement

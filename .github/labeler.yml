@@ -1,0 +1,107 @@
+# Path rules for the `crate:` and `area:` labels on a pull request.
+#
+# Only the coarse axis is automated. This workspace is one crate per directory,
+# so the label follows from the path that changed. Anything finer — which role,
+# which subsystem — is a judgement call a path cannot make, and stays manual.
+#
+# Every label named here must exist in `.github/labels.yml`; check-labels.sh
+# enforces that.
+#
+# This runs on pull requests only. Issues are labelled by hand at triage.
+
+"crate: spate":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate/**
+
+"crate: spate-core":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-core/**
+
+"crate: spate-kafka":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-kafka/**
+
+"crate: spate-clickhouse":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-clickhouse/**
+
+"crate: spate-s3":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-s3/**
+
+"crate: spate-json":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-json/**
+
+"crate: spate-avro":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-avro/**
+
+"crate: spate-coordination":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-coordination/**
+
+"crate: spate-test":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-test/**
+
+# `docs/` is the prose tree; `website/` is the Docusaurus app that renders it.
+# They move independently often enough to be worth separating — a dependency
+# bump in the site's npm tree is not a documentation change.
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          - "*.md"
+      # Two root markdown files are not documentation in this sense. CHANGELOG
+      # is generated and moves on every release; THIRD-PARTY is generated and
+      # belongs to the supply-chain label below. Both would otherwise put
+      # `area: docs` on the automated pull requests, where it means nothing.
+      - all-globs-to-all-files:
+          - "!CHANGELOG.md"
+          - "!THIRD-PARTY.md"
+
+"area: website":
+  - changed-files:
+      - any-glob-to-any-file: website/**
+
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - scripts/**
+          - Makefile
+          - codecov.yml
+          - .config/nextest.toml
+
+"area: benchmarks":
+  - changed-files:
+      - any-glob-to-any-file: benchmarks/**
+
+"area: examples":
+  - changed-files:
+      - any-glob-to-any-file: examples/**
+
+# The licence and advisory surface, all of it CODEOWNED. Worth seeing apart from
+# the rest of CI: these are the files where a change is a supply-chain decision
+# rather than a build tweak.
+"area: supply-chain":
+  - changed-files:
+      - any-glob-to-any-file:
+          - deny.toml
+          - about.toml
+          - about-html.hbs
+          - about-md.hbs
+          - THIRD-PARTY.md
+
+# The root manifest and lockfile — cross-crate plumbing that belongs to no single
+# crate. Cargo.lock is deliberately here rather than under supply-chain: it moves
+# on every dependency bump, and burying those in the supply-chain label would
+# make that label mean nothing.
+"area: workspace":
+  - changed-files:
+      - any-glob-to-any-file:
+          - Cargo.toml
+          - Cargo.lock
+          - release-plz.toml
+          - cliff.toml

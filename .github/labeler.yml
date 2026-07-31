@@ -54,9 +54,23 @@
           - docs/**
           - "*.md"
       # Two root markdown files are not documentation in this sense. CHANGELOG
-      # is generated and moves on every release; THIRD-PARTY is generated and
-      # belongs to the supply-chain label below. Both would otherwise put
+      # is assembled from changelog.d/ at release time; THIRD-PARTY is generated
+      # and belongs to the supply-chain label below. Both would otherwise put
       # `area: docs` on the automated pull requests, where it means nothing.
+      #
+      # This block is `all-globs-to-all-files`, so every pattern is required of
+      # *every* changed file — it is what stops a pull request whose only
+      # markdown is CHANGELOG.md from being called documentation. Nothing that
+      # legitimately accompanies a code change belongs here: `changelog.d/**`
+      # was briefly in this list and, because these are ANDed over every file,
+      # it stripped `area: docs` from any pull request carrying a fragment —
+      # which is the exact shape "Done means" mandates for a crate change that
+      # also touches docs/. With `sync-labels: true` that does not merely fail
+      # to add the label, it removes one already there.
+      #
+      # A fragment needs no rule of its own. It rides along with the change it
+      # describes, and `*.md` does not cross a `/` under minimatch, so
+      # `changelog.d/x.fixed.md` matches nothing above.
       - all-globs-to-all-files:
           - "!CHANGELOG.md"
           - "!THIRD-PARTY.md"

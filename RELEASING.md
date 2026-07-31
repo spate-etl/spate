@@ -5,31 +5,73 @@ Maintainer reference. Contributors want
 
 ## The normal case
 
-1. Draft the changelog entry: `git cliff --unreleased`. Edit it into a
-   `## [Unreleased]` section in [CHANGELOG.md](CHANGELOG.md) and push that to
-   `main`. Commit subjects say what changed; a release note says what it means
-   for somebody upgrading, so this is writing, not pasting.
-2. release-plz keeps a **release pull request** open against `main`, bumping
-   every crate's version and the exact internal pins. Review the bump — it is
-   derived from conventional-commit types, and a `feat` that should have been a
-   `fix` shows up here as a version that is one step too high.
-3. Move the `## [Unreleased]` heading to the new version number and date in the
-   same pull request.
-4. **Regenerate the attribution inventory onto the release branch:**
+Everything a release needs from a human lands on `main` **before** the release
+pull request merges, and nothing is ever committed onto that branch. release-plz
+**closes and replaces** a release pull request that gains a non-bot commit, so a
+commit made there is lost the next time anything lands on `main` — and the
+failure is silent, because what comes back is a fresh pull request that looks
+right. Steps 1 and 2 are in that order for this reason.
+
+1. **Decide the version, from release-plz rather than by hand.** Open the release
+   pull request it keeps against `main`: its title is `chore: release vX.Y.Z` and
+   its body lists every crate's bump with the `cargo-semver-checks` verdict.
+   Review that bump — it is derived from conventional-commit types, and a `feat`
+   that should have been a `fix` shows up here as a version one step too high.
+
+   Use the number from that pull request in the next step. Nothing reconciles the
+   two automatically, and a mismatch ships a changelog headed `## [X.Y.Z]` whose
+   tag link points at a tag that never gets created.
+
+2. **Assemble the changelog and regenerate the inventory, both on `main`:**
 
    ```sh
+   ./scripts/changelog.sh --build X.Y.Z
+
    cargo install cargo-about --locked --features cli --version 0.9.1
    ./scripts/attribution.sh
    ```
 
-   `THIRD-PARTY.md` is not gated on ordinary pull requests — it would fail every
-   dependency bump, since Dependabot cannot regenerate it — so by release time
-   it is usually stale by however many bumps have landed. This is the point at
-   which it has to be exact, because it is what somebody's legal review reads
-   against the version they are actually consuming. The nightly `attribution`
-   job will have said so already if it drifted.
-5. Merge it. The `release` job publishes all nine crates in dependency order,
+   The first groups everything in [`changelog.d/`](changelog.d) under a new
+   version heading, resolves each entry's pull request link, adds the
+   contributors, and deletes the fragments it consumed. **Read what it wrote
+   before committing it** — the assembly is mechanical, the release note is not,
+   and this is the last point at which a badly worded entry is cheap to fix.
+
+   The second is `THIRD-PARTY.md`, which is not gated on ordinary pull requests —
+   it would fail every dependency bump, since Dependabot cannot regenerate it —
+   so by release time it is stale by however many bumps have landed. This is the
+   point at which it has to be exact, because it is what somebody's legal review
+   reads against the version they are actually consuming. The nightly
+   `attribution` job will have said so already if it drifted.
+
+   Cross-check what the fragments cover against what actually landed:
+
+   ```sh
+   git log --no-merges --format='%s' vX.Y.Z-previous..main
+   ```
+
+   Anything user-visible there without an entry is a fragment somebody owed and
+   the gate did not catch. This is a plain `git log` on purpose — the check that
+   belongs in a tool is `make check-changelog`, which already runs per pull
+   request, and the release procedure should not depend on one nothing installs.
+
+   Both go to `main` through a pull request like anything else: the branch
+   ruleset requires one and carries no bypass actors, so there is no direct push.
+
+3. **Merge the release pull request.** It rebases onto the `main` you just
+   updated, and the `release` job publishes all nine crates in dependency order,
    tags `vX.Y.Z`, and opens the GitHub release.
+
+   Between step 2 landing and this merge, `CHANGELOG.md` on `main` carries a
+   version heading whose tag link 404s. That window is the cost of writing the
+   release note before the tag exists, and it closes on merge.
+
+   If the merge slips past the day step 2 ran, correct the date on the version
+   heading by hand before merging. `--build` stamps `date -u` at assembly, and
+   it will not re-run for a version the changelog already has — deliberately,
+   since a published version can never be replaced. The date is the one field in
+   an assembled block that is a fact about *when* rather than *what*, so it is
+   the one worth a second look.
 
 Nothing releases without a human merging something. `release_always = false`
 is what guarantees that.

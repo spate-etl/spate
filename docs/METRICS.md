@@ -228,10 +228,10 @@ series carry its name as the `component` label (a single sink uses
 | `spate_sink_retry_backoff_seconds` | gauge | `shard` | Retry backoff the shard is currently sleeping between write attempts **on an available replica**; `0` when no write is backing off. The step being served, **not** the time left in it — it does not count down, and jitter puts it in `[(1 - retry.jitter) × step, step]`. A shard writes up to `inflight.max_per_shard` batches at once, each backing off independently, so this is the max across them: it answers "is this shard asleep right now, and for how long", which the counters cannot (`spate_sink_retries_total` only moves on an *attempt*, so a shard parked in a long backoff looks flat and idle). A shard whose every replica is quarantined also sleeps — waiting for the earliest of a probe window and an in-flight probe reporting — and reads `0` here, because no attempt is being backed off; `spate_sink_shard_healthy == 0` covers that state. The implication runs one way: the write loop waits only when no replica is circuit-closed, but a shard with none can still be handing out a half-open probe rather than waiting. That is the safe direction — alerting on shard health cannot miss a parked shard. |
 | `spate_sink_errors_total` | counter | `shard`, `error_type` | Write errors by taxonomy class. |
 | `spate_sink_inflight_batches` | gauge | `shard` | Sealed batches not yet settled — those being written **plus** any sealed batch still queueing for one of the shard's `inflight.max_per_shard` slots. It can therefore sit one above the cap while a batch waits, and further above it in the pathological case where a single chunk crosses `batch.max_bytes` on its own (see `spate_sink_permit_wait_duration_seconds`). Read it against the cap for saturation, not as an equality. |
-| `spate_sink_replica_healthy` | gauge | `shard`, `replica` | 1 = circuit closed, 0 = open (replica quarantined). |
+| `spate_sink_replica_healthy` | gauge | `shard`, `replica` | 1 = circuit closed, 0 = not usable — open (quarantined) **or** half-open, where a replica is being probed but is not yet carrying ordinary writes. The distinction matters when reading `spate_sink_shard_healthy`, which is `≥1 replica closed` by the same rule. |
 | `spate_sink_breaker_opens_total` | counter | `shard`, `replica` | Circuit-breaker open transitions. |
 | `spate_sink_replica_errors_total` | counter | `shard`, `replica` | Failed write attempts attributed to a replica — which endpoint is erroring (`spate_sink_errors_total` gives the class breakdown per shard). |
-| `spate_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing each `open_for` window. |
+| `spate_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing. The probe cadence is `open_for` **plus** the probe's own duration — the re-open deadline is stamped when a failure is reported, not when the attempt began — and while a probe is in flight no further one starts. |
 | `spate_sink_abandoned_batches_total` | counter | `shard` | Batches abandoned at drain deadline (will replay after restart). |
 | `spate_sink_drain_overrun_total` | counter | `shard` | Shard workers force-aborted for failing to return by the drain deadline. **Non-zero is a framework bug, not an operating condition** — a worker is supposed to abandon at the deadline under its own power. Shutdown still terminated and the data still replays (the acknowledgements fail with the worker), but that shard's batches are missing from `abandoned` above and from the `ExitReport`'s drain counts, so the two disagree by an unknown amount. Alert on `> 0`. |
 
@@ -429,9 +429,10 @@ config section):
   replicas of a shard means the shard channel will fill and pause the source.
 - `spate_sink_shard_healthy == 0` — no replica of the shard is circuit-closed;
   intake stalls and the shard back-pressures the source (the whole-shard
-  escalation of the per-replica `replica_healthy` signal). Recovery probes
-  still fire each `open_for` window, so the gauge stays 0 through failed
-  probe cycles until one succeeds. Pair with a rising
+  escalation of the per-replica `replica_healthy` signal). Recovery probes keep
+  firing — every `open_for` plus the failing probe's own duration, since the
+  re-open deadline is stamped when the failure is reported — so the gauge stays
+  0 through failed probe cycles until one succeeds. Pair with a rising
   `spate_sink_replica_errors_total{replica}` to identify the failing endpoints.
 - `spate_sink_retry_backoff_seconds` sustained near `retry.max` — the shard is
   parked between attempts, not idle. Threshold at `(1 - retry.jitter) *

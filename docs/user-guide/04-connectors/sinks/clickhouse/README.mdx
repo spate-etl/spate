@@ -189,10 +189,10 @@ stays async and takes no position on the tradeoff.
 When **no** replica of a shard is circuit-closed, write attempts park until
 the next half-open probe window, or until a probe already in flight reports
 (each probe is a real batch write, retried every `open_for`), in-flight slots
-stay held, and the shard's queue fills,
-so backpressure reaches the source and the source watermark stalls rather
-than losing or misrouting data — records are never rerouted to another shard
-(that would break the record→shard placement and the dedup-token scheme).
+stay held, and the shard's queue fills, so backpressure reaches the source and
+the source watermark stalls rather than losing or misrouting data — records
+are never rerouted to another shard (that would break the record→shard
+placement and the dedup-token scheme).
 With the default unbounded `retry.max_attempts` this holds indefinitely;
 with a bounded one, exhausted batches fail their acks and replay after
 restart instead — the watermark stalls either way. Recovery is automatic

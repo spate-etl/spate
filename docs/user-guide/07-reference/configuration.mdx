@@ -120,8 +120,8 @@ it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
 | `retry.jitter` | float | `0.2` | Fraction of each delay randomized away. Must be finite and within `[0.0, 1.0]`, both ends allowed. Jitter only ever **shortens**: the sleep lands in `[(1 - jitter) × delay, delay]`, never above it and never at zero. |
 | `retry.max_attempts` | integer | `0` | Attempt cap; `0` = unbounded (retry until the drain deadline — the at-least-once default). |
 | `breaker.failure_threshold` | integer | `3` | Consecutive failures before a shard/replica endpoint is quarantined. |
-| `breaker.open_for` | duration | `5s` | Quarantine duration before a half-open probe. |
-| `breaker.half_open_probes` | integer | `1` | Probe writes allowed while half-open. |
+| `breaker.open_for` | duration | `5s` | Quarantine duration before a half-open probe. Doubles as the ceiling on how long a batch parked behind a fully-probing shard waits before re-checking of its own accord, clamped to `[100ms, 30s]` — a backstop against a signal that never arrives, never the thing recovery depends on. Values above a year are capped, because `open_for` is stamped into a deadline and a cadence that long already means "never probe again". |
+| `breaker.half_open_probes` | integer | `1` | Probe writes allowed while half-open. `0` is treated as `1`: taken literally it would mean the replica never recovers, since the first probe is admitted regardless and nothing could ever re-admit the slot afterwards. |
 
 The `retry` bounds above are enforced at load by `RetryConfig::validate`, which
 every sink calls, so a bad multiplier or a zero delay fails startup with the

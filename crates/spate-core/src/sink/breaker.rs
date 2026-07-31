@@ -17,14 +17,31 @@
 use super::config::BreakerConfig;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+/// Ceiling applied to `breaker.open_for` at construction. See
+/// [`BreakerSet::new`].
+const MAX_OPEN_FOR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-    Closed { consecutive_failures: u32 },
-    Open { until: Instant },
-    HalfOpen { probes_in_flight: u32 },
+    Closed {
+        consecutive_failures: u32,
+    },
+    Open {
+        until: Instant,
+    },
+    HalfOpen {
+        probes_in_flight: u32,
+        /// Which half-open *episode* this is. A replica can enter half-open,
+        /// re-open, and enter it again while a probe slot from the first
+        /// episode is still unaccounted for; without this, handing that stale
+        /// slot back would credit the later episode and let it run one more
+        /// concurrent probe than `half_open_probes` allows.
+        episode: u64,
+    },
 }
 
 /// One replica handed out by [`BreakerSet::next_replica`].
@@ -32,10 +49,13 @@ enum State {
 pub(crate) struct Pick {
     /// Index into the shard's endpoint list.
     pub(crate) replica: usize,
-    /// This pick consumed a half-open probe slot, so the caller must release
-    /// it if the attempt never reports an outcome. See
+    /// `Some(episode)` when this pick spent a half-open probe slot, which the
+    /// caller must hand back if the attempt never reports an outcome. The
+    /// episode identifies *which* half-open run the slot came from, so a
+    /// release that arrives after the replica has re-opened and re-probed is
+    /// discarded rather than credited to the wrong one. See
     /// [`BreakerSet::release_probe`].
-    pub(crate) probe: bool,
+    pub(crate) probe: Option<u64>,
 }
 
 /// Breaker state for every replica of one shard, plus the round-robin
@@ -67,11 +87,36 @@ pub(crate) struct BreakerSet {
     /// bump and waker wakes — the same class of side effect as the gauge
     /// writes already made here.
     wake_tx: watch::Sender<u64>,
+    /// Source of half-open episode numbers. Monotonic across the whole set —
+    /// it only has to distinguish one episode from another, never to be dense
+    /// per replica.
+    next_episode: u64,
 }
 
 impl BreakerSet {
-    pub(crate) fn new(replicas: usize, cfg: BreakerConfig, metrics: Arc<SinkShardMetrics>) -> Self {
+    pub(crate) fn new(
+        replicas: usize,
+        mut cfg: BreakerConfig,
+        metrics: Arc<SinkShardMetrics>,
+    ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
+        // `BreakerConfig` has no validator, and `half_open_probes: 0` is
+        // expressible both in YAML and through the public `Copy` struct. Taken
+        // literally it is not "probe cautiously" but "never recover": the
+        // open→half-open promotion admits its first probe unconditionally, and
+        // once that slot is handed back the replica sits in `HalfOpen { 0 }`,
+        // which no budget of `0` can ever re-admit and no deadline covers,
+        // because half-open schedules nothing. One probe is the least a
+        // breaker can do and still be a breaker.
+        cfg.half_open_probes = cfg.half_open_probes.max(1);
+        // Same reason, other key: `on_failure` stamps `now + open_for`, and
+        // `Instant + Duration` *panics* on overflow rather than saturating. A
+        // cadence beyond a year is already indistinguishable from "never probe
+        // again", so capping there costs no expressible intent and keeps an
+        // absurd `humantime` value from taking the shard worker down. The
+        // heartbeat's own clamp does not cover this — it bounds only how long
+        // a parked task waits, never what gets written into the state.
+        cfg.open_for = cfg.open_for.min(MAX_OPEN_FOR);
         for r in 0..replicas {
             metrics.set_replica_healthy(r, true);
         }
@@ -89,12 +134,20 @@ impl BreakerSet {
             metrics,
             shard_healthy: true,
             wake_tx: watch::Sender::new(0),
+            next_episode: 0,
         }
     }
 
-    /// A receiver for the wake signal, marked as having seen the present.
-    /// Every write task takes one before it can park on a set that offers it
-    /// nothing.
+    /// A receiver for the wake signal, whose cursor is the version of the
+    /// state as of this call.
+    ///
+    /// Meant to be taken **inside the same critical section** that found
+    /// nothing pickable. That is what makes a missed wake impossible rather
+    /// than merely unlikely: every publisher runs in a strictly later critical
+    /// section, so its bump is strictly later than this cursor, and the
+    /// waiter's `changed()` returns without suspending. A receiver held across
+    /// picks would push that guarantee out into wherever the caller chooses to
+    /// re-arm.
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.wake_tx.subscribe()
     }
@@ -107,20 +160,26 @@ impl BreakerSet {
     /// where a moment ago there was none, and a waiter that computed its wake
     /// from the old state has to recompute it.
     ///
-    /// Ordering, which is the whole point: a waiter snapshots its receiver's
-    /// version *before* it reads the states, and this bump happens *after*
-    /// the mutation and under the same mutex. The two critical sections
-    /// serialize, so a waiter that read the pre-outcome states is necessarily
-    /// behind this version and its next `changed()` returns without ever
-    /// suspending. There is no interleaving in which a waiter observes the
-    /// old state and also misses the wake.
+    /// Ordering, which is the whole point: a waiter takes its receiver from
+    /// [`subscribe`](Self::subscribe) inside the very critical section that
+    /// read the states, and this bump happens after the mutation inside
+    /// another. The two serialize on the mutex, so a waiter holding a cursor
+    /// from the pre-outcome state is necessarily behind this version and its
+    /// `changed()` returns without ever suspending. There is no interleaving
+    /// in which a waiter observes the old state and also misses the wake.
     fn publish_wake(&self) {
         self.wake_tx.send_modify(|g| *g = g.wrapping_add(1));
     }
 
-    /// Pick the next usable replica, rotating round-robin and skipping open
-    /// breakers (open breakers past their deadline transition to half-open
-    /// and become usable as probes). `None` when every replica is open.
+    /// Pick the next usable replica, rotating round-robin and skipping
+    /// unavailable ones (an open breaker past its deadline transitions to
+    /// half-open and becomes usable as a probe).
+    ///
+    /// `None` when nothing is pickable, which is **two** states, not one:
+    /// every replica open and still inside its deadline, or every replica
+    /// half-open with its probe budget spent. Only the first has an instant to
+    /// wait for — see [`next_probe_at`](Self::next_probe_at) and the module
+    /// header.
     pub(crate) fn next_replica(&mut self, now: Instant) -> Option<Pick> {
         let n = self.states.len();
         for step in 0..n {
@@ -130,29 +189,36 @@ impl BreakerSet {
                     self.cursor = (idx + 1) % n;
                     return Some(Pick {
                         replica: idx,
-                        probe: false,
+                        probe: None,
                     });
                 }
                 State::Open { until } if now >= until => {
+                    // A fresh half-open run, so a probe slot still outstanding
+                    // from the previous one cannot be handed back into it.
+                    self.next_episode += 1;
+                    let episode = self.next_episode;
                     self.states[idx] = State::HalfOpen {
                         probes_in_flight: 1,
+                        episode,
                     };
                     self.cursor = (idx + 1) % n;
                     return Some(Pick {
                         replica: idx,
-                        probe: true,
+                        probe: Some(episode),
                     });
                 }
-                State::HalfOpen { probes_in_flight }
-                    if probes_in_flight < self.cfg.half_open_probes =>
-                {
+                State::HalfOpen {
+                    probes_in_flight,
+                    episode,
+                } if probes_in_flight < self.cfg.half_open_probes => {
                     self.states[idx] = State::HalfOpen {
                         probes_in_flight: probes_in_flight + 1,
+                        episode,
                     };
                     self.cursor = (idx + 1) % n;
                     return Some(Pick {
                         replica: idx,
-                        probe: true,
+                        probe: Some(episode),
                     });
                 }
                 _ => {}
@@ -178,16 +244,28 @@ impl BreakerSet {
     /// a release — the probe never happened, so the next caller should be
     /// allowed to take it.
     ///
-    /// Only meaningful while the replica is still `HalfOpen`; a replica that
-    /// has since moved on had its budget cleared wholesale, so this is a
-    /// no-op. Callers must still disarm rather than rely on that check — see
-    /// `ProbeGuard` in the worker.
-    pub(crate) fn release_probe(&mut self, replica: usize) {
-        if let State::HalfOpen { probes_in_flight } = self.states[replica] {
-            self.states[replica] = State::HalfOpen {
-                probes_in_flight: probes_in_flight.saturating_sub(1),
-            };
+    /// `episode` is what makes this safe to call late. A replica can leave
+    /// half-open and enter it again while a slot from the earlier run is still
+    /// unaccounted for, and "is this replica half-open *now*" cannot tell the
+    /// two runs apart — crediting the later one would let it run
+    /// `half_open_probes + 1` concurrent probes against an endpoint the
+    /// breaker exists to shield. A release naming a run that has ended is
+    /// therefore dropped, and wakes nobody, because it changed nothing.
+    pub(crate) fn release_probe(&mut self, replica: usize, episode: u64) {
+        let State::HalfOpen {
+            probes_in_flight,
+            episode: current,
+        } = self.states[replica]
+        else {
+            return;
+        };
+        if current != episode {
+            return;
         }
+        self.states[replica] = State::HalfOpen {
+            probes_in_flight: probes_in_flight.saturating_sub(1),
+            episode: current,
+        };
         self.publish_wake();
     }
 
@@ -474,7 +552,8 @@ mod tests {
     }
 
     /// `Pick::probe` is what tells the write task whether it is holding a
-    /// budgeted slot it must hand back. A pick off a closed breaker is not.
+    /// budgeted slot it must hand back, and which half-open run it came from.
+    /// A pick off a closed breaker holds nothing.
     #[tokio::test(start_paused = true)]
     async fn only_a_half_open_pick_reports_itself_as_a_probe() {
         let mut b = set(1, 1);
@@ -483,19 +562,17 @@ mod tests {
             b.next_replica(t0),
             Some(Pick {
                 replica: 0,
-                probe: false
+                probe: None
             }),
             "a closed breaker consumes no budget"
         );
 
         b.on_failure(0, t0);
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(
-            b.next_replica(t1),
-            Some(Pick {
-                replica: 0,
-                probe: true
-            }),
+        let pick = b.next_replica(t1).expect("promoted to half-open");
+        assert_eq!(pick.replica, 0);
+        assert!(
+            pick.probe.is_some(),
             "the open→half-open promotion spends the first probe"
         );
     }
@@ -509,10 +586,10 @@ mod tests {
         let t0 = Instant::now();
         b.on_failure(0, t0);
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
+        let episode = b.next_replica(t1).expect("probe").probe.expect("budgeted");
         assert_eq!(b.next_replica_idx(t1), None, "budget spent");
 
-        b.release_probe(0);
+        b.release_probe(0, episode);
         assert_eq!(
             b.next_replica_idx(t1),
             Some(0),
@@ -520,23 +597,60 @@ mod tests {
         );
     }
 
-    /// A guard that drops after its outcome was already reported must not
-    /// hand back a slot the reported outcome already cleared — another batch
-    /// may have re-promoted the replica since. The worker disarms rather than
-    /// relying on this, but the state check is the second line of defence.
+    /// A slot handed back after its half-open run has *ended* must not be
+    /// credited to whatever run is current.
+    ///
+    /// "Is this replica half-open now" cannot tell the two apart: a replica
+    /// can go half-open, re-open, and go half-open again while the first run's
+    /// slot is still unaccounted for. Crediting the later run lets it write
+    /// `half_open_probes + 1` concurrent probes at an endpoint the breaker
+    /// exists to shield, which is the whole point of quarantining it.
+    #[tokio::test(start_paused = true)]
+    async fn a_slot_released_from_an_ended_run_does_not_credit_the_current_one() {
+        let mut b = set(1, 1);
+        let t0 = Instant::now();
+        b.on_failure(0, t0);
+
+        // Run one: X takes the only probe, then a straggler failure re-opens
+        // the replica while X is still in flight.
+        let t1 = t0 + Duration::from_secs(6);
+        let stale = b.next_replica(t1).expect("probe").probe.expect("budgeted");
+        b.on_failure(0, t1);
+        assert!(b.is_open(0), "re-opened under X");
+
+        // Run two: C takes its only probe, and the budget is spent.
+        let t2 = t1 + Duration::from_secs(6);
+        assert_eq!(b.next_replica_idx(t2), Some(0));
+        assert_eq!(b.next_replica_idx(t2), None, "run two's budget is spent");
+
+        // X finally dies and hands back a slot belonging to run one.
+        b.release_probe(0, stale);
+        assert_eq!(
+            b.next_replica_idx(t2),
+            None,
+            "a slot from an ended run must not become a second concurrent \
+             probe in the current one"
+        );
+    }
+
+    /// The same rule for a replica that has left half-open altogether: the
+    /// reported outcome already cleared the budget wholesale, so a late
+    /// release must not resurrect a slot.
     #[tokio::test(start_paused = true)]
     async fn releasing_a_replica_that_moved_on_does_not_grant_extra_probes() {
         let mut b = set(1, 1);
         let t0 = Instant::now();
         b.on_failure(0, t0);
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
+        let episode = b.next_replica(t1).expect("probe").probe.expect("budgeted");
 
-        // The probe succeeded: the replica is closed and the budget is gone
-        // wholesale. A late release must not resurrect it as a half-open slot.
+        // The probe succeeded, so the replica is closed.
         b.on_success(0);
-        b.release_probe(0);
-        assert!(!b.is_open(0), "still closed");
+        b.release_probe(0, episode);
+        assert!(
+            matches!(b.states[0], State::Closed { .. }),
+            "a release must not drag a closed replica back into half-open"
+        );
 
         // Re-open it and confirm the budget is the configured one, not one
         // inflated by the stale release.
@@ -544,6 +658,71 @@ mod tests {
         let t2 = t1 + Duration::from_secs(6);
         assert_eq!(b.next_replica_idx(t2), Some(0));
         assert_eq!(b.next_replica_idx(t2), None, "still exactly one probe");
+    }
+
+    /// `half_open_probes: 0` is expressible — `BreakerConfig` has no validator
+    /// — and taken literally it means "never recover": the promotion admits
+    /// its first probe regardless, and once that slot is handed back the
+    /// replica rests in half-open with a budget nothing can satisfy and no
+    /// deadline to wait on, so the shard is unwritable for good.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_probe_budget_cannot_wedge_a_replica_shut() {
+        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let mut b = BreakerSet::new(
+            1,
+            BreakerConfig {
+                failure_threshold: 1,
+                open_for: Duration::from_secs(5),
+                half_open_probes: 0,
+            },
+            Arc::new(SinkShardMetrics::new(
+                &labels,
+                0,
+                &["r0".to_string()],
+                crate::metrics::E2eBasis::Ingest,
+            )),
+        );
+        let t0 = Instant::now();
+        b.on_failure(0, t0);
+        let t1 = t0 + Duration::from_secs(6);
+        let episode = b.next_replica(t1).expect("probe").probe.expect("budgeted");
+
+        b.release_probe(0, episode);
+        assert_eq!(
+            b.next_replica_idx(t1),
+            Some(0),
+            "a released slot must be re-takeable, or the replica is shut for \
+             the life of the process"
+        );
+    }
+
+    /// `open_for` is unvalidated, and `Instant + Duration` panics on overflow
+    /// rather than saturating — so an absurd value would take the shard worker
+    /// down at the first failure, not merely probe slowly.
+    #[tokio::test(start_paused = true)]
+    async fn an_absurd_open_for_does_not_panic_the_state_machine() {
+        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let mut b = BreakerSet::new(
+            1,
+            BreakerConfig {
+                failure_threshold: 1,
+                open_for: Duration::MAX,
+                half_open_probes: 1,
+            },
+            Arc::new(SinkShardMetrics::new(
+                &labels,
+                0,
+                &["r0".to_string()],
+                crate::metrics::E2eBasis::Ingest,
+            )),
+        );
+        let t0 = Instant::now();
+        b.on_failure(0, t0);
+        assert!(b.is_open(0));
+        assert!(
+            b.next_probe_at(t0).is_some(),
+            "an open breaker still names a deadline, however distant"
+        );
     }
 
     #[tokio::test(start_paused = true)]

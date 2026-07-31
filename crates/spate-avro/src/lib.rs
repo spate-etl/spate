@@ -2,9 +2,11 @@
 //!
 //! Decodes bare Avro datums as carried by Kafka messages — Confluent wire
 //! format (magic byte + schema id + datum), Avro single-object encoding,
-//! or raw datums with a fixed schema — into either dynamically-typed
-//! [`AvroValue`] records or your own serde types
-//! ([`AvroSerdeDeserializer`]).
+//! or raw datums with a fixed schema — three ways: single-pass into your
+//! own serde types ([`AvroDatumDeserializer`], the throughput path, with
+//! optional zero-copy borrowed records), two-pass into serde types with
+//! Avro schema resolution ([`AvroSerdeDeserializer`]), or into
+//! dynamically-typed [`AvroValue`] records ([`AvroValueDeserializer`]).
 //!
 //! # Never block the pipeline thread
 //!

@@ -169,7 +169,7 @@ licence texts — both are deploy-time artifacts, and generating them cost every
 Two consequences, both deliberate and both worth stating plainly. **The whole
 published site is now up to a day stale**, not just `/api/` — the deleted
 `docs.yml` deployed on every push to `main` (seven deploys on 2026-07-24), and
-this deploys once a night. And `cargo doc` and `about-html.hbs` are no longer
+this deploys once a night. And `cargo doc` and `about/html.hbs` are no longer
 exercised before merge, so a rustdoc-breaking doc comment or a broken licence
 template merges green and fails that night — which is why `docs-build` failing
 now files an issue rather than going unnoticed.

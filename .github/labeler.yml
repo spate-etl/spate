@@ -90,8 +90,7 @@
       - any-glob-to-any-file:
           - deny.toml
           - about.toml
-          - about-html.hbs
-          - about-md.hbs
+          - about/**
           - THIRD-PARTY.md
 
 # The root manifest and lockfile — cross-crate plumbing that belongs to no single

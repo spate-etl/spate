@@ -20,8 +20,14 @@
 
 # Supply-chain surface: the licence/advisory/bans policy, the resolved graph
 # every gate is evaluated against, and the generated attribution inventory.
+#
+# `/about/` belongs here as much as `about.toml` does. The templates decide what
+# the published attribution *says* — the terms we claim to comply with, and the
+# caveats a reader relies on — so editing one is a compliance change wearing the
+# clothes of a formatting change.
 /deny.toml              @MarcusKainth
 /about.toml             @MarcusKainth
+/about/                 @MarcusKainth
 /Cargo.lock             @MarcusKainth
 /THIRD-PARTY.md         @MarcusKainth
 

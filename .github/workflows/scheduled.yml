@@ -383,7 +383,7 @@ jobs:
           rm -rf website/static/licenses
           mkdir -p website/static/licenses
           cargo about generate --workspace --all-features --locked --fail \
-            -o website/static/licenses/index.html about-html.hbs
+            -o website/static/licenses/index.html about/html.hbs
 
       - name: Install dependencies
         working-directory: website

@@ -119,6 +119,18 @@ needs_entry() {
     scopes="${BASH_REMATCH[3]}"
     bang="${BASH_REMATCH[4]}"
 
+    # `!` decides on its own, before either axis. It is the author declaring a
+    # breaking change, and a breaking change is the one thing a reader upgrading
+    # cannot afford to have omitted — so the scope it was filed under does not
+    # get to overrule it.
+    #
+    # This is not hypothetical. `c6a7a5c docs(workspace)!:` was scoped to a
+    # documentation area and carried, inside it, `fix(spate-core,spate-kafka,
+    # spate-clickhouse)!: validate breaker config at load` with a BREAKING
+    # CHANGE footer — `breaker.open_for: 0s` stopped loading. Reading the scope
+    # first exempted it, and 0.2.0 was assembled without the entry it owed.
+    [ -n "$bang" ] && return 0
+
     # --- scope axis: can this reach something somebody depends on? ---
     if [ -z "$scopes" ]; then
         reaches_crate=1
@@ -138,10 +150,6 @@ needs_entry() {
     [ "$reaches_crate" = "1" ] || return 1
 
     # --- type axis: would somebody upgrading care? ---
-    # `!` promotes any type, but only this far down: the scope axis has already
-    # exempted `docs(workspace)!:`, which is a documentation rename and breaks
-    # no API.
-    [ -n "$bang" ] && return 0
     case "$type" in
     # Exactly cliff.toml's non-skipped, user-facing groups. `perf` is in because
     # that file already groups it under a "Performance" heading — the repository
@@ -161,7 +169,7 @@ needs_entry() {
 # a here-document and costs microseconds, and a separate target is a target
 # somebody forgets to run.
 self_test() {
-    local failures=0 subject want got crate scope n=0 sample extracted
+    local failures=0 subject want got crate scope n=0 sample extracted probe
 
     while IFS='|' read -r subject want; do
         case "$subject" in '' | '#'*) continue ;; esac
@@ -197,12 +205,16 @@ chore(ci): bump mikepenz/action-junit-report|exempt
 chore(docs): bump typescript in /website|exempt
 chore(examples): bump a dependency|exempt
 chore: release v0.2.0|exempt
-# --- the breaking marker promotes an otherwise-exempt type ---
+# --- the breaking marker decides on its own, before either axis ---
 refactor(spate-core)!: rename a public trait|need
 perf(spate-kafka)!: change the batch shape|need
 feat(spate-s3)!: fence the split leases|need
-# --- ...but only where the scope already reaches a crate ---
-docs(workspace)!: migrate CLAUDE.md to AGENTS.md|exempt
+# `docs(workspace)!:` is real history — c6a7a5c — and it carried a BREAKING
+# CHANGE to `breaker.open_for` inside a documentation scope. Reading the scope
+# first exempted it and 0.2.0 shipped without the entry.
+docs(workspace)!: migrate CLAUDE.md to AGENTS.md|need
+chore(ci)!: drop a workflow input|need
+test(spate-core)!: rename a test helper somebody imports|need
 # --- no scope is not an exemption. All five are real history. ---
 refactor!: rename the framework to spate|need
 feat!: leader-computed sticky assignment for source coordination|need
@@ -268,6 +280,34 @@ TABLE
         echo "changelog.sh: fragment_type accepted README.md as type '$extracted'" >&2
         failures=$((failures + 1))
     fi
+    # A nested path must be rejected. `--build` globs one level, so accepting it
+    # here would pass the gate on a fragment the release cannot see.
+    extracted=$(fragment_type "changelog.d/sub/x.fixed.md" || true)
+    if [ -n "$extracted" ]; then
+        echo "changelog.sh: fragment_type accepted a nested path as type '$extracted' —" >&2
+        echo "  --build globs one level, so the gate would pass and the release would omit it" >&2
+        failures=$((failures + 1))
+    fi
+
+    # A fragment has to say something. This is the guard that keeps the
+    # design claim in this file's header true.
+    probe="$(mktemp -d)/probe.fixed.md"
+    : >"$probe"
+    if fragment_has_prose "$probe"; then
+        echo "changelog.sh: an empty file counts as a fragment — the gate is fail-open" >&2
+        failures=$((failures + 1))
+    fi
+    printf '   \n\n\t\n' >"$probe"
+    if fragment_has_prose "$probe"; then
+        echo "changelog.sh: a whitespace-only file counts as a fragment" >&2
+        failures=$((failures + 1))
+    fi
+    printf 'A real note.\n' >"$probe"
+    if ! fragment_has_prose "$probe"; then
+        echo "changelog.sh: a fragment with prose does not count as one" >&2
+        failures=$((failures + 1))
+    fi
+    rm -rf "$(dirname "$probe")"
 
     [ "$failures" -eq 0 ] || fail "$failures self-test failure(s) — this script is wrong, not your change"
 }
@@ -275,9 +315,17 @@ TABLE
 # The type embedded in a fragment filename, or nothing if the name is not a
 # fragment. Keeping this a function rather than a glob is what lets the
 # self-test assert that README.md is not mistaken for one.
+#
+# The path must be exactly `changelog.d/<slug>.<type>.md` — one level, no
+# subdirectories. `--build` globs one level, so accepting a nested path here
+# would let `--check` pass on a fragment the release then cannot see: the gate
+# would say the note exists and the release would ship without it.
 fragment_type() {
-    local base type
-    base=$(basename "$1")
+    local path=$1 base type
+    case "$path" in
+    */*/*) return 1 ;;
+    esac
+    base=$(basename "$path")
     case "$base" in
     *.*.md) ;;
     *) return 1 ;;
@@ -290,12 +338,21 @@ fragment_type() {
     esac
 }
 
+# A fragment has to say something. An empty or whitespace-only file satisfied
+# the gate and shipped as an empty bullet — which refutes the property this
+# whole approach is chosen for, that checking a file was added has no fail-open
+# mode. It has one if the file's contents are never looked at.
+fragment_has_prose() {
+    [ -s "$1" ] || return 1
+    grep -qE '[^[:space:]]' "$1"
+}
+
 # ---------------------------------------------------------------------------
 # --check
 # ---------------------------------------------------------------------------
 cmd_check() {
     local base="" head="" mode=structure candidate ref
-    local subjects_file offenders_file trailers subject origin file sha
+    local subjects_file offenders_file empty_file trailers subject origin file sha
     local offenders=0 added=0
 
     [ -d "$fragments" ] || fail "$fragments/ not found — it holds the changelog fragments"
@@ -367,8 +424,10 @@ cmd_check() {
     scratch=$(mktemp -d)
     subjects_file="$scratch/subjects"
     offenders_file="$scratch/offenders"
+    empty_file="$scratch/empty"
     : >"$subjects_file"
     : >"$offenders_file"
+    : >"$empty_file"
 
     [ -n "${PR_TITLE:-}" ] && printf '%s\t%s\n' "$PR_TITLE" "pull request title" >>"$subjects_file"
     while IFS=$'\t' read -r subject sha; do
@@ -396,9 +455,25 @@ cmd_check() {
     # note, and counting it would let a typo fix satisfy the gate for a feature.
     while IFS= read -r file; do
         [ -n "$file" ] || continue
-        fragment_type "$file" >/dev/null 2>&1 && added=$((added + 1))
+        fragment_type "$file" >/dev/null 2>&1 || continue
+        # Read the worktree, not the indexed blob: locally the file is right
+        # there, and in CI the checkout is of the head commit anyway. An empty
+        # fragment is not a fragment.
+        if [ -f "$file" ] && ! fragment_has_prose "$file"; then
+            printf '    %s\n' "$file" >>"$empty_file"
+            continue
+        fi
+        added=$((added + 1))
     done < <(git diff --no-ext-diff --no-textconv --name-only --diff-filter=A \
         "$base" "${head:-HEAD}" -- "$fragments/" 2>/dev/null || true)
+
+    if [ "$added" -eq 0 ] && [ -s "$empty_file" ]; then
+        fail "these fragment(s) were added but are empty:
+
+$(cat "$empty_file")
+  A fragment is the release note. Write what the change means for somebody
+  upgrading — $fragments/README.md has the conventions."
+    fi
 
     if [ "$added" -gt 0 ]; then
         echo "changelog.sh: $offenders subject(s) require a changelog fragment, $added added."
@@ -526,6 +601,33 @@ cmd_build() {
         fail "$changelog already has a '## [$version]' section. Pick the next version,
   or if the previous attempt failed part-way, undo it before running this again."
 
+    # The Unreleased section has to be empty. Anything sitting under it would
+    # otherwise fall through the insertion below and land *inside* the new
+    # release, out of section order and dated into a version it was not part of
+    # — and the heading it came from would be left empty, so nothing would look
+    # wrong. There is one legitimate way to get text under there (the
+    # no-fragments error a few lines down says to write a section by hand), so
+    # this says what to do rather than only refusing.
+    if awk '/^## \[Unreleased\]$/{f=1;next} f&&/^## /{exit} f&&/[^[:space:]]/{found=1} END{exit !found}' \
+        "$changelog"; then
+        fail "the '## [Unreleased]' section in $changelog is not empty.
+
+  --build assembles from $fragments/, and anything written under that heading by
+  hand would be swept into '## [$version]' below the link definitions rather than
+  read as part of it. Move it into a fragment — one file per entry, typed by its
+  Keep a Changelog section — and run this again."
+    fi
+
+    # A fragment has to say something; an empty one would ship as an empty
+    # bullet. `--check` rejects these on the pull request, so reaching here means
+    # one was committed before that gate existed, or edited to nothing since.
+    for file in "$fragments"/*.md; do
+        [ -e "$file" ] || continue
+        fragment_type "$file" >/dev/null 2>&1 || continue
+        fragment_has_prose "$file" ||
+            fail "$file is empty. A fragment is the release note — write it, or delete the file."
+    done
+
     today=$(date -u +%Y-%m-%d)
     previous=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
     range="${previous:+$previous..}HEAD"
@@ -555,35 +657,57 @@ cmd_build() {
             body=$(sed -e 's/[[:space:]]*$//' "$file")
             body=$(printf '%s\n' "$body" | sed -e '/./,$!d')
 
-            # A `([#N])` written into the fragment wins over the derived one,
-            # and only its link definitions are emitted. That is what lets an
-            # entry point at the pull request that actually did the work when
-            # the fragment was written somewhere else — a retroactive entry, or
-            # one restored after a release went out without it.
-            explicit=$(printf '%s' "$body" | grep -oE '\(\[#[0-9]+\]\)' |
-                grep -oE '[0-9]+' || true)
-            if [ -n "$explicit" ]; then
+            # A `([#N])` written at the very *end* of the entry wins over the
+            # derived one, and only its link definitions are emitted. That is
+            # what lets an entry point at the pull request that actually did the
+            # work when the fragment was written somewhere else — a retroactive
+            # entry, or one restored after a release went out without it.
+            #
+            # Anchored to the end on purpose. Matching anywhere would read a
+            # mid-sentence citation of some earlier pull request as this entry's
+            # own reference, drop the derived link, and point the reader at the
+            # wrong change — and citing a prior pull request mid-sentence is a
+            # style the README itself models.
+            #
+            # Every `[#N]` the prose mentions gets a link definition regardless,
+            # or a citation renders as literal text instead of a link. Only the
+            # trailing one decides whether to skip deriving.
+            printf '%s' "$body" | grep -oE '\[#[0-9]+\]' | tr -d '[]#' |
                 while IFS= read -r n; do
-                    [ -n "$n" ] && printf '[#%s]: %s/pull/%s\n' "$n" "$repo_url" "$n" >>"$links"
-                done <<<"$explicit"
+                    [ -n "$n" ] && printf '[#%s]: %s/pull/%s\n' "$n" "$repo_url" "$n"
+                done >>"$links" || true
+
+            explicit=$(printf '%s' "$body" | tail -n 1 |
+                sed -n 's/.*(\[#\([0-9][0-9]*\)\])[[:space:]]*$/\1/p')
+            if [ -n "$explicit" ]; then
+                : # already collected above
             else
                 # Otherwise the number comes from the subject of the commit that
                 # *added* the fragment — this repository's squash subjects end in
-                # `(#NN)`, and 12 of the 12 commits since v0.1.0 do. A fragment
-                # added by a direct push has no number, and that renders without
-                # a link rather than failing: the entry is still the point.
+                # `(#NN)`, and every commit since v0.1.0 does. A fragment added by
+                # a direct push has no number, and that renders without a link
+                # rather than failing: the entry is still the point.
                 pr=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null |
                     sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p' | head -n 1)
                 if [ -n "$pr" ]; then
-                    body="$body ([#$pr])"
+                    # On its own line, never appended to the last one. A fragment
+                    # may legitimately end in a fenced code block, and CommonMark
+                    # allows only whitespace after a closing fence — appending
+                    # there leaves the fence unclosed and the block swallows every
+                    # section below it, including earlier releases.
+                    body="$body
+([#$pr])"
                     printf '[#%s]: %s/pull/%s\n' "$pr" "$repo_url" "$pr" >>"$links"
                 fi
             fi
 
             # A fragment is prose, not a list item: the bullet and its
             # continuation indent are applied here so the file stays readable on
-            # its own.
-            printf '%s\n' "$(printf '%s\n' "$body" | sed -e '1s/^/- /' -e '2,$s/^/  /')" >>"$block"
+            # its own. Blank lines stay blank — indenting them to `"  "` leaves
+            # trailing whitespace and makes the section a *loose* list, undoing
+            # the adjacency the section heading above works to keep.
+            printf '%s\n' "$(printf '%s\n' "$body" |
+                sed -e '1s/^/- /' -e '2,$s/^\(.\)/  \1/')" >>"$block"
         done
     done
 
@@ -607,7 +731,10 @@ cmd_build() {
 
     if [ -s "$links" ]; then
         printf '\n' >>"$block"
-        sort -u -t'#' -k2 -n "$links" >>"$block"
+        # `sort -u` over whole lines, then a numeric sort for the order. Doing
+        # both at once with `-u -t'#' -k2 -n` compares only the numeric key, so
+        # `[#031]` and `[#31]` collapse to one and a definition is dropped.
+        sort -u "$links" | sort -t'#' -k2 -n >>"$block"
     fi
 
     # Trim trailing blank lines. Whichever section ended the block left one, and
@@ -641,13 +768,35 @@ cmd_build() {
             if (!inserted)  { print "changelog.sh: the Unreleased heading vanished mid-write" > "/dev/stderr"; exit 1 }
             if (!rewritten) { print "changelog.sh: no [Unreleased]: link reference to rewrite"  > "/dev/stderr"; exit 1 }
         }
-    ' "$changelog" >"$changelog.new"
+    ' "$changelog" >"$scratch/changelog.new"
 
-    mv "$changelog.new" "$changelog"
+    # Everything that can fail happens before anything is written back.
+    #
+    # The removals used to run after the file had already been replaced, with
+    # `git rm` as the last command of an `&&` list — so an uncommitted fragment
+    # (`--new` and forgot to `git add`) aborted the loop under `set -e` with the
+    # changelog rewritten, some fragments staged for deletion and others not, and
+    # the duplicate-version guard then blocking the retry. `git rm --cached`
+    # cannot fail that way, but the ordering is the real fix: prove the removals
+    # first, then commit to the write.
+    #
+    # The scratch copy also means an awk failure leaves nothing behind. It used
+    # to write `CHANGELOG.md.new` into the repository root, untracked and not
+    # ignored.
+    for type in $TYPES; do
+        for file in "$fragments"/*."$type".md; do
+            [ -e "$file" ] || continue
+            git ls-files --error-unmatch "$file" >/dev/null 2>&1 ||
+                fail "$file is not tracked. Commit it before assembling a release —
+  a fragment that never reached git is not part of what is being released."
+        done
+    done
+
+    mv "$scratch/changelog.new" "$changelog"
 
     for type in $TYPES; do
         for file in "$fragments"/*."$type".md; do
-            [ -e "$file" ] && git rm --quiet "$file"
+            [ -e "$file" ] && git rm --quiet --force "$file"
         done
     done
 

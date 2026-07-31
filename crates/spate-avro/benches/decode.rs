@@ -1,7 +1,9 @@
-//! Datum-decoding throughput: the dynamically-typed Value path vs the
-//! serde-typed path, on a realistic 15-field record — plus a batch shape
-//! (one datum = an array of 50 events, per-event throughput) tracking the
-//! flagship `flat_map` use case.
+//! Datum-decoding throughput across the three decode paths — the
+//! dynamically-typed Value path, the two-pass serde-typed path, and the
+//! single-pass datum path (owned and borrowed) — on a realistic 15-field
+//! record, a batch shape (one datum = an array of 50 events, per-event
+//! throughput) tracking the flagship `flat_map` use case, and the
+//! sensor-batch attribution corpus with its decode-plus-flatten arms.
 
 use apache_avro::{Schema, to_avro_datum};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};

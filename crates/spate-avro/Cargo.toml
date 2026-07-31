@@ -26,7 +26,6 @@ tracing = { workspace = true }
 all-features = true
 
 [dev-dependencies]
-bytes = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 spate-test = { workspace = true }

@@ -5,8 +5,9 @@
 //! semantics come from the reference implementation, not from this suite's
 //! opinion of the spec.
 //!
-//! The known, documented divergences (strict truncation; skipped-field
-//! content validation) are pinned by their own tests at the bottom.
+//! The known, documented divergences (strict truncation; the per-datum
+//! collection-item budget; skipped-field content validation; the uniform
+//! acceptance superset) are pinned by their own tests at the bottom.
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
@@ -604,6 +605,135 @@ fn truncated_trailing_option_diverges_by_design() {
         "{err}"
     );
     assert!(single_pass.0.is_empty());
+}
+
+#[test]
+fn string_into_unit_enum_matches_two_pass() {
+    // `from_value` feeds a plain string value into a unit enum by variant
+    // name (`EnumUnitDeserializer`); the single-pass path mirrors it.
+    const SCH: &str = r#"{"type":"record","name":"T","fields":[
+        {"name":"e","type":"string"}]}"#;
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    enum E {
+        #[serde(rename = "on")]
+        On,
+        #[serde(rename = "off")]
+        Off,
+    }
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct T {
+        e: E,
+    }
+    let datum = to_avro_datum(
+        &Schema::parse_str(SCH).unwrap(),
+        Value::Record(vec![("e".into(), Value::String("off".into()))]),
+    )
+    .unwrap();
+    let got: T = assert_parity(SCH, &datum);
+    assert_eq!(got, T { e: E::Off });
+    let _ = E::On;
+}
+
+#[test]
+fn invalid_utf8_in_a_skipped_field_diverges_by_design() {
+    // decode_internal UTF-8-validates every string; the single-pass path
+    // validates skipped fields structurally only.
+    const SCH: &str = r#"{"type":"record","name":"T","fields":[
+        {"name":"skip","type":"string"},
+        {"name":"keep","type":"long"}]}"#;
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct T {
+        keep: i64,
+    }
+    // skip: a 2-byte string holding invalid UTF-8; keep: 5.
+    let datum = [0x04, 0xFF, 0xFE, 0x0A];
+
+    let b = builder(SCH);
+    let (ack, _rx) = AckRef::test_pair();
+
+    let mut two_pass = Collected::<T>(Vec::new());
+    b.build_serde::<T>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .unwrap_err();
+    assert!(two_pass.0.is_empty());
+
+    let mut single_pass = Collected::<T>(Vec::new());
+    b.build_serde_datum::<T>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .expect("the single-pass path skips the field structurally");
+    assert_eq!(single_pass.0[0].payload, T { keep: 5 });
+}
+
+#[test]
+fn zero_width_item_bomb_diverges_by_design() {
+    // A four-byte payload claiming 100 000 null items: the two-pass path
+    // walks it into 100 000 values, the single-pass path errors on the
+    // per-datum collection-item budget.
+    const SCH: &str = r#"{"type":"array","items":"null"}"#;
+    let datum = to_avro_datum(
+        &Schema::parse_str(SCH).unwrap(),
+        Value::Array(vec![Value::Null; 100_000]),
+    )
+    .unwrap();
+
+    let b = builder(SCH);
+    let (ack, _rx) = AckRef::test_pair();
+
+    let mut two_pass = Collected::<Vec<()>>(Vec::new());
+    b.build_serde::<Vec<()>>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .expect("the two-pass path walks the bomb");
+    assert_eq!(two_pass.0[0].payload.len(), 100_000);
+
+    let mut single_pass = Collected::<Vec<()>>(Vec::new());
+    let err = b
+        .build_serde_datum::<Vec<()>>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .unwrap_err();
+    assert!(
+        matches!(err, spate_core::error::DeserError::Malformed { .. }),
+        "{err}"
+    );
+    assert!(single_pass.0.is_empty());
+}
+
+#[test]
+fn union_into_map_target_diverges_by_design() {
+    // The uniform-superset direction: `from_value`'s `deserialize_map`
+    // refuses a union value where every single-pass method unwraps the
+    // branch, so this shape decodes only on the single-pass path.
+    const SCH: &str = r#"["null",{"type":"map","values":"long"}]"#;
+    let datum = to_avro_datum(
+        &Schema::parse_str(SCH).unwrap(),
+        Value::Union(
+            1,
+            Box::new(Value::Map(HashMap::from([("a".into(), Value::Long(1))]))),
+        ),
+    )
+    .unwrap();
+
+    let b = builder(SCH);
+    let (ack, _rx) = AckRef::test_pair();
+
+    let mut two_pass = Collected::<HashMap<String, i64>>(Vec::new());
+    b.build_serde::<HashMap<String, i64>>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .unwrap_err();
+
+    let mut single_pass = Collected::<HashMap<String, i64>>(Vec::new());
+    b.build_serde_datum::<HashMap<String, i64>>()
+        .unwrap()
+        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .expect("the single-pass path unwraps the union");
+    assert_eq!(
+        single_pass.0[0].payload,
+        HashMap::from([("a".to_owned(), 1)])
+    );
 }
 
 #[test]

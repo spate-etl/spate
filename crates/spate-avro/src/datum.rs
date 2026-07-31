@@ -52,14 +52,19 @@ use std::marker::PhantomData;
 /// # Parity and strictness
 ///
 /// Decoded values are identical to running the two-pass path
-/// (`from_avro_datum` + `from_value`) for every payload both accept; the
-/// differential suite in `tests/datum_parity.rs` pins this. The deliberate
-/// differences are strictness on truncated payloads (this path errors
-/// where apache-avro 0.21 silently yields `Null`), skipped-field contents
-/// (structurally validated only, not UTF-8-checked), and schemas using the
-/// `duration` or `big-decimal` logical types, which are rejected up front
-/// (build error for fixed schemas, per-record `SchemaUnavailable` for
-/// registry ids) instead of failing on every record's type.
+/// (`from_avro_datum` + `from_value`) for every well-formed payload both
+/// accept; the differential suite in `tests/datum_parity.rs` pins this.
+/// The deliberate differences are strictness on truncated payloads (this
+/// path errors where apache-avro 0.21 silently yields `Null`), a per-datum
+/// budget of `max(payload length, 65 536)` claimed collection items (a
+/// hostile block count over zero-width items errors instead of walking),
+/// skipped-field contents (structurally validated only, not UTF-8-checked
+/// — and a skipped size-prefixed block is trusted at its declared byte
+/// size, so a corrupt block whose size field lies can skip differently
+/// than it decodes), and schemas using the `duration` or `big-decimal`
+/// logical types, which are rejected up front (build error for fixed
+/// schemas, per-record `SchemaUnavailable` for registry ids) instead of
+/// failing on every record's type.
 pub struct AvroDatumDeserializer<F: RecFamily> {
     core: DecoderCore,
     _f: PhantomData<fn() -> F>,

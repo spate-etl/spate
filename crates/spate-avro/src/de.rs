@@ -23,8 +23,9 @@
 //!   uneven (`deserialize_str` rejects an enum value that
 //!   `deserialize_string` accepts; `deserialize_map` refuses a union that
 //!   `deserialize_struct` unwraps). Here every method unwraps a union
-//!   branch and accepts the enum-symbol string, a strict superset: anything
-//!   the two-pass path decodes, this decodes identically, and some target
+//!   branch, accepts the enum-symbol string, and feeds a string position
+//!   into a unit enum by variant name — a strict superset: anything the
+//!   two-pass path decodes, this decodes identically, and some target
 //!   shapes it rejects also work.
 //! - **Enum symbols and record field names are transient** (`visit_str`),
 //!   never `'de`-borrowed — they live in the schema, not the payload. A
@@ -34,15 +35,31 @@
 //!   replicated.
 //! - **Skipped fields are structurally validated only.** A field the target
 //!   type ignores is skipped by wire structure (lengths, block counts,
-//!   union indexes are still bounds-checked) without validating string
-//!   contents as UTF-8, so a payload whose *ignored* fields hold invalid
-//!   UTF-8 decodes here and errors in the two-pass path.
+//!   union and enum indexes are still bounds-checked) without validating
+//!   string contents as UTF-8, so a payload whose *ignored* fields hold
+//!   invalid UTF-8 decodes here and errors in the two-pass path. A skipped
+//!   size-prefixed array/map block is trusted at its declared byte size,
+//!   where the decode paths (both of them) walk the items and ignore the
+//!   size — a corrupt payload whose size field lies about the block can
+//!   therefore skip differently than it decodes.
+//! - **Collections carry a per-datum item budget** of
+//!   `max(payload length, 65 536)` claimed items, charged as each block
+//!   opens. A legitimate item costs at least one wire byte except for
+//!   zero-width shapes (an array of `null`s or of empty records), where a
+//!   hostile block count would otherwise drive an unbounded walk;
+//!   apache-avro instead caps each single block at 512 Mi items and walks
+//!   it.
+//! - **Two accepting-direction corners.** A zero-length decimal passes its
+//!   (empty) wire bytes through where `Decimal::to_vec` errors, and a
+//!   bytes-shaped target over a string position receives the raw bytes
+//!   without the UTF-8 validation `decode_internal` applies to every
+//!   string.
 //! - `is_human_readable` is hardcoded `false` — apache-avro's matching
 //!   global (`set_serde_human_readable`) cannot be read from outside the
 //!   crate, and this workspace never sets it.
 //!
 //! `Duration` and `BigDecimal` schemas are rejected when the decode spec is
-//! compiled (see `cache::DatumSpec`), so the dispatch here treats them as
+//! compiled (see [`compile_spec`]), so the dispatch here treats them as
 //! unreachable-but-fallible.
 //!
 //! # Malformed-input safety
@@ -50,9 +67,11 @@
 //! Every length and block count read from the wire is checked against the
 //! *remaining buffer* before any slice or allocation; collection
 //! `size_hint`s are capped the same way, so a hostile count cannot drive a
-//! large `Vec::with_capacity`. Varints are capped at 10 bytes. Recursion is
+//! large `Vec::with_capacity`, and the per-datum item budget above bounds
+//! the collection walk itself. Varints are capped at 10 bytes. Recursion is
 //! schema-and-data driven (nested records, arrays, unions), so a depth
-//! guard of [`MAX_DEPTH`] bounds it; nothing here panics on any input.
+//! guard of [`MAX_DEPTH`] bounds it; nothing here panics or loops
+//! unboundedly on any input.
 
 use apache_avro::Schema;
 use apache_avro::schema::{DecimalSchema, RecordSchema, UnionSchema};
@@ -60,16 +79,32 @@ use serde::de::{self, DeserializeSeed, Visitor};
 use std::collections::HashMap;
 use std::fmt;
 
-/// Named types (record/enum/fixed) keyed by rendered fullname
-/// (`namespace.name`), cloned out of the schema once at compile time so
-/// `Schema::Ref` resolves without apache-avro's per-datum `ResolvedSchema`
-/// allocation.
-pub(crate) type Names = HashMap<String, Schema>;
+/// Named types (record/enum/fixed) keyed by namespace (`""` for none),
+/// then by simple name, cloned out of the schema once at compile time so a
+/// `Schema::Ref` resolves with two borrowed-key lookups — no per-datum
+/// `ResolvedSchema` allocation, and no rendered-fullname `String` per
+/// occurrence.
+pub(crate) type Names = HashMap<String, HashMap<String, Schema>>;
 
 /// Recursion bound for the schema/data walk. apache-avro 0.21 has no
 /// decode-side depth guard at all; 128 comfortably covers real schemas
 /// while keeping a recursive-schema depth bomb from overflowing the stack.
 const MAX_DEPTH: u16 = 128;
+
+/// Floor of the per-datum collection-item budget (see the module docs): a
+/// datum's collections may claim at most `max(payload length, this)` items
+/// in total, so zero-width items cannot drive an unbounded walk.
+const MIN_ITEMS_BUDGET: u64 = 1 << 16;
+
+/// The depth-limit check every walk entry shares.
+fn check_depth(depth: u16) -> Result<(), DatumError> {
+    if depth >= MAX_DEPTH {
+        return Err(DatumError(format!(
+            "datum nesting exceeds the depth limit of {MAX_DEPTH}"
+        )));
+    }
+    Ok(())
+}
 
 /// Decode error: a pre-rendered message, converted to
 /// `DeserError::Malformed` at the deserializer boundary.
@@ -95,16 +130,38 @@ impl de::Error for DatumError {
 #[derive(Debug)]
 pub(crate) struct Cursor<'de> {
     buf: &'de [u8],
+    items_budget: u64,
 }
 
 impl<'de> Cursor<'de> {
     pub(crate) fn new(buf: &'de [u8]) -> Self {
-        Cursor { buf }
+        Cursor {
+            items_budget: u64::try_from(buf.len())
+                .unwrap_or(u64::MAX)
+                .max(MIN_ITEMS_BUDGET),
+            buf,
+        }
     }
 
     #[inline]
     fn remaining(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Charge `count` claimed collection items against the per-datum
+    /// budget (see the module docs), erroring before any walk happens.
+    #[inline]
+    fn charge_items(&mut self, count: u64) -> Result<(), DatumError> {
+        match self.items_budget.checked_sub(count) {
+            Some(rest) => {
+                self.items_budget = rest;
+                Ok(())
+            }
+            None => Err(DatumError(format!(
+                "block claims {count} items, over the datum's remaining item budget of {}",
+                self.items_budget
+            ))),
+        }
     }
 
     #[inline]
@@ -217,19 +274,15 @@ impl<'de> Cursor<'de> {
 pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
     let resolved = apache_avro::schema::ResolvedSchema::try_from(schema)
         .map_err(|e| format!("schema references cannot be resolved: {e}"))?;
-    let names: Names = resolved
-        .get_names()
-        .iter()
-        .map(|(name, s)| {
-            let key = match &name.namespace {
-                Some(ns) => format!("{ns}.{}", name.name),
-                None => name.name.clone(),
-            };
-            (key, (*s).clone())
-        })
-        .collect();
+    let mut names = Names::new();
+    for (name, s) in resolved.get_names() {
+        names
+            .entry(name.namespace.clone().unwrap_or_default())
+            .or_default()
+            .insert(name.name.clone(), (*s).clone());
+    }
     scan_supported(schema)?;
-    for named in names.values() {
+    for named in names.values().flat_map(HashMap::values) {
         scan_supported(named)?;
     }
     Ok(names)
@@ -264,7 +317,7 @@ fn scan_supported(schema: &Schema) -> Result<(), String> {
 }
 
 /// Decode one datum into `T`, driven by `schema`. The caller guarantees the
-/// schema passed the `DatumSpec` compile (no `Duration`/`BigDecimal`).
+/// schema passed [`compile_spec`] (no `Duration`/`BigDecimal`).
 /// Trailing bytes after the datum are ignored, as `from_avro_datum` does.
 pub(crate) fn decode_datum<'de, T>(
     schema: &Schema,
@@ -316,23 +369,32 @@ fn resolve_schema<'x>(
 ) -> Result<(&'x Schema, Option<&'x str>), DatumError> {
     match schema {
         Schema::Ref { name } => {
-            let key = ref_key(name, enclosing);
-            let target = names
-                .get(&key)
-                .ok_or_else(|| DatumError(format!("schema reference `{key}` has no definition")))?;
+            let target =
+                lookup_named(names, name, enclosing).ok_or_else(|| missing_ref(name, enclosing))?;
             Ok((target, name.namespace.as_deref().or(enclosing)))
         }
         other => Ok((other, enclosing)),
     }
 }
 
-/// Renders a `Ref`'s target key the way `Name::fully_qualified_name`
-/// resolves it: the ref's own namespace, else the enclosing one.
-fn ref_key(name: &apache_avro::schema::Name, enclosing: Option<&str>) -> String {
-    match name.namespace.as_deref().or(enclosing) {
-        Some(ns) => format!("{ns}.{}", name.name),
-        None => name.name.clone(),
-    }
+/// Resolve a `Ref`'s target the way `Name::fully_qualified_name` does —
+/// the ref's own namespace, else the enclosing one — with two borrowed-key
+/// lookups: no per-occurrence allocation.
+fn lookup_named<'x>(
+    names: &'x Names,
+    name: &apache_avro::schema::Name,
+    enclosing: Option<&str>,
+) -> Option<&'x Schema> {
+    let ns = name.namespace.as_deref().or(enclosing).unwrap_or_default();
+    names.get(ns)?.get(name.name.as_str())
+}
+
+/// The unresolved-`Ref` error, rendered on the failure path only.
+fn missing_ref(name: &apache_avro::schema::Name, enclosing: Option<&str>) -> DatumError {
+    DatumError(match name.namespace.as_deref().or(enclosing) {
+        Some(ns) => format!("schema reference `{ns}.{}` has no definition", name.name),
+        None => format!("schema reference `{}` has no definition", name.name),
+    })
 }
 
 impl<'a, 'de> DatumDeserializer<'a, 'de> {
@@ -343,17 +405,13 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
         schema: &'b Schema,
         enclosing: Option<&'b str>,
     ) -> Result<DatumDeserializer<'b, 'de>, DatumError> {
-        if self.depth >= MAX_DEPTH {
-            return Err(DatumError(format!(
-                "datum nesting exceeds the depth limit of {MAX_DEPTH}"
-            )));
-        }
+        let depth = self.deeper()?;
         Ok(DatumDeserializer {
             cur: self.cur,
             schema,
             names: self.names,
             enclosing,
-            depth: self.depth + 1,
+            depth,
         })
     }
 
@@ -364,11 +422,7 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
 
     /// One nesting level down, or the depth-limit error.
     fn deeper(&self) -> Result<u16, DatumError> {
-        if self.depth >= MAX_DEPTH {
-            return Err(DatumError(format!(
-                "datum nesting exceeds the depth limit of {MAX_DEPTH}"
-            )));
-        }
+        check_depth(self.depth)?;
         Ok(self.depth + 1)
     }
 
@@ -402,21 +456,21 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
         })
     }
 
-    /// Decode a uuid position to its canonical hyphenated form, mirroring
-    /// apache-avro's dual representation: a 16-byte payload is raw uuid
-    /// bytes, anything else is parsed as text.
-    fn uuid_string(cur: &mut Cursor<'de>) -> Result<String, DatumError> {
+    /// Decode a uuid position, mirroring apache-avro's dual
+    /// representation: a 16-byte payload is raw uuid bytes, anything else
+    /// is parsed as text. Callers render the canonical hyphenated form
+    /// into a stack buffer — no heap `String` per field.
+    fn uuid_value(cur: &mut Cursor<'de>) -> Result<apache_avro::Uuid, DatumError> {
         let bytes = cur.len_prefixed()?;
-        let uuid = if bytes.len() == 16 {
+        if bytes.len() == 16 {
             apache_avro::Uuid::from_slice(bytes)
-                .map_err(|e| DatumError(format!("invalid uuid bytes: {e}")))?
+                .map_err(|e| DatumError(format!("invalid uuid bytes: {e}")))
         } else {
             let s = std::str::from_utf8(bytes)
                 .map_err(|e| DatumError(format!("uuid is not valid UTF-8: {e}")))?;
             apache_avro::Uuid::parse_str(s)
-                .map_err(|e| DatumError(format!("invalid uuid string: {e}")))?
-        };
-        Ok(uuid.to_string())
+                .map_err(|e| DatumError(format!("invalid uuid string: {e}")))
+        }
     }
 
     /// Decode a decimal position (bytes- or fixed-backed) to its wire
@@ -444,17 +498,12 @@ fn skip_datum(
     enclosing: Option<&str>,
     depth: u16,
 ) -> Result<(), DatumError> {
-    if depth >= MAX_DEPTH {
-        return Err(DatumError(format!(
-            "datum nesting exceeds the depth limit of {MAX_DEPTH}"
-        )));
-    }
+    check_depth(depth)?;
     match schema {
         Schema::Null => Ok(()),
         Schema::Boolean => cur.bool().map(drop),
-        Schema::Int | Schema::Date | Schema::TimeMillis | Schema::Enum(_) => {
-            cur.zag_i32().map(drop)
-        }
+        Schema::Int | Schema::Date | Schema::TimeMillis => cur.zag_i32().map(drop),
+        Schema::Enum(e) => DatumDeserializer::enum_symbol(cur, &e.symbols).map(drop),
         Schema::Long
         | Schema::TimeMicros
         | Schema::TimestampMillis
@@ -490,6 +539,10 @@ fn skip_datum(
                     cur.take(size)?;
                 }
                 std::cmp::Ordering::Greater => {
+                    #[expect(clippy::cast_sign_loss, reason = "the Greater arm: count is positive")]
+                    {
+                        cur.charge_items(count as u64)?;
+                    }
                     for _ in 0..count {
                         skip_datum(cur, inner.items.as_ref(), names, enclosing, depth + 1)?;
                     }
@@ -507,6 +560,10 @@ fn skip_datum(
                     cur.take(size)?;
                 }
                 std::cmp::Ordering::Greater => {
+                    #[expect(clippy::cast_sign_loss, reason = "the Greater arm: count is positive")]
+                    {
+                        cur.charge_items(count as u64)?;
+                    }
                     for _ in 0..count {
                         cur.len_prefixed()?;
                         skip_datum(cur, inner.types.as_ref(), names, enclosing, depth + 1)?;
@@ -519,10 +576,8 @@ fn skip_datum(
             skip_datum(cur, branch, names, enclosing, depth + 1)
         }
         Schema::Ref { name } => {
-            let key = ref_key(name, enclosing);
-            let target = names
-                .get(&key)
-                .ok_or_else(|| DatumError(format!("schema reference `{key}` has no definition")))?;
+            let target =
+                lookup_named(names, name, enclosing).ok_or_else(|| missing_ref(name, enclosing))?;
             skip_datum(
                 cur,
                 target,
@@ -692,7 +747,7 @@ impl<'a, 'de> BlockSeqAccess<'a, 'de> {
                 }
             }
         }
-        Ok(())
+        cur.charge_items(*remaining)
     }
 }
 
@@ -919,7 +974,11 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
             Schema::Bytes => visitor.visit_borrowed_bytes(self.cur.len_prefixed()?),
             Schema::Fixed(f) => visitor.visit_borrowed_bytes(self.cur.take(f.size)?),
             Schema::Enum(e) => visitor.visit_str(Self::enum_symbol(self.cur, &e.symbols)?),
-            Schema::Uuid => visitor.visit_str(&Self::uuid_string(self.cur)?),
+            Schema::Uuid => {
+                let uuid = Self::uuid_value(self.cur)?;
+                let mut buf = apache_avro::Uuid::encode_buffer();
+                visitor.visit_str(uuid.hyphenated().encode_lower(&mut buf))
+            }
             Schema::Decimal(DecimalSchema { inner, .. }) => {
                 visitor.visit_borrowed_bytes(Self::decimal_bytes(self.cur, inner)?)
             }
@@ -993,7 +1052,11 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 visitor.visit_borrowed_str(s)
             }
             Schema::Enum(e) => visitor.visit_str(Self::enum_symbol(self.cur, &e.symbols)?),
-            Schema::Uuid => visitor.visit_str(&Self::uuid_string(self.cur)?),
+            Schema::Uuid => {
+                let uuid = Self::uuid_value(self.cur)?;
+                let mut buf = apache_avro::Uuid::encode_buffer();
+                visitor.visit_str(uuid.hyphenated().encode_lower(&mut buf))
+            }
             Schema::Union(u) => {
                 let (_, branch) = Self::union_branch(self.cur, u)?;
                 self.child(branch, enclosing)?.deserialize_str(visitor)
@@ -1021,12 +1084,7 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 visitor.visit_borrowed_bytes(self.cur.len_prefixed()?)
             }
             Schema::Fixed(f) => visitor.visit_borrowed_bytes(self.cur.take(f.size)?),
-            Schema::Uuid => {
-                let s = Self::uuid_string(self.cur)?;
-                let uuid = apache_avro::Uuid::parse_str(&s)
-                    .map_err(|e| DatumError(format!("invalid uuid: {e}")))?;
-                visitor.visit_bytes(uuid.as_bytes())
-            }
+            Schema::Uuid => visitor.visit_bytes(Self::uuid_value(self.cur)?.as_bytes()),
             Schema::Decimal(DecimalSchema { inner, .. }) => {
                 visitor.visit_borrowed_bytes(Self::decimal_bytes(self.cur, inner)?)
             }
@@ -1266,8 +1324,15 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 let symbol = Self::enum_symbol(self.cur, &e.symbols)?;
                 visitor.visit_enum(SymbolAccess { symbol })
             }
+            // `from_value` also feeds a plain string value into a unit
+            // enum (`EnumUnitDeserializer`, matched by variant name);
+            // mirrored so the acceptance table stays a superset.
+            Schema::String => {
+                let symbol = self.cur.utf8()?;
+                visitor.visit_enum(SymbolAccess { symbol })
+            }
             other => Err(DatumError(format!(
-                "expected a union or enum schema for a Rust enum, got {other:?}"
+                "expected a union, enum, or string schema for a Rust enum, got {other:?}"
             ))),
         }
     }
@@ -1674,5 +1739,194 @@ mod tests {
         );
         let err = compile_spec(&dur).unwrap_err();
         assert!(err.contains("does not support"), "{err}");
+        let big = schema(
+            r#"{"type":"record","name":"R","fields":[
+                {"name":"d","type":{"type":"bytes","logicalType":"big-decimal"}}]}"#,
+        );
+        let err = compile_spec(&big).unwrap_err();
+        assert!(err.contains("does not support"), "{err}");
+    }
+
+    #[test]
+    fn hostile_count_over_zero_width_items_is_bounded() {
+        // Null items are zero-width: only the item budget bounds the walk.
+        const SCH: &str = r#"{"type":"array","items":"null"}"#;
+        let err = decode::<Vec<()>>(&schema(SCH), &zig(i64::MAX)).unwrap_err();
+        assert!(err.0.contains("item budget"), "{err}");
+        // The same count in a *skipped* field.
+        const REC: &str = r#"{"type":"record","name":"R","fields":[
+            {"name":"skip","type":{"type":"array","items":"null"}},
+            {"name":"keep","type":"long"}]}"#;
+        #[derive(Debug, Deserialize)]
+        #[expect(dead_code, reason = "shape only")]
+        struct R {
+            keep: i64,
+        }
+        let err = decode::<R>(&schema(REC), &zig(i64::MAX)).unwrap_err();
+        assert!(err.0.contains("item budget"), "{err}");
+        // A run of blocks cannot ratchet past the budget either.
+        let mut blocks = Vec::new();
+        for _ in 0..64 {
+            blocks.extend(zig(2048));
+        }
+        let err = decode::<Vec<()>>(&schema(SCH), &blocks).unwrap_err();
+        assert!(err.0.contains("item budget"), "{err}");
+        // Within the budget, zero-width items decode.
+        let mut ok = zig(1000);
+        ok.extend(zig(0));
+        let got: Vec<()> = decode(&schema(SCH), &ok).unwrap();
+        assert_eq!(got.len(), 1000);
+    }
+
+    #[test]
+    fn skipped_enum_index_is_bounds_checked() {
+        const SCH: &str = r#"{"type":"record","name":"R","fields":[
+            {"name":"skip","type":{"type":"enum","name":"E","symbols":["A","B"]}},
+            {"name":"keep","type":"long"}]}"#;
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct R {
+            keep: i64,
+        }
+        let mut datum = zig(999);
+        datum.extend(zig(7));
+        let err = decode::<R>(&schema(SCH), &datum).unwrap_err();
+        assert!(err.0.contains("enum index 999 out of range"), "{err}");
+        let mut datum = zig(1);
+        datum.extend(zig(7));
+        assert_eq!(decode::<R>(&schema(SCH), &datum).unwrap(), R { keep: 7 });
+    }
+
+    #[test]
+    fn string_position_decodes_a_unit_enum() {
+        // The `from_value` string-into-unit-enum arm, mirrored.
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum E {
+            A,
+            B,
+        }
+        assert_eq!(
+            decode::<E>(&schema(r#""string""#), &avro_str("B")).unwrap(),
+            E::B
+        );
+        let err = decode::<E>(&schema(r#""string""#), &avro_str("C")).unwrap_err();
+        assert!(err.0.contains("unknown variant"), "{err}");
+        let _ = E::A;
+    }
+
+    #[test]
+    fn truncated_boolean_is_an_error_not_null() {
+        // The third lenient-EOF site in decode_internal; the union index
+        // and the string body are pinned above.
+        let err = decode::<bool>(&schema(r#""boolean""#), &[]).unwrap_err();
+        assert!(err.0.contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn rust_enum_over_a_record_schema_is_an_error() {
+        // `from_value`'s legacy record-with-a-`"type"`-field arm is not
+        // replicated (see the module docs).
+        #[derive(Debug, Deserialize)]
+        enum E {
+            A,
+        }
+        const SCH: &str = r#"{"type":"record","name":"R","fields":[
+            {"name":"type","type":"string"}]}"#;
+        let err = decode::<E>(&schema(SCH), &avro_str("A")).unwrap_err();
+        assert!(err.0.contains("expected a union, enum, or string"), "{err}");
+    }
+
+    #[test]
+    fn enum_symbols_are_never_borrowed() {
+        // Symbols live in the schema, not the payload: a `&'de str` target
+        // over an enum position must fail rather than dangle.
+        let sch = schema(r#"{"type":"enum","name":"E","symbols":["A"]}"#);
+        let err = decode::<&str>(&sch, &zig(0)).unwrap_err();
+        assert!(err.0.contains("borrowed string"), "{err}");
+    }
+
+    #[test]
+    fn is_human_readable_is_false() {
+        struct Probe(bool);
+        impl<'de> Deserialize<'de> for Probe {
+            fn deserialize<D>(d: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let hr = d.is_human_readable();
+                serde::de::IgnoredAny::deserialize(d)?;
+                Ok(Probe(hr))
+            }
+        }
+        let got: Probe = decode(&schema(r#""long""#), &zig(1)).unwrap();
+        assert!(!got.0);
+    }
+
+    /// A bytes-visiting target for positions that only surface through
+    /// `deserialize_bytes` (decimal wire bytes, string-as-bytes).
+    #[derive(Debug, PartialEq)]
+    struct RawBytes(Vec<u8>);
+    impl<'de> Deserialize<'de> for RawBytes {
+        fn deserialize<D>(d: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct V;
+            impl Visitor<'_> for V {
+                type Value = RawBytes;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("bytes")
+                }
+                fn visit_bytes<E>(self, v: &[u8]) -> Result<RawBytes, E> {
+                    Ok(RawBytes(v.to_vec()))
+                }
+            }
+            d.deserialize_bytes(V)
+        }
+    }
+
+    #[test]
+    fn zero_length_decimal_passes_through() {
+        // Accepting-direction corner: `Decimal::to_vec` cannot render a
+        // zero-length value, so the two-pass path errors where the wire
+        // bytes here pass through unchanged (see the module docs).
+        const SCH: &str = r#"{"type":"bytes","logicalType":"decimal","precision":4,"scale":2}"#;
+        let got: RawBytes = decode(&schema(SCH), &zig(0)).unwrap();
+        assert_eq!(got, RawBytes(Vec::new()));
+    }
+
+    #[test]
+    fn bytes_target_over_a_string_position_skips_utf8_validation() {
+        // Accepting-direction corner: decode_internal UTF-8-validates
+        // every string; a bytes target here receives the raw bytes.
+        let mut datum = zig(2);
+        datum.extend_from_slice(&[0xFF, 0xFE]);
+        let got: RawBytes = decode(&schema(r#""string""#), &datum).unwrap();
+        assert_eq!(got, RawBytes(vec![0xFF, 0xFE]));
+    }
+
+    #[test]
+    fn skipped_negative_block_trusts_its_size() {
+        // Documented corner: the fast skip honours the declared byte size;
+        // the decode paths walk the items and ignore it. A payload whose
+        // size field lies therefore skips differently than it decodes.
+        const SCH: &str = r#"{"type":"record","name":"R","fields":[
+            {"name":"arr","type":{"type":"array","items":"long"}},
+            {"name":"keep","type":"long"}]}"#;
+        #[derive(Debug, Deserialize)]
+        struct Full {
+            arr: Vec<i64>,
+            keep: i64,
+        }
+        #[derive(Debug, Deserialize)]
+        struct Skipping {
+            keep: i64,
+        }
+        // One size-prefixed block whose declared size (2) covers a filler
+        // byte beyond its single 1-byte item.
+        let datum: Vec<u8> = vec![0x01, 0x04, 0x00, 0x00, 0x00, 0x02, 0x04];
+        let full: Full = decode(&schema(SCH), &datum).unwrap();
+        assert_eq!((full.arr, full.keep), (vec![0], 0));
+        let skipping: Skipping = decode(&schema(SCH), &datum).unwrap();
+        assert_eq!(skipping.keep, 1);
     }
 }

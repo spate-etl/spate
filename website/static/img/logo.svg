@@ -1,7 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="Spate">
-  <line x1="6" y1="16" x2="16" y2="16" stroke="#e65a0f" stroke-width="2.6" stroke-linecap="round"/>
-  <line x1="16" y1="16" x2="26" y2="16" stroke="#e65a0f" stroke-width="2.6" stroke-linecap="round"/>
-  <circle cx="6" cy="16" r="4.2" fill="#d1500b"/>
-  <rect x="12.3" y="12.3" width="7.4" height="7.4" rx="1.6" fill="#f37831"/>
-  <circle cx="26" cy="16" r="4.2" fill="#d1500b"/>
+<g transform="translate(0.000 0.000) scale(1.000000)">
+    <g stroke="#e65a0f" stroke-width="2.2" stroke-linecap="round" fill="none">
+      <path d="M7.7 9.3 L13.6 15.6"/>
+      <path d="M8.4 16 L13.6 16"/>
+      <path d="M7.7 22.7 L13.6 16.4"/>
+      <path d="M19.6 16 L23.0 16"/>
+    </g>
+    <circle cx="6" cy="7.5" r="2.4" fill="#d1500b"/>
+    <circle cx="6" cy="16" r="2.4" fill="#d1500b"/>
+    <circle cx="6" cy="24.5" r="2.4" fill="#d1500b"/>
+    <rect x="12.6" y="12.6" width="6.8" height="6.8" rx="1.6" fill="#f37831"/>
+    <circle cx="26" cy="16" r="2.9" fill="#d1500b"/>
+  </g>
 </svg>

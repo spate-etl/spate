@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Spate">
-  <rect width="32" height="32" rx="7" fill="#16181d"/>
-<g transform="translate(0.000 0.000) scale(1.000000)">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Spate">
+  <rect width="512" height="512" fill="#16181d"/>
+<g transform="translate(52.111 55.247) scale(12.547036)">
     <g stroke="#ff8c4a" stroke-width="2.2" stroke-linecap="round" fill="none">
       <path d="M7.7 9.3 L13.6 15.6"/>
       <path d="M8.4 16 L13.6 16"/>

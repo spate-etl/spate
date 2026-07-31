@@ -184,7 +184,7 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/favicon.svg',
+    image: 'img/brand/social-spate.png',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -194,6 +194,7 @@ const config: Config = {
       logo: {
         alt: 'Spate logo',
         src: 'img/logo.svg',
+        srcDark: 'img/logo-dark.svg',
       },
       items: [
         {

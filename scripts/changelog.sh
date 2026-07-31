@@ -534,7 +534,12 @@ cmd_build() {
             [ -e "$file" ] || continue
             if [ "$found" -eq 0 ]; then
                 # Sentence case for the section heading, as Keep a Changelog
-                # spells them: Added, Changed, Fixed.
+                # spells them: Added, Changed, Fixed. The leading blank is
+                # emitted here rather than after each entry so that entries
+                # within a section stay adjacent — a blank line between list
+                # items makes it a *loose* list, which renders every bullet
+                # wrapped in its own paragraph and does not match 0.1.0.
+                [ -s "$block" ] && printf '\n' >>"$block"
                 printf '### %s%s\n\n' "$(printf '%s' "${type%"${type#?}"}" | tr '[:lower:]' '[:upper:]')" "${type#?}" >>"$block"
                 found=1
             fi
@@ -570,7 +575,7 @@ cmd_build() {
             # A fragment is prose, not a list item: the bullet and its
             # continuation indent are applied here so the file stays readable on
             # its own.
-            printf '%s\n\n' "$(printf '%s\n' "$body" | sed -e '1s/^/- /' -e '2,$s/^/  /')" >>"$block"
+            printf '%s\n' "$(printf '%s\n' "$body" | sed -e '1s/^/- /' -e '2,$s/^/  /')" >>"$block"
         done
     done
 
@@ -587,13 +592,13 @@ cmd_build() {
         grep -v '\[bot\]$' || true)
     if [ -n "$contributors" ]; then
         {
-            printf '### Contributors\n\n'
+            printf '\n### Contributors\n\n'
             printf '%s\n' "$contributors" | sed -e 's/^/- /'
-            printf '\n'
         } >>"$block"
     fi
 
     if [ -s "$links" ]; then
+        printf '\n' >>"$block"
         sort -u -t'#' -k2 -n "$links" >>"$block"
     fi
 

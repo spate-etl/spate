@@ -17,8 +17,14 @@ enum Outcome {
     Write(Duration),
     Fail(ErrorClass, Duration),
     Hang,
-    /// Panic the write task (simulates a writer bug / poisoned lock).
-    Panic,
+    /// Panic the write task after holding the write open for this long,
+    /// simulating a writer bug. The delay lets a test park another batch
+    /// behind the panicking one before it dies.
+    ///
+    /// Panics inside `write_batch` holding no lock, so it does **not** poison
+    /// the breaker mutex — `ProbeGuard::drop`'s poison tolerance is defensive
+    /// and stays uncovered by this.
+    Panic(Duration),
     /// Block the runtime thread outright, so an abort cannot land until it
     /// returns (simulates a writer doing synchronous work between awaits).
     BlockThread(Duration),
@@ -35,6 +41,15 @@ struct Call {
     replica: usize,
     token: String,
     rows: u64,
+    /// When the attempt started, on the (usually paused) tokio clock. Lets a
+    /// test assert *when* a parked batch resumed, which is the only way to
+    /// tell a wake driven by an event from one driven by a timer.
+    ///
+    /// Explicitly tokio's `Instant`, not the `std` one this module inherits
+    /// from `sink`: only tokio's tracks `start_paused` time, and the `std`
+    /// one would silently record wall-clock and make every such assertion
+    /// vacuous.
+    at: tokio::time::Instant,
 }
 
 #[derive(Debug)]
@@ -99,6 +114,7 @@ impl ShardWriter for MockWriter {
             replica: ep.replica,
             token: batch.dedup_token.clone(),
             rows: batch.rows,
+            at: tokio::time::Instant::now(),
         });
         let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_concurrent.fetch_max(now, Ordering::SeqCst);
@@ -128,7 +144,10 @@ impl ShardWriter for MockWriter {
                 }
                 Ok(())
             }
-            Outcome::Panic => panic!("scripted sink write panic"),
+            Outcome::Panic(d) => {
+                tokio::time::sleep(d).await;
+                panic!("scripted sink write panic")
+            }
         };
         self.concurrent.fetch_sub(1, Ordering::SeqCst);
         result
@@ -548,7 +567,10 @@ async fn write_task_panic_abandons_exactly_the_panicked_batch() {
     f.writer.script(
         0,
         0,
-        [Outcome::Write(Duration::from_millis(50)), Outcome::Panic],
+        [
+            Outcome::Write(Duration::from_millis(50)),
+            Outcome::Panic(Duration::ZERO),
+        ],
     );
 
     let (ok_ack, ok_rx) = AckRef::test_pair();
@@ -1766,4 +1788,331 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
         0.0,
         "an aborted sleep must not strand the gauge at its last step"
     );
+}
+
+/// Config for the quarantine-wait tests: two batches contend for a single
+/// replica's single half-open probe slot, which is the state in which nothing
+/// is pickable *and* no deadline exists.
+///
+/// The ladder is deliberately steep and unjittered, so the published step
+/// names the number of `next_delay` calls unambiguously: 1s, 8s, 64s (capped).
+fn quarantine_contention() -> SinkPoolConfig {
+    let mut cfg = small_batches();
+    cfg.inflight.max_per_shard = 2;
+    cfg.retry.initial = Duration::from_secs(1);
+    cfg.retry.max = Duration::from_secs(64);
+    cfg.retry.multiplier = 8.0;
+    cfg.retry.jitter = 0.0;
+    cfg.retry.max_attempts = 0;
+    cfg.breaker.failure_threshold = 1;
+    cfg.breaker.open_for = Duration::from_secs(5);
+    cfg.breaker.half_open_probes = 1;
+    cfg
+}
+
+/// A batch parked because a shard's only half-open probe is already taken has
+/// made no attempt, so it must not have moved along its retry ladder either.
+///
+/// `docs/METRICS.md` presents the counter and the gauge as complementary
+/// readings of the same retry loop. It states no arithmetic identity between
+/// them, so this pins the stronger one the loop actually maintains and the
+/// docs lean on: with `jitter` at zero — required, since jitter shortens a
+/// delay — a batch that has retried `n` times serves
+/// `initial * multiplier^(n-1)`. That is exactly what the quarantine wait
+/// broke — it advanced the ladder without touching the counter, so the two
+/// drifted apart by however many probe windows the batch lost. Also the only
+/// assertion in the tree on `spate_sink_retries_total`.
+///
+/// Timeline on the paused clock. B is dispatched *after* A already holds the
+/// probe, so there is no race to resolve and no reliance on timer ordering:
+///
+/// * `t0` — A picks the closed replica and fails, opening it until `t0+5s`.
+///   A sleeps its first real step, 1s, then waits out the open deadline.
+/// * `t0+5s` — A is promoted and takes the single probe; its attempt runs 30s.
+/// * `t0+6s` — B is sealed and finds the replica half-open with its budget
+///   spent and no open breaker to wait on: nothing pickable, and no deadline
+///   to sleep until. **The bug's state.**
+/// * `t0+35s` — A's probe fails *fatally*, so A abandons without a backoff
+///   sleep and stops contributing to a gauge that reads the max across a
+///   shard's sleeping batches. The replica re-opens until `t0+40s`.
+/// * `t0+40s` — B takes its **first** attempt, fails, and publishes its first
+///   ladder step. Nothing else is sleeping, so the gauge is B's alone.
+#[test]
+fn a_quarantine_wait_neither_retries_nor_advances_the_ladder() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let cfg = quarantine_contention();
+            let fx = fixture(1, 1, cfg, 16);
+            fx.writer.script(
+                0,
+                0,
+                [
+                    Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                    Outcome::Fail(ErrorClass::Fatal, Duration::from_secs(30)),
+                ],
+            );
+            fx.writer
+                .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+
+            let (ack_a, _rx_a) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack_a)).expect("send a");
+            // Dispatch B only once A is inside the probe, so B provably lands
+            // in the all-half-open wait rather than racing A for the slot.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            assert_eq!(
+                fx.writer.calls().len(),
+                2,
+                "A has failed once and is now holding the probe"
+            );
+            let (ack_b, _rx_b) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack_b)).expect("send b");
+
+            // Past A's fatal probe and B's first real attempt, but inside the
+            // 1s step B is now sleeping.
+            tokio::time::sleep(Duration::from_millis(34_500)).await;
+
+            let calls = fx.writer.calls();
+            assert_eq!(
+                calls.len(),
+                3,
+                "A's failure, A's probe, then B's first attempt. Fewer means \
+                 B is still asleep on ladder it burned while waiting — the \
+                 defect itself; more means it never parked here at all and \
+                 the scenario has drifted"
+            );
+
+            let rendered = handle.render();
+            let retries = metric_value(&rendered, "spate_sink_retries_total", "shard=\"0\"");
+            let step = metric_value(&rendered, "spate_sink_retry_backoff_seconds", "shard=\"0\"");
+            assert_eq!(
+                retries, 2.0,
+                "one retryable failure each; A's fatal probe is not a retry"
+            );
+            assert_eq!(
+                step,
+                cfg.retry.initial.as_secs_f64(),
+                "B has retried exactly once, so it must be serving \
+                 retry.initial. A larger step is ladder it climbed while \
+                 waiting for a probe window it never got — invisible to the \
+                 counter, which is the drift this pins"
+            );
+
+            drop(ack_a);
+            drop(ack_b);
+            drop(fx.queues);
+            fx.pool.drain(Duration::ZERO).await;
+        });
+    });
+}
+
+/// A batch parked because every replica is quarantined resumes when the probe
+/// *resolves*, not when some timer happens to expire.
+///
+/// `open_for` is 60s here, so the heartbeat is clamped to 30s and every
+/// timer-driven alternative is far away: waiting out a ladder step, a
+/// heartbeat, or the next probe window would all land visibly later than the
+/// probe's own completion. Asserting on the recorded attempt instants is what
+/// makes those distinguishable — under `start_paused` the clock auto-advances
+/// to the next deadline, so wall-clock duration says nothing.
+#[test]
+fn a_recovered_replica_is_picked_up_without_waiting_out_a_timer() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut cfg = quarantine_contention();
+        cfg.breaker.open_for = Duration::from_secs(60);
+        let fx = fixture(1, 1, cfg, 16);
+        fx.writer.script(
+            0,
+            0,
+            [
+                Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                // The probe succeeds after 10s, closing the breaker.
+                Outcome::Write(Duration::from_secs(10)),
+            ],
+        );
+        fx.writer.set_default(Outcome::Write(Duration::ZERO));
+
+        let (ack_a, _rx_a) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_a)).expect("send a");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (ack_b, _rx_b) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_b)).expect("send b");
+
+        drop(ack_a);
+        drop(ack_b);
+        drop(fx.queues);
+        let report = fx.pool.drain(Duration::from_secs(300)).await;
+        assert_eq!(
+            report,
+            DrainReport {
+                flushed: 2,
+                abandoned: 0
+            }
+        );
+
+        let calls = fx.writer.calls();
+        // Three attempts: one failure, one probe, one write. Which *batch*
+        // makes which is not determined — both park on the same `open_for`
+        // deadline and poll order decides — and it does not matter here, since
+        // the property is about when the third attempt starts relative to the
+        // second, not who owns them. Do not read batch identity into the
+        // indices.
+        assert_eq!(calls.len(), 3, "one failure, one probe, one write");
+        // The probe ran 10s; whoever was parked behind it must have gone as
+        // soon as it closed the breaker.
+        let probe_started = calls[1].at;
+        let parked_resumed = calls[2].at;
+        let waited_after_probe =
+            parked_resumed.saturating_duration_since(probe_started + Duration::from_secs(10));
+        assert!(
+            waited_after_probe < Duration::from_millis(100),
+            "the parked batch resumed {waited_after_probe:?} after the probe \
+             closed the breaker; it should follow the outcome, not a timer"
+        );
+    });
+}
+
+/// A writer that panics mid-probe never reports an outcome, so the probe slot
+/// it held is never cleared by the state machine — `probes_in_flight` is
+/// decremented only by *leaving* half-open. Unreleased, the replica is pinned
+/// half-open for the life of the process: `next_replica` never offers it
+/// again and every **later** batch finds the shard unwritable, which is the
+/// sharper consequence than the one parked batch at the time.
+///
+/// No timer recovers this, which is why the heartbeat is not the answer to it
+/// — re-picking finds the same exhausted budget. Nor is it a regression this
+/// change introduces: the old code was equally stuck, it just spun a backoff
+/// ladder while being so.
+///
+/// B is sent after the panic has already happened, so the assertion is about
+/// the state the dead probe left behind rather than about a race.
+#[test]
+fn a_panicked_probe_does_not_wedge_the_shard() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut cfg = quarantine_contention();
+        cfg.breaker.open_for = Duration::from_secs(2);
+        let fx = fixture(1, 1, cfg, 16);
+        fx.writer.script(
+            0,
+            0,
+            [
+                Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                Outcome::Panic(Duration::ZERO),
+            ],
+        );
+        fx.writer.set_default(Outcome::Write(Duration::ZERO));
+
+        let (ack_a, rx_a) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_a)).expect("send a");
+        // Past the open deadline, so A has been promoted, taken the shard's
+        // single probe, and died inside it.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(
+            fx.writer.calls().len(),
+            2,
+            "A failed once and then panicked in its probe"
+        );
+
+        let (ack_b, rx_b) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_b)).expect("send b");
+
+        drop(ack_a);
+        drop(ack_b);
+        drop(fx.queues);
+        let report = fx.pool.drain(Duration::from_secs(300)).await;
+        assert_eq!(
+            report,
+            DrainReport {
+                flushed: 1,
+                abandoned: 1
+            },
+            "the panicking batch is abandoned, but the shard must still \
+             accept the next one on the slot the dead probe handed back"
+        );
+        assert_eq!(rx_a.try_recv().unwrap().status, AckStatus::Failed);
+        assert_eq!(rx_b.try_recv().unwrap().status, AckStatus::Delivered);
+    });
+}
+
+/// Handing a probe slot back has to *wake* the batch parked because it was
+/// taken, not merely leave the state pickable for whoever looks next.
+///
+/// This is the production shape of a dead probe: somebody is already waiting
+/// on it, and the death is the event they are waiting for. B is parked in the
+/// all-half-open state — nothing pickable, no deadline — for the whole 10s A
+/// holds the probe, so the only thing that can release B promptly is the wake
+/// inside `release_probe`. `open_for` is far above the 30s heartbeat ceiling,
+/// so falling back to a heartbeat is plainly distinguishable.
+#[test]
+fn a_released_probe_slot_wakes_the_batch_that_was_waiting_for_it() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut cfg = quarantine_contention();
+        cfg.breaker.open_for = Duration::from_secs(600);
+        let fx = fixture(1, 1, cfg, 16);
+        fx.writer.script(
+            0,
+            0,
+            [
+                Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                // A holds the shard's only probe for 10s, then dies without
+                // ever reporting an outcome.
+                Outcome::Panic(Duration::from_secs(10)),
+            ],
+        );
+        fx.writer.set_default(Outcome::Write(Duration::ZERO));
+
+        let (ack_a, _rx_a) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_a)).expect("send a");
+        // B is sealed while A is still open-quarantined, so it is already
+        // parked when A is promoted and takes the probe.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (ack_b, _rx_b) = AckRef::test_pair();
+        fx.queues.try_send(0, chunk(1, 1, &ack_b)).expect("send b");
+
+        drop(ack_a);
+        drop(ack_b);
+        drop(fx.queues);
+        let report = fx.pool.drain(Duration::from_secs(1800)).await;
+        assert_eq!(
+            report,
+            DrainReport {
+                flushed: 1,
+                abandoned: 1
+            },
+            "A dies in its probe; B must still get through"
+        );
+
+        let calls = fx.writer.calls();
+        assert_eq!(calls.len(), 3, "A failed, A probed and died, B wrote");
+        // A's probe began at the open deadline and held for 10s before dying.
+        let died = calls[1].at + Duration::from_secs(10);
+        let waited = calls[2].at.saturating_duration_since(died);
+        assert!(
+            waited < Duration::from_secs(1),
+            "B resumed {waited:?} after the probe died; a released slot must \
+             wake the batch waiting on it rather than leave it to the \
+             heartbeat"
+        );
+    });
 }

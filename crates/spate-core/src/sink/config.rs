@@ -134,9 +134,12 @@ impl RetryConfig {
     /// the message, so the rules stay in one place instead of being mirrored
     /// per connector.
     ///
-    /// This is about intent, not safety. [`Backoff`](super::retry) is total
-    /// for *any* `RetryConfig` — it saturates at `max` and never returns a
-    /// zero delay — so nothing here is load-bearing for the write loop. What
+    /// This is about intent, not safety. [`Backoff`](super::retry) never
+    /// panics for *any* `RetryConfig` and always saturates at `max`, so
+    /// nothing here is load-bearing for the write loop. It returns a zero
+    /// delay only for a policy this rejects (`initial` or `max` of zero), so
+    /// "never zero" is a property of a **validated** policy, not of the type.
+    /// What
     /// it catches is a policy no operator means: a sub-`1.0` multiplier
     /// shrinks the delay instead of backing off, a zero delay is not a
     /// backoff at all, and both are worth failing at load rather than at 3am.
@@ -204,9 +207,18 @@ pub struct BreakerConfig {
     /// Consecutive failures that open the breaker, quarantining that endpoint.
     pub failure_threshold: u32,
     /// How long an open breaker rejects a replica before probing again.
+    ///
+    /// Also bounds how long a batch parked behind a fully-probing shard waits
+    /// before re-checking of its own accord (clamped to `[100ms, 30s]`).
+    /// Capped at a year on the way in: it is stamped into a deadline, and
+    /// `Instant + Duration` panics rather than saturating.
     #[serde(with = "humantime_serde")]
     pub open_for: Duration,
     /// Concurrent probe writes allowed while half-open.
+    ///
+    /// `0` is treated as `1`. Taken literally it would mean the replica never
+    /// recovers — the first probe is admitted regardless of the budget, and
+    /// once that slot comes back nothing could re-admit it.
     pub half_open_probes: u32,
 }
 

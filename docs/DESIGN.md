@@ -397,8 +397,10 @@ open circuit breakers). Failures retry the **same sealed batch** on the next
 healthy replica with capped exponential backoff. Per-shard-worker (rather
 than per-replica) keeps batches full-sized — ClickHouse wants few big inserts
 — while `max_inflight` still provides replica parallelism. When no replica of
-a shard is circuit-closed, new write attempts park until the next half-open
-probe window while their in-flight permits stay held, so intake stalls and
+a shard is circuit-closed, new write attempts park until the earliest of the
+next half-open probe window and an in-flight probe reporting — a shard whose
+every replica is already probing has no window to wait for — while their
+in-flight permits stay held, so intake stalls and
 the shard back-pressures the source (surfaced as `spate_sink_shard_healthy ==
 0`; with a bounded `retry.max_attempts` a batch instead fails and replays
 after restart — the watermark stalls either way). Records are never rerouted

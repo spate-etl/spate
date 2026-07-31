@@ -2,15 +2,18 @@ name: CI
 
 # The trigger list is deliberately unfiltered. A workflow skipped by `on: paths:`
 # never reports its checks, and a required check that never reports blocks the
-# pull request forever — GitHub's own guidance is "do not use path or branch
-# filtering to skip workflow runs if the workflow is required to pass before
-# merging". A skipped *job*, by contrast, reports success. So the workflow always
-# runs and every filtering decision lives in a per-job `if:`, fed by the
-# `changes` job below.
+# pull request forever.
 on:
   push:
     branches: [main]
+  # `labeled` is in addition to the three defaults, which have to be named once
+  # any `types:` is given. It is what makes `ci: docker` and `ci: loom` take
+  # effect when applied — without it a label only reaches the classifier on the
+  # next push, which is too late to be useful. `unlabeled` is deliberately
+  # absent: removing a label cannot switch a suite off, so re-running for it
+  # would only spend minutes to reach the same verdict.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # A merge queue entry is a separate event with its own ref; without this line
   # nothing would report and every queued merge would fail on a missing check.
   merge_group:
@@ -69,6 +72,7 @@ jobs:
       site: ${{ steps.classify.outputs.site }}
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
+      loom: ${{ steps.classify.outputs.loom }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,6 +92,11 @@ jobs:
           # The pull request's author, not `github.actor` — the latter is
           # whoever last triggered the run and changes on a manual re-run.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Comma-joined, and through `env:` for the same injection reason as
+          # the SHAs above — a label name is free text somebody else typed.
+          # The classifier only reads `ci: docker` and `ci: loom` from this, and
+          # can only ever add work on the strength of them.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: ./scripts/ci-changes.sh
 
   # ---------------------------------------------------------------------------
@@ -463,6 +472,31 @@ jobs:
           shared-key: dev-allfeatures
       - run: make check-features
 
+  loom:
+    name: Loom models (opt-in)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # Opt-in only, via the `ci: loom` label. The models run nightly regardless
+    # (see scheduled.yml); this exists for the case where you have just changed
+    # something under INV-3 and want the answer before merge rather than in the
+    # morning. Skipping is a legitimate outcome and the gate treats it as one.
+    if: needs.changes.outputs.loom == 'true'
+    timeout-minutes: 60
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # `--cfg loom` rebuilds the world against loom-typed primitives, so
+          # this shares nothing with any other job and needs its own cache. Same
+          # key as the scheduled job, so whichever runs first warms the other.
+          shared-key: loom
+      - run: make loom
+
   msrv:
     name: Check (MSRV 1.94)
     runs-on: ubuntu-latest
@@ -646,7 +680,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, test, doctests, features, msrv, containers, site]
+    needs: [changes, lint, workflows, deny, test, doctests, features, msrv, containers, site, loom]
     steps:
       - name: Evaluate dependency results
         env:

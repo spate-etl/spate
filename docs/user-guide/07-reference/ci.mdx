@@ -80,6 +80,35 @@ destination (so moving a `.rs` file out of a crate would look like a docs
 change), and `core.quotePath` C-quotes non-ASCII filenames into matching
 nothing.
 
+### Forcing a suite on
+
+Two labels override the path selection upward:
+
+| Label | Effect |
+| --- | --- |
+| `ci: docker` | Runs every container suite, whatever the paths selected |
+| `ci: loom` | Runs the loom models, which are otherwise nightly only |
+
+They exist for the change whose blast radius the path rules cannot see — a
+refactor that moves code between crates, or a fix under an invariant you want
+proven before merge rather than the next morning.
+
+They can only add work. That is a property of the code rather than a rule
+somebody has to remember: the override appends to the selected set and never
+assigns over it, so its result is a superset of the path-derived one by
+construction, and `--self-test` asserts that for a matrix of label and
+starting-set combinations. Nothing switches a suite off. The classifier fails
+closed on purpose, and a label that could clear a selection would make it fail
+open with a checkbox instead.
+
+Applying a label re-triggers the workflow, because `labeled` is in the trigger's
+`types:`. Removing one does not, since removing it cannot turn anything off — the
+path-derived baseline simply stands again on the next push.
+
+One deliberate interaction: the override is applied *after* the rule that defers
+container suites on Dependabot pull requests, so labelling one `ci: docker` is a
+maintainer overruling that deferral for a single bump.
+
 ## The Actions allowlist
 
 The organisation permits GitHub-owned actions, verified-publisher actions, and

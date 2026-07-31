@@ -337,10 +337,11 @@ else
             suites="$suites $(container_suites_for "$crate")"
             ;;
         # A dependency or lint change moves the whole graph. So does a change to
-        # the workflows, the composite action, or this script — the last one
-        # decides what runs at all, so it has to prove itself against everything.
+        # the workflows, the composite action, the Makefile the workflow steps
+        # call, or this script — the last one decides what runs at all, so it
+        # has to prove itself against everything.
         Cargo.lock | Cargo.toml | deny.toml | rust-toolchain.toml | .config/* | \
-            .github/workflows/* | .github/actions/* | scripts/*)
+            .github/workflows/* | .github/actions/* | scripts/* | Makefile)
             suites="$suites $CONTAINER_PKGS"
             site=true
             ;;

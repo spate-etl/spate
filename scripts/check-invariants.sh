@@ -19,7 +19,12 @@ cd "$(dirname "$0")/.."
 
 source_of_truth=docs/DESIGN.md
 full=(AGENTS.md CONTRIBUTING.md .github/pull_request_template.md)
-subset=(.github/ISSUE_TEMPLATE/4-feature.yml)
+# Anywhere else that names invariants by number. A module doc restating a few of
+# them is a subset restatement like any other, and drifts the same way.
+subset=(
+    .github/ISSUE_TEMPLATE/4-feature.yml
+    crates/spate-core/src/checkpoint/mod.rs
+)
 
 fail() {
     echo "check-invariants.sh: $1" >&2
@@ -43,10 +48,10 @@ problems=0
 checked=0
 
 for f in "${full[@]}"; do
-    if [ ! -f "$f" ]; then
-        echo "check-invariants.sh: $f not found, skipping" >&2
-        continue
-    fi
+    # A missing file is a failure, not a skip. Skipping means the list it was
+    # supposed to police goes unchecked while the script still reports success —
+    # if one of these is genuinely retired, remove it from the array above.
+    [ -f "$f" ] || fail "$f not found — it is listed as a full restatement"
     checked=$((checked + 1))
     if ! diff -q <(cites "$f") <(printf '%s\n' "$defined") >/dev/null; then
         echo "check-invariants.sh: $f does not cite the same set as $source_of_truth" >&2
@@ -57,9 +62,14 @@ for f in "${full[@]}"; do
 done
 
 for f in "${subset[@]}"; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] || fail "$f not found — it is listed as a subset restatement"
     checked=$((checked + 1))
-    extra=$(comm -13 <(printf '%s\n' "$defined") <(cites "$f"))
+    # `grep -vxF -f`, not `comm`: comm is a merge of two *lexically* sorted
+    # streams, and these are sorted with `-V` so that INV-10 follows INV-9
+    # rather than INV-1. Feeding version order to comm gives undefined output —
+    # it reported INV-10 as undefined while INV-10 was defined. A set-difference
+    # that does not care about order cannot have that failure.
+    extra=$(grep -vxF -f <(printf '%s\n' "$defined") <(cites "$f") || true)
     if [ -n "$extra" ]; then
         echo "check-invariants.sh: $f cites numbers not defined in $source_of_truth:" >&2
         while IFS= read -r line; do

@@ -31,40 +31,68 @@ fail() {
 defined=$(sed -n 's/^- name: "\(.*\)"$/\1/p' "$definitions" | sort -u)
 [ -n "$defined" ] || fail "no labels defined in $definitions — is the format still \`- name: \"...\"\`?"
 
-# Collect references as TAB-separated "label<TAB>source" pairs.
+# Each source spells its labels its own way, so each gets its own extractor.
 #
-# All three sources spell a label list the same way — a bracketed, quoted,
-# comma-separated array on one line — so one extractor covers them. If any of
-# them ever moves to a block list, this stops seeing it: the count assertion at
-# the end is what turns that into a failure rather than a false pass.
+# An extractor that stops matching is the dangerous failure: the labels it was
+# watching become unchecked and the script still exits 0. `extract` guards
+# against it by pairing every extractor with a loose pattern for "this file
+# still mentions labels at all". If the loose pattern hits and the strict one
+# does not, the extractor has gone blind and that is a hard failure — the file
+# has changed shape and nobody taught this script the new one.
+# extract <source> <loose> <strict> <label-filter>
+#
+# `loose` matches every line that mentions labels at all; `strict` matches the
+# spelling this script can actually read. The counts must agree. Comparing them
+# per occurrence rather than per file is what matters: dependabot.yml carries
+# four `labels:` entries, so "did we get any" would still pass with three of
+# them parsed and one silently unread.
+extract() {
+    local source=$1 loose=$2 strict=$3 filter=$4 n_loose n_strict
+    [ -f "$source" ] || return 0
+
+    n_loose=$(grep -cE "$loose" "$source" || true)
+    n_strict=$(grep -cE "$strict" "$source" || true)
+    if [ "$n_loose" -ne "$n_strict" ]; then
+        fail "$source has $n_loose line(s) mentioning labels but $n_strict this script can read.
+  The file has changed shape and this extractor has not. Fix the extractor —
+  do not delete the check, it is the one that notices."
+    fi
+
+    while IFS= read -r label; do
+        [ -n "$label" ] && printf '%s\t%s\n' "$label" "$source"
+    done < <(grep -hE "$strict" "$source" | eval "$filter" || true)
+}
+
 references=$(
     {
-        # Dependabot: one `labels:` line per ecosystem.
-        grep -hoE '^ *labels: \[[^]]*\]' .github/dependabot.yml 2>/dev/null |
-            grep -oE '"[^"]+"' | tr -d '"' | sed 's/$/\t.github\/dependabot.yml/'
+        quoted='grep -oE "\"[^\"]+\"" | tr -d "\""'
 
-        # Issue forms: a top-level `labels:` key in the front matter.
+        # Dependabot: one bracketed `labels:` array per ecosystem.
+        extract .github/dependabot.yml '^ *labels:' '^ *labels: \[[^]]*\]' "$quoted"
+
+        # Issue forms: a top-level `labels:` key in the front matter. A form
+        # carrying none is legitimate — several set only a native issue type.
         for form in .github/ISSUE_TEMPLATE/*.yml; do
             [ -e "$form" ] || continue
-            grep -hoE '^labels: \[[^]]*\]' "$form" 2>/dev/null |
-                grep -oE '"[^"]+"' | tr -d '"' | sed "s|\$|\t$form|"
+            extract "$form" '^labels:' '^labels: \[[^]]*\]' "$quoted"
         done
 
         # release-plz: the label put on the automated release pull request.
-        if [ -f release-plz.toml ]; then
-            grep -hoE '^ *pr_labels *= *\[[^]]*\]' release-plz.toml 2>/dev/null |
-                grep -oE '"[^"]+"' | tr -d '"' | sed 's/$/\trelease-plz.toml/'
-        fi
+        extract release-plz.toml '^ *pr_labels *=' '^ *pr_labels *= *\[[^]]*\]' "$quoted"
 
-        # The path labeler: its keys are the label names.
-        if [ -f .github/labeler.yml ]; then
-            sed -n 's/^"\(.*\)":.*$/\1/p' .github/labeler.yml |
-                sed 's/$/\t.github\/labeler.yml/'
-        fi
+        # The path labeler: its top-level keys are the label names.
+        extract .github/labeler.yml '^"' '^"[^"]+":' \
+            'sed -E "s/^\"([^\"]+)\":.*/\1/"'
+
+        # The CI classifier matches two label names as string literals, so a
+        # rename there is executable rather than declarative: the gate would
+        # stay green while `apply_ci_labels` silently stopped firing.
+        extract scripts/ci-changes.sh '== \*",' '== \*",[^"]+,"\*' \
+            'grep -oE "\*\",[^\"]+,\"\*" | sed -E "s/^\*\",(.*),\"\*$/\1/"'
     } | sort -u
 )
 
-[ -n "$references" ] || fail "no label references found — did a source file change shape?"
+[ -n "$references" ] || fail "no label references found — did every source change shape at once?"
 
 missing=0
 while IFS=$'\t' read -r label source; do
@@ -83,4 +111,5 @@ fi
 
 defined_count=$(grep -c . <<<"$defined")
 reference_count=$(grep -c . <<<"$references")
-echo "check-labels.sh: $reference_count reference(s) across the tree, all defined among $defined_count label(s)"
+source_count=$(cut -f2 <<<"$references" | sort -u | grep -c .)
+echo "check-labels.sh: $reference_count reference(s) from $source_count source(s), all defined among $defined_count label(s)"

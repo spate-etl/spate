@@ -17,7 +17,10 @@ governs, because none of them is reconstructable from the code:
 human contributor, with the reasoning attached. The overlap is deliberate — one
 audience needs them in every session, the other once — and `make ci-lint`
 is what keeps the two honest, so prefer fixing a drift it reports over
-rewording around it.
+rewording around it. [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution
+has to withstand; the part that most often applies here is that a
+delivery-correctness change is judged on a failing test, not on reasoning that
+reads well.
 
 ## Invariants (do not break)
 

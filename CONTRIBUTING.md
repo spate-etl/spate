@@ -32,6 +32,12 @@ not which iteration of a plan it belongs to.
 Contributions are accepted under Apache-2.0 §5, inbound under the same terms as
 outbound. There is no CLA and nothing to sign.
 
+AI tools are welcome here, and [`AI_POLICY.md`](AI_POLICY.md) says what a
+contribution has to withstand regardless of how it was produced. The short
+version: be able to answer questions about your own change in your own words,
+and back a delivery-correctness fix with a failing test rather than an
+explanation.
+
 ## The invariants
 
 These are the properties the engine is built around. Most changes touch none of

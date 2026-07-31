@@ -520,3 +520,147 @@ async fn panicking_schema_parse_poisons_the_id_rather_than_stalling() {
         "a panicking schema parse must poison the id, not stall at NotReady: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The single-pass datum path against the registry
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize, PartialEq)]
+struct EventRec {
+    id: i64,
+}
+
+struct CollectedRec(Vec<EventRec>);
+impl EmitRecord<'_, EventRec> for CollectedRec {
+    fn emit(&mut self, rec: Record<EventRec>) -> Flow {
+        self.0.push(rec.payload);
+        Flow::Continue
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
+    const SCHEMA_V2: &str = r#"{"type":"record","name":"Event2","fields":[
+        {"name":"id","type":"long"},
+        {"name":"tag","type":"string"}]}"#;
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/61", 200, &schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/62", 200, &schema_body(SCHEMA_V2), 0);
+    let addr = stub.clone().serve().await;
+
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder
+        .build_serde_datum::<EventRec>()
+        .expect("datum builder");
+
+    // id 61: plain Event.
+    let p61 = confluent_payload(61, 7);
+    // id 62: Event2, whose extra `tag` field the target type skips — a
+    // different writer schema (and datum spec) on the same deserializer.
+    let p62 = {
+        let schema = Schema::parse_str(SCHEMA_V2).unwrap();
+        let mut rec = apache_avro::types::Record::new(&schema).unwrap();
+        rec.put("id", 8i64);
+        rec.put("tag", "extra");
+        let datum = to_avro_datum(&schema, rec).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(&62u32.to_be_bytes());
+        payload.extend_from_slice(&datum);
+        payload
+    };
+
+    // First call misses: NotReady, and the contract demands zero emits.
+    let (ack, _rx) = AckRef::test_pair();
+    let mut out = CollectedRec(Vec::new());
+    let err = deser.deserialize(&raw(&p61), &ack, &mut out).unwrap_err();
+    assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
+    assert!(out.0.is_empty());
+
+    let decoded = tokio::task::spawn_blocking(move || {
+        let mut out = CollectedRec(Vec::new());
+        drive_until_ready(&mut deser, &p61, &mut out).unwrap();
+        drive_until_ready(&mut deser, &p62, &mut out).unwrap();
+        // And interleave again from the (now warm) per-deserializer memo.
+        drive_until_ready(&mut deser, &p61, &mut out).unwrap();
+        out.0
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        decoded,
+        vec![EventRec { id: 7 }, EventRec { id: 8 }, EventRec { id: 7 }]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duration_schema_gates_only_the_datum_path() {
+    // A schema the datum path refuses (`duration` logical type) must stay
+    // fully usable on the Value path: the id is published Ready with the
+    // datum-side reason stored per path — never negative-cached.
+    const DURATION_SCHEMA: &str = r#"{"type":"record","name":"D","fields":[
+        {"name":"id","type":"long"},
+        {"name":"d","type":{"type":"fixed","name":"F","size":12,"logicalType":"duration"}}]}"#;
+    let stub = StubRegistry::default();
+    stub.script(
+        "/schemas/ids/77",
+        200,
+        &schema_body(&DURATION_SCHEMA.replace('\n', " ")),
+        0,
+    );
+    let addr = stub.clone().serve().await;
+
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+
+    let payload = {
+        let schema = Schema::parse_str(DURATION_SCHEMA).unwrap();
+        let mut rec = apache_avro::types::Record::new(&schema).unwrap();
+        rec.put("id", 5i64);
+        rec.put(
+            "d",
+            apache_avro::types::Value::Duration(apache_avro::Duration::from([
+                0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3,
+            ])),
+        );
+        let datum = to_avro_datum(&schema, rec).unwrap();
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(&77u32.to_be_bytes());
+        payload.extend_from_slice(&datum);
+        payload
+    };
+
+    // Value path: decodes fine once fetched.
+    let mut value_deser = builder.build_value().expect("value builder");
+    let p = payload.clone();
+    let values = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut value_deser, &p, &mut out).unwrap();
+        out.0
+    })
+    .await
+    .unwrap();
+    assert_eq!(values.len(), 1);
+
+    // Datum path on the SAME (now Ready) id: per-record SchemaUnavailable
+    // with the stored reason — not NotReady, not Malformed.
+    let mut datum_deser = builder
+        .build_serde_datum::<EventRec>()
+        .expect("datum builder");
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = CollectedRec(Vec::new());
+        drive_until_ready(&mut datum_deser, &payload, &mut out).unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("datum path")),
+        "{err}"
+    );
+}

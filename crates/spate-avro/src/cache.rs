@@ -19,6 +19,15 @@ pub(crate) struct CompiledSchema {
     pub(crate) id: u32,
     /// The parsed writer schema, or why the parser rejected it.
     pub(crate) schema: Result<Schema, String>,
+    /// The single-pass datum path's decode spec: the named-type index its
+    /// walk resolves `Schema::Ref` through, or the pre-rendered reason the
+    /// schema cannot datum-decode. Gated per *path*, not per entry: a
+    /// schema the datum path rejects (e.g. a `duration` logical type)
+    /// stays fully usable on the Value/serde paths — only the datum
+    /// deserializer surfaces the stored reason, per record. A datum-only
+    /// failure therefore never negative-caches the id
+    /// ([`Self::unusable_reason`] stays schema-based).
+    pub(crate) datum: Result<crate::de::Names, String>,
 }
 
 impl CompiledSchema {
@@ -32,12 +41,25 @@ impl CompiledSchema {
     /// touch it first. (The caught panic prints a backtrace to stderr; that
     /// is harmless.)
     pub(crate) fn compile(id: u32, json: &str) -> Self {
-        let schema = match std::panic::catch_unwind(|| Schema::parse_str(json)) {
-            Ok(Ok(schema)) => Ok(schema),
-            Ok(Err(e)) => Err(format!("schema {id} is not usable: {e}")),
-            Err(_panic) => Err(format!("schema {id} is not usable: the parser panicked")),
+        let compiled = std::panic::catch_unwind(|| {
+            let schema = Schema::parse_str(json);
+            let datum = match &schema {
+                Ok(parsed) => crate::de::compile_spec(parsed).map_err(|reason| {
+                    format!("schema {id} is not usable on the datum path: {reason}")
+                }),
+                Err(e) => Err(format!("schema {id} is not usable: {e}")),
+            };
+            (schema, datum)
+        });
+        let (schema, datum) = match compiled {
+            Ok((Ok(schema), datum)) => (Ok(schema), datum),
+            Ok((Err(e), datum)) => (Err(format!("schema {id} is not usable: {e}")), datum),
+            Err(_panic) => {
+                let reason = format!("schema {id} is not usable: the parser panicked");
+                (Err(reason.clone()), Err(reason))
+            }
         };
-        CompiledSchema { id, schema }
+        CompiledSchema { id, schema, datum }
     }
 
     /// `None` when the schema compiled (the entry is `Ready` material);

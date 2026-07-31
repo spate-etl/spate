@@ -40,13 +40,16 @@ Never post PR comments, never commit, never push without being asked.
 ## Process
 
 ### 1. Establish ground truth
-Read, before judging anything: `CLAUDE.md` (the Invariants and Commands
-sections), `docs/DESIGN.md` (the sections the diff touches), and `docs/METRICS.md`.
+Read, before judging anything: `docs/DESIGN.md` — the canonical `## Invariants`
+section in full, plus the sections the diff touches — then `AGENTS.md` (its
+Invariants section carries the implementation detail) and `docs/METRICS.md`.
 Findings are judged against *this repo's* invariants, not generic Rust intuition.
-Note the hard invariants explicitly — at-least-once delivery, source threads
-never block on send, the checkpoint tracker stays sync/tokio-free and loom-clean,
-no connector/0.x types in `spate-core` public bounds, acks never block behind data,
-metrics pre-registered at build time, error policies Skip-or-Fail-only.
+Cite them by number: INV-1 at-least-once delivery, INV-2 source threads never
+block on send, INV-3 the checkpoint tracker stays sync/tokio-free and loom-clean,
+INV-4 acks never block behind data, INV-5 the sink intake never awaits outside
+its `select!`, INV-6 no connector/0.x types in `spate-core` public bounds,
+INV-7 error policies Skip-or-Fail-only, INV-8 metrics pre-registered at build
+time, INV-9 the `spate_` umbrella, INV-10 one live owner per gauge series.
 
 ### 2. Scope the diff and extract the claim set
 - `git diff --stat ${1:-main}...HEAD` and `git log ${1:-main}..HEAD` for shape.
@@ -65,8 +68,8 @@ real defects live at the seam between the diff and the code it assumes.
 ### 4. Fan out finders — grouped by dimension
 Spawn a small set of finder agents, each owning one dimension across the whole
 diff (adjust to the diff; keep the set small):
-1. **Correctness + invariants** — logic bugs and any violation of the CLAUDE.md
-   invariants above. Highest priority.
+1. **Correctness + invariants** — logic bugs and any violation of INV-1..INV-10
+   above. Highest priority.
 2. **API / semver surface** — public API design, semver hazards, the no-0.x-types
    -leak rule, `#[non_exhaustive]` correctness, additive-vs-breaking.
 3. **Doc-vs-code accuracy** — do the guide pages, desugaring tables, config
@@ -77,18 +80,18 @@ Each finder returns candidate findings with `file:line` and a proposed failure
 scenario — not verdicts.
 
 ### 5. Verify: run the gates, then refute
-Run the full-reproduce gates (explicit exit codes, per `CLAUDE.md`):
+Run the full-reproduce gates, checking each by **explicit exit code** — a piped
+`grep`/`tail` reports the pipeline's last command and has masked real failures
+here:
 ```sh
-cargo check --workspace --all-features
-cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-cargo bench -p spate-core            # confirms bench claims actually measure
-RUSTFLAGS="--cfg loom" cargo test -p spate-core --release --lib   # if sync/loom code touched
-cargo check -p spate --examples --all-features
-# Docker acceptance gate — the delivery-guarantee claims live here:
-#   run the #[ignore]d testcontainers suite explicitly (it is opt-in, ~minutes).
+make gates          # lint, check, test, doctest, check-features, deny, ci-lint
+make bench          # if a bench claim is in the ledger — confirms it measures
+make loom           # if sync/loom code was touched
+make test-docker    # the delivery-guarantee claims live here; opt-in, ~minutes
 ```
+Every target passes `--locked`, as CI does. An ad-hoc cargo call added during
+review needs it too, or it can resolve a different graph than the one under
+review.
 Then, **per dimension** (not per finding), run one adversarial verification pass
 that tries to *disprove* each candidate and each ledger claim against the code
 and the gate results. Assign each survivor a verdict:

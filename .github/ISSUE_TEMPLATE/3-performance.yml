@@ -1,6 +1,7 @@
 name: Throughput or latency below expectation
 description: The pipeline is slower than it should be, or slower than it was.
 title: "[perf] "
+type: Bug
 labels: ["performance"]
 body:
   - type: markdown
@@ -43,6 +44,40 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: components
+    attributes:
+      label: Which components
+      description: >-
+        The preamble above is not a deflection — most of what looks like
+        framework overhead is one of these bounding the pipeline on its own.
+        Saying which are in the path is what makes the numbers readable.
+      multiple: true
+      options:
+        - Engine (spate-core)
+        - Kafka source (spate-kafka)
+        - Kafka sink (spate-kafka)
+        - ClickHouse sink (spate-clickhouse)
+        - S3 source (spate-s3)
+        - JSON deserializer (spate-json)
+        - Avro deserializer (spate-avro)
+        - Coordination (spate-coordination)
+        - A connector I wrote
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Rust version and platform
+      description: >-
+        `rustc --version` and your OS/architecture. Both matter here more than
+        they do elsewhere: a throughput number is not comparable across
+        architectures, and the reference hardware is named in the methodology.
+      placeholder: "rustc 1.97.0, Linux x86_64"
+    validations:
+      required: true
+
   - type: textarea
     id: numbers
     attributes:
@@ -81,5 +116,7 @@ body:
     id: config
     attributes:
       label: Configuration
-      description: Your YAML, with credentials removed.
+      description: >-
+        Your YAML. **Remove credentials, hostnames and anything else you would
+        not publish** — this is a public issue.
       render: yaml

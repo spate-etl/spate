@@ -1,7 +1,7 @@
 name: Something else does the wrong thing
 description: A crash, a wrong result, a configuration that will not load, a metric that reads wrong.
 title: "[bug] "
-labels: ["bug"]
+type: Bug
 body:
   - type: markdown
     attributes:
@@ -12,18 +12,21 @@ body:
         of bug needs.
 
   - type: dropdown
-    id: area
+    id: components
     attributes:
       label: Where
       options:
-        - Engine (operators, checkpointing, sinks, backpressure, runtime)
-        - Kafka connector
-        - ClickHouse connector
-        - S3 connector
-        - Avro or JSON deserializer
-        - Coordination (multi-instance work assignment)
-        - Metrics or the admin endpoint
-        - Configuration loading
+        - Engine (spate-core)
+        - Kafka source (spate-kafka)
+        - Kafka sink (spate-kafka)
+        - ClickHouse sink (spate-clickhouse)
+        - S3 source (spate-s3)
+        - JSON deserializer (spate-json)
+        - Avro deserializer (spate-avro)
+        - Coordination (spate-coordination)
+        - Test doubles (spate-test)
+        - Metrics or the admin endpoint (spate-core)
+        - Configuration loading (spate-core)
         - Documentation
         - Build, CI, or the examples
     validations:
@@ -46,6 +49,8 @@ body:
         Which features are enabled. This matters more than it looks — most of
         the crate is behind one.
       placeholder: 'kafka, clickhouse, avro'
+    validations:
+      required: true
 
   - type: input
     id: toolchain
@@ -54,6 +59,8 @@ body:
       description: >-
         `rustc --version` and your OS/architecture. The MSRV is 1.94.
       placeholder: "rustc 1.97.0, macOS aarch64"
+    validations:
+      required: true
 
   - type: textarea
     id: what
@@ -82,15 +89,28 @@ body:
       render: rust
 
   - type: textarea
+    id: data
+    attributes:
+      label: A sample record
+      description: >-
+        If the bug involves records at all, one in the shape the pipeline was
+        carrying, with anything sensitive replaced.
+      placeholder: '{"id": 1, "ts": "2026-07-31T09:00:00Z", "payload": "..."}'
+
+  - type: textarea
     id: config
     attributes:
       label: Configuration
-      description: Relevant YAML, with credentials removed.
+      description: >-
+        Relevant YAML. **Remove credentials, hostnames and anything else you
+        would not publish** — this is a public issue.
       render: yaml
 
   - type: textarea
     id: logs
     attributes:
       label: Output
-      description: Errors, panics, or relevant log lines. Long output is fine.
+      description: >-
+        Errors, panics, or relevant log lines. Long output is fine. **Check it
+        for credentials before pasting.**
       render: shell

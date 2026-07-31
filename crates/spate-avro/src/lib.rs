@@ -27,6 +27,8 @@
 
 mod cache;
 mod config;
+mod datum;
+mod de;
 mod deser;
 mod registry;
 mod wire;
@@ -34,5 +36,6 @@ mod wire;
 pub use config::{
     AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection, SchemaSource,
 };
+pub use datum::AvroDatumDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};
 pub use wire::{parse_confluent, parse_single_object};

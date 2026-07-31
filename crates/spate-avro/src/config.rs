@@ -20,6 +20,7 @@
 //! ```
 
 use crate::cache::CompiledSchema;
+use crate::datum::AvroDatumDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
 use crate::registry::{RegistryConfig, spawn_fetcher};
 use apache_avro::Schema;
@@ -355,6 +356,71 @@ impl AvroDeserializerBuilder {
         }
         Ok(AvroSerdeDeserializer::new(self.core.clone()))
     }
+
+    /// The fixed schema's datum-path failure, if any — the
+    /// [`Self::fixed_schema_error`] twin for the single-pass spec, which
+    /// can reject a schema the other paths accept (`duration`,
+    /// `big-decimal`).
+    fn fixed_datum_error(&self) -> Option<String> {
+        match &self.core.mode {
+            SchemaSourceMode::Raw { schema } | SchemaSourceMode::SingleObject { schema, .. } => {
+                schema.datum.as_ref().err().cloned()
+            }
+            SchemaSourceMode::Confluent { .. } => None,
+        }
+    }
+
+    /// The single-pass datum deserializer for any record family — owned or
+    /// borrowed (see [`AvroDatumDeserializer`]'s zero-copy notes). For a
+    /// plain owned `T`, [`Self::build_serde_datum`] reads better.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a configured `reader_schema` — this path decodes in the
+    /// writer schema's shape only (use `#[serde(default)]`/`#[serde(alias)]`
+    /// on the record type for additive evolution, or [`Self::build_serde`]
+    /// for Avro's full resolution rules). Also rejects a fixed schema that
+    /// cannot be parsed, or that the datum path cannot decode
+    /// (`duration`/`big-decimal` logical types) — deferring either would
+    /// surface every record as `SchemaUnavailable` and drop the whole
+    /// stream under the default Skip policy.
+    pub fn build_datum<F>(&self) -> Result<AvroDatumDeserializer<F>, AvroConfigError>
+    where
+        F: spate_core::deser::RecFamily,
+        for<'buf> F::Rec<'buf>: serde::Deserialize<'buf>,
+    {
+        if self.core.reader_schema.is_some() {
+            return Err(AvroConfigError::Invalid {
+                detail: "the datum deserializer does not apply a `reader_schema` \
+                         (records decode in the writer schema's shape; use \
+                         `#[serde(default)]`/`#[serde(alias)]` on the record type, \
+                         or `build_serde` for Avro schema resolution)"
+                    .into(),
+            });
+        }
+        if let Some(reason) = self.fixed_schema_error() {
+            return Err(AvroConfigError::Invalid { detail: reason });
+        }
+        if let Some(reason) = self.fixed_datum_error() {
+            return Err(AvroConfigError::Invalid { detail: reason });
+        }
+        Ok(AvroDatumDeserializer::new(self.core.clone()))
+    }
+
+    /// The single-pass datum deserializer emitting an owned `T` — the
+    /// convenience form of [`Self::build_datum`] for the common case.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build_datum`].
+    pub fn build_serde_datum<T>(
+        &self,
+    ) -> Result<AvroDatumDeserializer<spate_core::deser::Owned<T>>, AvroConfigError>
+    where
+        T: serde::de::DeserializeOwned + Send + 'static,
+    {
+        self.build_datum::<spate_core::deser::Owned<T>>()
+    }
 }
 
 #[cfg(test)]
@@ -396,6 +462,53 @@ mod tests {
         assert_eq!(settings.negative_cache_ttl, Duration::from_secs(45));
         let rt = runtime();
         AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+    }
+
+    #[test]
+    fn build_datum_rejects_a_reader_schema_at_build_time() {
+        let rt = runtime();
+        let yaml = format!(
+            "mode: raw\nschema: {{inline: '{SCHEMA}'}}\nreader_schema: {{inline: '{SCHEMA}'}}"
+        );
+        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
+        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+        // The Value/serde paths accept a reader schema; the datum path
+        // gates it at build time, not per record.
+        builder.build_value().unwrap();
+        let err = builder.build_serde_datum::<TestRec>().unwrap_err();
+        assert!(err.to_string().contains("reader_schema"), "{err}");
+    }
+
+    #[test]
+    fn build_datum_rejects_a_duration_schema_the_other_paths_accept() {
+        let rt = runtime();
+        let duration = r#"{"type":"record","name":"R","fields":[{"name":"d",
+            "type":{"type":"fixed","name":"F","size":12,"logicalType":"duration"}}]}"#
+            .replace('\n', " ");
+        let yaml = format!("mode: raw\nschema: {{inline: '{duration}'}}");
+        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
+        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+        builder.build_value().unwrap();
+        let err = builder.build_serde_datum::<TestRec>().unwrap_err();
+        assert!(err.to_string().contains("does not support"), "{err}");
+    }
+
+    #[test]
+    fn build_serde_datum_happy_path() {
+        let rt = runtime();
+        let yaml = format!("mode: raw\nschema: {{inline: '{SCHEMA}'}}");
+        let settings: AvroSettings = component(&yaml).deserialize_into().unwrap();
+        let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+        builder.build_serde_datum::<TestRec>().unwrap();
+        builder
+            .build_datum::<spate_core::deser::Owned<TestRec>>()
+            .unwrap();
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "builder-gate shape only")]
+    struct TestRec {
+        id: i64,
     }
 
     #[test]

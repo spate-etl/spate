@@ -71,7 +71,10 @@ impl DecoderCore {
     /// framing, and schema resolution. The returned datum slice borrows the
     /// payload buffer (`'buf`), so a borrowed-record backend can decode
     /// straight out of it.
-    fn resolve<'buf>(&mut self, raw: &RawPayload<'buf>) -> Result<Resolved<'buf>, DeserError> {
+    pub(crate) fn resolve<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+    ) -> Result<Resolved<'buf>, DeserError> {
         if raw.bytes.is_empty() {
             return Ok(None);
         }

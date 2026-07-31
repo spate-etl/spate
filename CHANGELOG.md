@@ -8,7 +8,8 @@ breaking change ships in a **minor** bump, not a major one.
 All nine crates version in lockstep, so one entry covers the whole release.
 There is a single supported version at a time: the newest `0.x` minor.
 
-This file is written by hand, drafted from `git cliff --unreleased`. Commit
+Entries are written by hand, one per change, as fragments under
+[`changelog.d/`](changelog.d) and assembled here at release time. Commit
 subjects say what changed; a release note says what it means for somebody
 upgrading, and the second is what belongs here.
 

@@ -5,16 +5,33 @@ Maintainer reference. Contributors want
 
 ## The normal case
 
-1. Draft the changelog entry: `git cliff --unreleased`. Edit it into a
-   `## [Unreleased]` section in [CHANGELOG.md](CHANGELOG.md) and push that to
-   `main`. Commit subjects say what changed; a release note says what it means
-   for somebody upgrading, so this is writing, not pasting.
+1. Assemble the changelog on `main`:
+
+   ```sh
+   ./scripts/changelog.sh --build X.Y.Z
+   ```
+
+   That groups everything in [`changelog.d/`](changelog.d) under a new version
+   heading, resolves each entry's pull request link, adds the contributors, and
+   deletes the fragments it consumed. **Read what it wrote before committing
+   it** — the assembly is mechanical, the release note is not, and this is the
+   last point at which a badly worded entry is cheap to fix.
+
+   Cross-check it against `git cliff --unreleased`, which lists what actually
+   landed. Anything user-visible there with no entry here is a fragment somebody
+   owed and the gate did not catch.
+
+   Push that to `main`. It must land **before** the release pull request merges,
+   and it must not be committed onto the release branch — see step 3.
 2. release-plz keeps a **release pull request** open against `main`, bumping
    every crate's version and the exact internal pins. Review the bump — it is
    derived from conventional-commit types, and a `feat` that should have been a
    `fix` shows up here as a version that is one step too high.
-3. Move the `## [Unreleased]` heading to the new version number and date in the
-   same pull request.
+3. Do not edit the release pull request's branch. release-plz **closes and
+   replaces** a release pull request that gains a non-bot commit, so an entry
+   committed there is lost the next time anything lands on `main`. Everything
+   the release needs from a human goes to `main` first, which is why step 1 is
+   step 1.
 4. **Regenerate the attribution inventory onto the release branch:**
 
    ```sh

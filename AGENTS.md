@@ -193,5 +193,11 @@ closed unfixed) — so check the issue afterwards rather than assuming.
 
 - `make gates` green.
 - Normative docs changed in the *same commit* as the behaviour they describe.
+- A **changelog fragment** under `changelog.d/` whenever the change reaches a
+  crate and somebody upgrading would care — which is what `feat`, `fix`, `perf`
+  and `!` mean. `make changelog-new TYPE=fixed SLUG=…` scaffolds one, and
+  `changelog.d/README.md` has the conventions. Naming no scope is *not* an
+  exemption; only naming one of the non-crate areas is. For a fix to a bug that
+  was never released, a `Changelog: none` trailer is the honest way out.
 - No unrun or failing tests handed over. If something is blocked, say which part
   and why, rather than narrowing the task to what passed.

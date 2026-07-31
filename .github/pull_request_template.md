@@ -64,6 +64,10 @@ Tick by exit code, not by memory.
       rather than bumping one
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),
       scoped to the crate touched, and carry no AI attribution trailers
+- [ ] Crate-reaching `feat`, `fix`, `perf` or `!`: a fragment under
+      `changelog.d/`, from `make changelog-new TYPE=… SLUG=…`. Scoping to a
+      non-crate area is the exemption; leaving the scope off is not. A fix to a
+      bug that was never released takes a `Changelog: none` trailer instead
 
 ## Anything else
 

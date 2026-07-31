@@ -51,6 +51,23 @@ areas that are not crates. Breaking changes carry `!`. Messages should make
 sense to somebody who was not in the conversation: say what changed and why,
 not which iteration of a plan it belongs to.
 
+If the change reaches a crate and somebody upgrading would care, it also needs a
+**changelog fragment** — a short file under [`changelog.d/`](changelog.d), which
+is assembled into the changelog at release time:
+
+```sh
+make changelog-new TYPE=fixed SLUG=short-description
+```
+
+In practice that means a `feat`, `fix` or `perf`, or anything carrying `!`.
+Scoping the commit to one of the areas that is not a crate — `ci`, `docs`,
+`examples`, `benchmarks`, `workspace`, `website` — is what earns an exemption;
+leaving the scope off does not, and neither does a type this repository does not
+recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
+the conventions, `make check-changelog` is the gate, and there is deliberately
+no label to switch it off — the exemption is derived from the type and scope you
+write, so the way out is a subject that is true.
+
 Contributions are accepted under Apache-2.0 §5, inbound under the same terms as
 outbound. There is no CLA and nothing to sign.
 
@@ -217,9 +234,11 @@ methodology lives in
 
 ## Releases
 
-Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md) —
-contributors never need it, but that is where the version, tag and changelog
-mechanics live.
+Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md), which is
+where the version and tag mechanics live. The one part of it that reaches a
+contributor is the changelog fragment described above: releases are assembled
+from `changelog.d/`, so the release note for your change is written with the
+change and not reconstructed from the log months later.
 
 ## Reporting a vulnerability
 

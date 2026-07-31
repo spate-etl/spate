@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Keep a Changelog](https://keepachangelog.com/en/2.0.0/), and versions follow
 [semantic versioning](https://semver.org/) — with the pre-1.0 caveat that a
 breaking change ships in a **minor** bump, not a major one.
 

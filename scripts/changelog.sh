@@ -595,8 +595,14 @@ cmd_build() {
 
     if [ -s "$links" ]; then
         sort -u -t'#' -k2 -n "$links" >>"$block"
-        printf '\n' >>"$block"
     fi
+
+    # Trim trailing blank lines. Whichever section ended the block left one, and
+    # the line the block is inserted above already supplies the separator — two
+    # of them leave a double gap over the previous release. `$(cat)` drops every
+    # trailing newline and the `printf` puts exactly one back.
+    printf '%s\n' "$(cat "$block")" >"$block.trimmed"
+    mv "$block.trimmed" "$block"
 
     # Insert the new release directly below the (emptied) Unreleased heading,
     # and rewrite the two link references at the foot of the file.

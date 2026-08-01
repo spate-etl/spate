@@ -163,6 +163,9 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, AvroValue>,
     ) -> Result<(), DeserError> {
+        // Planted regression for the label verification: two heap blocks per
+        // record, deterministically over the TotalBlocks threshold.
+        let _bloat = std::hint::black_box((Box::new(0u64), Box::new(0u64)));
         if let Some(value) = self.core.decode(raw)? {
             let _ = out.emit(Record {
                 payload: value,

@@ -155,6 +155,7 @@ impl AvroValueDeserializer {
     }
 }
 
+// Throwaway verification pull request — never merges.
 impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
     fn deserialize<'buf>(
         &mut self,

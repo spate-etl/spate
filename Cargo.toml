@@ -135,6 +135,11 @@ proptest = "1.11"
 loom = "0.7"
 criterion = "0.8"
 divan = "0.1.13"
+# Instruction-count benches. Deterministic counters rather than wall time, so
+# they compare across the shared runners CI actually uses; running them needs
+# valgrind and a same-version `gungraun-runner`, which is why `bench-gungraun`
+# is its own target rather than part of `bench-check`.
+gungraun = "0.19.4"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

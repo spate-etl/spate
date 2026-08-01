@@ -25,7 +25,8 @@
 # Every target is a verb, not a file. Without this a target would be skipped if
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
-        check-features check-examples bench-check bench loom deny attribution \
+        check-features check-examples bench-check bench bench-gungraun loom \
+        deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-invariants \
         check-changelog changelog-new ci-lint docs docs-serve gates
 
@@ -108,6 +109,18 @@ bench-check: ## Every benchmark rig still compiles (release profile, slow)
 # rejects any forwarded criterion argument.
 bench: ## Criterion and divan micro benches
 	cargo bench -p spate-core --locked --bench chain
+
+# Instruction counts, not wall time. Runs only on a platform valgrind supports
+# — Linux here — with valgrind on PATH and `gungraun-runner` installed at the
+# same version as the `gungraun` dependency (0.19.4):
+# `cargo install --version 0.19.4 gungraun-runner`. A mismatched runner is a
+# hard error, not a warning. CI runs this; on a machine without valgrind, add
+# `--no-run` to each line to check the benches still build. Each target is
+# named explicitly for the same reason `bench` names one: an unnamed run also
+# drives the lib's libtest harness, which rejects the harness's own arguments.
+bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-runner)
+	cargo bench -p spate-core --locked --bench chain_gungraun
+	cargo bench -p spate-avro --locked --bench decode_gungraun
 
 ##@ Supply chain
 

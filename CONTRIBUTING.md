@@ -138,7 +138,15 @@ make test-docker   # container-backed suites
 make loom          # the concurrency models
 make docs          # the documentation site
 make bench-check   # every benchmark rig still compiles, in the release profile
+make bench-gungraun  # instruction counts, on Linux with valgrind installed
 ```
+
+`make bench-gungraun` is the odd one out: it counts instructions under valgrind
+rather than measuring wall time, which is what makes the number comparable
+across machines instead of a property of the one that produced it. It needs
+valgrind and a `gungraun-runner` at the same version as the pinned `gungraun`,
+so it does not run on macOS at all — CI runs it, and locally the most you can
+check is that the benches build.
 
 If you changed dependencies, add `make attribution` to regenerate
 `THIRD-PARTY.md`. It is checked nightly and regenerated at release rather than

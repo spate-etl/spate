@@ -4142,6 +4142,7 @@ dependencies = [
  "bytesize",
  "flate2",
  "futures-util",
+ "gungraun",
  "object_store",
  "proptest",
  "serde",

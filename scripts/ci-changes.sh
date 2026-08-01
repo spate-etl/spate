@@ -381,15 +381,19 @@ else
             ;;
         esac
 
-        # Which files can move an instruction count? Exactly the two crates
-        # the gungraun benches compile: spate-core (the chain rigs) and
-        # spate-avro (decode). The unit is the whole crate, not the module a
-        # bench happens to import, because codegen is crate-global — an edit
-        # anywhere in a measured crate can shift inlining and with it the
-        # count. Nothing else belongs here: the s3 request-shape tests and
-        # the wall-clock rigs under benchmarks/ are exercised by the jobs the
-        # `rust` output already selects, and listing their paths would boot a
-        # double bench build to measure code the benches never compile.
+        # Which changes get their instruction counts compared automatically?
+        # spate-core (the chain rigs) and spate-avro (decode). The unit is the
+        # whole crate, not the module a bench happens to import, because
+        # codegen is crate-global — an edit anywhere in a measured crate can
+        # shift inlining and with it the count.
+        #
+        # This is deliberately narrower than the set of crates that *have*
+        # benches. spate-s3 has them and is not listed: every benched crate
+        # costs two builds and two valgrind runs, merge base and head, so
+        # selecting all of them here would tax ordinary pull requests to
+        # measure code they did not touch. The rest are opt-in through the
+        # `ci: bench` label, which selects everything — so a change that means
+        # to move one of those counts has to ask for the comparison.
         #
         # A separate `case` rather than arms on the one above, because the
         # two questions have different answers for the same file.

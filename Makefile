@@ -112,9 +112,11 @@ bench: ## Criterion and divan micro benches
 
 # Instruction counts, not wall time. Runs only on a platform valgrind supports
 # — Linux here — with valgrind on PATH and `gungraun-runner` installed at the
-# same version as the `gungraun` dependency (0.19.4):
-# `cargo install --version 0.19.4 gungraun-runner`. A mismatched runner is a
-# hard error, not a warning. CI runs this; on a machine without valgrind, add
+# version Cargo.lock pins for the `gungraun` dependency, which
+#   cargo metadata --format-version 1 --locked \
+#     | jq -r '.packages[] | select(.name == "gungraun") | .version'
+# prints and CI derives the same way. A mismatched runner is a hard error,
+# not a warning. On a machine without valgrind, add
 # `--no-run` to each line to check the benches still build. Each target is
 # named explicitly for the same reason `bench` names one: an unnamed run also
 # drives the lib's libtest harness, which rejects the harness's own arguments.

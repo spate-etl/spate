@@ -45,6 +45,11 @@ spate-s3 = { path = ".", features = ["testing"] }
 # feature — dependents of spate-s3 never link async-nats through it.
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-test = { workspace = true }
+# The framer for the framing bench. This crate ships none of its own —
+# production wires the format's framer through `with_framer` — and object
+# storage carrying newline-delimited JSON is the pairing it really runs.
+# spate-json does not depend on spate-s3, so there is no cycle.
+spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }
@@ -52,10 +57,14 @@ tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-# gungraun's `main!` is the harness; without this the default libtest one wraps
-# it and rejects the harness's own arguments at run time.
+# gungraun's `main!` is the harness; without these the default libtest one
+# wraps them and rejects the harness's own arguments at run time.
 [[bench]]
 name = "split_gungraun"
+harness = false
+
+[[bench]]
+name = "framing_gungraun"
 harness = false
 
 [lints]

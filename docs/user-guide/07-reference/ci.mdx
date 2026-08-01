@@ -372,12 +372,15 @@ stripping a true one because a docs push skipped the benches), and
 hand-applying the label only lasts until the next benched push.
 
 `perf-counters` is selected by its own classification output, `bench`, from
-exactly the two crates the benches compile — `crates/spate-core/` and
-`crates/spate-avro/` — plus the `ci: bench` label. The unit is the whole
-crate rather than the modules a bench imports, because codegen is
-crate-global: an edit anywhere in a measured crate can shift inlining and
-with it the count. Paths the benches never compile select nothing here,
-whatever other jobs they select.
+two crates — `crates/spate-core/` and `crates/spate-avro/` — plus the
+`ci: bench` label. That is narrower than the set of crates the benches
+compile, and deliberately so: every benched crate costs two builds and two
+valgrind runs, merge base and head, so the automatic set holds the crates
+whose counts are wanted unprompted and the rest are opt-in through the label.
+The unit is the whole crate rather than the modules a bench imports, because
+codegen is crate-global: an edit anywhere in a measured crate can shift
+inlining and with it the count. A change to an opt-in crate lands unmeasured
+unless someone applies the label.
 
 The runner binary's version must match the `gungraun` dependency exactly — a
 mismatch fails every bench with a version error rather than a measurement —

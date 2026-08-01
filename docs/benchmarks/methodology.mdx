@@ -275,7 +275,8 @@ regression suite is therefore split by what varies:
   chain hot path (`crates/spate-core/tests/chain_alloc.rs`), object-store
   request shapes for a coordinated backfill (one LIST per run, one GET per
   object — `crates/spate-s3/tests/request_shape.rs`), and instruction counts
-  via gungraun. None of these read a clock, so they hold on any machine.
+  via gungraun. Each gates on a counter, never on elapsed time, so the
+  verdicts hold on any machine.
   The instruction counts are advisory: the comparison lands in the pull-request
   summary without a blocking threshold, but a bench that fails to build or run
   fails its job like any other. The job wiring is in the

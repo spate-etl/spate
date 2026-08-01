@@ -381,20 +381,20 @@ else
             ;;
         esac
 
-        # Which files can move a deterministic performance counter? The
-        # instruction-count benches cover the chain hot path and Avro decode,
-        # the request-shape tests cover the object-store read path, and the
-        # rigs are the code that drives them.
-        # A separate `case` rather than arms on the one above, because the two
-        # questions have different answers for the same file: a change under
-        # `crates/spate-core/src/` reaches every container suite and only the
-        # `ops` subtree is benched.
+        # Which files can move an instruction count? Exactly the two crates
+        # the gungraun benches compile: spate-core (the chain rigs) and
+        # spate-avro (decode). The unit is the whole crate, not the module a
+        # bench happens to import, because codegen is crate-global — an edit
+        # anywhere in a measured crate can shift inlining and with it the
+        # count. Nothing else belongs here: the s3 request-shape tests and
+        # the wall-clock rigs under benchmarks/ are exercised by the jobs the
+        # `rust` output already selects, and listing their paths would boot a
+        # double bench build to measure code the benches never compile.
         #
-        # This sits after the ignore-list `case` above, which is what keeps
-        # `benchmarks/results/` — committed chart data, not code — from
-        # selecting a bench run.
+        # A separate `case` rather than arms on the one above, because the
+        # two questions have different answers for the same file.
         case "$file" in
-        crates/spate-s3/* | crates/spate-core/src/ops/* | crates/spate-avro/* | benchmarks/*)
+        crates/spate-core/* | crates/spate-avro/*)
             bench=true
             ;;
         esac

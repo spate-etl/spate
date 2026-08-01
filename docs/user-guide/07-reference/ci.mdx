@@ -277,10 +277,10 @@ on any host.
 (`cargo test -p spate-core --release --test chain_alloc`). Its bounds are
 absolute rather than relative to a stored baseline, so it compares against
 nothing and cannot drift: an allocation that scales with record count fails it.
-It is the one job on this path that builds in the release profile, because the
-bounds are calibrated against optimised code — and it pays for that by sharing
-the `release` cache entry the scheduled release-profile jobs populate from
-`main`.
+It builds in the release profile, because the bounds are calibrated against
+optimised code — and it pays for that by sharing the `release` cache entry the
+scheduled release-profile jobs populate from `main`, the same entry
+`perf-counters` uses for the bench profile that inherits release.
 
 `perf-counters` runs the gungraun benches, which count instructions,
 branches and cache references under callgrind. On a pull request the
@@ -290,10 +290,13 @@ compares against it — so the comparator is always the merge base, never a
 cache whose newest entry could be any branch's. `scripts/gungraun-report.sh`
 parses the machine-readable summaries into the table in the job's step
 summary, and fails loudly if the summary schema version ever drifts from the
-one its field paths were written against. A merge base that predates a bench
-reports that bench as *new* rather than failing, and a merge base with no
-benches at all — the first pull request after a bench lands — is reported as
-having no baseline. Push and merge-group runs report absolute counts.
+one its field paths were written against. The baseline leg is scaffolding,
+not the gate: it discovers benches from the merge-base tree by naming
+convention, carries `continue-on-error`, and wipes a partial measurement —
+so a merge base that predates a bench reports that bench as *new*, one with
+no benches reports no baseline, and one that no longer builds on today's
+toolchain reports no baseline rather than blocking a pull request on code
+its author did not write. Push and merge-group runs report absolute counts.
 
 The numbers are advisory and the job is not. The comparison step carries
 `continue-on-error: true`, so a count that moved does not block a merge; the job
@@ -303,12 +306,12 @@ before real pull requests have been through the job is guessing at the noise
 floor, and one set too tight would turn an advisory signal into a rerun button.
 
 `perf-counters` is selected by its own classification output, `bench`, from
-four path groups — `crates/spate-s3/`, `crates/spate-core/src/ops/`,
-`crates/spate-avro/`, and the rigs under `benchmarks/` — plus the `ci: bench`
-label. Committed results under
-`benchmarks/results/` are chart data rather than code and select nothing, which
-is a property of where that arm sits in the classifier's `case` rather than a
-rule anyone has to remember.
+exactly the two crates the benches compile — `crates/spate-core/` and
+`crates/spate-avro/` — plus the `ci: bench` label. The unit is the whole
+crate rather than the modules a bench imports, because codegen is
+crate-global: an edit anywhere in a measured crate can shift inlining and
+with it the count. Paths the benches never compile select nothing here,
+whatever other jobs they select.
 
 The runner binary is installed with `cargo install gungraun-runner
 --version …`, and its version must match the `gungraun` dependency in the

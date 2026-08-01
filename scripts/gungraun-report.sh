@@ -41,23 +41,37 @@ fi
 
 # Field-path conventions (summary.v6.schema.json): `metrics` is Left/Both/Right
 # with Left = the NEW metric and Right = the OLD one; `diffs` is present only
-# when both sides are, carrying the derived percentage as a string.
-jq -r -s --arg base "$baseline_label" '
+# when both sides are, carrying the derived percentage as a string — including
+# the strings "inf"/"-inf" (a metric that was zero at the baseline) and "NaN"
+# (zero on both sides), which must not reach `tonumber` (jq renders them as
+# ±1.8e308 and null rather than aborting).
+#
+# The report is captured whole and printed only on success: jq streams its
+# output, so an error midway through would otherwise leave a truncated table
+# in the step summary under a green `continue-on-error` step.
+report=$(jq -r -s --arg base "$baseline_label" '
     def val: if type == "object" then (.Int // .Float) else . end;
     def new_side: .metrics | (if .Both then .Both[0] else .Left end) | val;
     def old_side: .metrics | (if .Both then .Both[1] elif .Right then .Right else null end)
         | if . == null then null else val end;
     def delta:
         if .diffs == null then "*new*"
-        else (.diffs.diff_pct | tonumber | (. * 100 | round) / 100
-              | if . > 0 then "+\(.)%" else "\(.)%" end)
+        else (.diffs.diff_pct
+            | if test("inf") then (if startswith("-") then "-∞%" else "+∞%" end)
+              elif . == "NaN" then "n/a"
+              else (tonumber | (. * 100 | round) / 100
+                    | if . > 0 then "+\(.)%" else "\(.)%" end)
+              end)
         end;
     def bench_name:
         (.module_path | split("::") | .[1:] | join("::"))
         + (if .id != null and .id != "" then " \(.id)" else "" end);
+    # null when the summary carries no callgrind profile at all (a run under
+    # a different valgrind tool): rendered as an explicit row, never an error
+    # that truncates the report.
     def callgrind:
         [.profiles[] | select(.tool == "Callgrind")][0]
-        | .summaries.total.summary.Callgrind;
+        | if . == null then null else .summaries.total.summary.Callgrind end;
 
     "## Instruction counts",
     "",
@@ -67,11 +81,15 @@ jq -r -s --arg base "$baseline_label" '
     "| Bench | PR | \($base) | Δ |",
     "| --- | ---: | ---: | ---: |",
     (.[] | callgrind as $cg
-        | "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | delta) |"),
+        | if $cg == null or ($cg | has("Ir") | not)
+          then "| \(bench_name) | — | — | *no callgrind profile* |"
+          else "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | delta) |"
+          end),
     "",
     "<details><summary>All callgrind metrics</summary>",
     "",
     (.[] | callgrind as $cg
+        | select($cg != null)
         | "**\(bench_name)**",
           "",
           "| Metric | PR | \($base) | Δ |",
@@ -79,4 +97,5 @@ jq -r -s --arg base "$baseline_label" '
           ($cg | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta) |"),
           ""),
     "</details>"
-' "$summaries"
+' "$summaries")
+printf '%s\n' "$report"

@@ -537,12 +537,13 @@ jobs:
     # belongs on the path that stops a change entering `main` rather than on a
     # timer that reports the morning after the merge.
     #
-    # The constraint it carries is a release build, which nothing else on this
-    # path needs — the bounds are calibrated against optimised code, and a debug
-    # build allocates differently enough that they say nothing. `shared-key:
-    # release` is what makes that affordable: the same cache entry the scheduled
-    # release-profile jobs populate from `main`, so this restores warm instead
-    # of compiling the dependency graph into a tree of its own.
+    # The constraint it carries is a release build — the bounds are calibrated
+    # against optimised code, and a debug build allocates differently enough
+    # that they say nothing. `shared-key: release` is what makes that
+    # affordable: the same cache entry the scheduled release-profile jobs
+    # populate from `main` and that `perf-counters` below shares for its
+    # bench profile, so this restores warm instead of compiling the
+    # dependency graph into a tree of its own.
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
@@ -610,31 +611,50 @@ jobs:
       # without the other turns every bench into a hard error.
       - run: cargo install gungraun-runner --version 0.19.4 --locked
 
-      # The baseline: check out the merge base, measure it, come back. Direct
-      # cargo invocations rather than `make bench-gungraun`, because the
-      # merge-base tree is historical — on the first pull request after a
-      # bench lands, that tree has neither the bench file nor the make target
-      # — so each bench runs only if its source exists there. A merge base
-      # with no benches at all is reported as having no baseline, not failed.
+      # The baseline: check out the merge base, measure it, come back. The
+      # benches are discovered from the merge-base tree itself by the
+      # `*_gungraun.rs` naming convention — a list hardcoded here would
+      # drift from `make bench-gungraun` the first time a bench is added,
+      # and the discovery also handles the merge base that predates a bench:
+      # it simply contributes no baseline for it.
+      #
+      # `continue-on-error`, and bench failures are caught inside the script,
+      # because this leg builds historical code with today's toolchain: its
+      # failure says nothing about the change under review, and the head run
+      # below still reports absolute counts. A partial measurement is wiped
+      # rather than kept, so the comparison is all-or-nothing.
       #
       # Only a pull request has a merge base to compare against; a push or
       # merge-group run reports absolute counts instead.
       - name: Measure the merge base
         id: base
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         run: |
           set -euo pipefail
           head_sha=$(git rev-parse HEAD)
           merge_base=$(git merge-base HEAD^1 HEAD^2)
           git checkout --quiet --detach "$merge_base"
+          # Never inherit counter output the shared cargo cache may have
+          # restored: stale data here would silently become the comparison.
+          rm -rf target/gungraun
           measured=false
-          if [[ -f crates/spate-core/benches/chain_gungraun.rs ]]; then
-            GUNGRAUN_SAVE_BASELINE=base cargo bench -p spate-core --locked --bench chain_gungraun
-            measured=true
-          fi
-          if [[ -f crates/spate-avro/benches/decode_gungraun.rs ]]; then
-            GUNGRAUN_SAVE_BASELINE=base cargo bench -p spate-avro --locked --bench decode_gungraun
-            measured=true
+          ok=true
+          for bench_src in crates/*/benches/*_gungraun.rs; do
+            [[ -e "$bench_src" ]] || continue
+            # Crate directory names equal package names in this workspace.
+            pkg=${bench_src#crates/}
+            pkg=${pkg%%/*}
+            bench=$(basename "$bench_src" .rs)
+            if GUNGRAUN_SAVE_BASELINE=base cargo bench -p "$pkg" --locked --bench "$bench"; then
+              measured=true
+            else
+              ok=false
+            fi
+          done
+          if [[ "$ok" == "false" ]]; then
+            rm -rf target/gungraun
+            measured=false
           fi
           git checkout --quiet --detach "$head_sha"
           {
@@ -642,8 +662,8 @@ jobs:
             echo "merge-base=$merge_base"
           } >>"$GITHUB_OUTPUT"
 
-      # This step is allowed to fail the job, and that is the whole distinction
-      # the plan draws: the numbers are advisory, a broken bench is not.
+      # This step is allowed to fail the job, and that is the whole
+      # distinction: the numbers are advisory, a broken bench is not.
       #
       # `GUNGRAUN_BASELINE` makes the run compare against the merge-base
       # measurement saved above; `GUNGRAUN_SAVE_SUMMARY` writes one
@@ -658,6 +678,10 @@ jobs:
           set -euo pipefail
           if [[ -z "$GUNGRAUN_BASELINE" ]]; then
             unset GUNGRAUN_BASELINE
+            # Absolute means absolute: without a named baseline, gungraun
+            # would still compare against whatever output a restored cache or
+            # an aborted base leg left behind here.
+            rm -rf target/gungraun
           fi
           make bench-gungraun
 

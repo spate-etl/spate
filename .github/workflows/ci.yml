@@ -568,7 +568,13 @@ jobs:
     # same commit on the same toolchain yields the same number on any host, so
     # it is a performance signal a pull request can actually carry.
     #
-    # Advisory in what it reports, blocking in whether it ran. The comparison
+    # The comparison is a paired measurement inside one job: the merge base is
+    # measured first and saved as a named baseline, then the head run compares
+    # against it. The comparator is therefore always the merge base rather
+    # than whatever a cache last held — at the cost of building and running
+    # the benches twice, a few minutes on an advisory job.
+    #
+    # Advisory in what it reports, blocking in whether it ran. The report
     # step below carries `continue-on-error: true`, so a count that moved does
     # not block a merge; the job stays in `ci-gate`'s `needs:`, so a bench that
     # no longer builds or dies under valgrind does. Keeping the job out of the
@@ -576,10 +582,12 @@ jobs:
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
-      # action inside it can be read.
+      # action inside it can be read. Full history, because the merge base has
+      # to be resolvable and checked out for the baseline measurement.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: ./.github/actions/setup-rust
         with:
           # The bench profile inherits release, so these artifacts belong with
@@ -602,59 +610,80 @@ jobs:
       # without the other turns every bench into a hard error.
       - run: cargo install gungraun-runner --version 0.19.4 --locked
 
-      # Restored BEFORE the benches run, which is the whole point: gungraun
-      # compares each measurement against the previous run's output sitting in
-      # this directory, and rotates it as it goes. Restored afterwards, the
-      # extraction would overwrite the numbers just measured, the comparison
-      # would be against nothing, and the post-job save would freeze whatever
-      # the first run produced under every later key.
+      # The baseline: check out the merge base, measure it, come back. Direct
+      # cargo invocations rather than `make bench-gungraun`, because the
+      # merge-base tree is historical — on the first pull request after a
+      # bench lands, that tree has neither the bench file nor the make target
+      # — so each bench runs only if its source exists there. A merge base
+      # with no benches at all is reported as having no baseline, not failed.
       #
-      # The exact key can never hit, so the restore always falls through to the
-      # newest entry under the prefix — the same mechanism the scheduled
-      # criterion baseline uses. What lands here is callgrind output for a
-      # handful of benches, kilobytes rather than the hundreds of megabytes that
-      # made the site's node_modules cache restore-only.
-      - name: Restore the previous instruction counts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/gungraun
-          key: gungraun-baseline-${{ github.run_id }}
-          restore-keys: gungraun-baseline-
+      # Only a pull request has a merge base to compare against; a push or
+      # merge-group run reports absolute counts instead.
+      - name: Measure the merge base
+        id: base
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          merge_base=$(git merge-base HEAD^1 HEAD^2)
+          git checkout --quiet --detach "$merge_base"
+          measured=false
+          if [[ -f crates/spate-core/benches/chain_gungraun.rs ]]; then
+            GUNGRAUN_SAVE_BASELINE=base cargo bench -p spate-core --locked --bench chain_gungraun
+            measured=true
+          fi
+          if [[ -f crates/spate-avro/benches/decode_gungraun.rs ]]; then
+            GUNGRAUN_SAVE_BASELINE=base cargo bench -p spate-avro --locked --bench decode_gungraun
+            measured=true
+          fi
+          git checkout --quiet --detach "$head_sha"
+          {
+            echo "measured=$measured"
+            echo "merge-base=$merge_base"
+          } >>"$GITHUB_OUTPUT"
 
       # This step is allowed to fail the job, and that is the whole distinction
       # the plan draws: the numbers are advisory, a broken bench is not.
       #
-      # `pipefail` is set explicitly because the runner's default shell is
-      # `bash -e`, where a pipeline reports only `tee`'s exit status and a
-      # failing bench would be swallowed. The log is kept so the summary step
-      # below has something to render without re-running the measurement.
+      # `GUNGRAUN_BASELINE` makes the run compare against the merge-base
+      # measurement saved above; `GUNGRAUN_SAVE_SUMMARY` writes one
+      # machine-readable summary per bench under `target/gungraun`, which is
+      # what the report step parses — the human-readable output stays in this
+      # step's log.
       - name: Instruction counts
+        env:
+          GUNGRAUN_SAVE_SUMMARY: json
+          GUNGRAUN_BASELINE: ${{ steps.base.outputs.measured == 'true' && 'base' || '' }}
         run: |
           set -euo pipefail
-          make bench-gungraun 2>&1 | tee gungraun.log
+          if [[ -z "$GUNGRAUN_BASELINE" ]]; then
+            unset GUNGRAUN_BASELINE
+          fi
+          make bench-gungraun
 
-      # No regression threshold, deliberately. gungraun can fail a run on a
-      # percentage change, but choosing that percentage before any real pull
-      # request has been through the job is guessing at the noise floor — and a
-      # threshold set too tight turns the advisory signal into a rerun button.
-      # Turning one on once the spread is known is a follow-up.
+      # No regression threshold, deliberately — the report renders no verdict.
+      # gungraun can fail a run on a percentage change, but choosing that
+      # percentage before any real pull request has been through the job is
+      # guessing at the noise floor — and a threshold set too tight turns the
+      # advisory signal into a rerun button. Turning one on once the spread is
+      # known is a follow-up.
       #
       # `continue-on-error` belongs on this step and nowhere else. On the job it
-      # would also excuse the step above.
-      - name: Summarise instruction counts
+      # would also excuse the steps above.
+      - name: Report instruction counts
         continue-on-error: true
+        env:
+          BASE_MEASURED: ${{ steps.base.outputs.measured }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
         run: |
           set -euo pipefail
-          {
-            echo "## Instruction counts"
-            echo
-            echo "Deterministic counters under callgrind, compared against the"
-            echo "previous run. Advisory: no threshold blocks a merge."
-            echo
-            echo '```'
-            cat gungraun.log
-            echo '```'
-          } >>"$GITHUB_STEP_SUMMARY"
+          find target/gungraun -name summary.json -exec cat {} + >gungraun-summaries.jsonl
+          if [[ "$BASE_MEASURED" == "true" ]]; then
+            label="main @ ${MERGE_BASE:0:12}"
+          else
+            label="baseline (none measured)"
+          fi
+          ./scripts/gungraun-report.sh gungraun-summaries.jsonl "$label" >>"$GITHUB_STEP_SUMMARY"
 
   loom:
     name: Loom models (opt-in)

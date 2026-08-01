@@ -283,11 +283,17 @@ the `release` cache entry the scheduled release-profile jobs populate from
 `main`.
 
 `perf-counters` runs the gungraun benches, which count instructions,
-branches and cache references under callgrind. The comparison is against the
-previous run's counters, carried between runs by an `actions/cache` entry whose
-exact key never hits and whose `restore-keys:` prefix therefore falls through to
-the newest one — the same mechanism as the scheduled criterion baseline, and
-restored **before** the benches run for the same reason.
+branches and cache references under callgrind. On a pull request the
+comparison is a paired measurement inside the one job: the merge base is
+checked out and measured first as a named baseline, then the head run
+compares against it — so the comparator is always the merge base, never a
+cache whose newest entry could be any branch's. `scripts/gungraun-report.sh`
+parses the machine-readable summaries into the table in the job's step
+summary, and fails loudly if the summary schema version ever drifts from the
+one its field paths were written against. A merge base that predates a bench
+reports that bench as *new* rather than failing, and a merge base with no
+benches at all — the first pull request after a bench lands — is reported as
+having no baseline. Push and merge-group runs report absolute counts.
 
 The numbers are advisory and the job is not. The comparison step carries
 `continue-on-error: true`, so a count that moved does not block a merge; the job

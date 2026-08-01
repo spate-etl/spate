@@ -330,10 +330,12 @@ crate-global: an edit anywhere in a measured crate can shift inlining and
 with it the count. Paths the benches never compile select nothing here,
 whatever other jobs they select.
 
-The runner binary is installed with `cargo install gungraun-runner
---version …`, and its version must match the `gungraun` dependency in the
-workspace manifest. Bumping one without the other fails every bench with a
-version-mismatch error rather than a measurement.
+The runner binary's version must match the `gungraun` dependency exactly — a
+mismatch fails every bench with a version error rather than a measurement —
+so the workflow derives it from the locked workspace resolution
+(`cargo metadata --locked`) at install time rather than hardcoding it. The
+version is pinned by `Cargo.lock` like any other dependency; a dependency
+bump carries the runner with it, and there is no second copy to drift.
 
 ## Coverage
 

@@ -254,9 +254,18 @@ docker` for anything `--run-ignored` — `default` hard-kills a test at 120s, wh
 a cold container pull can exceed, and the SIGKILL reports `TIMEOUT`
 indistinguishably from a real hang.
 
-Only `ci` retries; `docker` does not. A fixture that boots a container waits for
-it to answer a real query, and on timeout reports that container's liveness,
-exit code and log tail — so a container failure carries its own diagnosis.
+Both `ci` and `docker` retry once. The container suites earn it on measurement
+rather than on the assumption that container failures are infrastructural: the
+servers they boot become ready in about a second and have never taken more than
+six, while *starting* a container is near-instant once warm but costs ten to
+sixteen seconds on a job's first boot, and has been seen to exceed sixty. That
+spread belongs to the docker daemon, and no fixture change reaches it.
+
+A retry does not hide the failure it absorbs. A fixture that boots a container
+waits for it to answer a real query, and on timeout reports that container's
+liveness, exit code and log tail; a retried test lands as a flaky annotation in
+the container job's JUnit report. A retry that starts recurring with a cause
+attached is a signal to delete the retry, not to trust it.
 
 `benchmarks/` sets `autobins = false`, so a new rig in `benchmarks/src/bin/` is
 invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
@@ -344,10 +353,11 @@ cargo llvm-cov nextest --profile ci --workspace --all-features --summary-only \
 ```
 
 Both suites publish their JUnit report as a check annotation — `Test results`
-from the fast suite, `Container test results` from the container job. For the
-fast suite that is what keeps its `retries = 1` from hiding a flake behind a
-green run; for the container job, which does not retry, it is what puts a
-failure somewhere other than scrolled-past log text.
+from the fast suite, `Container test results` from the container job. That is
+what keeps `retries = 1` from hiding a flake behind a green run, and it is the
+reason both jobs declare `checks: write`: without it the publish step reports
+`Resource not accessible by integration` and continues, leaving the job green
+and the annotation never written.
 
 The loom invocation must stay `--lib`: doc tests compiled under `--cfg loom`
 construct loom-typed primitives outside a model and abort. The same applies

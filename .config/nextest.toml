@@ -37,13 +37,29 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # on a fresh machine — SIGKILL at 120s reports TIMEOUT, indistinguishable from
 # a genuine hang, and can orphan the container. Warn late, never terminate: CI
 # already bounds these with `timeout-minutes`.
-#
-# No `retries` here, deliberately, unlike `ci` below. A fixture that boots a
-# container owns its readiness gate and reports the container's exit code and
-# log tail when that gate expires, so a failure names a cause. A retry would
-# turn the ones that still get through back into a green run and a shrug.
 [profile.docker]
 slow-timeout = { period = "120s" }
+# One retry, for a failure that measurement puts outside the code under test.
+#
+# Timing every boot in this suite on runner hardware separates the two things
+# the old error conflated. A ClickHouse server becoming ready is well behaved —
+# a median near a second and no sample past six, over 720 boots. Starting the
+# container is not: warm, it has a median under a fifth of a second and never
+# passed one second across 1434 boots, but the first boot of a job costs ten to
+# sixteen, and the failure that started all this took more than sixty. That
+# distribution belongs to the docker daemon. No fixture change reaches it.
+#
+# What makes this retry honest is the pair of things a retried run now leaves
+# behind, neither of which existed when it was first written. The container job
+# publishes its JUnit report, so a retried test is a flaky annotation rather
+# than a silently green run — the previous comment here claimed that and it was
+# false, because the job had no permission to create the check. And the fixtures
+# report the container's exit code and log tail when their own gate expires, so
+# a repeat is attributable instead of merely re-run.
+#
+# If retries start showing up in that annotation with a *cause* attached, this
+# line is the thing to delete, not defend.
+retries = 1
 
 [profile.ci]
 # `fail-fast` is inherited from `[profile.default]`; restating it here would

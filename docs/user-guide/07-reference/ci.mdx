@@ -338,7 +338,10 @@ execute the pull request's code, so `perf-counters` runs with a read-only
 token and hands over exactly one boolean as an artifact; `perf-label.yml`
 runs with `pull-requests: write`, checks out nothing, executes nothing from
 the pull request, binds its download to the triggering run, and treats the
-artifact as untrusted input parsed as `true`, `false`, or ignored. The
+artifact as untrusted input parsed as `true`, `false`, or ignored. The two
+workflows can never execute together before a merge — the label half runs
+the default branch's definition — so the write side of that one-file
+contract runs on every pull request instead, as `make check-perf-report`. The
 report itself deliberately never leaves the step summary: re-posting
 fork-authored markdown from a privileged workflow is the vulnerability class
 this design exists to avoid. Two consequences worth knowing: a CI run that

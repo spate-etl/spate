@@ -27,8 +27,9 @@
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
         check-features check-examples bench-check bench bench-gungraun loom \
         deny attribution \
-        supply-chain zizmor shellcheck self-test check-labels check-invariants \
-        check-changelog changelog-new ci-lint docs docs-serve gates
+        supply-chain zizmor shellcheck self-test check-labels check-perf-report \
+        check-invariants check-changelog changelog-new ci-lint docs docs-serve \
+        gates
 
 ##@ Help
 
@@ -150,6 +151,12 @@ self-test: ## The CI change classifier still matches the crate graph
 check-labels: ## Every referenced label is a defined label
 	./scripts/check-labels.sh
 
+# The report script and perf-label.yml share a one-file contract that no pull
+# request can execute end to end (`workflow_run` runs the default branch's
+# definition), so the write side runs here instead.
+check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
+	./scripts/gungraun-report.sh --self-test
+
 check-invariants: ## The invariant lists still agree
 	./scripts/check-invariants.sh
 
@@ -161,7 +168,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-invariants check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

@@ -16,8 +16,15 @@ name: Performance label
 #
 # The artifact download is bound to the triggering run by `run-id:`, so a
 # different run — or a different workflow — cannot feed it. The pull-request
-# number is taken from the event payload (with the trusted `head_sha` as the
-# fork fallback), never from the artifact.
+# number is resolved through the API from the event's trusted `head_sha`,
+# never from the artifact and never from `workflow_run.pull_requests` — that
+# array is empty for fork pull requests and can carry siblings when branches
+# stack.
+#
+# The write side of the flag-file contract runs on every pull request as
+# `make check-perf-report`; the two workflows themselves can never execute
+# together before a merge, because this one runs the default branch's
+# definition.
 on:
   workflow_run:
     workflows: [CI]
@@ -44,6 +51,9 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     permissions:
+      # Downloading an artifact from *another* run — which `run-id:` below
+      # makes this — is an actions-scoped read; without it the download 403s.
+      actions: read
       # Labels on a pull request are a pull-requests-scoped write.
       pull-requests: write
     steps:
@@ -69,20 +79,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           PERF_LABEL: "affects-performance"
         run: |
           set -euo pipefail
-          pr="$PR_NUMBER"
+          # The head SHA is trusted event payload; resolving it through the
+          # API keeps both the artifact and `workflow_run.pull_requests` out
+          # of the decision — the latter is empty for fork pull requests and
+          # can carry siblings when branches stack (a run on a branch that is
+          # one pull request's head and another's base), and labelling the
+          # wrong one is worse than labelling none. The filter keeps only an
+          # open pull request whose current head is exactly this run's commit.
+          pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            | jq -r --arg sha "$HEAD_SHA" \
+                '[.[] | select(.state == "open" and .head.sha == $sha)][0].number // empty')
           if [[ -z "$pr" ]]; then
-            # `workflow_run.pull_requests` is empty for a fork's pull request;
-            # the head SHA is trusted event payload, so resolving it back to
-            # a pull request through the API keeps the artifact out of the
-            # decision.
-            pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')
-          fi
-          if [[ -z "$pr" ]]; then
-            echo "no pull request for $HEAD_SHA (closed before this ran?); nothing to sync"
+            echo "no open pull request heads $HEAD_SHA (closed, or superseded by a newer push); nothing to sync"
             exit 0
           fi
           flag=$(tr -d '[:space:]' <has_regressions)

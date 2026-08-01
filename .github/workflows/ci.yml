@@ -212,6 +212,12 @@ jobs:
       - run: make check-labels
       - run: make check-invariants
 
+      # The report script and perf-label.yml share a one-file contract that
+      # no pull request can execute end to end — the label workflow runs the
+      # default branch's definition — so the write side runs here: the flag
+      # file must be the bare boolean the label workflow's parse accepts.
+      - run: make check-perf-report
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest

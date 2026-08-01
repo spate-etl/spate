@@ -2,6 +2,7 @@
 # Render gungraun's machine-readable summaries as a Markdown report.
 #
 #   gungraun-report.sh [--regressions-out FILE] <summaries> [<baseline-label>]
+#   gungraun-report.sh --self-test
 #
 # <summaries> is a concatenation of the `summary.json` files one CI run wrote
 # under `target/gungraun` (`GUNGRAUN_SAVE_SUMMARY=json`), each a single JSON
@@ -16,12 +17,13 @@
 # percentage column is gungraun's own derived diff, not recomputed here.
 #
 # Rows that cross the advisory thresholds below are marked in the tables, and
-# `--regressions-out FILE` writes `has_regressions=true|false` for the label
-# workflow to read. That is the entire verdict: the script always exits 0 on
-# a metric moving — the label is the only consequence — and the thresholds
-# are provisional, borrowed from the closest worked reference in the
-# ecosystem rather than measured here, until enough real pull requests have
-# been through the job to know the noise floor.
+# `--regressions-out FILE` writes the bare string `true` or `false` — exactly
+# the two values `perf-label.yml` acts on, checked by `--self-test`. That is
+# the entire verdict: the script always exits 0 on a metric moving — the
+# label is the only consequence — and the thresholds are provisional,
+# borrowed from the closest worked reference in the ecosystem rather than
+# measured here, until enough real pull requests have been through the job to
+# know the noise floor.
 set -euo pipefail
 
 # Bumping the gungraun workspace dependency across a summary-format major
@@ -37,6 +39,45 @@ SCHEMA_VERSION="6"
 IR_THRESHOLD_PCT=5
 BLOCKS_THRESHOLD_ABS=1
 PEAK_THRESHOLD_PCT=5
+
+# The write side of the perf-label.yml contract, executable. The two
+# workflows can never run together before a merge (`workflow_run` executes
+# the default branch's definition), so this is the only place the contract
+# runs on a pull request: the flag file must be the bare `true` or `false`
+# the label workflow's `case` accepts, and threshold crossings must mark
+# rows. The fixtures pin schema v6 on purpose — bumping SCHEMA_VERSION makes
+# this fail at the version gate until they are rebuilt against the new
+# shape, which is the reminder doing its job.
+if [[ "${1:-}" == "--self-test" ]]; then
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    fail_self() {
+        echo "gungraun-report.sh --self-test: $1" >&2
+        exit 1
+    }
+    printf '%s\n' \
+        '{"version":"6","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}},{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{"TotalBlocks":{"metrics":{"Both":[{"Int":38},{"Int":40}]},"diffs":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"metrics":{"Both":[{"Int":4342},{"Int":4096}]},"diffs":{"diff_pct":"6.0"}}}}}}}]}' \
+        >"$tmp/hot.jsonl"
+    printf '%s\n' \
+        '{"version":"6","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}' \
+        >"$tmp/quiet.jsonl"
+
+    "$0" --regressions-out "$tmp/flag" "$tmp/hot.jsonl" self-test >"$tmp/report.md"
+    [[ "$(cat "$tmp/flag")" == "true" ]] \
+        || fail_self "hot fixture: flag file holds '$(cat "$tmp/flag")', not the bare string 'true'"
+    grep -q "(over threshold)" "$tmp/report.md" \
+        || fail_self "hot fixture: no row carries the over-threshold marker"
+
+    "$0" --regressions-out "$tmp/flag" "$tmp/quiet.jsonl" self-test >"$tmp/report.md"
+    [[ "$(cat "$tmp/flag")" == "false" ]] \
+        || fail_self "quiet fixture: flag file holds '$(cat "$tmp/flag")', not the bare string 'false'"
+    if grep -q "(over threshold)" "$tmp/report.md"; then
+        fail_self "quiet fixture: a row is marked over threshold"
+    fi
+
+    echo "gungraun-report.sh: self-test ok — the flag file is the bare boolean perf-label.yml parses, and markers track the thresholds"
+    exit 0
+fi
 
 regressions_out=""
 if [[ "${1:-}" == "--regressions-out" ]]; then
@@ -211,7 +252,7 @@ if [[ -n "$regressions_out" ]]; then
                 end)
         ] | any
     ' "$summaries")
-    printf 'has_regressions=%s\n' "$has" >"$regressions_out"
+    printf '%s\n' "$has" >"$regressions_out"
 fi
 
 printf '%s\n' "$report"

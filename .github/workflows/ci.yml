@@ -218,6 +218,14 @@ jobs:
       # file must be the bare boolean the label workflow's parse accepts.
       - run: make check-perf-report
 
+      # Without this the manifest check only ever runs on a developer machine,
+      # and the mistake it exists to catch — a bench with no `harness = false`
+      # stanza — reaches CI as a confusing runtime error about arguments in the
+      # perf job, which is exactly what the script's own comment says it
+      # prevents. `ci-lint` aggregates these for local use; CI runs them one by
+      # one, so a new check has to be added in both places.
+      - run: make check-gungraun-benches
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest
@@ -625,11 +633,16 @@ jobs:
           cargo install gungraun-runner --version "$version" --locked
 
       # The baseline: check out the merge base, measure it, come back. The
-      # benches are discovered from the merge-base tree itself by the
-      # `*_gungraun.rs` naming convention — a list hardcoded here would
-      # drift from `make bench-gungraun` the first time a bench is added,
-      # and the discovery also handles the merge base that predates a bench:
-      # it simply contributes no baseline for it.
+      # benches are discovered from the merge-base tree itself, by the
+      # merge base's own copy of `scripts/gungraun-benches.sh` — the same
+      # script `make bench-gungraun` and the head leg below run, so the two
+      # sides of the comparison cannot disagree about what to measure. The
+      # discovery also handles the merge base that predates a bench: it
+      # simply contributes no baseline for it.
+      #
+      # A merge base predating the script itself reports no baseline rather
+      # than failing, which is the same degradation as a merge base that no
+      # longer builds, and it self-heals once the script is on `main`.
       #
       # `continue-on-error`, and bench failures are caught inside the script,
       # because this leg builds historical code with today's toolchain: its
@@ -652,22 +665,28 @@ jobs:
           # restored: stale data here would silently become the comparison.
           rm -rf target/gungraun
           measured=false
-          ok=true
-          for bench_src in crates/*/benches/*_gungraun.rs; do
-            [[ -e "$bench_src" ]] || continue
-            # Crate directory names equal package names in this workspace.
-            pkg=${bench_src#crates/}
-            pkg=${pkg%%/*}
-            bench=$(basename "$bench_src" .rs)
-            if GUNGRAUN_SAVE_BASELINE=base cargo bench -p "$pkg" --locked --bench "$bench"; then
-              measured=true
-            else
-              ok=false
-            fi
-          done
-          if [[ "$ok" == "false" ]]; then
-            rm -rf target/gungraun
-            measured=false
+          if [[ ! -x scripts/gungraun-benches.sh ]]; then
+            # Says which cause, because they are otherwise indistinguishable:
+            # a merge base predating the script, a lost exec bit, a bench that
+            # failed, and a tree with no benches all end as `measured=false`,
+            # and a commit that dropped `+x` would disable every baseline
+            # permanently while CI stayed green.
+            echo "no baseline: scripts/gungraun-benches.sh is absent or not executable at the merge base"
+          else
+            # Exit 0 means every discovered bench ran and succeeded; 1 means
+            # one failed; 2 means this tree has no benches yet. Only the
+            # first is a usable baseline, and a partial measurement is wiped
+            # rather than kept, so the comparison is all-or-nothing.
+            set +e
+            GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh --run
+            rc=$?
+            set -e
+            case "$rc" in
+              0) measured=true ;;
+              2) echo "no baseline: the merge base has no gungraun benches" ;;
+              *) echo "no baseline: a bench failed on the merge base (exit $rc)" ;;
+            esac
+            [[ "$measured" == "true" ]] || rm -rf target/gungraun
           fi
           git checkout --quiet --detach "$head_sha"
           {

@@ -315,6 +315,21 @@ no benches reports no baseline, and one that no longer builds on today's
 toolchain reports no baseline rather than blocking a pull request on code
 its author did not write. Push and merge-group runs report absolute counts.
 
+Both legs, and `make bench-gungraun`, take that list from one place:
+`scripts/gungraun-benches.sh`. A list written into the workflow could name a
+bench the Makefile did not, and the two sides of a comparison would then
+measure different things without anything failing — so the baseline leg runs
+the merge base's own copy of the script, and a merge base predating the
+script reports no baseline like one that no longer builds. Its exit codes
+separate the three outcomes the workflow acts on differently: every bench
+ran, a bench failed, or this tree has none.
+
+`make check-gungraun-benches` proves that contract, and that every discovered
+bench declares a `harness = false` target. Without that stanza cargo
+auto-discovers the file anyway, under the default libtest harness, and the
+bench compiles cleanly and then fails at run time complaining about arguments
+rather than about the missing target.
+
 The numbers are advisory and the job is not. The comparison step carries
 `continue-on-error: true`, so a count that moved does not block a merge; the job
 itself is in `ci-gate`'s `needs:`, so a bench that stops building or dies under

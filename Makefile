@@ -28,8 +28,8 @@
         check-features check-examples bench-check bench bench-gungraun loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
-        check-invariants check-changelog changelog-new ci-lint docs docs-serve \
-        gates
+        check-gungraun-benches check-invariants check-changelog changelog-new \
+        ci-lint docs docs-serve gates
 
 ##@ Help
 
@@ -117,13 +117,15 @@ bench: ## Criterion and divan micro benches
 #   cargo metadata --format-version 1 --locked \
 #     | jq -r '.packages[] | select(.name == "gungraun") | .version'
 # prints and CI derives the same way. A mismatched runner is a hard error,
-# not a warning. On a machine without valgrind, add
-# `--no-run` to each line to check the benches still build. Each target is
-# named explicitly for the same reason `bench` names one: an unnamed run also
-# drives the lib's libtest harness, which rejects the harness's own arguments.
+# not a warning.
+#
+# The bench list is discovered rather than written here: both CI legs run the
+# same script, so a bench cannot be measured on one side of a comparison and
+# not the other. `./scripts/gungraun-benches.sh` on its own prints what would
+# run. On a machine without valgrind, that listing plus `make bench-check` is
+# the most this target can prove.
 bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-runner)
-	cargo bench -p spate-core --locked --bench chain_gungraun
-	cargo bench -p spate-avro --locked --bench decode_gungraun
+	./scripts/gungraun-benches.sh --run
 
 ##@ Supply chain
 
@@ -160,6 +162,13 @@ check-perf-report: ## The perf report's flag file stays parseable by perf-label.
 check-invariants: ## The invariant lists still agree
 	./scripts/check-invariants.sh
 
+# A `*_gungraun.rs` without a `[[bench]] harness = false` stanza is still
+# auto-discovered by cargo — under the default libtest harness, which rejects
+# gungraun's arguments. It compiles and dies at run time complaining about the
+# wrong thing, so the manifest is checked here rather than found in a CI log.
+check-gungraun-benches: ## Every gungraun bench declares a harness-free target
+	./scripts/gungraun-benches.sh --self-test
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -168,7 +177,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-invariants check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

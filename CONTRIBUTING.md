@@ -148,6 +148,17 @@ valgrind and a `gungraun-runner` at the same version as the pinned `gungraun`,
 so it does not run on macOS at all — CI runs it, and locally the most you can
 check is that the benches build.
 
+Adding one is two steps: name the file `benches/<something>_gungraun.rs`, and
+declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
+Nothing else registers it — `scripts/gungraun-benches.sh` discovers it by that
+name, and the Makefile target and both CI legs all read from that one place, so
+there is no list to add yourself to. `./scripts/gungraun-benches.sh` on its own
+prints what would run, which is the quickest way to confirm a new bench is
+visible. Skipping the `harness = false` stanza is the mistake worth knowing
+about: cargo auto-discovers the file anyway, under the default libtest harness,
+and the bench then compiles cleanly and fails at run time complaining about
+arguments. `make check-gungraun-benches` (part of `make ci-lint`) catches it.
+
 If you changed dependencies, add `make attribution` to regenerate
 `THIRD-PARTY.md`. It is checked nightly and regenerated at release rather than
 gated on your pull request, so it is welcome but not required.

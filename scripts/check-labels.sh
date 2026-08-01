@@ -89,6 +89,12 @@ references=$(
         # stay green while `apply_ci_labels` silently stopped firing.
         extract scripts/ci-changes.sh '== \*",' '== \*",[^"]+,"\*' \
             'grep -oE "\*\",[^\"]+,\"\*" | sed -E "s/^\*\",(.*),\"\*$/\1/"'
+
+        # The performance-label workflow syncs one label, and routes its name
+        # through a `PERF_LABEL:` env key precisely so this extractor can read
+        # it declaratively instead of parsing shell. Renaming the key trips
+        # the gone-blind guard above rather than going unchecked.
+        extract .github/workflows/perf-label.yml '_LABEL:' '^ *PERF_LABEL: "[^"]+"$' "$quoted"
     } | sort -u
 )
 

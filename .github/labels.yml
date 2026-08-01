@@ -173,6 +173,11 @@
 # type for both is Bug. They are classes of bug that carry a triage priority.
 #
 # `dependencies` is the one label `dependabot.yml` requires.
+#
+# `affects-performance` is machine-managed: `perf-label.yml` adds it when a
+# pull request's counter deltas cross the advisory thresholds and removes it
+# when they stop. Triagers reach for `performance`; nobody applies this one by
+# hand, and hand-applying it only lasts until the next benched push.
 
 - name: "delivery-correctness"
   color: "b60205"
@@ -181,6 +186,10 @@
 - name: "performance"
   color: "0e8a16"
   description: "Throughput or latency below expectation"
+
+- name: "affects-performance"
+  color: "d93f0b"
+  description: "CI measured instruction-count or heap movement past the advisory thresholds"
 
 - name: "dependencies"
   color: "0366d6"

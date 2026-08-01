@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render gungraun's machine-readable summaries as a Markdown report.
 #
-#   gungraun-report.sh <summaries> [<baseline-label>]
+#   gungraun-report.sh [--regressions-out FILE] <summaries> [<baseline-label>]
 #
 # <summaries> is a concatenation of the `summary.json` files one CI run wrote
 # under `target/gungraun` (`GUNGRAUN_SAVE_SUMMARY=json`), each a single JSON
@@ -15,9 +15,13 @@
 # peak), with every other metric per bench behind a <details> fold. The
 # percentage column is gungraun's own derived diff, not recomputed here.
 #
-# The report renders no verdict deliberately: no regression threshold exists
-# until the noise floor is known from real pull requests, so the numbers are
-# presented and not judged.
+# Rows that cross the advisory thresholds below are marked in the tables, and
+# `--regressions-out FILE` writes `has_regressions=true|false` for the label
+# workflow to read. That is the entire verdict: the script always exits 0 on
+# a metric moving — the label is the only consequence — and the thresholds
+# are provisional, borrowed from the closest worked reference in the
+# ecosystem rather than measured here, until enough real pull requests have
+# been through the job to know the noise floor.
 set -euo pipefail
 
 # Bumping the gungraun workspace dependency across a summary-format major
@@ -26,8 +30,26 @@ set -euo pipefail
 # error naming the fix.
 SCHEMA_VERSION="6"
 
+# Advisory thresholds. Instructions and peak heap flag on percentage
+# *increases* only; the block count flags on an absolute move in either
+# direction, because a structural allocation change is worth eyes even when
+# it shrinks. Rows with no baseline never flag — there is no delta to judge.
+IR_THRESHOLD_PCT=5
+BLOCKS_THRESHOLD_ABS=1
+PEAK_THRESHOLD_PCT=5
+
+regressions_out=""
+if [[ "${1:-}" == "--regressions-out" ]]; then
+    if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "::error::--regressions-out needs a file argument" >&2
+        exit 1
+    fi
+    regressions_out="$2"
+    shift 2
+fi
+
 if [[ $# -lt 1 || ! -r "${1:-}" || ! -s "${1:-}" ]]; then
-    echo "::error::usage: $0 <summaries> [<baseline-label>] — needs a non-empty, readable summaries file" >&2
+    echo "::error::usage: $0 [--regressions-out FILE] <summaries> [<baseline-label>] — needs a non-empty, readable summaries file" >&2
     exit 1
 fi
 summaries="$1"
@@ -47,10 +69,14 @@ fi
 # (zero on both sides), which must not reach `tonumber` (jq renders them as
 # ±1.8e308 and null rather than aborting).
 #
-# The report is captured whole and printed only on success: jq streams its
-# output, so an error midway through would otherwise leave a truncated table
-# in the step summary under a green `continue-on-error` step.
-report=$(jq -r -s --arg base "$baseline_label" '
+# One definition set, two programs: the report and the has_regressions
+# verdict read the same summaries through the same field paths, so the flag
+# a row shows and the flag the label workflow reads cannot disagree.
+#
+# The dollar signs below are jq variables ($t, $flagged); not expanding them
+# in the shell is the point of the single quotes.
+# shellcheck disable=SC2016
+jq_defs='
     def val: if type == "object" then (.Int // .Float) else . end;
     def new_side: .metrics | (if .Both then .Both[0] else .Left end) | val;
     def old_side: .metrics | (if .Both then .Both[1] elif .Right then .Right else null end)
@@ -64,6 +90,27 @@ report=$(jq -r -s --arg base "$baseline_label" '
                     | if . > 0 then "+\(.)%" else "\(.)%" end)
               end)
         end;
+    # An increase past $t percent, judged on gungraun'\''s own diff string with
+    # the same inf/NaN guards as `delta`. "+inf" (a zero baseline that grew)
+    # counts as flagged; "-inf" and NaN do not; no diff means no baseline.
+    def flag_pct_increase($t):
+        if .diffs == null then false
+        else (.diffs.diff_pct
+            | if test("inf") then (startswith("-") | not)
+              elif . == "NaN" then false
+              else (tonumber >= $t)
+              end)
+        end;
+    # An absolute move past $t in either direction, from the two sides
+    # directly rather than the percentage — a one-block change on a small
+    # baseline and on a large one are the same structural fact.
+    def flag_abs_delta($t):
+        old_side as $old
+        | if $old == null then false
+          else ((new_side - $old) | if . < 0 then -. else . end) > $t
+          end;
+    def marked($flagged): delta as $d
+        | if $flagged then "**\($d)** (over threshold)" else $d end;
     def bench_name:
         (.module_path | split("::") | .[1:] | join("::"))
         + (if .id != null and .id != "" then " \(.id)" else "" end);
@@ -79,18 +126,29 @@ report=$(jq -r -s --arg base "$baseline_label" '
     def dhat:
         [.profiles[] | select(.tool == "DHAT")][0]
         | if . == null then null else .summaries.total.summary.Dhat end;
+'
 
+# The report is captured whole and printed only on success: jq streams its
+# output, so an error midway through would otherwise leave a truncated table
+# in the step summary under a green `continue-on-error` step.
+report=$(jq -r -s --arg base "$baseline_label" \
+    --argjson ir_pct "$IR_THRESHOLD_PCT" \
+    --argjson blocks_abs "$BLOCKS_THRESHOLD_ABS" \
+    --argjson peak_pct "$PEAK_THRESHOLD_PCT" \
+    "$jq_defs"'
     "## Instruction counts",
     "",
     "Callgrind instructions (`Ir`) per bench: pull request vs \($base).",
     "Advisory: numbers never block a merge; a bench that stops running does.",
+    "A **bold** delta crossed a provisional threshold and syncs the",
+    "`affects-performance` label; nothing else happens.",
     "",
     "| Bench | PR | \($base) | Δ |",
     "| --- | ---: | ---: | ---: |",
     (.[] | callgrind as $cg
         | if $cg == null or ($cg | has("Ir") | not)
           then "| \(bench_name) | — | — | *no callgrind profile* |"
-          else "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | delta) |"
+          else "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | marked(flag_pct_increase($ir_pct))) |"
           end),
     (if any(.[]; dhat != null) then
         "",
@@ -106,7 +164,9 @@ report=$(jq -r -s --arg base "$baseline_label" '
             | (["TotalBlocks", "AtTGmaxBytes"][] as $key
                 | $dh[$key]
                 | select(. != null)
-                | "| \($bn) | \($key) | \(new_side) | \(old_side // "—") | \(delta) |"))
+                | (if $key == "TotalBlocks" then flag_abs_delta($blocks_abs)
+                   else flag_pct_increase($peak_pct) end) as $flagged
+                | "| \($bn) | \($key) | \(new_side) | \(old_side // "—") | \(marked($flagged)) |"))
     else empty end),
     "",
     "<details><summary>All metrics</summary>",
@@ -129,4 +189,29 @@ report=$(jq -r -s --arg base "$baseline_label" '
           ""),
     "</details>"
 ' "$summaries")
+
+# The verdict is a second pass over the same file with the same definitions,
+# not a parse of the rendered markdown: the report is for people, the file is
+# for the label workflow, and neither should have to stay grep-compatible
+# with the other.
+if [[ -n "$regressions_out" ]]; then
+    has=$(jq -r -s \
+        --argjson ir_pct "$IR_THRESHOLD_PCT" \
+        --argjson blocks_abs "$BLOCKS_THRESHOLD_ABS" \
+        --argjson peak_pct "$PEAK_THRESHOLD_PCT" \
+        "$jq_defs"'
+        [ .[]
+          | (callgrind as $cg
+              | if $cg == null or ($cg | has("Ir") | not) then false
+                else ($cg.Ir | flag_pct_increase($ir_pct)) end),
+            (dhat as $dh
+              | if $dh == null then false
+                else (($dh.TotalBlocks | if . == null then false else flag_abs_delta($blocks_abs) end),
+                      ($dh.AtTGmaxBytes | if . == null then false else flag_pct_increase($peak_pct) end))
+                end)
+        ] | any
+    ' "$summaries")
+    printf 'has_regressions=%s\n' "$has" >"$regressions_out"
+fi
+
 printf '%s\n' "$report"

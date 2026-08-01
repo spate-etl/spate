@@ -318,9 +318,33 @@ its author did not write. Push and merge-group runs report absolute counts.
 The numbers are advisory and the job is not. The comparison step carries
 `continue-on-error: true`, so a count that moved does not block a merge; the job
 itself is in `ci-gate`'s `needs:`, so a bench that stops building or dies under
-valgrind does. No regression threshold is configured: choosing a percentage
-before real pull requests have been through the job is guessing at the noise
-floor, and one set too tight would turn an advisory signal into a rerun button.
+valgrind does.
+
+A pull request's movement surfaces in two places, and nothing blocks on
+either. The report marks any row that crosses the advisory thresholds —
+instructions up 5%, allocated blocks moving by more than one in either
+direction, peak heap up 5% — and a separate workflow, `perf-label.yml`,
+syncs the `affects-performance` label from the same verdict: added when a
+threshold is crossed, removed when it stops, so the label self-clears when a
+fix lands. The thresholds are provisional, borrowed from the closest worked
+reference in the ecosystem; tightening them from this repository's own
+observed deltas is deliberately deferred until enough real pull requests
+have been through the job, because a threshold set too tight turns an
+advisory signal into a rerun button.
+
+The label workflow is the privileged half of a two-workflow split, and the
+split is a security boundary rather than an organisational one. The benches
+execute the pull request's code, so `perf-counters` runs with a read-only
+token and hands over exactly one boolean as an artifact; `perf-label.yml`
+runs with `pull-requests: write`, checks out nothing, executes nothing from
+the pull request, binds its download to the triggering run, and treats the
+artifact as untrusted input parsed as `true`, `false`, or ignored. The
+report itself deliberately never leaves the step summary: re-posting
+fork-authored markdown from a privileged workflow is the vulnerability class
+this design exists to avoid. Two consequences worth knowing: a CI run that
+fails or skips the benches leaves the label untouched (a stale label beats
+stripping a true one because a docs push skipped the benches), and
+hand-applying the label only lasts until the next benched push.
 
 `perf-counters` is selected by its own classification output, `bench`, from
 exactly the two crates the benches compile — `crates/spate-core/` and

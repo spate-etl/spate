@@ -692,16 +692,15 @@ jobs:
           fi
           make bench-gungraun
 
-      # No regression threshold, deliberately — the report renders no verdict.
-      # gungraun can fail a run on a percentage change, but choosing that
-      # percentage before any real pull request has been through the job is
-      # guessing at the noise floor — and a threshold set too tight turns the
-      # advisory signal into a rerun button. Turning one on once the spread is
-      # known is a follow-up.
+      # The report script marks rows that cross the provisional advisory
+      # thresholds and writes `has_regressions` for `perf-label.yml`; the
+      # script itself always exits 0 on a metric moving, so nothing here can
+      # turn the numbers into a gate. The thresholds live in the script.
       #
       # `continue-on-error` belongs on this step and nowhere else. On the job it
       # would also excuse the steps above.
       - name: Report instruction counts
+        id: report
         continue-on-error: true
         env:
           BASE_MEASURED: ${{ steps.base.outputs.measured }}
@@ -714,7 +713,22 @@ jobs:
           else
             label="baseline (none measured)"
           fi
-          ./scripts/gungraun-report.sh gungraun-summaries.jsonl "$label" >>"$GITHUB_STEP_SUMMARY"
+          mkdir -p perf-regressions
+          ./scripts/gungraun-report.sh \
+            --regressions-out perf-regressions/has_regressions \
+            gungraun-summaries.jsonl "$label" >>"$GITHUB_STEP_SUMMARY"
+
+      # The one output that crosses into `perf-label.yml`: a boolean. The
+      # report markdown deliberately stays in the step summary — nothing
+      # fork-authored is ever re-posted by a privileged workflow. Gated on the
+      # report step's *outcome* because that step is `continue-on-error`: a
+      # report that died must not hand over a stale or half-written flag.
+      - name: Upload the regression flag
+        if: github.event_name == 'pull_request' && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-regressions
+          path: perf-regressions/has_regressions
 
   loom:
     name: Loom models (opt-in)

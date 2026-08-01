@@ -12,9 +12,11 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# Test-only injection seams (currently `S3Source::with_store`). Off by
-# default and never enabled by the `spate` facade, so the `object_store`
-# types they expose stay out of every real consumer's API surface.
+# Development-only seams: `S3Source::with_store` for tests, and
+# `bench_seams` for the instruction-count benches. Off by default and never
+# enabled by the `spate` facade, so neither the `object_store` types the
+# first exposes nor the internals the second reaches touch a real consumer's
+# API surface.
 testing = []
 
 [dependencies]
@@ -43,11 +45,18 @@ spate-s3 = { path = ".", features = ["testing"] }
 # feature — dependents of spate-s3 never link async-nats through it.
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-test = { workspace = true }
+gungraun = { workspace = true }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# gungraun's `main!` is the harness; without this the default libtest one wraps
+# it and rejects the harness's own arguments at run time.
+[[bench]]
+name = "split_gungraun"
+harness = false
 
 [lints]
 workspace = true

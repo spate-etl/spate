@@ -277,6 +277,15 @@ regression suite is therefore split by what varies:
   object — `crates/spate-s3/tests/request_shape.rs`), and instruction counts
   via gungraun. Each gates on a counter, never on elapsed time, so the
   verdicts hold on any machine.
+  The instruction-count benches cover the operator chain, payload decoding,
+  and the planning an object-store backfill does per plan. Each is one
+  workload shape parameterised over the axis that changes its cost — a
+  listing profile, a codec — rather than one case per function: below the
+  shape, attribution comes from the callgrind profile the run already writes,
+  which a finer set of cases would only duplicate. The corpora are generated
+  from a fixed sequence and asserted reproducible
+  (`crates/spate-s3/tests/bench_fixtures.rs`), because a count is only
+  comparable when both legs packed byte-identical input.
   The instruction counts are advisory: the comparison lands in the pull-request
   summary without a blocking threshold, movement past the advisory thresholds
   surfaces as the `affects-performance` label, and a bench that fails to build

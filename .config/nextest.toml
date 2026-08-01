@@ -33,27 +33,32 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 #
 # These pull and boot real containers (SeaweedFS, NATS, Redpanda, ClickHouse),
 # so their wall time is dominated by infrastructure, not by the test. Under
-# `default` they inherit a 120s hard kill, and a cold image pull can exceed
-# that on a fresh machine — SIGKILL at 120s reports TIMEOUT, indistinguishable
-# from a genuine hang, and can orphan the container. Warn late, never
-# terminate: CI already bounds these with `timeout-minutes`.
+# `default` they inherit a 120s hard kill, which a cold image pull can exceed
+# on a fresh machine — SIGKILL at 120s reports TIMEOUT, indistinguishable from
+# a genuine hang, and can orphan the container. Warn late, never terminate: CI
+# already bounds these with `timeout-minutes`.
 [profile.docker]
 slow-timeout = { period = "120s" }
-# Same single retry as `ci`, and for the same reason — with more force here.
-# These tests boot real containers over a real docker network, so their flakes
-# are infrastructure flakes: a cold image pull, a node that took longer than 60s
-# to accept connections, a port that was not listening yet. That is not a defect
-# in the code under test and it is not reproducible by fixing anything.
+# One retry, for a failure that measurement puts outside the code under test.
 #
-# It stopped being tolerable when the merge queue became a required check. A
-# single container hiccup does not just redden a run, it *dequeues* the pull
-# request, and somebody has to notice and re-queue it by hand. One retry costs
-# a few minutes of runner; not having it costs a human.
+# Timing every boot in this suite on runner hardware separates the two things
+# the old error conflated. A ClickHouse server becoming ready is well behaved —
+# a median near a second and no sample past six, over 720 boots. Starting the
+# container is not: warm, it has a median under a fifth of a second and never
+# passed one second across 1434 boots, but the first boot of a job costs ten to
+# sixteen, and the failure that started all this took more than sixty. That
+# distribution belongs to the docker daemon. No fixture change reaches it.
 #
-# This does not hide anything: `[profile.docker.junit]` below reports through
-# the same JUnit pipeline as the fast suite, so a retried test is surfaced as
-# flaky in a check annotation rather than vanishing into a green run. That
-# reporting is what makes a retry honest, and it is already in place.
+# What makes this retry honest is the pair of things a retried run now leaves
+# behind, neither of which existed when it was first written. The container job
+# publishes its JUnit report, so a retried test is a flaky annotation rather
+# than a silently green run — the previous comment here claimed that and it was
+# false, because the job had no permission to create the check. And the fixtures
+# report the container's exit code and log tail when their own gate expires, so
+# a repeat is attributable instead of merely re-run.
+#
+# If retries start showing up in that annotation with a *cause* attached, this
+# line is the thing to delete, not defend.
 retries = 1
 
 [profile.ci]

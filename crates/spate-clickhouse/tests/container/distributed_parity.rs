@@ -41,10 +41,11 @@
 // cluster XML embeds `<user>default</user><password>...</password>` in each
 // replica so inter-node subqueries and distributed inserts authenticate.
 //
-// Container names/network carry a per-run nonce so two concurrently-scheduled
-// tests (cargo runs them in parallel) never collide on a docker name; the
-// cluster XML is generated with the same nonced hostnames so peer resolution
-// still works. The in-cluster hostnames are therefore `spate-ch0-<nonce>` /
+// Container names/network carry a per-run nonce so concurrent runs never
+// collide on a docker name — nextest gives each test its own process, and a
+// leftover container from an aborted run outlives both; the cluster XML is
+// generated with the same nonced hostnames so peer resolution still works.
+// The in-cluster hostnames are therefore `spate-ch0-<nonce>` /
 // `spate-ch1-<nonce>` rather than a fixed `ch-shard-0`.
 
 use super::*;
@@ -263,25 +264,28 @@ fn cluster_xml(pw: &str, h0: &str, h1: &str) -> String {
 /// Start one node: pinned 26.3, password auth, joined to `net` under the
 /// hostname `host`, with the cluster XML dropped into `config.d` before boot.
 async fn start_node(pw: &str, net: &str, host: &str, xml: &str) -> Node {
-    let container = ClickHouse::default()
-        .with_tag("26.3")
-        .with_env_var("CLICKHOUSE_USER", "default")
-        .with_env_var("CLICKHOUSE_PASSWORD", pw)
-        .with_network(net)
-        .with_container_name(host)
-        .with_copy_to(
-            "/etc/clickhouse-server/config.d/cluster.xml",
-            xml.as_bytes().to_vec(),
-        )
-        .start()
-        .await
-        .expect("start clickhouse node");
+    let container = started_only(
+        ClickHouse::default()
+            .with_tag("26.3")
+            .with_env_var("CLICKHOUSE_USER", "default")
+            .with_env_var("CLICKHOUSE_PASSWORD", pw)
+            .with_network(net)
+            .with_container_name(host)
+            .with_copy_to(
+                "/etc/clickhouse-server/config.d/cluster.xml",
+                xml.as_bytes().to_vec(),
+            ),
+    )
+    .start()
+    .await
+    .unwrap_or_else(|e| panic!("start clickhouse node {host}: {e}"));
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let url = format!("http://127.0.0.1:{port}");
     let admin = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
         .with_password(pw);
+    wait_for_queries(&container, &admin, host).await;
     Node {
         _container: container,
         url,

@@ -12,8 +12,11 @@ use spate_core::sink::SealedBatch;
 // `use super::*`; re-export it so that stays a no-op for the root helpers.
 use serde::{Deserialize, Serialize};
 pub(crate) use spate_core::sink::ShardWriter;
+use std::time::{Duration, Instant};
 use testcontainers_modules::clickhouse::ClickHouse;
+use testcontainers_modules::testcontainers::core::WaitFor;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use testcontainers_modules::testcontainers::{ContainerAsync, ContainerRequest, ImageExt};
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 struct Order {
@@ -28,14 +31,94 @@ struct Server {
     admin: clickhouse::Client,
 }
 
+/// How long `docker start` itself gets. Readiness is not in here — the
+/// fixtures wait for that themselves, in [`wait_for_queries`], so that a
+/// server which never comes up can be reported rather than merely timed out.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a started node gets to answer an authenticated query.
+///
+/// A node answers in about a second, so this is already two orders of
+/// magnitude of headroom, and raising it buys nothing a passing test wants:
+/// it only decides how long a *broken* fixture burns before it reports. The
+/// old 60s budget was not the problem — arriving at the end of it with no
+/// information was.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How much of a failed node's stderr the panic carries.
+const LOG_TAIL: usize = 40;
+
+/// Hand readiness to the caller: `.start()` returns once the container is
+/// started, without waiting on any condition.
+///
+/// The stock condition is an *unauthenticated* `GET /` returning 200, which
+/// answers before the entrypoint has necessarily applied `CLICKHOUSE_PASSWORD`
+/// — and it is awaited inside `.start()`, which drops the container handle on
+/// failure. Waiting ourselves buys both the stronger condition and, on
+/// timeout, the container's logs.
+fn started_only(req: impl Into<ContainerRequest<ClickHouse>>) -> ContainerRequest<ClickHouse> {
+    req.into()
+        .with_ready_conditions(vec![WaitFor::Nothing])
+        .with_startup_timeout(START_TIMEOUT)
+}
+
+/// A single readiness probe's own bound.
+///
+/// The `clickhouse` client sets no request timeout, so an attempt against a
+/// half-open socket can hang indefinitely. A poll loop that only checks its
+/// deadline *between* attempts therefore has no deadline at all — one hung
+/// attempt outlasts any budget. Every probe below is wrapped in this.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Block until `admin` can run a query, or panic saying why it never could.
+///
+/// A ClickHouse server that dies on startup and one that is merely slow
+/// present identically — as a wait that never finishes — so the panic carries
+/// the container's liveness, exit code and stderr. Without those a failure
+/// here is unactionable, and the only recourse is to re-run it.
+async fn wait_for_queries(
+    container: &ContainerAsync<ClickHouse>,
+    admin: &clickhouse::Client,
+    who: &str,
+) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let mut last;
+    loop {
+        let probe = tokio::time::timeout(PROBE_TIMEOUT, admin.query("SELECT 1").execute()).await;
+        match probe {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => last = e.to_string(),
+            Err(_) => last = format!("no response within {PROBE_TIMEOUT:?}"),
+        }
+        if Instant::now() >= deadline {
+            let running = container.is_running().await;
+            let exit = container.exit_code().await;
+            let logs =
+                String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap_or_default())
+                    .into_owned();
+            // The tail, not the whole log: a fatal is the last thing a
+            // ClickHouse server writes, and a full startup log buries it.
+            let tail: Vec<&str> = logs.lines().rev().take(LOG_TAIL).collect();
+            let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+            panic!(
+                "{who} never answered a query within {READY_TIMEOUT:?} \
+                 (running={running:?}, exit_code={exit:?}); last error: {last}\n\
+                 ---- last {LOG_TAIL} lines of {who} stderr ----\n{tail}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn server() -> Server {
-    let container = ClickHouse::default()
+    let container = started_only(ClickHouse::default())
         .start()
         .await
         .expect("start clickhouse");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let url = format!("http://127.0.0.1:{port}");
     let admin = clickhouse::Client::default().with_url(&url);
+    wait_for_queries(&container, &admin, "clickhouse").await;
     admin
         .query(
             "CREATE TABLE orders (id UInt64, name String, amount Nullable(Float64)) \
@@ -200,20 +283,22 @@ where
 /// password unless one is provided, so this always configures explicit
 /// credentials (unlike the module's ancient default image).
 async fn bare_server(tag: &str, password: &str) -> Server {
-    use testcontainers_modules::testcontainers::ImageExt;
-    let container = ClickHouse::default()
-        .with_tag(tag)
-        .with_env_var("CLICKHOUSE_USER", "default")
-        .with_env_var("CLICKHOUSE_PASSWORD", password)
-        .start()
-        .await
-        .expect("start clickhouse");
+    let container = started_only(
+        ClickHouse::default()
+            .with_tag(tag)
+            .with_env_var("CLICKHOUSE_USER", "default")
+            .with_env_var("CLICKHOUSE_PASSWORD", password),
+    )
+    .start()
+    .await
+    .expect("start clickhouse");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let url = format!("http://127.0.0.1:{port}");
     let admin = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
         .with_password(password);
+    wait_for_queries(&container, &admin, "clickhouse").await;
     Server {
         _container: container,
         url,

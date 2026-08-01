@@ -41,10 +41,11 @@
 // cluster XML embeds `<user>default</user><password>...</password>` in each
 // replica so inter-node subqueries and distributed inserts authenticate.
 //
-// Container names/network carry a per-run nonce so two concurrently-scheduled
-// tests (cargo runs them in parallel) never collide on a docker name; the
-// cluster XML is generated with the same nonced hostnames so peer resolution
-// still works. The in-cluster hostnames are therefore `spate-ch0-<nonce>` /
+// Container names/network carry a per-run nonce so concurrent runs never
+// collide on a docker name — nextest gives each test its own process, and a
+// leftover container from an aborted run outlives both; the cluster XML is
+// generated with the same nonced hostnames so peer resolution still works.
+// The in-cluster hostnames are therefore `spate-ch0-<nonce>` /
 // `spate-ch1-<nonce>` rather than a fixed `ch-shard-0`.
 
 use super::*;
@@ -60,7 +61,7 @@ use spate_core::sink::{DrainReport, SinkPool, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::memory_source;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
 // ---- the user-side record types + their owned families ----------------------
@@ -263,30 +264,63 @@ fn cluster_xml(pw: &str, h0: &str, h1: &str) -> String {
 /// Start one node: pinned 26.3, password auth, joined to `net` under the
 /// hostname `host`, with the cluster XML dropped into `config.d` before boot.
 async fn start_node(pw: &str, net: &str, host: &str, xml: &str) -> Node {
-    let container = ClickHouse::default()
-        .with_tag("26.3")
-        .with_env_var("CLICKHOUSE_USER", "default")
-        .with_env_var("CLICKHOUSE_PASSWORD", pw)
-        .with_network(net)
-        .with_container_name(host)
-        .with_copy_to(
-            "/etc/clickhouse-server/config.d/cluster.xml",
-            xml.as_bytes().to_vec(),
-        )
-        .start()
-        .await
-        .expect("start clickhouse node");
+    let container = started_only(
+        ClickHouse::default()
+            .with_tag("26.3")
+            .with_env_var("CLICKHOUSE_USER", "default")
+            .with_env_var("CLICKHOUSE_PASSWORD", pw)
+            .with_network(net)
+            .with_container_name(host)
+            .with_copy_to(
+                "/etc/clickhouse-server/config.d/cluster.xml",
+                xml.as_bytes().to_vec(),
+            ),
+    )
+    .start()
+    .await
+    .unwrap_or_else(|e| panic!("start clickhouse node {host}: {e}"));
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let url = format!("http://127.0.0.1:{port}");
     let admin = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
         .with_password(pw);
+    wait_for_queries(&container, &admin, host).await;
     Node {
         _container: container,
         url,
         admin,
         host: host.to_string(),
+    }
+}
+
+/// Block until every shard of `name` answers a native query from node 0.
+///
+/// `wait_for_queries` proves each node's own HTTP interface; this proves the
+/// path the proofs actually run on — node 0 resolving node 1's hostname and
+/// connecting to native 9000, which nothing else waits for. `cluster(...)`
+/// fans a query out to every shard, so a success here is that connection, not
+/// a proxy for it. Polling also absorbs a negatively-cached DNS entry that
+/// `SYSTEM DROP DNS CACHE` raced.
+async fn wait_for_cluster(c: &Cluster, name: &str) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let query = format!("SELECT count() FROM cluster('{name}', system.one)");
+    let mut last;
+    loop {
+        match c.node0.admin.query(&query).fetch_one::<u64>().await {
+            Ok(2) => return,
+            Ok(shards) => last = format!("{shards} shards answered, want 2"),
+            Err(e) => last = e.to_string(),
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "cluster `{name}` never answered from both shards within \
+                 {READY_TIMEOUT:?} ({h0}, {h1}); last error: {last}",
+                h0 = c.node0.host,
+                h1 = c.node1.host,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -312,6 +346,7 @@ async fn two_node_cluster(pw: &str) -> Cluster {
             .await
             .expect("drop dns cache");
     }
+    wait_for_cluster(&cluster, "parity").await;
 
     // Sanity: shard 1 == node 0's host, shard 2 == node 1's host. The whole
     // parity story depends on this ordering (sink shard i == cluster

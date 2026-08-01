@@ -278,8 +278,9 @@ regression suite is therefore split by what varies:
   via gungraun. Each gates on a counter, never on elapsed time, so the
   verdicts hold on any machine.
   The instruction counts are advisory: the comparison lands in the pull-request
-  summary without a blocking threshold, but a bench that fails to build or run
-  fails its job like any other. The job wiring is in the
+  summary without a blocking threshold, movement past the advisory thresholds
+  surfaces as the `affects-performance` label, and a bench that fails to build
+  or run fails its job like any other. The job wiring is in the
   [CI reference](../user-guide/07-reference/ci.mdx).
 - **Wall-clock numbers come from identified hardware.** Every figure on these
   pages is rendered from committed records whose provenance (CPU, commit,

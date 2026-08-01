@@ -1,0 +1,104 @@
+name: Performance label
+
+# Syncs the `affects-performance` label on a pull request from the verdict
+# the `perf-counters` job computed: added when the counter deltas crossed the
+# advisory thresholds, removed when they stopped — so the label self-clears
+# when a fix lands and is never stale on a green run.
+#
+# `workflow_run`, because the two halves of this must never share a job: the
+# benches execute the pull request's code (build scripts, proc-macros, the
+# bench bodies, all under valgrind) and therefore run with a read-only token,
+# while adding a label is a write. This workflow is the privileged half. It
+# runs the *default branch's* definition with repository credentials, checks
+# out nothing, executes nothing from the pull request, and reads exactly one
+# fork-influenceable input: an artifact whose content is parsed as `true`,
+# `false`, or ignored. The only write it can make is one label.
+#
+# The artifact download is bound to the triggering run by `run-id:`, so a
+# different run — or a different workflow — cannot feed it. The pull-request
+# number is resolved through the API from the event's trusted `head_sha`,
+# never from the artifact and never from `workflow_run.pull_requests` — that
+# array is empty for fork pull requests and can carry siblings when branches
+# stack.
+#
+# The write side of the flag-file contract runs on every pull request as
+# `make check-perf-report`; the two workflows themselves can never execute
+# together before a merge, because this one runs the default branch's
+# definition.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-label-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Sync the affects-performance label
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only pull-request runs carry a label to sync, and only a completed-green
+    # run has a verdict worth acting on. A failed or cancelled CI run does
+    # nothing here — a label earned by an earlier benched push persists until
+    # the next green one, which beats stripping a true label because a docs
+    # push skipped the benches.
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      # Downloading an artifact from *another* run — which `run-id:` below
+      # makes this — is an actions-scoped read; without it the download 403s.
+      actions: read
+      # Labels on a pull request are a pull-requests-scoped write.
+      pull-requests: write
+    steps:
+      # A missing artifact is the normal outcome of a run whose paths never
+      # selected `perf-counters`, so it must not fail the workflow — the
+      # sync step is simply skipped and the label keeps its state.
+      - name: Download the regression flag
+        id: flag
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: perf-regressions
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # `gh pr edit` resolves labels through GraphQL; if that path ever
+      # rejects the token's scope, the REST equivalents are
+      #   gh api -X POST "repos/$REPO/issues/$pr/labels" -f 'labels[]=...'
+      #   gh api -X DELETE "repos/$REPO/issues/$pr/labels/..."
+      - name: Sync the label
+        if: steps.flag.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PERF_LABEL: "affects-performance"
+        run: |
+          set -euo pipefail
+          # The head SHA is trusted event payload; resolving it through the
+          # API keeps both the artifact and `workflow_run.pull_requests` out
+          # of the decision — the latter is empty for fork pull requests and
+          # can carry siblings when branches stack (a run on a branch that is
+          # one pull request's head and another's base), and labelling the
+          # wrong one is worse than labelling none. The filter keeps only an
+          # open pull request whose current head is exactly this run's commit.
+          pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            | jq -r --arg sha "$HEAD_SHA" \
+                '[.[] | select(.state == "open" and .head.sha == $sha)][0].number // empty')
+          if [[ -z "$pr" ]]; then
+            echo "no open pull request heads $HEAD_SHA (closed, or superseded by a newer push); nothing to sync"
+            exit 0
+          fi
+          flag=$(tr -d '[:space:]' <has_regressions)
+          case "$flag" in
+            true) gh pr edit "$pr" --repo "$REPO" --add-label "$PERF_LABEL" ;;
+            false) gh pr edit "$pr" --repo "$REPO" --remove-label "$PERF_LABEL" ;;
+            *) echo "::warning::unrecognised regression flag content; leaving labels alone" ;;
+          esac

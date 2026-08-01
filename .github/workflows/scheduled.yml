@@ -521,27 +521,11 @@ jobs:
           shared-key: dev-allfeatures
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
-  alloc-assertions:
-    name: Allocation assertions (spate-core)
-    runs-on: ubuntu-latest
-    needs: plan
-    # Nightly, and its own job rather than a step inside the weekly bench run.
-    # `chain_alloc` is a hard assertion — a per-record allocation on the hot
-    # path fails it — so it is a gate, and the rule at the top of this file
-    # says gates do not belong on a slow timer. It cannot go on the pull-request
-    # path without paying for a release build there, which is precisely what
-    # moving the benches off that path bought back; nightly is where it was
-    # before this restructure and is the honest compromise.
-    if: needs.plan.outputs.nightly == 'true'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          shared-key: release
-      - run: cargo test -p spate-core --release --test chain_alloc --locked
+  # The allocation assertions are not here. `chain_alloc` is a hard assertion
+  # rather than a measurement, so by the rule at the top of this file it is a
+  # gate and belongs on the pull-request path — it lives in ci.yml, where the
+  # release build it needs shares the `release` cache entry this tier populates.
+  # Running it here as well would buy nothing once it gates the merge.
 
   loom:
     name: Loom models (spate-core)
@@ -821,7 +805,6 @@ jobs:
       - docs-build
       - docs-deploy
       - features-powerset
-      - alloc-assertions
       - loom
       - coverage-containers
       - bench

@@ -102,8 +102,8 @@ container_suites_for() {
 # ---------------------------------------------------------------------------
 # Label overrides.
 # ---------------------------------------------------------------------------
-# `ci: docker` and `ci: loom` force a suite on for a pull request whose changed
-# paths would not have selected it.
+# `ci: docker`, `ci: loom` and `ci: bench` force a suite on for a pull request
+# whose changed paths would not have selected it.
 #
 # They can only add. `apply_ci_labels` appends to the list it was handed and
 # never assigns over it, so its result is a superset of its input by
@@ -127,14 +127,22 @@ ci_label_wants_loom() {
     [[ "$labels" == *",ci: loom,"* ]]
 }
 
+# The instruction-count benches. Selected by path below as well; the label is
+# for the change whose effect on the hot path the paths cannot see — a
+# dependency swap, or a refactor that moves code between crates.
+ci_label_wants_bench() {
+    local labels=",${1:-},"
+    [[ "$labels" == *",ci: bench,"* ]]
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
     repo_root=$(git rev-parse --show-toplevel)
 
     # Every case asserts that what comes out still contains everything that went
     # in. `spate-kafka` stands in for "the paths already selected something", so
     # an override that replaced rather than appended is caught here.
-    for labels in "" "ci: docker" "ci: loom" "ci: docker,ci: loom" \
-        "crate: spate-s3,ci: docker" "area: ci"; do
+    for labels in "" "ci: docker" "ci: loom" "ci: bench" "ci: docker,ci: loom" \
+        "ci: bench,ci: docker" "crate: spate-s3,ci: docker" "area: ci"; do
         for before in "" "spate-kafka" "$CONTAINER_PKGS"; do
             after=$(apply_ci_labels "$labels" "$before")
             for pkg in $before; do
@@ -153,10 +161,34 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "::error::'ci: docker' no longer forces the container suites on."
         exit 1
     fi
-    if ! ci_label_wants_loom "ci: loom" || ci_label_wants_loom "ci: docker"; then
+    # Every predicate must recognise exactly its own label, and no other. The
+    # labels share a prefix, so a pattern that lost one of its comma anchors
+    # would match a neighbour and quietly widen what a label turns on.
+    if ! ci_label_wants_loom "ci: loom" ||
+        ci_label_wants_loom "ci: docker" ||
+        ci_label_wants_loom "ci: bench"; then
         echo "::error::ci_label_wants_loom no longer recognises exactly the loom label."
         exit 1
     fi
+    if ! ci_label_wants_bench "ci: bench" ||
+        ci_label_wants_bench "ci: docker" ||
+        ci_label_wants_bench "ci: loom" ||
+        ci_label_wants_bench ""; then
+        echo "::error::ci_label_wants_bench no longer recognises exactly the bench label."
+        exit 1
+    fi
+
+    # Additivity, for an output that is a boolean rather than a set: `bench` is
+    # selected by paths OR label, so the only way the label could ever subtract
+    # is by ceasing to match once a second label arrives. Both orderings, since
+    # a pull request carries its labels in whatever order they were applied.
+    for other in "ci: docker" "ci: loom" "crate: spate-s3" "area: ci"; do
+        if ! ci_label_wants_bench "ci: bench,$other" ||
+            ! ci_label_wants_bench "$other,ci: bench"; then
+            echo "::error::'ci: bench' stopped matching alongside '$other'."
+            exit 1
+        fi
+    done
 
     # Which crates actually own container tests, according to the source tree?
     derived_pkgs=""
@@ -281,11 +313,13 @@ esac
 # ---------------------------------------------------------------------------
 rust=false
 site=false
+bench=false
 suites=""
 
 if [[ "$force_all" == "1" ]]; then
     rust=true
     site=true
+    bench=true
     suites="$CONTAINER_PKGS"
 else
     while IFS= read -r -d '' file; do
@@ -346,6 +380,24 @@ else
             site=true
             ;;
         esac
+
+        # Which files can move a deterministic performance counter? The
+        # instruction-count benches cover the chain hot path and Avro decode,
+        # the request-shape tests cover the object-store read path, and the
+        # rigs are the code that drives them.
+        # A separate `case` rather than arms on the one above, because the two
+        # questions have different answers for the same file: a change under
+        # `crates/spate-core/src/` reaches every container suite and only the
+        # `ops` subtree is benched.
+        #
+        # This sits after the ignore-list `case` above, which is what keeps
+        # `benchmarks/results/` — committed chart data, not code — from
+        # selecting a bench run.
+        case "$file" in
+        crates/spate-s3/* | crates/spate-core/src/ops/* | crates/spate-avro/* | benchmarks/*)
+            bench=true
+            ;;
+        esac
     done <"$changed_file"
 fi
 
@@ -394,6 +446,11 @@ if ci_label_wants_loom "${PR_LABELS:-}"; then
     loom=true
 fi
 
+if ci_label_wants_bench "${PR_LABELS:-}"; then
+    echo "note: 'ci: bench' label present; instruction counts forced on."
+    bench=true
+fi
+
 # Deduplicate and render as cargo -p arguments.
 container_args=""
 if [[ -n "${suites// /}" ]]; then
@@ -412,4 +469,5 @@ fi
     echo "containers=$([[ -n "$container_args" ]] && echo true || echo false)"
     echo "container-args=$container_args"
     echo "loom=$loom"
+    echo "bench=$bench"
 } | tee -a "${GITHUB_OUTPUT:-/dev/stdout}"

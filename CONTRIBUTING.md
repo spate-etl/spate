@@ -193,9 +193,10 @@ kill reports as a timeout indistinguishable from a real hang.
 
 CI picks the container suites from the paths you changed. If your change is one
 whose reach those paths do not show — a refactor moving code between crates, say
-— a maintainer can label the pull request `ci: docker` to run them all, or
-`ci: loom` for the concurrency models. Both only ever add work; neither can
-switch a suite off.
+— a maintainer can label the pull request `ci: docker` to run them all,
+`ci: loom` for the concurrency models, or `ci: bench` for the
+instruction-count benches. All three only ever add work; none can switch a
+suite off.
 
 ## Testing conventions
 

@@ -9,7 +9,8 @@ on:
   # `labeled` and `edited` are in addition to the three defaults, which have to
   # be named once any `types:` is given.
   #
-  # `labeled` is what makes `ci: docker` and `ci: loom` take effect when applied
+  # `labeled` is what makes `ci: docker`, `ci: loom` and `ci: bench` take effect
+  # when applied
   # — without it a label only reaches the classifier on the next push, which is
   # too late to be useful. `unlabeled` is deliberately absent: removing a label
   # cannot switch a suite off, so re-running for it would only spend minutes to
@@ -83,6 +84,7 @@ jobs:
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
       loom: ${{ steps.classify.outputs.loom }}
+      bench: ${{ steps.classify.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,8 +106,8 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           # Comma-joined, and through `env:` for the same injection reason as
           # the SHAs above — a label name is free text somebody else typed.
-          # The classifier only reads `ci: docker` and `ci: loom` from this, and
-          # can only ever add work on the strength of them.
+          # The classifier only reads `ci: docker`, `ci: loom` and `ci: bench`
+          # from this, and can only ever add work on the strength of them.
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: ./scripts/ci-changes.sh
 
@@ -523,6 +525,137 @@ jobs:
           shared-key: dev-allfeatures
       - run: make check-features
 
+  alloc-assertions:
+    name: Allocation assertions (spate-core)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    # `chain_alloc` is a hard assertion, not a measurement: a counting global
+    # allocator with absolute per-iteration bounds, so a per-record allocation
+    # on the chain hot path fails it outright. That makes it a gate, and a gate
+    # belongs on the path that stops a change entering `main` rather than on a
+    # timer that reports the morning after the merge.
+    #
+    # The constraint it carries is a release build, which nothing else on this
+    # path needs — the bounds are calibrated against optimised code, and a debug
+    # build allocates differently enough that they say nothing. `shared-key:
+    # release` is what makes that affordable: the same cache entry the scheduled
+    # release-profile jobs populate from `main`, so this restores warm instead
+    # of compiling the dependency graph into a tree of its own.
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: release
+      - run: cargo test -p spate-core --release --test chain_alloc --locked
+
+  perf-counters:
+    name: Instruction counts (gungraun)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.bench == 'true'
+    timeout-minutes: 45
+    # Counters, not clocks. A hosted runner is contended and virtualised, so a
+    # wall-clock number measured here describes the machine at least as much as
+    # the change — which is why no wall-clock figure gates anything in this
+    # repository. An instruction count under callgrind is deterministic: the
+    # same commit on the same toolchain yields the same number on any host, so
+    # it is a performance signal a pull request can actually carry.
+    #
+    # Advisory in what it reports, blocking in whether it ran. The comparison
+    # step below carries `continue-on-error: true`, so a count that moved does
+    # not block a merge; the job stays in `ci-gate`'s `needs:`, so a bench that
+    # no longer builds or dies under valgrind does. Keeping the job out of the
+    # gate entirely would have hidden the second case along with the first.
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The bench profile inherits release, so these artifacts belong with
+          # the other release-profile jobs' entry rather than in one of their
+          # own. Same key as `alloc-assertions` above and the scheduled benches.
+          shared-key: release
+
+      # callgrind is the instrument; gungraun only drives it and reads its
+      # output. Without valgrind on the runner the harness fails at the first
+      # bench with no measurement taken.
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      # Built from source: install-action carries no manifest entry for it, so
+      # there is no checksummed prebuilt to fetch. The version must match the
+      # `gungraun` dependency in the workspace manifest exactly — the
+      # harness refuses to run against a mismatched runner, and bumping one
+      # without the other turns every bench into a hard error.
+      - run: cargo install gungraun-runner --version 0.19.4 --locked
+
+      # Restored BEFORE the benches run, which is the whole point: gungraun
+      # compares each measurement against the previous run's output sitting in
+      # this directory, and rotates it as it goes. Restored afterwards, the
+      # extraction would overwrite the numbers just measured, the comparison
+      # would be against nothing, and the post-job save would freeze whatever
+      # the first run produced under every later key.
+      #
+      # The exact key can never hit, so the restore always falls through to the
+      # newest entry under the prefix — the same mechanism the scheduled
+      # criterion baseline uses. What lands here is callgrind output for a
+      # handful of benches, kilobytes rather than the hundreds of megabytes that
+      # made the site's node_modules cache restore-only.
+      - name: Restore the previous instruction counts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/gungraun
+          key: gungraun-baseline-${{ github.run_id }}
+          restore-keys: gungraun-baseline-
+
+      # This step is allowed to fail the job, and that is the whole distinction
+      # the plan draws: the numbers are advisory, a broken bench is not.
+      #
+      # `pipefail` is set explicitly because the runner's default shell is
+      # `bash -e`, where a pipeline reports only `tee`'s exit status and a
+      # failing bench would be swallowed. The log is kept so the summary step
+      # below has something to render without re-running the measurement.
+      - name: Instruction counts
+        run: |
+          set -euo pipefail
+          make bench-gungraun 2>&1 | tee gungraun.log
+
+      # No regression threshold, deliberately. gungraun can fail a run on a
+      # percentage change, but choosing that percentage before any real pull
+      # request has been through the job is guessing at the noise floor — and a
+      # threshold set too tight turns the advisory signal into a rerun button.
+      # Turning one on once the spread is known is a follow-up.
+      #
+      # `continue-on-error` belongs on this step and nowhere else. On the job it
+      # would also excuse the step above.
+      - name: Summarise instruction counts
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          {
+            echo "## Instruction counts"
+            echo
+            echo "Deterministic counters under callgrind, compared against the"
+            echo "previous run. Advisory: no threshold blocks a merge."
+            echo
+            echo '```'
+            cat gungraun.log
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
   loom:
     name: Loom models (opt-in)
     runs-on: ubuntu-latest
@@ -731,7 +864,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom]
+    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom, alloc-assertions, perf-counters]
     steps:
       - name: Evaluate dependency results
         env:

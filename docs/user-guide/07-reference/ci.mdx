@@ -31,9 +31,9 @@ useless as a gate.
   missing release note in front of the whole expensive tier, so somebody who
   forgot one sentence would learn nothing else about their branch. On its own it
   blocks the merge through `ci-gate` without blocking the feedback.
-- **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom,
-  allocation assertions, docs build and deploy) and weekly (feature powerset,
-  container coverage, benches), selected by which cron fired. `workflow_dispatch`
+- **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom, docs
+  build and deploy) and weekly (feature powerset, container coverage, benches),
+  selected by which cron fired. `workflow_dispatch`
   takes a `tier` input for testing. A `report` job files one tracking issue for
   any job that fails without its own reporting.
 
@@ -88,12 +88,13 @@ nothing.
 
 ### Forcing a suite on
 
-Two labels override the path selection upward:
+Three labels override the path selection upward:
 
 | Label | Effect |
 | --- | --- |
 | `ci: docker` | Runs every container suite, whatever the paths selected |
 | `ci: loom` | Runs the loom models, which are otherwise nightly only |
+| `ci: bench` | Runs the instruction-count benches, whatever the paths selected |
 
 They exist for the change whose blast radius the path rules cannot see — a
 refactor that moves code between crates, or a fix under an invariant you want
@@ -263,6 +264,50 @@ every PR **that touches Rust**, since that step carries
 nothing, which is the point, but it does mean the rigs are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
+
+## Performance gates
+
+Two pull-request jobs answer performance questions without reading a clock. A
+hosted runner is contended and virtualised, so a wall-clock figure measured
+there describes the machine as much as the change — which is why no wall-clock
+number gates anything here. Both of these produce a quantity that is the same
+on any host.
+
+`alloc-assertions` runs the counting-allocator test over the chain hot path
+(`cargo test -p spate-core --release --test chain_alloc`). Its bounds are
+absolute rather than relative to a stored baseline, so it compares against
+nothing and cannot drift: an allocation that scales with record count fails it.
+It is the one job on this path that builds in the release profile, because the
+bounds are calibrated against optimised code — and it pays for that by sharing
+the `release` cache entry the scheduled release-profile jobs populate from
+`main`.
+
+`perf-counters` runs the gungraun benches, which count instructions,
+branches and cache references under callgrind. The comparison is against the
+previous run's counters, carried between runs by an `actions/cache` entry whose
+exact key never hits and whose `restore-keys:` prefix therefore falls through to
+the newest one — the same mechanism as the scheduled criterion baseline, and
+restored **before** the benches run for the same reason.
+
+The numbers are advisory and the job is not. The comparison step carries
+`continue-on-error: true`, so a count that moved does not block a merge; the job
+itself is in `ci-gate`'s `needs:`, so a bench that stops building or dies under
+valgrind does. No regression threshold is configured: choosing a percentage
+before real pull requests have been through the job is guessing at the noise
+floor, and one set too tight would turn an advisory signal into a rerun button.
+
+`perf-counters` is selected by its own classification output, `bench`, from
+four path groups — `crates/spate-s3/`, `crates/spate-core/src/ops/`,
+`crates/spate-avro/`, and the rigs under `benchmarks/` — plus the `ci: bench`
+label. Committed results under
+`benchmarks/results/` are chart data rather than code and select nothing, which
+is a property of where that arm sits in the classifier's `case` rather than a
+rule anyone has to remember.
+
+The runner binary is installed with `cargo install gungraun-runner
+--version …`, and its version must match the `gungraun` dependency in the
+workspace manifest. Bumping one without the other fails every bench with a
+version-mismatch error rather than a measurement.
 
 ## Coverage
 

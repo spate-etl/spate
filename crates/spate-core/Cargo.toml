@@ -34,6 +34,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 [dev-dependencies]
 criterion = { workspace = true }
 divan = { workspace = true }
+gungraun = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
@@ -49,6 +50,12 @@ loom = { workspace = true }
 # wraps the file and `cargo bench` silently runs zero benchmarks.
 [[bench]]
 name = "chain"
+harness = false
+
+# Same reason: gungraun's `main!` is the harness. Runs only where valgrind and
+# a same-version `gungraun-runner` are installed — see `make bench-gungraun`.
+[[bench]]
+name = "chain_gungraun"
 harness = false
 
 [lints]

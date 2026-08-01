@@ -31,9 +31,9 @@ useless as a gate.
   missing release note in front of the whole expensive tier, so somebody who
   forgot one sentence would learn nothing else about their branch. On its own it
   blocks the merge through `ci-gate` without blocking the feedback.
-- **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom,
-  allocation assertions, docs build and deploy) and weekly (feature powerset,
-  container coverage, benches), selected by which cron fired. `workflow_dispatch`
+- **`scheduled.yml`** — nightly (advisories, `minimal-versions`, loom, docs
+  build and deploy) and weekly (feature powerset, container coverage, benches),
+  selected by which cron fired. `workflow_dispatch`
   takes a `tier` input for testing. A `report` job files one tracking issue for
   any job that fails without its own reporting.
 
@@ -88,12 +88,13 @@ nothing.
 
 ### Forcing a suite on
 
-Two labels override the path selection upward:
+Three labels override the path selection upward:
 
 | Label | Effect |
 | --- | --- |
 | `ci: docker` | Runs every container suite, whatever the paths selected |
 | `ci: loom` | Runs the loom models, which are otherwise nightly only |
+| `ci: bench` | Runs the instruction-count benches, whatever the paths selected |
 
 They exist for the change whose blast radius the path rules cannot see — a
 refactor that moves code between crates, or a fix under an invariant you want
@@ -263,6 +264,59 @@ every PR **that touches Rust**, since that step carries
 nothing, which is the point, but it does mean the rigs are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
+
+## Performance gates
+
+Two pull-request jobs answer performance questions without reading a clock. A
+hosted runner is contended and virtualised, so a wall-clock figure measured
+there describes the machine as much as the change — which is why no wall-clock
+number gates anything here. Both of these produce a quantity that is the same
+on any host.
+
+`alloc-assertions` runs the counting-allocator test over the chain hot path
+(`cargo test -p spate-core --release --test chain_alloc`). Its bounds are
+absolute rather than relative to a stored baseline, so it compares against
+nothing and cannot drift: an allocation that scales with record count fails it.
+It builds in the release profile, because the bounds are calibrated against
+optimised code — and it pays for that by sharing the `release` cache entry the
+scheduled release-profile jobs populate from `main`, the same entry
+`perf-counters` uses for the bench profile that inherits release.
+
+`perf-counters` runs the gungraun benches, which count instructions,
+branches and cache references under callgrind. On a pull request the
+comparison is a paired measurement inside the one job: the merge base is
+checked out and measured first as a named baseline, then the head run
+compares against it — so the comparator is always the merge base, never a
+cache whose newest entry could be any branch's. `scripts/gungraun-report.sh`
+parses the machine-readable summaries into the table in the job's step
+summary, and fails loudly if the summary schema version ever drifts from the
+one its field paths were written against. The baseline leg is scaffolding,
+not the gate: it discovers benches from the merge-base tree by naming
+convention, carries `continue-on-error`, and wipes a partial measurement —
+so a merge base that predates a bench reports that bench as *new*, one with
+no benches reports no baseline, and one that no longer builds on today's
+toolchain reports no baseline rather than blocking a pull request on code
+its author did not write. Push and merge-group runs report absolute counts.
+
+The numbers are advisory and the job is not. The comparison step carries
+`continue-on-error: true`, so a count that moved does not block a merge; the job
+itself is in `ci-gate`'s `needs:`, so a bench that stops building or dies under
+valgrind does. No regression threshold is configured: choosing a percentage
+before real pull requests have been through the job is guessing at the noise
+floor, and one set too tight would turn an advisory signal into a rerun button.
+
+`perf-counters` is selected by its own classification output, `bench`, from
+exactly the two crates the benches compile — `crates/spate-core/` and
+`crates/spate-avro/` — plus the `ci: bench` label. The unit is the whole
+crate rather than the modules a bench imports, because codegen is
+crate-global: an edit anywhere in a measured crate can shift inlining and
+with it the count. Paths the benches never compile select nothing here,
+whatever other jobs they select.
+
+The runner binary is installed with `cargo install gungraun-runner
+--version …`, and its version must match the `gungraun` dependency in the
+workspace manifest. Bumping one without the other fails every bench with a
+version-mismatch error rather than a measurement.
 
 ## Coverage
 

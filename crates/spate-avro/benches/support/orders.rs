@@ -1,0 +1,146 @@
+//! Decode fixtures shared by `benches/decode.rs` (wall time) and
+//! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record and
+//! an array-shaped one.
+//!
+//! Included with `#[path]` rather than imported: a bench target is its own
+//! crate, so two targets can only agree on a workload by compiling the same
+//! source. If the two ever encoded different datums, a wall-clock result and
+//! an instruction count would not be talking about the same bytes.
+//!
+//! The published comparison corpus is deliberately *not* here — it lives in
+//! `decode.rs` with the golden self-check that pins it to the benchmark
+//! repository.
+
+use apache_avro::{Schema, to_avro_datum};
+use spate_core::record::{Flow, Record};
+
+/// A realistic flat record: 15 fields, two nullable unions, one string array.
+pub(crate) const SCHEMA: &str = r#"{"type":"record","name":"Order","fields":[
+  {"name":"id","type":"long"},
+  {"name":"user_id","type":"long"},
+  {"name":"sku","type":"string"},
+  {"name":"quantity","type":"int"},
+  {"name":"unit_price","type":"double"},
+  {"name":"currency","type":"string"},
+  {"name":"region","type":"string"},
+  {"name":"channel","type":"string"},
+  {"name":"created_ms","type":"long"},
+  {"name":"updated_ms","type":"long"},
+  {"name":"discount","type":["null","double"],"default":null},
+  {"name":"coupon","type":["null","string"],"default":null},
+  {"name":"tags","type":{"type":"array","items":"string"}},
+  {"name":"priority","type":"int"},
+  {"name":"note","type":"string"}]}"#;
+
+#[derive(Debug, serde::Deserialize)]
+#[expect(dead_code, reason = "deserialization target only")]
+pub(crate) struct Order {
+    id: i64,
+    user_id: i64,
+    sku: String,
+    quantity: i32,
+    unit_price: f64,
+    currency: String,
+    region: String,
+    channel: String,
+    created_ms: i64,
+    updated_ms: i64,
+    discount: Option<f64>,
+    coupon: Option<String>,
+    tags: Vec<String>,
+    priority: i32,
+    note: String,
+}
+
+/// Counts emitted records and drops them, so a decode bench measures the
+/// decode rather than whatever a downstream operator would do with the result.
+pub(crate) struct Sink(pub(crate) u64);
+
+impl<T> spate_core::deser::EmitRecord<'_, T> for Sink {
+    fn emit(&mut self, _rec: Record<T>) -> Flow {
+        self.0 += 1;
+        Flow::Continue
+    }
+}
+
+/// One `Order` as a bare Avro datum.
+pub(crate) fn order_datum() -> Vec<u8> {
+    use apache_avro::types::Value;
+
+    let schema = Schema::parse_str(SCHEMA).unwrap();
+    let mut rec = apache_avro::types::Record::new(&schema).unwrap();
+    rec.put("id", 902_144i64);
+    rec.put("user_id", 71_002i64);
+    rec.put("sku", "SKU-4477-XL");
+    rec.put("quantity", 3);
+    rec.put("unit_price", 24.99f64);
+    rec.put("currency", "GBP");
+    rec.put("region", "emea");
+    rec.put("channel", "web");
+    rec.put("created_ms", 1_772_000_000_000i64);
+    rec.put("updated_ms", 1_772_000_060_000i64);
+    rec.put("discount", Value::Union(0, Box::new(Value::Null)));
+    rec.put("coupon", Value::Union(0, Box::new(Value::Null)));
+    rec.put(
+        "tags",
+        Value::Array(vec![
+            Value::String("gift".into()),
+            Value::String("prio".into()),
+        ]),
+    );
+    rec.put("priority", 2);
+    rec.put("note", "leave at the door");
+    to_avro_datum(&schema, rec).unwrap()
+}
+
+/// The batch shape: one datum is an array of events, so throughput is
+/// measured per event. Tracks the `flat_map` use case.
+pub(crate) const BATCH_SCHEMA: &str = r#"{"type":"record","name":"SensorBatch","fields":[
+  {"name":"sensor","type":"string"},
+  {"name":"events","type":{"type":"array","items":
+    {"type":"record","name":"Event","fields":[
+      {"name":"name","type":"string"},
+      {"name":"value","type":"long"},
+      {"name":"unit","type":"string"}]}}}]}"#;
+
+/// Events in one [`BATCH_SCHEMA`] datum.
+pub(crate) const BATCH_EVENTS: u64 = 50;
+
+#[derive(Debug, serde::Deserialize)]
+#[expect(dead_code, reason = "deserialization target only")]
+pub(crate) struct SensorBatch {
+    sensor: String,
+    events: Vec<Event>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[expect(dead_code, reason = "deserialization target only")]
+pub(crate) struct Event {
+    name: String,
+    value: i64,
+    unit: String,
+}
+
+/// One [`BATCH_SCHEMA`] datum holding [`BATCH_EVENTS`] events.
+pub(crate) fn batch_datum() -> Vec<u8> {
+    use apache_avro::types::Value;
+
+    let schema = Schema::parse_str(BATCH_SCHEMA).unwrap();
+    let mut rec = apache_avro::types::Record::new(&schema).unwrap();
+    rec.put("sensor", "sensor-7");
+    rec.put(
+        "events",
+        Value::Array(
+            (0..BATCH_EVENTS)
+                .map(|i| {
+                    Value::Record(vec![
+                        ("name".into(), Value::String(format!("metric_{i}"))),
+                        ("value".into(), Value::Long(i as i64 * 37)),
+                        ("unit".into(), Value::String("count".into())),
+                    ])
+                })
+                .collect(),
+        ),
+    );
+    to_avro_datum(&schema, rec).unwrap()
+}

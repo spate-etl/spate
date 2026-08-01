@@ -265,6 +265,28 @@ A recurring harness lesson, now encoded in the binaries: metric handles created
 nothing. The harnesses install the recorder first; the examples should be
 audited for the same pattern.
 
+## Regression gates {#regression-gates}
+
+Wall-clock throughput is not a gating quantity: on a shared CI runner it
+measures the runner's neighbours as much as the change under test. The
+regression suite is therefore split by what varies:
+
+- **Deterministic counters gate every pull request.** Allocation counts on the
+  chain hot path (`crates/spate-core/tests/chain_alloc.rs`), object-store
+  request shapes for a coordinated backfill (one LIST per run, one GET per
+  object — `crates/spate-s3/tests/request_shape.rs`), and instruction counts
+  via gungraun. Each gates on a counter, never on elapsed time, so the
+  verdicts hold on any machine.
+  The instruction counts are advisory: the comparison lands in the pull-request
+  summary without a blocking threshold, but a bench that fails to build or run
+  fails its job like any other. The job wiring is in the
+  [CI reference](../user-guide/07-reference/ci.mdx).
+- **Wall-clock numbers come from identified hardware.** Every figure on these
+  pages is rendered from committed records whose provenance (CPU, commit,
+  profile) travels with the data, recorded on a quiet machine. Wall-clock
+  comparisons never gate a pull request, and benchmark numbers are never
+  hand-written into the docs.
+
 ## Accounting note (2026-07 correction) {#accounting-note}
 
 An earlier revision of the framework-ceiling table

@@ -143,6 +143,10 @@
   color: "fbca04"
   description: "Force the loom models to run on this pull request"
 
+- name: "ci: bench"
+  color: "fbca04"
+  description: "Force the instruction-count benches to run on this pull request"
+
 # ------------------------------------------------------------------ needs ----
 #
 # What the issue is waiting on. Distinct from what it is about — an issue keeps

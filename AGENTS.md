@@ -112,8 +112,8 @@ Read it before changing a workflow.
 
 - `ci-gate` is the only job that should ever be a required status check.
 - `scripts/ci-changes.sh` picks the expensive jobs from the changed paths. It is
-  an ignore-list and **fails closed** on purpose: the `ci: docker` and `ci: loom`
-  labels can force a suite on, and nothing can force one off.
+  an ignore-list and **fails closed** on purpose: the `ci: docker`, `ci: loom`
+  and `ci: bench` labels can force a suite on, and nothing can force one off.
 - Every action is pinned to a full commit SHA.
 
 ## Testing

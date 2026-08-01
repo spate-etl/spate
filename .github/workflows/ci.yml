@@ -9,7 +9,8 @@ on:
   # `labeled` and `edited` are in addition to the three defaults, which have to
   # be named once any `types:` is given.
   #
-  # `labeled` is what makes `ci: docker` and `ci: loom` take effect when applied
+  # `labeled` is what makes `ci: docker`, `ci: loom` and `ci: bench` take effect
+  # when applied
   # — without it a label only reaches the classifier on the next push, which is
   # too late to be useful. `unlabeled` is deliberately absent: removing a label
   # cannot switch a suite off, so re-running for it would only spend minutes to
@@ -83,6 +84,7 @@ jobs:
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
       loom: ${{ steps.classify.outputs.loom }}
+      bench: ${{ steps.classify.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,8 +106,8 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           # Comma-joined, and through `env:` for the same injection reason as
           # the SHAs above — a label name is free text somebody else typed.
-          # The classifier only reads `ci: docker` and `ci: loom` from this, and
-          # can only ever add work on the strength of them.
+          # The classifier only reads `ci: docker`, `ci: loom` and `ci: bench`
+          # from this, and can only ever add work on the strength of them.
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: ./scripts/ci-changes.sh
 
@@ -523,6 +525,190 @@ jobs:
           shared-key: dev-allfeatures
       - run: make check-features
 
+  alloc-assertions:
+    name: Allocation assertions (spate-core)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    # `chain_alloc` is a hard assertion, not a measurement: a counting global
+    # allocator with absolute per-iteration bounds, so a per-record allocation
+    # on the chain hot path fails it outright. That makes it a gate, and a gate
+    # belongs on the path that stops a change entering `main` rather than on a
+    # timer that reports the morning after the merge.
+    #
+    # The constraint it carries is a release build — the bounds are calibrated
+    # against optimised code, and a debug build allocates differently enough
+    # that they say nothing. `shared-key: release` is what makes that
+    # affordable: the same cache entry the scheduled release-profile jobs
+    # populate from `main` and that `perf-counters` below shares for its
+    # bench profile, so this restores warm instead of compiling the
+    # dependency graph into a tree of its own.
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: release
+      - run: cargo test -p spate-core --release --test chain_alloc --locked
+
+  perf-counters:
+    name: Instruction counts (gungraun)
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.bench == 'true'
+    timeout-minutes: 45
+    # Counters, not clocks. A hosted runner is contended and virtualised, so a
+    # wall-clock number measured here describes the machine at least as much as
+    # the change — which is why no wall-clock figure gates anything in this
+    # repository. An instruction count under callgrind is deterministic: the
+    # same commit on the same toolchain yields the same number on any host, so
+    # it is a performance signal a pull request can actually carry.
+    #
+    # The comparison is a paired measurement inside one job: the merge base is
+    # measured first and saved as a named baseline, then the head run compares
+    # against it. The comparator is therefore always the merge base rather
+    # than whatever a cache last held — at the cost of building and running
+    # the benches twice, a few minutes on an advisory job.
+    #
+    # Advisory in what it reports, blocking in whether it ran. The report
+    # step below carries `continue-on-error: true`, so a count that moved does
+    # not block a merge; the job stays in `ci-gate`'s `needs:`, so a bench that
+    # no longer builds or dies under valgrind does. Keeping the job out of the
+    # gate entirely would have hidden the second case along with the first.
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read. Full history, because the merge base has
+      # to be resolvable and checked out for the baseline measurement.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The bench profile inherits release, so these artifacts belong with
+          # the other release-profile jobs' entry rather than in one of their
+          # own. Same key as `alloc-assertions` above and the scheduled benches.
+          shared-key: release
+
+      # callgrind is the instrument; gungraun only drives it and reads its
+      # output. Without valgrind on the runner the harness fails at the first
+      # bench with no measurement taken.
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      # Built from source: install-action carries no manifest entry for it, so
+      # there is no checksummed prebuilt to fetch. The version must match the
+      # `gungraun` dependency in the workspace manifest exactly — the
+      # harness refuses to run against a mismatched runner, and bumping one
+      # without the other turns every bench into a hard error.
+      - run: cargo install gungraun-runner --version 0.19.4 --locked
+
+      # The baseline: check out the merge base, measure it, come back. The
+      # benches are discovered from the merge-base tree itself by the
+      # `*_gungraun.rs` naming convention — a list hardcoded here would
+      # drift from `make bench-gungraun` the first time a bench is added,
+      # and the discovery also handles the merge base that predates a bench:
+      # it simply contributes no baseline for it.
+      #
+      # `continue-on-error`, and bench failures are caught inside the script,
+      # because this leg builds historical code with today's toolchain: its
+      # failure says nothing about the change under review, and the head run
+      # below still reports absolute counts. A partial measurement is wiped
+      # rather than kept, so the comparison is all-or-nothing.
+      #
+      # Only a pull request has a merge base to compare against; a push or
+      # merge-group run reports absolute counts instead.
+      - name: Measure the merge base
+        id: base
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          merge_base=$(git merge-base HEAD^1 HEAD^2)
+          git checkout --quiet --detach "$merge_base"
+          # Never inherit counter output the shared cargo cache may have
+          # restored: stale data here would silently become the comparison.
+          rm -rf target/gungraun
+          measured=false
+          ok=true
+          for bench_src in crates/*/benches/*_gungraun.rs; do
+            [[ -e "$bench_src" ]] || continue
+            # Crate directory names equal package names in this workspace.
+            pkg=${bench_src#crates/}
+            pkg=${pkg%%/*}
+            bench=$(basename "$bench_src" .rs)
+            if GUNGRAUN_SAVE_BASELINE=base cargo bench -p "$pkg" --locked --bench "$bench"; then
+              measured=true
+            else
+              ok=false
+            fi
+          done
+          if [[ "$ok" == "false" ]]; then
+            rm -rf target/gungraun
+            measured=false
+          fi
+          git checkout --quiet --detach "$head_sha"
+          {
+            echo "measured=$measured"
+            echo "merge-base=$merge_base"
+          } >>"$GITHUB_OUTPUT"
+
+      # This step is allowed to fail the job, and that is the whole
+      # distinction: the numbers are advisory, a broken bench is not.
+      #
+      # `GUNGRAUN_BASELINE` makes the run compare against the merge-base
+      # measurement saved above; `GUNGRAUN_SAVE_SUMMARY` writes one
+      # machine-readable summary per bench under `target/gungraun`, which is
+      # what the report step parses — the human-readable output stays in this
+      # step's log.
+      - name: Instruction counts
+        env:
+          GUNGRAUN_SAVE_SUMMARY: json
+          GUNGRAUN_BASELINE: ${{ steps.base.outputs.measured == 'true' && 'base' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GUNGRAUN_BASELINE" ]]; then
+            unset GUNGRAUN_BASELINE
+            # Absolute means absolute: without a named baseline, gungraun
+            # would still compare against whatever output a restored cache or
+            # an aborted base leg left behind here.
+            rm -rf target/gungraun
+          fi
+          make bench-gungraun
+
+      # No regression threshold, deliberately — the report renders no verdict.
+      # gungraun can fail a run on a percentage change, but choosing that
+      # percentage before any real pull request has been through the job is
+      # guessing at the noise floor — and a threshold set too tight turns the
+      # advisory signal into a rerun button. Turning one on once the spread is
+      # known is a follow-up.
+      #
+      # `continue-on-error` belongs on this step and nowhere else. On the job it
+      # would also excuse the steps above.
+      - name: Report instruction counts
+        continue-on-error: true
+        env:
+          BASE_MEASURED: ${{ steps.base.outputs.measured }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
+        run: |
+          set -euo pipefail
+          find target/gungraun -name summary.json -exec cat {} + >gungraun-summaries.jsonl
+          if [[ "$BASE_MEASURED" == "true" ]]; then
+            label="main @ ${MERGE_BASE:0:12}"
+          else
+            label="baseline (none measured)"
+          fi
+          ./scripts/gungraun-report.sh gungraun-summaries.jsonl "$label" >>"$GITHUB_STEP_SUMMARY"
+
   loom:
     name: Loom models (opt-in)
     runs-on: ubuntu-latest
@@ -731,7 +917,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom]
+    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom, alloc-assertions, perf-counters]
     steps:
       - name: Evaluate dependency results
         env:

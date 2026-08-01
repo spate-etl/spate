@@ -4150,6 +4150,7 @@ dependencies = [
  "sha2 0.11.0",
  "spate-coordination",
  "spate-core",
+ "spate-json",
  "spate-s3",
  "spate-test",
  "tempfile",

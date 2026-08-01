@@ -2,8 +2,9 @@
 //! dynamically-typed Value path, the two-pass serde-typed path, and the
 //! single-pass datum path (owned and borrowed) — on a realistic 15-field
 //! record, a batch shape (one datum = an array of 50 events, per-event
-//! throughput) tracking the flagship `flat_map` use case, and the
-//! sensor-batch attribution corpus with its decode-plus-flatten arms.
+//! throughput) tracking the flagship `flat_map` use case, the
+//! sensor-batch attribution corpus with its decode-plus-flatten arms, and
+//! the malformed-datum error path.
 //!
 //! The flat-record and batch fixtures live in `benches/support/orders.rs`,
 //! shared with the instruction-count bench in `benches/decode_gungraun.rs`.
@@ -62,6 +63,26 @@ fn bench(c: &mut Criterion) {
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
+        });
+    });
+    // The error path Skip and Fail both pay per bad record: decode until the
+    // truncation, build the `Err`. The assert keeps the fixture honest — if
+    // it ever decodes cleanly, the bench panics instead of timing the happy
+    // path.
+    group.bench_function("value_malformed", |b| {
+        let mut deser = builder.build_value().expect("value builder");
+        let mut sink = Sink(0);
+        let bad = orders::malformed_datum();
+        let raw_bad = RawPayload {
+            bytes: &bad,
+            key: None,
+            partition: PartitionId(0),
+            offset: 1,
+            timestamp_ms: 0,
+        };
+        b.iter(|| {
+            let res = deser.deserialize(black_box(&raw_bad), &ack, &mut sink);
+            assert!(black_box(res).is_err(), "malformed fixture decoded cleanly");
         });
     });
     group.finish();

@@ -85,6 +85,10 @@ jobs:
       container-args: ${{ steps.classify.outputs.container-args }}
       loom: ${{ steps.classify.outputs.loom }}
       bench: ${{ steps.classify.outputs.bench }}
+      # Which crates' benches to measure, not merely whether to measure. Every
+      # benched crate costs two builds and two valgrind runs, so a change is
+      # measured against what it can move rather than against everything.
+      bench-pkgs: ${{ steps.classify.outputs.bench-pkgs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -648,6 +652,11 @@ jobs:
         id: base
         if: github.event_name == 'pull_request'
         continue-on-error: true
+        env:
+          # Through `env:` rather than `${{ }}` inside `run:` — an expression
+          # interpolated into the script body is a template-injection finding
+          # even when its value is classifier-derived.
+          BENCH_PKGS: ${{ needs.changes.outputs.bench-pkgs }}
         run: |
           set -euo pipefail
           head_sha=$(git rev-parse HEAD)
@@ -662,7 +671,14 @@ jobs:
             # one failed; 2 means this tree has no benches yet. Only the
             # first is a usable baseline, and a partial measurement is wiped
             # rather than kept, so the comparison is all-or-nothing.
-            if GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh --run; then
+            #
+            # $BENCH_PKGS is deliberately unquoted: it is a space-separated
+            # package list and each word is a separate argument. The classifier
+            # emits only workspace package names, and the head leg below is
+            # given the identical list — measuring a different set on the two
+            # sides would be the drift this whole arrangement exists to stop.
+            # shellcheck disable=SC2086
+            if GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh --run $BENCH_PKGS; then
               measured=true
             else
               rm -rf target/gungraun
@@ -686,6 +702,7 @@ jobs:
         env:
           GUNGRAUN_SAVE_SUMMARY: json
           GUNGRAUN_BASELINE: ${{ steps.base.outputs.measured == 'true' && 'base' || '' }}
+          BENCH_PKGS: ${{ needs.changes.outputs.bench-pkgs }}
         run: |
           set -euo pipefail
           if [[ -z "$GUNGRAUN_BASELINE" ]]; then
@@ -695,7 +712,12 @@ jobs:
             # an aborted base leg left behind here.
             rm -rf target/gungraun
           fi
-          make bench-gungraun
+          # The same list the base leg measured, for the same reason it is
+          # unquoted there. `make bench-gungraun` runs every bench in the tree
+          # and stays the local convenience; CI measures only what the change
+          # can move.
+          # shellcheck disable=SC2086
+          ./scripts/gungraun-benches.sh --run $BENCH_PKGS
 
       # The report script marks rows that cross the provisional advisory
       # thresholds and writes `has_regressions` for `perf-label.yml`; the

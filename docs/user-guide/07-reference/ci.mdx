@@ -364,13 +364,29 @@ fails or skips the benches leaves the label untouched (a stale label beats
 stripping a true one because a docs push skipped the benches), and
 hand-applying the label only lasts until the next benched push.
 
-`perf-counters` is selected by its own classification output, `bench`, from
-exactly the two crates the benches compile — `crates/spate-core/` and
-`crates/spate-avro/` — plus the `ci: bench` label. The unit is the whole
-crate rather than the modules a bench imports, because codegen is
+`perf-counters` is selected by its own classification output, `bench`, and a
+second output, `bench-pkgs`, says which crates' benches to run. The unit is
+the whole crate rather than the modules a bench imports, because codegen is
 crate-global: an edit anywhere in a measured crate can shift inlining and
-with it the count. Paths the benches never compile select nothing here,
+with it the count. Paths that reach no benched crate select nothing here,
 whatever other jobs they select.
+
+The set measured automatically is deliberately smaller than the set of crates
+that have benches. `crates/spate-core/` and `crates/spate-avro/` select
+themselves, because their counts are wanted unprompted; the rest are opt-in
+through the `ci: bench` label, which selects every benched crate. The reason
+is cost, not confidence: each benched crate is two builds and two valgrind
+runs — merge base and head — so measuring all of them on every pull request
+would tax changes that cannot move the numbers. Both legs are given the same
+list, since measuring a different set on the two sides of a comparison is the
+drift the single bench list exists to prevent.
+
+The consequence worth knowing: **a change to an opt-in crate shows no
+counters unless someone applies the label.** For a change that means to move
+one of those numbers — object-storage packing or framing, say — applying
+`ci: bench` is part of raising it. `make self-test` asserts that every
+auto-selected crate actually has a bench, so the list cannot name a crate
+whose bench was deleted or renamed and quietly measure nothing.
 
 The runner binary's version must match the `gungraun` dependency exactly — a
 mismatch fails every bench with a version error rather than a measurement —

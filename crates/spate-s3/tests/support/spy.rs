@@ -136,7 +136,13 @@ impl StoreSpy {
         self.gets.lock().expect("spy log is never poisoned").clone()
     }
 
-    /// The most GETs ever in flight at one instant.
+    /// The most `get_opts` calls ever in flight at one instant. A call
+    /// resolves when the store returns the response, before the body is
+    /// necessarily consumed — `LocalFileSystem` hands the bytes over
+    /// eagerly, so here call-overlap and read-overlap coincide, but against
+    /// a store that streams lazily this counter would undercount body
+    /// overlap. The gate below forces the overlap inside `get_opts` itself,
+    /// which is what makes the depth assertion about calls sound.
     pub(crate) fn peak_concurrent_gets(&self) -> usize {
         self.depth.peak.load(Ordering::SeqCst)
     }

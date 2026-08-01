@@ -281,7 +281,7 @@ fn concurrent_reads_reach_the_in_flight_budget() {
     assert_eq!(
         spy.peak_concurrent_gets(),
         4,
-        "four in-flight splits must read through four concurrent GETs"
+        "four in-flight splits must issue four concurrent get_opts calls"
     );
     assert_eq!(spy.lists(), 1, "still one LIST across four lanes");
     assert_eq!(
@@ -293,11 +293,13 @@ fn concurrent_reads_reach_the_in_flight_budget() {
 
 #[test]
 fn a_final_plan_is_never_re_listed() {
-    // `refresh_listing: false` makes the plan final, and a final plan is never
-    // re-planned — so a run outliving several replan ticks still costs exactly
-    // one LIST. The injected per-GET latency is what guarantees the run spans
-    // those ticks: twelve objects on one lane pay it twelve times over, so the
-    // elapsed lower bound below holds however fast the machine is.
+    // `refresh_listing: false` makes the plan final, and a final plan
+    // disables replanning outright — no tick is ever attempted. What this
+    // test establishes is therefore that the run outlived the interval at
+    // which an *open* plan would have re-listed, and still cost one LIST.
+    // The injected per-GET latency is what guarantees that span: twelve
+    // objects on one lane pay it twelve times over, so the elapsed lower
+    // bound below holds however fast the machine is.
     let staged = stage(12, 20);
     let yaml = config_yaml(&staged.data, "8MiB", "512KiB");
     let hold = Duration::from_millis(300);
@@ -321,11 +323,12 @@ fn a_final_plan_is_never_re_listed() {
         sorted(staged.expected.clone())
     );
 
-    // `test_tuning` replans on the lease interval; without spanning one, the
-    // LIST count below would pass vacuously.
+    // An open plan under `test_tuning` would re-list on the lease interval;
+    // without spanning it, the LIST count below would pass vacuously.
     assert!(
         elapsed > TEST_LEASE * 2,
-        "the run must outlive several replan ticks to prove anything: {elapsed:?}"
+        "the run must outlive the interval an open plan re-lists at, or \
+         lists == 1 proves nothing: {elapsed:?}"
     );
     assert_eq!(
         spy.lists(),

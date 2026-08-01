@@ -296,7 +296,11 @@ scheduled release-profile jobs populate from `main`, the same entry
 `perf-counters` uses for the bench profile that inherits release.
 
 `perf-counters` runs the gungraun benches, which count instructions,
-branches and cache references under callgrind. On a pull request the
+branches and cache references under callgrind, and heap shape — allocated
+blocks and peak bytes — under DHAT in the same run. The decode benches cover
+the error path alongside the happy paths: a malformed payload's
+decode-until-error cost is what every bad record pays whichever record error
+policy is configured. On a pull request the
 comparison is a paired measurement inside the one job: the merge base is
 checked out and measured first as a named baseline, then the head run
 compares against it — so the comparator is always the merge base, never a

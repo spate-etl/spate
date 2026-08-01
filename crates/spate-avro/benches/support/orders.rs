@@ -1,6 +1,7 @@
 //! Decode fixtures shared by `benches/decode.rs` (wall time) and
-//! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record and
-//! an array-shaped one.
+//! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record,
+//! an array-shaped one, and a truncated copy of the flat record for the
+//! error path.
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
 //! crate, so two targets can only agree on a workload by compiling the same
@@ -91,6 +92,16 @@ pub(crate) fn order_datum() -> Vec<u8> {
     rec.put("priority", 2);
     rec.put("note", "leave at the door");
     to_avro_datum(&schema, rec).unwrap()
+}
+
+/// One [`SCHEMA`] datum cut off mid-record: the front half of
+/// [`order_datum`]'s bytes, ending inside a field. Decoding it must fail on
+/// every path — truncation, not emptiness, because an empty payload is a
+/// tombstone and decodes to nothing without touching the error path.
+pub(crate) fn malformed_datum() -> Vec<u8> {
+    let mut datum = order_datum();
+    datum.truncate(datum.len() / 2);
+    datum
 }
 
 /// The batch shape: one datum is an array of events, so throughput is

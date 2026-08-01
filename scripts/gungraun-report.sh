@@ -10,9 +10,10 @@
 # whether a baseline was measured and which commit it was.
 #
 # The output is one table of callgrind instruction counts (the headline
-# quantity: deterministic, so comparable across runners), with every other
-# callgrind metric per bench behind a <details> fold. The percentage column is
-# gungraun's own derived diff, not recomputed here.
+# quantity: deterministic, so comparable across runners) and, when any summary
+# carries a DHAT profile, one of heap counts (allocated blocks and the t-gmax
+# peak), with every other metric per bench behind a <details> fold. The
+# percentage column is gungraun's own derived diff, not recomputed here.
 #
 # The report renders no verdict deliberately: no regression threshold exists
 # until the noise floor is known from real pull requests, so the numbers are
@@ -72,6 +73,12 @@ report=$(jq -r -s --arg base "$baseline_label" '
     def callgrind:
         [.profiles[] | select(.tool == "Callgrind")][0]
         | if . == null then null else .summaries.total.summary.Callgrind end;
+    # null when the summary carries no DHAT profile: the heap table is simply
+    # absent, so the report stays correct against summaries measured before
+    # DHAT rode along (a merge-base leg, an old artifact).
+    def dhat:
+        [.profiles[] | select(.tool == "DHAT")][0]
+        | if . == null then null else .summaries.total.summary.Dhat end;
 
     "## Instruction counts",
     "",
@@ -85,16 +92,40 @@ report=$(jq -r -s --arg base "$baseline_label" '
           then "| \(bench_name) | — | — | *no callgrind profile* |"
           else "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | delta) |"
           end),
+    (if any(.[]; dhat != null) then
+        "",
+        "## Heap (DHAT)",
+        "",
+        "DHAT heap blocks and peak bytes per bench: pull request vs \($base).",
+        "",
+        "| Bench | Metric | PR | \($base) | Δ |",
+        "| --- | --- | ---: | ---: | ---: |",
+        (.[] | dhat as $dh
+            | select($dh != null)
+            | bench_name as $bn
+            | (["TotalBlocks", "AtTGmaxBytes"][] as $key
+                | $dh[$key]
+                | select(. != null)
+                | "| \($bn) | \($key) | \(new_side) | \(old_side // "—") | \(delta) |"))
+    else empty end),
     "",
-    "<details><summary>All callgrind metrics</summary>",
+    "<details><summary>All metrics</summary>",
     "",
     (.[] | callgrind as $cg
         | select($cg != null)
-        | "**\(bench_name)**",
+        | "**\(bench_name)** — callgrind",
           "",
           "| Metric | PR | \($base) | Δ |",
           "| --- | ---: | ---: | ---: |",
           ($cg | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta) |"),
+          ""),
+    (.[] | dhat as $dh
+        | select($dh != null)
+        | "**\(bench_name)** — DHAT",
+          "",
+          "| Metric | PR | \($base) | Δ |",
+          "| --- | ---: | ---: | ---: |",
+          ($dh | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta) |"),
           ""),
     "</details>"
 ' "$summaries")

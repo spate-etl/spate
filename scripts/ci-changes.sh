@@ -91,6 +91,24 @@ container_suites_for() {
     esac
 }
 
+# Which crates' instruction-count benches should a change to $1 run without
+# being asked? See the note at the `bench` classification below for why this
+# is smaller than the set of crates that have benches. `--self-test` checks it
+# against what `gungraun-benches.sh` discovers, so it cannot name a crate whose
+# bench no longer exists.
+bench_pkgs_for() {
+    case "$1" in
+        spate-core | spate-avro) echo "$1" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Every crate that has a gungraun bench, discovered rather than listed — the
+# `ci: bench` label and the force-all events select all of them.
+all_bench_pkgs() {
+    "$(git rev-parse --show-toplevel)/scripts/gungraun-benches.sh" | cut -d' ' -f1 | sort -u
+}
+
 # ---------------------------------------------------------------------------
 # Self-test: assert the table above still matches the real dependency graph.
 # Runs in the `deny` job, which already has a toolchain. `cargo metadata
@@ -266,8 +284,83 @@ for crate in sorted(names):
         diff <(echo "$expected") <(echo "$actual") || true
         exit 1
     fi
+    # The auto-selected bench crates must all actually have benches. The two
+    # sets are allowed to differ — that asymmetry is the design — but only in
+    # one direction: selecting a crate whose bench has been deleted or renamed
+    # would run nothing and report success, which is the failure mode this
+    # whole file exists to avoid.
+    discovered=$(all_bench_pkgs)
+    auto=""
+    while IFS= read -r crate; do
+        [[ -n "$crate" ]] || continue
+        auto="$auto $(bench_pkgs_for "$crate")"
+    done < <(ls -1 "$repo_root/crates")
+    for pkg in $auto; do
+        if ! echo "$discovered" | grep -qx "$pkg"; then
+            echo "::error::bench_pkgs_for() selects '$pkg', which has no gungraun bench."
+            echo "Crates with benches: $(echo "$discovered" | tr '\n' ' ')"
+            echo "Either restore the bench or drop the crate from bench_pkgs_for()."
+            exit 1
+        fi
+    done
+
+    # And the auto set must be non-empty, or every ordinary pull request
+    # silently stopped being measured while the label still worked.
+    if [[ -z "${auto// /}" ]]; then
+        echo "::error::bench_pkgs_for() selects nothing; no pull request would be measured by path."
+        exit 1
+    fi
+
+    # What each path arm selects. Membership checks above cannot see this: they
+    # test the tables, and the arms are what consult them. Every row here is a
+    # rule stated in prose somewhere — in the comments below, in CONTRIBUTING.md
+    # or in the CI reference — so a rule that stops holding fails here instead
+    # of going quietly false in three documents at once.
+    all_pkgs=$(all_bench_pkgs | tr '\n' ' ')
+    all_pkgs="${all_pkgs% }"
+    path_case_failed=0
+    check_paths() {
+        local want_bench="$1" want_pkgs="$2" desc="$3"
+        shift 3
+        local list out got_bench got_pkgs
+        list=$(mktemp)
+        out=$(mktemp)
+        printf '%s\0' "$@" >"$list"
+        # A subprocess, because classification runs at the bottom of this file
+        # rather than in a function. Read the answers from the child's own
+        # `GITHUB_OUTPUT` rather than its stdout: the classifier `tee`s to both,
+        # so stdout carries every line twice when the variable is unset. Giving
+        # it a temporary file also keeps synthetic answers out of the calling
+        # job's real output. `PR_LABELS` and `EVENT_NAME` are unset so that
+        # neither a label nor an event can decide what the arms should.
+        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
+            "$0" --classify-paths "$list" >/dev/null
+        got_bench=$(sed -n 's/^bench=//p' "$out")
+        got_pkgs=$(sed -n 's/^bench-pkgs=//p' "$out")
+        rm -f "$list" "$out"
+        if [[ "$got_bench" != "$want_bench" || "$got_pkgs" != "$want_pkgs" ]]; then
+            echo "::error::$desc: expected bench=$want_bench bench-pkgs='$want_pkgs',"
+            echo "got bench=$got_bench bench-pkgs='$got_pkgs' for: $*"
+            path_case_failed=1
+        fi
+    }
+    check_paths true "spate-core" "a measured crate selects itself" \
+        crates/spate-core/src/lib.rs
+    check_paths true "spate-avro spate-core" "two measured crates select both" \
+        crates/spate-core/src/lib.rs crates/spate-avro/src/lib.rs
+    check_paths false "" "an opt-in crate selects nothing by path" \
+        crates/spate-s3/src/lib.rs
+    check_paths false "" "docs select nothing" docs/DESIGN.md
+    for apparatus in scripts/ci-changes.sh scripts/gungraun-benches.sh \
+        scripts/gungraun-report.sh .github/workflows/ci.yml; do
+        check_paths true "$all_pkgs" "$apparatus selects every benched crate" \
+            "$apparatus"
+    done
+    [[ "$path_case_failed" == "0" ]] || exit 1
+
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
-    echo "and the label overrides are additive."
+    echo "the label overrides are additive, every auto-selected bench crate has a bench,"
+    echo "and each path arm selects the crates it claims to."
     exit 0
 fi
 
@@ -278,7 +371,26 @@ force_all=0
 changed_file=$(mktemp)
 trap 'rm -f "$changed_file"' EXIT
 
-case "${EVENT_NAME:-}" in
+# `--classify-paths FILE` classifies a NUL-separated list given on the command
+# line instead of a diff, so `--self-test` can assert what each arm below
+# selects. It is an argument rather than an environment variable deliberately:
+# an exported variable could turn a real classification into a synthetic one by
+# accident, and an argument cannot arrive that way. The sentinel is hyphenated
+# so no webhook event name can collide with it — GitHub's are underscored.
+mode="${EVENT_NAME:-}"
+if [[ "${1:-}" == "--classify-paths" ]]; then
+    if [[ -z "${2:-}" || ! -r "${2:-}" ]]; then
+        echo "--classify-paths needs a readable file of NUL-separated paths" >&2
+        exit 2
+    fi
+    cat "$2" >"$changed_file"
+    mode=classify-paths
+fi
+
+case "$mode" in
+classify-paths)
+    # The list is already in place; skip the diff entirely.
+    ;;
 pull_request)
     # Against the *merge base*, not the base branch tip. `base.sha` is the tip,
     # so a two-dot diff also reports everything main has gained since this
@@ -318,12 +430,14 @@ esac
 rust=false
 site=false
 bench=false
+bench_pkgs=""
 suites=""
 
 if [[ "$force_all" == "1" ]]; then
     rust=true
     site=true
     bench=true
+    bench_pkgs=$(all_bench_pkgs)
     suites="$CONTAINER_PKGS"
 else
     while IFS= read -r -d '' file; do
@@ -385,25 +499,50 @@ else
             ;;
         esac
 
-        # Which changes get their instruction counts compared automatically?
-        # spate-core (the chain rigs) and spate-avro (decode). The unit is the
-        # whole crate, not the module a bench happens to import, because
-        # codegen is crate-global — an edit anywhere in a measured crate can
-        # shift inlining and with it the count.
+        # Which files can move an instruction count, and whose benches
+        # should run because of it? The unit is the whole crate, not the
+        # module a bench happens to import, because codegen is crate-global —
+        # an edit anywhere in a measured crate can shift inlining and with it
+        # the count.
         #
-        # This is deliberately narrower than the set of crates that *have*
-        # benches. spate-s3 has them and is not listed: every benched crate
-        # costs two builds and two valgrind runs, merge base and head, so
-        # selecting all of them here would tax ordinary pull requests to
-        # measure code they did not touch. The rest are opt-in through the
-        # `ci: bench` label, which selects everything — so a change that means
-        # to move one of those counts has to ask for the comparison.
+        # `bench_pkgs_for` is the auto-selected set, and it is deliberately
+        # *smaller* than the set of crates that have benches. Every benched
+        # crate costs two builds and two valgrind runs — merge base and head —
+        # so putting all of them on every path would tax ordinary pull
+        # requests to measure code they did not touch. The crates here are the
+        # ones whose counts are wanted unprompted; the rest are opt-in through
+        # the `ci: bench` label, which selects everything. `--self-test`
+        # asserts the auto set is a subset of what the benches actually
+        # discover, so a crate cannot be selected here after its bench is gone.
         #
         # A separate `case` rather than arms on the one above, because the
         # two questions have different answers for the same file.
         case "$file" in
-        crates/spate-core/* | crates/spate-avro/*)
+        crates/*)
+            crate="${file#crates/}"
+            crate="${crate%%/*}"
+            selected=$(bench_pkgs_for "$crate")
+            if [[ -n "$selected" ]]; then
+                bench=true
+                bench_pkgs="$bench_pkgs $selected"
+            fi
+            ;;
+        # The measuring apparatus itself. A change to what gets discovered,
+        # which crates are chosen, how the results are read, or the job that
+        # drives them can alter the outcome for every crate, so it selects all
+        # of them. This file is on the list because it is the chooser: an edit
+        # here can leave every later pull request measuring the wrong set.
+        #
+        # This is not symmetry for its own sake: without it, the pull request
+        # that rewrites how benches are chosen is precisely the one that never
+        # runs them. That happened — the change introducing the discovery
+        # script landed its bench job as `skipped`, because the paths that
+        # force the whole container graph do not touch `bench`, and nothing
+        # said so.
+        scripts/ci-changes.sh | scripts/gungraun-benches.sh | \
+            scripts/gungraun-report.sh | .github/workflows/ci.yml)
             bench=true
+            bench_pkgs="$bench_pkgs $(all_bench_pkgs)"
             ;;
         esac
     done <"$changed_file"
@@ -457,6 +596,16 @@ fi
 if ci_label_wants_bench "${PR_LABELS:-}"; then
     echo "note: 'ci: bench' label present; instruction counts forced on."
     bench=true
+    bench_pkgs=$(all_bench_pkgs)
+fi
+
+# Deduplicate: a pull request touching several files in one measured crate
+# accumulates it once per file, and each duplicate would be a repeated bench
+# run.
+bench_pkgs_out=""
+if [[ -n "${bench_pkgs// /}" ]]; then
+    bench_pkgs_out=$(echo "$bench_pkgs" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    bench_pkgs_out="${bench_pkgs_out% }"
 fi
 
 # Deduplicate and render as cargo -p arguments.
@@ -478,4 +627,5 @@ fi
     echo "container-args=$container_args"
     echo "loom=$loom"
     echo "bench=$bench"
+    echo "bench-pkgs=$bench_pkgs_out"
 } | tee -a "${GITHUB_OUTPUT:-/dev/stdout}"

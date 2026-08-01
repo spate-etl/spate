@@ -766,6 +766,12 @@ jobs:
     needs: [changes, lint, workflows]
     if: needs.changes.outputs.containers == 'true'
     timeout-minutes: 60
+    # `checks: write` for the JUnit report below. Without it the publish step
+    # logs `Resource not accessible by integration` and carries on, so the job
+    # stays green while the annotation it exists to create is never made.
+    permissions:
+      contents: read
+      checks: write
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite

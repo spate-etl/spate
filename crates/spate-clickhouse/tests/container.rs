@@ -34,12 +34,16 @@ struct Server {
 /// How long `docker start` itself gets. Readiness is not in here — the
 /// fixtures wait for that themselves, in [`wait_for_queries`], so that a
 /// server which never comes up can be reported rather than merely timed out.
-const START_TIMEOUT: Duration = Duration::from_secs(120);
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a started node gets to answer an authenticated query. Generous:
-/// the bound that matters for a hung suite is the CI job's `timeout-minutes`,
-/// and a tight cap here only turns a slow boot into a red run.
-const READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a started node gets to answer an authenticated query.
+///
+/// A node answers in about a second, so this is already two orders of
+/// magnitude of headroom, and raising it buys nothing a passing test wants:
+/// it only decides how long a *broken* fixture burns before it reports. The
+/// old 60s budget was not the problem — arriving at the end of it with no
+/// information was.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How much of a failed node's stderr the panic carries.
 const LOG_TAIL: usize = 40;
@@ -58,6 +62,14 @@ fn started_only(req: impl Into<ContainerRequest<ClickHouse>>) -> ContainerReques
         .with_startup_timeout(START_TIMEOUT)
 }
 
+/// A single readiness probe's own bound.
+///
+/// The `clickhouse` client sets no request timeout, so an attempt against a
+/// half-open socket can hang indefinitely. A poll loop that only checks its
+/// deadline *between* attempts therefore has no deadline at all — one hung
+/// attempt outlasts any budget. Every probe below is wrapped in this.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Block until `admin` can run a query, or panic saying why it never could.
 ///
 /// A ClickHouse server that dies on startup and one that is merely slow
@@ -72,9 +84,11 @@ async fn wait_for_queries(
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last;
     loop {
-        match admin.query("SELECT 1").execute().await {
-            Ok(()) => return,
-            Err(e) => last = e.to_string(),
+        let probe = tokio::time::timeout(PROBE_TIMEOUT, admin.query("SELECT 1").execute()).await;
+        match probe {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => last = e.to_string(),
+            Err(_) => last = format!("no response within {PROBE_TIMEOUT:?}"),
         }
         if Instant::now() >= deadline {
             let running = container.is_running().await;

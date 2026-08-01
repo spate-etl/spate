@@ -61,7 +61,7 @@ use spate_core::sink::{DrainReport, SinkPool, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::memory_source;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
 // ---- the user-side record types + their owned families ----------------------
@@ -294,36 +294,6 @@ async fn start_node(pw: &str, net: &str, host: &str, xml: &str) -> Node {
     }
 }
 
-/// Block until every shard of `name` answers a native query from node 0.
-///
-/// `wait_for_queries` proves each node's own HTTP interface; this proves the
-/// path the proofs actually run on — node 0 resolving node 1's hostname and
-/// connecting to native 9000, which nothing else waits for. `cluster(...)`
-/// fans a query out to every shard, so a success here is that connection, not
-/// a proxy for it. Polling also absorbs a negatively-cached DNS entry that
-/// `SYSTEM DROP DNS CACHE` raced.
-async fn wait_for_cluster(c: &Cluster, name: &str) {
-    let deadline = Instant::now() + READY_TIMEOUT;
-    let query = format!("SELECT count() FROM cluster('{name}', system.one)");
-    let mut last;
-    loop {
-        match c.node0.admin.query(&query).fetch_one::<u64>().await {
-            Ok(2) => return,
-            Ok(shards) => last = format!("{shards} shards answered, want 2"),
-            Err(e) => last = e.to_string(),
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "cluster `{name}` never answered from both shards within \
-                 {READY_TIMEOUT:?} ({h0}, {h1}); last error: {last}",
-                h0 = c.node0.host,
-                h1 = c.node1.host,
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 /// Bring up the two-node `parity` cluster and assert its topology resolves
 /// in config order before any real test runs.
 async fn two_node_cluster(pw: &str) -> Cluster {
@@ -346,7 +316,6 @@ async fn two_node_cluster(pw: &str) -> Cluster {
             .await
             .expect("drop dns cache");
     }
-    wait_for_cluster(&cluster, "parity").await;
 
     // Sanity: shard 1 == node 0's host, shard 2 == node 1's host. The whole
     // parity story depends on this ordering (sink shard i == cluster

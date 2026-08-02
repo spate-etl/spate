@@ -17,10 +17,12 @@ default = ["nats"]
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats"]
 # Test-only injection seam: exposes `clock::TestClock`, the deterministic
-# clock this crate's `tests/` binaries drive. Off by default and never
-# enabled by the `spate` facade, so a `TestClock` can never be wired into a
-# real pipeline — it would stop the control loop dead. Enabled for our own
-# integration tests via the self dev-dependency below.
+# clock this crate's `tests/` binaries drive, and `bench_seams`, which the
+# instruction-count benches reach the pure decision core through. Off by
+# default and never enabled by the `spate` facade, so a `TestClock` can never
+# be wired into a real pipeline — it would stop the control loop dead — and
+# neither seam is part of this crate's semver surface. Enabled for our own
+# integration tests and benches via the self dev-dependency below.
 testing = []
 
 [dependencies]
@@ -44,10 +46,21 @@ uuid = { workspace = true, features = ["v4"] }
 # Self dev-dependency so the external `tests/` binaries see the `testing`
 # feature's `TestClock` while consumers never do.
 spate-coordination = { path = ".", features = ["testing"] }
+gungraun = { workspace = true }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# gungraun's `main!` is the harness; without these the default libtest one
+# wraps them and rejects the harness's own arguments at run time.
+[[bench]]
+name = "assignment_gungraun"
+harness = false
+
+[[bench]]
+name = "claims_gungraun"
+harness = false
 
 [lints]
 workspace = true

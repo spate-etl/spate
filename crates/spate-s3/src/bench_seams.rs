@@ -1,9 +1,9 @@
 //! Measurable entry points into work this crate does not otherwise expose.
 //!
-//! Benches in this workspace drive their crate's public API — `spate-core`
-//! and `spate-avro`, the two that have them, both do, and a new crate is
-//! expected to. This module is the one exception, and the reason is not that
-//! the internals are more interesting than the surface.
+//! Benches in this workspace drive their crate's public API, and a new crate
+//! is expected to. Two do not: this module, and `spate-coordination`'s. The
+//! reason is the same for both, and it is not that the internals are more
+//! interesting than the surface.
 //!
 //! This crate's public entry point is [`S3Source`](crate::S3Source), which is
 //! asynchronous and driven by object-store I/O. Those are exactly the two

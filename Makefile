@@ -25,7 +25,7 @@
 # Every target is a verb, not a file. Without this a target would be skipped if
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
-        check-features check-examples bench-check bench bench-gungraun loom \
+        check-features check-examples bench-check bench bench-ab bench-gungraun loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-invariants check-changelog changelog-new \
@@ -126,6 +126,44 @@ bench: ## Criterion and divan micro benches
 # the most this target can prove.
 bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-runner)
 	./scripts/gungraun-benches.sh --run
+
+# An A/B sweep on the machine in front of you: two or more arms of the
+# object-storage backfill, interleaved, with a discarded priming pass. See
+# `docs/benchmarks/methodology.mdx` for why all three matter and what skipping
+# them costs.
+#
+# Defaults are plain variables rather than `$(or ...)`, which cannot express a
+# comma-separated default at all: make reads `$(or $(ARMS),none,gzip,zstd)` as
+# four arguments and returns `none`, so the target silently measured one arm
+# and called it an A/B. A command-line `ARMS=…` still wins over `?=`.
+ARMS ?= none,gzip,zstd
+REPS ?= 5
+BENCH ?= s3_backfill_ab
+
+# Only `s3_backfill` is driven here, and the parameter it used to take was a
+# lie: driving another rig needs that rig to read `CODECS`, `REPS`, `BENCH` and
+# `RESULTS`, and no other bin in the crate reads any of them —
+# `s3_backfill_coordinated`, the nearest neighbour, takes `CODEC` singular and
+# hardcodes its own report name. Add a rig here when it grows that contract,
+# not before.
+#
+# `cargo run` rather than a hand-built path: `./target/release/…` is wrong the
+# moment `CARGO_TARGET_DIR` is set, and the failure is silent — an older binary
+# at that path runs and is stamped with today's commit, which is exactly the
+# misattribution this whole tier is trying to avoid.
+#
+# GIT_COMMIT is deliberately *not* set here. The report layer already derives
+# the same value the same way when it is unset, so exporting it would add
+# nothing — and it would clobber a caller's value, which is the one case that
+# matters: a comparison of two builds has to name each build's commit itself.
+#
+#   make bench-ab ARMS=none,gzip REPS=5
+bench-ab: ## Interleaved A/B of the s3 backfill: make bench-ab ARMS=… REPS=…
+	mkdir -p benchmarks/tuning
+	CODECS="$(ARMS)" REPS="$(REPS)" BENCH="$(BENCH)" \
+	  RESULTS=benchmarks/tuning/s3_backfill-ab.jsonl \
+	  cargo run --release -p benchmarks --bin s3_backfill --locked
+	echo "wrote benchmarks/tuning/s3_backfill-ab.jsonl (gitignored)"
 
 ##@ Supply chain
 

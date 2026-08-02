@@ -33,6 +33,58 @@ defined once, versioned, in `benchmarks/src/report.rs`:
 
 ## Reproducing
 
+### Comparing two arms
+
+```sh
+make bench-ab ARMS=none,gzip REPS=5
+```
+
+Most of what makes that comparison sound belongs to the rig, not the target:
+it interleaves the arms, runs a discarded pass over every arm before measuring
+any of them, and stages each corpus once before the clock starts. Invoking the
+binary directly gets all three. What the target adds is a repetition count —
+the rig on its own runs once, which yields a point value and no interval — and
+an output path under `benchmarks/tuning/`, which is not committed.
+
+That last one is worth the target on its own. An exploratory run on a laptop
+is not a published record, and the failure mode is silent: the site draws
+everything under `results/` without knowing which machine was busy, so a
+contended number and a quiet one render identically. Promoting a number stays
+a deliberate copy rather than a consequence of `git add -A`.
+
+The rig records the commit its `git rev-parse` finds at run time, which is the
+working tree's. That is right for arms of one build and wrong for anything
+else — see below.
+
+### Comparing two builds
+
+`make bench-ab` does not do this, and the difference is not cosmetic. It builds
+and then immediately measures, so two invocations interleave nothing and the
+second build lands after the first measurement — a sequential comparison of
+the kind this page's own interleaving rule rejects.
+
+Comparing a merge base against a head means driving the rig directly:
+
+1. Build both binaries first, from two checkouts. Building one arm while the
+   other is being timed measures the compiler.
+2. Stage the corpus once and point both at it with `DATA_DIR`, so the two
+   builds read literally the same bytes.
+3. Set `GIT_COMMIT` explicitly per arm. The rig otherwise asks git at run time,
+   which reports the checkout it is *run* from rather than the one it was
+   *built* from — the single most likely way a two-build comparison
+   misattributes its numbers.
+4. Alternate the arms yourself, and discard the first pass over each.
+
+A change that can be expressed as a runtime switch avoids all of this: one
+binary, two arms, and the rig's own interleaving applies. Prefer that shape
+where the change allows it.
+
+Before quoting a number from a local run, read
+[Regression gates](#regression-gates) — the machine has to be quiet, and a
+result about parallelism has to state its core count.
+
+### The committed runs
+
 Reproduce per the usage headers in each binary under `benchmarks/src/bin/`. Each
 rig appends to the result file named below; the exact env vars used for the
 committed runs are:
@@ -303,6 +355,12 @@ regression suite is therefore split by what varies:
   profile) travels with the data, recorded on a quiet machine. Wall-clock
   comparisons never gate a pull request, and benchmark numbers are never
   hand-written into the docs.
+  A result about **parallelism** carries one further obligation: state the core
+  count, and measure it on a machine with enough cores to show the effect. A
+  concurrency win measured on fewer cores than a deployment would use
+  understates itself, and the resulting figure is not comparable with one taken
+  on wider hardware — so a directional answer from a small machine is fine,
+  while a number that gets quoted is not.
 - **A rig that compares arms interleaves them, and discards a pass first.**
   This is the standard for a comparison, not a description of every rig here:
   the object-storage backfill implements it, and a rig that measures one arm

@@ -57,5 +57,9 @@ harness = false
 name = "decode_gungraun"
 harness = false
 
+[[bench]]
+name = "framing_gungraun"
+harness = false
+
 [lints]
 workspace = true

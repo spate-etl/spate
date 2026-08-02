@@ -278,14 +278,15 @@ regression suite is therefore split by what varies:
   via gungraun. Each gates on a counter, never on elapsed time, so the
   verdicts hold on any machine.
   The instruction-count benches cover the operator chain, payload decoding,
-  and the planning and record framing an object-store backfill does. New
-  benches are written as one workload shape parameterised over the axis that
-  changes its cost — a listing profile, a codec, an entry point — rather than
-  one case per function, because attribution below the shape comes from the
-  callgrind profile the run already writes and a finer set of cases would only
-  duplicate it. Where a bench generates its own corpus, that corpus is
-  produced from a fixed sequence and pinned by a test
-  (`crates/spate-s3/tests/bench_fixtures.rs`), because a count is only
+  row encoding for the wire, and the planning and record framing an
+  object-store backfill does. New benches are written as one workload shape
+  parameterised over the axis that changes its cost — a listing profile, a
+  codec, an entry point — rather than one case per function, because
+  attribution below the shape comes from the callgrind profile the run already
+  writes and a finer set of cases would only duplicate it. Where a bench
+  generates its own corpus, that corpus is produced from a fixed sequence and
+  pinned by a test (`crates/spate-s3/tests/bench_fixtures.rs`,
+  `crates/spate-clickhouse/tests/bench_fixtures.rs`), because a count is only
   comparable when both legs of the comparison packed byte-identical input.
   Where a format crate wraps a third-party parser, the wall-clock bench keeps
   cases that call the parser directly and the counted bench measures the

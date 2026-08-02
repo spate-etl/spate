@@ -82,7 +82,11 @@ container_suites_for() {
         spate-s3) echo "spate spate-s3" ;;
         spate-kafka) echo "spate spate-kafka" ;;
         spate-clickhouse) echo "spate spate-clickhouse" ;;
-        spate-avro | spate-json | spate) echo "spate" ;;
+        # spate-json reaches spate-s3 as a dev-dependency: the object-store
+        # framing bench frames with `NdjsonFramer` rather than a local copy,
+        # so a change to the framer can break spate-s3's suite.
+        spate-json) echo "spate spate-s3" ;;
+        spate-avro | spate) echo "spate" ;;
         *) echo "" ;;
     esac
 }

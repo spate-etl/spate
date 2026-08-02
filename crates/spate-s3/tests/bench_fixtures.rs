@@ -1,4 +1,5 @@
-//! The bench corpora are reproducible, and pack the way the bench claims.
+//! The bench corpora are reproducible, and pack and frame the way the benches
+//! claim.
 //!
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
@@ -8,11 +9,20 @@
 //! `cargo test` does.
 
 use spate_core::coordination::SplitId;
-use spate_s3::bench_seams::plan_listing;
+use spate_json::NdjsonFramer;
+use spate_s3::Compression;
+use spate_s3::bench_seams::{MakeFramer, frame_objects, plan_listing};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 #[path = "../benches/support/listing.rs"]
 mod listing;
+#[path = "../benches/support/ndjson.rs"]
+mod ndjson;
+
+fn framer() -> MakeFramer {
+    Arc::new(|| Box::new(NdjsonFramer::new(ndjson::MAX_RECORD_BYTES)))
+}
 
 #[test]
 fn the_listing_corpora_are_reproducible() {
@@ -122,4 +132,82 @@ fn the_profiles_pack_differently() {
         "small objects should share bins, got {uniform_splits} splits for {} objects",
         uniform.len()
     );
+}
+
+#[test]
+fn every_codec_frames_the_whole_body() {
+    let body = ndjson::whole_body();
+    let expect = body.iter().filter(|&&b| b == b'\n').count();
+
+    for (compression, suffix, stored) in [
+        (Compression::Auto, "", body.clone()),
+        (Compression::Auto, ".gz", ndjson::gzip(&body)),
+        (Compression::Auto, ".zst", ndjson::zstd(&body)),
+    ] {
+        let objects = vec![(
+            format!("part-000000.ndjson{suffix}"),
+            ndjson::chunks(&stored),
+        )];
+        let records = frame_objects(compression, framer(), &objects).expect("frames cleanly");
+        assert_eq!(records, expect, "{compression:?} framed a different count");
+    }
+}
+
+/// The mid-object entry point must land *inside* a record, or the bench case
+/// is silently measuring an aligned read and the contract it exists to pin is
+/// untested.
+#[test]
+fn the_mid_offset_entry_lands_inside_a_record() {
+    let body = ndjson::whole_body();
+    let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
+    assert_ne!(body[at], b'\n', "the offset sits on a delimiter");
+    assert_ne!(
+        body[at - 1],
+        b'\n',
+        "the offset sits at the start of a record, not inside one"
+    );
+}
+
+/// The mid-object entry's record count is the contract the framing bench
+/// exists to pin: entering part-way through a record, the framer emits the
+/// leading partial line *as a record*, and a reader that discarded through
+/// the first delimiter would emit one fewer.
+///
+/// Asserting it only inside the bench is not enough. The bench runs when a
+/// maintainer applies `ci: bench` or on a push to `main` — so a pull request
+/// changing the partial-line rule can pass `cargo test` and merge, with the
+/// assertion first firing after the fact. Here it gates every pull request.
+#[test]
+fn entering_mid_record_still_counts_the_leading_partial_line() {
+    let body = ndjson::whole_body();
+    let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
+    let tail = &body[at..];
+
+    let complete = tail.iter().filter(|&&b| b == b'\n').count();
+    let records = frame_objects(
+        Compression::Auto,
+        framer(),
+        &[("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
+    )
+    .expect("frames cleanly");
+
+    assert_eq!(
+        records,
+        complete + usize::from(!tail.ends_with(b"\n")),
+        "the leading partial line is no longer counted as a record; if that \
+         is intended, this is the contract being changed and the framing \
+         bench's expectation moves with it"
+    );
+}
+
+#[test]
+fn a_run_of_objects_frames_every_record() {
+    let objects: Vec<_> = (0..ndjson::RUN_OBJECTS)
+        .map(|i| {
+            let body = ndjson::body(i * ndjson::RUN_RECORDS_EACH, ndjson::RUN_RECORDS_EACH);
+            (format!("part-{i:06}.ndjson"), ndjson::chunks(&body))
+        })
+        .collect();
+    let records = frame_objects(Compression::Auto, framer(), &objects).expect("frames cleanly");
+    assert_eq!(records, ndjson::RUN_OBJECTS * ndjson::RUN_RECORDS_EACH);
 }

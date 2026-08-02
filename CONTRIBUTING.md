@@ -160,6 +160,14 @@ about: cargo auto-discovers the file anyway, under the default libtest harness,
 and the bench then compiles cleanly and fails at run time complaining about
 arguments. `make check-gungraun-benches` (part of `make ci-lint`) catches it.
 
+Measuring a crate under more than one compiled feature arm *is* a second edit:
+CI runs one job per (package, arm), and the arm table lives in
+`feature_arms_for` in `scripts/ci-changes.sh`. Add an arm when a feature swaps
+an implementation the benches execute — not for every feature key, since each
+arm is another pair of builds and valgrind runs. `make self-test` checks the
+table against `cargo metadata`, so an arm naming a feature the package does not
+declare fails before it burns a job.
+
 If you changed dependencies, add `make attribution` to regenerate
 `THIRD-PARTY.md`. It is checked nightly and regenerated at release rather than
 gated on your pull request, so it is welcome but not required.

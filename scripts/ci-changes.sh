@@ -152,6 +152,74 @@ bench_pkgs_for() {
 }
 
 # ---------------------------------------------------------------------------
+# The compiled-feature arms, and the matrix built from them.
+# ---------------------------------------------------------------------------
+# An instruction count describes a build, and a cargo feature that swaps an
+# implementation produces a different build of the same bench. The counter tier
+# therefore fans out over (package, feature arm) rather than over packages, and
+# this is the one place the second dimension is written down.
+#
+# It lives here rather than in a file of its own because this script already
+# answers "which crates does this change measure"; the matrix is that question
+# with a second axis. A separate file would be a third thing the apparatus list
+# below has to know about and a third thing a pull request can forget to touch.
+#
+# Each line is `<label> [<cargo feature list>]`:
+#
+#   label          names the arm in the report, the job name and the artifact
+#                  name. `default` is the label for the unmodified build
+#                  everywhere — it is not a cargo feature name, because not
+#                  every package here declares a `default` key and cargo
+#                  rejects `--features default` when one is absent.
+#   feature list   what reaches `--features`, verbatim. Absent means the
+#                  package's default features and no `--features` flag at all.
+#
+# The table is written rather than derived, and that is the honest shape: a
+# crate's feature keys are not its performance arms. Most of them are optional
+# column types or transport knobs no bench executes, and measuring the powerset
+# would be exponentially many shards for one real question. An arm earns a
+# shard by changing the code under the benches. `--self-test` holds the table
+# to `cargo metadata` — an arm naming a feature its package does not declare
+# fails the gate rather than burning a shard on `error: the package … does not
+# contain this feature`.
+feature_arms_for() {
+    case "$1" in
+        # `simd` replaces the byte-slice-to-value decoder behind the backend
+        # seam, so the two arms are one set of benches over two
+        # implementations — which is the comparison the seam exists for, and
+        # the reason the axis is worth a matrix at all.
+        spate-json) printf '%s\n' "default" "simd simd" ;;
+        *) printf '%s\n' "default" ;;
+    esac
+}
+
+# The selected packages crossed with their arms, as a JSON array that
+# `fromJSON` hands straight to `strategy.matrix.include`.
+#
+# Built by string concatenation rather than with jq, borrowing the idiom from
+# `gungraun-benches.sh --pkgs-json` — not its source, which derives from
+# *unfiltered* discovery and would measure every crate on every pull request.
+# Concatenating raw values into JSON is only safe because `--self-test`
+# checks both halves of every object against a character class — package names
+# against `[A-Za-z0-9_.-]+` and arm labels against `[A-Za-z0-9_.,-]+` — so no
+# quote, backslash or control character can reach the document, and nothing
+# that GitHub refuses in an artifact name can reach one. The package half
+# matters as much as the label: it is a directory name under `crates/`, which
+# a branch chooses, not a value this file does.
+bench_shards_json() {
+    local pkg label feats out="[" first=1
+    for pkg in $1; do
+        while read -r label feats; do
+            [[ -n "$label" ]] || continue
+            [[ "$first" -eq 1 ]] || out+=","
+            out+="{\"package\":\"$pkg\",\"arm\":\"$label\",\"cargo_features\":\"$feats\"}"
+            first=0
+        done < <(feature_arms_for "$pkg")
+    done
+    printf '%s]\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test: assert the table above still matches the real dependency graph.
 # Runs in the `deny` job, which already has a toolchain. `cargo metadata
 # --no-deps` reads manifests only and does not resolve the registry.
@@ -396,16 +464,138 @@ for crate in sorted(names):
         exit 1
     fi
 
+    # ------------------------------------------------------------------
+    # The feature-arm table and the matrix built from it.
+    #
+    # The table is the one hand-written thing in the selection path, and each
+    # check below catches a mistake that would otherwise surface as a burnt
+    # shard, a corrupt matrix, or two rows in the report that cannot be told
+    # apart.
+    # ------------------------------------------------------------------
+    arm_failed=0
+
+    # Every feature key cargo knows about, per package. `default` is in this
+    # map only for packages that declare one, which is exactly why the arm
+    # *label* `default` is not passed to `--features`.
+    feature_map=$(mktemp)
+    echo "$metadata" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin)["packages"]:
+    for f in sorted(p["features"]):
+        print("{}\t{}".format(p["name"], f))
+' >"$feature_map"
+
+    multi_arm=0
+    while IFS= read -r crate; do
+        [[ -n "$crate" ]] || continue
+        # The package name is concatenated into the matrix JSON and into an
+        # artifact name exactly as the arm label is, and it is *not* a value
+        # this file chooses — it comes from a directory name under `crates/`,
+        # which a branch controls. Checked here so the concatenation below is
+        # safe by assertion rather than by cargo's naming rules happening to
+        # be narrower than JSON's.
+        if [[ ! "$crate" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::package name '$crate' carries a character that cannot go unescaped into the matrix JSON or an artifact name."
+            arm_failed=1
+        fi
+        arms=$(feature_arms_for "$crate")
+        if [[ -z "$arms" ]]; then
+            echo "::error::feature_arms_for('$crate') names no arm; a benched crate needs at least the default one."
+            arm_failed=1
+            continue
+        fi
+        arm_count=0
+        default_arms=0
+        seen_labels=""
+        while read -r label feats; do
+            [[ -n "$label" ]] || continue
+            arm_count=$((arm_count + 1))
+            # The label is concatenated into JSON and into an artifact name,
+            # neither of which is escaped. Constraining it here is what makes
+            # that concatenation safe rather than lucky.
+            if [[ ! "$label" =~ ^[A-Za-z0-9_.,-]+$ ]]; then
+                echo "::error::arm label '$label' on '$crate' carries a character that cannot go unescaped into the matrix JSON or an artifact name."
+                arm_failed=1
+            fi
+            if [[ " $seen_labels " == *" $label "* ]]; then
+                echo "::error::'$crate' declares the arm label '$label' twice; the two shards would stamp themselves identically and their rows could not be told apart."
+                arm_failed=1
+            fi
+            seen_labels="$seen_labels $label"
+            if [[ -z "$feats" ]]; then
+                default_arms=$((default_arms + 1))
+            else
+                IFS=',' read -ra arm_feats <<<"$feats"
+                for arm_feat in "${arm_feats[@]}"; do
+                    if ! grep -qxF "$crate"$'\t'"$arm_feat" "$feature_map"; then
+                        echo "::error::'$crate' has no feature '$arm_feat', but the arm table names it."
+                        echo "Cargo would fail the shard with 'the package does not contain this feature'."
+                        arm_failed=1
+                    fi
+                done
+            fi
+        done <<<"$arms"
+        # Exactly one arm builds with no `--features` flag. Two of them would
+        # be the same build measured twice under two labels; none of them
+        # would leave the unmodified crate unmeasured.
+        if [[ "$default_arms" -ne 1 ]]; then
+            echo "::error::'$crate' declares $default_arms arm(s) with no feature list; exactly one (the default build) is required."
+            arm_failed=1
+        fi
+        [[ "$arm_count" -le 1 ]] || multi_arm=1
+    done <<<"$discovered"
+    rm -f "$feature_map"
+
+    # The axis has to be load-bearing somewhere. If every crate is measured
+    # under one arm, the matrix has grown a dimension of size one everywhere
+    # and the second build the whole shape exists for is not happening —
+    # which is a green run measuring less than it claims, the failure this
+    # tier keeps having.
+    if [[ "$multi_arm" -eq 0 ]]; then
+        echo "::error::no benched crate is measured under more than one feature arm."
+        echo "The (package, arm) matrix has no second arm anywhere; see feature_arms_for()."
+        arm_failed=1
+    fi
+
+    # The emitted document, checked as a document: `fromJSON` in ci.yml turns
+    # a malformed one into a workflow-level error with no job to attribute it
+    # to, and a duplicated (package, arm) into two shards racing for one
+    # artifact name.
+    if ! SHARDS="$(bench_shards_json "$all_pkgs")" python3 -c '
+import json, os, sys
+
+rows = json.loads(os.environ["SHARDS"])
+if not rows:
+    sys.exit("the matrix is empty")
+for row in rows:
+    if set(row) != {"package", "arm", "cargo_features"}:
+        sys.exit("unexpected keys in {!r}".format(row))
+keys = [(r["package"], r["arm"]) for r in rows]
+if len(set(keys)) != len(keys):
+    sys.exit("duplicate (package, arm) in {!r}".format(keys))
+'; then
+        echo "::error::the emitted bench matrix is not the shape ci.yml's strategy.matrix.include reads."
+        arm_failed=1
+    fi
+    [[ "$arm_failed" == "0" ]] || exit 1
+
     # What each path arm selects. The checks above cannot see this: they test
     # the selection functions, and the arms are what consult them. Every row
     # here is a rule stated in prose somewhere — in the comments below, in
     # CONTRIBUTING.md or in the CI reference — so a rule that stops holding
     # fails here instead of going quietly false in three documents at once.
     path_case_failed=0
+    #
+    # `$2` is still a package list, and the expectation is the matrix that
+    # list crosses to. The arm table is not what these cases test — the checks
+    # above own it — so reusing it to build the expectation keeps each case
+    # readable as "which crates does this path select", which is the rule each
+    # one states.
     check_paths() {
         local want_bench="$1" want_pkgs="$2" desc="$3"
         shift 3
         local list out got_bench got_pkgs
+        want_pkgs=$(bench_shards_json "$want_pkgs")
         list=$(mktemp)
         out=$(mktemp)
         printf '%s\0' "$@" >"$list"
@@ -419,11 +609,11 @@ for crate in sorted(names):
         env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
             "$0" --classify-paths "$list" >/dev/null
         got_bench=$(sed -n 's/^bench=//p' "$out")
-        got_pkgs=$(sed -n 's/^bench-pkgs=//p' "$out")
+        got_pkgs=$(sed -n 's/^bench-shards=//p' "$out")
         rm -f "$list" "$out"
         if [[ "$got_bench" != "$want_bench" || "$got_pkgs" != "$want_pkgs" ]]; then
-            echo "::error::$desc: expected bench=$want_bench bench-pkgs='$want_pkgs',"
-            echo "got bench=$got_bench bench-pkgs='$got_pkgs' for: $*"
+            echo "::error::$desc: expected bench=$want_bench bench-shards='$want_pkgs',"
+            echo "got bench=$got_bench bench-shards='$got_pkgs' for: $*"
             path_case_failed=1
         fi
     }
@@ -470,8 +660,13 @@ for crate in sorted(names):
             "crates/$unbenched/src/lib.rs"
     fi
     check_paths false "" "docs select nothing" docs/DESIGN.md
+    # Every file that can change what the counter tier measures, in the same
+    # order as the `case` arm it mirrors. A file added to one and not the other
+    # silently stops forcing a full re-measurement, which is how a change to
+    # the apparatus lands unmeasured.
     for apparatus in scripts/ci-changes.sh scripts/gungraun-benches.sh \
-        scripts/gungraun-report.sh .github/workflows/ci.yml; do
+        scripts/gungraun-report.sh .github/workflows/ci.yml \
+        .github/actions/setup-rust/action.yml; do
         check_paths true "$all_pkgs" "$apparatus selects every benched crate" \
             "$apparatus"
     done
@@ -479,7 +674,8 @@ for crate in sorted(names):
 
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
     echo "the label overrides are additive, bench selection follows what the benches"
-    echo "discover, and each path arm selects the crates it claims to."
+    echo "discover, every feature arm names a feature its package declares, and each"
+    echo "path arm selects the crates it claims to."
     exit 0
 fi
 
@@ -665,8 +861,14 @@ else
         # script landed its bench job as `skipped`, because the paths that
         # force the whole container graph do not touch `bench`, and nothing
         # said so.
+        #
+        # `.github/actions/` is on the list because the shared build cache is
+        # configured there, and which cache a shard restores decides whether it
+        # compiles the bench graph from scratch — a change that can move every
+        # crate's job, without touching a crate.
         scripts/ci-changes.sh | scripts/gungraun-benches.sh | \
-            scripts/gungraun-report.sh | .github/workflows/ci.yml)
+            scripts/gungraun-report.sh | .github/workflows/ci.yml | \
+            .github/actions/*)
             bench=true
             bench_pkgs="$bench_pkgs $(all_bench_pkgs)"
             ;;
@@ -734,6 +936,15 @@ if [[ -n "${bench_pkgs// /}" ]]; then
     bench_pkgs_out="${bench_pkgs_out% }"
 fi
 
+# Cross the selection with the arm table. An empty `include:` is a workflow
+# *error* rather than a skipped job, so the boolean and the array have to agree
+# — `bench` is only ever set true alongside a non-empty selection today, and
+# this keeps that true by construction rather than by inspection.
+bench_shards=$(bench_shards_json "$bench_pkgs_out")
+if [[ "$bench_shards" == "[]" ]]; then
+    bench=false
+fi
+
 # Deduplicate and render as cargo -p arguments.
 container_args=""
 if [[ -n "${suites// /}" ]]; then
@@ -753,5 +964,8 @@ fi
     echo "container-args=$container_args"
     echo "loom=$loom"
     echo "bench=$bench"
-    echo "bench-pkgs=$bench_pkgs_out"
+    # One line of JSON, and one line only: `$GITHUB_OUTPUT` is a key=value
+    # file, so a multi-line value would need heredoc delimiters and a value
+    # containing the delimiter is a known output-injection vector.
+    echo "bench-shards=$bench_shards"
 } | tee -a "${GITHUB_OUTPUT:-/dev/stdout}"

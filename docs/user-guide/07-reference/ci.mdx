@@ -380,20 +380,24 @@ crate-global: an edit anywhere in a measured crate can shift inlining and
 with it the count. A path that reaches no measured crate selects nothing
 here, whatever other jobs it selects — with one exception, below.
 
-The set measured automatically is deliberately smaller than the set of crates
-that have benches. `crates/spate-core/` and `crates/spate-avro/` select
-themselves, because their counts are wanted unprompted; the rest are opt-in
-through the `ci: bench` label, which selects every benched crate. The reason
-is cost, not confidence: each benched crate is two builds and two valgrind
-runs — merge base and head — so measuring all of them on every pull request
-would tax changes that cannot move the numbers. Both legs are given the same
+The set is derived from what the benches discover rather than from a list, so
+a crate is measured by the same pull request that gives it a bench:
+
+- A crate that has a bench selects itself.
+- `crates/spate-core/` selects every benched crate. Every crate depends on it,
+  and by the same crate-global codegen argument a change there can move a count
+  in any of them.
+- A crate with no bench selects nothing.
+
+Cost is bounded by the reach of the change rather than by a list. Each benched
+crate is two builds and two valgrind runs — merge base and head — so a change
+confined to one benched crate pays for one crate, and only a change to the
+crate everything depends on pays for all of them. Both legs are given the same
 list, since measuring a different set on the two sides of a comparison is the
 drift the single bench list exists to prevent.
 
-The consequence worth knowing: **a change to an opt-in crate shows no
-counters unless someone applies the label.** For a change that means to move
-one of those numbers — object-storage packing or framing, say — applying
-`ci: bench` is part of raising it.
+`ci: bench` is how a path that selects less asks for the full set — a
+dependency swap, or a refactor that moves code between crates.
 
 The exception is the measuring apparatus. A change to the classifier, the
 discovery script, the report script or `ci.yml` selects every benched crate,
@@ -402,12 +406,13 @@ all of them. Without that rule the pull request rewriting how benches are
 chosen is the one that never runs them — a fail-open in the one classifier
 built to fail closed.
 
-`make self-test` holds these rules to their word. It asserts that every
-auto-selected crate actually has a bench, so the list cannot name a crate
-whose bench was deleted or renamed and quietly measure nothing; and it
-classifies a synthetic path list through the real arms, so each rule above —
-including the apparatus one — fails the gate rather than this page when it
-stops being true.
+`make self-test` holds these rules to their word. It asserts the shape of the
+selection — the core crate selecting every benched crate, a benched crate
+selecting itself, a crate without one selecting nothing — and that discovery
+finds any bench at all, since an empty set would satisfy the rest while
+nothing was measured. It then classifies a synthetic path list through the
+real arms, so each rule above — including the apparatus one — fails the gate
+rather than this page when it stops being true.
 
 The runner binary's version must match the `gungraun` dependency exactly — a
 mismatch fails every bench with a version error rather than a measurement —

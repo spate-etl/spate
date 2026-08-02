@@ -151,13 +151,11 @@ check is that the benches build.
 Adding one is two steps: name the file `benches/<something>_gungraun.rs`, and
 declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it — `scripts/gungraun-benches.sh` discovers it by that
-name, and the Makefile target and both CI legs all read from that one place, so
-there is no list of benches to add yourself to. Whether the job runs for a
-given pull request is a separate question, answered by a crate list in
-`scripts/ci-changes.sh` — a bench in a crate that list does not name is built
-and compared only when a maintainer applies `ci: bench`. `./scripts/gungraun-benches.sh` on its own
-prints what would run, which is the quickest way to confirm a new bench is
-visible. Skipping the `harness = false` stanza is the mistake worth knowing
+name, and the Makefile target, both CI legs and `scripts/ci-changes.sh` all read
+from that one place, so there is no list of benches to add yourself to and no
+second edit to make it run on a pull request. `./scripts/gungraun-benches.sh` on
+its own prints what would run, which is the quickest way to confirm a new bench
+is visible. Skipping the `harness = false` stanza is the mistake worth knowing
 about: cargo auto-discovers the file anyway, under the default libtest harness,
 and the bench then compiles cleanly and fails at run time complaining about
 arguments. `make check-gungraun-benches` (part of `make ci-lint`) catches it.
@@ -212,12 +210,11 @@ whose reach those paths do not show — a refactor moving code between crates, s
 instruction-count benches. All three only ever add work; none can switch a
 suite off.
 
-`ci: bench` does more than cover a blind spot, because not every crate with
-benches is measured automatically. `spate-core` and `spate-avro` select
-themselves from their paths; the rest — object-storage packing and framing
-among them — are opt-in, since each one costs two builds and two valgrind runs
-per pull request. If you are changing something whose instruction count is the
-point, add the label; without it the change lands unmeasured.
+Which counters run comes from the changed paths too, and it is derived from the
+benches themselves: a crate with a bench selects its own, `spate-core` selects
+every benched crate because everything depends on it, and a crate without one
+selects nothing. `ci: bench` is for the change those paths cannot speak for — a
+dependency swap, or code moving between crates.
 
 ## Testing conventions
 

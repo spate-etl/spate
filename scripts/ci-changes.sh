@@ -91,22 +91,64 @@ container_suites_for() {
     esac
 }
 
-# Which crates' instruction-count benches should a change to $1 run without
-# being asked? See the note at the `bench` classification below for why this
-# is smaller than the set of crates that have benches. `--self-test` checks it
-# against what `gungraun-benches.sh` discovers, so it cannot name a crate whose
-# bench no longer exists.
-bench_pkgs_for() {
-    case "$1" in
-        spate-core | spate-avro) echo "$1" ;;
-        *) echo "" ;;
-    esac
+# Every crate that has a gungraun bench, discovered rather than listed — the
+# `ci: bench` label and the force-all events select all of them, and
+# `bench_pkgs_for` below answers from the same set.
+#
+# Discovery is a subprocess and classification asks about every changed crate,
+# so the answer is cached. The cache has to be filled from the parent shell:
+# `bench_pkgs_for` is called inside a command substitution, and a subshell can
+# read an inherited variable but cannot write one back. `discover_bench_pkgs`
+# is therefore called explicitly before any run of per-crate selection — at the
+# top of `--self-test` and before the classification loop. Forgetting that call
+# costs a subprocess per changed crate; it does not change an answer.
+bench_pkgs_discovered=""
+bench_pkgs_discovery_done=0
+discover_bench_pkgs() {
+    if [[ "$bench_pkgs_discovery_done" == "0" ]]; then
+        bench_pkgs_discovered=$(
+            "$(git rev-parse --show-toplevel)/scripts/gungraun-benches.sh" |
+                cut -d' ' -f1 | sort -u
+        )
+        bench_pkgs_discovery_done=1
+    fi
 }
 
-# Every crate that has a gungraun bench, discovered rather than listed — the
-# `ci: bench` label and the force-all events select all of them.
 all_bench_pkgs() {
-    "$(git rev-parse --show-toplevel)/scripts/gungraun-benches.sh" | cut -d' ' -f1 | sort -u
+    discover_bench_pkgs
+    # Nothing rather than a blank line when the set is empty: callers append
+    # this to a space-separated list.
+    [[ -z "$bench_pkgs_discovered" ]] || printf '%s\n' "$bench_pkgs_discovered"
+}
+
+# Does $1 have a gungraun bench? The name is derived from a changed path and is
+# therefore attacker-controlled, so it is compared as data: a quoted right-hand
+# side in `[[ == ]]` is a literal string, where an unquoted one would be a glob
+# and a crate directory named `spate-*` would match every benched crate.
+has_gungraun_bench() {
+    local pkg
+    while IFS= read -r pkg; do
+        [[ "$pkg" == "$1" ]] && return 0
+    done < <(all_bench_pkgs)
+    return 1
+}
+
+# Which crates' instruction-count benches should a change to $1 run without
+# being asked? Derived from what the benches discover rather than tabulated, so
+# a crate that gains a bench is measured by the pull request that adds it and
+# nothing here needs editing:
+#
+#   spate-core             every benched crate. Every crate depends on it, and
+#                          codegen is crate-global, so a change there can move a
+#                          count in any of them. It selects them whether or not
+#                          it owns a bench itself — the rule is about reach.
+#   any other benched crate  itself.
+#   a crate with no bench   nothing.
+bench_pkgs_for() {
+    case "$1" in
+        spate-core) all_bench_pkgs ;;
+        *) if has_gungraun_bench "$1"; then echo "$1"; fi ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -284,40 +326,81 @@ for crate in sorted(names):
         diff <(echo "$expected") <(echo "$actual") || true
         exit 1
     fi
-    # The auto-selected bench crates must all actually have benches. The two
-    # sets are allowed to differ — that asymmetry is the design — but only in
-    # one direction: selecting a crate whose bench has been deleted or renamed
-    # would run nothing and report success, which is the failure mode this
-    # whole file exists to avoid.
+    # Bench selection is derived from discovery, which makes "everything
+    # selected has a bench" true by construction and therefore worth nothing as
+    # an assertion. What is checked instead is the shape of the three rules —
+    # each of them a claim this file, CONTRIBUTING.md and the CI reference all
+    # make in prose, and none of them guaranteed by the derivation alone.
+    discover_bench_pkgs
     discovered=$(all_bench_pkgs)
-    auto=""
-    while IFS= read -r crate; do
-        [[ -n "$crate" ]] || continue
-        auto="$auto $(bench_pkgs_for "$crate")"
-    done < <(ls -1 "$repo_root/crates")
-    for pkg in $auto; do
-        if ! echo "$discovered" | grep -qx "$pkg"; then
-            echo "::error::bench_pkgs_for() selects '$pkg', which has no gungraun bench."
-            echo "Crates with benches: $(echo "$discovered" | tr '\n' ' ')"
-            echo "Either restore the bench or drop the crate from bench_pkgs_for()."
-            exit 1
-        fi
-    done
+    all_pkgs=$(all_bench_pkgs | tr '\n' ' ')
+    all_pkgs="${all_pkgs% }"
 
-    # And the auto set must be non-empty, or every ordinary pull request
-    # silently stopped being measured while the label still worked.
-    if [[ -z "${auto// /}" ]]; then
-        echo "::error::bench_pkgs_for() selects nothing; no pull request would be measured by path."
+    # First, because every assertion below is about a discovered set: an empty
+    # one would satisfy most of them vacuously while no pull request was
+    # measured by path at all.
+    if [[ -z "$all_pkgs" ]]; then
+        echo "::error::no gungraun bench was discovered; nothing would be measured by path."
+        echo "Check scripts/gungraun-benches.sh and the benches/*_gungraun.rs naming convention."
         exit 1
     fi
 
-    # What each path arm selects. Membership checks above cannot see this: they
-    # test the tables, and the arms are what consult them. Every row here is a
-    # rule stated in prose somewhere — in the comments below, in CONTRIBUTING.md
-    # or in the CI reference — so a rule that stops holding fails here instead
-    # of going quietly false in three documents at once.
-    all_pkgs=$(all_bench_pkgs | tr '\n' ' ')
-    all_pkgs="${all_pkgs% }"
+    # spate-core reaches every count, so it selects every benched crate.
+    core_pkgs=$(bench_pkgs_for spate-core | tr '\n' ' ')
+    core_pkgs="${core_pkgs% }"
+    if [[ "$core_pkgs" != "$all_pkgs" ]]; then
+        echo "::error::bench_pkgs_for(spate-core) selects '$core_pkgs', not every benched crate."
+        echo "Crates with benches: $all_pkgs"
+        exit 1
+    fi
+
+    # Every other benched crate selects exactly itself — not the whole set,
+    # which would put every crate's valgrind runs on every pull request.
+    while IFS= read -r crate; do
+        [[ -n "$crate" && "$crate" != "spate-core" ]] || continue
+        selected=$(bench_pkgs_for "$crate" | tr '\n' ' ')
+        if [[ "${selected% }" != "$crate" ]]; then
+            echo "::error::bench_pkgs_for('$crate') selects '${selected% }', not just itself."
+            exit 1
+        fi
+    done <<<"$discovered"
+
+    # And a crate with no bench selects nothing, so an ordinary change to one
+    # does not pay for a measurement that would report on code it did not
+    # touch. Checked against the tree, and against a name that is in no tree at
+    # all — the `*` arm has to answer both with silence.
+    #
+    # spate-core is exempt, and not as a convenience: its rule is about what a
+    # change to it can reach, not about what it owns, so it selects every
+    # benched crate whether or not it has one of its own. Without the exemption
+    # this loop would fail a tree where spate-core's bench had been deleted, and
+    # blame the wrong rule for it.
+    for dir in "$repo_root"/crates/*/; do
+        crate=$(basename "$dir")
+        [[ "$crate" != "spate-core" ]] || continue
+        has_gungraun_bench "$crate" && continue
+        if [[ -n "$(bench_pkgs_for "$crate")" ]]; then
+            echo "::error::bench_pkgs_for('$crate') selects something, but '$crate' has no bench."
+            exit 1
+        fi
+    done
+    if [[ -n "$(bench_pkgs_for __no_such_crate__)" ]]; then
+        echo "::error::bench_pkgs_for() selects something for a crate that does not exist."
+        exit 1
+    fi
+    # A crate name reaches here from a changed path, and a branch may legally
+    # contain a directory called `crates/spate-*/`. Matched as data it selects
+    # nothing; matched as a pattern it would select every benched crate.
+    if [[ -n "$(bench_pkgs_for 'spate-*')" ]]; then
+        echo "::error::bench_pkgs_for() treats a crate name as a glob, not as data."
+        exit 1
+    fi
+
+    # What each path arm selects. The checks above cannot see this: they test
+    # the selection functions, and the arms are what consult them. Every row
+    # here is a rule stated in prose somewhere — in the comments below, in
+    # CONTRIBUTING.md or in the CI reference — so a rule that stops holding
+    # fails here instead of going quietly false in three documents at once.
     path_case_failed=0
     check_paths() {
         local want_bench="$1" want_pkgs="$2" desc="$3"
@@ -344,12 +427,48 @@ for crate in sorted(names):
             path_case_failed=1
         fi
     }
-    check_paths true "spate-core" "a measured crate selects itself" \
+
+    # The sample crates are derived, not named: naming one would put this file
+    # back in the path of every pull request that adds or removes a bench,
+    # which is the coupling the derivation exists to remove. Expectations stay
+    # exact — what varies is which crate stands for each rule, not what the arm
+    # is allowed to answer.
+    benched_a="" benched_b="" unbenched=""
+    while IFS= read -r crate; do
+        [[ -n "$crate" && "$crate" != "spate-core" ]] || continue
+        if [[ -z "$benched_a" ]]; then
+            benched_a="$crate"
+        elif [[ -z "$benched_b" ]]; then
+            benched_b="$crate"
+        fi
+    done <<<"$discovered"
+    for dir in "$repo_root"/crates/*/; do
+        crate=$(basename "$dir")
+        # Exempt for the same reason as the loop above: spate-core selects every
+        # benched crate whether or not it owns one, so it cannot stand for the
+        # crate that selects nothing.
+        [[ "$crate" != "spate-core" ]] || continue
+        has_gungraun_bench "$crate" && continue
+        unbenched="$crate"
+        break
+    done
+
+    check_paths true "$all_pkgs" "the core crate selects every benched crate" \
         crates/spate-core/src/lib.rs
-    check_paths true "spate-avro spate-core" "two measured crates select both" \
-        crates/spate-core/src/lib.rs crates/spate-avro/src/lib.rs
-    check_paths false "" "an opt-in crate selects nothing by path" \
-        crates/spate-s3/src/lib.rs
+    if [[ -n "$benched_a" ]]; then
+        check_paths true "$benched_a" "a benched crate selects itself" \
+            "crates/$benched_a/src/lib.rs"
+    fi
+    if [[ -n "$benched_b" ]]; then
+        # Discovery is sorted and so is the emitted list, so taking the first
+        # two in order needs no second sort here.
+        check_paths true "$benched_a $benched_b" "two benched crates select both" \
+            "crates/$benched_a/src/lib.rs" "crates/$benched_b/src/lib.rs"
+    fi
+    if [[ -n "$unbenched" ]]; then
+        check_paths false "" "a crate without a bench selects nothing" \
+            "crates/$unbenched/src/lib.rs"
+    fi
     check_paths false "" "docs select nothing" docs/DESIGN.md
     for apparatus in scripts/ci-changes.sh scripts/gungraun-benches.sh \
         scripts/gungraun-report.sh .github/workflows/ci.yml; do
@@ -359,8 +478,8 @@ for crate in sorted(names):
     [[ "$path_case_failed" == "0" ]] || exit 1
 
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
-    echo "the label overrides are additive, every auto-selected bench crate has a bench,"
-    echo "and each path arm selects the crates it claims to."
+    echo "the label overrides are additive, bench selection follows what the benches"
+    echo "discover, and each path arm selects the crates it claims to."
     exit 0
 fi
 
@@ -440,6 +559,10 @@ if [[ "$force_all" == "1" ]]; then
     bench_pkgs=$(all_bench_pkgs)
     suites="$CONTAINER_PKGS"
 else
+    # Fill the discovery cache here, in the parent shell: the loop below asks
+    # `bench_pkgs_for` about every changed crate from inside a command
+    # substitution, and a subshell cannot write the answer back.
+    discover_bench_pkgs
     while IFS= read -r -d '' file; do
         [[ -z "$file" ]] && continue
 
@@ -505,15 +628,18 @@ else
         # an edit anywhere in a measured crate can shift inlining and with it
         # the count.
         #
-        # `bench_pkgs_for` is the auto-selected set, and it is deliberately
-        # *smaller* than the set of crates that have benches. Every benched
-        # crate costs two builds and two valgrind runs — merge base and head —
-        # so putting all of them on every path would tax ordinary pull
-        # requests to measure code they did not touch. The crates here are the
-        # ones whose counts are wanted unprompted; the rest are opt-in through
-        # the `ci: bench` label, which selects everything. `--self-test`
-        # asserts the auto set is a subset of what the benches actually
-        # discover, so a crate cannot be selected here after its bench is gone.
+        # `bench_pkgs_for` answers from what the benches discover: a benched
+        # crate selects itself, spate-core selects every benched crate because
+        # every crate depends on it, and a crate with no bench selects nothing.
+        # Adding a bench wires it into pull-request selection without an edit
+        # here, which is what keeps this file from naming a subset of the
+        # benches that exist.
+        #
+        # Cost is bounded by the reach of the change rather than by a list: a
+        # change confined to one benched crate pays for that crate's two builds
+        # and two valgrind runs, and only a change to the crate everything
+        # depends on pays for all of them. The `ci: bench` label is still how a
+        # path that selects less asks for the full set.
         #
         # A separate `case` rather than arms on the one above, because the
         # two questions have different answers for the same file.

@@ -4097,6 +4097,7 @@ name = "spate-json"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "gungraun",
  "metrics",
  "metrics-exporter-prometheus",
  "proptest",

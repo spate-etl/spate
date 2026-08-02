@@ -29,7 +29,8 @@
         bench-gungraun-check loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
-        check-gungraun-benches check-invariants check-changelog changelog-new \
+        check-gungraun-benches check-collected-region check-invariants \
+        check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -126,8 +127,14 @@ bench: ## Criterion and divan micro benches
 # run. On a machine without valgrind, `make bench-gungraun-check` builds each
 # bench without running it — cheaper and more targeted than `bench-check`,
 # which builds every rig in the workspace.
+#
+# The guard runs straight after, over the profiles the run just wrote. A bench
+# whose collected region measured the allocator instead of its own code still
+# reports a plausible number, so the machine that can run the benches at all is
+# the right place to find that out — CI runs the same check per shard.
 bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-runner)
 	./scripts/gungraun-benches.sh --run
+	./scripts/gungraun-collected-region.sh
 
 bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind needed)
 	./scripts/gungraun-benches.sh --check
@@ -212,6 +219,13 @@ check-invariants: ## The invariant lists still agree
 check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 	./scripts/gungraun-benches.sh --self-test
 
+# The guard that rejects a bench measuring the C runtime instead of itself.
+# Its rule is only exercised where valgrind runs, so the fixtures — real
+# profiles, captured under valgrind on Linux — are what holds it to its word
+# everywhere else.
+check-collected-region: ## The degenerate-region guard still recognises both shapes
+	./scripts/gungraun-collected-region.sh --self-test
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -220,7 +234,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

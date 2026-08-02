@@ -38,6 +38,7 @@ tracing = { workspace = true }
 all-features = true
 
 [dev-dependencies]
+gungraun = { workspace = true }
 spate-test = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -48,6 +49,12 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
 name = "decode"
+harness = false
+
+# gungraun's `main!` is the harness; without this the default libtest one wraps
+# it and rejects the harness's own arguments at run time.
+[[bench]]
+name = "decode_gungraun"
 harness = false
 
 [lints]

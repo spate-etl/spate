@@ -395,6 +395,14 @@ so the workflow derives it from the locked workspace resolution
 version is pinned by `Cargo.lock` like any other dependency; a dependency
 bump carries the runner with it, and there is no second copy to drift.
 
+That same resolved version is the cache key for the built binary, which is
+otherwise a minute of compilation on every run that measures anything —
+there is no checksummed prebuilt to fetch, so the alternative is building it
+each time. Pinning the version on both the install and the key is what makes
+the cache safe to trust: a restored binary can only ever be the one this
+lockfile asks for, and a mismatch would be a hard error rather than a wrong
+number anyway.
+
 ## Coverage
 
 Coverage is `cargo llvm-cov`, reported to Codecov under two flags. `unit` runs on

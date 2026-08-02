@@ -621,12 +621,43 @@ jobs:
       # resolution rather than hardcoded: `--locked` reports what Cargo.lock
       # pins and refuses to re-resolve, a dependency bump carries the runner
       # with it, and there is no second copy of the version to drift.
-      - name: Install gungraun-runner
+      # The version is read first and on its own, because it is the cache key.
+      # `--locked` reports what Cargo.lock pins and refuses to re-resolve, so
+      # the key changes only when a reviewed dependency bump moves it.
+      - name: Resolve the gungraun-runner version
+        id: runner-version
         run: |
           set -euo pipefail
           version=$(cargo metadata --format-version 1 --locked \
             | jq -r '.packages[] | select(.name == "gungraun") | .version')
-          cargo install gungraun-runner --version "$version" --locked
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      # Building the runner from source costs about a minute of every job that
+      # needs it, and it is the same binary every time for a given version —
+      # `install-action` carries no manifest entry for it, so there is no
+      # checksummed prebuilt to fetch instead. Cached under its own root
+      # rather than `~/.cargo/bin` so the key covers exactly this binary and
+      # nothing else the toolchain cache already handles.
+      - name: Cache gungraun-runner
+        id: runner-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gungraun/bin
+          key: gungraun-runner-${{ runner.os }}-${{ steps.runner-version.outputs.version }}
+
+      # A mismatched runner is a hard error rather than a wrong measurement,
+      # so the version is pinned on both the install and the cache key: a
+      # restored binary can only ever be the one this lockfile asks for.
+      - name: Install gungraun-runner
+        if: steps.runner-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.runner-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo install gungraun-runner --version "$VERSION" --locked --root ~/.gungraun
+
+      - name: Put gungraun-runner on PATH
+        run: echo "$HOME/.gungraun/bin" >>"$GITHUB_PATH"
 
       # The baseline: check out the merge base, measure it, come back. The
       # benches are discovered from the merge-base tree itself, by the

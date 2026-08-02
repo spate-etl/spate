@@ -67,15 +67,68 @@ impl Lcg {
 /// ever asks of it. The partition components therefore advance with the
 /// index instead of cycling.
 fn key(index: usize) -> String {
-    // The divisors nest: an hour covers 100 parts and a day covers 24 hours,
-    // so each component only advances when the one below it wraps. Divisors
-    // that do not nest give a key that is not monotone in the index even
-    // though every component looks ordered on its own.
+    let (day, hour) = partition(index);
+    format!("year=2026/month=08/day={day:02}/hour={hour:02}/part-{index:08}.ndjson")
+}
+
+/// The `(day, hour)` partition an object's index falls in.
+///
+/// The divisors nest: an hour covers 100 parts and a day covers 24 hours, so
+/// each component only advances when the one below it wraps. Divisors that do
+/// not nest give a key that is not monotone in the index even though every
+/// component looks ordered on its own.
+fn partition(index: usize) -> (usize, usize) {
     const PER_HOUR: usize = 100;
     const PER_DAY: usize = PER_HOUR * 24;
-    let day = index / PER_DAY % 28 + 1;
-    let hour = index / PER_HOUR % 24;
-    format!("year=2026/month=08/day={day:02}/hour={hour:02}/part-{index:08}.ndjson")
+    (index / PER_DAY % 28 + 1, index / PER_HOUR % 24)
+}
+
+/// Total length of a [`deep_keys`] key, in bytes.
+///
+/// An object store caps a key at 1024 bytes; this sits just under it, which
+/// is the adversarial end of the range rather than a typical layout. Both
+/// terms that scale with key length — the digest, which hashes every key
+/// byte, and the descriptor JSON, which carries every key verbatim — are
+/// therefore measured at their worst plausible input.
+pub(crate) const DEEP_KEY_BYTES: usize = 1_000;
+
+/// `dimNN=` plus a 36-byte identifier: one filler partition component.
+const DEEP_COMPONENT_BYTES: usize = 42;
+/// `year=2026/month=08/day=DD/hour=HH/`, the time prefix a deep key shares
+/// with an ordinary one.
+const DEEP_PREFIX_BYTES: usize = 34;
+/// `/part-NNNNNNNN.ndjson`, the object name a deep key ends with.
+const DEEP_NAME_BYTES: usize = 21;
+
+/// Filler partition components between the time prefix and the object name —
+/// as many as fit, each costing its own length plus the `/` before it.
+///
+/// Derived rather than written down so that [`DEEP_KEY_BYTES`] is the single
+/// place the profile's key length is set. The division has to come out exact
+/// for the keys to land on it, and
+/// `the_deep_keys_sit_just_under_the_key_limit` is what fails if a change to
+/// any of the three widths above makes it stop doing so.
+const DEEP_COMPONENTS: usize =
+    (DEEP_KEY_BYTES + 1 - DEEP_PREFIX_BYTES - DEEP_NAME_BYTES) / (DEEP_COMPONENT_BYTES + 1);
+
+/// The constant middle of a deep key.
+///
+/// Constant on purpose, and that is the realistic part: members of one split
+/// come from one partition, so their keys share almost their whole prefix.
+/// Every comparison in `split_id_for`'s per-bin sort therefore walks ~950
+/// bytes before it can order two keys, which a 60-byte key never asks of it.
+fn deep_filler() -> String {
+    (0..DEEP_COMPONENTS)
+        .map(|dim| format!("dim{dim:02}=6f1c2d9a-3b4e-4c5f-8a70-9d2e1b0c4f56"))
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
+/// A deep key: the same monotone time prefix and object name as [`key`],
+/// around a fixed run of extra partition components.
+fn deep_key(index: usize, filler: &str) -> String {
+    let (day, hour) = partition(index);
+    format!("year=2026/month=08/day={day:02}/hour={hour:02}/{filler}/part-{index:08}.ndjson")
 }
 
 /// A quoted 32-character hexadecimal ETag — the shape an S3-compatible store
@@ -94,6 +147,7 @@ fn etag(index: usize, lcg: &mut Lcg) -> String {
 fn corpus(
     count: usize,
     seed: u64,
+    key: impl Fn(usize) -> String,
     size: impl Fn(usize, &mut Lcg) -> u64,
 ) -> Vec<(String, u64, String)> {
     let mut lcg = Lcg::new(seed);
@@ -105,13 +159,46 @@ fn corpus(
         .collect()
 }
 
+/// The size draw the ordinary backfill listing uses: every object under the
+/// open-cost floor, so each pays the floor and bins fill to ~16 members.
+///
+/// Shared by [`uniform_small`] and [`deep_keys`] rather than written twice —
+/// with the same seed, that is what makes the pair a controlled comparison:
+/// the two corpora draw the same sizes and the same ETags for the same
+/// indices, so the only thing that differs between them is key length.
+fn under_the_floor(_: usize, lcg: &mut Lcg) -> u64 {
+    lcg.range(FLOOR / 4, FLOOR / 2)
+}
+
 /// The ordinary backfill listing: many objects well under the target, each
 /// paying the open-cost floor, so bins fill to ~16 members. The denominator
 /// every other profile is read against.
 pub(crate) fn uniform_small() -> Vec<(String, u64, String)> {
-    corpus(10_000, 0x5EED_0001, |_, lcg| {
-        lcg.range(FLOOR / 4, FLOOR / 2)
-    })
+    corpus(10_000, 0x5EED_0001, key, under_the_floor)
+}
+
+/// [`uniform_small`] at a tenth the length, with keys just under the store's
+/// limit.
+///
+/// The count, the seed and the size draw are shared with `uniform_small`, so
+/// this corpus is that one's first tenth with every key ~18 times longer and
+/// nothing else changed — which is what lets key length be read off the pair
+/// rather than inferred. The comparison is per object: 1,000 objects here
+/// against a tenth of `uniform_small`'s 10,000, both packing 16 to a bin.
+///
+/// A tenth rather than all 10,000 because key length is not free — a
+/// [`DEEP_KEY_BYTES`] key puts around eighteen times the bytes through
+/// SHA-256 and into the descriptor JSON as an ordinary 54-byte one, and at
+/// 10,000 objects the case would leave the instruction budget rather than
+/// measure inside it.
+pub(crate) fn deep_keys() -> Vec<(String, u64, String)> {
+    let filler = deep_filler();
+    corpus(
+        1_000,
+        0x5EED_0001,
+        |i| deep_key(i, &filler),
+        under_the_floor,
+    )
 }
 
 /// Objects at or above the split target. Today each closes a bin on its own
@@ -121,7 +208,7 @@ pub(crate) fn uniform_small() -> Vec<(String, u64, String)> {
 /// each of these into several members, moving both the input cardinality and
 /// the open-bin scan, so this is the profile a subdivision change shows up in.
 pub(crate) fn big_objects() -> Vec<(String, u64, String)> {
-    corpus(2_000, 0x5EED_0002, |_, lcg| {
+    corpus(2_000, 0x5EED_0002, key, |_, lcg| {
         lcg.range(TARGET_BYTES * 4, TARGET_BYTES * 16)
     })
 }
@@ -140,7 +227,7 @@ pub(crate) fn big_objects() -> Vec<(String, u64, String)> {
 /// That scan is where an implementation splicing subdivided members back into
 /// listing order would show first, which is why the profile has to reach it.
 pub(crate) fn mixed_tail() -> Vec<(String, u64, String)> {
-    corpus(5_000, 0x5EED_0003, |i, lcg| {
+    corpus(5_000, 0x5EED_0003, key, |i, lcg| {
         if i % 50 == 49 {
             // Just under the target: enough to nearly fill a bin, not enough
             // to close it.

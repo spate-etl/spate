@@ -216,7 +216,7 @@ impl SplitDescriptor {
 /// 1. Sort the members ascending by key (byte-wise comparison of the
 ///    UTF-8 key bytes).
 /// 2. Feed SHA-256 with, in order:
-///    - the domain tag: the 13 ASCII bytes `spate-s3-split\n`;
+///    - the domain tag: the 15 ASCII bytes `spate-s3-split\n`;
 ///    - the packing version as a little-endian `u32` (currently `1` —
 ///      the crate's `PACKING_VERSION`);
 ///    - for each member, in sorted order:

@@ -4,11 +4,61 @@
 #   gungraun-report.sh [--regressions-out FILE] <summaries> [<baseline-label>]
 #   gungraun-report.sh --self-test
 #
-# <summaries> is a concatenation of the `summary.json` files one CI run wrote
-# under `target/gungraun` (`GUNGRAUN_SAVE_SUMMARY=json`), each a single JSON
-# object; jq's slurp mode parses the stream whether or not the files ended in
-# newlines. <baseline-label> names what the old column is — the caller knows
-# whether a baseline was measured and which commit it was.
+# <summaries> is a concatenation of the `summary.json` files one or more CI
+# runs wrote under `target/gungraun` (`GUNGRAUN_SAVE_SUMMARY=json`), each a
+# single JSON object; jq's slurp mode parses the stream whether or not the
+# files ended in newlines. Concatenation is the only merge operation: a run
+# split across several jobs produces a report by `cat`-ing their files
+# together, and the rows sort into a stable order regardless of which order
+# they arrived in.
+#
+# <baseline-label> names what the old column is for any line that does not
+# name its own — the caller knows whether a baseline was measured and which
+# commit it was.
+#
+# ## Shard identity: the `spate_shard` stamp
+#
+# A summary describes a bench, not the build that produced it. gungraun's
+# harness hands the runner `CARGO_PKG_NAME`, but the runner spends it on the
+# output directory rather than recording it as a field; `module_path` is
+# `bench_file::group::bench`, which begins at the bench-file stem and never
+# carries the package either; and the schema has no notion of cargo features
+# at all. What is left is two absolute paths on the machine that measured it:
+# `package_dir`, and `summary_output.path`, which does contain the package
+# name as a directory segment — but at a depth that moves with
+# `separate_targets`, and only when a summary was asked for. `package_dir`
+# is the stable one, so it is the fallback below.
+#
+# So when one run is split over a matrix of (package, feature arm), the
+# identity that tells two of its rows apart does not exist in the data and has
+# to be put there. Each job stamps its own summaries as it collects them, with
+# a single object this script reads and gungraun never writes:
+#
+#   {"spate_shard": {"package": "spate-json",
+#                    "features": "simd",
+#                    "baseline": "main @ 0123456789ab"}}
+#
+#   package   the cargo package built, for the Shard column.
+#   features  the feature arm's label, for the same column; the empty string
+#             (or an absent key) means the job built one unlabelled arm, and
+#             the shard renders as the bare package name.
+#   baseline  what this job's old column is. The empty string means this job
+#             measured no baseline, and its rows read *no baseline* rather
+#             than *new* — one job's merge-base leg can fail while another's
+#             succeeds, and the two cases must not look alike. An absent key
+#             falls back to <baseline-label>.
+#
+# Nothing is inferred when the stamp is absent: `package` falls back to the
+# last segment of `package_dir` (crate directory names equal package names in
+# this workspace, the same convention `gungraun-benches.sh` discovers by), and
+# the feature arm is left blank rather than guessed. An unstamped run is a
+# single-job run: it gains the Shard column like any other report, carrying
+# the bare package name, and everything else about it — the baseline label,
+# the deltas, the threshold markers, the flag file — is what it always was.
+#
+# Two rows that still land on one identity are a bug somewhere upstream, not
+# a reason to lose an advisory report: they are rendered with a warning
+# naming the key they share.
 #
 # The output is one table of callgrind instruction counts (the headline
 # quantity: deterministic, so comparable across runners) and, when any summary
@@ -40,42 +90,103 @@ IR_THRESHOLD_PCT=5
 BLOCKS_THRESHOLD_ABS=1
 PEAK_THRESHOLD_PCT=5
 
-# The write side of the perf-label.yml contract, executable. The two
-# workflows can never run together before a merge (`workflow_run` executes
-# the default branch's definition), so this is the only place the contract
-# runs on a pull request: the flag file must be the bare `true` or `false`
-# the label workflow's `case` accepts, and threshold crossings must mark
-# rows. The fixtures pin schema v6 on purpose — bumping SCHEMA_VERSION makes
-# this fail at the version gate until they are rebuilt against the new
-# shape, which is the reminder doing its job.
+# The write side of the perf-label.yml contract, executable, plus the shard
+# contract documented above. The two workflows can never run together before
+# a merge (`workflow_run` executes the default branch's definition), so this
+# is the only place the label contract runs on a pull request: the flag file
+# must be the bare `true` or `false` the label workflow's `case` accepts, and
+# threshold crossings must mark rows. The fixtures pin schema v6 on purpose —
+# bumping SCHEMA_VERSION makes this fail at the version gate until they are
+# rebuilt against the new shape, which is the reminder doing its job.
+#
+# GUNGRAUN_REPORT_UNDER_TEST points the fixtures at another copy of this
+# script. That is how a fixture is shown to be load-bearing rather than
+# decorative: run it against the revision it was written to catch and watch
+# it fail.
 if [[ "${1:-}" == "--self-test" ]]; then
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
+    under_test="${GUNGRAUN_REPORT_UNDER_TEST:-$0}"
     fail_self() {
         echo "gungraun-report.sh --self-test: $1" >&2
         exit 1
     }
+    # Asserts exactly $1 lines contain $2, by count rather than by `grep -q`:
+    # a merged report's failure mode is a row appearing twice, and presence
+    # alone cannot see it.
+    count_is() {
+        local want=$1 needle=$2 desc=$3 got
+        got=$(grep -c -F -- "$needle" "$tmp/report.md" || true)
+        [[ "$got" -eq "$want" ]] \
+            || fail_self "$desc: expected $want line(s) matching '$needle', found $got"
+    }
     printf '%s\n' \
-        '{"version":"6","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}},{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{"TotalBlocks":{"metrics":{"Both":[{"Int":38},{"Int":40}]},"diffs":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"metrics":{"Both":[{"Int":4342},{"Int":4096}]},"diffs":{"diff_pct":"6.0"}}}}}}}]}' \
+        '{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}},{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{"TotalBlocks":{"metrics":{"Both":[{"Int":38},{"Int":40}]},"diffs":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"metrics":{"Both":[{"Int":4342},{"Int":4096}]},"diffs":{"diff_pct":"6.0"}}}}}}}]}' \
         >"$tmp/hot.jsonl"
     printf '%s\n' \
-        '{"version":"6","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}' \
+        '{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}' \
         >"$tmp/quiet.jsonl"
+    # Three jobs of one matrix run, concatenated the way the aggregating job
+    # concatenates them. The first two are the same package and the same
+    # bench built two ways — indistinguishable without the stamp, which is
+    # the whole point of the fixture — and the third measured no baseline
+    # while the other two did.
+    printf '%s\n' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"nested_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":211000}}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":""},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}' \
+        >"$tmp/matrix.jsonl"
+    # Two jobs that stamped themselves identically — an aggregation bug the
+    # report has to name rather than quietly average over.
+    printf '%s\n' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":62000},{"Int":60000}]},"diffs":{"diff_pct":"3.33"}}}}}}}]}' \
+        >"$tmp/collide.jsonl"
 
-    "$0" --regressions-out "$tmp/flag" "$tmp/hot.jsonl" self-test >"$tmp/report.md"
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/hot.jsonl" self-test >"$tmp/report.md"
     [[ "$(cat "$tmp/flag")" == "true" ]] \
         || fail_self "hot fixture: flag file holds '$(cat "$tmp/flag")', not the bare string 'true'"
     grep -q "(over threshold)" "$tmp/report.md" \
         || fail_self "hot fixture: no row carries the over-threshold marker"
+    # The unstamped path, which is what a single-job run is: the package still
+    # has to be named, from `package_dir`, with no feature arm invented.
+    count_is 1 "| spate-json | decode::decode_value flat_record | 107000 |" \
+        "hot fixture"
 
-    "$0" --regressions-out "$tmp/flag" "$tmp/quiet.jsonl" self-test >"$tmp/report.md"
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/quiet.jsonl" self-test >"$tmp/report.md"
     [[ "$(cat "$tmp/flag")" == "false" ]] \
         || fail_self "quiet fixture: flag file holds '$(cat "$tmp/flag")', not the bare string 'false'"
     if grep -q "(over threshold)" "$tmp/report.md"; then
         fail_self "quiet fixture: a row is marked over threshold"
     fi
 
-    echo "gungraun-report.sh: self-test ok — the flag file is the bare boolean perf-label.yml parses, and markers track the thresholds"
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/matrix.jsonl" self-test >"$tmp/report.md"
+    [[ "$(cat "$tmp/flag")" == "false" ]] \
+        || fail_self "matrix fixture: flag file holds '$(cat "$tmp/flag")', not the bare string 'false'"
+    # One bench, two feature arms, two rows that name which is which.
+    count_is 1 "| spate-json (default) | decode::decode_value flat_record | 100000 |" \
+        "matrix fixture"
+    count_is 1 "| spate-json (simd) | decode::decode_value flat_record | 61000 |" \
+        "matrix fixture"
+    # A job whose merge-base leg failed must not read like a bench that is
+    # simply new, and a genuinely new bench in a job that did measure one
+    # must not read like a missing baseline.
+    count_is 1 "| spate-core (default) | chain::forward one_stage | 50000 | — | *no baseline* |" \
+        "matrix fixture"
+    count_is 1 "| spate-json (default) | decode::decode_value nested_record | 211000 | — | *new* |" \
+        "matrix fixture"
+    grep -q "Baseline per shard" "$tmp/report.md" \
+        || fail_self "matrix fixture: shards disagree about the baseline and no legend says so"
+    if grep -q "Duplicate shard identity" "$tmp/report.md"; then
+        fail_self "matrix fixture: distinct shards were reported as a collision"
+    fi
+
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/collide.jsonl" self-test >"$tmp/report.md"
+    grep -q "Duplicate shard identity" "$tmp/report.md" \
+        || fail_self "collision fixture: two identically stamped jobs are reported as one shard, unremarked"
+
+    echo "gungraun-report.sh: self-test ok — the flag file is the bare boolean perf-label.yml parses, markers track the thresholds, and merged jobs keep their shard identity"
     exit 0
 fi
 
@@ -122,8 +233,10 @@ jq_defs='
     def new_side: .metrics | (if .Both then .Both[0] else .Left end) | val;
     def old_side: .metrics | (if .Both then .Both[1] elif .Right then .Right else null end)
         | if . == null then null else val end;
-    def delta:
-        if .diffs == null then "*new*"
+    # $absent is what a metric with no comparison reads as, decided per row
+    # by whether that row'\''s shard measured a baseline at all.
+    def delta($absent):
+        if .diffs == null then $absent
         else (.diffs.diff_pct
             | if test("inf") then (if startswith("-") then "-∞%" else "+∞%" end)
               elif . == "NaN" then "n/a"
@@ -150,11 +263,28 @@ jq_defs='
         | if $old == null then false
           else ((new_side - $old) | if . < 0 then -. else . end) > $t
           end;
-    def marked($flagged): delta as $d
+    def marked($flagged; $absent): delta($absent) as $d
         | if $flagged then "**\($d)** (over threshold)" else $d end;
     def bench_name:
         (.module_path | split("::") | .[1:] | join("::"))
         + (if .id != null and .id != "" then " \(.id)" else "" end);
+    # Shard identity — see the header. Only `package` has a fallback in the
+    # data, and it is the last segment of `package_dir`; the feature arm is
+    # blank unless stamped, never guessed.
+    def shard_package:
+        .spate_shard.package
+        // ((.package_dir // "") | split("/") | map(select(. != "")) | last)
+        // "unknown";
+    def shard_features: .spate_shard.features // "";
+    def shard_name:
+        shard_package + (shard_features | if . == "" then "" else " (\(.))" end);
+    def shard_baseline($fallback): .spate_shard.baseline // $fallback;
+    # The distinction defect the stamp exists for: a bench with no comparison
+    # is new if its shard measured a baseline, and simply uncompared if the
+    # shard'\''s merge-base leg never produced one.
+    def absent_label($fallback):
+        if shard_baseline($fallback) == "" then "*no baseline*" else "*new*" end;
+    def row_key: "\(shard_name) — \(bench_name)";
     # null when the summary carries no callgrind profile at all (a run under
     # a different valgrind tool): rendered as an explicit row, never an error
     # that truncates the report.
@@ -177,56 +307,85 @@ report=$(jq -r -s --arg base "$baseline_label" \
     --argjson blocks_abs "$BLOCKS_THRESHOLD_ABS" \
     --argjson peak_pct "$PEAK_THRESHOLD_PCT" \
     "$jq_defs"'
-    "## Instruction counts",
+    # Sorted once, up front. Jobs are merged by concatenation and artifacts
+    # download in no particular order, so input order is not an order; the
+    # tables must not shuffle between two runs of the same matrix.
+    sort_by([shard_name, bench_name]) as $rows
+    | ([$rows[] | shard_baseline($base)] | unique) as $bases
+    # One column header can only name one baseline. When every job agrees it
+    # names theirs — which is a single-job run, and a matrix run where every
+    # merge-base leg succeeded. When they disagree the header goes generic
+    # and a legend below carries the per-job labels.
+    | (if ($bases | length) == 1
+       then ($bases[0] | if . == "" then "no baseline" else . end)
+       else "baseline" end) as $base_header
+    | ([$rows[] | row_key] | group_by(.) | map(select(length > 1) | .[0])) as $dupes
+    | "## Instruction counts",
     "",
-    "Callgrind instructions (`Ir`) per bench: pull request vs \($base).",
+    "Callgrind instructions (`Ir`) per bench: pull request vs \($base_header).",
     "Advisory: numbers never block a merge; a bench that stops running does.",
     "A **bold** delta crossed a provisional threshold and syncs the",
     "`affects-performance` label; nothing else happens.",
+    (if ($dupes | length) > 0 then
+        "",
+        "**Duplicate shard identity**: \($dupes | map("`\(.)`") | join(", ")) "
+            + "appears more than once — either two jobs stamped themselves alike, "
+            + "or one package has two bench files whose group, bench and case names "
+            + "coincide (the bench-file stem is not part of the name). Either way "
+            + "the rows below cannot be told apart."
+     else empty end),
+    (if ($bases | length) > 1 then
+        "",
+        "Baseline per shard:",
+        ($rows | map({s: shard_name, b: shard_baseline($base)}) | unique | .[]
+            | "- `\(.s)` — \(.b | if . == "" then "*none measured*" else . end)")
+     else empty end),
     "",
-    "| Bench | PR | \($base) | Δ |",
-    "| --- | ---: | ---: | ---: |",
-    (.[] | callgrind as $cg
+    "| Shard | Bench | PR | \($base_header) | Δ |",
+    "| --- | --- | ---: | ---: | ---: |",
+    ($rows[] | absent_label($base) as $absent | shard_name as $sh | callgrind as $cg
         | if $cg == null or ($cg | has("Ir") | not)
-          then "| \(bench_name) | — | — | *no callgrind profile* |"
-          else "| \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | marked(flag_pct_increase($ir_pct))) |"
+          then "| \($sh) | \(bench_name) | — | — | *no callgrind profile* |"
+          else "| \($sh) | \(bench_name) | \($cg.Ir | new_side) | \($cg.Ir | old_side // "—") | \($cg.Ir | marked(flag_pct_increase($ir_pct); $absent)) |"
           end),
-    (if any(.[]; dhat != null) then
+    (if any($rows[]; dhat != null) then
         "",
         "## Heap (DHAT)",
         "",
-        "DHAT heap blocks and peak bytes per bench: pull request vs \($base).",
+        "DHAT heap blocks and peak bytes per bench: pull request vs \($base_header).",
         "",
-        "| Bench | Metric | PR | \($base) | Δ |",
-        "| --- | --- | ---: | ---: | ---: |",
-        (.[] | dhat as $dh
+        "| Shard | Bench | Metric | PR | \($base_header) | Δ |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
+        ($rows[] | dhat as $dh
             | select($dh != null)
+            | absent_label($base) as $absent
+            | shard_name as $sh
             | bench_name as $bn
             | (["TotalBlocks", "AtTGmaxBytes"][] as $key
                 | $dh[$key]
                 | select(. != null)
                 | (if $key == "TotalBlocks" then flag_abs_delta($blocks_abs)
                    else flag_pct_increase($peak_pct) end) as $flagged
-                | "| \($bn) | \($key) | \(new_side) | \(old_side // "—") | \(marked($flagged)) |"))
+                | "| \($sh) | \($bn) | \($key) | \(new_side) | \(old_side // "—") | \(marked($flagged; $absent)) |"))
     else empty end),
     "",
     "<details><summary>All metrics</summary>",
     "",
-    (.[] | callgrind as $cg
+    ($rows[] | absent_label($base) as $absent | shard_name as $sh | callgrind as $cg
         | select($cg != null)
-        | "**\(bench_name)** — callgrind",
+        | "**\($sh) — \(bench_name)** — callgrind",
           "",
-          "| Metric | PR | \($base) | Δ |",
+          "| Metric | PR | \($base_header) | Δ |",
           "| --- | ---: | ---: | ---: |",
-          ($cg | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta) |"),
+          ($cg | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta($absent)) |"),
           ""),
-    (.[] | dhat as $dh
+    ($rows[] | absent_label($base) as $absent | shard_name as $sh | dhat as $dh
         | select($dh != null)
-        | "**\(bench_name)** — DHAT",
+        | "**\($sh) — \(bench_name)** — DHAT",
           "",
-          "| Metric | PR | \($base) | Δ |",
+          "| Metric | PR | \($base_header) | Δ |",
           "| --- | ---: | ---: | ---: |",
-          ($dh | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta) |"),
+          ($dh | to_entries[] | "| \(.key) | \(.value | new_side) | \(.value | old_side // "—") | \(.value | delta($absent)) |"),
           ""),
     "</details>"
 ' "$summaries")

@@ -212,6 +212,13 @@ whose reach those paths do not show — a refactor moving code between crates, s
 instruction-count benches. All three only ever add work; none can switch a
 suite off.
 
+`ci: bench` does more than cover a blind spot, because not every crate with
+benches is measured automatically. `spate-core` and `spate-avro` select
+themselves from their paths; the rest — object-storage packing and framing
+among them — are opt-in, since each one costs two builds and two valgrind runs
+per pull request. If you are changing something whose instruction count is the
+point, add the label; without it the change lands unmeasured.
+
 ## Testing conventions
 
 Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's

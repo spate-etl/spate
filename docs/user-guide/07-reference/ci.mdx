@@ -315,21 +315,23 @@ no benches reports no baseline, and one that no longer builds on today's
 toolchain reports no baseline rather than blocking a pull request on code
 its author did not write. Push and merge-group runs report absolute counts.
 
-Both legs, and `make bench-gungraun`, take **which benches to measure** from
-one place:
-`scripts/gungraun-benches.sh`. A list written into the workflow could name a
-bench the Makefile did not, and the two sides of a comparison would then
-measure different things without anything failing — so the baseline leg runs
-the merge base's own copy of the script, and a merge base predating the
+Both legs, and `make bench-gungraun`, take **which benches exist** from one
+place: `scripts/gungraun-benches.sh`. A list written into the workflow could
+name a bench the Makefile did not, and the two sides of a comparison would
+then measure different things without anything failing — so the baseline leg
+runs the merge base's own copy of the script, and a merge base predating the
 script reports no baseline like one that no longer builds. Its exit codes
 separate the three outcomes the workflow acts on differently: every bench
-ran, a bench failed, or this tree has none.
+ran, a bench failed, or this tree has none for the crates it was given.
 
-That covers what gets measured, not what gets selected: whether the job runs
-at all is still decided by a hand-written crate list in
-`scripts/ci-changes.sh`, described below. The two answer different questions —
-"which benches exist" and "is this change worth measuring" — but only the
-first is derived from the tree.
+Which of those benches a given pull request runs is a second question, and
+`scripts/ci-changes.sh` answers it — described below. Its automatic set is a
+written list rather than a derived one, checked against discovery by
+`make self-test`; the label and the apparatus paths take the discovered set
+whole. Both legs are handed the identical answer either way, so the
+comparison cannot end up measuring different sets on its two sides. `make
+bench-gungraun` takes no list at all and stays the local convenience: it runs
+every bench in the tree.
 
 `make check-gungraun-benches` proves the exit-code contract, and that every
 discovered bench declares a `harness = false` target. Without that stanza cargo
@@ -371,16 +373,41 @@ fails or skips the benches leaves the label untouched (a stale label beats
 stripping a true one because a docs push skipped the benches), and
 hand-applying the label only lasts until the next benched push.
 
-`perf-counters` is selected by its own classification output, `bench`, from
-two crates — `crates/spate-core/` and `crates/spate-avro/` — plus the
-`ci: bench` label. That is narrower than the set of crates the benches
-compile, and deliberately so: every benched crate costs two builds and two
-valgrind runs, merge base and head, so the automatic set holds the crates
-whose counts are wanted unprompted and the rest are opt-in through the label.
-The unit is the whole crate rather than the modules a bench imports, because
-codegen is crate-global: an edit anywhere in a measured crate can shift
-inlining and with it the count. A change to an opt-in crate lands unmeasured
-unless someone applies the label.
+`perf-counters` is selected by its own classification output, `bench`, and a
+second output, `bench-pkgs`, says which crates' benches to run. The unit is
+the whole crate rather than the modules a bench imports, because codegen is
+crate-global: an edit anywhere in a measured crate can shift inlining and
+with it the count. A path that reaches no measured crate selects nothing
+here, whatever other jobs it selects — with one exception, below.
+
+The set measured automatically is deliberately smaller than the set of crates
+that have benches. `crates/spate-core/` and `crates/spate-avro/` select
+themselves, because their counts are wanted unprompted; the rest are opt-in
+through the `ci: bench` label, which selects every benched crate. The reason
+is cost, not confidence: each benched crate is two builds and two valgrind
+runs — merge base and head — so measuring all of them on every pull request
+would tax changes that cannot move the numbers. Both legs are given the same
+list, since measuring a different set on the two sides of a comparison is the
+drift the single bench list exists to prevent.
+
+The consequence worth knowing: **a change to an opt-in crate shows no
+counters unless someone applies the label.** For a change that means to move
+one of those numbers — object-storage packing or framing, say — applying
+`ci: bench` is part of raising it.
+
+The exception is the measuring apparatus. A change to the classifier, the
+discovery script, the report script or `ci.yml` selects every benched crate,
+whatever crates it touches, because each of them can alter the outcome for
+all of them. Without that rule the pull request rewriting how benches are
+chosen is the one that never runs them — a fail-open in the one classifier
+built to fail closed.
+
+`make self-test` holds these rules to their word. It asserts that every
+auto-selected crate actually has a bench, so the list cannot name a crate
+whose bench was deleted or renamed and quietly measure nothing; and it
+classifies a synthetic path list through the real arms, so each rule above —
+including the apparatus one — fails the gate rather than this page when it
+stops being true.
 
 The runner binary's version must match the `gungraun` dependency exactly — a
 mismatch fails every bench with a version error rather than a measurement —

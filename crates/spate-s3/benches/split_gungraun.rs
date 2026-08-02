@@ -17,6 +17,15 @@
 //!   *at or above* the target instead closes each bin on placement and the
 //!   scan never runs — measurably identical to `uniform_small`, which is what
 //!   an earlier version of this profile did.
+//! - `deep_keys` — `uniform_small`'s first tenth with keys just under the
+//!   store's 1024-byte cap and nothing else changed. Key length scales two
+//!   terms at once — the digest hashes every key byte, and the descriptor
+//!   carries every key verbatim into JSON — and it is the one of those that
+//!   varies, since a store reports ETags at a fixed width. The other three
+//!   profiles all sit at 54 bytes, so without this case a change whose cost
+//!   is per key *byte* rather than per object is invisible here.
+//!   Read per object against `uniform_small`, which shares its seed and size
+//!   draw exactly so that the difference is attributable.
 //!
 //! Packing, minting and descriptor encoding are one case rather than three on
 //! purpose: the planner does them as a single pass per split, and a change to
@@ -51,6 +60,7 @@ mod listing;
 #[bench::uniform_small(listing::uniform_small())]
 #[bench::big_objects(listing::big_objects())]
 #[bench::mixed_tail(listing::mixed_tail())]
+#[bench::deep_keys(listing::deep_keys())]
 fn plan(objects: Vec<(String, u64, String)>) -> Vec<spate_core::coordination::SplitId> {
     let ids = plan_listing(black_box(objects), listing::TARGET_BYTES);
     assert!(!ids.is_empty(), "a non-empty listing planned no splits");

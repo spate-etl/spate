@@ -21,7 +21,18 @@ pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
 /// lands around 4 MiB, which is ~16 chunks: enough that per-chunk work
 /// dominates per-object setup, and small enough to stay well inside the
 /// instruction budget under emulation.
-const RECORDS: usize = 16_000;
+pub(crate) const RECORDS: usize = 16_000;
+
+/// Independently-encoded streams inside one compressed object — gzip calls
+/// them members, zstd frames, and the decoders treat them alike: read to the
+/// end of one, validate its trailer, reinitialise, continue.
+///
+/// Sixteen because that is what a run of upload sessions appending to one
+/// export key produces, and because it makes the multi-part cases the
+/// per-member counterpart of `plain_many_small`'s sixteen *objects*: one
+/// charges sixteen framer resets across object boundaries, the other sixteen
+/// decoder reinitialisations inside a single object.
+pub(crate) const MEMBERS: usize = 16;
 
 /// Objects in the multi-object profile, and records in each. Shared with the
 /// test that pins the profile's record count: two copies of these would let
@@ -67,6 +78,31 @@ pub(crate) fn body(first: usize, records: usize) -> Vec<u8> {
 /// The standard single-object body: one object's worth of lines.
 pub(crate) fn whole_body() -> Vec<u8> {
     body(0, RECORDS)
+}
+
+/// The standard single-object body encoded as [`MEMBERS`] independent
+/// streams, each covering an equal run of records.
+///
+/// Every part is a complete stream in its own right — its own header, its own
+/// trailer — so the returned pieces concatenate into an object a decoder must
+/// re-enter [`MEMBERS`] times. `the_multi_part_objects_are_really_multi_part`
+/// pins that: without it the fixture could quietly encode one stream and the
+/// case would measure the same thing `gzip_whole` already does.
+pub(crate) fn members(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<Vec<u8>> {
+    assert!(
+        RECORDS.is_multiple_of(MEMBERS),
+        "{RECORDS} records do not divide into {MEMBERS} equal parts, so the \
+         parts would not reassemble into the whole body"
+    );
+    let each = RECORDS / MEMBERS;
+    (0..MEMBERS).map(|m| store(&body(m * each, each))).collect()
+}
+
+/// [`members`] concatenated: one stored object, many streams. Byte-for-byte
+/// the same decoded content as [`whole_body`], which is what makes the pair a
+/// controlled comparison — the only difference is how many streams it took.
+pub(crate) fn concatenated(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    members(store).concat()
 }
 
 /// Split a body into fetch-sized chunks.

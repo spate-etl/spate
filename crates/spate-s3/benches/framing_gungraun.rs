@@ -11,6 +11,19 @@
 //!   codec cannot be entered at an arbitrary offset, so subdivision must
 //!   never apply to them. If either count moves when subdivision lands, the
 //!   capability probe has leaked into the whole-stream path.
+//! - `gzip_multi_member`, `zstd_multi_frame` — the same body again, stored as
+//!   sixteen independently-encoded streams concatenated into one object,
+//!   which is what an export key appended to by a run of upload sessions
+//!   holds. Decoded content is byte-identical to the `_whole` pair, so the
+//!   difference between them is the per-stream term those fixtures never
+//!   charge — trailer validation, decoder reinitialisation, the next stream's
+//!   header parse — **plus** whatever the compressed input's own shape
+//!   contributes, since sixteen streams each starting from a cleared window
+//!   do not compress to the same bytes as one. The pair bounds that term
+//!   rather than isolating it. Both codecs have to read every stream; a
+//!   decoder that stopped at the first would drop fifteen sixteenths of the
+//!   object, and the asserted record count turns that into a failure rather
+//!   than into a welcome fall in the number.
 //! - `plain_mid_offset` — the same object fed from a byte offset that falls
 //!   *inside* a record, which is what a reader entering a subdivided object
 //!   faces. The case asserts the record count, and that assertion is the
@@ -94,6 +107,32 @@ fn zstd_whole() -> Rig {
     one_object(Compression::Auto, ".zst", ndjson::zstd)
 }
 
+/// One object whose body is stored as several independent streams.
+///
+/// The decoded bytes are the whole body either way, so `expect_records` is
+/// the same count the `_whole` case asserts — which is the assertion that
+/// matters here: a decoder that stopped at the first stream would return one
+/// sixteenth of the records and fail rather than report a smaller number.
+fn multi_part_object(suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
+    let stored = ndjson::concatenated(store);
+    Rig {
+        compression: Compression::Auto,
+        objects: vec![(
+            format!("part-000000.ndjson{suffix}"),
+            ndjson::chunks(&stored),
+        )],
+        expect_records: ndjson::RECORDS,
+    }
+}
+
+fn gzip_multi_member() -> Rig {
+    multi_part_object(".gz", ndjson::gzip)
+}
+
+fn zstd_multi_frame() -> Rig {
+    multi_part_object(".zst", ndjson::zstd)
+}
+
 /// The same object entered part-way through a record.
 ///
 /// The expected count is derived from the fixture rather than written down,
@@ -140,6 +179,8 @@ fn plain_many_small() -> Rig {
 #[bench::plain_whole(plain_whole())]
 #[bench::gzip_whole(gzip_whole())]
 #[bench::zstd_whole(zstd_whole())]
+#[bench::gzip_multi_member(gzip_multi_member())]
+#[bench::zstd_multi_frame(zstd_multi_frame())]
 #[bench::plain_mid_offset(plain_mid_offset())]
 #[bench::plain_many_small(plain_many_small())]
 fn frame(rig: Rig) -> Rig {

@@ -43,6 +43,7 @@
 
 use benchmarks::deser_sample::{self, Order, Reading, SensorBatch};
 use benchmarks::report::{Metric, Report};
+use benchmarks::stats::{median, stats};
 use benchmarks::{env_str, env_u64};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use spate_core::checkpoint::AckRef;
@@ -342,49 +343,6 @@ fn build_payload(format: &str, shape: &str, framing: &str, events: u64) -> Vec<u
         ("json", "batch", "array") => deser_sample::json_batch_array(events),
         ("json", "batch", "ndjson") => deser_sample::json_batch_ndjson(events),
         _ => panic!("unsupported payload: format={format} shape={shape} framing={framing}"),
-    }
-}
-
-/// Student-t critical value t(df, 0.975).
-fn t_975(df: usize) -> f64 {
-    const TABLE: [f64; 15] = [
-        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160,
-        2.145, 2.131,
-    ];
-    match df {
-        0 => 0.0,
-        d if d <= TABLE.len() => TABLE[d - 1],
-        _ => 1.96,
-    }
-}
-
-/// (mean, ci95_low, ci95_high) — a Student-t 95% confidence interval.
-fn stats(xs: &[f64]) -> (f64, f64, f64) {
-    let n = xs.len();
-    if n == 0 {
-        return (0.0, 0.0, 0.0);
-    }
-    let nf = n as f64;
-    let mean = xs.iter().sum::<f64>() / nf;
-    if n < 2 {
-        return (mean, mean, mean);
-    }
-    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nf - 1.0);
-    let sem = (var / nf).sqrt();
-    let t = t_975(n - 1);
-    (mean, mean - t * sem, mean + t * sem)
-}
-
-fn median(xs: &[f64]) -> f64 {
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
-    let n = v.len();
-    if n == 0 {
-        0.0
-    } else if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
 }
 

@@ -26,6 +26,14 @@ pub use spate_core::coordination::*;
 pub mod config;
 pub mod store;
 
+// The `testing` feature also carries `bench_seams`, which reaches the pure,
+// synchronous decisions an instruction-count bench cannot get to through an
+// async surface. It is deliberately unlinked: the module is `#[doc(hidden)]`,
+// so the link would dangle on docs.rs (where the feature is off) and render
+// as literal text in the published API reference (where it is on).
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod bench_seams;
 // Time seam behind every deadline in the control loop: `SystemClock` in
 // production, a clock the test advances in tests. `#[doc(hidden)]` hides the
 // *module path* only — `Clock`, `SystemClock` and `Sleep` are re-exported

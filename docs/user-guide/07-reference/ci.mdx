@@ -280,11 +280,12 @@ that, and costs a second full dependency build, so it runs in the weekly tier.
 
 ## Performance gates
 
-Two pull-request jobs answer performance questions without reading a clock. A
-hosted runner is contended and virtualised, so a wall-clock figure measured
-there describes the machine as much as the change — which is why no wall-clock
-number gates anything here. Both of these produce a quantity that is the same
-on any host.
+Two things on the pull-request path answer performance questions without
+reading a clock: an allocation gate, and a tier of jobs that counts
+instructions. A hosted runner is contended and virtualised, so a wall-clock
+figure measured there describes the machine as much as the change — which is
+why no wall-clock number gates anything here. Both produce a quantity that is
+the same on any host.
 
 `alloc-assertions` runs the counting-allocator test over the chain hot path
 (`cargo test -p spate-core --release --test chain_alloc`). Its bounds are
@@ -292,8 +293,7 @@ absolute rather than relative to a stored baseline, so it compares against
 nothing and cannot drift: an allocation that scales with record count fails it.
 It builds in the release profile, because the bounds are calibrated against
 optimised code — and it pays for that by sharing the `release` cache entry the
-scheduled release-profile jobs populate from `main`, the same entry
-`perf-counters` uses for the bench profile that inherits release.
+scheduled release-profile jobs populate from `main`.
 
 `perf-counters` runs the gungraun benches, which count instructions,
 branches and cache references under callgrind, and heap shape — allocated
@@ -301,19 +301,104 @@ blocks and peak bytes — under DHAT in the same run. The decode benches cover
 the error path alongside the happy paths: a malformed payload's
 decode-until-error cost is what every bad record pays whichever record error
 policy is configured. On a pull request the
-comparison is a paired measurement inside the one job: the merge base is
+comparison is a paired measurement inside the one shard: the merge base is
 checked out and measured first as a named baseline, then the head run
 compares against it — so the comparator is always the merge base, never a
 cache whose newest entry could be any branch's. `scripts/gungraun-report.sh`
-parses the machine-readable summaries into the table in the job's step
-summary, and fails loudly if the summary schema version ever drifts from the
-one its field paths were written against. The baseline leg is scaffolding,
-not the gate: it discovers benches from the merge-base tree by naming
-convention, carries `continue-on-error`, and wipes a partial measurement —
-so a merge base that predates a bench reports that bench as *new*, one with
-no benches reports no baseline, and one that no longer builds on today's
-toolchain reports no baseline rather than blocking a pull request on code
-its author did not write. Push and merge-group runs report absolute counts.
+parses the machine-readable summaries into one table, in the step summary of
+the job that aggregates them, and fails loudly if the summary schema version
+ever drifts from the one its field paths were written against. The baseline
+leg is scaffolding, not the gate: it discovers benches from the merge-base
+tree by naming convention, carries `continue-on-error`, and wipes a partial
+measurement — so a merge base that predates a bench reports that bench as
+*new*, one with no benches reports no baseline, and one that no longer builds
+on today's toolchain reports no baseline rather than blocking a pull request
+on code its author did not write. Push and merge-group runs report absolute
+counts.
+
+### The shard matrix
+
+`perf-counters` is a matrix, one job per (package, compiled feature arm), and
+that shape is forced rather than chosen. gungraun writes a summary to
+
+```
+target/gungraun/<package>/<bench-stem>/<group>/<fn>/<case>/summary.json
+```
+
+which has no feature component anywhere in it — the saved-baseline setting
+changes filenames *within* that directory, not the directory. Two feature
+builds of one bench in one workspace therefore overwrite each other's summary
+*and* each other's saved baseline, and nothing reports it: the result is a
+wrong number, silently. A job per arm gives each arm its own runner and its own
+target tree, which is what makes the axis safe to have.
+
+An arm is a label and a cargo feature list, and the table pairing them sits in
+`scripts/ci-changes.sh` beside the rules that pick the packages — the matrix is
+that same question with a second axis, and a file of its own would be a third
+thing the apparatus list has to know about. The table is written rather than
+derived, because a crate's feature keys are not its performance arms: most are
+optional column types or transport knobs no bench executes, and the powerset
+would be exponentially many shards for one real question. An arm earns a shard
+by changing the code under the benches. `make self-test` checks every arm
+against `cargo metadata`, so an arm naming a feature its package does not
+declare fails the gate rather than burning a shard.
+
+Three properties keep a matrix run from reporting a confidently wrong number,
+and each of them is a mechanism rather than a convention.
+
+**A shard whose merge base cannot build its arm has no baseline.** The baseline
+leg runs the merge base's *own* copy of `scripts/gungraun-benches.sh`, and that
+copy may predate the feature axis — in which case it ignores the arm and
+measures the default build, so a comparison between the two legs is a
+comparison between two different builds rendered as a delta. The shard
+therefore probes first: asking the merge base's copy to run a package that
+cannot exist reaches the empty-selection exit without invoking cargo if the
+copy understands the axis, and the unknown-argument exit if it does not. Only
+the first answer earns a baseline. The unmodified build skips the probe, which
+is the rule rather than an exception to it: it asks the merge base for no
+feature flag at all — what every copy of the script has always done — so both
+legs build the same thing whatever the merge base knows.
+
+**A shard that measured no baseline says so, rather than reading as new.** The
+report distinguishes a bench with no comparison because it is new from one with
+no comparison because its shard's baseline leg never produced one, and it can
+only do that if the shard states which. Every shard states it, including by
+stating the empty string.
+
+**Row identity is stamped, not inferred.** A summary describes a bench, not the
+build that produced it: the package survives only as an absolute directory path
+on the machine that measured it, and the schema has no notion of cargo features
+at all. So the identity that tells two rows of one matrix run apart does not
+exist in the data, and each shard writes it in — a `spate_shard` object naming
+its package, its arm and its baseline — before uploading its summaries.
+`scripts/gungraun-report.sh` documents the contract it reads; the shard step in
+`ci.yml` is the other half of it.
+
+A dependent job downloads every shard's artifact, concatenates them and renders
+the single table. Concatenation is the whole merge: the report sorts its rows by
+shard and bench, so the order artifacts arrive in is not an order.
+
+`perf-warm` is the third job of the tier, and it is load-bearing rather than a
+nicety. A matrix multiplies a cold dependency compile by the shard count
+instead of dividing it, so without a warm cache a fan-out of shards is slower
+than measuring the same crates one after another. The counter tier has its own
+cache entry, populated by
+that one job from `main`: the bench profile inherits release, but the graph does
+not — these builds pull each benched crate's dev-dependencies and the harness,
+which no other release-profile job compiles. Sharing an entry with a narrower
+job means whichever finishes first defines it, and the narrow one always
+finishes first. The shards consume that entry and never write it, so the job
+that compiled the most is the one whose tree they restore.
+
+Two facts about the instrument itself are worth keeping in view. valgrind
+emulates CPUID, so which instruction-set width a bench executes is decided by
+the runner image rather than by the code — a runner-image bump can move a count
+with nothing in this repository changing, which is why the shards log the
+valgrind version alongside the measurement. And determinism is a property of
+the instrument, not a guarantee about every bench: one encoder bench does not
+reproduce bit-for-bit across two runs of the same commit. Its spread sits well
+inside the advisory thresholds, and it belongs to that bench rather than to the
+tier — so read a sub-threshold move on it as noise, not as signal.
 
 Both legs, and `make bench-gungraun`, take **which benches exist** from one
 place: `scripts/gungraun-benches.sh`. A list written into the workflow could
@@ -325,10 +410,10 @@ separate the three outcomes the workflow acts on differently: every bench
 ran, a bench failed, or this tree has none for the crates it was given.
 
 Which of those benches a given pull request runs is a second question, and
-`scripts/ci-changes.sh` answers it — described below. Its automatic set is a
-written list rather than a derived one, checked against discovery by
-`make self-test`; the label and the apparatus paths take the discovered set
-whole. Both legs are handed the identical answer either way, so the
+`scripts/ci-changes.sh` answers it — described below. Its automatic set comes
+from the same discovery, so a crate is measured by the pull request that gives
+it a bench; the label and the apparatus paths take the discovered set whole.
+Both legs of a shard are handed the identical answer either way, so the
 comparison cannot end up measuring different sets on its two sides. `make
 bench-gungraun` takes no list at all and stays the local convenience: it runs
 every bench in the tree.
@@ -337,12 +422,18 @@ every bench in the tree.
 discovered bench declares a `harness = false` target. Without that stanza cargo
 auto-discovers the file anyway, under the default libtest harness, and the
 bench compiles cleanly and then fails at run time complaining about arguments
-rather than about the missing target.
+rather than about the missing target. It also proves the feature arm reaches
+every cargo invocation and no other, by capturing the argument list a stub
+cargo was handed: a seam asserted only in prose is one that passes whether or
+not it is wired up.
 
-The numbers are advisory and the job is not. The comparison step carries
-`continue-on-error: true`, so a count that moved does not block a merge; the job
-itself is in `ci-gate`'s `needs:`, so a bench that stops building or dies under
-valgrind does.
+The numbers are advisory and the jobs are not. The rendering step carries
+`continue-on-error: true`, so a count that moved does not block a merge; all
+three jobs of the tier are in `ci-gate`'s `needs:`, so a bench that stops
+building or dies under valgrind does. The matrix carries `fail-fast: false` for
+the same reason: `ci-gate` counts `cancelled` as failure, so fail-fast would
+turn one real failure into several, all but one of them unattributable, and
+throw away the measurements of every arm that was fine.
 
 A pull request's movement surfaces in two places, and nothing blocks on
 either. The report marks any row that crosses the advisory thresholds —
@@ -358,7 +449,7 @@ advisory signal into a rerun button.
 
 The label workflow is the privileged half of a two-workflow split, and the
 split is a security boundary rather than an organisational one. The benches
-execute the pull request's code, so `perf-counters` runs with a read-only
+execute the pull request's code, so the counter tier runs with a read-only
 token and hands over exactly one boolean as an artifact; `perf-label.yml`
 runs with `pull-requests: write`, checks out nothing, executes nothing from
 the pull request, binds its download to the triggering run, and treats the
@@ -373,12 +464,18 @@ fails or skips the benches leaves the label untouched (a stale label beats
 stripping a true one because a docs push skipped the benches), and
 hand-applying the label only lasts until the next benched push.
 
-`perf-counters` is selected by its own classification output, `bench`, and a
-second output, `bench-pkgs`, says which crates' benches to run. The unit is
-the whole crate rather than the modules a bench imports, because codegen is
-crate-global: an edit anywhere in a measured crate can shift inlining and
-with it the count. A path that reaches no measured crate selects nothing
-here, whatever other jobs it selects — with one exception, below.
+The tier is selected by its own classification output, `bench`, and a second
+output, `bench-shards`, is the matrix itself: a JSON array of
+`{package, arm, cargo_features}` objects that `fromJSON` hands to
+`strategy.matrix.include`. The two must agree — an empty `include:` is a
+workflow-level error rather than a skipped job — so the classifier keeps them
+consistent where it emits them rather than leaving the workflow to check.
+
+The unit of selection is the whole crate rather than the modules a bench
+imports, because codegen is crate-global: an edit anywhere in a measured crate
+can shift inlining and with it the count. A path that reaches no measured crate
+selects nothing here, whatever other jobs it selects — with one exception,
+below.
 
 The set is derived from what the benches discover rather than from a list, so
 a crate is measured by the same pull request that gives it a bench:
@@ -389,30 +486,38 @@ a crate is measured by the same pull request that gives it a bench:
   in any of them.
 - A crate with no bench selects nothing.
 
-Cost is bounded by the reach of the change rather than by a list. Each benched
-crate is two builds and two valgrind runs — merge base and head — so a change
-confined to one benched crate pays for one crate, and only a change to the
-crate everything depends on pays for all of them. Both legs are given the same
-list, since measuring a different set on the two sides of a comparison is the
-drift the single bench list exists to prevent.
+Cost is bounded by the reach of the change rather than by a list. Each selected
+crate crosses to one shard per arm, and each shard is two builds and two
+valgrind runs — merge base and head — so a change confined to one benched crate
+pays for that crate's arms, and only a change to the crate everything depends
+on pays for all of them. The shards run concurrently, so the tier's wall clock
+is the slowest arm rather than the sum. Both legs of a shard are given the same
+package and the same arm, since measuring a different build on the two sides of
+a comparison is the drift the single bench list exists to prevent.
 
 `ci: bench` is how a path that selects less asks for the full set — a
 dependency swap, or a refactor that moves code between crates.
 
 The exception is the measuring apparatus. A change to the classifier, the
-discovery script, the report script or `ci.yml` selects every benched crate,
-whatever crates it touches, because each of them can alter the outcome for
-all of them. Without that rule the pull request rewriting how benches are
-chosen is the one that never runs them — a fail-open in the one classifier
-built to fail closed.
+discovery script, the report script, `ci.yml` or the shared setup action
+selects every benched crate, whatever crates it touches, because each of them
+can alter the outcome for all of them — the last because which cache a shard
+restores decides whether it compiles the bench graph from scratch. Without that
+rule the pull request rewriting how benches are chosen is the one that never
+runs them — a fail-open in the one classifier built to fail closed.
 
 `make self-test` holds these rules to their word. It asserts the shape of the
 selection — the core crate selecting every benched crate, a benched crate
 selecting itself, a crate without one selecting nothing — and that discovery
 finds any bench at all, since an empty set would satisfy the rest while
-nothing was measured. It then classifies a synthetic path list through the
-real arms, so each rule above — including the apparatus one — fails the gate
-rather than this page when it stops being true.
+nothing was measured. It asserts the arm table too: every arm names a feature
+its package declares, exactly one arm per crate is the unmodified build, labels
+are unique and carry only characters that survive JSON and an artifact name
+unescaped, and at least one crate is measured under more than one arm — an axis
+of size one everywhere would be a green run measuring less than it claims. It
+then classifies a synthetic path list through the real arms, so each rule above
+— including the apparatus one — fails the gate rather than this page when it
+stops being true.
 
 The runner binary's version must match the `gungraun` dependency exactly — a
 mismatch fails every bench with a version error rather than a measurement —

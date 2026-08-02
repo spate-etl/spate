@@ -85,10 +85,15 @@ jobs:
       container-args: ${{ steps.classify.outputs.container-args }}
       loom: ${{ steps.classify.outputs.loom }}
       bench: ${{ steps.classify.outputs.bench }}
-      # Which crates' benches to measure, not merely whether to measure. Every
-      # benched crate costs two builds and two valgrind runs, so a change is
-      # measured against what it can move rather than against everything.
-      bench-pkgs: ${{ steps.classify.outputs.bench-pkgs }}
+      # The counter tier's matrix: a JSON array of `{package, arm,
+      # cargo_features}` objects, one per shard, handed to
+      # `strategy.matrix.include` through `fromJSON`. Which crates to measure,
+      # not merely whether — every shard costs two builds and two valgrind
+      # runs, so a change is measured against what it can move rather than
+      # against everything — and under which compiled feature arms, because an
+      # instruction count describes a build and a feature that swaps an
+      # implementation produces a different one.
+      bench-shards: ${{ steps.classify.outputs.bench-shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -574,12 +579,115 @@ jobs:
           shared-key: release
       - run: cargo test -p spate-core --release --test chain_alloc --locked
 
-  perf-counters:
-    name: Instruction counts (gungraun)
+  # ---------------------------------------------------------------------------
+  # The instruction-count tier: a warming job, a shard per (package, feature
+  # arm), and one job that renders the shards' output as a single report.
+  #
+  # The split into shards is forced by where gungraun writes. Its runner puts a
+  # summary at
+  #
+  #   target/gungraun/<CARGO_PKG_NAME>/<bench-stem>/<group>/<fn>/<case>/summary.json
+  #
+  # and there is no feature component anywhere in that path — `GUNGRAUN_SAVE_BASELINE`
+  # changes filenames *within* the directory, not the directory. So two feature
+  # builds of one bench in one workspace overwrite each other's summary and each
+  # other's saved baseline, with nothing to signal it: a wrong number, silently.
+  # A job per arm is what gives each arm its own runner and its own target tree,
+  # and it is the only reason the axis is safe to have at all.
+  # ---------------------------------------------------------------------------
+  perf-warm:
+    name: Warm the counter-tier build cache
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
-    if: needs.changes.outputs.bench == 'true'
+    # `main` only, because `main` is the only ref rust-cache is allowed to
+    # write from (see setup-rust) — on a pull request this job would compile
+    # for nothing and hand nothing on.
+    #
+    # What it buys, and why it is load-bearing rather than a nicety: the shards
+    # below each build the merge base and the head from whatever the shared
+    # cache holds. A matrix multiplies a cold dependency compile by the shard
+    # count instead of dividing it, so without a warm entry this shape is
+    # slower than the serial job it replaces. The `bench` entry exists so that
+    # one job on `main` pays that compile once, for every arm, and every shard
+    # afterwards restores it.
+    if: github.event_name == 'push' && needs.changes.outputs.bench == 'true'
     timeout-minutes: 45
+    steps:
+      # Checkout precedes setup-rust because a `uses: ./...` action is resolved
+      # from the workspace on disk — the tree has to exist before the composite
+      # action inside it can be read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # Its own entry, not the `release` one `alloc-assertions` uses. The
+          # bench profile inherits release, but the graph does not: these
+          # builds pull each benched crate's dev-dependencies and the gungraun
+          # harness, which no other release-profile job compiles. Sharing a key
+          # with a narrower job means whichever finishes first defines the
+          # entry, and the narrow one always finishes first — which left the
+          # shards compiling the bench graph from scratch anyway.
+          shared-key: bench
+      - name: Build every bench arm
+        env:
+          # Through `env:` rather than interpolated into the script body — an
+          # expression spliced into generated shell is a template-injection
+          # finding even when its value is classifier-derived.
+          BENCH_SHARDS: ${{ needs.changes.outputs.bench-shards }}
+        # `--check` builds without running, which is all a cache needs and
+        # skips valgrind entirely. One invocation per arm, filtered to the one
+        # package that arm belongs to: handing `--features simd` to a package
+        # with no such feature is a hard cargo error, not a no-op.
+        run: |
+          set -euo pipefail
+          # Materialised and counted rather than streamed straight into the
+          # loop. A `while read` fed by a process substitution whose producer
+          # died iterates zero times and reports success, so a broken shard
+          # list would leave this job green having warmed nothing — the exact
+          # silent no-op the tier cannot afford, since nothing downstream can
+          # tell a warmed cache from a cold one.
+          jq -r '.[] | [.package, .cargo_features] | @tsv' <<<"$BENCH_SHARDS" >arms.tsv
+          arms=$(grep -c '' arms.tsv)
+          if [[ "$arms" -eq 0 ]]; then
+            echo "::error::the bench matrix is empty; there is nothing to warm"
+            exit 1
+          fi
+          echo "warming $arms arm(s)"
+          built=0
+          while IFS=$'\t' read -r package cargo_features; do
+            [[ -n "$package" ]] || continue
+            ./scripts/gungraun-benches.sh --features "$cargo_features" --check "$package"
+            built=$((built + 1))
+          done <arms.tsv
+          if [[ "$built" -ne "$arms" ]]; then
+            echo "::error::warmed $built of $arms arm(s)"
+            exit 1
+          fi
+
+  perf-counters:
+    name: Instruction counts (${{ matrix.package }} / ${{ matrix.arm }})
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # The second clause is the documented shape of a dynamic matrix, not
+    # belt-and-braces on the first: a matrix that expands to zero jobs is a
+    # workflow-level error rather than a skipped job, and a false `if:` is what
+    # stops the expansion being attempted. The classifier keeps the two answers
+    # consistent, so this can only ever agree with `bench` — which is the point.
+    if: needs.changes.outputs.bench == 'true' && needs.changes.outputs.bench-shards != '[]'
+    timeout-minutes: 45
+    strategy:
+      # One shard's bench dying must not cancel its siblings. `ci-gate` counts
+      # `cancelled` as failure, so fail-fast would turn one real failure into
+      # several, all but one of them unattributable — and it would throw away
+      # the measurements of every arm that was fine.
+      fail-fast: false
+      matrix:
+        # `include:` on its own runs one job per object. The classifier
+        # guarantees a non-empty array whenever `bench` is true; an empty one
+        # is a workflow-level error rather than a skipped job, which is why the
+        # two outputs are kept consistent there rather than here.
+        include: ${{ fromJSON(needs.changes.outputs.bench-shards) }}
     # Counters, not clocks. A hosted runner is contended and virtualised, so a
     # wall-clock number measured here describes the machine at least as much as
     # the change — which is why no wall-clock figure gates anything in this
@@ -587,17 +695,18 @@ jobs:
     # same commit on the same toolchain yields the same number on any host, so
     # it is a performance signal a pull request can actually carry.
     #
-    # The comparison is a paired measurement inside one job: the merge base is
-    # measured first and saved as a named baseline, then the head run compares
-    # against it. The comparator is therefore always the merge base rather
-    # than whatever a cache last held — at the cost of building and running
-    # the benches twice, a few minutes on an advisory job.
+    # The comparison is a paired measurement inside one shard: the merge base
+    # is measured first and saved as a named baseline, then the head run
+    # compares against it. The comparator is therefore always the merge base
+    # rather than whatever a cache last held — at the cost of building and
+    # running the benches twice, a few minutes on an advisory job.
     #
-    # Advisory in what it reports, blocking in whether it ran. The report
-    # step below carries `continue-on-error: true`, so a count that moved does
-    # not block a merge; the job stays in `ci-gate`'s `needs:`, so a bench that
-    # no longer builds or dies under valgrind does. Keeping the job out of the
-    # gate entirely would have hidden the second case along with the first.
+    # Advisory in what it reports, blocking in whether it ran. The rendering
+    # step in `perf-report` below carries `continue-on-error: true`, so a count
+    # that moved does not block a merge; this job stays in `ci-gate`'s
+    # `needs:`, so a bench that no longer builds or dies under valgrind does.
+    # Keeping the job out of the gate entirely would have hidden the second
+    # case along with the first.
     steps:
       # Checkout precedes setup-rust because a `uses: ./...` action is resolved
       # from the workspace on disk — the tree has to exist before the composite
@@ -609,18 +718,27 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
         with:
-          # The bench profile inherits release, so these artifacts belong with
-          # the other release-profile jobs' entry rather than in one of their
-          # own. Same key as `alloc-assertions` above and the scheduled benches.
-          shared-key: release
+          shared-key: bench
+          # A pure consumer of the entry `perf-warm` owns. Several shards
+          # sharing a key would race to write it the first time it is missing,
+          # and the winner would be whichever arm compiled the least.
+          cache-save: never
 
       # callgrind is the instrument; gungraun only drives it and reads its
       # output. Without valgrind on the runner the harness fails at the first
       # bench with no measurement taken.
+      #
+      # Its version is recorded because it is part of the measurement: valgrind
+      # emulates CPUID, so which SIMD width a bench executes is decided by the
+      # runner image rather than by the code. A runner-image bump can therefore
+      # move a count with nothing in this repository changing, and the log line
+      # is what makes that explicable after the fact.
       - name: Install valgrind
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y valgrind
+          valgrind --version
 
       # The runner version must match the `gungraun` dependency exactly — the
       # harness refuses to run against a mismatched runner — so it is read from
@@ -643,7 +761,8 @@ jobs:
       # `install-action` carries no manifest entry for it, so there is no
       # checksummed prebuilt to fetch instead. Cached under its own root
       # rather than `~/.cargo/bin` so the key covers exactly this binary and
-      # nothing else the toolchain cache already handles.
+      # nothing else the toolchain cache already handles. The key names no
+      # shard, so the matrix shares one entry rather than one each.
       - name: Cache gungraun-runner
         id: runner-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -673,6 +792,29 @@ jobs:
       # discovery also handles the merge base that predates a bench: it
       # simply contributes no baseline for it.
       #
+      # Running the merge base's own copy is what makes the feature arm a
+      # question rather than an assumption. That copy may predate the axis
+      # entirely, in which case it ignores `--features` and measures the
+      # default arm — so a `simd` head would be compared against a
+      # `serde_json` base and the difference rendered as a delta. Measured on a
+      # throwaway probe, that mismatch reads as +11.78%, over the advisory
+      # threshold, and would have set the regression flag and pushed the
+      # performance label on nothing but arm mismatch.
+      #
+      # Hence the probe. `--features X --run <no such package>` matches no
+      # package, so a copy that understands the axis answers with the
+      # empty-selection exit 2 without invoking cargo, while one that does not
+      # falls through to its `unknown argument` arm and answers 1. An arm whose
+      # merge base cannot build that same arm has no baseline, by
+      # construction — the shard reports one rather than comparing across arms.
+      #
+      # The default arm skips the probe, and that is the point of the rule
+      # rather than an exception to it: it asks the merge base for no feature
+      # flag at all, which is what every copy of the script has always done, so
+      # the two legs build the same thing whatever the merge base knows. Probing
+      # it would discard a perfectly good baseline for every pull request whose
+      # merge base predates the axis.
+      #
       # A merge base predating the script itself reports no baseline rather
       # than failing, which is the same degradation as a merge base that no
       # longer builds, and it self-heals once the script is on `main`.
@@ -693,7 +835,9 @@ jobs:
           # Through `env:` rather than `${{ }}` inside `run:` — an expression
           # interpolated into the script body is a template-injection finding
           # even when its value is classifier-derived.
-          BENCH_PKGS: ${{ needs.changes.outputs.bench-pkgs }}
+          PACKAGE: ${{ matrix.package }}
+          ARM: ${{ matrix.arm }}
+          CARGO_FEATURES: ${{ matrix.cargo_features }}
         run: |
           set -euo pipefail
           head_sha=$(git rev-parse HEAD)
@@ -711,27 +855,42 @@ jobs:
             # permanently while CI stayed green.
             echo "no baseline: scripts/gungraun-benches.sh is absent or not executable at the merge base"
           else
-            # Exit 0 means every discovered bench ran and succeeded; 1 means
-            # one failed; 2 means this tree has no benches yet. Only the
-            # first is a usable baseline, and a partial measurement is wiped
-            # rather than kept, so the comparison is all-or-nothing.
-            #
-            # $BENCH_PKGS is deliberately unquoted: it is a space-separated
-            # package list and each word is a separate argument. The classifier
-            # emits only workspace package names, and the head leg below is
-            # given the identical list — measuring a different set on the two
-            # sides would be the drift this whole arrangement exists to stop.
-            set +e
-            # shellcheck disable=SC2086
-            GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh --run $BENCH_PKGS
-            rc=$?
-            set -e
-            case "$rc" in
-              0) measured=true ;;
-              2) echo "no baseline: the merge base has no benches for the selected crates" ;;
-              *) echo "no baseline: a bench failed on the merge base (exit $rc)" ;;
-            esac
-            [[ "$measured" == "true" ]] || rm -rf target/gungraun
+            # The default arm asks the merge base for no feature flag at all,
+            # which is precisely what every copy of the script has always done
+            # — so it is comparable against a merge base that predates the
+            # feature axis, and probing it would throw away a baseline that is
+            # perfectly good. Only a *non-default* arm needs the capability
+            # question, because only it can be answered with the wrong build.
+            args=()
+            probe=2
+            if [[ -n "$CARGO_FEATURES" ]]; then
+              args=(--features "$CARGO_FEATURES")
+              set +e
+              ./scripts/gungraun-benches.sh "${args[@]}" \
+                --run __no_such_package__ >/dev/null 2>&1
+              probe=$?
+              set -e
+            fi
+            if [[ "$probe" -ne 2 ]]; then
+              echo "no baseline: the merge base's scripts/gungraun-benches.sh does not take --features (probe exit $probe)."
+              echo "It would build the default arm while this shard builds '$ARM', and two arms are not comparable."
+            else
+              # Exit 0 means every discovered bench ran and succeeded; 1 means
+              # one failed; 2 means this tree has no benches yet. Only the
+              # first is a usable baseline, and a partial measurement is wiped
+              # rather than kept, so the comparison is all-or-nothing.
+              set +e
+              GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh \
+                ${args[@]+"${args[@]}"} --run "$PACKAGE"
+              rc=$?
+              set -e
+              case "$rc" in
+                0) measured=true ;;
+                2) echo "no baseline: the merge base has no bench for $PACKAGE" ;;
+                *) echo "no baseline: a bench failed on the merge base (exit $rc)" ;;
+              esac
+              [[ "$measured" == "true" ]] || rm -rf target/gungraun
+            fi
           fi
           git checkout --quiet --detach "$head_sha"
           {
@@ -745,13 +904,14 @@ jobs:
       # `GUNGRAUN_BASELINE` makes the run compare against the merge-base
       # measurement saved above; `GUNGRAUN_SAVE_SUMMARY` writes one
       # machine-readable summary per bench under `target/gungraun`, which is
-      # what the report step parses — the human-readable output stays in this
-      # step's log.
+      # what the stamping step collects — the human-readable output stays in
+      # this step's log.
       - name: Instruction counts
         env:
           GUNGRAUN_SAVE_SUMMARY: json
           GUNGRAUN_BASELINE: ${{ steps.base.outputs.measured == 'true' && 'base' || '' }}
-          BENCH_PKGS: ${{ needs.changes.outputs.bench-pkgs }}
+          PACKAGE: ${{ matrix.package }}
+          CARGO_FEATURES: ${{ matrix.cargo_features }}
         run: |
           set -euo pipefail
           if [[ -z "$GUNGRAUN_BASELINE" ]]; then
@@ -761,41 +921,118 @@ jobs:
             # an aborted base leg left behind here.
             rm -rf target/gungraun
           fi
-          # The same list the base leg measured, for the same reason it is
-          # unquoted there. `make bench-gungraun` runs every bench in the tree
-          # and stays the local convenience; CI measures only what the change
-          # can move.
-          # shellcheck disable=SC2086
-          ./scripts/gungraun-benches.sh --run $BENCH_PKGS
+          # The same package and the same arm the base leg measured. `make
+          # bench-gungraun` runs every bench in the tree and stays the local
+          # convenience; CI measures only what the change can move.
+          ./scripts/gungraun-benches.sh --features "$CARGO_FEATURES" --run "$PACKAGE"
+
+      # Row identity is stamped, not derived. A gungraun summary describes a
+      # bench, not the build that produced it: the package survives only as a
+      # directory path on the machine that measured it, and the schema has no
+      # notion of cargo features at all. So when one run is split over a matrix,
+      # the identity that tells two of its rows apart does not exist in the data
+      # and has to be put there. `scripts/gungraun-report.sh` documents the
+      # `spate_shard` object it reads; this is the other half of that contract.
+      #
+      # `baseline` is the empty string when this shard measured none — the
+      # signal the report renders as *no baseline* rather than as *new*. One
+      # shard's merge-base leg can fail while another's succeeds, and a
+      # genuinely new bench must not read like a leg that died.
+      #
+      # Not `continue-on-error`: a shard that ran its benches and produced no
+      # summary has measured nothing, and a report silently missing an arm is
+      # the failure this whole arrangement exists to prevent.
+      - name: Stamp this shard's summaries
+        env:
+          PACKAGE: ${{ matrix.package }}
+          ARM: ${{ matrix.arm }}
+          BASE_MEASURED: ${{ steps.base.outputs.measured }}
+          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
+        run: |
+          set -euo pipefail
+          if [[ ! -d target/gungraun ]]; then
+            echo "::error::$PACKAGE ($ARM) ran its benches but wrote no target/gungraun"
+            exit 1
+          fi
+          find target/gungraun -name summary.json -exec cat {} + >raw.jsonl
+          if [[ ! -s raw.jsonl ]]; then
+            echo "::error::$PACKAGE ($ARM) wrote no summary.json; GUNGRAUN_SAVE_SUMMARY may no longer be honoured"
+            exit 1
+          fi
+          if [[ "$BASE_MEASURED" == "true" ]]; then
+            baseline="main @ ${MERGE_BASE:0:12}"
+          else
+            baseline=""
+          fi
+          mkdir -p shard
+          jq -c --arg p "$PACKAGE" --arg a "$ARM" --arg b "$baseline" \
+            '. + {spate_shard: {package: $p, features: $a, baseline: $b}}' \
+            raw.jsonl >"shard/$PACKAGE.$ARM.jsonl"
+
+      # One artifact per shard, concatenated by `perf-report` below. Named for
+      # the shard, because two artifacts cannot share a name within a run —
+      # the arm labels are constrained to `[A-Za-z0-9_.,-]` by the
+      # classifier's self-test, which is what keeps a label out of the set of
+      # characters GitHub refuses here.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-summaries-${{ matrix.package }}-${{ matrix.arm }}
+          path: shard/
+          if-no-files-found: error
+
+  perf-report:
+    name: Instruction count report
+    runs-on: ubuntu-latest
+    needs: [changes, perf-counters]
+    # `!cancelled()` rather than `always()`: a shard that failed still leaves
+    # its siblings' measurements worth rendering, and the failure is already
+    # `ci-gate`'s business through `perf-counters`. A cancelled run has nothing
+    # to say.
+    if: ${{ !cancelled() && needs.changes.outputs.bench == 'true' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every shard's stamped summaries, each under its own directory, so two
+      # shards' identically named files cannot overwrite each other on the way
+      # in. Concatenation is the only merge the report needs: it sorts its rows
+      # by shard and bench, so the order artifacts arrive in is not an order.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: perf-summaries-*
+          path: shards
 
       # The report script marks rows that cross the provisional advisory
       # thresholds and writes `has_regressions` for `perf-label.yml`; the
       # script itself always exits 0 on a metric moving, so nothing here can
       # turn the numbers into a gate. The thresholds live in the script.
       #
-      # `continue-on-error` belongs on this step and nowhere else. On the job it
-      # would also excuse the steps above.
+      # `continue-on-error` belongs on this step and nowhere else. On the job
+      # it would also excuse the checkout and the download.
+      #
+      # The baseline label passed here is a fallback for a summary carrying no
+      # `spate_shard` stamp, which a shard of this matrix never produces —
+      # every row names its own baseline, including the shards that measured
+      # none.
       - name: Report instruction counts
         id: report
         continue-on-error: true
-        env:
-          BASE_MEASURED: ${{ steps.base.outputs.measured }}
-          MERGE_BASE: ${{ steps.base.outputs.merge-base }}
         run: |
           set -euo pipefail
-          find target/gungraun -name summary.json -exec cat {} + >gungraun-summaries.jsonl
-          if [[ "$BASE_MEASURED" == "true" ]]; then
-            label="main @ ${MERGE_BASE:0:12}"
-          else
-            label="baseline (none measured)"
-          fi
+          mkdir -p shards
+          find shards -name '*.jsonl' -exec cat {} + >gungraun-summaries.jsonl
           mkdir -p perf-regressions
           ./scripts/gungraun-report.sh \
             --regressions-out perf-regressions/has_regressions \
-            gungraun-summaries.jsonl "$label" >>"$GITHUB_STEP_SUMMARY"
+            gungraun-summaries.jsonl "baseline" >>"$GITHUB_STEP_SUMMARY"
 
-      # The one output that crosses into `perf-label.yml`: a boolean. The
-      # report markdown deliberately stays in the step summary — nothing
+      # The one output that crosses into `perf-label.yml`: a boolean, under the
+      # artifact name and file name that workflow reads. It moved job, which
+      # that workflow cannot observe — it downloads by name from the triggering
+      # *run* — so the contract is unchanged and the label half needs no edit.
+      # The report markdown deliberately stays in the step summary; nothing
       # fork-authored is ever re-posted by a privileged workflow. Gated on the
       # report step's *outcome* because that step is `continue-on-error`: a
       # report that died must not hand over a stale or half-written flag.
@@ -1044,7 +1281,7 @@ jobs:
     # protection — so a gate without `always()` is strictly worse than no gate,
     # because it green-lights exactly the runs it exists to stop.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom, alloc-assertions, perf-counters]
+    needs: [changes, lint, workflows, deny, changelog, test, doctests, features, msrv, containers, site, loom, alloc-assertions, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

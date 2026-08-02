@@ -37,6 +37,15 @@ inputs:
       instead of writing one each. Leave empty to skip caching entirely.
     required: false
     default: ""
+  cache-save:
+    description: >
+      Whether this job may write its cache entry. "auto" (the default) writes
+      from `main` only. "never" makes the job a pure consumer, for an entry a
+      single dedicated job is meant to own — several jobs sharing one key race
+      to write it the first time it is missing, and the fastest job wins, which
+      is reliably the one that built the least.
+    required: false
+    default: auto
 
 runs:
   using: composite
@@ -61,8 +70,16 @@ runs:
     # building cold *while still paying the upload*. Writing only from main
     # gives one warm baseline that every PR restores from — legal because a run
     # may read its own branch, the default branch, and its PR base.
+    #
+    # `cache-save: never` narrows that further, to an entry whose contents are
+    # meant to come from one named job. rust-cache writes when the key was not
+    # an exact hit, so on the first run after a lockfile bump every job sharing
+    # the key writes concurrently and the first to finish is the one that
+    # persists — the job that compiled the least. An entry a matrix restores
+    # from has to be filled by the job that compiled the most, so the shards
+    # consume and never produce.
     - if: inputs.shared-key != ''
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         shared-key: ${{ inputs.shared-key }}
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        save-if: ${{ inputs.cache-save != 'never' && github.ref == 'refs/heads/main' }}

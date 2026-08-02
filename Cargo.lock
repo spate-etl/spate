@@ -4019,6 +4019,7 @@ dependencies = [
  "bytesize",
  "chrono",
  "clickhouse",
+ "criterion",
  "crossbeam-channel",
  "foldhash",
  "gungraun",

@@ -42,6 +42,7 @@ rust_decimal = ["dep:rust_decimal"]
 
 [dev-dependencies]
 gungraun = { workspace = true }
+criterion = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls", "test-util"] }
 crossbeam-channel = { workspace = true }
 spate-test = { workspace = true }
@@ -52,10 +53,18 @@ serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
+[[bench]]
+name = "encode"
+harness = false
+
 # gungraun's `main!` is the harness; without this the default libtest one wraps
 # it and rejects the harness's own arguments at run time.
 [[bench]]
 name = "encode_gungraun"
+harness = false
+
+[[bench]]
+name = "route_gungraun"
 harness = false
 
 [lints]

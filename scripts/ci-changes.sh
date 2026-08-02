@@ -665,8 +665,8 @@ if len(set(keys)) != len(keys):
     # silently stops forcing a full re-measurement, which is how a change to
     # the apparatus lands unmeasured.
     for apparatus in scripts/ci-changes.sh scripts/gungraun-benches.sh \
-        scripts/gungraun-report.sh .github/workflows/ci.yml \
-        .github/actions/setup-rust/action.yml; do
+        scripts/gungraun-report.sh scripts/gungraun-collected-region.sh \
+        .github/workflows/ci.yml .github/actions/setup-rust/action.yml; do
         check_paths true "$all_pkgs" "$apparatus selects every benched crate" \
             "$apparatus"
     done
@@ -867,8 +867,8 @@ else
         # compiles the bench graph from scratch — a change that can move every
         # crate's job, without touching a crate.
         scripts/ci-changes.sh | scripts/gungraun-benches.sh | \
-            scripts/gungraun-report.sh | .github/workflows/ci.yml | \
-            .github/actions/*)
+            scripts/gungraun-report.sh | scripts/gungraun-collected-region.sh | \
+            .github/workflows/ci.yml | .github/actions/*)
             bench=true
             bench_pkgs="$bench_pkgs $(all_bench_pkgs)"
             ;;

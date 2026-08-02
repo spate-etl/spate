@@ -235,6 +235,13 @@ jobs:
       # one, so a new check has to be added in both places.
       - run: make check-gungraun-benches
 
+      # The degenerate-region guard's own rule only executes where valgrind
+      # does, which is one job of one tier on some pull requests. Its fixtures
+      # are real profiles and need neither, so they run here on every pull
+      # request — otherwise the guard could stop recognising either shape and
+      # nothing would say so until the next benched change.
+      - run: make check-collected-region
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest
@@ -925,6 +932,29 @@ jobs:
           # bench-gungraun` runs every bench in the tree and stays the local
           # convenience; CI measures only what the change can move.
           ./scripts/gungraun-benches.sh --features "$CARGO_FEATURES" --run "$PACKAGE"
+
+      # A bench can report a plausible number while measuring nothing: the
+      # collected region is bounded by a callgrind toggle, and work the
+      # optimiser leaves in an unstable shape can fall outside it, leaving
+      # glibc's free path counted in its place. Every other signal stays green
+      # through that — the bench builds, runs, exits 0, and renders a row.
+      #
+      # This step gates, and it belongs on the same side of the line as a
+      # bench that no longer builds rather than with the numbers. A count that
+      # moved is advisory because the reader can judge it; a region that
+      # measured the allocator is not a moved number, it is a broken bench,
+      # and its number would become a baseline every later comparison
+      # inherits. So no `continue-on-error` here, deliberately.
+      #
+      # The head leg only. The merge-base leg is scaffolding — it already
+      # carries `continue-on-error` and reports no baseline rather than
+      # failing — and a degenerate bench in code the author did not write is
+      # not theirs to fix.
+      - name: Reject a degenerate collected region
+        env:
+          PACKAGE: ${{ matrix.package }}
+          ARM: ${{ matrix.arm }}
+        run: ./scripts/gungraun-collected-region.sh --shard "$PACKAGE ($ARM)"
 
       # Row identity is stamped, not derived. A gungraun summary describes a
       # bench, not the build that produced it: the package survives only as a

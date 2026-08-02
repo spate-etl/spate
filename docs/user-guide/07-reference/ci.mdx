@@ -435,6 +435,72 @@ the same reason: `ci-gate` counts `cancelled` as failure, so fail-fast would
 turn one real failure into several, all but one of them unattributable, and
 throw away the measurements of every arm that was fine.
 
+### The collected region
+
+A third outcome belongs with the second rather than the first: a bench that
+runs and reports a number it did not measure. Collection under callgrind is
+bounded by a toggle on the module the benchmark macro wraps the function in,
+and a toggle flips collection rather than forcing it on — so work the optimiser
+leaves in an unstable shape inside that module can fall outside the collected
+region, and whatever else runs while collection is on is counted in its place.
+That is usually the C runtime freeing a corpus the fixture built outside the
+region. Nothing else in the tier sees it: the bench builds, exits 0, reports a
+plausible count in the millions, satisfies the summary schema, and renders a
+row that every later comparison is then measured against.
+
+`scripts/gungraun-collected-region.sh` reads the callgrind profile each case
+leaves under `target/gungraun` and requires **at least 10% of a case's
+collected instructions to be attributed to the binary under measurement, and at
+least 1,000 of them**. Composition is the primary signal and magnitude
+corroborates it, because a lost region has two faces: one leaves the C runtime
+behind and reports a number nobody would question, the other leaves a handful
+of instructions belonging to the toggled wrapper — application code, so
+composition reads 100% and objects to nothing. Each rule is blind to the face
+the other catches. Every case is judged separately, since a bench does not
+necessarily lose its region in all of them. The
+classification is the ELF object callgrind records against each instruction,
+not a pattern over function names: every crate here and every Rust dependency
+is compiled into the bench executable, so what falls outside it is the C
+runtime the process links dynamically — the allocator, `memcpy`, the loader.
+The binary is identified from the profile's own `cmd:` header, which is the
+program valgrind ran, so no list of library names has to be kept current for
+each platform. The parser is held to callgrind's own arithmetic — the self
+costs it sums must equal the profile's `summary:` line — and refuses to judge a
+profile it cannot account for, rather than computing a share from whatever it
+managed to read.
+
+The threshold is a floor on composition rather than on a count, so it does not
+move when a bench gets faster or slower — and because it is a ratio, it reads
+within a few points of itself on two architectures whose absolute counts do not
+agree at all. Measured across all forty cases, the lowest healthy share is
+33.35% on the runner architecture and 28.67% on the one a reproduction was
+built on, against a reproduced degenerate case at 0.47%. That leaves a gap with
+nothing in it; any threshold inside it separates the two. It sits at the bottom of the gap because the two errors are
+not symmetric — a degenerate bench that passes becomes a baseline every later
+comparison inherits, while a healthy bench that fails blocks a pull request
+that did nothing wrong. The low end of the healthy range is genuine rather than
+marginal: a decoder that allocates a tree per record spends most of its
+instructions inside the allocator, and a guard that condemned it would be
+calling allocation a defect.
+
+This step gates. It runs on the head leg of every shard, labelled with that
+shard's package and arm so a failure in a six-way matrix says which job
+produced it and which case, and it carries no `continue-on-error`: a count that
+moved is advisory because a reader can judge it, and a region that measured the
+allocator is a broken bench. The merge-base leg is exempt for the reason it is
+exempt from everything else — it is scaffolding, and code the author did not
+write is not theirs to fix.
+
+The convention the guard exists to enforce sits on the bench author's side: the
+measured work goes in a named `#[inline(never)]` function the benchmark
+function calls, which is a frame the toggle cannot lose. The benches that
+predate the guard escape the problem because each reaches its workload through
+a single cross-crate call, which has the same property by accident;
+[CONTRIBUTING.md](https://github.com/spate-etl/spate/blob/main/CONTRIBUTING.md)
+states the rule where a bench is written. `make check-collected-region` holds
+the guard to both shapes using captured profiles and needs no valgrind, so it
+runs on every pull request rather than only on a benched one.
+
 A pull request's movement surfaces in two places, and nothing blocks on
 either. The report marks any row that crosses the advisory thresholds —
 instructions up 5%, allocated blocks moving by more than one in either
@@ -499,12 +565,16 @@ a comparison is the drift the single bench list exists to prevent.
 dependency swap, or a refactor that moves code between crates.
 
 The exception is the measuring apparatus. A change to the classifier, the
-discovery script, the report script, `ci.yml` or the shared setup action
-selects every benched crate, whatever crates it touches, because each of them
-can alter the outcome for all of them — the last because which cache a shard
-restores decides whether it compiles the bench graph from scratch. Without that
-rule the pull request rewriting how benches are chosen is the one that never
-runs them — a fail-open in the one classifier built to fail closed.
+discovery script, the report script, the collected-region guard, `ci.yml` or
+the shared setup action selects every benched crate, whatever crates it
+touches, because each of them can alter the outcome for all of them — the last
+because which cache a shard restores decides whether it compiles the bench
+graph from scratch. Without that rule the pull request rewriting how benches
+are chosen is the one that never runs them — a fail-open in the one classifier
+built to fail closed. The list appears twice in `scripts/ci-changes.sh`, in the
+classifying `case` and in the loop `--self-test` walks, so a file added to one
+and not the other fails the gate rather than silently stopping forcing a
+re-measurement.
 
 `make self-test` holds these rules to their word. It asserts the shape of the
 selection — the core crate selecting every benched crate, a benched crate

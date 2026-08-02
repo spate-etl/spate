@@ -160,6 +160,34 @@ about: cargo auto-discovers the file anyway, under the default libtest harness,
 and the bench then compiles cleanly and fails at run time complaining about
 arguments. `make check-gungraun-benches` (part of `make ci-lint`) catches it.
 
+**Put the measured work in a named `#[inline(never)]` function and have the
+benchmark function call it.** This is the one rule about a counted bench that
+cannot be inferred from a working example, and getting it wrong produces a
+number rather than an error. Collection is bounded by a callgrind toggle on the
+module the `#[library_benchmark]` macro wraps the function in, and a toggle
+*flips* collection rather than forcing it on — so work written inline in that
+function can be reshaped by the optimiser until it falls outside the collected
+region, and whatever runs while collection happens to be on is counted instead.
+What that turns out to be is glibc tearing down the corpus the fixture built.
+One bench here reported 858,925 instructions that way, every one of them in
+`malloc_consolidate` and `unlink_chunk`, with no application frame at all and
+the same total whether its corpus held 400 documents or 6,400; moving the loop
+behind a named callee took it to 30,086,540. The benches that never hit this
+were not written more carefully — each happened to reach its workload through a
+single cross-crate call, which is a frame the toggle cannot lose. A named
+`#[inline(never)]` callee is how a bench gets that property on purpose.
+
+`scripts/gungraun-collected-region.sh` enforces it, from the callgrind profile
+rather than from the source: a case must attribute at least 10% of its
+collected instructions to the binary under measurement — against a real spread
+that bottoms out at 33.35% on the runner architecture and 28.67% on arm64 — and
+must collect at least 1,000 of them, since a region can also be lost by leaving
+almost nothing rather than by leaving the allocator. `make bench-gungraun` runs
+it after the benches, and CI runs it per shard as a *gate* — the counts are
+advisory, a bench measuring the allocator is not. `make check-collected-region`
+checks the guard itself against captured profiles of both shapes, and needs no
+valgrind.
+
 Measuring a crate under more than one compiled feature arm *is* a second edit:
 CI runs one job per (package, arm), and the arm table lives in
 `feature_arms_for` in `scripts/ci-changes.sh`. Add an arm when a feature swaps

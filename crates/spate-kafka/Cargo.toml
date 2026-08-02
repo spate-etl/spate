@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+gungraun = { workspace = true }
 spate-test = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -40,6 +41,14 @@ serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# gungraun's `main!` is the harness; without this the default libtest one wraps
+# it and rejects the harness's own arguments at run time. Runs only where
+# valgrind and a same-version `gungraun-runner` are installed — see
+# `make bench-gungraun`.
+[[bench]]
+name = "encode_gungraun"
+harness = false
 
 [lints]
 workspace = true

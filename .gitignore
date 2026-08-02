@@ -24,6 +24,14 @@ id_ed25519*
 credentials
 secrets/
 
+# Exploratory benchmark output. `make bench-ab` writes here rather than to
+# benchmarks/results/, so a local sweep cannot become a published record by
+# being caught in `git add -A`. Committing a curated record stays a deliberate
+# act — the site renders everything under results/, and a number measured on a
+# contended laptop looks identical to one measured on quiet hardware once it
+# is in there.
+/benchmarks/tuning
+
 # Docusaurus docs site (website/)
 website/node_modules
 website/build

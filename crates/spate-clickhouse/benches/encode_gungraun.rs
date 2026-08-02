@@ -9,12 +9,30 @@
 //! published on the ClickHouse format page from a wall-clock measurement; this
 //! is the counted number underneath it.
 //!
-//! The two schemas exercise different halves of the encoder. `events` is wide
+//! The schemas exercise different halves of the encoder. `events` is wide
 //! and string-heavy — LowCardinality dictionaries, a Nullable null-map, an
 //! Array with its offsets, a Decimal — while `metrics` is narrow and almost
 //! entirely fixed-width. A change that speeds up dictionary handling and slows
 //! down fixed-width columns moves the two in opposite directions, which either
 //! schema alone would hide.
+//!
+//! `exotic` is the third, and Native-only. It holds the column types neither
+//! of the others reaches — `Map`, `Tuple`, `FixedString`, the fixed-width
+//! blobs (`UUID`, `IPv6`, `Int256`, `UInt256`), `Enum8`/`Enum16` and
+//! `LowCardinality(Nullable(String))` — each of which has its own
+//! [`ColumnWriter`](spate_clickhouse::native) arm, several of them bypassing
+//! the column serializer for a raw byte sink.
+//!
+//! Native-only is a limit, not an absence. RowBinary here is this crate's own
+//! serializer, not the `clickhouse` crate's, and `exotic` does reach arms of
+//! it that no other corpus does: `serialize_map`, `serialize_tuple` (both
+//! tuples and the `[u8; N]` lowering the 256-bit and address types use), and
+//! the `Int8`/`Int16` leaves the enums serialize through. What RowBinary does
+//! not have is a *per-column-type* writer — it is driven by the row struct,
+//! so the exotic corpus adds arms rather than a structure. Counting a fourth
+//! encoder case for those arms would have matched the wall-time sibling case
+//! for case, which is the thing this tier deliberately does not do; the
+//! sibling carries `rowbinary_exotic` and the scheduled comparison runs it.
 //!
 //! The measured region is a whole chunk, not one row. A ClickHouse insert is a
 //! block: per-row work is only meaningful amortised over one, and the Native
@@ -42,7 +60,7 @@ use std::hint::black_box;
 #[path = "support/rows.rs"]
 mod rows;
 
-use rows::{EventRow, MetricRow, ROWS};
+use rows::{EventRow, ExoticRow, MetricRow, ROWS};
 
 /// A record carrying one row. The ack receiver is leaked rather than dropped
 /// so that resolving a batch cannot enqueue on a live channel and make the
@@ -117,6 +135,10 @@ fn native_metrics() -> Rig<NativeEncoder<Owned<MetricRow>>, MetricRow> {
     native_rig(&rows::metric_columns(), rows::metrics(ROWS))
 }
 
+fn native_exotic() -> Rig<NativeEncoder<Owned<ExoticRow>>, ExoticRow> {
+    native_rig(&rows::exotic_columns(), rows::exotic(ROWS))
+}
+
 fn rowbinary_events() -> Rig<ClickHouseEncoder<Owned<EventRow>>, EventRow> {
     rowbinary_rig(rows::events(ROWS))
 }
@@ -149,6 +171,15 @@ fn encode_native_metrics(
 }
 
 #[library_benchmark]
+#[bench::native_exotic(native_exotic())]
+fn encode_native_exotic(
+    mut rig: Rig<NativeEncoder<Owned<ExoticRow>>, ExoticRow>,
+) -> Rig<NativeEncoder<Owned<ExoticRow>>, ExoticRow> {
+    encode_chunk(&mut rig);
+    rig
+}
+
+#[library_benchmark]
 #[bench::rowbinary_events(rowbinary_events())]
 fn encode_rowbinary_events(
     mut rig: Rig<ClickHouseEncoder<Owned<EventRow>>, EventRow>,
@@ -171,6 +202,7 @@ library_benchmark_group!(
     benchmarks =
         encode_native_events,
         encode_native_metrics,
+        encode_native_exotic,
         encode_rowbinary_events,
         encode_rowbinary_metrics
 );

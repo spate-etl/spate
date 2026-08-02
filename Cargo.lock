@@ -4021,6 +4021,7 @@ dependencies = [
  "clickhouse",
  "crossbeam-channel",
  "foldhash",
+ "gungraun",
  "humantime-serde",
  "hyper",
  "proptest",

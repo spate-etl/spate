@@ -180,7 +180,17 @@ run() {
         # read stdin would swallow the remaining benches and the run would
         # report success having measured a subset — which the base leg would
         # then save as a complete baseline.
-        if (set -x; cargo bench -p "$pkg" --locked --bench "$bench" </dev/null); then
+        # THROWAWAY PROBE — do not merge. spate-json's `simd` backend uses
+        # runtime CPU-feature dispatch, and nothing has ever built it under
+        # callgrind. Hardcoded here to find out whether valgrind survives it
+        # and whether the resulting counts are reproducible; a real feature
+        # axis would be declared, not baked into the runner.
+        local probe_features=()
+        if [[ "$pkg" == "spate-json" ]]; then
+            probe_features=(--features simd)
+        fi
+        if (set -x; cargo bench -p "$pkg" --locked --bench "$bench" \
+            ${probe_features[@]+"${probe_features[@]}"} </dev/null); then
             ran=$((ran + 1))
         else
             echo "gungraun-benches.sh: $pkg --bench $bench failed" >&2

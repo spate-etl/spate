@@ -286,6 +286,12 @@ regression suite is therefore split by what varies:
   corpora are generated from a fixed sequence and asserted reproducible
   (`crates/spate-s3/tests/bench_fixtures.rs`), because a count is only
   comparable when both legs packed byte-identical input.
+  Where a format crate wraps a third-party parser, the wall-clock bench keeps
+  cases that call the parser directly and the counted bench measures the
+  crate's own path over the same bytes. The first is a floor — what the
+  underlying library costs — and the second is what the framework adds to it;
+  reading the second without the first turns a parser's regression into an
+  unexplained framework one.
   The instruction counts are advisory: the comparison lands in the pull-request
   summary without a blocking threshold, movement past the advisory thresholds
   surfaces as the `affects-performance` label, and a bench that fails to build

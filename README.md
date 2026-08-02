@@ -1,23 +1,83 @@
-# Spate
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-dark.png">
+  <source media="(prefers-color-scheme: light)"
+          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-light.png">
+  <img alt="spate"
+       src="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-light.png"
+       width="380">
+</picture>
+
+**A high-performance, at-least-once ETL pipeline framework for Rust.**
+
+*spate* /speɪt/ — a river in sudden flood.
 
 [![crates.io](https://img.shields.io/crates/v/spate.svg)](https://crates.io/crates/spate)
+[![CI](https://img.shields.io/github/actions/workflow/status/spate-etl/spate/ci.yml?branch=main&label=CI)](https://github.com/spate-etl/spate/actions/workflows/ci.yml?query=branch%3Amain)
+[![coverage](https://img.shields.io/codecov/c/github/spate-etl/spate?branch=main)](https://app.codecov.io/gh/spate-etl/spate)
 [![docs.rs](https://img.shields.io/docsrs/spate)](https://docs.rs/spate)
-[![CI](https://github.com/spate-etl/spate/actions/workflows/ci.yml/badge.svg)](https://github.com/spate-etl/spate/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/spate-etl/spate/branch/main/graph/badge.svg)](https://codecov.io/gh/spate-etl/spate)
-[![Documentation](https://img.shields.io/badge/docs-spate.kainth.dev-e8590c)](https://spate.kainth.dev/)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](https://blog.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/crates/msrv/spate)](https://blog.rust-lang.org/)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/spate-etl/spate/badge)](https://scorecard.dev/viewer/?uri=github.com/spate-etl/spate)
 
-A high-performance, at-least-once ETL pipeline framework for Rust.
+[Documentation](https://spate.kainth.dev/) ·
+[Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart) ·
+[Examples](crates/spate/examples) ·
+[Benchmarks](docs/benchmarks) ·
+[Changelog](CHANGELOG.md)
 
-Spate provides the abstractions for streaming Extract-Transform-Load pipelines:
-an operator graph you write in Rust and chain into a single monomorphized loop,
-CPU-pinned processing threads over zero-copy borrowed records, checkpoint-driven
-source commits, sharded and replicated asynchronous sinks, built-in
-backpressure, and first-class Prometheus metrics — measured at **~9 ns/record
-with zero per-record allocations** through a realistic operator chain (see
-[docs/benchmarks/](docs/benchmarks/)).
+</div>
+
+---
+
+## Why Spate
+
+Moving a stream into a warehouse usually means choosing between two shapes.
+Take a general-purpose stream processor and you inherit its delivery
+guarantees and its operational maturity, but your transformations are written
+in whatever language that runtime accepts, and the runtime is not yours to
+profile. Write the consumer loop yourself and you get the opposite trade: your
+language, your allocator, your profile — and every guarantee is now your
+problem, including the ones you find out about in production.
+
+Spate is the third shape. Transformations are ordinary Rust functions,
+monomorphized into the pipeline rather than interpreted by it. Delivery,
+backpressure, checkpointing, rebalancing and drain-on-shutdown belong to the
+framework, and the properties they hold to are written down, numbered, and
+tested rather than described.
+
+The name is the workload: more water arriving than the channel was built for.
+
+## How it works
+
+One process runs one pipeline, in four stages. The property each stage holds
+to is stated and numbered in [docs/DESIGN.md](docs/DESIGN.md), so a claim
+below is something you can go and check.
+
+**Extract** — one consumer per process. Partitions fan out across CPU-pinned
+threads as zero-copy lanes, so a record is read from the source buffer and
+never copied on the way in. A thread that cannot keep up pauses its lanes and
+keeps polling; it never blocks on a channel send, because a blocked poll loop
+is how a consumer gets evicted from its group.
+
+**Transform** — operators are stateful closures chained in Rust. A chain
+compiles to a single loop over borrowed records with no per-record
+allocation. Record-level failure is `Skip` or `Fail`, never a silent drop:
+both are surfaced through metrics.
+
+**Load** — sinks are sharded and replicated, running asynchronously on a
+shared I/O runtime. The chain routes rows into bounded per-shard queues;
+workers merge chunks, seal batches, rotate replicas and retry. The queue
+bound is the backpressure signal that reaches all the way back to Extract.
+
+**Observe** — a source watermark advances only behind data the sink has
+acknowledged as durable, so commits trail delivery rather than leading it.
+Instrumentation is built on the [`metrics`](https://crates.io/crates/metrics)
+facade, so any recorder in that ecosystem works; a Prometheus scrape endpoint
+and health probes ship on the admin server.
+
+## Install
 
 ```toml
 [dependencies]
@@ -30,41 +90,61 @@ compiles the Kafka tree and never resolves `rdkafka` into its lockfile.
 ## A taste
 
 Operators are stateful closures composed into one monomorphized loop; YAML
-carries the tuning and connector configuration:
+carries the tuning and connector configuration. This is a whole program —
+against in-memory mocks, so it needs no infrastructure to build or run:
 
-```rust,ignore
-let chains = move |_thread| {
-    chain_owned::<Order, _>(avro.clone())
-        .with_metrics("orders", "main")
-        .try_map(validate, ErrorPolicy::Skip)
-        .map(enrich)
-        .sink(ClickHouseEncoder::new(), KeyHashRouter,
-              ChunkConfig::default(), queues.clone(), budget.clone())
-        .build()
-};
-PipelineRuntime::new(config, kafka_source, chains, sink, budget).run()?;
+```rust,no_run
+use spate::prelude::*;
+use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = PipelineConfig::from_str(
+        "pipeline: { name: demo, threads: 1 }\n\
+         checkpoint: { interval: 100ms }\n\
+         source: { memory: {} }\n\
+         sink: { capture: {} }",
+    )?;
+    let (source, _handle) = memory_source();
+    let (sink, _script) = capture_sink(1, 1);
+
+    let report = Pipeline::from_config(config)?
+        .sink(sink)?
+        .chains(|ctx| {
+            // The sink's YAML `chunk:` block, bound before `with_metrics`
+            // takes ownership of `ctx.pipeline`.
+            let chunk_cfg = ctx.chunk();
+            chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
+                .with_metrics(ctx.pipeline, "main")
+                .filter(|word: &Vec<u8>| !word.is_empty())
+                .map(|word: Vec<u8>| word.to_ascii_uppercase())
+                .sink(TestEncoder, KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
+                .build()
+        })
+        .run(source)?;
+
+    report.log();
+    std::process::exit(report.exit_code());
+}
 ```
 
-Start at [`crates/spate/examples`](crates/spate/examples): `memory_pipeline`
-runs with zero infrastructure (`cargo run -p spate --example
-memory_pipeline`); `kafka_avro_to_clickhouse` is the fully-commented
-production assembly; `custom_source_sink` is the connector-author
-tutorial. [`examples/docker`](examples/docker) covers containers and
-Kubernetes (probes, drain timeouts, sizing).
+Swap `memory_source()` for `KafkaSource::from_component_config` and the
+capture sink for a ClickHouse one, and the chain in the middle does not
+change. `run` installs signal handling and blocks until the pipeline has
+drained; tests use `into_runtime` instead, which hands back a shutdown handle
+so they can drive it. A version that scripts records through and asserts on
+what the sink captured runs from the repository:
 
-## Crates
+```sh
+cargo run -p spate --example memory_pipeline
+```
 
-| Crate | Feature | Description |
-|---|---|---|
-| [`spate`](https://crates.io/crates/spate) | — | The facade — the only crate applications depend on. |
-| [`spate-core`](https://crates.io/crates/spate-core) | — | The engine: records and acknowledgements, operator chains, source/sink abstractions, checkpointing, backpressure, config, metrics, the pipeline runtime. |
-| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source and sink on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
-| [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
-| [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Coordinated object-storage backfill source: a leader plans a prefix into splits, workers lease them with fenced progress. |
-| [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
-| [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |
-| [`spate-coordination`](https://crates.io/crates/spate-coordination) | `coordination`, `coordination-nats` | Multi-instance work assignment: leader-computed sticky assignment over a pluggable store. |
-| [`spate-test`](https://crates.io/crates/spate-test) | — | In-memory sources and sinks with scripting handles — test your pipelines without infrastructure. |
+Start at [`crates/spate/examples`](crates/spate/examples):
+`kafka_avro_to_clickhouse` is the fully-commented production assembly,
+`custom_source_sink` is the connector-author tutorial, and
+`s3_coordinated_backfill` runs two instances sharing one bounded backfill
+without either duplicating it.
+[`examples/docker`](examples/docker) covers containers and Kubernetes —
+probes, drain timeouts, sizing.
 
 ## Delivery semantics, honestly
 
@@ -78,16 +158,68 @@ with new boundaries and will land rows twice** — design target tables to
 tolerate that (`ReplacingMergeTree` with a version column is the sanctioned
 ClickHouse pattern).
 
+## Connectors
+
+| Crate | Feature | Role |
+|---|---|---|
+| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source and sink on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
+| [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
+| [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Coordinated object-storage backfill source: a leader plans a prefix into splits, workers lease them with fenced progress. |
+| [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
+| [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |
+| [`spate-coordination`](https://crates.io/crates/spate-coordination) | `coordination` | Multi-instance work assignment: leader-computed sticky assignment over a pluggable store. |
+
+And the framework itself:
+
+| Crate | Role |
+|---|---|
+| [`spate`](https://crates.io/crates/spate) | The facade — the only crate applications depend on. |
+| [`spate-core`](https://crates.io/crates/spate-core) | The engine: operator chains, source and sink abstractions, checkpointing, backpressure, config, metrics, the runtime. |
+| [`spate-test`](https://crates.io/crates/spate-test) | In-memory sources and sinks with scripting handles — test your pipelines without infrastructure. |
+
+Each connector feature turns on one crate. Finer knobs — a SIMD JSON backend,
+TLS and SASL for Kafka, `chrono`/`time`/`uuid`/`rust_decimal` column types for
+ClickHouse, a NATS JetStream store for coordination — are separate features,
+listed with what they pull in on [docs.rs](https://docs.rs/spate). Writing your
+own connector is a supported path, not a fork: see
+[`custom_source_sink`](crates/spate/examples/custom_source_sink.rs).
+
+## Performance
+
+Single-node throughput is the point of the design, so it is measured rather
+than asserted. Every change runs allocation assertions and instruction-count
+benchmarks in CI, and the benchmark suite records throughput and latency
+against a versioned schema so results stay comparable across releases.
+
+Methodology and current numbers — including the A/B studies that settled the
+consumer topology, chunk sizing and deserializer choice — are in
+[docs/benchmarks/](docs/benchmarks).
+
+## Testing
+
+The guarantees above are claims, so they are tested rather than asserted.
+proptest covers the checkpoint tracker, the codecs and the assignment
+protocol across seven crates. loom models the tracker's concurrency
+directly, which is why that module stays synchronous and free of async
+runtime types. Kafka runs against librdkafka's `MockCluster` on every pull
+request; brokers, ClickHouse and object stores run against real containers
+whenever a change reaches them, and on a schedule regardless. The
+work-assignment invariants each
+[name the property test that enforces them](docs/user-guide/02-concepts/08-work-assignment.mdx).
+
+The most useful contribution is one that proves a delivery guarantee wrong.
+
 ## Documentation
 
 The full documentation site — the user guide plus the generated API reference —
 is published at **<https://spate.kainth.dev/>** (source in
 [`website/`](website), content in [`docs/`](docs)).
 
-- [docs/DESIGN.md](docs/DESIGN.md) — architecture and the decision log.
+- [docs/DESIGN.md](docs/DESIGN.md) — architecture, the numbered invariants,
+  and the decision log.
 - [docs/METRICS.md](docs/METRICS.md) — every metric, its labels, and
   alerting starting points.
-- [docs/benchmarks/](docs/benchmarks/) — methodology and measured
+- [docs/benchmarks/](docs/benchmarks) — methodology and measured
   results, including the consumer-topology A/B that shaped the Kafka
   connector.
 - [examples/docker](examples/docker) — containers and Kubernetes.
@@ -100,9 +232,10 @@ changes ship in a minor bump and are called out in
 
 ## Contributing
 
-The most useful contribution is one that proves a delivery guarantee wrong.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the invariants, the gates, and how
 changes land; the [Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
+[AI_POLICY.md](AI_POLICY.md) covers what a contribution has to withstand,
+whatever wrote it.
 
 Vulnerabilities go through
 [GitHub's private advisory flow](https://github.com/spate-etl/spate/security/advisories/new),

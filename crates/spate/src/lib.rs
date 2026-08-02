@@ -170,3 +170,14 @@ pub use spate_s3 as s3;
 /// + in-memory store). The seam and driver need no feature.
 #[cfg(feature = "coordination")]
 pub use spate_coordination as coordination;
+
+/// Compile-checks the README's example, so it cannot drift from the builder
+/// API the way an `ignore`d block silently did.
+///
+/// `cfg(doctest)` is stripped before macro expansion, so `include_str!` never
+/// runs in an ordinary build — the README escaping this crate's directory
+/// cannot break `cargo publish`, and the file is not appended to the rendered
+/// documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;

@@ -1,13 +1,48 @@
 //! Instruction counts for the operator-chain hot path (gungraun).
 //!
-//! The same two rigs `benches/chain.rs` times, counted instead of timed:
-//! callgrind's instruction count is deterministic, so it compares across the
-//! shared CI runners where a wall-clock number is only noise. DHAT runs
-//! alongside callgrind in the same invocation, so both cases also report
-//! deterministic heap counts. `tests/chain_alloc.rs` bounds the chain's
-//! allocation *count* absolutely; DHAT adds bytes and the t-gmax peak, which
-//! a buffer that doubles in place moves without a new allocation. Two cases,
-//! not the full divan matrix — callgrind runs the workload under emulation.
+//! One shape — one poll batch of 512 payloads through deserialize → filter →
+//! flat_map → encode → handoff, drained to encoded chunks — parameterised by
+//! the three things the terminal stage varies in production, plus the
+//! borrowed-versus-owned payload contrast `benches/chain.rs` times:
+//!
+//! - **The router.** `borrowed` pins a constant router over a keyless
+//!   corpus: no key is hashed and every record lands on shard 0.
+//!   `keyed_one_shard` is the same batch under the production
+//!   [`KeyHashRouter`](spate_core::sink::KeyHashRouter) over a keyed corpus,
+//!   which is what a source that carries message keys actually pays — a
+//!   stable hash of every key during deserialization, and a modulo per record
+//!   in the terminal stage. Read against `borrowed`, the pair is the price of
+//!   real routing.
+//! - **The shard count.** Every shard owns its own encoder clone, chunk
+//!   buffer and `AckSet`, and `flush` seals each of them, so the stage's
+//!   bookkeeping scales with shards while the record count does not.
+//!   `keyed_sixteen_shards` is `keyed_one_shard` with the same records spread
+//!   sixteen ways.
+//! - **The chunk target.** The default 64 KiB target is above everything one
+//!   batch encodes, so the baselines never trip the seal check — the batch's
+//!   one chunk seals at `flush`. `chunk_half_batch` seals 2 chunks and
+//!   `chunk_sixteenth_batch` 16, so the 14-seal gap between them prices
+//!   `seal_and_send`: `BytesMut::split`, the fresh `reserve`, the in-flight
+//!   budget update, the `AckSet` hand-off, the next chunk's `Instant::now`,
+//!   and the queue `try_send`. Both targets divide the batch's encoding
+//!   exactly, so every one of those seals fires inside `push` and `flush`
+//!   finds the shard empty — the pair prices the steady-state seal, not the
+//!   flush-time partial one the baselines carry.
+//!
+//! Deliberately absent are the interior points of the two swept axes — four
+//! shards, a quarter-batch target — and every product of one axis with
+//! another. Both axes are linear in the stage by construction (a shard is a
+//! buffer and a seal; a smaller target is more seals of the same code), so
+//! their endpoints fix the slope and a midpoint only re-measures it. Six
+//! cases, not eighteen: callgrind runs the workload under emulation, and the
+//! divan sibling carries the fuller sweep at wall-clock prices.
+//!
+//! DHAT runs alongside callgrind in the same invocation, so every case also
+//! reports deterministic heap counts. `tests/chain_alloc.rs` bounds the
+//! chain's allocation *count* absolutely; DHAT adds bytes and the t-gmax
+//! peak, which a buffer that doubles in place moves without a new allocation
+//! — and which the seal cases move on purpose, since each seal hands off its
+//! allocation and reserves another.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
 //! exists on every developer machine: run it with `make bench-gungraun`.
@@ -23,7 +58,7 @@ use std::hint::black_box;
 #[path = "support/chain_rig.rs"]
 mod chain_rig;
 
-use chain_rig::{Rig, borrowed_rig, owned_rig};
+use chain_rig::{BORROWED_BATCH_BYTES, Rig, Routing, borrowed_rig, borrowed_rig_with, owned_rig};
 
 /// Build the rig and drive one batch through it, so the measured batch sees
 /// warm shard queues and chunk buffers. Everything a `#[bench]` argument
@@ -33,15 +68,47 @@ fn warmed(mut rig: Rig) -> Rig {
     rig
 }
 
+/// The production `KeyHashRouter` over a keyed corpus, at `shards` shards and
+/// the default chunk target.
+fn keyed(shards: usize) -> Rig {
+    warmed(borrowed_rig_with(
+        Routing::KeyHash,
+        shards,
+        spate_core::ops::ChunkConfig::default().target_bytes,
+    ))
+}
+
+/// The `borrowed` baseline with a chunk target of `BORROWED_BATCH_BYTES /
+/// divisor`, which seals `divisor` chunks per batch, all of them inside
+/// `push`. The rig builder rejects a divisor that would overshoot the target
+/// mid-payload instead.
+fn sealing(divisor: usize) -> Rig {
+    warmed(borrowed_rig_with(
+        Routing::Fixed,
+        1,
+        BORROWED_BATCH_BYTES / divisor,
+    ))
+}
+
 // One batch of 512 payloads through the chain.
 //
 // Returns the rig rather than dropping it: a value moved into the benchmark
 // function is dropped inside the collected region, which would charge the
 // count for tearing down the chain and its queues. A `///` comment here is a
 // `#[doc]` attribute, which `#[library_benchmark]` rejects.
+//
+// Every per-record cost is `spate_core`'s and reached through the boxed
+// `RunnableChain` seam — a cross-crate virtual call the optimiser cannot
+// reshape into this module. What the rig itself contributes to the region is
+// the batch's payload callbacks and the drain sweep in `Rig::drive`; both have
+// side effects the compiler must keep, and `black_box` holds the row count.
 #[library_benchmark]
 #[bench::borrowed(warmed(borrowed_rig()))]
 #[bench::owned(warmed(owned_rig()))]
+#[bench::keyed_one_shard(keyed(1))]
+#[bench::keyed_sixteen_shards(keyed(16))]
+#[bench::chunk_half_batch(sealing(2))]
+#[bench::chunk_sixteenth_batch(sealing(16))]
 fn push_batch(mut rig: Rig) -> Rig {
     black_box(rig.drive());
     rig

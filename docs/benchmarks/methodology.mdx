@@ -303,6 +303,23 @@ regression suite is therefore split by what varies:
   profile) travels with the data, recorded on a quiet machine. Wall-clock
   comparisons never gate a pull request, and benchmark numbers are never
   hand-written into the docs.
+- **Arms are interleaved, and a discarded pass runs first.** A rig that
+  repeats a measurement runs every arm once per repetition rather than
+  finishing one arm before starting the next, because anything that drifts
+  over a run — thermal state, page cache, a neighbour on the host — otherwise
+  lands entirely on whichever arm went last. Interleaving alone is not
+  sufficient: the first repetition still has to put some arm first, and that
+  arm absorbs the cold-start cost. Measured on the object-storage backfill,
+  the leading arm's interval came out ±74% of its mean against ±1.4% for the
+  one behind it, and swapping the order moved the penalty with the position
+  rather than with the codec — enough to change which arm looked faster. One
+  discarded pass over every arm before any measurement brings all of them
+  inside ±3% and makes the result independent of order.
+  Repeated runs report a Student-t interval and the repetition count beside
+  the value, so a reader can tell a difference from a spread. Student-t rather
+  than a normal approximation because a benchmark repeats five times, not a
+  thousand, and an interval that is too narrow is what turns noise into an
+  apparent result.
 
 ## Accounting note (2026-07 correction) {#accounting-note}
 

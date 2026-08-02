@@ -4120,6 +4120,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "bytesize",
+ "gungraun",
  "humantime-serde",
  "metrics",
  "metrics-exporter-prometheus",

@@ -708,14 +708,39 @@ jobs:
       # No `RESULTS`, so nothing is written. One arm each: enough to prove the
       # rig runs, not a sweep.
       - run: cargo build --release -p benchmarks --locked
-      - name: Smoke three rigs that need no broker or container
+      # Which rigs to run comes from the classifier, and what "small" means for
+      # each comes from the rig. This step therefore names no rig: a list here
+      # would be a second one to keep in step, and the parameters that shrink a
+      # run are the rig's own — `pipeline_synthetic` alone has sixteen knobs.
+      - name: Smoke the rigs classified as runnable
         env:
           BENCH_TRIGGER: ci
+          SMOKE: 1
         run: |
           set -euo pipefail
-          RUN_ONE=1 THREADS=2 DURATION_S=3 ./target/release/pipeline_synthetic
-          OBJECTS=2 RECORDS_PER_OBJECT=500 CODECS=none REPS=1 ./target/release/s3_backfill
-          REPS=1 DURATION_S=1 EVENTS=10 ./target/release/deser_formats
+          # Materialised, not piped in: a process substitution whose producer
+          # died iterates zero times and reports success, so a classifier that
+          # crashed after printing nothing would leave this step green having
+          # smoked nothing. The classifier itself materialises its own diff for
+          # the same reason.
+          rigs=$(mktemp)
+          trap 'rm -f "$rigs"' EXIT
+          ./scripts/ci-changes.sh --wallclock-rigs-all >"$rigs"
+          # An empty runnable set would smoke nothing and say so; the classifier
+          # cannot produce one without failing its own self-test, but this step
+          # should not be the place that discovers otherwise.
+          if [ ! -s "$rigs" ]; then
+            echo "::error::the classifier named no runnable rig; this step proved nothing."
+            exit 1
+          fi
+          # Each rig gets its own stdin. Sharing the loop's would let a rig that
+          # ever read stdin swallow the remaining names, ending the loop early
+          # and exiting 0 having smoked a subset.
+          while IFS= read -r rig; do
+            [ -n "$rig" ] || continue
+            echo "=== $rig ==="
+            "./target/release/$rig" </dev/null
+          done <"$rigs"
 
   # ===========================================================================
   # Catch-all failure reporting.

@@ -279,10 +279,11 @@ those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
 
 That tier also *runs* what it compiled, and discards the timings. The criterion
-benches execute with their measurement windows cut to a second, and three rigs
-that need no broker or container run briefly with no results path — enough to
-catch a panic or a configuration a rig can no longer parse, which linking alone
-does not. A step then asserts each criterion group produced output by name,
+benches execute with their measurement windows cut to a second, and the rigs
+that need no broker or container and are not otherwise excluded run briefly with
+no results path — enough to catch a panic or a configuration a rig can no longer
+parse, which linking alone does not. A step then asserts each criterion group
+produced output by name,
 because a bench that quietly runs nothing still exits 0. No comparison is made:
 a hosted runner cannot say whether a wall-clock number moved.
 
@@ -654,6 +655,89 @@ request run and a scheduled one carry the same trigger. And an A/B comparison
 is barred even when it was measured on a quiet machine: its arms are chosen to
 separate two builds, not to describe a shipping configuration, so drawn beside
 a baseline an arm chosen to lose would read as a measurement of the framework.
+
+### Which rigs a change drives
+
+The counter tier measures crates and fans out over the benches inside them. A
+wall-clock rig is the other shape: it is a program, and the crates it exercises
+are whichever ones it happens to call — one, several, or none. A change to
+`crates/spate-s3/` should run `s3_backfill` and not `deser_formats`.
+
+`scripts/ci-changes.sh --wallclock-rigs <base> <head>` answers that, and the
+mapping is derived rather than written down. A rig reaches the crates named in
+its own source and in the shared modules under `benchmarks/src/` that it pulls
+in, **closed over their workspace dependencies**.
+
+Each part covers a gap the others leave:
+
+- **Reading `use` lines would undercount what a rig names.** `s3_backfill`
+  reaches `spate_json::NdjsonFramer` through a path expression and imports it
+  nowhere, so a change to `crates/spate-json/` does drive it.
+- **Reading the rig alone would miss what its shared code links.** A crate
+  called from `benchmarks/src/` is in the binary either way. The walk parses
+  rather than greps, because a doc comment naming a crate is not a reference to
+  it, `rustfmt` wraps a long `use benchmarks::{…}` across lines, and shared
+  modules reach each other as `crate::x`.
+- **Stopping at what a rig names would undercount what it runs.**
+  `s3_backfill` names `spate-s3`, which depends on `spate-coordination` and
+  builds a memory store unconditionally, so coordination code executes on every
+  backfill though the rig mentions it nowhere.
+
+The closure follows normal dependencies only. Neither a dev-dependency nor a
+build-dependency is linked into the rig binary. It is not feature-aware, so the
+`spate` facade would reach every connector it can enable; no rig names the
+facade, and `--self-test` fails if one starts to.
+
+Three rules select from that mapping. A change to `crates/spate-core/` drives
+every rig, because everything depends on it. Any other crate drives the rigs
+that *reach* it — the closure, not the naming, which is why a change to
+`crates/spate-coordination/` drives `s3_backfill` — and that is none for
+`crates/spate-kafka/` and `crates/spate-clickhouse/`, whose every rig is
+excluded. And a change to the apparatus drives everything: the rigs themselves,
+`scripts/ci-changes.sh`, `scripts/bench-compare.sh`, the `Makefile`,
+`.github/workflows/scheduled.yml`, `.github/actions/`, and what pins the build
+— `Cargo.lock`, the root manifest, `deny.toml`, a toolchain file and the cargo
+and nextest configs. Each moves every measurement without any measured file
+changing. That list is not the counter tier's: it omits that tier's own
+scripts and `ci.yml`, and adds the lockfile, which the counter tier leaves out
+because a dependency bump moves a wall-clock number while leaving the
+instruction count of a bench that never calls the dependency alone.
+
+A rig is excluded for one of two reasons, and both are recorded beside the
+lists in `scripts/ci-changes.sh`. Most need a broker or a database server, so
+they are run by hand on identified hardware rather than in CI; their numbers are
+published from `benchmarks/results/` like any other. `s3_backfill_coordinated`
+is the exception: it needs no infrastructure and is excluded because it cannot
+run, two of its instances claiming one gauge series
+([#89](https://github.com/spate-etl/spate/issues/89)). Exclusion is a property
+of the rig, not of the crates it exercises — `spate-coordination` is reached by
+the excluded `s3_backfill_coordinated` and by the runnable `s3_backfill`, and a
+change to it drives the latter.
+
+Every rig is classified exactly once, runnable or excluded. `--self-test` fails
+if a rig under `benchmarks/src/bin/` is in neither list, or if a runnable one
+names no crate — a rig added and left out of both would be silently
+undriveable, which is the failure the seam exists to prevent. It does *not*
+re-check that an exclusion reason is still true; when #89 is fixed, moving
+`s3_backfill_coordinated` across is a manual step.
+
+Nothing dispatches from this repository, so nothing calls `--wallclock-rigs`
+automatically. The weekly smoke job calls the sibling flag
+`--wallclock-rigs-all`, which prints the runnable set and ignores the diff, and
+runs each name it gets under `SMOKE=1`.
+
+That environment variable is the rig's own affair, and it is why the job names
+no rig. `SMOKE=1` asks for the shortest window, the smallest corpus and one
+repetition — the job criterion's `--test` does for a bench — and what those
+mean is a property of the rig, not of the caller. `pipeline_synthetic` alone
+takes sixteen knobs; a workflow choosing which three to shrink would be a second
+list of rigs to keep in step with the classifier, and would drift from it in
+silence. An explicit setting still wins over the smoke default, so a smoke run
+stays steerable.
+
+Adding a rig therefore touches the classifier and the rig, and nothing else. The
+classification lists are gated on every change — `make self-test` runs in the
+`deny` job — so a rig that is added and left unclassified fails at merge.
 
 ### The wall-clock comparator
 

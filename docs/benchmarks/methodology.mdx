@@ -53,6 +53,19 @@ and the names are case-sensitive — `BENCH_TRIGGER=CI` is an error, not `ci`. A
 typo that quietly became `manual` would produce exactly the record this field
 exists to prevent, so it fails at start-up instead.
 
+### Smoke runs
+
+`SMOKE=1` asks a rig for the shortest window, the smallest corpus and one
+repetition — enough to prove it still runs, and never a measurement. Each rig
+decides what that means for its own parameters, because they are the parameters
+it understands; a caller shrinking a run from outside needs a table of every
+knob, and that table drifts from the rigs it describes. A knob set explicitly
+still wins, so a smoke run remains steerable.
+
+Nothing about a smoke run makes its numbers publishable: it is the weekly tier
+that sets it, `BENCH_TRIGGER=ci` bars that record anyway, and the job writes no
+`RESULTS` path.
+
 ### Memory
 
 Some rigs report `peak_rss_mb`: the high-water mark of the process's resident

@@ -80,10 +80,10 @@ throughput claim.
 3. **At scale** — `benchmarks/e2e_kafka_clickhouse` + `benchmarks/loadgen`
    against local containers or external clusters (env-configured endpoints).
 
-Weekly CI compiles every bench and rig, runs the wall-clock benches, smokes
-three rigs that need no broker or container, and discards every timing: a hosted
-runner cannot say whether a wall-clock number moved. What that tier establishes
-is that nothing has stopped working.
+Weekly CI compiles every bench and rig, runs the wall-clock benches, smokes the
+rigs that need no broker or container and are not otherwise excluded, and
+discards every timing: a hosted runner cannot say whether a wall-clock number
+moved. What that tier establishes is that nothing has stopped working.
 
 The quantities that do hold on any machine are checked elsewhere. Allocation
 counts on the chain hot path are asserted against fixed bounds by a test, on

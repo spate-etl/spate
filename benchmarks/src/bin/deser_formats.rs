@@ -39,6 +39,10 @@
 //! - `REPS`    repetitions for the mean + CI (default 5)
 //! - `COPY_ONLY` `1` measures the memcpy-only baseline instead of decoding (JSON)
 //! - `RESULTS` append the JSONL record to this path
+//!
+//! `peak_rss_mb` is reported at `REPS=1` only: the figure is a maximum, and
+//! `REPS` is not part of a record's variant identity, so a max over five
+//! repetitions and a max over one would be indistinguishable in the schema.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use benchmarks::deser_sample::{self, Order, Reading, SensorBatch};
@@ -395,6 +399,10 @@ fn main() {
         payload.len()
     );
 
+    // Baseline after the payload is built, so the figure describes decoding
+    // rather than the fixture.
+    let watch = benchmarks::rss::PeakWatch::start();
+
     let mut rps_samples = Vec::with_capacity(reps as usize);
     let mut nspe_samples = Vec::with_capacity(reps as usize);
     for r in 0..reps {
@@ -431,21 +439,32 @@ fn main() {
     if shape == "batch" {
         rep = rep.variant("events", events);
     }
-    rep.metric(
-        metric_name,
-        Metric::minimize(nspe_mean, "ns")
-            .with_n(reps)
-            .with_ci(nspe_lo, nspe_hi),
-    )
-    .metric(
-        "records_per_s",
-        Metric::maximize(rps_mean, "records/s")
-            .with_n(reps)
-            .with_ci(rps_lo, rps_hi),
-    )
-    .note(format!(
-        "mean of {reps} reps, 95% Student-t CI (median {:.2}M/s)",
-        median(&rps_samples) / 1e6
-    ))
-    .emit();
+    rep = rep
+        .metric(
+            metric_name,
+            Metric::minimize(nspe_mean, "ns")
+                .with_n(reps)
+                .with_ci(nspe_lo, nspe_hi),
+        )
+        .metric(
+            "records_per_s",
+            Metric::maximize(rps_mean, "records/s")
+                .with_n(reps)
+                .with_ci(rps_lo, rps_hi),
+        )
+        .note(format!(
+            "mean of {reps} reps, 95% Student-t CI (median {:.2}M/s)",
+            median(&rps_samples) / 1e6
+        ));
+    // One arm per invocation — but the repetitions run in this process, and the
+    // figure is a maximum over whatever it spans. `REPS` is not part of the
+    // record's variant identity, so a max over five repetitions and a max over
+    // one are two quantities the schema reads as the same arm. Reported only at
+    // `REPS=1`, which is how a two-build comparison drives it.
+    if reps == 1
+        && let Some(m) = watch.metric()
+    {
+        rep = rep.metric(benchmarks::rss::PeakWatch::KEY, m);
+    }
+    rep.emit();
 }

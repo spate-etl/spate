@@ -24,7 +24,23 @@ pub fn line(i: usize, payload: usize) -> String {
     format!("{head}{}{tail}", "x".repeat(pad))
 }
 
-/// Stages the objects and returns the **decoded** size of one object in bytes.
+/// What a [`stage`] call did, and how big one object decodes to.
+///
+/// `rebuilt` matters to any rig reporting memory: building a corpus grows the
+/// allocator's arenas far past anything the pipeline afterwards needs, and
+/// those arenas are not returned — so a process that staged carries a resident
+/// set that is not comparable with one that reused. The high-water mark cannot
+/// be reset, so the only honest handling is for the rig to report no memory
+/// figure at all from a staging run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Staged {
+    /// Decoded size of one object, in bytes.
+    pub decoded_bytes: u64,
+    /// `true` when this call built the corpus; `false` when it reused one.
+    pub rebuilt: bool,
+}
+
+/// Stages the objects and reports the **decoded** size of one object in bytes.
 ///
 /// The caller reports throughput against this rather than against
 /// `records * payload`: [`line`] pads to a fixed width only while there is room
@@ -38,7 +54,7 @@ pub fn stage(
     objects: usize,
     records: usize,
     payload: usize,
-) -> u64 {
+) -> Staged {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).expect("data dir");
     std::fs::create_dir_all(dir.join("state")).expect("state dir");
@@ -56,7 +72,10 @@ pub fn stage(
             && staged_files() == objects
             && let Ok(decoded) = decoded.parse::<u64>()
         {
-            return decoded;
+            return Staged {
+                decoded_bytes: decoded,
+                rebuilt: false,
+            };
         }
     }
 
@@ -116,5 +135,8 @@ pub fn stage(
         format!("v1\t{codec}\t{objects}\t{records}\t{payload}\t{decoded}\n"),
     )
     .expect("write corpus manifest");
-    decoded
+    Staged {
+        decoded_bytes: decoded,
+        rebuilt: true,
+    }
 }

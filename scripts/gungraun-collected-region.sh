@@ -74,8 +74,10 @@
 #
 # ## The threshold, and why it is where it is
 #
-# Measured over every case in the tree — 40 of them across the six shards, on
-# both architectures this repository is measured on:
+# Measured over every case in the tree, on both architectures this repository
+# is measured on. A count of cases is deliberately not quoted: the tree gains
+# benches, and a number here would go stale while the measurement it stands for
+# did not. Re-measured as benches landed, these have not moved.
 #
 #                        runner (x86_64)   development (arm64)
 #   lowest healthy case    33.35%            28.67%   spate-avro, decode_value
@@ -108,11 +110,39 @@
 # than to pre-empt with a looser number: such a bench is measuring glibc, and
 # whether that is what it means to measure is a question worth asking out loud.
 #
+# ## A case is not always one file
+#
+# callgrind writes one output per thread the process ran, named
+# `<base>.t<thread>.p<part>.out`. A bench whose setup spawns a helper —
+# a loopback stub answering one request, say — therefore leaves a second
+# profile beside the first, complete and well-formed and declaring
+# `summary: 0`, because that thread never entered the collected region.
+#
+# Every part of a case is summed before anything is judged. Judging them one
+# at a time reads that zero-cost part as a region that collected nothing —
+# the very shape this guard exists to reject — and refuses a case that
+# measured perfectly well.
+#
+# Summing is the more lenient of the two, and deliberately so: a case whose
+# parts are one healthy and one degenerate is judged on their sum, where
+# per-file judging would have refused it. That is the right trade because the
+# mixed case is not a shape callgrind produces. Collection is toggled on the
+# thread that enters the wrapper, so exactly one part can carry cost and the
+# rest declare zero — which is why the sum has matched the count gungraun
+# reports for every case measured here. A part carrying *unexpected* cost is
+# not silently absorbed either: it lands in the sum, and the composition rule
+# is asked of that.
+#
+# The parts of a case are the files in one directory, which is what gungraun writes per case;
+# grouping by directory rather than by filename is what keeps a threaded bench
+# whole.
+#
 # ## Whether the arithmetic can be trusted
 #
-# The parser is checked against callgrind's own arithmetic on every file it
-# reads: the self costs it sums must equal the `summary:` line the profile
-# declares. That is what makes the share safe to act on. A cost line following
+# The parser is checked against callgrind's own arithmetic on every case it
+# reads: the self costs it sums must equal the sum of the `summary:` lines its
+# parts declare, and a part that declares none makes the case unverifiable and
+# so refused. That is what makes the share safe to act on. A cost line following
 # `calls=` is the *inclusive* cost of a call and is excluded — counting it
 # would inflate the runtime's share, since the outermost call chains in these
 # profiles run through glibc's startup — and a parser that stopped excluding
@@ -147,10 +177,28 @@ fail() {
     exit 1
 }
 
-# One case's verdict, on stdout, as a single line:
+# One *case's* verdict, on stdout, as a single line:
 #
 #   OK <hundredths of a percent> <percent, for reading> <application Ir> <total Ir>
 #   ERROR <reason> [detail...]
+#
+# Every argument is one part of the same case, and they are summed before
+# anything is judged. A case is not always one file: callgrind writes one
+# output per thread the process ran, named `<base>.t<thread>.p<part>.out`, so a
+# bench whose setup spawns a helper thread leaves a second profile beside the
+# first. That profile is complete and well-formed and its own `summary:` is
+# `0` — the thread never entered the collected region, which is the ordinary
+# outcome for a thread that exists to answer one request during setup.
+#
+# Judging those files one at a time reads the zero-cost part as a region that
+# collected nothing, which is the degenerate case this guard exists to catch —
+# so it refuses a case that measured perfectly well. Summing is the more
+# lenient reading, and a case of one healthy part and one degenerate part
+# would pass it where per-file judging would not; that is not a shape
+# callgrind produces, because collection is toggled on the thread that enters
+# the wrapper, so one part carries the cost and the rest declare zero. It is
+# also why the sum has equalled the count gungraun reports for every case
+# measured here.
 #
 # Parsed rather than acted on here so the caller owns every message: the
 # awk is the measurement and the shell is the report.
@@ -162,8 +210,9 @@ fail() {
 # reads as a different number entirely. Left unset, every healthy bench on a
 # European developer's machine is condemned; the assertion at the end of
 # `--self-test` is what keeps that fixed.
-read_profile() {
-    LC_ALL=C awk '
+read_case() {
+    local expected=$#
+    LC_ALL=C awk -v parts="$expected" '
         # Name compression: a position line may introduce an id
         # (`ob=(1) /lib/libc.so.6`) and later refer to it (`ob=(1)`). Ids are
         # per name kind, and `cob=`/`cfn=`/`cfi=` share the namespace of
@@ -183,22 +232,52 @@ read_profile() {
             return names[kind SUBSEP id]
         }
 
-        # Defaults for a profile that declares neither header. `positions:` is
-        # one field (`line`) and `Ir` is the first event in every callgrind
-        # profile; both are re-read below if the file says otherwise.
-        BEGIN { npos = 1; iri = 1 }
+        # Header state belongs to a file; cost belongs to the case. Everything
+        # reset here is re-read from each part, while `ir[]`, `total`, `seen[]`
+        # and the declared running total accumulate across all of them.
+        #
+        # `positions: line` and `Ir` first are the defaults, re-read below if a
+        # part says otherwise. Name-compression ids are per file too: `(1)` in
+        # one part has nothing to do with `(1)` in the next, and neither does
+        # the current object: a part whose first cost line precedes its `ob=`
+        # would otherwise be charged to whichever object the previous part
+        # left current, inflating whatever share that object holds.
+        function reset_file() {
+            npos = 1
+            iri = 1
+            ob = ""
+            declared = ""
+            declared_here = 0
+            pending = 0
+            delete names
+        }
 
-        /^cmd:/ { cmd = substr($0, 5); sub(/^[ \t]+/, "", cmd); next }
+        BEGIN { reset_file() }
+
+        # A part boundary. The part just finished contributes its declared
+        # total, so the aggregate is compared against the sum of what every
+        # part claimed rather than against whichever one happened to be last.
+        FNR == 1 && NR > 1 {
+            declared_total += declared
+            declared_files += declared_here
+            reset_file()
+        }
+        FNR == 1 { seen_files++ }
+
+        # Identical across every part of one case; the first is as good as any.
+        /^cmd:/ { if (cmd == "") { cmd = substr($0, 5); sub(/^[ \t]+/, "", cmd) } next }
         /^positions:/ { npos = NF - 1; next }
         /^events:/ {
             iri = 0
             for (i = 2; i <= NF; i++) if ($i == "Ir") iri = i - 1
+            if (iri == 0) no_ir = 1
             next
         }
-        # What the profile says it collected, for the totals check. `totals:`
-        # is the same quantity under the name callgrind uses when the run was
-        # dumped rather than ended.
-        /^(summary|totals):/ { declared = $(1 + iri); next }
+        # What this part says it collected, for the totals check. `totals:` is
+        # the same quantity under the name callgrind uses when the run was
+        # dumped rather than ended, and a part carrying both carries them
+        # equal — so the last one read is the part total, not their sum.
+        /^(summary|totals):/ { declared = $(1 + iri); declared_here = 1; next }
 
         /^ob=/  { ob = deref("ob", substr($0, 4)); seen[ob] = 1; next }
         /^cob=/ { seen[deref("ob", substr($0, 5))] = 1; next }
@@ -226,15 +305,38 @@ read_profile() {
         { pending = 0 }
 
         END {
+            # The last part never hit the boundary rule above.
+            declared_total += declared
+            declared_files += declared_here
+
             if (cmd == "") { print "ERROR no-cmd"; exit }
             # Named rather than left to surface as a totals mismatch, which is
             # what a missing Ir column produces: the parser would be summing
             # the position field, and the resulting complaint would send a
-            # reader looking at the wrong thing entirely.
-            if (iri == 0) { print "ERROR no-ir-column"; exit }
+            # reader looking at the wrong thing entirely. Any part missing it
+            # is enough, since its cost joins the same sum.
+            if (no_ir) { print "ERROR no-ir-column"; exit }
+            # Zero across *every* part of the case. One part at zero is
+            # ordinary — a thread that never entered the collected region —
+            # and is why this is asked of the sum rather than of each file.
             if (total == 0) { print "ERROR no-cost"; exit }
-            if (declared != "" && declared != total) {
-                printf "ERROR totals-mismatch %d %d\n", total, declared
+            # Every part has to have declared a total, or the sum being
+            # compared against is not the sum of what was read. Refusing is
+            # the fail-closed answer: a part whose claim is unknown cannot
+            # corroborate anything.
+            #
+            # Counted against `parts`, which the *shell* counted, rather than
+            # against the files awk saw. An empty file has no records, so it
+            # never reaches the `FNR == 1` rule above — awk cannot see it at
+            # all, and a truncated part beside a healthy one would slip
+            # through every check here while the caller reported "2 parts".
+            # Taking the count from the side that listed the directory is what
+            # makes a part that produced no records a refusal rather than an
+            # absence.
+            if (seen_files != parts) { print "ERROR unreadable-part"; exit }
+            if (declared_files != parts) { print "ERROR partial-summary"; exit }
+            if (declared_total != total) {
+                printf "ERROR totals-mismatch %d %d\n", total, declared_total
                 exit
             }
             # The binary under measurement is the object whose path the
@@ -254,27 +356,50 @@ read_profile() {
                 10000 * ir[binary] / total, 100 * ir[binary] / total, \
                 ir[binary], total
         }
-    ' "$1"
+    ' "$@"
 }
 
 check_dir() {
-    local dir=$1 shard=$2 profile case_id verdict hundredths pct app total
-    local failed=0 checked=0
+    local dir=$1 shard=$2 case_dir case_id profile verdict hundredths pct app total
+    local failed=0 checked=0 where status
+    local -a parts
     [[ -d "$dir" ]] || fail "$dir does not exist; there are no profiles to check"
     # Joined here rather than by the caller so a label and its absence render
     # the same way everywhere: one shard's message must be greppable by the
     # same pattern whether or not the tier is fanned out.
     [[ -z "$shard" ]] || shard="$shard — "
 
-    while IFS= read -r profile; do
+    # One iteration per *case*, which is one directory. Grouping by directory
+    # rather than trusting the filename is what keeps a threaded bench whole:
+    # callgrind splits such a case into `<base>.t<thread>.p<part>.out`, and the
+    # parts are only a measurement together.
+    while IFS= read -r case_dir; do
         # `spate-s3/descriptor_gungraun/descriptor/decode.full_splits` — the
         # directory gungraun writes one case into, which is the identity a
         # reader needs to find the bench again.
-        case_id=${profile#"$dir"/}
-        case_id=${case_id%/*}
+        # Relative to the tree the caller named. A profile sitting directly in
+        # that tree has no relative path to strip to, and would otherwise be
+        # reported by its absolute one — so it is named for its own directory.
+        if [[ "$case_dir" == "$dir" ]]; then
+            case_id=$(basename "$case_dir")
+        else
+            case_id=${case_dir#"$dir"/}
+        fi
+        parts=()
+        while IFS= read -r profile; do
+            parts+=("$profile")
+        done < <(find "$case_dir" -maxdepth 1 -name 'callgrind.*.out' ! -name '*@*' | LC_ALL=C sort)
+        [[ ${#parts[@]} -gt 0 ]] || continue
+        # Named for the reader: one file is a path, several are a directory
+        # and a count, and quoting all of them would bury the message.
+        if [[ ${#parts[@]} -eq 1 ]]; then
+            where="${parts[0]}"
+        else
+            where="$case_dir (${#parts[@]} parts)"
+        fi
         # An awk that died — an unreadable file, a build without a working
         # awk — is turned into a verdict rather than left to `set -e`, which
-        # would abort the loop with the profile unnamed and the remaining
+        # would abort the loop with the case unnamed and the remaining
         # cases unchecked.
         #
         # Stdout only, deliberately. Folding stderr in here looks like it
@@ -284,7 +409,7 @@ check_dir() {
         # the verdict and is parsed as one, so a perfectly good profile is
         # reported as unreadable. The real diagnostic is already in the job
         # log, where stderr goes.
-        verdict=$(read_profile "$profile") || verdict="ERROR unreadable"
+        verdict=$(read_case "${parts[@]}") || verdict="ERROR unreadable"
         read -r status hundredths pct app total <<<"$verdict" || true
         case "$status" in
         OK) ;;
@@ -293,7 +418,7 @@ check_dir() {
             # onwards any detail, which is what the ERROR line's shape puts
             # in those positions.
             echo "::error::$shard$case_id: its callgrind profile could not be read ($hundredths $pct $app)."
-            echo "  $profile"
+            echo "  $where"
             echo "  The guard refuses to judge a profile it cannot account for; see scripts/gungraun-collected-region.sh."
             failed=1
             checked=$((checked + 1))
@@ -308,7 +433,7 @@ check_dir() {
             echo "::error::$shard$case_id: the collected region is $total Ir, below the $MIN_COLLECTED_IR floor;"
             echo "  a bench case cannot do meaningful work in that many instructions, so the region was lost"
             echo "  rather than measured — the same defect as a runtime-dominated region, wearing the other face."
-            echo "  Profile: $profile"
+            echo "  Profile: $where"
             echo "  Move the measured work into a named #[inline(never)] function the benchmark calls,"
             echo "  and see CONTRIBUTING.md."
             failed=1
@@ -321,23 +446,27 @@ check_dir() {
         else
             echo "::error::$shard$case_id: the collected region is ${pct}% application code ($app of $total Ir);"
             echo "  the rest is the C runtime, so this case is measuring the allocator rather than the code it names."
-            echo "  Profile: $profile"
+            echo "  Profile: $where"
             echo "  The usual cause is the measured work being written inline in the #[library_benchmark]"
             echo "  function, where the optimiser may reshape it out of the collected region. Move it into a"
             echo "  named #[inline(never)] function the benchmark calls — see CONTRIBUTING.md."
             failed=1
         fi
         checked=$((checked + 1))
-        # The head leg's profiles only. A saved baseline lands beside them as
-        # `callgrind.<case>.out.<label>@<label>`, which today's pattern already
-        # misses because it does not end in `.out` — but only by accident, and
-        # the accident is worth not relying on: judging the merge base would
-        # fail a pull request for a degenerate bench in code its author did not
-        # write, which is the one thing every other part of this tier is
-        # careful not to do. `@` is gungraun's baseline separator and cannot
-        # appear in a bench, group or case name, all of which are Rust
-        # identifiers.
-    done < <(find "$dir" -name 'callgrind.*.out' ! -name '*@*' | LC_ALL=C sort)
+        # One directory per case, deduplicated: a threaded case contributes
+        # several profiles and must be judged once, on their sum.
+        #
+        # The head leg's profiles only, here and in the per-case glob above. A
+        # saved baseline lands beside them as
+        # `callgrind.<case>.out.<label>@<label>`, which the `.out` suffix
+        # already misses — but only by accident, and the accident is worth not
+        # relying on: judging the merge base would fail a pull request for a
+        # degenerate bench in code its author did not write, which is the one
+        # thing every other part of this tier is careful not to do. `@` is
+        # gungraun's baseline separator and cannot appear in a bench, group or
+        # case name, all of which are Rust identifiers.
+    done < <(find "$dir" -name 'callgrind.*.out' ! -name '*@*' -exec dirname {} \; |
+        LC_ALL=C sort -u)
 
     # Fails closed, for the same reason the rest of this tier does: a run that
     # measured nothing and a run that measured well are otherwise the same
@@ -354,11 +483,15 @@ check_dir() {
 # ---------------------------------------------------------------------------
 # Self-test.
 #
-# The fixtures are real. Both are callgrind profiles this repository's own
-# benches produced under valgrind on Linux, reduced to one cost line per
-# function — which drops the call chains and the source-position detail while
-# preserving every self cost, so each object's total, and therefore the share
-# the guard computes, is the measured one to the instruction.
+# The fixtures are real: every one of them is a callgrind profile this
+# repository's own benches produced under valgrind on Linux, reduced to one
+# cost line per function — which drops the call chains and the source-position
+# detail while preserving every self cost, so each object's total, and
+# therefore the share the guard computes, is the measured one to the
+# instruction. The exceptions are the malformed ones — a profile disagreeing
+# with its own totals, one with no Ir column, one collapsed to a handful of
+# instructions — which are written by hand because they are shapes this tree
+# has not produced and the guard has to refuse anyway.
 #
 # The degenerate fixture is the s3 descriptor bench with its measured work
 # written inline in the benchmark function instead of behind a named
@@ -549,6 +682,177 @@ $out"
         "a saved baseline was judged alongside the head measurement:
 $out"
 
+    # --- a case split across threads is judged once, on the sum -------------
+    #
+    # Both parts are the real artifact, captured from the Confluent-framing
+    # case whose setup starts a loopback registry stub on a thread and joins
+    # it. callgrind writes one output per thread the process ran, so the case
+    # arrives as `.t1.p1.out` and `.t2.p1.out`: the first carries every
+    # instruction, the second is complete, well-formed, and declares
+    # `summary: 0`, because that thread served one request during setup and
+    # never entered the collected region.
+    #
+    # Judged a file at a time, the second part reads as a region that
+    # collected nothing — which is the degenerate case, so the guard rejected
+    # it and ejected a perfectly good pull request from the merge queue. The
+    # assertion is therefore about *how many* verdicts the case produces as
+    # much as what they say: one case, one line, on the summed total.
+    mkdir -p "$tmp/threaded/spate-avro/decode_gungraun/confluent/decode_confluent.poisoned_schema_id"
+    cat >"$tmp/threaded/spate-avro/decode_gungraun/confluent/decode_confluent.poisoned_schema_id/callgrind.decode_confluent.poisoned_schema_id.t1.p1.out" <<'PROFILE'
+# callgrind format
+version: 1
+creator: callgrind-3.19.0
+cmd:  /target/release/deps/decode_gungraun-5c06e881b9bb3e01 --gungraun-run 00001 00000 00002
+part: 1
+thread: 1
+positions: line
+events: Ir
+summary: 2180066
+
+ob=/usr/lib/aarch64-linux-gnu/libc.so.6
+fn=clock_gettime@@GLIBC_2.17
+86 40000
+fn=free'2
+0 132000
+fn=_int_free
+3389 264000
+fn=_int_free'2
+4698 56000
+fn=malloc
+1473 216000
+fn=__GI_memcpy
+183 152000
+
+ob=/target/release/deps/decode_gungraun-5c06e881b9bb3e01
+fn=__aarch64_cas4_acq
+154 10000
+fn=__aarch64_ldadd8_relax
+252 10000
+fn=__aarch64_ldadd4_rel
+252 10000
+fn=__aarch64_ldadd8_rel
+252 10000
+fn=spate_avro::cache::SchemaCache::eval
+48 196000
+fn=spate_avro::cache::SchemaCache::eval'2
+0 114000
+fn=core::hash::BuildHasher::hash_one
+703 284000
+fn=std::sys::pal::unix::time::Timespec::now
+143 200000
+fn=std::sys::pal::unix::time::Timespec::sub_timespec
+179 128000
+fn=<core::hash::sip::Hasher<S> as core::hash::Hasher>::write
+130 76000
+fn=<core::hash::sip::Hasher<S> as core::hash::Hasher>::write'2
+301 16000
+fn=spate_avro::deser::DecoderCore::decode
+120 24
+fn=spate_avro::deser::DecoderCore::decode'2
+120 47976
+fn=spate_avro::deser::DecoderCore::resolve
+160 92000
+fn=spate_avro::deser::DecoderCore::resolve'2
+164 96000
+fn=decode_gungraun::decode_confluent::__gungraun_wrapper_mod::decode_confluent
+513 9
+fn=decode_gungraun::decode_batch
+165 54
+fn=decode_gungraun::decode_batch'2
+231 30003
+
+ob=/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+PROFILE
+    # Verbatim, including the blank lines: this is the whole of what callgrind
+    # wrote for the stub's thread.
+    cat >"$tmp/threaded/spate-avro/decode_gungraun/confluent/decode_confluent.poisoned_schema_id/callgrind.decode_confluent.poisoned_schema_id.t2.p1.out" <<'PROFILE'
+# callgrind format
+version: 1
+creator: callgrind-3.19.0
+pid: 771
+cmd:  /target/release/deps/decode_gungraun-5c06e881b9bb3e01 --gungraun-run 00001 00000 00002
+part: 1
+thread: 2
+
+desc: Timerange: Basic block 0 - 38958101
+desc: Trigger: Program termination
+
+positions: line
+events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw
+summary: 0
+
+
+totals: 0
+PROFILE
+    rc=0
+    out=$("$under_test" "$tmp/threaded" 2>&1) || rc=$?
+    [[ "$rc" -eq 0 ]] || fail \
+        "a case split across threads was condemned; its zero-cost part is a thread that never
+    entered the collected region, not a region that collected nothing:
+$out"
+    # The summed total, which is also the number gungraun reports for the case
+    # — so the guard and the report cannot disagree about what was measured.
+    grep -qF '60.55% of 2180066 Ir' <<<"$out" || fail \
+        "the threaded case's parts were not summed into one measurement:
+$out"
+    # One case, one verdict. Counted rather than grepped: judging per file
+    # produces two lines here, and the second is the failure that started all
+    # of this.
+    [[ "$(grep -cF 'decode_confluent.poisoned_schema_id' <<<"$out")" -eq 1 ]] || fail \
+        "a case split across threads produced more than one verdict:
+$out"
+
+    # --- one part cannot inherit the object another part left current -------
+    #
+    # `ob=` is position, and position belongs to a file. A part whose cost
+    # lines precede its own `ob=` would otherwise be charged to whatever the
+    # previous part left current — and since the binary under measurement is
+    # usually the last object named, that inflates precisely the share this
+    # guard is a floor on. Asserted by the share rather than by the verdict:
+    # both readings clear the threshold, so only the number tells them apart.
+    mkdir -p "$tmp/orphan/spate-clickhouse/encode_gungraun/encode/encode.rowbinary"
+    cp "$tmp/healthy/spate-clickhouse/encode_gungraun/encode/encode_rowbinary_events.rowbinary_events/callgrind.encode_rowbinary_events.rowbinary_events.out" \
+        "$tmp/orphan/spate-clickhouse/encode_gungraun/encode/encode.rowbinary/callgrind.encode.rowbinary.t1.p1.out"
+    cat >"$tmp/orphan/spate-clickhouse/encode_gungraun/encode/encode.rowbinary/callgrind.encode.rowbinary.t2.p1.out" <<'PROFILE'
+cmd:  /target/release/deps/encode_gungraun-435f3f43eb3bf4fe --gungraun-run 00000 00003 00000
+positions: line
+events: Ir
+summary: 730429
+
+fn=an_orphan_frame_before_any_ob
+0 730429
+PROFILE
+    rc=0
+    out=$("$under_test" "$tmp/orphan" 2>&1) || rc=$?
+    [[ "$rc" -eq 0 ]] || fail "the orphan-cost fixture exited $rc, not 0:
+$out"
+    # 620806 of 1460858. Reading the orphaned cost as the binary would report
+    # 92.50% instead, and the totals check would not notice.
+    grep -qF '42.50% of 1460858 Ir' <<<"$out" || fail \
+        "cost with no object of its own was attributed to another part's object:
+$out"
+
+    # --- a part that produced no records is refused, not skipped ------------
+    #
+    # The fail-open this shape invites: a truncated or zero-byte part has no
+    # records, so it never reaches awk's per-file rule and cannot be counted
+    # there. Counted only by awk, a healthy part beside an empty one passes at
+    # the healthy part's own share while the caller reports two parts — a
+    # guard manufacturing confidence about a file it never read. The part
+    # count comes from the shell, which listed the directory, so an empty part
+    # is a refusal.
+    cp -R "$tmp/threaded" "$tmp/truncated"
+    : >"$tmp/truncated/spate-avro/decode_gungraun/confluent/decode_confluent.poisoned_schema_id/callgrind.decode_confluent.poisoned_schema_id.t2.p1.out"
+    rc=0
+    out=$("$under_test" "$tmp/truncated" 2>&1) || rc=$?
+    [[ "$rc" -eq 1 ]] || fail \
+        "a case with an empty part exited $rc, not 1 — a part the parser never saw was counted as
+    agreeing with the sum:
+$out"
+    grep -qF 'unreadable-part' <<<"$out" || fail \
+        "an empty part was not named as the reason:
+$out"
+
     # --- a stray diagnostic on stderr cannot make the guard misjudge --------
     #
     # Constructed rather than waited for, and constructed at the exact seam
@@ -695,10 +999,13 @@ $out"
     fi
 
     echo "gungraun-collected-region.sh --self-test: the measured degenerate profile is rejected at
-    0.47%, a collapsed 22 Ir region at the magnitude floor, and the allocation-heavy healthy one is
-    accepted at 84.99% — with a diagnostic on stderr${comma_locale:+, and under $comma_locale}. A saved
-    baseline is not judged, a profile disagreeing with its own totals and one with no Ir column are
-    refused by name, an empty tree fails closed, and nothing but this rule rejects the fixture."
+    0.47% and a collapsed 22 Ir region at the magnitude floor; the allocation-heavy healthy one is
+    accepted at 84.99% — with a diagnostic on stderr${comma_locale:+, and under $comma_locale}; and a case
+    split across threads is judged once, on the sum of its parts, at 60.55%. A part that produced
+    no records and a part carrying cost with no object of its own are both refused rather than
+    absorbed. A saved baseline is not judged, a profile disagreeing with its own totals and one
+    with no Ir column are refused by name, an empty tree fails closed, and nothing but this rule
+    rejects the fixture."
 }
 
 shard=""

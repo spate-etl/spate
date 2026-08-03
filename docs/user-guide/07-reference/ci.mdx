@@ -465,15 +465,31 @@ runtime the process links dynamically — the allocator, `memcpy`, the loader.
 The binary is identified from the profile's own `cmd:` header, which is the
 program valgrind ran, so no list of library names has to be kept current for
 each platform. The parser is held to callgrind's own arithmetic — the self
-costs it sums must equal the profile's `summary:` line — and refuses to judge a
-profile it cannot account for, rather than computing a share from whatever it
-managed to read.
+costs it sums must equal the `summary:` lines the profile declares — and
+refuses to judge a profile it cannot account for, rather than computing a share
+from whatever it managed to read.
+
+A case is not always one profile. callgrind writes one output per thread the
+process ran, so a bench whose setup spawns a helper — a loopback stub that
+answers one request, say — leaves a second file beside the first, complete and
+well-formed and declaring zero cost, because that thread never entered the
+collected region. Every part of a case is summed before anything is judged.
+Judged a file at a time, that zero-cost part reads as a region that collected
+nothing — the exact shape the guard exists to reject — and a healthy pull
+request is refused for it. The parts of a case are the files in one directory,
+which is what the harness writes per case, so grouping by directory rather than
+by filename is what keeps a threaded bench whole. Summing is the more lenient
+reading of the two, and that is the right trade: collection is toggled on the
+thread that enters the measured function, so one part carries the cost and the
+rest declare zero. A part that produced no records at all, or one that declares
+no total of its own, is refused rather than skipped — an absence cannot
+corroborate a sum.
 
 The threshold is a floor on composition rather than on a count, so it does not
 move when a bench gets faster or slower — and because it is a ratio, it reads
 within a few points of itself on two architectures whose absolute counts do not
-agree at all. Measured across all forty cases, the lowest healthy share is
-33.35% on the runner architecture and 28.67% on the one a reproduction was
+agree at all. Measured across every case in the tree, the lowest healthy share
+is 33.35% on the runner architecture and 28.67% on the one a reproduction was
 built on, against a reproduced degenerate case at 0.47%. That leaves a gap with
 nothing in it; any threshold inside it separates the two. It sits at the bottom of the gap because the two errors are
 not symmetric — a degenerate bench that passes becomes a baseline every later

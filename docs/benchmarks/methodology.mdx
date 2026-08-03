@@ -22,6 +22,9 @@ defined once, versioned, in `benchmarks/src/report.rs`:
   any line without `schema == 1`, so older ad-hoc records never render.
 - `bench` — the rig that produced the record.
 - `kind` — `measurement` or `verdict` (a go/no-go conclusion drawn across arms).
+- `trigger` — what produced the run: `manual`, `ci` or `dispatched`. Set from
+  `BENCH_TRIGGER`; unset it reads as `ci` under a CI environment and `manual`
+  otherwise.
 - `run` — provenance: timestamp, short commit, host, CPU brand, cores, OS,
   profile. This is what the "provenance" line under each chart reports.
 - `variant` — the arm under test (an open map, e.g. `{"deser":"apache_owned",
@@ -30,6 +33,25 @@ defined once, versioned, in `benchmarks/src/report.rs`:
   `higher_is_better`, and optional `ci95` / `n`. The direction of goodness
   travels **with** the number, so a chart can never silently draw a
   lower-is-better quantity as a taller bar.
+
+`trigger` is what bars a record from publication. Provenance says *where* a
+number came from; it cannot say whether the machine was worth quoting. A `ci`
+record comes off a hosted runner, which is contended and virtualised, and a
+`dispatched` one answers a single comparison rather than recording a figure.
+Both are useful, and neither belongs on these pages, where they would render
+beside a quiet-machine recording with nothing to tell them apart.
+
+`make check-results` refuses any record under `benchmarks/results/` whose
+trigger bars publication, on every pull request rather than only where somebody
+runs the gates, and refuses a trigger it does not recognise so a value added
+later cannot slip past an older copy of the check. A barred record also carries
+the reason at the front of its `note`, so one line of JSONL says so in prose as
+well as in a typed field.
+
+An unrecognised or empty `BENCH_TRIGGER` aborts the run rather than defaulting,
+and the names are case-sensitive — `BENCH_TRIGGER=CI` is an error, not `ci`. A
+typo that quietly became `manual` would produce exactly the record this field
+exists to prevent, so it fails at start-up instead.
 
 ## Reproducing
 

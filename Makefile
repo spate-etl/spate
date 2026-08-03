@@ -30,7 +30,7 @@
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-collected-region check-invariants \
-        check-changelog changelog-new \
+        check-results check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -170,12 +170,21 @@ BENCH ?= s3_backfill_ab
 # matters: a comparison of two builds has to name each build's commit itself.
 #
 #   make bench-ab ARMS=none,gzip REPS=5
+# BENCH_TRIGGER=dispatched is what makes the output of this target
+# unpublishable, and it is set here rather than left to the caller because this
+# is the one target that produces that shape. An A/B sweep answers "did this
+# change move it"; it is not a recording, and the arms are not the configuration
+# anything ships at. Writing to gitignored `tuning/` keeps it out of the tree by
+# path; the trigger keeps it out by rule, so copying a line into `results/` by
+# hand fails `make check-results` rather than quietly publishing a laptop
+# number.
 bench-ab: ## Interleaved A/B of the s3 backfill: make bench-ab ARMS=… REPS=…
 	mkdir -p benchmarks/tuning
-	CODECS="$(ARMS)" REPS="$(REPS)" BENCH="$(BENCH)" \
+	BENCH_TRIGGER=dispatched \
+	  CODECS="$(ARMS)" REPS="$(REPS)" BENCH="$(BENCH)" \
 	  RESULTS=benchmarks/tuning/s3_backfill-ab.jsonl \
 	  cargo run --release -p benchmarks --bin s3_backfill --locked
-	echo "wrote benchmarks/tuning/s3_backfill-ab.jsonl (gitignored)"
+	echo "wrote benchmarks/tuning/s3_backfill-ab.jsonl (gitignored, never publishable)"
 
 ##@ Supply chain
 
@@ -226,6 +235,15 @@ check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 check-collected-region: ## The degenerate-region guard still recognises both shapes
 	./scripts/gungraun-collected-region.sh --self-test
 
+# The site draws every record under `benchmarks/results/` without knowing which
+# machine was busy, so a number measured in CI renders identically to one taken
+# on a quiet host. The record's trigger is what bars the first from being
+# committed. CI runs this same target on every pull request — a bar that held
+# only for whoever remembered to run the gates would not be one.
+check-results: ## No committed benchmark record carries a trigger that bars publication
+	./scripts/check-results-publishable.sh
+	./scripts/check-results-publishable.sh --self-test
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -234,7 +252,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-results check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

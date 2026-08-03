@@ -543,6 +543,9 @@ fn run_one() {
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
     if env_u64("RUN_ONE", 0) != 0 {
         run_one();

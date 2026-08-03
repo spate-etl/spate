@@ -28,6 +28,12 @@ export interface BenchRecord {
   schema: number;
   bench: string;
   kind: 'measurement' | 'verdict';
+  // What produced the run. Optional to mirror the field's serde default, which
+  // tolerates a hand-edited line; every committed record carries it. The charts
+  // never filter on it: `make check-results` runs on every pull request and
+  // refuses to commit a record whose trigger bars publication, so a barred one
+  // cannot reach this loader in the first place.
+  trigger?: 'manual' | 'ci' | 'dispatched';
   run: RunMeta;
   variant: Record<string, string | number | boolean>;
   metrics: Record<string, Metric>;

@@ -735,7 +735,16 @@ jobs:
         with:
           shared-key: release
       - run: cargo build --release -p benchmarks --locked
+      # BENCH_TRIGGER stamps the record with what produced it. A hosted runner
+      # is contended and virtualised, so this number describes the runner as
+      # much as the code and must never be published — `ci` is what says so,
+      # and `make check-results` refuses to commit a record carrying it.
+      # Set explicitly rather than left to the fallback: the fallback reads
+      # `CI` and would be right here, but a record's provenance should not
+      # depend on a variable this workflow never mentions.
       - run: RUN_ONE=1 THREADS=2 DURATION_S=60 RESULTS=synthetic-trend.jsonl ./target/release/pipeline_synthetic
+        env:
+          BENCH_TRIGGER: ci
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: synthetic-trend-${{ github.run_id }}

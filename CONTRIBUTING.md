@@ -296,6 +296,13 @@ methodology lives in
 [`docs/benchmarks/methodology.mdx`](docs/benchmarks/methodology.mdx) and the
 [benchmark repository](https://github.com/spate-etl/benchmark).
 
+Part of that is mechanised rather than left to judgement: every record names
+what produced it, and `make check-results` refuses to let a record measured in
+CI — or one that came out of an A/B sweep rather than a recording — reach
+`benchmarks/results/`. If you are adding a rig or a workflow that emits
+records, set `BENCH_TRIGGER` to say what it is; an unrecognised value fails the
+run at start-up rather than defaulting to something publishable.
+
 ## Releases
 
 Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md), which is

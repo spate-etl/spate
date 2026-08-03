@@ -278,6 +278,14 @@ nothing, which is the point, but it does mean the rigs are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
 
+That tier also *runs* what it compiled, and discards the timings. The criterion
+benches execute with their measurement windows cut to a second, and three rigs
+that need no broker or container run briefly with no results path — enough to
+catch a panic or a configuration a rig can no longer parse, which linking alone
+does not. A step then asserts each criterion group produced output by name,
+because a bench that quietly runs nothing still exits 0. No comparison is made:
+a hosted runner cannot say whether a wall-clock number moved.
+
 ## Performance gates
 
 Two things on the pull-request path answer performance questions without

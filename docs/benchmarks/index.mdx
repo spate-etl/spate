@@ -71,15 +71,26 @@ throughput claim.
 
 ## Tiers
 
-1. **Micro** — `cargo bench` (criterion + divan `AllocProfiler`) in
-   `crates/spate-core/benches` and `crates/spate-avro/benches`.
+1. **Micro** — `cargo bench` under `crates/*/benches`: criterion in
+   `spate-avro`, `spate-json` and `spate-clickhouse`, divan with an
+   `AllocProfiler` in `spate-core`, and an instruction-count bench per crate
+   measured under valgrind rather than a clock.
 2. **Framework overhead** — `benchmarks/pipeline_synthetic` (release binary,
    JSON report): in-memory source → chain → null sink; no broker in the loop.
 3. **At scale** — `benchmarks/e2e_kafka_clickhouse` + `benchmarks/loadgen`
    against local containers or external clusters (env-configured endpoints).
 
-Weekly CI compares criterion baselines with `critcmp`; divan allocation
-assertions are hard failures.
+Weekly CI compiles every bench and rig, runs the wall-clock benches, smokes
+three rigs that need no broker or container, and discards every timing: a hosted
+runner cannot say whether a wall-clock number moved. What that tier establishes
+is that nothing has stopped working.
+
+The quantities that do hold on any machine are checked elsewhere. Allocation
+counts on the chain hot path are asserted against fixed bounds by a test, on
+every pull request that touches Rust. Instruction counts come from callgrind and
+heap shape from DHAT, for the benched crates a change selects — its own crate,
+or all of them for a change to the engine. Those numbers are advisory; what
+gates is that the benches still build and run.
 
 ## The studies
 

@@ -403,11 +403,12 @@ Superseded reference point: an earlier rate-limited E2E smoke (100k rec/s target
 above (`RATE=0`), which measures the pipeline ceiling instead of a throttled
 target.
 
-The micro-benchmarks are separate: `cargo bench -p spate-core` and
-`cargo bench -p spate-avro` (criterion + divan). Divan's `AllocProfiler`
-allocation assertions are hard failures in CI, and the counting-allocator
-integration test (`crates/spate-core/tests/chain_alloc.rs`) hard-fails if
-per-iteration allocations scale with record count.
+The micro-benchmarks are separate, one per crate under `crates/*/benches`:
+criterion in `spate-avro`, `spate-json` and `spate-clickhouse`, divan in
+`spate-core`. Divan's `AllocProfiler` *reports* allocation counts beside each
+timing; nothing fails on them. What hard-fails is the counting-allocator
+integration test (`crates/spate-core/tests/chain_alloc.rs`), if per-iteration
+allocations scale with record count.
 
 A recurring harness lesson, now encoded in the binaries: metric handles created
 **before** `metrics::install` bind to the no-op recorder and silently render

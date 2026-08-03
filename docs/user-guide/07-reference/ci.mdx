@@ -647,6 +647,39 @@ is barred even when it was measured on a quiet machine: its arms are chosen to
 separate two builds, not to describe a shipping configuration, so drawn beside
 a baseline an arm chosen to lose would read as a measurement of the framework.
 
+### The wall-clock comparator
+
+Nothing in this repository gates on a clock, but two result sets still have to
+be compared. `scripts/bench-compare.sh` renders that comparison as Markdown:
+what moved, what did not, what is reported but never judged, and what could not
+be paired at all.
+
+Nothing runs it automatically. It is a target a contributor invokes over two
+result files they produced themselves — one renderer rather than a habit of
+eyeballing JSON, so two people comparing the same runs reach the same table.
+
+Its fixtures run on every pull request as `make check-bench-compare`, for the
+same reason `make check-collected-region` does: the failure being guarded
+against is one that produces a plausible number rather than an error. A
+comparator renders a perfectly well-formed table off a comparison that paired
+the wrong records — an answer that looks right and is not — so the self-test
+asserts the wrong answers rather than the happy path. Among them: a variant key
+added on one side (which makes every scenario unpairable at once), a metric
+present on one side only, a scenario added or deleted, repetitions that do not
+align between the legs, a base of zero, a single repetition, a leg with no
+records, non-finite values, and records that are not measurements.
+
+The verdict needs two things at once — an effect size past the threshold for
+that bench *and* a 95% Student-t interval on the paired per-repetition
+differences that excludes zero. Requiring both is what stops a tiny but very
+consistent shift being called a regression, and a large but noisy one too. Both
+inputs come from a single comparison, so it needs no baseline beyond the two
+legs in front of it — which matters, because there is no per-pull-request
+history of wall-clock runs to learn a noise floor from.
+
+A row that cannot be judged — one repetition, so no interval, or a base of zero,
+so no relative change — is reported as exactly that, never as unchanged.
+
 ## Coverage
 
 Coverage is `cargo llvm-cov`, reported to Codecov under two flags. `unit` runs on

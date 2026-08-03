@@ -154,6 +154,32 @@ Before quoting a number from a local run, read
 [Regression gates](#regression-gates) — the machine has to be quiet, and a
 result about parallelism has to state its core count.
 
+### Reading a comparison
+
+```sh
+make bench-compare BASE=before.jsonl HEAD=after.jsonl
+```
+
+Renders the two result sets as Markdown: what moved, what did not, what is
+reported but never judged, and what could not be paired at all. Producing the
+two legs is the previous section; this reads them.
+
+A row **moved** when both conditions hold — the paired mean difference is at
+least the threshold for that bench in magnitude, and the 95% interval on the
+per-repetition differences excludes zero. The thresholds are 5% by default and
+10% for the rebalancing rig, which is inherently noisier; peak memory and the
+workload counters (records processed, rows written) are rendered and never
+judged, the counters because they describe the job rather than its speed — a
+run that processed 7% more records is a different run, not a slower one.
+Delivery signals such as duplicate rows are **not** exempt: a rise there is
+precisely what should be flagged. Requiring both is deliberate: a shift
+far smaller than the threshold can be extremely consistent, and a large one can
+be entirely noise.
+
+Scenarios pair on the whole `variant` map, so adding or removing a variant key
+makes every scenario unpairable at once. The report says so rather than
+rendering an empty table, which would read as "nothing changed".
+
 ### The committed runs
 
 Reproduce per the usage headers in each binary under `benchmarks/src/bin/`. Each

@@ -249,6 +249,12 @@ jobs:
       # `make gates` first — which is the state this check exists to replace.
       - run: make check-results
 
+      # The A/B comparator's fixtures. Its worst failure is a well-formed table
+      # off a comparison that paired the wrong records — an answer that looks
+      # right and is not — so what holds it to its word is a self-test asserting
+      # each wrong answer, and that has to run somewhere a change cannot skip.
+      - run: make check-bench-compare
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest

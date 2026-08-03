@@ -25,12 +25,12 @@
 # Every target is a verb, not a file. Without this a target would be skipped if
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
-        check-features check-examples bench-check bench bench-ab bench-gungraun \
+        check-features check-examples bench-check bench bench-ab bench-compare bench-gungraun \
         bench-gungraun-check loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-collected-region check-invariants \
-        check-results check-changelog changelog-new \
+        check-results check-bench-compare check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -186,6 +186,19 @@ bench-ab: ## Interleaved A/B of the s3 backfill: make bench-ab ARMS=… REPS=…
 	  cargo run --release -p benchmarks --bin s3_backfill --locked
 	echo "wrote benchmarks/tuning/s3_backfill-ab.jsonl (gitignored, never publishable)"
 
+# Renders two result files as Markdown: what moved, what did not, what is
+# reported but never judged, and what could not be paired. BASE and HEAD are the
+# two legs' JSONL.
+#
+#   make bench-compare BASE=before.jsonl HEAD=after.jsonl
+#
+# Both are required. The script names which of the two is unusable rather than
+# failing on an empty path, so no `@`-prefixed guard is needed here — the rule
+# at the top of this file keeps `help` as the only recipe that hides its
+# commands.
+bench-compare: ## Compare two benchmark result files: make bench-compare BASE=… HEAD=…
+	./scripts/bench-compare.sh "$(BASE)" "$(HEAD)" "$(BASE_LABEL)" "$(HEAD_LABEL)"
+
 ##@ Supply chain
 
 deny: ## Licences, advisories, bans, sources
@@ -244,6 +257,13 @@ check-results: ## No committed benchmark record carries a trigger that bars publ
 	./scripts/check-results-publishable.sh
 	./scripts/check-results-publishable.sh --self-test
 
+# The comparator renders a table off a pairing, and its worst failure is a
+# well-formed table built on the wrong one — an answer that looks right. No
+# amount of reading catches that, so the fixtures assert the wrong answers
+# rather than the happy path.
+check-bench-compare: ## The A/B comparator still reports every unpairable input
+	./scripts/bench-compare.sh --self-test
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -252,7 +272,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-results check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-results check-bench-compare check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

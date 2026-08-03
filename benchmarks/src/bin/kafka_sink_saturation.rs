@@ -633,6 +633,9 @@ fn run_one(bootstrap: &str) {
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
 
     // Resolve the broker: external BOOTSTRAP, else the local bench container

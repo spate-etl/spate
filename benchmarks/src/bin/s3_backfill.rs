@@ -215,6 +215,9 @@ sink: {{ nullsink: {{}} }}
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     let objects = env_u64("OBJECTS", 64) as usize;
     let records = env_u64("RECORDS_PER_OBJECT", 20_000) as usize;
     let payload = env_u64("PAYLOAD", 256) as usize;

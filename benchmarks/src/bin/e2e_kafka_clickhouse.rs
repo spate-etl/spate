@@ -1029,6 +1029,9 @@ fn run_owned_rowbinary<D>(
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     spate_core::telemetry::init(spate_core::telemetry::LogFormat::Pretty, "info");
     let duration = Duration::from_secs(env_u64("DURATION_S", 60));
     let rate = env_u64("RATE", 100_000);

@@ -620,6 +620,33 @@ the cache safe to trust: a restored binary can only ever be the one this
 lockfile asks for, and a mismatch would be a hard error rather than a wrong
 number anyway.
 
+### Records that may be published
+
+The two tiers above measure. A third check decides what may be *kept*.
+
+Wall-clock records live under `benchmarks/results/` and the documentation site
+draws all of them, without knowing which machine produced which. Provenance —
+host, CPU, cores, commit — travels with every record and says where a number
+came from; it cannot say whether that machine was one worth quoting from. So a
+record carries a `trigger` naming what produced it, and `make check-results`
+refuses to let the ones that bar publication reach the tree.
+
+It runs as a step of the same always-on job as the other repository-metadata
+checks, for the reason those run there: a bar enforced only where somebody
+happens to run `make gates` is not a bar. `benchmarks/src/report.rs` holds the
+single predicate that decides, and the check is an allow-list rather than a
+deny-list — a trigger it has never heard of is refused, so a value added to the
+enum later cannot slip past an older copy of the script. It also refuses a
+directory holding no records at all, because a check that examined nothing is
+not a check that passed.
+
+Two things follow that are easy to miss. A record produced on a hosted runner
+is barred by the hardware rather than by the job that started it, so a pull
+request run and a scheduled one carry the same trigger. And an A/B comparison
+is barred even when it was measured on a quiet machine: its arms are chosen to
+separate two builds, not to describe a shipping configuration, so drawn beside
+a baseline an arm chosen to lose would read as a measurement of the framework.
+
 ## Coverage
 
 Coverage is `cargo llvm-cov`, reported to Codecov under two flags. `unit` runs on

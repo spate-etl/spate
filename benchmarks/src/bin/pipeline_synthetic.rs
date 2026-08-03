@@ -346,6 +346,9 @@ sink: {{ nullsink: {{}} }}
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     if std::env::var("RUN_ONE").is_ok() {
         run_one();
         return;

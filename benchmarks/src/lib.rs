@@ -243,11 +243,32 @@ pub fn percentile(samples: &mut [u64], p: f64) -> u64 {
     samples[idx]
 }
 
+/// Validates the run's environment before a rig does any work.
+///
+/// Every rig calls this first. `BENCH_TRIGGER` is otherwise read when the first
+/// [`report::Report`] is constructed, which every rig does *after* measuring —
+/// so a typo cost a finished sweep and wrote nothing. Resolving it here fails
+/// in the first millisecond instead, and the answer is memoised, so nothing is
+/// read twice or read differently later.
+///
+/// # Panics
+///
+/// If `BENCH_TRIGGER` is set to something that is not a trigger, or is set and
+/// empty. See [`report::Trigger::resolve`].
+pub fn preflight() {
+    let _ = report::Trigger::detect();
+}
+
 /// Prints one [`report::Report`] as a JSON line on stdout and appends it to
 /// the file named by `RESULTS` when that variable is set.
 ///
 /// Prefer [`report::Report::emit`] at call sites.
+///
+/// The publication bar is applied here, in the one function that writes, rather
+/// than in `emit` — otherwise this would be a public path to `RESULTS` that
+/// skips it, and a bar with a way around it is not a bar.
 pub fn report(rep: &report::Report) {
+    let rep = &rep.for_emission();
     let line = serde_json::to_string(rep).expect("serialize report");
     #[allow(clippy::print_stdout)]
     {

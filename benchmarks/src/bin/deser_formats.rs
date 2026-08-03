@@ -347,6 +347,9 @@ fn build_payload(format: &str, shape: &str, framing: &str, events: u64) -> Vec<u
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     let shape = env_str("SHAPE", "batch");
     let format = env_str("FORMAT", "json");
     let record = env_str("RECORD", "typed");

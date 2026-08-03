@@ -242,6 +242,13 @@ jobs:
       # nothing would say so until the next benched change.
       - run: make check-collected-region
 
+      # The bar on publishing a record measured somewhere it should not be
+      # quoted from. It has to run here or it is not a bar at all: a pull
+      # request adding a record from a hosted runner would otherwise merge
+      # green, and the rule would hold only for whoever remembered to run
+      # `make gates` first — which is the state this check exists to replace.
+      - run: make check-results
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest

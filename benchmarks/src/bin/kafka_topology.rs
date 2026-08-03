@@ -382,6 +382,9 @@ fn backlog(cfg: &Config) -> u64 {
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     let cfg = Config::from_env();
     let command = std::env::args().nth(1).unwrap_or_default();
     match command.as_str() {

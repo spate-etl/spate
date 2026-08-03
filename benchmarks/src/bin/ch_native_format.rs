@@ -596,6 +596,9 @@ fn server_parse_cpu(rows: usize, reps: u64) -> Option<(f64, f64, String)> {
 }
 
 fn main() {
+    // Validates BENCH_TRIGGER before any work: it is otherwise read when the
+    // first report is built, which is after the measurement.
+    benchmarks::preflight();
     let rows = env_u64("ROWS", 200_000) as usize;
     let iters = env_u64("ITERS", 25);
     let reps = env_u64("REPS", 15);

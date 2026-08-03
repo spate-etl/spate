@@ -40,9 +40,11 @@ env:
 permissions:
   contents: read
 
-# The old file had none, so a manual dispatch could race the cron and two runs
-# would fight over the criterion baseline cache. Never cancels: a half-finished
-# deploy or a half-written baseline is worse than a queued run.
+# The old file had none, so a manual dispatch could race the cron. What two
+# concurrent runs collide over is the production Pages deploy and the several
+# `gh issue list … || gh issue create` paths below, none of which is atomic:
+# two runs that both find no open issue both open one. Never cancels, because a
+# half-finished deploy is worse than a queued run.
 concurrency:
   group: scheduled-${{ github.ref }}
   cancel-in-progress: false
@@ -638,26 +640,6 @@ jobs:
           # Release-profile artifacts; shares nothing with the dev-profile jobs.
           shared-key: release
 
-      # Restored BEFORE the benches run, which is the whole point: this brings
-      # last week's `previous` baseline onto disk so there is something to
-      # compare against. Restoring it afterwards, as this once did, extracts a
-      # tar over `target/criterion` and overwrites the results just measured —
-      # the job then compares this week's numbers against themselves and the
-      # post-job save stores the stale tree back under a fresh key, freezing the
-      # baseline at whatever the first run produced, forever.
-      #
-      # A cache with a prefix restore-key is the mechanism that carries state
-      # between scheduled runs: the exact key never hits, so it always falls
-      # back to the newest previous entry. (`download-artifact` cannot do this —
-      # with no `run-id` it looks only in the current run, where the artifact
-      # does not exist yet.)
-      - name: Restore last week's criterion baseline
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ github.run_id }}
-          restore-keys: criterion-baseline-
-
       # Compile every bench target and benchmark rig in the bench (release)
       # profile. ci.yml's clippy `--all-targets` already type-checks all of them
       # on each PR, so what this adds is release-profile-only breakage — a link
@@ -665,91 +647,75 @@ jobs:
       # this job needs a release build anyway; on the PR path it was a second
       # full dependency compile and the slowest job in CI.
       - run: make bench-check
-      # Both bench steps below name their target explicitly. `cargo bench -p X --
-      # --save-baseline` forwards those args to *every* bench target in the
-      # package, including the lib's default libtest harness, which rejects them
-      # with "Unrecognized option: 'save-baseline'" and fails the step. That is
-      # exactly how the 2026-07-06 run died.
+
+      # The benches are RUN, and their numbers are discarded. A hosted runner
+      # cannot say whether a wall-clock number moved, so nothing here compares
+      # one; what these steps establish is that the benches still execute — a
+      # panic, an assertion, or a fixture that stopped generating what its bench
+      # expects. The measurement windows are cut to a second because no timing
+      # is read; criterion still executes every benchmark function in the
+      # target.
       #
-      # spate-core's only bench target is divan, not criterion — divan has no
-      # baseline concept, so it takes no criterion arguments at all.
+      # Every step names its target explicitly, for two reasons. `cargo bench -p X
+      # -- ARGS` forwards those args to *every* bench target in the package,
+      # including the lib's default libtest harness, which rejects them and
+      # fails the step. And most packages here also carry `*_gungraun` targets,
+      # which need valgrind and a version-matched runner this runner does not
+      # have — `spate-core` alone declares four of them beside its divan bench.
       - run: make bench
-      # The criterion benches, and they are what critcmp compares below. Saved
-      # as `current`, against last week's `previous`: critcmp needs *two* named
-      # baselines to compare anything. Given one it prints a single column of
-      # 1.00 ratios and exits 0, which reads exactly like a clean comparison
-      # and is how this step used to pass every week while measuring nothing.
+      - run: cargo bench -p spate-avro --locked --bench decode -- --warm-up-time 1 --measurement-time 1
+      - run: cargo bench -p spate-clickhouse --locked --bench encode -- --warm-up-time 1 --measurement-time 1
+      - run: cargo bench -p spate-json --locked --bench decode -- --warm-up-time 1 --measurement-time 1
+
+      # Each expected group by NAME, not a count. A criterion step that runs
+      # nothing still exits 0 — an emptied `criterion_group!` is the simplest
+      # way there — and a count over the whole tree cannot see one target going
+      # quiet while its neighbours fill it. Naming them turns "something ran"
+      # into "each of these ran", which is what the rotation step this commit
+      # removes used to assert.
       #
-      # Each criterion bench needs its own step. They write into disjoint group
-      # directories under `target/criterion`, so critcmp compares and the
-      # rotation below rotates all of them together — but a bench that is
-      # never run leaves no `current`, and a group with no baseline is silently
-      # absent from the comparison rather than reported as missing.
-      - run: cargo bench -p spate-avro --locked --bench decode -- --save-baseline current
-      - run: cargo bench -p spate-clickhouse --locked --bench encode -- --save-baseline current
-
-      # Version-pinned, but still built from source — critcmp is not in
-      # install-action's manifest, so there is no checksummed prebuilt binary to
-      # fetch. It runs after the benches and its output is advisory, so the
-      # exposure is a build script on a scheduled runner rather than anything on
-      # the pull-request path.
-      - run: cargo install critcmp --locked --version 0.1.8
-
-      - name: Compare against last week's baseline
+      # Adding a group here is deliberate: a bench that gains one has to say so,
+      # and one that loses a group has to explain why.
+      - name: Assert every criterion bench produced results
         run: |
           set -euo pipefail
-          if find target/criterion -type d -name previous | grep -q .; then
-            critcmp previous current
-          else
-            echo "::notice::No previous baseline yet; this run establishes one."
-          fi
-
-      # Rotate `current` to `previous` so next week has something to compare
-      # against. The cache saves at post-job from the tree as it stands here.
-      - name: Rotate this week's baseline
-        run: |
-          set -euo pipefail
-          rotated=0
-          while IFS= read -r dir; do
-            rm -rf "${dir%/current}/previous"
-            mv "$dir" "${dir%/current}/previous"
-            rotated=$((rotated + 1))
-          done < <(find target/criterion -type d -name current)
-          echo "rotated $rotated baseline director(ies) to 'previous'"
-          if [ "$rotated" -eq 0 ]; then
-            echo "::error::criterion wrote no 'current' baseline; the comparison above proved nothing."
+          missing=0
+          for group in avro_decode avro_decode_batch50 sensor_batch \
+                       clickhouse_encode json_decode json_decode_batch50; do
+            if [ -d "target/criterion/$group" ]; then
+              echo "ok: $group"
+            else
+              echo "::error::criterion group '$group' produced no output — its bench ran nothing."
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::$missing criterion group(s) missing."
             exit 1
           fi
 
-  synthetic-trend:
-    name: pipeline_synthetic trend run
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          shared-key: release
+      # The rigs under `benchmarks/` are binaries, so `bench-check` only links
+      # them. Running one is what catches a failure that needs the runtime to
+      # exist: a panic, a config the rig can no longer parse, or two components
+      # claiming one gauge series — which is a real defect in one of these rigs
+      # today (#89), invisible to every other job.
+      #
+      # What it does NOT catch is a metric that silently reads zero. These rigs
+      # take their throughput from counters they own and read metrics through
+      # `unwrap_or(0.0)`, so a handle bound to the no-op recorder yields a
+      # well-formed record. That failure needs an assertion inside the rig.
+      #
+      # No `RESULTS`, so nothing is written. One arm each: enough to prove the
+      # rig runs, not a sweep.
       - run: cargo build --release -p benchmarks --locked
-      # BENCH_TRIGGER stamps the record with what produced it. A hosted runner
-      # is contended and virtualised, so this number describes the runner as
-      # much as the code and must never be published — `ci` is what says so,
-      # and `make check-results` refuses to commit a record carrying it.
-      # Set explicitly rather than left to the fallback: the fallback reads
-      # `CI` and would be right here, but a record's provenance should not
-      # depend on a variable this workflow never mentions.
-      - run: RUN_ONE=1 THREADS=2 DURATION_S=60 RESULTS=synthetic-trend.jsonl ./target/release/pipeline_synthetic
+      - name: Smoke three rigs that need no broker or container
         env:
           BENCH_TRIGGER: ci
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-trend-${{ github.run_id }}
-          path: synthetic-trend.jsonl
-          if-no-files-found: error
+        run: |
+          set -euo pipefail
+          RUN_ONE=1 THREADS=2 DURATION_S=3 ./target/release/pipeline_synthetic
+          OBJECTS=2 RECORDS_PER_OBJECT=500 CODECS=none REPS=1 ./target/release/s3_backfill
+          REPS=1 DURATION_S=1 EVENTS=10 ./target/release/deser_formats
 
   # ===========================================================================
   # Catch-all failure reporting.
@@ -822,7 +788,6 @@ jobs:
       - loom
       - coverage-containers
       - bench
-      - synthetic-trend
     # `always()` so this runs at all when a dependency failed, and a `contains`
     # guard so it stays silent on a green run. Skipped dependencies — the whole
     # other tier — are not failures.

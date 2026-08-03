@@ -58,5 +58,17 @@ harness = false
 name = "chain_gungraun"
 harness = false
 
+[[bench]]
+name = "split_gungraun"
+harness = false
+
+[[bench]]
+name = "checkpoint_gungraun"
+harness = false
+
+[[bench]]
+name = "backpressure_gungraun"
+harness = false
+
 [lints]
 workspace = true

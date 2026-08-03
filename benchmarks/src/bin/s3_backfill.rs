@@ -27,6 +27,15 @@
 //! which is what lets two builds of this rig — a merge base and a head, say —
 //! measure literally the same bytes.
 //!
+//! `peak_rss_mb` is reported only when this process measured **one** codec at
+//! **one** repetition over a **reused** corpus:
+//!
+//!   DATA_DIR=/tmp/corpus CODECS=none REPS=1 s3_backfill   # run twice
+//!
+//! The first run stages and reports no memory figure; the second reuses and
+//! does. See `benchmarks/src/rss.rs` for why each condition is the difference
+//! between a number that means something and one that does not.
+//!
 //! `GIT_COMMIT` is read by the report layer and should be set explicitly when
 //! running a binary built from a commit other than the working tree's: the
 //! fallback asks git at run time, so a binary built from one commit and run
@@ -76,6 +85,10 @@ impl RowEncoder<Owned<Vec<u8>>> for OwnedBytesEncoder {
 /// state.
 struct Corpus {
     codec: String,
+    /// Whether this process built the corpus rather than reusing one. A
+    /// staging run's resident set is not comparable with a reusing run's, so
+    /// it reports no memory figure.
+    rebuilt: bool,
     data: std::path::PathBuf,
     decoded_bytes: u64,
     stored_bytes: u64,
@@ -98,7 +111,8 @@ fn stage_corpus(codec: &str, objects: usize, records: usize, payload: usize) -> 
         }
     };
 
-    let decoded_bytes = stage(&root, codec, objects, records, payload) * objects as u64;
+    let staged = stage(&root, codec, objects, records, payload);
+    let decoded_bytes = staged.decoded_bytes * objects as u64;
     let data = root.join("data");
     let stored_bytes: u64 = std::fs::read_dir(&data)
         .expect("dir")
@@ -107,6 +121,7 @@ fn stage_corpus(codec: &str, objects: usize, records: usize, payload: usize) -> 
 
     Corpus {
         codec: codec.to_owned(),
+        rebuilt: staged.rebuilt,
         data,
         decoded_bytes,
         stored_bytes,
@@ -250,6 +265,26 @@ fn main() {
         run_once(corpus, total_records);
     }
 
+    // The baseline for the memory figure: staging is done and the priming pass
+    // has run, so a peak above this mark was set by the measured region.
+    let watch = benchmarks::rss::PeakWatch::start();
+
+    // Three conditions decide whether a memory figure is attributable, and each
+    // one is about what the number would otherwise mean rather than caution.
+    //
+    //  - One arm. A process peak cannot be split between arms of an in-process
+    //    sweep; it is the mark of whichever arm reached it.
+    //  - One repetition. The figure is a *maximum*, and `REPS` is not part of a
+    //    record's variant identity — so a max over ten repetitions and a max
+    //    over one are two different quantities the schema cannot tell apart,
+    //    and the site would median them into one bar. Every other metric here
+    //    is a mean or a derived rate, which does not have that problem.
+    //  - A reused corpus. Building one grows allocator arenas far past anything
+    //    the pipeline needs, and they are never returned, so a staging run's
+    //    resident set is not comparable with a reusing run's. `DATA_DIR` is
+    //    what makes a reusing run possible.
+    let attributable = corpora.len() == 1 && reps == 1;
+
     // Interleaved: repetition outermost, arm innermost. See the module docs
     // for why the other order is not a comparison.
     // `vec![v; n]` clones, and `Clone` does not carry capacity, so reserving
@@ -274,7 +309,7 @@ fn main() {
         // the quantity actually measured here is elapsed time.
         let per_s = |total: f64| Metric::maximize(total / mean, "records/s");
 
-        Report::measurement(&bench)
+        let mut rep = Report::measurement(&bench)
             .variant("codec", corpus.codec.as_str())
             .variant("objects", objects as u64)
             .variant("records_per_object", records as u64)
@@ -301,7 +336,14 @@ fn main() {
             )
             .note(format!(
                 "bounded end-to-end incl. listing; {n} repetition(s), arms interleaved"
-            ))
-            .emit();
+            ));
+        // Two conditions, and both are about attribution rather than caution.
+        if attributable
+            && !corpus.rebuilt
+            && let Some(m) = watch.metric()
+        {
+            rep = rep.metric(benchmarks::rss::PeakWatch::KEY, m);
+        }
+        rep.emit();
     }
 }

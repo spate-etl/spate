@@ -53,6 +53,55 @@ and the names are case-sensitive — `BENCH_TRIGGER=CI` is an error, not `ci`. A
 typo that quietly became `manual` would produce exactly the record this field
 exists to prevent, so it fails at start-up instead.
 
+### Memory
+
+Some rigs report `peak_rss_mb`: the high-water mark of the process's resident
+set, as the kernel accounted it. It is a blunter quantity than the heap shape
+the instruction-count tier measures under DHAT, and a more operational one — it
+includes what the allocator retained rather than returned, and it is the figure
+a container limit is set against. The two answer different questions, and a
+pipeline's memory is decided by things no micro-benchmark contains: the
+in-flight budget, queue depth, and how many chunks are sealed but
+unacknowledged. Those move with a configuration change and leave every
+instruction count where it was.
+
+The catch is that the figure is a **process** high-water mark. It cannot be
+reset, so it measures the thing under test only when nothing else in that
+process reached higher. Three conditions follow, and a rig that cannot meet
+them reports no memory figure rather than a misleading one:
+
+- **One arm.** A rig sweeping arms in one process would report the same mark
+  for all of them, whichever arm reached it.
+- **One repetition.** The figure is a *maximum*, where every other metric on the
+  record is a mean or a derived rate. Repetition count is not part of a record's
+  variant identity, so a maximum over ten repetitions and one over a single
+  repetition are two quantities the schema cannot tell apart — and the charts
+  would take a median across both.
+- **A measured region that set the mark.** Each rig takes a baseline once setup
+  is done and reports only if the process rose above it afterwards, which is
+  what shows the mark belongs to the measurement. This is a validity check, not
+  a subtraction: the value reported is the process peak, so anything still
+  resident from setup is inside it.
+
+The object-storage backfill carries a fourth: it will not report from a run that
+built its own corpus. Building one grows allocator arenas far past anything the
+pipeline needs and never returns them, so a staging run's resident set is not
+comparable with a reusing run's — pointing a second run at the same `DATA_DIR`
+is what makes the number mean the pipeline. A decode fixture is different and
+stays included, because it is resident *while* the arm runs and is therefore
+part of what the arm needs.
+
+So an exploratory sweep gets no memory figure, and that is the right answer
+rather than a gap. Each rig's usage header names the invocation that does
+produce one.
+
+The metric carries `n = 1` and no interval, because one observation of a
+high-water mark is not a mean. Where a rig repeats by re-running itself as a
+child process, the spread is visible across records rather than within one —
+and on the synthetic pipeline rig that spread is around three times wider than
+its throughput numbers', so read it across repetitions rather than from a
+single record.
+
 ## Reproducing
 
 ### Comparing two arms

@@ -30,6 +30,7 @@ pub mod deser_sample;
 pub mod docker;
 pub mod prom;
 pub mod report;
+pub mod rss;
 pub mod s3data;
 pub mod stats;
 pub mod synthetic;

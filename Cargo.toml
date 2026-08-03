@@ -125,6 +125,17 @@ zstd = "0.13"
 lz4_flex = "0.11.6"
 schema_registry_converter = { version = "4.9", default-features = false }
 
+# Platform bindings. `libc` is here for one call: `getrusage`, which is how the
+# benchmark rigs read the peak resident set the kernel already tracked for them.
+# No published crate *declares* it — `benchmarks` (`publish = false`) is the only
+# one that does, though several reach it transitively through tokio and
+# core_affinity, so it is already in the lockfile and the attribution inventory.
+# The Linux-only alternative, reading `VmHWM` out of `/proc/self/status`, does
+# not exist on macOS, where every committed record was recorded. Unpinned beyond
+# the major: it is the platform's own ABI surface, and there is no released
+# behaviour here to hold still.
+libc = "0.2"
+
 # Test and bench tooling.
 async-trait = "0.1.53"
 serde_repr = "0.1.16"

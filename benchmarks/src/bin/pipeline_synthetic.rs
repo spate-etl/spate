@@ -216,6 +216,10 @@ sink: {{ nullsink: {{}} }}
     std::thread::sleep(Duration::from_secs(3));
     let text0 = metrics_handle.render();
     let c0 = produced.load(Ordering::Relaxed);
+    // Baseline once the runtime is assembled: what follows is the measured
+    // window, and what precedes it is setup this figure should not carry.
+    let watch = benchmarks::rss::PeakWatch::start();
+
     let t0 = Instant::now();
     std::thread::sleep(duration);
     let c1 = produced.load(Ordering::Relaxed);
@@ -324,7 +328,7 @@ sink: {{ nullsink: {{}} }}
     // the box running out of cores, not the framework failing to scale.
     let busy = threads + io_threads + 1;
     let cores = std::thread::available_parallelism().map_or(0, usize::from);
-    rep.note(format!(
+    rep = rep.note(format!(
         "exit={:?}; window_s={window:.3}; verdict={}; \
          pause_events={pause_events}; paused_s={paused_seconds:.3}; \
          threads_busy={busy}/{cores}{}; \
@@ -341,8 +345,13 @@ sink: {{ nullsink: {{}} }}
         } else {
             ""
         },
-    ))
-    .emit();
+    ));
+    // `RUN_ONE` gives each arm and each repetition its own process, so this
+    // peak belongs to exactly the arm the record names.
+    if let Some(m) = watch.metric() {
+        rep = rep.metric(benchmarks::rss::PeakWatch::KEY, m);
+    }
+    rep.emit();
 }
 
 fn main() {

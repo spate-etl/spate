@@ -267,6 +267,13 @@ fn main() {
 
     // Stage the "bucket" once; every instance points at the same prefix.
     let dir = tempfile::tempdir().expect("tempdir");
+    // No `peak_rss_mb` from this rig, deliberately. It stages into a fresh
+    // temporary directory on every run, so it always builds its corpus — and a
+    // process that built one carries allocator arenas grown far past anything
+    // the pipeline needed, which are never returned. With no reused-corpus path
+    // there is nothing to compare a figure against, so it reports none rather
+    // than one that is mostly generator. `s3_backfill` reports it because
+    // `DATA_DIR` gives it a reusing run.
     stage(dir.path(), &codec, objects, records, payload);
 
     let lease = Duration::from_millis(lease_ms);

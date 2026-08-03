@@ -283,6 +283,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "flate2",
+ "libc",
  "lz4_flex",
  "rdkafka",
  "serde",

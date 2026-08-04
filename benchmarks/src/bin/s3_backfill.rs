@@ -41,6 +41,9 @@
 //! fallback asks git at run time, so a binary built from one commit and run
 //! from another checkout records the wrong one.
 //!
+//! `SMOKE=1` shrinks this to 2 objects of 500 records over one codec: enough
+//! to prove the rig runs, not to measure it. Any knob set explicitly wins.
+//!
 //! Env: OBJECTS (64) | RECORDS_PER_OBJECT (20000) | PAYLOAD (256)
 //! SPLIT_TARGET_MB (64) | THREADS (2) | CODECS (none,gzip,zstd)
 //! REPS (1) | DATA_DIR (a fresh temporary directory) | BENCH (s3_backfill)
@@ -51,7 +54,7 @@ use benchmarks::report::{Metric, Report};
 use benchmarks::s3data::stage;
 use benchmarks::stats::{median, stats};
 use benchmarks::synthetic::NullWriter;
-use benchmarks::{env_str, env_u64};
+use benchmarks::{env_str, env_str_smoke, env_u64, env_u64_smoke};
 use bytes::BytesMut;
 use spate_core::backpressure::InflightBudget;
 use spate_core::config::PipelineConfig;
@@ -233,8 +236,8 @@ fn main() {
     // Validates BENCH_TRIGGER before any work: it is otherwise read when the
     // first report is built, which is after the measurement.
     benchmarks::preflight();
-    let objects = env_u64("OBJECTS", 64) as usize;
-    let records = env_u64("RECORDS_PER_OBJECT", 20_000) as usize;
+    let objects = env_u64_smoke("OBJECTS", 64, 2) as usize;
+    let records = env_u64_smoke("RECORDS_PER_OBJECT", 20_000, 500) as usize;
     let payload = env_u64("PAYLOAD", 256) as usize;
     let split_target_mb = env_u64("SPLIT_TARGET_MB", 64);
     let threads = env_u64("THREADS", 2) as usize;
@@ -245,7 +248,7 @@ fn main() {
     // Every arm staged before any of them is measured. Doing this inside the
     // repetition loop would put the generator inside the comparison, and doing
     // it per repetition would give each one a different page-cache state.
-    let corpora: Vec<Corpus> = env_str("CODECS", "none,gzip,zstd")
+    let corpora: Vec<Corpus> = env_str_smoke("CODECS", "none,gzip,zstd", "none")
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())

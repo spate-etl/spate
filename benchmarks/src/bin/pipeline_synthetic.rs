@@ -6,6 +6,10 @@
 //!   pipeline_synthetic          # matrix over THREADS_LIST, one child per config
 //!   RUN_ONE=1 pipeline_synthetic  # single measurement, JSON line on stdout
 //!
+//! `SMOKE=1` runs a single arm at 2 threads for 3 seconds — the sweep proves
+//! nothing extra about whether the rig still runs. Any knob set explicitly
+//! wins.
+//!
 //! Env: THREADS_LIST (1,2,4,8) | THREADS (1) DURATION_S (30) PAYLOAD (256)
 //! WORK_US (0) QUEUE_CAP (64) CHECKPOINT_INTERVAL_MS (200)
 //! METRICS_PORT (19095) RESULTS (append JSONL path)
@@ -24,7 +28,7 @@
 
 use benchmarks::report::{Metric, Report};
 use benchmarks::synthetic::{NullWriter, RawDeser, RawEncoder, RawFam, RawView, SyntheticSource};
-use benchmarks::{busy_work, env_str, env_u64, prom};
+use benchmarks::{busy_work, env_str, env_u64, env_u64_smoke, prom};
 use spate_core::backpressure::InflightBudget;
 use spate_core::config::PipelineConfig;
 use spate_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
@@ -49,8 +53,8 @@ fn spin(r: RawView<'_>) -> RawView<'_> {
 }
 
 fn run_one() {
-    let threads = env_u64("THREADS", 1) as usize;
-    let duration_s = env_u64("DURATION_S", 30);
+    let threads = env_u64_smoke("THREADS", 1, 2) as usize;
+    let duration_s = env_u64_smoke("DURATION_S", 30, 3);
     let duration = Duration::from_secs(duration_s);
     let payload = env_u64("PAYLOAD", 256) as usize;
     let work_us = env_u64("WORK_US", 0);
@@ -358,7 +362,10 @@ fn main() {
     // Validates BENCH_TRIGGER before any work: it is otherwise read when the
     // first report is built, which is after the measurement.
     benchmarks::preflight();
-    if std::env::var("RUN_ONE").is_ok() {
+    // A smoke run is a single arm by definition: the sweep below re-executes
+    // this binary once per arm and per repetition, which proves nothing extra
+    // about whether the rig still runs.
+    if std::env::var("RUN_ONE").is_ok() || benchmarks::smoke() {
         run_one();
         return;
     }

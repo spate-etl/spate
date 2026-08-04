@@ -61,6 +61,36 @@ pub fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// Whether this run only has to prove the rig works.
+///
+/// `SMOKE=1` is the weekly tier's "does it still run" pass, the same job
+/// criterion's `--test` does for a bench: shortest window, smallest corpus, one
+/// repetition, nothing recorded. A rig decides for itself what that means,
+/// because the parameters that make a run small are the rig's own — a caller
+/// choosing them needs a table of every knob, and that table drifts.
+///
+/// Anything but unset, empty or `0` counts as on.
+pub fn smoke() -> bool {
+    match std::env::var("SMOKE") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+/// `key` from the environment, else `smoke` under [`smoke`] and `default`
+/// otherwise.
+///
+/// An explicit setting still wins, so a smoke run stays steerable — the same
+/// precedence every other knob has.
+pub fn env_u64_smoke(key: &str, default: u64, smoke_value: u64) -> u64 {
+    env_u64(key, if smoke() { smoke_value } else { default })
+}
+
+/// [`env_str`] with a separate default under [`smoke`].
+pub fn env_str_smoke(key: &str, default: &str, smoke_value: &str) -> String {
+    env_str(key, if smoke() { smoke_value } else { default })
+}
+
 /// Creates `topic` with `partitions` partitions.
 ///
 /// An existing topic is reused, but only after its partition count is checked

@@ -25,7 +25,10 @@
 #
 # Usage:
 #   scripts/ci-changes.sh              # emit outputs (reads env, see below)
-#   scripts/ci-changes.sh --self-test  # verify the container map against cargo
+#   scripts/ci-changes.sh --self-test  # verify the derived maps against cargo
+#                                      # and the source tree
+#   scripts/ci-changes.sh --wallclock-rigs <base> <head>   # rigs a diff drives
+#   scripts/ci-changes.sh --wallclock-rigs-all             # every runnable rig
 #
 # Environment:
 #   EVENT_NAME  github.event_name
@@ -51,6 +54,11 @@
 # classification path.
 
 set -euo pipefail
+
+# A newline, for the accumulator strings below. Written once because `$'\n'`
+# inside a parameter expansion is a parse error in some shells and a literal in
+# others, and both failures are quiet.
+_NL=$'\n'
 
 # Workspace packages that own `#[ignore]`d container tests. Everything else in
 # the workspace has no container suite to run. `--self-test` derives this same
@@ -148,6 +156,303 @@ bench_pkgs_for() {
     case "$1" in
         spate-core) all_bench_pkgs ;;
         *) if has_gungraun_bench "$1"; then echo "$1"; fi ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# The wall-clock rigs, and which crates select them.
+# ---------------------------------------------------------------------------
+# A separate question from the counter tier above, with a separate answer. The
+# counter tier measures crates and fans out over benches inside them; the
+# wall-clock tier runs whole-pipeline rigs, each of which reaches several
+# crates. A change to `spate-s3` should drive the object-storage backfill and
+# not the ClickHouse encoder.
+#
+# The mapping is DERIVED, not written down. Each rig is a binary in
+# `benchmarks/src/bin/`, and the crates it exercises are the ones it names:
+#
+#     grep -oE "spate_(core|avro|...)::"
+#
+# Reading `use` lines alone would undercount — `s3_backfill` reaches
+# `spate_json::NdjsonFramer` through a path expression and imports it nowhere —
+# and a hand-kept table is one more thing to forget when a rig grows a
+# dependency. `--self-test` re-derives it and fails if a rig is in neither list
+# below; it does not re-check that an exclusion reason still holds.
+#
+# Two rigs name no `spate_*` crate at all: `kafka_topology` and `loadgen` drive
+# rdkafka directly and measure the broker rather than the framework. Both are
+# excluded on the infrastructure ground below, so the mapping never reaches
+# them — noted because a reader who promoted one would otherwise expect a crate
+# change to select it, and nothing would.
+#
+# Excluded from the runnable set, with the reason, because an unexplained
+# absence reads as an oversight:
+#
+#   container rigs   need a broker or a database server, so they are run by
+#                    hand on identified hardware rather than in CI. Their
+#                    numbers are published from `benchmarks/results/` like any
+#                    other; what they are not is dispatchable from a diff.
+#   s3_backfill_coordinated
+#                    dependency-free and otherwise eligible, but it cannot run:
+#                    two of its instances claim one gauge series (#89). Listing
+#                    it as runnable would turn a dispatch into a red run rather
+#                    than a measurement.
+WALLCLOCK_RIGS=(deser_formats pipeline_synthetic s3_backfill)
+WALLCLOCK_EXCLUDED=(
+    ch_native_format ch_sink_saturation e2e_kafka_clickhouse
+    kafka_sink_saturation kafka_topology loadgen multi_table_split
+    s3_backfill_coordinated
+)
+
+# The crates one rig reaches: the ones it names, closed over their workspace
+# dependencies.
+#
+# Naming alone is not enough, and the gap is the same one this mapping exists to
+# close, a level deeper. `s3_backfill` names `spate_s3::`; `spate-s3` depends on
+# `spate-coordination` and builds a memory store unconditionally, so every run
+# of that rig executes coordination code the rig mentions nowhere. Stopping at
+# what a rig names would let a coordination change drive no rig at all.
+#
+# "Names" spans the shared modules a rig pulls in, for the same reason: a crate
+# called only from `benchmarks/src/` code is still linked into the rig binary,
+# and reading the rig's own source alone would miss it.
+#
+# The walk is a parser rather than a line-wise grep, because three ordinary
+# shapes defeat one. A doc comment mentioning a crate is not a reference to it,
+# and reading one as such turns a merge gate red naming a cause that is not
+# there. `rustfmt` wraps a long `use benchmarks::{…}` across lines, and a
+# line-wise match on the brace form sees no closing brace and drops every module
+# in the group. And shared modules reach each other as `crate::x`, never as
+# `benchmarks::x`, so the transitive step never fires without it.
+#
+# The crate list is passed in, built from the directory names under `crates/`
+# rather than written out — a hardcoded list is what this file already removed
+# once for the container map. Each name is validated first: a directory is a
+# name a branch chooses, and one carrying a regex metacharacter would otherwise
+# make the match fail and the classifier answer "nothing" with status 0, the
+# fail-open this file's header twice says it will not do.
+#
+# $2 overrides the tree to read, for `--self-test`'s fixtures.
+rig_named_crates() {
+    local rig=$1 root=${2:-} names name dir
+    [ -n "$root" ] || root=$(git rev-parse --show-toplevel)
+    names=""
+    # Iterated as paths rather than through word splitting: a directory name
+    # carrying whitespace would otherwise arrive as two fragments that each
+    # pass the check below, while the name it was split from would not.
+    for dir in "$root"/crates/*/; do
+        name=${dir%/}
+        name=${name##*/}
+        if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::crate directory '$name' carries a character that cannot go into a pattern unescaped." >&2
+            return 1
+        fi
+        names+="${names:+$_NL}$(printf '%s' "$name" | tr '-' '_')"
+    done
+    if [ ! -f "$root/benchmarks/src/bin/$rig.rs" ]; then
+        echo "::error::rig '$rig' has no source at benchmarks/src/bin/$rig.rs." >&2
+        return 1
+    fi
+    printf '%s\n' "$names" | python3 -c '
+import os, re, sys
+
+src, rig = sys.argv[1], sys.argv[2]
+crates = {n.strip() for n in sys.stdin if n.strip()}
+
+def strip_comments(text):
+    # Block first, then line. Neither is string-aware, and it does not need to
+    # be: over-stripping can only drop a reference, and a crate path inside a
+    # string literal is not a reference to begin with. A line comment opener
+    # preceded by a colon is left alone, so a URL in a string does not truncate
+    # the code after it.
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", " ", text)
+
+def read(rel):
+    for cand in (os.path.join(src, rel + ".rs"), os.path.join(src, rel, "mod.rs")):
+        if os.path.isfile(cand):
+            with open(cand, encoding="utf-8", errors="replace") as fh:
+                return strip_comments(fh.read())
+    return None
+
+# One nesting level of braces, spanning newlines because the negated class
+# matches them, so a wrapped or nested use-group yields every identifier in it.
+# A crate-relative path inside a binary means that binary, not the shared
+# library, so the roots differ by where we are: only library files follow it.
+def patterns(roots):
+    alt = "|".join(roots)
+    return (re.compile(r"\b(?:" + alt + r")::([A-Za-z0-9_]+)"),
+            re.compile(r"\b(?:" + alt + r")::\{((?:[^{}]|\{[^{}]*\})*)\}"))
+
+IDENT = re.compile(r"[A-Za-z0-9_]+")
+BIN = patterns(["benchmarks"])
+LIB = patterns(["benchmarks", "crate"])
+
+seen, found, pending = set(), set(), ["bin/" + rig, "lib"]
+while pending:
+    rel = pending.pop()
+    if rel in seen:
+        continue
+    seen.add(rel)
+    text = read(rel)
+    if text is None:
+        continue
+    for crate in crates:
+        if re.search(r"\b" + re.escape(crate) + r"::", text):
+            found.add(crate)
+    plain, group = BIN if rel.startswith("bin/") else LIB
+    # A name that turns out to be a function rather than a module simply
+    # resolves to no file, so over-collecting here costs nothing.
+    pending += plain.findall(text)
+    for grp in group.findall(text):
+        pending += IDENT.findall(grp)
+print("\n".join(sorted(c.replace("_", "-") for c in found)))
+' "$root/benchmarks/src" "$rig"
+}
+
+# `rig<TAB>crate crate …` for every runnable rig.
+#
+# Built once by each entry point and passed down as an argument. Not memoised
+# inside a helper: every caller is a pipeline, a command substitution or a
+# process substitution, so a cache written there lives in a subshell and dies
+# with it — the rule this file already records for `discover_bench_pkgs`, and
+# one a first attempt here measured at zero hits against 621 misses.
+rig_crate_map() {
+    local root rig named
+    root=$(git rev-parse --show-toplevel)
+    # One `cargo metadata`, expanded in python: for each workspace package, the
+    # workspace packages it reaches transitively. `--no-deps` keeps registry
+    # crates out; a rig reaching `serde` tells us nothing about which rig a
+    # change drives.
+    local closure
+    # cargo's stderr is kept: a stale lockfile under `--locked` fails here, and
+    # hiding the cause leaves only "cannot read the workspace dependency graph".
+    closure=$(cargo metadata --format-version 1 --no-deps --locked | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+names = {p["name"] for p in m["packages"]}
+# Normal dependencies only. A dev-dependency is linked into a test or a
+# bench, never into the rig binary, so a change to the test doubles cannot
+# move a rig'"'"'s numbers.
+direct = {p["name"]: {d["name"] for d in p["dependencies"]
+                      if d["name"] in names and d.get("kind") is None}
+          for p in m["packages"]}
+def close(n, seen=None):
+    seen = seen or set()
+    for d in direct.get(n, ()):
+        if d not in seen:
+            seen.add(d)
+            close(d, seen)
+    return seen
+for n in sorted(names):
+    print("{}\t{}".format(n, " ".join(sorted(close(n)))))
+') || {
+        echo "::error::cannot read the workspace dependency graph" >&2
+        return 1
+    }
+    for rig in "${WALLCLOCK_RIGS[@]}"; do
+        named=$(rig_named_crates "$rig") || return 1
+        printf '%s\t%s\n' "$rig" "$(
+            {
+                printf '%s\n' "$named"
+                while IFS= read -r c; do
+                    [ -n "$c" ] || continue
+                    printf '%s' "$closure" | sed -n "s/^$c\t//p" | tr ' ' '\n'
+                done <<<"$named"
+            } | sed '/^$/d' | sort -u | tr '\n' ' '
+        )"
+    done
+}
+
+# Which runnable rigs does a change to crate $1 drive, given the map in $2?
+#
+# `spate-core` selects every one of them, for the reason it selects every
+# benched crate above: everything depends on it. Any other crate selects the
+# rigs that *reach* it — which is the closure, not the naming. A rig that names
+# only `spate-s3` is driven by a `spate-coordination` change.
+#
+# The map is a required argument, not a default that falls back to building
+# one. A fallback is invisible: it made the cost linear in the number of
+# changed files while the comment above claimed the map was built once, and it
+# swallowed the builder's exit status, so a workspace that could not be read
+# produced an empty map and therefore the answer "this change drives nothing"
+# — the fail-open this file's header twice says it will not do.
+wallclock_rigs_for() {
+    local crate=$1 map=$2 rig names reached
+    # An empty crate name reaches the whole table: the rows end in a space, so
+    # the split below yields a trailing empty field that a `-x` match on the
+    # empty string would hit.
+    [ -n "$crate" ] || return 0
+    while IFS=$'\t' read -r rig names; do
+        [ -n "$rig" ] || continue
+        # `-x` and `-F`, because `$crate` comes from a changed path and a branch
+        # chooses those: `crates/spate-.*/README.md` is a legal directory name
+        # that as a pattern would match every rig. Captured rather than piped
+        # into `grep -q`, for the SIGPIPE reason recorded in `--self-test`.
+        reached=$(printf '%s\n' "$names" | tr ' ' '\n' | sed '/^$/d')
+        if [ "$crate" = "spate-core" ] || grep -qxF -- "$crate" <<<"$reached"; then
+            echo "$rig"
+        fi
+    done <<<"$map"
+}
+
+# Which crate does a changed path attribute to, for the wall-clock mapping?
+# Prints the crate name, or nothing when the path drives no rig.
+#
+# A function rather than a `case` inline in the dispatch below, because
+# `--self-test` drives these arms directly. A table that re-implemented them
+# kept passing while the real classification drifted, which is the failure
+# this seam exists to prevent.
+wallclock_crate_for_path() {
+    local file=$1 root=$2 crate
+    case "$file" in
+    # Committed datasets are chart data the site reads, not code — the same
+    # call the main classifier makes for them 500 lines below. Listed before
+    # the `benchmarks/*` arm because `*` matches `/` in a bash case, so
+    # without it a results-recording commit drives every rig.
+    benchmarks/results/*) ;;
+    crates/*)
+        crate="${file#crates/}"
+        crate="${crate%%/*}"
+        # The changed paths come from a ref pair, but everything they are
+        # matched against comes from the checkout: the crate list, the rig
+        # sources and the dependency graph. A crate the checkout does not have
+        # cannot be mapped, and answering "drives nothing" for it is the
+        # fail-open this file's header twice says it will not do — a range
+        # spanning a crate rename answered nothing at all, silently, while the
+        # main classification path called the same input code.
+        #
+        # Unresolvable therefore means everything, which is the call that path
+        # makes for anything it does not recognise. It costs a full run on the
+        # commit that deletes or renames a crate, and that is the direction to
+        # be wrong in.
+        if [ -d "$root/crates/$crate" ]; then
+            printf '%s' "$crate"
+        else
+            printf '%s' spate-core
+        fi
+        ;;
+    # The rigs themselves, the apparatus that runs and reads them, the workflow
+    # that drives them, and what pins the build they all compile into. A change
+    # to any can move every number, and none lives under `crates/`. This script
+    # is first: without it the change that rewrites how rigs are chosen is the
+    # one that never runs them, which the counter tier's equivalent arm records
+    # as having already happened once.
+    #
+    # `Cargo.lock` and the root manifest are here because a dependency or
+    # profile change moves what every rig links, and the shared setup action
+    # because it pins the toolchain they build with — each alters every
+    # measurement without any measured file changing. This is deliberately
+    # wider than the counter tier's bench arm, which lists the setup action but
+    # not the lockfile: a wall-clock number moves with a dependency bump and an
+    # instruction count for a bench that does not call it does not.
+    scripts/ci-changes.sh | benchmarks/* | scripts/bench-compare.sh | \
+        Makefile | .github/workflows/scheduled.yml | \
+        .github/actions/* | Cargo.lock | Cargo.toml | deny.toml | \
+        rust-toolchain.toml | rust-toolchain | .cargo/* | .config/*)
+        printf '%s' spate-core
+        ;;
+    *) ;;
     esac
 }
 
@@ -266,6 +571,87 @@ ci_label_wants_bench() {
     local labels=",${1:-},"
     [[ "$labels" == *",ci: bench,"* ]]
 }
+
+# Every runnable rig, for a caller that runs them all rather than selecting.
+#
+#   ci-changes.sh --wallclock-rigs-all
+#
+# It exists so the weekly smoke job does not keep a second copy of WHICH rigs to
+# run. That job still keeps one invocation per rig — a rig needs arguments, and
+# those cannot be derived — and it asserts that the two agree in both
+# directions, so a rig added here fails it until it is given an invocation, and
+# one dropped fails it until the invocation goes too.
+if [[ "${1:-}" == "--wallclock-rigs-all" ]]; then
+    # Exactly one, for the reason its sibling below rejects a fourth argument:
+    # a caller passing more thinks this takes something it does not.
+    if [[ $# -ne 1 ]]; then
+        echo "usage: $0 --wallclock-rigs-all" >&2
+        exit 1
+    fi
+    printf '%s\n' "${WALLCLOCK_RIGS[@]}"
+    exit 0
+fi
+
+# Which wall-clock rigs does a diff drive? Answered here rather than by the
+# caller, so the dispatched tier and a local run reach the same set from the
+# same rules — the same reason both counter legs run `gungraun-benches.sh`.
+#
+#   ci-changes.sh --wallclock-rigs <base-ref> <head-ref>
+#
+# Prints one rig per line, or nothing when the change reaches no rig. Nothing is
+# an answer: a docs-only change drives no measurement. A diff that cannot be
+# computed, or a workspace that cannot be read, is an error instead.
+if [[ "${1:-}" == "--wallclock-rigs" ]]; then
+    # Exactly three: a fourth argument is a caller that thinks this takes
+    # something it does not, and silently ignoring it hides that.
+    if [[ $# -ne 3 ]]; then
+        echo "usage: $0 --wallclock-rigs <base-ref> <head-ref>" >&2
+        exit 1
+    fi
+    # The merge base, and the same flags the main classification path uses, for
+    # the three reasons `docs/user-guide/07-reference/ci.mdx` gives: the base
+    # tip drags in everything `main` has gained since the branch moved, rename
+    # detection prints only the destination, and `core.quotePath` C-quotes
+    # non-ASCII names into matching nothing.
+    #
+    # Materialised rather than piped into the loop. A process substitution whose
+    # producer died iterates zero times and reports success, so an unreachable
+    # ref would print nothing and exit 0 — indistinguishable from "this change
+    # drives no rig", which is the one answer a caller must not be given by
+    # mistake.
+    base=$(git merge-base "$2" "$3" 2>/dev/null) || {
+        echo "::error::cannot find a merge base for '$2' and '$3'" >&2
+        exit 1
+    }
+    changed=$(mktemp)
+    trap 'rm -f "$changed"' EXIT
+    if ! git diff --name-only --no-ext-diff --no-textconv --no-renames -z \
+        "$base" "$3" >"$changed"; then
+        echo "::error::cannot diff '$base'..'$3'" >&2
+        exit 1
+    fi
+
+    # Built once, here, and passed to every lookup. Failing to read the
+    # workspace is an error, not an empty answer.
+    map=$(rig_crate_map) || exit 1
+    root=$(git rev-parse --show-toplevel)
+
+    selected=""
+    while IFS= read -r -d "" file; do
+        crate=$(wallclock_crate_for_path "$file" "$root")
+        [[ -n "$crate" ]] || continue
+        # Captured rather than consumed from a process substitution, for the
+        # reason given above the diff: a producer that died would iterate zero
+        # times and report success, printing nothing.
+        rigs=$(wallclock_rigs_for "$crate" "$map") || exit 1
+        while IFS= read -r rig; do
+            [[ -n "$rig" ]] || continue
+            selected+="$rig"$'\n'
+        done <<<"$rigs"
+    done <"$changed"
+    printf '%s' "$selected" | sort -u
+    exit 0
+fi
 
 if [[ "${1:-}" == "--self-test" ]]; then
     repo_root=$(git rev-parse --show-toplevel)
@@ -412,6 +798,254 @@ for crate in sorted(names):
         echo "Check scripts/gungraun-benches.sh and the benches/*_gungraun.rs naming convention."
         exit 1
     fi
+
+    # --- the wall-clock rigs ---------------------------------------------
+    #
+    # Every rig is classified, exactly once. A rig added to `benchmarks/` and
+    # left out of both lists would be silently unselectable — the failure this
+    # whole seam exists to prevent — so it fails here until somebody says which
+    # it is and why.
+    declared=$(find "$repo_root/benchmarks/src/bin" -maxdepth 1 -name '*.rs' -type f \
+        -exec basename {} .rs ';' | sort)
+    classified=$(printf '%s\n' "${WALLCLOCK_RIGS[@]}" "${WALLCLOCK_EXCLUDED[@]}" | sort)
+    if [[ "$declared" != "$classified" ]]; then
+        echo "::error::every rig under benchmarks/src/bin must appear in exactly one of WALLCLOCK_RIGS or WALLCLOCK_EXCLUDED."
+        diff <(printf '%s\n' "$declared") <(printf '%s\n' "$classified") || true
+        exit 1
+    fi
+    # The mapping is derived, so the only thing to check is that it answers.
+    # A runnable rig naming no crate could never be selected by any change.
+    for rig in "${WALLCLOCK_RIGS[@]}"; do
+        if [[ -z "$(rig_named_crates "$rig")" ]]; then
+            echo "::error::rig '$rig' names no spate crate, so no change can select it."
+            exit 1
+        fi
+    done
+
+    # The source walk, against a tree built to produce the wrong answers.
+    # Three shapes defeat a line-wise grep, and all three occur in this repo:
+    # a doc comment naming a crate the rig does not call (deser_formats carries
+    # one), a `use benchmarks::{…}` that rustfmt wrapped across lines, and
+    # shared modules reaching each other as `crate::x`. Each row below fails
+    # without the corresponding part of the parser.
+    fixture=$(mktemp -d)
+    trap 'rm -rf "$fixture"' EXIT
+    mkdir -p "$fixture/crates/spate-core" "$fixture/crates/spate-kafka" \
+        "$fixture/crates/spate-json" "$fixture/crates/spate-s3" \
+        "$fixture/crates/spate-avro" "$fixture/crates/spate-coordination" \
+        "$fixture/benchmarks/src/bin" "$fixture/benchmarks/src/dirmod"
+    # A module that lives in a directory rather than beside its siblings.
+    cat >"$fixture/benchmarks/src/dirmod/mod.rs" <<'FIXDIR'
+pub fn run() { let _ = spate_coordination::Store; }
+FIXDIR
+    # The crate root is linked into every rig, so a crate named only here is
+    # reached by all of them. Named nowhere else in the fixture.
+    cat >"$fixture/benchmarks/src/lib.rs" <<'FIXLIB'
+pub mod wrapped;
+pub mod reached;
+pub fn env_str() { let _ = spate_avro::Decoder; }
+FIXLIB
+    # Reached only through a wrapped brace group, and names a crate nowhere
+    # else in the fixture.
+    cat >"$fixture/benchmarks/src/wrapped.rs" <<'FIXWRAP'
+use crate::reached::helper;
+pub fn go() { let _ = spate_json::Framer; helper(); }
+FIXWRAP
+    # Reached only from another shared module, as `crate::reached`.
+    cat >"$fixture/benchmarks/src/reached.rs" <<'FIXREACH'
+pub fn helper() { let _ = spate_s3::Source; }
+FIXREACH
+    cat >"$fixture/benchmarks/src/bin/fixture.rs" <<'FIXBIN'
+//! Unlike [`spate_kafka::KafkaSource`], this rig needs no broker.
+/* An earlier draft called spate_kafka::Producer here.
+   It spans lines, as a disabled block does. */
+use benchmarks::{
+    dirmod,
+    env_str,
+    wrapped,
+};
+fn main() { let _ = spate_core::Pipeline; env_str(); wrapped::go(); dirmod::run(); }
+FIXBIN
+    fixture_got=$(rig_named_crates fixture "$fixture" | sort | tr '\n' ' ')
+    fixture_got="${fixture_got% }"
+    if [[ "$fixture_got" != "spate-avro spate-coordination spate-core spate-json spate-s3" ]]; then
+        echo "::error::the source walk answered '$fixture_got' for the fixture rig, want 'spate-avro spate-coordination spate-core spate-json spate-s3'."
+        echo "spate-kafka appearing means a doc comment was read as a reference; a missing"
+        echo "spate-json means a wrapped use-group was dropped; a missing spate-s3 means a"
+        echo "crate-relative edge between shared modules was not followed; a missing"
+        echo "spate-avro means the crate root was not treated as linked into every rig."
+        exit 1
+    fi
+    rm -rf "$fixture"
+    trap - EXIT
+
+    # The dependency closure is not feature-aware: `cargo metadata --no-deps`
+    # reports an optional dependency the same as a required one, so the facade
+    # reaches every connector it can enable. Nothing is wrong while no rig
+    # names the facade, and this says so rather than leaving the first rig
+    # written against the public API to surface as an unrelated red check —
+    # "every rig exercising it needs infrastructure", which is not what would
+    # have gone wrong.
+    for rig in "${WALLCLOCK_RIGS[@]}"; do
+        if grep -qxF spate <<<"$(rig_named_crates "$rig")"; then
+            echo "::error::rig '$rig' names the spate facade, whose optional connector dependencies are all in its closure."
+            echo "Make the closure feature-aware before a rig reaches a connector through the facade."
+            exit 1
+        fi
+    done
+
+    # Built once and passed down, exactly as the dispatch path does it.
+    map=$(rig_crate_map) || exit 1
+
+    # spate-core reaches everything, here as above — asserted against the map
+    # rather than through `wallclock_rigs_for`, which short-circuits on that
+    # crate before reading a row. Comparing its output to WALLCLOCK_RIGS put
+    # the same array on both sides and could not fail for any map.
+    for rig in "${WALLCLOCK_RIGS[@]}"; do
+        reached=$(printf '%s' "$map" | sed -n "s/^$rig$(printf '\t')//p")
+        if ! grep -qxF spate-core <<<"$(printf '%s\n' "$reached" | tr ' ' '\n')"; then
+            echo "::error::rig '$rig' does not reach spate-core, which every rig links."
+            exit 1
+        fi
+    done
+
+    # And a crate whose every rig needs infrastructure selects none of them.
+    # Two cases, and both would be easy to get wrong by reading `use` lines:
+    # spate-kafka's rigs all need a broker, spate-clickhouse's all need a
+    # server.
+    for crate in spate-kafka spate-clickhouse; do
+        if [[ -n "$(wallclock_rigs_for "$crate" "$map")" ]]; then
+            echo "::error::wallclock_rigs_for($crate) selects a rig, but every rig exercising it needs infrastructure."
+            exit 1
+        fi
+    done
+
+    # The closure, not just the naming. `s3_backfill` names spate-s3, which
+    # depends on spate-coordination and builds a memory store unconditionally —
+    # so coordination code runs on every backfill and a change to it must drive
+    # the rig, though the rig mentions it nowhere.
+    #
+    # Captured, not piped into `grep -q`: under `pipefail` a `-q` that exits on
+    # the first match kills the producer with SIGPIPE and the pipeline reports
+    # 141. That is not hypothetical here — promoting a fourth rig makes this
+    # producer write again after the match, and the check then fails on the
+    # exact change it was written to permit. No check below uses that shape.
+    coord_rigs=$(wallclock_rigs_for spate-coordination "$map")
+    if ! grep -qxF s3_backfill <<<"$coord_rigs"; then
+        echo "::error::a spate-coordination change must drive s3_backfill — spate-s3 depends on it."
+        exit 1
+    fi
+
+    # A dev-dependency is linked into a test or a bench, never the rig binary.
+    if [[ -n "$(wallclock_rigs_for spate-test "$map")" ]]; then
+        echo "::error::spate-test is a dev-dependency; it cannot move a rig binary."
+        exit 1
+    fi
+
+    # The mapping is derived from what a rig NAMES, not from what it imports.
+    # `s3_backfill` reaches `spate_json::NdjsonFramer` through a path
+    # expression and imports it nowhere, so an import-based table would miss
+    # this and a spate-json change would never drive the backfill.
+    json_rigs=$(wallclock_rigs_for spate-json "$map")
+    if ! grep -qxF s3_backfill <<<"$json_rigs"; then
+        echo "::error::a spate-json change must drive s3_backfill — it frames with NdjsonFramer."
+        exit 1
+    fi
+
+    # The narrow case, which is the whole point: a crate drives the rigs that
+    # name it and no others. Asserted as that property rather than as today's
+    # exact set — pinning the set would turn a legitimate promotion (see #89)
+    # into a red check, which is the shape of guard that gets deleted rather
+    # than fixed.
+    s3_rigs=$(wallclock_rigs_for spate-s3 "$map")
+    if ! grep -qxF s3_backfill <<<"$s3_rigs"; then
+        echo "::error::a spate-s3 change must drive s3_backfill."
+        exit 1
+    fi
+    for rig in $(printf '%s\n' "$s3_rigs"); do
+        reached=$(printf '%s' "$map" | sed -n "s/^$rig\t//p")
+        reached_lines=$(printf '%s\n' "$reached" | tr ' ' '\n')
+        if ! grep -qxF spate-s3 <<<"$reached_lines"; then
+            echo "::error::wallclock_rigs_for(spate-s3) selects '$rig', which does not reach spate-s3."
+            exit 1
+        fi
+    done
+    for rig in deser_formats pipeline_synthetic; do
+        if grep -qxF "$rig" <<<"$s3_rigs"; then
+            echo "::error::a spate-s3 change must not drive '$rig' — it names no spate-s3."
+            exit 1
+        fi
+    done
+
+    # The path arms, driven through `wallclock_crate_for_path` — the same
+    # function the dispatch calls, not a copy of its `case`. A copy passed this
+    # check while the real arms drifted, which is how deleting one of them from
+    # the dispatch left `--self-test` green.
+    #
+    # Each pair is a changed path and the crate it must attribute to — the
+    # attribution, not the rig set. Which rigs a crate drives is asserted as a
+    # property above; restating today's set here would turn a legitimate
+    # promotion (see #89) into a red check, which is the shape of guard that
+    # gets deleted rather than fixed. The empty answers carry the same weight
+    # as the others: the results-before-benchmarks ordering is asserted here
+    # because `*` matches `/` in a bash case, and getting it wrong makes
+    # recording a dataset drive everything.
+    while IFS='|' read -r probe want; do
+        [[ -n "$probe" ]] || continue
+        got=$(wallclock_crate_for_path "$probe" "$repo_root")
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::path '$probe' attributes to '$got', want '$want'."
+            exit 1
+        fi
+    done <<PATHS
+crates/spate-s3/src/lib.rs|spate-s3
+crates/spate-coordination/src/lib.rs|spate-coordination
+crates/spate-clickhouse/src/lib.rs|spate-clickhouse
+crates/etl-s3/src/source.rs|spate-core
+benchmarks/results/s3-backfill.jsonl|
+benchmarks/src/bin/s3_backfill.rs|spate-core
+scripts/ci-changes.sh|spate-core
+scripts/bench-compare.sh|spate-core
+Makefile|spate-core
+.github/workflows/scheduled.yml|spate-core
+.github/actions/setup-rust/action.yml|spate-core
+Cargo.lock|spate-core
+Cargo.toml|spate-core
+deny.toml|spate-core
+rust-toolchain.toml|spate-core
+.cargo/config.toml|spate-core
+.config/nextest.toml|spate-core
+docs/DESIGN.md|
+README.md|
+scripts/attribution.sh|
+PATHS
+
+    # And end to end, for the two answers that hold whatever the runnable set
+    # becomes: an apparatus path drives every rig, a docs or dataset path
+    # drives none. Both are derived, so a promotion moves them with it.
+    all_rigs=$(printf '%s\n' "${WALLCLOCK_RIGS[@]}" | sort | tr '\n' ' ')
+    all_rigs="${all_rigs% }"
+    while IFS='|' read -r probe want; do
+        [[ -n "$probe" ]] || continue
+        [[ "$want" != "@ALL" ]] || want="$all_rigs"
+        probe_crate=$(wallclock_crate_for_path "$probe" "$repo_root")
+        got=""
+        if [[ -n "$probe_crate" ]]; then
+            got=$(wallclock_rigs_for "$probe_crate" "$map" | sort | tr '\n' ' ')
+            got="${got% }"
+        fi
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::path '$probe' selects '$got', want '$want'."
+            exit 1
+        fi
+    done <<ENDTOEND
+scripts/ci-changes.sh|@ALL
+Makefile|@ALL
+.github/actions/setup-rust/action.yml|@ALL
+Cargo.lock|@ALL
+benchmarks/results/s3-backfill.jsonl|
+docs/DESIGN.md|
+ENDTOEND
 
     # spate-core reaches every count, so it selects every benched crate.
     core_pkgs=$(bench_pkgs_for spate-core | tr '\n' ' ')

@@ -37,6 +37,9 @@
 //! - `THREADS` parallelism (default 1)
 //! - `DURATION_S` measurement window per rep (default 3)
 //! - `REPS`    repetitions for the mean + CI (default 5)
+//! - `SMOKE=1` shrinks the run to 10 readings, a one-second window and one
+//!   repetition: enough to prove the rig runs, not to measure it. Any knob set
+//!   explicitly wins.
 //! - `COPY_ONLY` `1` measures the memcpy-only baseline instead of decoding (JSON)
 //! - `RESULTS` append the JSONL record to this path
 //!
@@ -48,7 +51,7 @@
 use benchmarks::deser_sample::{self, Order, Reading, SensorBatch};
 use benchmarks::report::{Metric, Report};
 use benchmarks::stats::{median, stats};
-use benchmarks::{env_str, env_u64};
+use benchmarks::{env_str, env_u64, env_u64_smoke};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
@@ -357,10 +360,10 @@ fn main() {
     let shape = env_str("SHAPE", "batch");
     let format = env_str("FORMAT", "json");
     let record = env_str("RECORD", "typed");
-    let events = env_u64("EVENTS", 50);
+    let events = env_u64_smoke("EVENTS", 50, 10);
     let threads = env_u64("THREADS", 1) as usize;
-    let duration = Duration::from_secs(env_u64("DURATION_S", 3));
-    let reps = env_u64("REPS", 5);
+    let duration = Duration::from_secs(env_u64_smoke("DURATION_S", 3, 1));
+    let reps = env_u64_smoke("REPS", 5, 1);
     let copy_only = env_u64("COPY_ONLY", 0) != 0;
 
     // Effective framing: Avro is always the single nested datum; a JSON order

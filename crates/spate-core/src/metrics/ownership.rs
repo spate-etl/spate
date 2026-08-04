@@ -58,8 +58,8 @@ impl SeriesClaim {
     }
 
     /// Claim `key`, or log and return `None` so the caller becomes a shadow.
-    /// The infallible path, for direct construction (benchmarks, hand
-    /// assembly, tests): a label collision must not take down a process whose
+    /// The infallible path, for direct construction (hand assembly, tests):
+    /// a label collision must not take down a process whose
     /// data path is fine, but it must be impossible to miss in the logs.
     pub(crate) fn claim_or_shadow(key: String) -> Option<Self> {
         if Self::insert(&key) {

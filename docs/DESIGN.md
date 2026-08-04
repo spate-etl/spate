@@ -704,7 +704,6 @@ in the tree and a breaking `metrics` release is upgraded in a single edit.
 | `spate-avro` | Avro deserializer: `apache-avro` backend, Confluent wire format, registry client + per-thread schema cache. |
 | `spate-coordination` | Multi-instance coordination backend for broker-less sources: leader-elected planning and work assignment, TTL'd split leases with heartbeats, cooperative revocation, epoch-fenced resumable commits — over a public six-primitive store trait with an in-memory store (tests, embedding) and a NATS JetStream KV store (server ≥ 2.11, default `nats` feature). The seam it implements (`SplitPlanner`/`SplitCoordinator`) and the reusable source-side `CoordinationDriver` live in `spate-core::coordination` — synchronous and tokio-free (no async runtime in spate-core). |
 | `spate-test` | Public in-memory source/sink mocks with scripting handles, plus a scripted `SplitCoordinator` for coordinated-source tests. |
-| `benchmarks` | Unpublished: topology A/B, synthetic framework-overhead, e2e harness, loadgen. |
 
 ## Decision log
 

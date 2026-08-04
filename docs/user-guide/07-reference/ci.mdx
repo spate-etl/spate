@@ -218,7 +218,7 @@ at it; without `CI=true` you will not find out until the PR is red.
 
 The `/api/` rustdoc is generated into `website/static/api/` (gitignored) by the
 nightly deploy only, not by the PR build. To populate it locally: `cargo doc
---workspace --exclude benchmarks --no-deps --all-features`, then copy
+--workspace --no-deps --all-features`, then copy
 `target/doc/.` into `website/static/api/`. The site builds fine without it —
 the navbar and footer reach rustdoc through `pathname:///api/`, which
 deliberately bypasses Docusaurus's link checker.
@@ -267,14 +267,11 @@ liveness, exit code and log tail; a retried test lands as a flaky annotation in
 the container job's JUnit report. A retry that starts recurring with a cause
 attached is a signal to delete the retry, not to trust it.
 
-`benchmarks/` sets `autobins = false`, so a new rig in `benchmarks/src/bin/` is
-invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
-`benchmarks::manifest::every_rig_is_declared_as_a_bin` fails if the two diverge.
-Note the rigs are not built by `cargo nextest run`; `cargo clippy
---workspace --all-targets` is what compile-checks them (and the examples) — on
-every PR **that touches Rust**, since that step carries
+Bench targets are not built by `cargo nextest run`; `cargo clippy --workspace
+--all-targets` is what compile-checks them (and the examples) — on every PR
+**that touches Rust**, since that step carries
 `if: needs.changes.outputs.rust == 'true'`. A docs-only PR compile-checks
-nothing, which is the point, but it does mean the rigs are unguarded on exactly
+nothing, which is the point, but it does mean they are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
 

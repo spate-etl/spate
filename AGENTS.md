@@ -1,7 +1,7 @@
 # Spate
 
 High-performance, at-least-once ETL pipeline framework in Rust. Publishable
-crates under `crates/`, plus an unpublished `benchmarks/` crate.
+crates under `crates/`.
 
 Four documents are normative. Read the relevant one before changing what it
 governs, because none of them is reconstructable from the code:

@@ -31,9 +31,9 @@ is why compile-time-only crates are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) appear in the table too, each
 under Apache-2.0. `cargo-about` only omits workspace members that are
-unpublished (which is why `benchmarks` is absent), and leaving the published
-ones in is useful: it shows at a glance that every crate you receive from this
-project carries the same terms as the repository.
+unpublished, and leaving the published ones in is useful: it shows at a glance
+that every crate you receive from this project carries the same terms as the
+repository.
 
 
 ## Summary

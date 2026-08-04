@@ -69,8 +69,8 @@ targets = [
 # ignored: a build script can contribute generated code to the shipped artifact.
 ignore-dev-dependencies = true
 
-# Skips `benchmarks` (publish = false). Our own crates are Apache-2.0 and are
-# already covered by the repository's LICENSE.
+# Skips any workspace member carrying `publish = false`. Our own crates are
+# Apache-2.0 and are already covered by the repository's LICENSE.
 private = { ignore = true }
 
 # Built-in clarifications for two crates that are well known for packaging their

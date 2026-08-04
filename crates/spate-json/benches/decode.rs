@@ -3,8 +3,7 @@
 //! `json_decode` measures a single flat 15-field record; `json_decode_batch50`
 //! measures a 50-element batch in each framing (one nested document, a
 //! top-level array, and NDJSON), reported per element so the framings compare
-//! directly. Cross-format comparison against Avro lives in the `deser_formats`
-//! rig under `benchmarks/`.
+//! directly.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::Value;

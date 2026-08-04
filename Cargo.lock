@@ -276,31 +276,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "benchmarks"
-version = "0.1.0"
-dependencies = [
- "apache-avro",
- "bytes",
- "crossbeam-channel",
- "flate2",
- "lz4_flex",
- "rdkafka",
- "serde",
- "serde_json",
- "spate-avro",
- "spate-clickhouse",
- "spate-coordination",
- "spate-core",
- "spate-json",
- "spate-kafka",
- "spate-s3",
- "tempfile",
- "tokio",
- "yaml_serde",
- "zstd",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2215,9 +2190,6 @@ name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
-dependencies = [
- "twox-hash",
-]
 
 [[package]]
 name = "mach2"

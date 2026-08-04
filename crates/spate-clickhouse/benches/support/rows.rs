@@ -18,10 +18,10 @@
 //! is pinned: growing it would silently re-baseline every count ever recorded
 //! against it.
 //!
-//! The shapes are chosen to be representative of an ingest schema rather than
-//! minimal — the same columns and types a wall-clock measurement of this path
-//! would want — so a count taken here and a throughput number taken elsewhere
-//! describe comparable work.
+//! Shared verbatim with the wall-clock sibling: `encode.rs` and
+//! `encode_gungraun.rs` both pull this module in, so the two tiers encode
+//! byte-identical corpora and a count here and a throughput number there
+//! describe the same work rather than merely comparable work.
 //!
 //! Row values are pure functions of the index — no random source — because an
 //! instruction count is only comparable when both legs encoded identical

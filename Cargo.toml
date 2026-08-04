@@ -10,7 +10,6 @@ members = [
     "crates/spate-coordination",
     "crates/spate-s3",
     "crates/spate-test",
-    "benchmarks",
 ]
 
 [workspace.package]
@@ -51,14 +50,12 @@ http-body-util = "0.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 # Opt-in SIMD JSON decode backend behind spate-json's `simd` feature (off by
-# default, excluded from `full`). The deserialization-formats study measured it
-# faster than serde_json on the single-document and array paths (the
-# Kafka-message default). Apache-2.0 / MIT with a clean transitive tree, so no
-# deny.toml carve-out is needed. Default features stay on — they enable
+# default, excluded from `full`). Apache-2.0 / MIT with a clean transitive tree,
+# so no deny.toml carve-out is needed. Default features stay on — they enable
 # `serde_impl` (the `from_slice` path used here) and `runtime-detection`.
 #
-# Was `=0.17.3`, to keep the benchmark and the licence review looking at one
-# fixed release. Cargo.lock already delivers that — it pins an exact version and
+# Was `=0.17.3`, to hold the licence review to one fixed release.
+# Cargo.lock already delivers that — it pins an exact version and
 # CI builds `--locked` — whereas an `=` requirement in a *published* manifest is
 # imposed on consumers, where it cannot be overridden and conflicts with any
 # other crate in their graph wanting a different 0.17.x. The blast radius was
@@ -94,6 +91,14 @@ sha2 = "0.11"
 # Connector dependencies. 0.x crates with breaking minors are held to a
 # single minor; Cargo.lock pins exact patches.
 rdkafka = "0.39"
+# `spate-clickhouse` enables this crate's `lz4` feature, so the LZ4 codec used
+# on the wire arrives transitively and moves with it. Re-declaring that codec
+# here is what to avoid: a compatible requirement unifies with the client's and
+# silently widens its feature set for every workspace build while leaving what
+# a consumer of `spate-clickhouse` resolves untouched — so CI would exercise a
+# different implementation from the one anybody runs — and an incompatible one
+# puts two majors in the graph. If something ever needs to compress outside the
+# client, hold it to whatever `clickhouse` pulls and move the two together.
 clickhouse = "0.15"
 apache-avro = "0.21"
 # Object-storage client for spate-s3. 0.x like rdkafka/clickhouse: internal
@@ -110,19 +115,6 @@ futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.22.1"
 flate2 = "1.1"
 zstd = "0.13"
-# Benchmark-only codec, listed here rather than in benchmarks/Cargo.toml so
-# every dependency in the workspace has exactly one declared version. 0.11.6
-# rather than 0.11 because 0.11.0 through 0.11.5 are all yanked — cargo will not
-# select them, so "0.11" was a floor naming no reachable release.
-#
-# Hold this at whatever `clickhouse` pulls, and move it when `clickhouse` moves.
-# It is not free-floating: `spate-clickhouse` enables `clickhouse`'s `lz4` feature
-# and `clickhouse 0.15.1` depends on `lz4_flex 0.11.6`, so raising this alone
-# puts two majors in the graph and — the part that actually matters — makes
-# `ch_native_format`'s `lz4_bytes` describe a compressor the ingest path does not
-# use. That rig exists to model the ClickHouse wire, and its numbers are
-# published. Dependabot proposed 0.13.1 in #105; it was closed for this reason.
-lz4_flex = "0.11.6"
 schema_registry_converter = { version = "4.9", default-features = false }
 
 # Test and bench tooling.

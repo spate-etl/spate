@@ -79,10 +79,8 @@ The builder hands out three deserializer flavors:
 - `build_serde_datum::<T>()` (and the record-family form `build_datum::<F>()`)
   — decodes each datum **directly** into `T` in a single pass, driven by the
   writer schema, never materialising an intermediate value tree. This is the
-  throughput path — see the
-  [deserialization benchmarks](../../../../benchmarks/deserialization-formats.mdx)
-  for measured numbers. With a borrowed record family, string and bytes
-  fields point straight into the payload buffer (zero-copy;
+  throughput path. With a borrowed record family, string and bytes fields
+  point straight into the payload buffer (zero-copy;
   `crates/spate-avro/tests/zero_copy_flat_map.rs` is the worked example).
   Two constraints: no `reader_schema` (rejected at build time — records
   decode in the writer schema's shape; additive evolution works through
@@ -155,5 +153,3 @@ neither an error nor backpressure. See [Metrics](../../../../METRICS.md).
   undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.
-- [Deserialization formats](../../../../benchmarks/deserialization-formats.mdx)
-  — measured decode throughput against the other formats.

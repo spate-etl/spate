@@ -111,16 +111,22 @@ a SIMD-accelerated parser, with no change to the builder API — `build_serde` a
 path — decoding always operates on the in-memory payload slice, which is both
 faster and lets the parser see the whole document at once.
 
-`simd` decodes roughly **1.4× faster** than `serde_json` on the
-single-document and array framings, narrowing to
-~1.15× on NDJSON — see the [deserialization-formats benchmark](../../../../benchmarks/deserialization-formats.mdx#simd-backend)
-for the full A/B and the aarch64 caveat. It is **off by default** and excluded
-from the facade's `full` feature: it is a per-deployment choice worth
-benchmarking against real hardware and payloads. A note on how it works — simd-json
-parses a mutable buffer in place, so the framework copies each borrowed payload
-into a reused thread-local buffer first (measured negligible, ~1% of the decode);
-the `reject_duplicate_keys` guard always runs on `serde_json`, so duplicate-key
-handling is identical either way.
+`simd` decodes faster than `serde_json` on the single-document and array
+framings, where one large document is parsed in a pass; the margin narrows on
+NDJSON, where per-parse overhead across many small lines dominates. How much
+faster is both payload- and architecture-sensitive, and aarch64 is the only
+side measured for throughput — an x86-64 host with AVX2 is unknown territory
+here. It is **off by default** and excluded from the facade's `full`
+feature: it is a per-deployment choice worth benchmarking against real
+hardware and payloads.
+
+A note on how it works — simd-json parses a mutable buffer in place, so the
+framework copies each borrowed payload into a reused thread-local buffer
+first (measured at ~1% of the decode on flat and nested records, by a rig this
+repository no longer carries). The
+`reject_duplicate_keys` guard
+always runs on `serde_json`, so duplicate-key handling is identical either
+way.
 
 `simd` is **not** byte-for-byte identical to `serde_json` on numbers, though — it
 is a different parser. `simd-json` **rejects integer literals outside the
@@ -163,5 +169,3 @@ wrap every decoder. See [Metrics](../../../../METRICS.md).
   undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.
-- [Deserialization formats benchmark](../../../../benchmarks/deserialization-formats.mdx)
-  — decode throughput per record, across the shipped formats.

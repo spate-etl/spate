@@ -74,7 +74,7 @@ Tick by exit code, not by memory.
 ## Anything else
 
 <!--
-If you measured something, say what you measured it on. Performance numbers
-are re-measured on reference hardware before they go anywhere near the docs —
-that is about comparability, not doubt.
+If you measured something, say what you measured it on, and on how quiet a
+machine. A figure only reaches the docs carrying how it was established — see
+CONTRIBUTING.md — because a number nobody can place is one nobody can check.
 -->

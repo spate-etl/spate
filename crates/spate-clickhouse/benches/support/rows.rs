@@ -18,11 +18,10 @@
 //! is pinned: growing it would silently re-baseline every count ever recorded
 //! against it.
 //!
-//! Deliberately the same *shapes* the wall-clock `ch_native_format` rig uses —
-//! the same columns and types — so a count here and a throughput number there
-//! describe comparable work. They are separate corpora, not shared ones: the
-//! value formulas differ, and nothing keeps them in step, so a byte count from
-//! one is not a byte count from the other.
+//! The shapes are chosen to be representative of an ingest schema rather than
+//! minimal — the same columns and types a wall-clock measurement of this path
+//! would want — so a count taken here and a throughput number taken elsewhere
+//! describe comparable work.
 //!
 //! Row values are pure functions of the index — no random source — because an
 //! instruction count is only comparable when both legs encoded identical

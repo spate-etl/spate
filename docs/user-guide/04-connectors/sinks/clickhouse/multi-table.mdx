@@ -8,9 +8,8 @@ terminal is generic; here is how the pieces line up for ClickHouse.
 
 Reach for it when your stream carries genuinely different record types (each
 wanting its own columns and `ORDER BY`) and you'd rather the ETL fan them out
-than a `Null` table + one `MATERIALIZED VIEW` per type. The trade-off — ETL-side
-fan-out CPU and part control vs. server-side fan-out — is measured in the
-[multi-table split benchmark](../../../../benchmarks/multi-table-split.mdx).
+than a `Null` table + one `MATERIALIZED VIEW` per type. The trade-off is
+ETL-side fan-out CPU and part control against server-side fan-out.
 
 ## Configuration: a `sinks:` map
 
@@ -146,5 +145,4 @@ with its cluster.
 
 - [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once + part-size trade.
 - [ClickHouse sink](README.mdx) — everything a single sink does, which each branch inherits.
-- [Multi-table split benchmark](../../../../benchmarks/multi-table-split.mdx) — split vs `Null`+MV on a CPU-bound server.
 - [Configuration reference](../../../07-reference/configuration.mdx#sinks) — the `sinks:` map.

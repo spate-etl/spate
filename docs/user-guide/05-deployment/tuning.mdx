@@ -172,8 +172,7 @@ Raise it when the chain outruns the shard workers — the symptom is backpressur
 pauses while the sink itself is idle (see the note below). Leave it alone for
 latency-sensitive pipelines: throughput and flush latency rise together, with
 **no knee** in the measured range, so there is no setting that dominates. The
-trade curve is on [Chunk sizing](../../benchmarks/chunk-sizing.mdx); the
-default sits deliberately at the low-latency end of it.
+default sits deliberately at the low-latency end of that range.
 
 Raising it never strands rows or delays commits: a chunk that has not
 reached `target_bytes` is sealed anyway on every commit tick
@@ -194,11 +193,10 @@ follow-up). It exists to signal, not to buffer: a full queue is the per-shard
 backpressure trigger (`spate_queue_full_events_total`). Keep it small; the
 global byte budget, not the queue, is the intended smoothing buffer.
 
-That "keep it small" is measured — see
-[Chunk sizing](../../benchmarks/chunk-sizing.mdx) — but it is a genuine trade,
-not a free default, and **its price depends on whether your sink is the
-constraint.** Depth raised throughput in every regime measured, by 46% to 92%.
-What changes is what you pay for it:
+That "keep it small" comes from a queue-depth sweep rather than from taste,
+but it is a genuine trade, not a free default, and **its price depends on
+whether your sink is the constraint.** Depth raised throughput in every regime
+measured, by 46% to 92%. What changes is what you pay for it:
 
 | Your sink | Throughput from depth | Flush p99 cost |
 |---|---|---|

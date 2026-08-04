@@ -24,7 +24,6 @@
 [Documentation](https://spate.kainth.dev/) ·
 [Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart) ·
 [Examples](crates/spate/examples) ·
-[Benchmarks](docs/benchmarks) ·
 [Changelog](CHANGELOG.md)
 
 </div>
@@ -187,13 +186,15 @@ own connector is a supported path, not a fork: see
 ## Performance
 
 Single-node throughput is the point of the design, so it is measured rather
-than asserted. Every change runs allocation assertions and instruction-count
-benchmarks in CI, and the benchmark suite records throughput and latency
-against a versioned schema so results stay comparable across releases.
+than asserted. A change that reaches Rust runs allocation assertions and
+request-shape assertions, and one whose blast radius reaches a benched crate
+runs instruction-count benches too. What they compare are counts rather than
+elapsed time, so a regression they report is a property of the change and not
+of how busy the runner was.
 
-Methodology and current numbers — including the A/B studies that settled the
-consumer topology, chunk sizing and deserializer choice — are in
-[docs/benchmarks/](docs/benchmarks).
+Wall-clock benches sit beside them as `cargo bench` targets, and nothing
+gates on one: a wall-clock figure is only worth reading against another taken
+on the same quiet hardware, which a shared CI runner is not.
 
 ## Testing
 
@@ -219,9 +220,6 @@ is published at **<https://spate.kainth.dev/>** (source in
   and the decision log.
 - [docs/METRICS.md](docs/METRICS.md) — every metric, its labels, and
   alerting starting points.
-- [docs/benchmarks/](docs/benchmarks) — methodology and measured
-  results, including the consumer-topology A/B that shaped the Kafka
-  connector.
 - [examples/docker](examples/docker) — containers and Kubernetes.
 
 ## Status

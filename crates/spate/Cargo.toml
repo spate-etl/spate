@@ -118,8 +118,8 @@ json-arbitrary-precision = ["json", "spate-json/arbitrary-precision"]
 json-raw-value = ["json", "spate-json/raw-value"]
 # Opt-in simd-json decode backend for JSON (implies `json`). Deliberately
 # excluded from `full`: it pulls in simd-json (SIMD JSON parsing) — a decode
-# speedup on the single-document/array path over serde_json, per the
-# deserialization-formats benchmark study. Kept opt-in so `full` stays lean.
+# speedup on the single-document/array path over serde_json, by a
+# payload- and architecture-dependent margin. Kept opt-in so `full` stays lean.
 # See the JSON connector docs.
 json-simd = ["json", "spate-json/simd"]
 kafka = ["dep:spate-kafka"]

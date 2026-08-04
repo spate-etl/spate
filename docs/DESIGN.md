@@ -190,11 +190,11 @@ The Kafka source uses a **single consumer per process** with
 fast rebalances), partitions mapped m:n onto pipeline threads under local
 control, borrows kept thread-local. Consumption parallelism is still bounded
 by partition count — identical to per-thread consumers — the win is group
-scale and unified drain choreography. Validated empirically (see
-`docs/benchmarks/kafka-topology.mdx`): split-queue polls reset
-`max.poll.interval.ms`, so
-group liveness never depends on the controller; at realistic per-record work
-the throughput delta vs per-thread consumers is ~3%; a per-thread-consumer
+scale and unified drain choreography. Validated empirically, first on a spike
+and then by an interleaved topology A/B: split-queue polls reset
+`max.poll.interval.ms`, so group liveness never depends on the controller; at
+realistic per-record work split queues trail per-thread consumers by a couple
+of percent; a per-thread-consumer
 fallback remains a documented escape hatch behind the same traits.
 
 Proven choreography spate-kafka must implement (spike-verified):
@@ -222,10 +222,16 @@ Proven choreography spate-kafka must implement (spike-verified):
 
 ## Frozen v1 contracts
 
-Validated by the zero-copy seam spike (borrowed static chain: ~40 ns/record,
-25M records/s, **0 allocations/record** hard-asserted by a counting
-allocator; owned records measured 3.7× slower) and the ClickHouse RowBinary
-spike. The load-bearing shapes:
+Validated on the production chain (`crates/spate-core/benches/chain.rs`):
+the borrowed arm emits a record roughly every 10 ns and allocates a fixed
+handful per *batch* — **none per record** — while the owned equivalent
+allocates once per record. `crates/spate-core/tests/chain_alloc.rs` is what
+holds that to absolute bounds under a counting allocator. The
+allocation contrast is what that rig establishes; its two arms fan out
+differently, so a wall-clock ratio between them is not a quantity it measures.
+The seam prototype put that ratio at 3.7× on a chain shaped to compare
+(spike-measured, hand-recorded). Together with the ClickHouse RowBinary spike,
+these are the load-bearing shapes:
 
 ```rust
 /// Data plane: a pollable unit pinned to one pipeline thread.
@@ -395,11 +401,10 @@ Two layers, one invariant.
 
 **Sizing rule** (motivated by a ~24× throughput collapse observed under an
 unthrottled source with default settings — hand-recorded during the tuning
-investigation, no committed record; see
-`docs/benchmarks/framework-overhead.mdx`): the
-in-flight budget must comfortably hold everything the sink legitimately
-keeps in flight, or steady-state operation lives above the high watermark
-and the pause controller duty-cycles at `min_pause`:
+investigation, no committed record): the in-flight budget must comfortably
+hold everything the sink legitimately keeps in flight, or steady-state
+operation lives above the high watermark and the pause controller duty-cycles
+at `min_pause`:
 
 ```text
 max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
@@ -432,10 +437,11 @@ left at the client library's defaults rather than pinned by the framework: the
 budget governs what the pipeline holds, not what a driver prefetches. The Kafka
 source therefore sets neither `queued.min.messages` nor
 `queued.max.messages.kbytes`, and a deployment that needs that memory bounded
-caps it through the source's `rdkafka` passthrough. (This crate previously
-forced `queued.min.messages` to 1000 as a memory backstop and measured 11x
-slower end-to-end on a backlogged consumer — 193k against 2.11M msg/s; sizing
-guidance now lives with the connector.)
+caps it through the source's `rdkafka` passthrough. Forcing
+`queued.min.messages` to 1000 as a memory backstop measured ~11x slower
+end-to-end on a backlogged consumer — 193k against 2.11M msg/s, recorded by a
+rig this repository no longer carries — which is why the framework sets no
+prefetch cap and the sizing guidance lives with the connector.
 
 ## Sink
 
@@ -493,9 +499,9 @@ transport the crate's typed path uses internally. The default format is
 row-wise **RowBinary**; an opt-in columnar **Native** encoder
 (`format: native`) transposes each chunk into one self-describing block —
 proven to cut server parse CPU ~90% and wire ~35–75% (schema- and
-codec-dependent) at ~2–3× the client
-encode cost (see `docs/benchmarks/clickhouse-format.mdx`), so it ships opt-in
-with RowBinary the
+codec-dependent) at ~2–3× the client encode cost (measured against an idle
+single-threaded server by a rig this repository no longer carries), so it
+ships opt-in with RowBinary the
 default. Both use the same frame transport: a Native insert body is a stream
 of concatenated blocks, so batching/acks are format-agnostic. The terminal
 stage's `RowEncoder` gained defaulted `buffered_bytes()`/`finish_chunk()`
@@ -706,14 +712,14 @@ in the tree and a breaking `metrics` release is upgraded in a single edit.
 |---|---|---|
 | Delivery | at-least-once | Kafka→ClickHouse standard; exactly-once machinery not worth v1 cost |
 | Source API | poll-based, control/data split | librdkafka owns I/O; Streams add overhead and `'static` bounds |
-| Kafka topology | single consumer + split partition queues | group scale, m:n thread mapping, one drain choreography (validated by benchmark) |
+| Kafka topology | single consumer + split partition queues | group scale, m:n thread mapping, one drain choreography (measured by a rig this repository no longer carries) |
 | Deser placement | pipeline thread | borrow lifetimes force it; keeps CPU pinned |
 | Operator dispatch | static in-chain, dyn per batch at boundary | preserves inlining; ~amortized-zero dispatch cost |
 | Ack design | refcounted per-batch Arc + contiguity ring | supports filter/flat_map/multi-sink for free; ~2 atomics/record |
-| Multi-sink | additive `add_sink` + a typed split terminal | per-type tables move fan-out off the DB onto the scalable ETL tier; +56%–212% throughput, 4–10× part size, 16–31% lower server CPU/row vs `Null`+MV (benchmark-verified) |
+| Multi-sink | additive `add_sink` + a typed split terminal | per-type tables move fan-out off the DB onto the scalable ETL tier; +56%–212% throughput, 4–10× part size, 16–31% lower server CPU/row vs `Null`+MV on a skewed type mix (measured by a rig this repository no longer carries) |
 | Sink workers | per shard, replica rotation, max_inflight | full-size batches (ClickHouse merge pressure) + parallelism |
 | ClickHouse insert | pre-encoded RowBinary frames via `InsertFormatted` + dedup token | encode on pipeline threads; deterministic batch boundaries for acks and idempotent retries (spike-verified) |
-| Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; 40 ns/rec, 0 allocs/rec vs 3.7× slower owned (spike-measured) |
+| Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; ~10 ns/rec and 0 allocs/rec borrowed against 1 alloc/rec owned (bench-measured, `crates/spate-core/benches/chain.rs`); 3.7× wall-clock on the prototype (spike-measured) |
 | Metrics | `metrics` facade + prometheus exporter | facade *is* the MeterRegistry pattern; backend-pluggable |
 | Config | YAML (`yaml_serde`), opaque passthrough | serde_yaml archived; serde-yml has RUSTSEC advisory. Provenance verified: yaml_serde is the YAML org's successor (github.com/yaml/yaml-serde, published by ingydotnet, YAML's co-creator) |
 | Error policy | Skip / Fail only, metrics-surfaced | no owned DLQ topic in target environments |

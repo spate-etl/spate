@@ -94,9 +94,8 @@ Each is a decision, not drift. Nothing else is exempt.
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |
 | `07-reference/glossary.mdx` | Definitions need anchors. | The mapping line above, nothing looser. |
 
-`docs/DESIGN.md` and `docs/benchmarks/**` sit outside `user-guide/` and outside
-this rule: the first records why decisions were made (including vendor-specific
-ones), the second reports measurements of specific systems. Neither should grow
+`docs/DESIGN.md` sits outside `user-guide/` and outside this rule: it records
+why decisions were made, including vendor-specific ones. It should not grow
 connector *usage* guidance — that belongs on the connector page.
 
 ## 2. Connector layout — group by role

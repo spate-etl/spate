@@ -190,9 +190,9 @@ impl KafkaSourceConfig {
         // so behaviour is predictable and reasoning transfers from librdkafka's
         // documentation like it does for every other Kafka client.
         //
-        // This crate previously forced `queued.min.messages` to 1000 as a
-        // memory backstop. Measured cost of that backstop on a backlogged
-        // consumer: 11x end-to-end (193k -> 2.11M msg/s through the full
+        // Forcing `queued.min.messages` to 1000 as a memory backstop cost,
+        // measured on a backlogged consumer by a rig this repository no longer
+        // carries: ~11x end-to-end (193k -> 2.11M msg/s through the full
         // pipeline) and 22-76x on the raw client path depending on message
         // size, because the local fetch queue sits empty and every driver
         // thread blocks on the broker. A memory cap that costs an order of
@@ -323,7 +323,7 @@ mod tests {
     }
 
     /// The framework must not set a prefetch cap of its own. Forcing
-    /// `queued.min.messages` down to 1000 cost 11x end-to-end throughput on a
+    /// `queued.min.messages` down to 1000 cost ~11x end-to-end throughput on a
     /// backlogged consumer, because the local fetch queue stays empty and the
     /// driver threads block on the broker. Leaving the key unset means
     /// librdkafka's documented default (100000) applies and users can reason

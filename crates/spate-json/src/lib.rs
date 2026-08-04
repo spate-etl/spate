@@ -56,8 +56,8 @@
 //! swaps in `simd-json` (SIMD-accelerated parsing) with no change to this API —
 //! [`BACKEND_ID`] reports which is compiled. `simd` is a decode speedup over
 //! serde_json on the single-document and array paths (the Kafka-message
-//! default), per a benchmark study (see the framework's deserialization-formats
-//! benchmark page). It is off by default and excluded from the facade's `full`
+//! default), by a margin that depends on the payload and the host
+//! architecture. It is off by default and excluded from the facade's `full`
 //! feature. `simd` is *not* byte-for-byte identical to serde_json on every
 //! input — it rejects integer literals outside the `i64`/`u64` range that
 //! serde_json accepts as `f64`, and does not honor serde_json's

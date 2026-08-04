@@ -292,7 +292,7 @@ absolute rather than relative to a stored baseline, so it compares against
 nothing and cannot drift: an allocation that scales with record count fails it.
 It builds in the release profile, because the bounds are calibrated against
 optimised code — and it pays for that by sharing the `release` cache entry the
-scheduled release-profile jobs populate from `main`.
+release-profile jobs populate from `main`.
 
 `crates/spate-s3/tests/request_shape.rs` is the second, and it counts calls
 rather than bytes: how many listings a coordinated backfill issues and how
@@ -719,7 +719,7 @@ on. Reproduce locally with:
 
 ```sh
 cargo llvm-cov nextest --profile ci --workspace --all-features --summary-only \
-  --ignore-filename-regex '(/tests/|/benchmarks/)'
+  --ignore-filename-regex '/tests/'
 ```
 
 Both suites publish their JUnit report as a check annotation — `Test results`

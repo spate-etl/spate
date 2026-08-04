@@ -768,15 +768,9 @@ else
         # into the library with `#![doc = include_str!(...)]`. Claiming the
         # source trees first is what keeps the prose arm honest.
         case "$file" in
-        # Committed benchmark datasets are chart data the site reads at build
-        # time, not code.
-        benchmarks/results/*)
-            site=true
-            continue
-            ;;
         # Source trees: always code, whatever the file extension. Empty body,
         # so control falls past the `case` to the classification below.
-        crates/* | benchmarks/* | scripts/*) ;;
+        crates/* | scripts/*) ;;
         # CI definitions decide what every other job does, so a change to one
         # has to be exercised by the full set.
         .github/workflows/* | .github/actions/*) ;;

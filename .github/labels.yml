@@ -78,7 +78,7 @@
 
 - name: "area: benchmarks"
   color: "5319e7"
-  description: "The rigs and their recorded results"
+  description: "The benchmark harness and how a change is measured"
 
 - name: "area: examples"
   color: "5319e7"
@@ -95,8 +95,8 @@
 # --------------------------------------------------------------- platform ----
 #
 # Only worth applying when the platform is the point rather than incidental.
-# e.g., benchmark question that only appears when the host CPU differs from
-# the reference hardware.
+# e.g., a measurement question that only appears on one host architecture —
+# instruction-set width is decided by the runner image, not by the code.
 
 - name: "platform: macos"
   color: "006b75"

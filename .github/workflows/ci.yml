@@ -149,9 +149,9 @@ jobs:
       # `--all-targets` is doing the work of three steps: it compiles every
       # lib, bin, test, bench and example in the workspace. The two steps that
       # used to follow it — `cargo check -p spate --examples` and
-      # `cargo bench --no-run --workspace` — were subsets of it, verified by
-      # planting a type error in `benchmarks/src/bin/loadgen.rs` and in
-      # `crates/spate/examples/`, both of which this line catches.
+      # `cargo bench --no-run --workspace` — are subsets of it: `--all-targets`
+      # names `--benches` and `--examples` among the target kinds it expands
+      # to, so a bench or an example that stops compiling fails here.
       #
       # `cargo bench --no-run` also built the whole dependency tree a second
       # time in the bench (release) profile, which made this the slowest job
@@ -418,7 +418,7 @@ jobs:
         run: >
           cargo llvm-cov nextest --profile ci --workspace --all-features --locked
           --lcov --output-path lcov.info
-          --ignore-filename-regex '(/tests/|/benchmarks/)'
+          --ignore-filename-regex '/tests/'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -570,7 +570,7 @@ jobs:
     # The constraint it carries is a release build — the bounds are calibrated
     # against optimised code, and a debug build allocates differently enough
     # that they say nothing. `shared-key: release` is what makes that
-    # affordable: the same cache entry the scheduled release-profile jobs
+    # affordable: the same cache entry the other release-profile jobs
     # populate from `main` and that `perf-counters` below shares for its
     # bench profile, so this restores warm instead of compiling the
     # dependency graph into a tree of its own.

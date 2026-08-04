@@ -2,11 +2,10 @@
 //!
 //! Measures the production path: `Box<dyn RunnableChain>` fed borrowed
 //! payload batches through deserialize → filter → flat_map → encode →
-//! handoff, against the owned-payload equivalent. The static-vs-dyn
-//! boundary delta was measured by the seam prototype (~+9% on a trivial
-//! chain, amortizing to 1–2% with realistic work; see
-//! `docs/benchmarks/zero-copy-seam.mdx`) — the boundary is one virtual call per batch by
-//! construction.
+//! handoff, against the owned-payload equivalent. The boundary is one
+//! virtual call per batch by construction; what that contrast establishes
+//! is recorded under "Performance gates" in
+//! `docs/user-guide/07-reference/ci.mdx`.
 //!
 //! Beyond that contrast, the borrowed rig sweeps the three parameters the
 //! terminal stage varies in production: the router (a constant stub against

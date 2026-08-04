@@ -277,7 +277,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "benchmarks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "spate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "spate-avro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "spate-clickhouse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "spate-coordination"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-nats",
  "base64",
@@ -4067,7 +4067,7 @@ dependencies = [
 
 [[package]]
 name = "spate-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4098,7 +4098,7 @@ dependencies = [
 
 [[package]]
 name = "spate-json"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "gungraun",
@@ -4118,7 +4118,7 @@ dependencies = [
 
 [[package]]
 name = "spate-kafka"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "spate-s3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -4170,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "spate-test"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crossbeam-channel",

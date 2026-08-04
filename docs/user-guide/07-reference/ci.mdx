@@ -747,8 +747,13 @@ what moved, what did not, what is reported but never judged, and what could not
 be paired at all.
 
 Nothing runs it automatically. It is a target a contributor invokes over two
-result files they produced themselves — one renderer rather than a habit of
-eyeballing JSON, so two people comparing the same runs reach the same table.
+result files — one renderer rather than a habit of eyeballing JSON, so two
+people comparing the same runs reach the same table. `make bench-vs-main`
+produces those two files: `scripts/bench-drive.sh` builds both arms before
+measuring either, alternates them over one corpus and discards the first pass,
+then hands the legs to the comparator. Its own fixture runs on every pull
+request as `make check-bench-drive`, because a run that got that ordering wrong
+produces records indistinguishable from a run that got it right.
 
 Its fixtures run on every pull request as `make check-bench-compare`, for the
 same reason `make check-collected-region` does: the failure being guarded

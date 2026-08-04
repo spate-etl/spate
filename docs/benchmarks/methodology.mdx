@@ -142,26 +142,94 @@ else — see below.
 
 ### Comparing two builds
 
+```sh
+make bench-vs-main                       # against main, 3 recorded repetitions
+make bench-vs-main AB_BASE=v0.1.0 AB_REPS=5
+```
+
 `make bench-ab` does not do this, and the difference is not cosmetic. It builds
 and then immediately measures, so two invocations interleave nothing and the
-second build lands after the first measurement — a sequential comparison of
-the kind this page's own interleaving rule rejects.
+second build lands after the first measurement — a sequential comparison of the
+kind this page's own interleaving rule rejects. A sequential run here once
+reported a 30% win that was the machine warming up.
 
-Comparing a merge base against a head means driving the rig directly:
+`scripts/bench-drive.sh` is what `make bench-vs-main` calls, and the properties
+it holds are the reason to use it rather than two runs by hand:
 
-1. Build both binaries first, from two checkouts. Building one arm while the
-   other is being timed measures the compiler.
-2. Stage the corpus once and point both at it with `DATA_DIR`, so the two
-   builds read literally the same bytes.
-3. Set `GIT_COMMIT` explicitly per arm. The rig otherwise asks git at run time,
+1. **Both binaries are built before either is measured**, from two checkouts.
+   Building one arm while the other is being timed measures the compiler.
+2. **The corpus is staged once** and both arms are pointed at it with
+   `DATA_DIR`, so the two builds read literally the same bytes. Rigs that take
+   no corpus ignore it; today only `s3_backfill` reads it.
+3. **`GIT_COMMIT` is set per arm.** The rig otherwise asks git at run time,
    which reports the checkout it is *run* from rather than the one it was
    *built* from — the single most likely way a two-build comparison
    misattributes its numbers.
-4. Alternate the arms yourself, and discard the first pass over each.
+4. **Arms alternate**, so drift over the run splits evenly between the legs
+   instead of landing on whichever went second.
+5. **The first pass is discarded.** Page cache, CPU frequency and allocator
+   arenas reach steady state after one pass, and the first pass is where they
+   are not.
+6. **One repetition per process.** `peak_rss_mb` is a whole-process high-water
+   mark, so anything sharing a process reports the larger figure for all of it;
+   and the comparator pairs repetitions by position, which needs each to be its
+   own record. The driver therefore sets `REPS=1` and loops itself rather than
+   using a rig's own repetition sweep.
+
+   A rig that sweeps some *other* dimension internally still does so —
+   `s3_backfill` runs its three codecs in one process — and suppresses
+   `peak_rss_mb` accordingly, so that rig reports no memory figure under the
+   driver. Pinning its codec list here would buy the metric by measuring less.
+
+Which rigs it drives comes from the classifier, so it cannot name a different
+set from the one CI smokes. It refuses to run against a dirty working tree: the
+head arm would not be the commit its records name.
 
 A change that can be expressed as a runtime switch avoids all of this: one
 binary, two arms, and the rig's own interleaving applies. Prefer that shape
 where the change allows it.
+
+The criterion micro-benches are a separate tier and are **not** driven by
+`bench-drive.sh`. `criterion_to_report` converts a criterion run into the same
+records, so one comparator reads both, but the interleaving, the discarded pass
+and the per-arm commit are all yours to arrange.
+
+```sh
+cargo build --release -p benchmarks --locked --bin criterion_to_report
+for rep in 1 2 3; do
+  export CRITERION_HOME=$(mktemp -d)
+  cargo bench -p spate-json --locked --bench decode
+  BENCH_TRIGGER=dispatched GIT_COMMIT=$(git rev-parse HEAD) \
+    ./target/release/criterion_to_report "$CRITERION_HOME" >> leg.jsonl
+done
+```
+
+Three things in that snippet are load-bearing:
+
+- **The converter is a binary of the `benchmarks` package**, so `cargo bench -p
+  spate-json` does not build it. Build it explicitly first.
+- **A fresh `CRITERION_HOME` per repetition.** criterion's default output
+  directory is shared and persistent, and each benchmark keeps its `new/` until
+  something overwrites it — so converting `target/criterion` converts every
+  benchmark that has ever run there, stamped with the current commit. The tool
+  takes the directory as a required argument for that reason, and has no
+  default.
+- **More than one repetition per leg.** The comparator needs at least two
+  records per identity to have an interval; with one, every row renders as
+  "not judgeable" and the verdict is always negative, however large the real
+  movement. Note that this discards criterion's own confidence interval, which
+  the comparator does not read.
+
+`BENCH_TRIGGER` is required rather than defaulted: unset, these would record as
+`manual`, the one trigger that does not bar publication, and a comparison arm is
+not a recording.
+
+It reads criterion's `new/` only, never its `base/` — that directory holds
+whatever ran on this disk last, which is the cross-run comparison this page
+rejects. It takes the mean rather than the median, because the `benchmarks`
+crate carries two disagreeing definitions of the median
+([#62](https://github.com/spate-etl/spate/issues/62)) and a value that depends
+on which one a reader assumes is worse than no value.
 
 Before quoting a number from a local run, read
 [Regression gates](#regression-gates) — the machine has to be quiet, and a

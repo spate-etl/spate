@@ -90,3 +90,12 @@ test = false
 [[bin]]
 name = "s3_backfill_coordinated"
 test = false
+
+# Not a rig: it converts a criterion run into the same records the rigs emit.
+# Deliberately outside `src/bin/`, which is the rig directory the classifier in
+# `scripts/ci-changes.sh` scans — everything there must be classified runnable
+# or excluded, and a tool that measures nothing is neither.
+[[bin]]
+name = "criterion_to_report"
+path = "src/tools/criterion_to_report.rs"
+test = false

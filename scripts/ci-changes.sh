@@ -447,6 +447,7 @@ wallclock_crate_for_path() {
     # not the lockfile: a wall-clock number moves with a dependency bump and an
     # instruction count for a bench that does not call it does not.
     scripts/ci-changes.sh | benchmarks/* | scripts/bench-compare.sh | \
+        scripts/bench-drive.sh | \
         Makefile | .github/workflows/scheduled.yml | \
         .github/actions/* | Cargo.lock | Cargo.toml | deny.toml | \
         rust-toolchain.toml | rust-toolchain | .cargo/* | .config/*)
@@ -1006,6 +1007,7 @@ benchmarks/results/s3-backfill.jsonl|
 benchmarks/src/bin/s3_backfill.rs|spate-core
 scripts/ci-changes.sh|spate-core
 scripts/bench-compare.sh|spate-core
+scripts/bench-drive.sh|spate-core
 Makefile|spate-core
 .github/workflows/scheduled.yml|spate-core
 .github/actions/setup-rust/action.yml|spate-core

@@ -255,6 +255,11 @@ jobs:
       # each wrong answer, and that has to run somewhere a change cannot skip.
       - run: make check-bench-compare
 
+      # The A/B driver's fixture. `ci-lint` aggregates these for local use but
+      # CI runs each as its own step, so a check added to that list and not to
+      # this one is not a gate at all.
+      - run: make check-bench-drive
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest

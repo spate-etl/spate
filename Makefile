@@ -25,12 +25,12 @@
 # Every target is a verb, not a file. Without this a target would be skipped if
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
-        check-features check-examples bench-check bench bench-ab bench-compare bench-gungraun \
+        check-features check-examples bench-check bench bench-ab bench-compare bench-vs-main bench-gungraun \
         bench-gungraun-check loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-collected-region check-invariants \
-        check-results check-bench-compare check-changelog changelog-new \
+        check-results check-bench-compare check-bench-drive check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -199,6 +199,30 @@ bench-ab: ## Interleaved A/B of the s3 backfill: make bench-ab ARMS=… REPS=…
 bench-compare: ## Compare two benchmark result files: make bench-compare BASE=… HEAD=…
 	./scripts/bench-compare.sh "$(BASE)" "$(HEAD)" "$(BASE_LABEL)" "$(HEAD_LABEL)"
 
+# The A/B run itself: build both sides, drive the rigs alternately over one
+# corpus, and compare the two legs. This is the only supported way to produce a
+# before/after on this repository's own rigs, because it is the only one that
+# controls for the machine — see `docs/benchmarks/methodology.mdx`.
+#
+#   make bench-vs-main                    # against main, 3 recorded repetitions
+#   make bench-vs-main AB_BASE=v0.1.0 AB_REPS=5
+#
+# Takes minutes and wants a quiet machine: it builds two release trees and then
+# runs every runnable rig 2 x (AB_REPS + 1) times.
+#
+# `AB_`-prefixed rather than `BASE`/`REPS`, which look nicer and are wrong here:
+# `bench-compare` above takes a `BASE`, and a default given to one target in a
+# Makefile is a default given to every target. `BASE ?= main` made
+# `make bench-compare HEAD=…` read a file literally named `main` instead of
+# reporting an unusable leg, which is the failure that comparator's fixtures
+# exist to prevent.
+AB_BASE ?= main
+AB_REPS ?= 3
+bench-vs-main: ## A/B this branch against a ref and compare: make bench-vs-main [AB_BASE=… AB_REPS=…]
+	./scripts/bench-drive.sh --base "$(AB_BASE)" --reps "$(AB_REPS)" --out "$(CURDIR)/target/bench-ab"
+	./scripts/bench-compare.sh "$(CURDIR)/target/bench-ab/base.jsonl" \
+		"$(CURDIR)/target/bench-ab/head.jsonl" "$(AB_BASE)" HEAD
+
 ##@ Supply chain
 
 deny: ## Licences, advisories, bans, sources
@@ -264,6 +288,13 @@ check-results: ## No committed benchmark record carries a trigger that bars publ
 check-bench-compare: ## The A/B comparator still reports every unpairable input
 	./scripts/bench-compare.sh --self-test
 
+# The driver's whole value is an ordering nobody can see in the output: two
+# builds before either run, arms alternating, the first pass discarded. A run
+# that got it wrong produces records that look exactly like a run that got it
+# right, so the fixture asserts the order and this keeps the fixture running.
+check-bench-drive: ## The A/B driver still builds both arms first and alternates them
+	./scripts/bench-drive.sh --self-test
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -272,7 +303,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-results check-bench-compare check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-results check-bench-compare check-bench-drive check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

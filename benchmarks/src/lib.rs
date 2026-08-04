@@ -415,22 +415,76 @@ mod manifest {
             .collect();
         on_disk.sort();
 
+        // Stanzas are split by whether they carry an explicit `path`. One
+        // without it defaults to `src/bin/<name>.rs` and is a rig; one with it
+        // is a tool that deliberately lives elsewhere, because `src/bin` is the
+        // directory `scripts/ci-changes.sh` scans and everything there has to
+        // be classified as a wall-clock rig, runnable or excluded. A converter
+        // that measures nothing is neither.
         let manifest = include_str!("../Cargo.toml");
-        let mut declared: Vec<String> = manifest
-            .lines()
-            .map(str::trim)
-            .skip_while(|l| *l != "[[bin]]")
-            .filter_map(|l| l.strip_prefix("name = \""))
-            .filter_map(|l| l.strip_suffix('"'))
-            .map(str::to_owned)
-            .collect();
+        let mut declared: Vec<String> = Vec::new();
+        let mut with_path: Vec<(String, String)> = Vec::new();
+        let (mut in_bin, mut name, mut path) = (false, None::<String>, None::<String>);
+        let close = |name: &mut Option<String>,
+                     path: &mut Option<String>,
+                     declared: &mut Vec<String>,
+                     with_path: &mut Vec<(String, String)>| {
+            if let Some(n) = name.take() {
+                match path.take() {
+                    Some(p) => with_path.push((n, p)),
+                    None => declared.push(n),
+                }
+            }
+        };
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                if in_bin {
+                    close(&mut name, &mut path, &mut declared, &mut with_path);
+                }
+                in_bin = line == "[[bin]]";
+                continue;
+            }
+            if !in_bin {
+                continue;
+            }
+            if let Some(v) = line
+                .strip_prefix("name = \"")
+                .and_then(|l| l.strip_suffix('"'))
+            {
+                name = Some(v.to_owned());
+            }
+            if let Some(v) = line
+                .strip_prefix("path = \"")
+                .and_then(|l| l.strip_suffix('"'))
+            {
+                path = Some(v.to_owned());
+            }
+        }
+        if in_bin {
+            close(&mut name, &mut path, &mut declared, &mut with_path);
+        }
         declared.sort();
 
         assert_eq!(
             on_disk, declared,
-            "benchmarks/src/bin and the [[bin]] stanzas in benchmarks/Cargo.toml \
-             have diverged. With `autobins = false` an undeclared rig is never \
-             compiled by anything. Add a `[[bin]]` stanza with `test = false`."
+            "benchmarks/src/bin and the path-less [[bin]] stanzas in \
+             benchmarks/Cargo.toml have diverged. With `autobins = false` an \
+             undeclared rig is never compiled by anything. Add a `[[bin]]` \
+             stanza with `test = false`."
         );
+
+        for (name, path) in &with_path {
+            assert!(
+                !path.starts_with("src/bin/"),
+                "[[bin]] '{name}' points into src/bin with an explicit path, \
+                 which hides it from the rig check above. Drop the `path` and \
+                 let it default, or move the source out of src/bin."
+            );
+            let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            assert!(
+                full.is_file(),
+                "[[bin]] '{name}' declares path '{path}', which does not exist."
+            );
+        }
     }
 }

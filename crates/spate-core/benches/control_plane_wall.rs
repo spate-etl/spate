@@ -115,6 +115,24 @@ const WIDE: usize = 256;
 /// over the same batches, and the counted tier's `narrow_ticks`.
 const NARROW: usize = 16;
 
+/// Iterations the ack cases pin rather than calibrate.
+///
+/// Not a statement about the workload — it is the harness's degenerate-region
+/// guard needing room to work. That guard times an empty loop of the case's
+/// own iteration count as its floor, and one drive here costs the better part
+/// of a millisecond, so calibrating to the default 50 ms target lands on a few
+/// dozen iterations. An empty loop that short is a couple of dozen nanoseconds
+/// against a clock whose granularity is tens, so the floor reads as zero and
+/// the case is refused for being unmeasurable — *intermittently*, since
+/// whether it rounds to zero depends on where the read lands. One A/A run
+/// reached its second replicate before hitting it.
+///
+/// Five hundred and twelve puts the reference loop a comfortable multiple
+/// above that granularity while keeping a replicate under a second. The
+/// guard's real job is unaffected: it exists to catch a routine the optimiser
+/// deleted, and one of those would still sit at the floor whatever the count.
+const ACK_ITERS: u64 = 512;
+
 /// Transitions each poll profile's script produces.
 ///
 /// Passed to the rig rather than derived by it: a rig that computed its own
@@ -152,6 +170,7 @@ fn ack_case(suite: Suite, id: &str, per_tick: usize, order: Order, threads: usiz
             },
         )
         .items(BATCHES as u64)
+        .iters(ACK_ITERS)
         .done()
 }
 

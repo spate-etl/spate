@@ -66,12 +66,16 @@ Both are generated, never hand-edited.
 
 ### Two things to know when reading them
 
-**They are the union across every optional feature.** Generation runs with
-`--all-features`, so the list is a strict superset of what a default build
-links; the extra crates come from opt-in features such as `kafka-tls`,
-`coordination-nats` and `json-simd`. Attributing more than you distribute is
-safe, which is why the superset is deliberate — but do not read the presence of
-a crate as proof your build contains it.
+**They are the union across every optional feature, and then some.**
+Generation runs with `--all-features`, so the list is a strict superset of what
+a default build links; the extra crates come from opt-in features such as
+`kafka-tls`, `coordination-nats` and `json-simd`. A few reach it another way
+again: the workspace holds unpublished members — the benchmark harness among
+them — and the generator ignores dev-dependencies but not the ordinary
+dependencies of a member nobody can install. Attributing more than you
+distribute is safe, which is why the superset is deliberate — but do not read
+the presence of a crate as proof your build contains it, or even that it is
+reachable from a released one.
 
 **Where a dependency offers a choice, one branch is elected.** Most of the Rust
 ecosystem is `MIT OR Apache-2.0`. Spate elects **MIT** for those, even though

@@ -139,6 +139,7 @@ make loom          # the concurrency models
 make docs          # the documentation site
 make bench-check   # every bench target still compiles, in the release profile
 make bench-gungraun  # instruction counts, on Linux with valgrind installed
+make bench-ab REF=main  # wall time, this tree against a reference
 ```
 
 `make bench-gungraun` is the odd one out: it counts instructions under valgrind
@@ -310,6 +311,12 @@ whichever arm goes last otherwise, and the first repetition hands one arm the
 cold-start cost, which has been large enough here to decide which arm looked
 faster. Report an interval and the repetition count beside the value, so a
 reader can tell a difference from a spread.
+
+`make bench-ab REF=main` does all of that for a change against a reference —
+worktree, interleave, discard the priming pass, pair by replicate and state the
+rule it decided by. Nothing it produces is stored;
+[the benchmarking page](docs/user-guide/07-reference/benchmarking.mdx) says what
+it measures and how to add a case.
 
 ## Releases
 

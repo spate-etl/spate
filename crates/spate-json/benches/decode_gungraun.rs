@@ -165,8 +165,8 @@ const BATCH: u64 = 50;
 const LABELS: (&str, &str) = ("bench", "json");
 
 /// [`batch_rig`] and [`shape_rig`] under this binary's labels. The shared rig
-/// takes them per call because the wall tier runs every case in one process
-/// and needs a distinct pair each; here there is nothing to separate.
+/// takes them per call for `tests/bench_fixtures.rs`, which builds several
+/// rigs in one process; here there is nothing to separate.
 fn batch(
     framing: JsonFraming,
     on_error: OnError,

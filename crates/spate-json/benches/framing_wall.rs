@@ -22,16 +22,22 @@
 //!   small-read source or a chunked transfer encoding puts the framer in.
 //! - `frame_crlf_fetch_chunks` — the baseline stream terminated `\r\n`. The
 //!   framer strips exactly one trailing `\r`, so the delta is that strip plus
-//!   one more byte to scan per line.
-//! - `frame_lf_wide_lines` — an eighth as many lines, eight times as wide, so
-//!   the byte total is the same. Read against the baseline it separates the
-//!   framer's per-byte cost from its per-record cost, which no other pair
-//!   here can do.
+//!   one more byte to scan per line. Both of those are inside the declared
+//!   byte total, which counts what the framer scanned rather than what it
+//!   emitted.
+//! - `frame_lf_wide_lines` — an eighth as many lines, eight times as wide.
+//!   The framed output is the same 1.6 MB either way; the scanned input is
+//!   0.4% smaller here, being the seven thousand terminators an eighth as many
+//!   lines do not carry. Read against the baseline it separates the framer's
+//!   per-byte cost from its per-record cost, which no other pair here can do.
 //!
-//! No metrics recorder. The framer registers nothing, which is why this is a
-//! second binary rather than four more cases in `decode_wall.rs`: a recorder
-//! is process-global, and the case-id prefix is only enough to separate two
-//! subjects when neither of them registers a metric.
+//! No metrics recorder: the framer registers nothing, so this binary depends
+//! on none of the instrumentation `decode_wall.rs` installs. That is the
+//! one-target-per-subject rule of thumb rather than a hard requirement here —
+//! the harness runs one process per case per replicate, so two subjects in one
+//! binary could not collide on a recorder anyway.
+//!
+//! Nothing pins an iteration count; see `decode_wall.rs` for why.
 //!
 //! Run it with `make bench-ab REF=main FILTER=frame_`.
 //!
@@ -47,17 +53,17 @@ mod lines;
 use frame_rig::{Rig, frame_stream};
 use lines::Eol;
 
-/// The iteration count every case is pinned to.
+/// The bytes a rig hands the framer, terminators included.
 ///
-/// Calibrating to the harness's 50 ms target lands these between thirty and a
-/// hundred and twenty iterations, because one drive frames a megabyte and a
-/// half. The degenerate-region guard times an empty loop at whatever count the
-/// case settled on, and an empty loop of thirty iterations is a few tens of
-/// nanoseconds — at or under the clock's own granularity, which the guard
-/// reports as a case it cannot judge rather than as a number. That failure
-/// arrives minutes into a comparison, after both legs have been built, so it
-/// is worth spending a longer region to rule out.
-const FRAME_ITERS: u64 = 512;
+/// Not the same quantity as `expect_bytes`, which is the framed *output* —
+/// records times width, with the terminators stripped. The framer scans the
+/// terminators, and the LF and CRLF streams differ by exactly the extra byte
+/// per line, so charging both against their output would hide half of that
+/// difference in the denominator and leave `bytes_per_s` describing a corpus
+/// neither case reads.
+fn input_bytes(rig: &Rig) -> u64 {
+    rig.chunks.iter().map(|chunk| chunk.len() as u64).sum()
+}
 
 /// A rig over the standard stream, chunked at `chunk_bytes`.
 fn standard(eol: Eol, blank_every: usize, chunk_bytes: usize) -> Rig {
@@ -125,8 +131,7 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
             },
         )
         .items_of(|rig: &Rig| rig.expect_records as u64)
-        .bytes_of(|rig: &Rig| rig.expect_bytes as u64)
-        .iters(FRAME_ITERS)
+        .bytes_of(input_bytes)
         .done()
 }
 

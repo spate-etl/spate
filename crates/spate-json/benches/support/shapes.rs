@@ -1,4 +1,4 @@
-//! Payload shapes for the decode-path counter bench.
+//! Payload shapes for the decode-path benches, counted and wall-clock alike.
 //!
 //! Every other corpus in this crate is a flat record of seven to fifteen
 //! fields, which is one point on an axis a JSON decoder is read along. These

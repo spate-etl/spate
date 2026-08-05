@@ -1,4 +1,5 @@
-//! Deterministic newline-delimited byte streams for the framing bench.
+//! Deterministic newline-delimited byte streams for the framing benches,
+//! counted and wall-clock alike.
 //!
 //! [`NdjsonFramer`](spate_json::NdjsonFramer) knows nothing about JSON beyond
 //! the newline convention, so what decides its cost is the *shape* of the byte

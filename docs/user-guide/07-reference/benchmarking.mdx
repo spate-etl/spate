@@ -393,9 +393,13 @@ The same target carries the other half of that rule. Where a crate wraps a
 third-party library, the library's own floor belongs beside the crate's path
 over the same bytes, so that a regression in the dependency is not read as one
 in the framework; and where the library is feature-selected, the leg that
-compiles the alternative carries its floor too. That puts the margin between
-two libraries inside one report, which is the reading a waiver would otherwise
-be needed for.
+compiles the alternative carries a floor for every entry point, not only for
+the one the default build has. A floor set that covers the entry points
+unevenly is worse than none: a case read against the *other* parser's floor
+reports the framework as faster than the library it calls, which is a
+well-formed number saying something impossible. Complete, the pair puts the
+margin between two libraries inside one report — the reading a waiver would
+otherwise be needed for.
 
 ## What this does not do
 

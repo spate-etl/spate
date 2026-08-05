@@ -349,14 +349,16 @@ pins all four rigs under `crates/spate-core/benches/support/` and goes further
 than a digest: it also holds the claims those rigs' cases are named for — the
 row counts a declared throughput rests on, the chunk targets that land on a
 record boundary, and the tag distributions that make a fan-out case a
-match-rate case rather than a narrower one. Wherever a crate is measured by
-both tiers, its file holds one more property, which the wall tier needs and the
-counted tier does not: that a second drive is the same work as the first. A rig
-the counted tier builds once and discards is driven thousands of times against
-one piece of state there, so one that drifts reports a case whose name has
-stopped describing what it measures — and reports it as a stable number.
-`spate-json`'s file pairs that with its mirror, that the sink reset the
-property rests on has not quietly become a no-op.
+match-rate case rather than a narrower one. For a rig that keeps state across a
+drive it holds one more property, which the wall tier needs and the counted
+tier does not: that a second drive emits what the first did. A rig the counted
+tier builds once and discards is driven hundreds of times against one piece of
+state there, so one that drifts reports a case whose name has stopped
+describing what it measures — and reports it as a stable number. `spate-core`
+carries it for its two control-plane rigs, whose budget and watermark state
+survives a drive; `spate-json` carries it for its decode rigs, alongside the
+mirror that the sink reset the property rests on has not quietly become a
+no-op.
 
 The criterion benches beside them gate nothing. A pull request only
 type-checks them, through the same `clippy --all-targets` that covers the
@@ -366,13 +368,12 @@ week's run left in a cache. The A/B harness in `bench/` is the third tier — th
 `*_wall.rs` targets, which no job runs at all — and
 [Benchmarking](benchmarking.mdx) is its account. `spate-core`'s per-record path
 and its control plane are measured there, as are `spate-json`'s decode and
-framing paths, rather than weekly. Seven cases are marked erratic there and so
-are reported without ever being gated: two split cases place occasional
-replicates well above their own mode on the machine they were developed on,
-three control-plane cases that drive acking threads follow where the scheduler
-places those threads, and two duplicate-key guard cases collect their keys into
-a table whose hasher is seeded per process. All three are enough to flag a
-change that never happened.
+framing paths, rather than weekly. Five of `spate-core`'s cases are marked
+erratic there and so are reported without ever being gated: two split cases
+place occasional replicates well above their own mode on the machine they were
+developed on, and three control-plane cases that drive acking threads follow
+where the scheduler places those threads. Both are enough to flag a change that
+never happened.
 
 That comparison is drawn across two rented machines, so read it as evidence
 the benches still produce numbers rather than as a regression signal. Nothing
@@ -387,9 +388,11 @@ underlying library costs and the second is what the framework adds to it, and
 reading the second without the first turns a parser's regression into an
 unexplained framework one. `crates/spate-json/benches/decode_wall.rs` is the
 worked example. Its floor cases share a binary with its framework ones, so one
-run carries both; and a build with the optional decode backend compiled in
-carries that backend's floor beside the default one's, which is what lets the
-library margin be read without comparing across two legs.
+run carries both; there is one per parser entry point rather than one per case,
+over the same corpus as the framework case it pairs with; and a build with the
+optional decode backend compiled in carries that backend's floors beside the
+default one's, so no pairing crosses two parsers and the margin between the two
+libraries reads without comparing across two legs.
 `crates/spate-avro/benches/decode.rs` has no floor at all — its non-crate
 cases time a flattening helper and a `memcpy`, neither of which is the Avro
 decoder.

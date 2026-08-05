@@ -159,7 +159,7 @@ fn the_corpora_are_pinned_across_revisions() {
     assert_eq!(
         pin(&orders::order_document()),
         (265, 0xed39_44fc_72ba_fb50),
-        "single_typed / decode_floor_serde_typed"
+        "single_typed / single_value"
     );
     assert_eq!(
         pin(&orders::readings_ndjson(RECORDS)),
@@ -617,25 +617,44 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 // Repeatability
 // ---------------------------------------------------------------------------
 
-/// Every rig performs the same work on its third drive as on its first.
+/// Every rig emits the same records on its third drive as on its first.
 ///
 /// The counted tier never needed this: gungraun drives a rig once and throws
-/// it away. The wall harness calls a routine thousands of times against one
+/// it away. The wall harness calls a routine hundreds of times against one
 /// piece of state, so a rig that drifts reports a case whose name has stopped
 /// describing what it measures — and reports it as a stable number, because
 /// the drift settles long before the measured region opens.
 ///
-/// A rig with a distinct label pair each, because one process registers all of
-/// them and identically-labelled counters would be summed together.
+/// What is asserted is the emitted count, which is what every case asserts and
+/// what a drifting sink or a fixture that stopped being broken would move. It
+/// is not the *whole* of "the same work": the rate limiter behind the skip
+/// warning admits five events per window, so a poison rig's first drive emits
+/// log events its later ones suppress. That difference is bounded, converges
+/// inside the harness's warm-up, and is the steady state a running pipeline is
+/// in — `warm_rig`'s own documentation is where it is accounted for.
+///
+/// A distinct label pair per rig, because this is one process and
+/// identically-labelled counters would be summed together.
 #[test]
-fn a_second_drive_is_the_same_work_as_the_first() {
-    let mut clean = decode_rig::batch_rig::<Reading>(
+fn a_second_drive_emits_what_the_first_did() {
+    // Both framings, since only ndjson decodes line by line.
+    let mut ndjson = decode_rig::batch_rig::<Reading>(
         JsonFraming::Ndjson,
         OnError::Skip,
         orders::readings_ndjson(RECORDS),
         RECORDS,
-        ("fixtures-clean", "json"),
+        ("fixtures-ndjson", "json"),
     );
+    let mut array = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Array,
+        OnError::Skip,
+        orders::readings_array(RECORDS),
+        RECORDS,
+        ("fixtures-array", "json"),
+    );
+    // Both poison rates: one record in ten, and every record. The second is
+    // the case that drops two thousand times per drive, which is where a
+    // limiter or a counter that accumulated would show first.
     let mut poisoned = decode_rig::batch_rig::<Reading>(
         JsonFraming::Ndjson,
         OnError::Skip,
@@ -643,16 +662,33 @@ fn a_second_drive_is_the_same_work_as_the_first() {
         orders::good_lines(RECORDS, BAD_EVERY),
         ("fixtures-poisoned", "json"),
     );
+    let mut storm = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::readings_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
+        0,
+        ("fixtures-storm", "json"),
+    );
     for drive in 1..=3 {
         assert_eq!(
-            decode_rig::decode_run::<Owned<Reading>, _>(&mut clean),
+            decode_rig::decode_run::<Owned<Reading>, _>(&mut ndjson),
             RECORDS,
-            "clean drive {drive}"
+            "ndjson drive {drive}"
+        );
+        assert_eq!(
+            decode_rig::decode_run::<Owned<Reading>, _>(&mut array),
+            RECORDS,
+            "array drive {drive}"
         );
         assert_eq!(
             decode_rig::decode_run::<Owned<Reading>, _>(&mut poisoned),
             orders::good_lines(RECORDS, BAD_EVERY),
             "poisoned drive {drive}"
+        );
+        assert_eq!(
+            decode_rig::decode_run::<Owned<Reading>, _>(&mut storm),
+            0,
+            "storm drive {drive}"
         );
     }
 
@@ -673,15 +709,45 @@ fn a_second_drive_is_the_same_work_as_the_first() {
         );
     }
 
-    // And the guard, whose second parse is the one thing here that keeps
-    // per-call state of its own.
+    // Every shape the wall tier measures, guard off — these decode into a
+    // value rather than a struct, and `large_string` is the one whose backend
+    // scratch is resized by its own payload.
+    for (label, payload) in [
+        ("fixtures-wide", shapes::wide_flat as fn() -> Vec<u8>),
+        ("fixtures-deep", shapes::deep_nested),
+        ("fixtures-numeric", shapes::numeric_array),
+        ("fixtures-large", shapes::large_string),
+    ] {
+        let mut rig = decode_rig::shape_rig(payload(), false, 1, (label, "json"));
+        for drive in 1..=3 {
+            assert_eq!(
+                decode_rig::decode_run::<Owned<serde_json::Value>, _>(&mut rig),
+                1,
+                "{label} drive {drive}"
+            );
+        }
+    }
+
+    // And both guard cases: the one that passes the guard and decodes, and
+    // the one the guard rejects before the decode runs at all.
     let mut guarded =
         decode_rig::shape_rig(shapes::wide_flat(), true, 1, ("fixtures-guard", "json"));
+    let mut rejected = decode_rig::shape_rig(
+        shapes::wide_flat_duplicate_key(),
+        true,
+        0,
+        ("fixtures-reject", "json"),
+    );
     for drive in 1..=3 {
         assert_eq!(
             decode_rig::decode_run::<Owned<serde_json::Value>, _>(&mut guarded),
             1,
             "guarded drive {drive}"
+        );
+        assert_eq!(
+            decode_rig::decode_run::<Owned<serde_json::Value>, _>(&mut rejected),
+            0,
+            "rejected drive {drive}"
         );
     }
 

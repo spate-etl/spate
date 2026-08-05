@@ -25,34 +25,70 @@
 //! parsers.
 //!
 //! So comparing the backends is a deliberate act rather than an accident. It
-//! is two legs of one commit, not one A/B run:
+//! is two legs of one commit, not one A/B run. A leg directory has to sit
+//! outside the repository, which is where the driver keeps its own:
 //!
 //! ```sh
-//! bench run --out legs/serde --leg base
-//! bench run --out legs/simd  --leg head --features simd
-//! bench compare legs/serde legs/simd --allow features --allow digest
+//! legs="${TMPDIR:-/tmp}/spate-json-backends"
+//! bench run --out "$legs/serde" --leg base
+//! bench run --out "$legs/simd"  --leg head --features simd
+//! bench compare "$legs/serde" "$legs/simd" --allow features --allow digest
 //! ```
 //!
-//! and the report says in its header which guards were waived. A run built
-//! with `--features simd` also carries a second floor, so the library margin
-//! can be read inside one leg without waiving anything at all.
+//! and the report says in its header which guards were waived. Both waivers
+//! are needed: `--allow features` alone leaves every shared case demoted on
+//! its corpus digest, which is the second tripwire doing its job.
+//!
+//! A leg built with `--features simd` also carries that backend's own floors,
+//! so the library margin reads inside one leg without waiving anything —
+//! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
+//! libraries over one corpus in one binary.
+//!
+//! ## Which cases carry a floor
+//!
+//! One floor per parser entry point, over the same bytes as its framework
+//! partner, in whichever backend the leg compiled:
+//!
+//! | Framework case | Floor |
+//! |---|---|
+//! | `decode_ndjson_typed` | `decode_floor_*_ndjson` |
+//! | `decode_array_typed` | `decode_floor_*_array` |
+//! | `decode_wide_flat` | `decode_floor_*_wide_flat` |
+//!
+//! The error-policy cases are read against `decode_ndjson_typed` rather than
+//! against a floor, because what they price is this crate's isolation and not
+//! the parser's. The other three shape cases vary the document rather than the
+//! entry point, and `decode_wide_flat` is the pair that prices that entry
+//! point; they have no floor of their own.
 //!
 //! ## What is left out
 //!
-//! Fewer cases than `decode_gungraun.rs` runs, and the omissions are where
-//! wall time cannot resolve what the counted tier can. `single_value` is
-//! dropped because the four shape cases already decode into a value; the array
-//! error path is dropped because its atomicity lives inside `serde` rather
-//! than in this crate, and `ndjson_fail_bad_last` already prices the
-//! decode-everything-emit-nothing shape. The typing, framing, error and shape
-//! axes are each still exercised, and none is crossed with another: a case
-//! that re-measures the product of two effects two others already fix costs a
-//! person several minutes of an afternoon.
+//! Fourteen cases where `decode_gungraun.rs` declares nineteen. `single_typed`
+//! and `single_value` are dropped because one 265-byte document decodes in
+//! about 360 ns, and at that size a build's code layout moves the figure by
+//! more than the 5% floor — an A/A comparison of one commit against itself
+//! produced verdicts in both directions on it. The counted tier measures that
+//! shape deterministically, which is where it belongs. `ndjson_batch50` and
+//! `array_batch50` go with them: they are the same framings at a fortieth of
+//! the size, and the batch-scale cases already walk that code. `dup_guard_deep`
+//! is dropped because `dup_guard_wide` prices the guard on clean input and a
+//! second shape does not change what it prices. `array_bad_last` is dropped
+//! because the array framing's atomicity lives inside `serde` rather than in
+//! this crate, and `ndjson_fail_bad_last` already prices the
+//! decode-everything-emit-nothing shape.
+//!
+//! Nothing here pins an iteration count. The harness calibrates every case to
+//! its `--target-ms`, and its degenerate-region guard resolves an empty loop
+//! at those counts with several orders of magnitude to spare — 64 iterations
+//! measure 291 ns against a clock that never failed to resolve one in two
+//! hundred passes. A case wanting a longer region wants `--target-ms`, which
+//! is the harness's knob for it and moves every case together.
 //!
 //! Run it with `make bench-ab REF=main FILTER=decode_`.
 //!
 //! [`BACKEND_ID`]: spate_json::BACKEND_ID
 
+use serde_json::Value;
 use spate_bench::{Corpus, Suite, bench_main};
 use spate_core::deser::Owned;
 use spate_json::{JsonFraming, JsonSerdeDeserializer, JsonValueDeserializer, OnError};
@@ -65,31 +101,17 @@ mod orders;
 #[path = "support/shapes.rs"]
 mod shapes;
 
-use decode_rig::{Rig, batch_rig, decode_run, decode_run_err, rig, shape_rig};
-use orders::{BAD_EVERY, Corruption, Order, RECORDS, Reading};
+use decode_rig::{Rig, batch_rig, decode_run, decode_run_err, shape_rig};
+use orders::{BAD_EVERY, Corruption, RECORDS, Reading};
 
-/// The component label every case's drop counters carry. The pipeline label is
-/// the case id, which is what keeps one case's counters out of another's: one
-/// bench binary runs every case in one process, and the recorder is global to
-/// it.
-const COMPONENT: &str = "json";
-
-/// The iteration count every case over [`RECORDS`] records is pinned to.
+/// The component label a case's drop counters carry; the pipeline label is the
+/// case id.
 ///
-/// Calibrating these to the harness's 50 ms target lands on a few dozen
-/// iterations, because one drive decodes a quarter of a megabyte. The
-/// degenerate-region guard times an empty loop at whatever count the case
-/// settled on, and an empty loop of thirty iterations is a few tens of
-/// nanoseconds — at or under the clock's own granularity, which the guard
-/// reports as a case it cannot judge. Pinning keeps the reference loop well
-/// clear of that, at the cost of a region closer to half a second than to
-/// fifty milliseconds.
-const BATCH_ITERS: u64 = 512;
-
-/// Why the guard cases can never reach the significant-changes table.
-const GUARD_ERRATIC: &str = "the duplicate-key guard collects keys into a HashSet whose hasher is \
-     seeded per process, and every replicate is a fresh process, so the same document hashes into \
-     a different number of probes and potentially a different rehash schedule";
+/// The harness runs one process per case per replicate, so nothing in a bench
+/// run could collide. `tests/bench_fixtures.rs` is the one process that builds
+/// several rigs at once, and distinct label sets are what keep one rig's
+/// counters from being summed into another's there.
+const COMPONENT: &str = "json";
 
 fn absorb<D>(corpus: &mut Corpus, rig: &Rig<D>) {
     corpus.absorb("payload", &rig.payload);
@@ -111,6 +133,11 @@ fn payload_bytes<D>(rig: &RefCell<Rig<D>>) -> u64 {
 /// The emitted count is asserted and returned: asserted so a fixture that
 /// stopped being broken cannot pass as a fast one, returned so `black_box` has
 /// something to hold and the decode cannot be optimised away.
+///
+/// No resident-set figure reaches these records. `warm_rig` drives a full pass
+/// before the region opens, so the process's high-water mark is already set by
+/// the time the harness starts watching, and it reports the metric absent
+/// rather than as a figure about the warm-up.
 fn batch_case(
     suite: Suite,
     id: &'static str,
@@ -144,7 +171,6 @@ fn batch_case(
         // case declaring no throughput at all.
         .items(RECORDS)
         .bytes_of(payload_bytes)
-        .iters(BATCH_ITERS)
         .done()
 }
 
@@ -179,12 +205,15 @@ fn batch_fail_case(
         )
         .items(RECORDS)
         .bytes_of(payload_bytes)
-        .iters(BATCH_ITERS)
         .done()
 }
 
 /// A case over one document of an arbitrary shape, decoded into a value,
 /// optionally through the duplicate-key guard.
+///
+/// `items` is one document, where the batch family counts records — so
+/// `records_per_s` here is documents per second and the two families are not
+/// comparable in that column. Wall time and the allocation totals are.
 fn shape_case(
     suite: Suite,
     id: &'static str,
@@ -192,7 +221,7 @@ fn shape_case(
     guard: bool,
     expect: u64,
 ) -> Suite {
-    let case = suite
+    suite
         .case(
             id,
             move |corpus, _seed| {
@@ -203,7 +232,7 @@ fn shape_case(
             |b, rig: &RefCell<Rig<JsonValueDeserializer>>| {
                 b.iter(|| {
                     let mut rig = rig.borrow_mut();
-                    let got = decode_run::<Owned<serde_json::Value>, _>(&mut rig);
+                    let got = decode_run::<Owned<Value>, _>(&mut rig);
                     assert_eq!(got, rig.expect, "the document emitted a different count");
                     got
                 });
@@ -211,53 +240,15 @@ fn shape_case(
         )
         .items(1)
         .bytes_of(payload_bytes)
-        .iters(BATCH_ITERS);
-    // A `CaseBuilder` cannot be branched on after `.done()`, so the guard
-    // cases take the mark here.
-    if guard {
-        case.erratic(GUARD_ERRATIC).done()
-    } else {
-        case.done()
-    }
+        .done()
 }
 
 fn suite() -> Suite {
     let suite = spate_bench::suite("spate-json");
 
-    // The per-record cost every payload pays, under the framing that has one
-    // record to split. Unwarmed and without metrics, which is what its counted
-    // twin `single_typed` is; every case below is warmed and instrumented,
-    // which is what theirs are.
-    let suite = suite
-        .case(
-            "decode_single_typed",
-            |corpus, _seed| {
-                let rig = rig(JsonFraming::Single, orders::order_document(), 1, |b| {
-                    b.build_serde::<Order>()
-                });
-                absorb(corpus, &rig);
-                RefCell::new(rig)
-            },
-            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<Order>>>| {
-                // `decode_once`, which the counted twin calls, asserts inside
-                // and returns nothing — so it cannot be the routine here,
-                // where the return value is what `black_box` holds. The work
-                // either side of that is the same call.
-                b.iter(|| {
-                    let mut rig = rig.borrow_mut();
-                    let got = decode_run::<Owned<Order>, _>(&mut rig);
-                    assert_eq!(got, 1, "the single framing emitted a different count");
-                    got
-                });
-            },
-        )
-        .items(1)
-        .bytes_of(payload_bytes)
-        .done();
-
-    // The framing and typing axes at batch scale. `ndjson_typed` is the
-    // headline; `ndjson_value` is the allocation-heavy arm, and the pair is
-    // where `alloc_count_per_iter` earns its 1% floor.
+    // The framing and typing axes at batch scale. `decode_ndjson_typed` is the
+    // headline, and the denominator the error-policy cases below are read
+    // against.
     let suite = batch_case(
         suite,
         "decode_ndjson_typed",
@@ -336,9 +327,25 @@ fn suite() -> Suite {
     );
     let suite = shape_case(suite, "decode_large_string", shapes::large_string, false, 1);
 
-    // The duplicate-key guard: what it costs on clean input, and what
-    // rejecting costs. Both share a corpus with a guard-off case above, so the
-    // difference is the guard alone.
+    // The duplicate-key guard, a documented second parse over the whole
+    // document.
+    //
+    // `decode_dup_guard_wide` shares `wide_flat` with the guard-off case
+    // above, so the difference between them is the guard on clean input.
+    // `decode_dup_guard_hit` has no such partner and is not read as one: the
+    // guard rejects before `decode_one` runs at all (`src/deser.rs`), so the
+    // case is the guard walking to the duplicate and nothing else, and
+    // subtracting a guard-off case from it yields a negative number rather
+    // than a cost.
+    //
+    // Neither is marked erratic, and the counted tier's caveat about them does
+    // not transfer. There the guard's `HashSet` is built once and the case is
+    // one drive, so that construction's seed decides the count — a spread of
+    // up to 1.74% between processes. `check_no_duplicate_keys` builds a fresh
+    // set per object per document, and `RandomState::new()` reseeds on every
+    // construction rather than once per process, so a region running hundreds
+    // of iterations averages over hundreds of seeds. Measured A/A, these are
+    // the quietest cases in the run at ±0.2%.
     let suite = shape_case(suite, "decode_dup_guard_wide", shapes::wide_flat, true, 1);
     let suite = shape_case(
         suite,
@@ -357,6 +364,10 @@ fn suite() -> Suite {
 
 /// A floor case over borrowed bytes.
 ///
+/// Neither warmed nor instrumented, unlike every framework case above: there
+/// is no deserializer to warm and no counter for the library to increment.
+/// What the pair still shares is the corpus, which is the comparison.
+///
 /// The parsed value is returned rather than discarded, so it is dropped inside
 /// the region — which is parity with the crate's path, where the record
 /// reaches a sink and is dropped there.
@@ -366,9 +377,8 @@ fn serde_floor<T: 'static>(
     items: u64,
     payload: fn() -> Vec<u8>,
     routine: fn(&[u8]) -> T,
-    iters: Option<u64>,
 ) -> Suite {
-    let case = suite
+    suite
         .case(
             id,
             move |corpus, _seed| {
@@ -382,23 +392,20 @@ fn serde_floor<T: 'static>(
             },
         )
         .items(items)
-        .bytes_of(|bytes: &Vec<u8>| bytes.len() as u64);
-    match iters {
-        Some(n) => case.iters(n).done(),
-        None => case.done(),
-    }
-}
-
-fn serde_one_order(bytes: &[u8]) -> Order {
-    serde_json::from_slice(bytes).expect("the fixture is a valid order")
+        .bytes_of(|bytes: &Vec<u8>| bytes.len() as u64)
+        .done()
 }
 
 fn serde_array(bytes: &[u8]) -> Vec<Reading> {
     serde_json::from_slice(bytes).expect("the fixture is a valid array")
 }
 
+fn serde_value(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("the fixture is a valid document")
+}
+
 /// The parser over a newline-delimited batch, split the way the crate's
-/// `Skip` path splits it.
+/// `Skip` path splits it — `is_blank` is all-ASCII-whitespace, not just empty.
 ///
 /// Counting rather than collecting is the parity choice: the crate's sink
 /// increments a counter and drops the record, so this does the same. The count
@@ -421,10 +428,10 @@ fn floors(suite: Suite) -> Suite {
 }
 
 /// Under `simd` the crate decodes through a different parser, so the leg
-/// carries both floors: `serde_json`, which is still the library the guard and
-/// the value arm use, and the compiled backend, which is what the framework
-/// cases are read against. The margin between the two is then readable inside
-/// one leg, without waiving a guard to compare across legs.
+/// carries both floor sets: `serde_json`, which is still the library the
+/// duplicate-key guard uses whatever the backend, and the compiled backend,
+/// which is what every framework case is read against. Both are present for
+/// each entry point, so no pairing crosses two parsers.
 #[cfg(feature = "simd")]
 fn floors(suite: Suite) -> Suite {
     simd_floors(serde_floors(suite))
@@ -433,27 +440,24 @@ fn floors(suite: Suite) -> Suite {
 fn serde_floors(suite: Suite) -> Suite {
     let suite = serde_floor(
         suite,
-        "decode_floor_serde_typed",
-        1,
-        orders::order_document,
-        serde_one_order,
-        None,
-    );
-    let suite = serde_floor(
-        suite,
         "decode_floor_serde_ndjson",
         RECORDS,
         || orders::readings_ndjson(RECORDS),
         serde_ndjson,
-        Some(BATCH_ITERS),
     );
-    serde_floor(
+    let suite = serde_floor(
         suite,
         "decode_floor_serde_array",
         RECORDS,
         || orders::readings_array(RECORDS),
         serde_array,
-        Some(BATCH_ITERS),
+    );
+    serde_floor(
+        suite,
+        "decode_floor_serde_wide_flat",
+        1,
+        shapes::wide_flat,
+        serde_value,
     )
 }
 
@@ -465,6 +469,15 @@ fn serde_floors(suite: Suite) -> Suite {
 /// fresh copy per iteration would price a memcpy and an allocation the crate's
 /// path does not pay, and would read as the framework being faster than the
 /// library it calls.
+///
+/// The crate reaches the same pair through a `thread_local!`, where this holds
+/// it in a struct field. That leaves the floor a lazy-initialisation check and
+/// a thread-local read per document lighter than the crate's path — a sliver
+/// of the measured margin that is the access, not the framework. Holding it in
+/// a real thread-local here would mean either a `const`-initialised one, which
+/// `simd_json::Buffers` is not, or reproducing the crate's lazy cell, at which
+/// point the floor stops being the library and starts being a copy of the
+/// backend module.
 #[cfg(feature = "simd")]
 struct SimdFloor {
     payload: Vec<u8>,
@@ -478,9 +491,8 @@ fn simd_floor<T: 'static>(
     items: u64,
     payload: fn() -> Vec<u8>,
     routine: fn(&SimdFloor) -> T,
-    iters: Option<u64>,
 ) -> Suite {
-    let case = suite
+    suite
         .case(
             id,
             move |corpus, _seed| {
@@ -503,11 +515,8 @@ fn simd_floor<T: 'static>(
             },
         )
         .items(items)
-        .bytes_of(|state: &SimdFloor| state.payload.len() as u64);
-    match iters {
-        Some(n) => case.iters(n).done(),
-        None => case.done(),
-    }
+        .bytes_of(|state: &SimdFloor| state.payload.len() as u64)
+        .done()
 }
 
 #[cfg(feature = "simd")]
@@ -520,7 +529,12 @@ fn simd_decode<T: serde::de::DeserializeOwned>(state: &SimdFloor, bytes: &[u8]) 
 }
 
 #[cfg(feature = "simd")]
-fn simd_one_order(state: &SimdFloor) -> Order {
+fn simd_array(state: &SimdFloor) -> Vec<Reading> {
+    simd_decode(state, &state.payload)
+}
+
+#[cfg(feature = "simd")]
+fn simd_value(state: &SimdFloor) -> Value {
     simd_decode(state, &state.payload)
 }
 
@@ -541,19 +555,24 @@ fn simd_ndjson(state: &SimdFloor) -> u64 {
 fn simd_floors(suite: Suite) -> Suite {
     let suite = simd_floor(
         suite,
-        "decode_floor_simd_typed",
-        1,
-        orders::order_document,
-        simd_one_order,
-        None,
-    );
-    simd_floor(
-        suite,
         "decode_floor_simd_ndjson",
         RECORDS,
         || orders::readings_ndjson(RECORDS),
         simd_ndjson,
-        Some(BATCH_ITERS),
+    );
+    let suite = simd_floor(
+        suite,
+        "decode_floor_simd_array",
+        RECORDS,
+        || orders::readings_array(RECORDS),
+        simd_array,
+    );
+    simd_floor(
+        suite,
+        "decode_floor_simd_wide_flat",
+        1,
+        shapes::wide_flat,
+        simd_value,
     )
 }
 

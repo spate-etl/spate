@@ -232,10 +232,11 @@ pub(crate) fn install_recorder() {
 /// a pipeline is in, and is why a wall case and its counted twin can differ
 /// here without either being wrong.
 ///
-/// `labels` names the pipeline and component the drop counters carry. One
-/// bench binary runs many cases in one process, so they are per-case rather
-/// than per-binary: distinct label sets keep one case's counters from being
-/// summed into another's.
+/// `labels` names the pipeline and component the drop counters carry. The
+/// wall harness runs one process per case, so nothing there could collide;
+/// they are a parameter because `tests/bench_fixtures.rs` builds several rigs
+/// in one process, and distinct label sets are what keep one rig's counters
+/// from being summed into another's.
 pub(crate) fn warm_rig<F, D>(
     settings: JsonSettings,
     payload: Vec<u8>,

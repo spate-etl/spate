@@ -11,8 +11,7 @@ This is the framework's answer to "should I write per-type tables in the ETL, or
 land everything in one table and let a `MATERIALIZED VIEW` split it?". Splitting
 in the ETL moves the fan-out CPU off the (scarce, hard-to-scale) database and
 onto the horizontally-scalable pipeline tier, and gives you per-table control of
-part size. The [multi-table split benchmark](../../benchmarks/multi-table-split.mdx)
-measures exactly that trade.
+part size.
 
 ## The shape
 
@@ -166,9 +165,7 @@ Both fan a stream into per-type tables; they differ in **who** does the fan-out.
 | Distinct schemas | one record family + encoder per table | one MV `SELECT` per target |
 
 The split wins when the database is the scarce resource and you want per-table
-part control; the MV approach keeps a simpler single-cadence checkpoint. The
-[benchmark](../../benchmarks/multi-table-split.mdx) quantifies the CPU/part-size
-difference on a CPU-bound server.
+part control; the MV approach keeps a simpler single-cadence checkpoint.
 
 ## Further reading
 

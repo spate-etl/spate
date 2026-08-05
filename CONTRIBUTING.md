@@ -137,7 +137,7 @@ minutes:
 make test-docker   # container-backed suites
 make loom          # the concurrency models
 make docs          # the documentation site
-make bench-check   # every benchmark rig still compiles, in the release profile
+make bench-check   # every bench target still compiles, in the release profile
 make bench-gungraun  # instruction counts, on Linux with valgrind installed
 ```
 
@@ -287,14 +287,29 @@ there is no lint gate for it. Before you push, run
 `cd website && npm run build`: that one *is* gated, and it is what catches a
 link you broke by moving a page.
 
-**Benchmark numbers are never hand-written into the docs.** They come from a
-versioned record emitted by the rigs in `benchmarks/`, and the site reads those
-records. If a change makes something faster, say so in the pull request and it
-gets measured — on reference hardware, under the published protocol, because a
-number from a busy laptop is not comparable to the ones already published. The
-methodology lives in
-[`docs/benchmarks/methodology.mdx`](docs/benchmarks/methodology.mdx) and the
-[benchmark repository](https://github.com/spate-etl/benchmark).
+**A performance figure in the docs carries how it was established.** The
+decision log in [`docs/DESIGN.md`](docs/DESIGN.md) is where the load-bearing
+ones live, most carrying a parenthetical for what stands behind them. Match the
+wording already there rather than inventing a stronger-sounding one. A figure
+nobody can place is one nobody can later check. If a change makes something
+faster, say so in the pull request and say what you measured it on, because a
+number from a busy laptop is not comparable to one taken on a quiet machine.
+
+The [benchmark repository](https://github.com/spate-etl/benchmark)
+carries the cross-framework comparison and the methodology it runs under: one
+fixed pipeline, several frameworks. Neither it nor this repository carries a
+rig that sweeps *this* framework's own settings against each other end to end,
+so a claim needing one is a claim to state as unmeasured rather than to dress
+in a figure nothing can reproduce. The bench targets here measure inside a
+single component, which is a different question again.
+
+When you do measure two arms against each other, interleave them — every arm
+once per repetition rather than one arm finished before the next starts — and
+throw the first pass away. Anything that drifts over a run lands entirely on
+whichever arm goes last otherwise, and the first repetition hands one arm the
+cold-start cost, which has been large enough here to decide which arm looked
+faster. Report an interval and the repetition count beside the value, so a
+reader can tell a difference from a spread.
 
 ## Releases
 

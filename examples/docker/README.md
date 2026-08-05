@@ -74,8 +74,8 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
 
 The in-flight byte budget (`backpressure.max_inflight_bytes`) must
 comfortably exceed what the sink legitimately keeps in flight, or a
-saturated pipeline duty-cycles against the pause controller (a ~24x collapse
-— see the benchmarks section, `docs/benchmarks/framework-overhead.mdx`):
+saturated pipeline duty-cycles against the pause controller (a ~24x collapse,
+hand-recorded during the tuning investigation, no committed record):
 
 ```text
 max_inflight_bytes x low_ratio >= 2 x ( shards x inflight.max_per_shard x batch.max_bytes

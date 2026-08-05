@@ -51,7 +51,7 @@ sink:
 |---|---|---|---|
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
 | `topic` | string | `required` | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
-| `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever ([benchmark](../../../../benchmarks/kafka-sink.mdx)). |
+| `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever. |
 | `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing retryably. |
 | `max_message_bytes` | bytes | `1MB` | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. `1MB` decodes to 1,000,000 bytes. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `spate_kafka_sink_*` families; `0s` disables statistics and those families with it. |
@@ -231,5 +231,3 @@ the series-ownership rules.
   ack chain the delivery reports plug into.
 - [Monitoring](../../../05-deployment/monitoring.mdx) — the framework
   `spate_sink_*` families and what to alert on across a whole pipeline.
-- [Kafka sink benchmark](../../../../benchmarks/kafka-sink.mdx) — where the
-  throughput actually comes from, and why `shards` is not the lever.

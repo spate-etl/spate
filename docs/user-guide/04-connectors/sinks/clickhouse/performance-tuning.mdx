@@ -8,8 +8,7 @@ deliberately sink-heavy workload — a fast in-memory source pushing narrow rows
 the source is never the bottleneck and the sink's own limits show through. Your
 optimum depends on your rows, your network, and whether your ClickHouse is
 CPU-, IO-, or client-bound, so treat every value here as a place to start
-measuring, not a fixed answer. The full study is on the
-[Sink saturation](../../../../benchmarks/sink-saturation.mdx) benchmark page.
+measuring, not a fixed answer.
 
 ## The mental model
 
@@ -162,7 +161,7 @@ does the row→column pivot. `native` does that pivot on the **client** and hand
 ClickHouse finished columnar blocks — it moves the row→column work off the
 server and onto the client, and can compress smaller on the wire, at the cost of
 more client CPU. Whether that is a net win depends on your workload and where the
-bottleneck actually sits; the measured trade-offs live on the benchmark pages.
+bottleneck actually sits.
 **Reach for `native`** when ClickHouse is the CPU bottleneck or your network
 egress is the constraint (cross-region, metered), and **keep `rowbinary`** when
 client CPU is what's scarce — then measure. See the
@@ -287,6 +286,4 @@ merges are few, and adjust the batch size and writer concurrency from there.
 
 - [ClickHouse sink](./README.mdx) — the full sink configuration reference.
 - [Native format](./native-format.mdx) — the RowBinary vs Native trade in depth.
-- [Sink saturation benchmark](../../../../benchmarks/sink-saturation.mdx) — the
-  measurements these recommendations are drawn from.
 - [Deployment tuning](../../../05-deployment/tuning.mdx) — pipeline-wide tuning.

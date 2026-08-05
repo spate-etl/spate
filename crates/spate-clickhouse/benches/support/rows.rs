@@ -18,11 +18,10 @@
 //! is pinned: growing it would silently re-baseline every count ever recorded
 //! against it.
 //!
-//! Deliberately the same *shapes* the wall-clock `ch_native_format` rig uses —
-//! the same columns and types — so a count here and a throughput number there
-//! describe comparable work. They are separate corpora, not shared ones: the
-//! value formulas differ, and nothing keeps them in step, so a byte count from
-//! one is not a byte count from the other.
+//! Shared verbatim with the wall-clock sibling: `encode.rs` and
+//! `encode_gungraun.rs` both pull this module in, so the two tiers encode
+//! byte-identical corpora and a count here and a throughput number there
+//! describe the same work rather than merely comparable work.
 //!
 //! Row values are pure functions of the index — no random source — because an
 //! instruction count is only comparable when both legs encoded identical

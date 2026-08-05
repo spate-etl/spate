@@ -6,13 +6,12 @@ you have run out of vertical headroom and should scale out instead. It assumes
 you have already established that the source is the binding side — see
 [Where to start](../../../05-deployment/tuning.mdx#where-to-start).
 
-Numbers here come from the
-[Kafka source ceiling](../../../../benchmarks/kafka-topology.mdx) benchmark: a
-backlogged 16-partition topic on a single local Redpanda broker, every arm
-interleaved with every other, medians over three runs. Your optimum depends on
-message size, partition count, broker fan-out, and compression, so treat every
-value as a place to start measuring — the shape of each curve transfers, the
-absolute numbers do not.
+Numbers here come from a source-ceiling study: a backlogged 16-partition topic
+on a single local Redpanda broker, every arm interleaved with every other,
+medians over three runs. Your optimum depends on message size, partition
+count, broker fan-out, and compression, so treat every value as a place to
+start measuring — the shape of each curve transfers, the absolute numbers do
+not.
 
 ## The mental model
 
@@ -59,9 +58,7 @@ partition is frequently *excluded*, and the same throughput needs
 proportionally more round trips.
 
 **There is no single right number, and in particular there is no invariant
-byte target.** The
-[benchmark](../../../../benchmarks/kafka-topology.mdx#source-ceiling-what-actually-sets-it-2026-07)
-sweeps eight depths at 64 B and six at 256 B:
+byte target.** The study sweeps eight depths at 64 B and six at 256 B:
 
 - **256 B** is saturated by `queued.min.messages` **10000** — about 2.5 MB
   buffered per partition.
@@ -224,8 +221,7 @@ Partitions map onto pipeline threads as lanes
 ([Lanes](./README.mdx#lanes-partitions-on-pipeline-threads)), so raising
 `pipeline.threads` looks like it should speed up consumption. **For the fetch
 path alone it does the opposite** — draining one client's partition queues from
-several threads contends inside librdkafka, and the
-[measured curve](../../../../benchmarks/kafka-topology.mdx#source-ceiling-what-actually-sets-it-2026-07)
+several threads contends inside librdkafka, and the measured curve
 falls monotonically from one thread to eight at both message sizes: 5.15M to
 2.06M msg/s at 64 B, 5.18M to 2.71M at 256 B.
 
@@ -312,7 +308,5 @@ as directional.
   its denylist, offsets, lanes, and backpressure.
 - [Where to start](../../../05-deployment/tuning.mdx#where-to-start) — the
   find-the-bottleneck loop this page slots into.
-- [Kafka source ceiling benchmark](../../../../benchmarks/kafka-topology.mdx) —
-  the study these numbers come from.
 - [librdkafka CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)
   — the authority for every property above.

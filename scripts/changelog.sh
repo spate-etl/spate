@@ -85,8 +85,8 @@ cleanup() {
 trap cleanup EXIT
 
 # The crate scopes are derived, never typed: a tenth crate must not become
-# exempt by being left out of a list. `benchmarks/` is a workspace member but
-# sits outside `crates/`, so the non-crate area scope is excluded for free, and
+# exempt by being left out of a list. Only `crates/*` is read, so a workspace
+# member outside it keeps whatever exemption its area scope carries, and
 # reading the directory needs no toolchain — which matters, because the job that
 # runs this has none.
 crate_scopes() {

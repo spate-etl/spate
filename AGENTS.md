@@ -1,7 +1,7 @@
 # Spate
 
 High-performance, at-least-once ETL pipeline framework in Rust. Publishable
-crates under `crates/`, plus an unpublished `benchmarks/` crate.
+crates under `crates/`.
 
 Four documents are normative. Read the relevant one before changing what it
 governs, because none of them is reconstructable from the code:
@@ -140,8 +140,8 @@ Two rules break by accident more than the rest:
   vocabulary. A connector name may appear only as a link label, a `## Related`
   entry, or inside a `:::note Connector specifics` block — never carrying the
   explanation. Fenced code and YAML are exempt; the prose around them is not.
-  `docs/DESIGN.md` and `docs/benchmarks/` sit outside the rule, but neither
-  should grow connector *usage* guidance.
+  `docs/DESIGN.md` sits outside the rule, but it should not grow connector
+  *usage* guidance either.
 - **Docs read as the present, never as a changelog.** No "now", "recently", "as
   of". If something changed, the page describes what is and the commit says what
   moved.

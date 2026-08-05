@@ -353,7 +353,7 @@ jobs:
           shared-key: docs
 
       - name: Build API reference (rustdoc)
-        run: cargo doc --workspace --exclude benchmarks --no-deps --all-features --locked
+        run: cargo doc --workspace --no-deps --all-features --locked
 
       # Stage rustdoc under the site's static/ dir so Docusaurus copies it into
       # the build at <baseUrl>/api/ (and it's served during local `npm start`).
@@ -607,7 +607,7 @@ jobs:
       - name: Merge coverage
         run: >
           cargo llvm-cov report --lcov --locked --output-path lcov-full.info
-          --ignore-filename-regex '(/tests/|/benchmarks/)'
+          --ignore-filename-regex '/tests/'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -658,12 +658,12 @@ jobs:
           key: criterion-baseline-${{ github.run_id }}
           restore-keys: criterion-baseline-
 
-      # Compile every bench target and benchmark rig in the bench (release)
-      # profile. ci.yml's clippy `--all-targets` already type-checks all of them
-      # on each PR, so what this adds is release-profile-only breakage — a link
-      # error, or a `cfg(not(debug_assertions))` path. It lives here because
-      # this job needs a release build anyway; on the PR path it was a second
-      # full dependency compile and the slowest job in CI.
+      # Compile every bench target in the bench (release) profile. ci.yml's
+      # clippy `--all-targets` already type-checks all of them on each PR, so
+      # what this adds is release-profile-only breakage — a link error, or a
+      # `cfg(not(debug_assertions))` path. It lives here because this job needs
+      # a release build anyway; on the PR path it was a second full dependency
+      # compile and the slowest job in CI.
       - run: make bench-check
       # Both bench steps below name their target explicitly. `cargo bench -p X --
       # --save-baseline` forwards those args to *every* bench target in the
@@ -720,27 +720,6 @@ jobs:
             echo "::error::criterion wrote no 'current' baseline; the comparison above proved nothing."
             exit 1
           fi
-
-  synthetic-trend:
-    name: pipeline_synthetic trend run
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          shared-key: release
-      - run: cargo build --release -p benchmarks --locked
-      - run: RUN_ONE=1 THREADS=2 DURATION_S=60 RESULTS=synthetic-trend.jsonl ./target/release/pipeline_synthetic
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-trend-${{ github.run_id }}
-          path: synthetic-trend.jsonl
-          if-no-files-found: error
 
   # ===========================================================================
   # Catch-all failure reporting.
@@ -813,7 +792,6 @@ jobs:
       - loom
       - coverage-containers
       - bench
-      - synthetic-trend
     # `always()` so this runs at all when a dependency failed, and a `contains`
     # guard so it stays silent on a green run. Skipped dependencies — the whole
     # other tier — are not failures.

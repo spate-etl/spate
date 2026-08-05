@@ -10,9 +10,10 @@
 //! buffer), so the borrowed payload is copied into a reused thread-local scratch
 //! first, and the parser's own scratch [`Buffers`] are likewise reused across
 //! calls — both are per-message allocations a production integration avoids, so
-//! the backend is charged only the unavoidable memcpy (measured negligible; see
-//! the deserialization-formats benchmark study for the serde_json/simd-json
-//! A/B). The structural [`check_no_duplicate_keys`] guard always stays on
+//! the backend is charged only the unavoidable memcpy (measured at ~1% of the
+//! decode on flat and nested records; `decode_gungraun.rs`'s `large_string`
+//! case is where a copy would show). The structural
+//! [`check_no_duplicate_keys`] guard always stays on
 //! `serde_json`: an off-by-default fidelity pass, not the hot path, keeping the
 //! duplicate-key error classification identical across backends.
 //!

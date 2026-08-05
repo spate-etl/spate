@@ -40,8 +40,8 @@ Two decisions define this stage:
   `try_map`, ...) compose statically — the whole chain compiles to one
   loop. Type erasure happens exactly once, at the chain boundary, with one
   virtual call per **batch**. Per-record dynamic dispatch would defeat
-  cross-operator inlining; this design measured ~40 ns and zero allocations
-  per record in the validation spike (see
+  cross-operator inlining; the chain bench measures this design at roughly ten
+  nanoseconds and zero allocations per record (see
   [docs/DESIGN.md](../../DESIGN.md) § Frozen v1 contracts).
 
 The chain's terminal stage encodes records into the sink's wire format
@@ -117,8 +117,8 @@ Non-goals).
 ## Further reading
 
 - [docs/DESIGN.md](../../DESIGN.md) § Process anatomy, § Source
-  abstraction, § Operator chain — the canonical version with all the
-  benchmarks and trade-offs.
+  abstraction, § Operator chain — the canonical version, with the trade-offs
+  and the measurements behind them.
 - [Custom sources](../06-extending/custom-source.mdx) /
   [Custom sinks](../06-extending/custom-sink.mdx) — implementing the seams
   this page describes.

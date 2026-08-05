@@ -22,8 +22,8 @@ arbitrary-precision = ["serde_json/arbitrary_precision"]
 raw-value = ["serde_json/raw_value"]
 # Opt-in SIMD decode backend behind the byte-slice → value seam (`backend.rs`).
 # Off by default; when on, `decode_one` parses with simd-json instead of
-# serde_json. The dup-key structural guard always stays on serde_json. See the
-# deserialization-formats benchmark study for the serde_json/simd-json A/B.
+# serde_json. The dup-key structural guard always stays on serde_json. The
+# margin over serde_json depends on the payload and the host architecture.
 simd = ["dep:simd-json"]
 
 [dependencies]

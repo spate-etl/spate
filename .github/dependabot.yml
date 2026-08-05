@@ -41,19 +41,6 @@ updates:
     # see the `attribution` job in scheduled.yml for why it moved.
     open-pull-requests-limit: 4
     labels: ["dependencies", "area: workspace"]
-    # lz4_flex moves with `clickhouse`, never on its own. `spate-clickhouse`
-    # enables `clickhouse`'s `lz4` feature and `clickhouse` pins the codec, so a
-    # solo bump puts two majors of it in the graph and makes
-    # `ch_native_format`'s `lz4_bytes` measure a compressor the ingest path does
-    # not use — a rig whose numbers are published. CI cannot catch that: nothing
-    # asserts the benchmark's codec matches the ingest path's, which is why the
-    # constraint lives in a comment beside the declaration in Cargo.toml.
-    #
-    # Proposed twice and closed twice for this reason. A `clickhouse` bump that
-    # moves the codec carries lz4_flex with it, by hand, in the same pull
-    # request.
-    ignore:
-      - dependency-name: "lz4_flex"
     commit-message:
       prefix: "chore(workspace)"
 

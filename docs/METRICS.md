@@ -151,8 +151,9 @@ process:
 On the assembly path (`Pipeline`) a collision is a hard `BuildError` /
 `StartError` — two pipelines, or two components, sharing a name in one process
 is a wiring mistake caught before any data flows. Constructing a handle struct
-directly (a benchmark, a hand-built harness) logs an error and shadows instead,
-because a metrics label collision must never take down a healthy data path.
+directly (a hand-built harness, a test fixture) logs an error and shadows
+instead, because a metrics label collision must never take down a healthy data
+path.
 
 Two consequences worth stating outright:
 

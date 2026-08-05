@@ -88,10 +88,6 @@
           - codecov.yml
           - .config/nextest.toml
 
-"area: benchmarks":
-  - changed-files:
-      - any-glob-to-any-file: benchmarks/**
-
 "area: examples":
   - changed-files:
       - any-glob-to-any-file: examples/**

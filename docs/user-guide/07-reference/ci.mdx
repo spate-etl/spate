@@ -218,7 +218,7 @@ at it; without `CI=true` you will not find out until the PR is red.
 
 The `/api/` rustdoc is generated into `website/static/api/` (gitignored) by the
 nightly deploy only, not by the PR build. To populate it locally: `cargo doc
---workspace --exclude benchmarks --no-deps --all-features`, then copy
+--workspace --no-deps --all-features`, then copy
 `target/doc/.` into `website/static/api/`. The site builds fine without it —
 the navbar and footer reach rustdoc through `pathname:///api/`, which
 deliberately bypasses Docusaurus's link checker.
@@ -267,25 +267,24 @@ liveness, exit code and log tail; a retried test lands as a flaky annotation in
 the container job's JUnit report. A retry that starts recurring with a cause
 attached is a signal to delete the retry, not to trust it.
 
-`benchmarks/` sets `autobins = false`, so a new rig in `benchmarks/src/bin/` is
-invisible to cargo until it also has a `[[bin]]` stanza (with `test = false`).
-`benchmarks::manifest::every_rig_is_declared_as_a_bin` fails if the two diverge.
-Note the rigs are not built by `cargo nextest run`; `cargo clippy
---workspace --all-targets` is what compile-checks them (and the examples) — on
-every PR **that touches Rust**, since that step carries
+Bench targets are not built by `cargo nextest run`; `cargo clippy --workspace
+--all-targets` is what compile-checks them (and the examples) — on every PR
+**that touches Rust**, since that step carries
 `if: needs.changes.outputs.rust == 'true'`. A docs-only PR compile-checks
-nothing, which is the point, but it does mean the rigs are unguarded on exactly
+nothing, which is the point, but it does mean they are unguarded on exactly
 those PRs. `cargo bench --no-run` adds only release-profile breakage on top of
 that, and costs a second full dependency build, so it runs in the weekly tier.
 
 ## Performance gates
 
-Two things on the pull-request path answer performance questions without
-reading a clock: an allocation gate, and a tier of jobs that counts
-instructions. A hosted runner is contended and virtualised, so a wall-clock
-figure measured there describes the machine as much as the change — which is
-why no wall-clock number gates anything here. Both produce a quantity that is
-the same on any host.
+Three things on the pull-request path answer performance questions without
+reading a clock: an allocation gate, a request-shape gate, and a tier of jobs
+that counts instructions. A hosted runner is contended and virtualised, so a
+wall-clock figure measured there describes the machine as much as the change —
+which is why no wall-clock number gates anything here. What these three
+compare is counts, which do not move with the runner's load. Instruction
+counts carry one caveat of their own, in "the shard matrix" below: the runner
+*image* still decides which instruction-set width a bench executes.
 
 `alloc-assertions` runs the counting-allocator test over the chain hot path
 (`cargo test -p spate-core --release --test chain_alloc`). Its bounds are
@@ -293,7 +292,18 @@ absolute rather than relative to a stored baseline, so it compares against
 nothing and cannot drift: an allocation that scales with record count fails it.
 It builds in the release profile, because the bounds are calibrated against
 optimised code — and it pays for that by sharing the `release` cache entry the
-scheduled release-profile jobs populate from `main`.
+release-profile jobs populate from `main`.
+
+`crates/spate-s3/tests/request_shape.rs` is the second, and it counts calls
+rather than bytes: how many listings a coordinated backfill issues and how
+many fetches each object costs, with the byte ranges asserted alongside. It
+needs no container — a temporary directory behind the object-store client, an
+in-process coordination store, and a recording wrapper that tallies the calls
+— so it runs with the ordinary test suite rather than behind the Docker job,
+and a change that quietly turns one fetch into two fails it. One assertion
+there does read a clock, as a floor rather than a budget: the run has to
+outlive the interval at which an open plan would re-list, or a listing count
+of one proves nothing.
 
 `perf-counters` runs the gungraun benches, which count instructions,
 branches and cache references under callgrind, and heap shape — allocated
@@ -315,6 +325,77 @@ measurement — so a merge base that predates a bench reports that bench as
 on today's toolchain reports no baseline rather than blocking a pull request
 on code its author did not write. Push and merge-group runs report absolute
 counts.
+
+### What the benches measure
+
+The counted benches follow the hot paths: the operator chain and its split
+terminal, the checkpoint and backpressure bookkeeping around it, payload
+decoding and record framing, row and message encoding for the wire with the
+routing in front of it, and the planning, assignment, claim scanning and
+descriptor decoding a coordinated backfill does. A new one is written as a
+single workload shape parameterised over the axis that changes its cost — a
+listing profile, a codec, an entry point — rather than one case per function,
+because attribution below the shape comes from the callgrind profile the run
+already writes, and a finer set of cases would only duplicate it. That is the
+rule for a new bench rather than a description of every existing one — several
+predate it and carry a case per entry point.
+
+Where a bench generates its own corpus, that corpus comes from a fixed
+sequence and is pinned by a test — `crates/<crate>/tests/bench_fixtures.rs`,
+in six of the seven benched crates. A count is only comparable when both legs
+of the comparison packed byte-identical input, so a generator free to drift
+between them is a difference the report would charge to the change.
+`spate-core` is the gap in that rule rather than an exception to it: nothing
+pins what its rigs under `crates/spate-core/benches/support/` build.
+
+The wall-clock benches beside them gate nothing. A pull request only
+type-checks them, through the same `clippy --all-targets` that covers the
+examples; the weekly tier builds them all in the bench profile and then runs
+three by name — the divan chain bench, and two of the three criterion targets
+against a baseline the previous week's run left in a cache. `spate-json`'s
+criterion bench is built and never run, because each criterion target needs
+its own step and it has none.
+
+That comparison is drawn across two rented machines, so read it as evidence
+the benches still produce numbers rather than as a regression signal. Nothing
+blocks on the delta. The rotation step after it fails when *no* criterion
+target wrote a baseline at all — the case where the comparison was vacuous —
+which means one target silently dropping out is not what it catches.
+
+Where a format crate wraps a third-party parser, the parser's own floor
+belongs in the wall-clock bench: cases that call it directly, beside the
+counted bench measuring the crate's path over the same bytes. The first is
+what the underlying library costs and the second is what the framework adds to
+it, and reading the second without the first turns a parser's regression into
+an unexplained framework one. `crates/spate-json/benches/decode.rs` is the
+worked example, with two caveats. The floor is in the tree for a person to
+run, not on a schedule; and it covers only the default parser, so the crate's
+second compiled feature arm is counted without one.
+`crates/spate-avro/benches/decode.rs` has no floor at all — its non-crate
+cases time a flattening helper and a `memcpy`, neither of which is the Avro
+decoder.
+
+One bench carries a design claim alongside its costs.
+`crates/spate-core/benches/chain.rs` drives the production path — a boxed
+chain fed borrowed payload batches through deserialize, filter, flat_map,
+encode and hand-off — against the owned-payload equivalent, and that contrast
+is what the zero-copy seam rests on: the borrowed chain allocates a fixed
+number of times per batch and nothing per record, while the owned one
+allocates once per record. Read the arms' allocation counts against each
+other, not their wall clocks — they fan out differently, so only the
+allocation contrast is like-for-like. Where the type erasure sits
+was settled on a prototype of the same seam rather than by this rig: one
+virtual call per batch is what the chain is built to, because a boundary per
+stage scales with the stage count and blocks vectorisation, while a per-batch
+boundary's own cost amortises away once each stage does realistic per-record
+work. What holds the first claim true afterwards is the counted sibling
+`chain_gungraun.rs`: it carries both arms as cases and runs DHAT alongside
+callgrind, so each arm's heap shape and instruction count move under one
+comparison. `alloc-assertions` is the narrower gate beside it — the borrowed
+chain alone, against absolute bounds rather than a baseline — and it is what
+fails if allocations start scaling with record count. Neither asserts that the
+gap between the two arms stays open, so that part is re-established by running
+the rig rather than watched for.
 
 ### The shard matrix
 
@@ -638,7 +719,7 @@ on. Reproduce locally with:
 
 ```sh
 cargo llvm-cov nextest --profile ci --workspace --all-features --summary-only \
-  --ignore-filename-regex '(/tests/|/benchmarks/)'
+  --ignore-filename-regex '/tests/'
 ```
 
 Both suites publish their JUnit report as a check annotation — `Test results`

@@ -358,6 +358,25 @@ takes a shard count that way has its division folded into a mask and reports a
 figure several times cheaper than the code it stands in for. `black_box` around
 the parameter is what holds the routine to the shape production runs.
 
+`crates/spate-core/benches/control_plane_wall.rs` is the third, for the trap
+neither of the others shows: **a routine runs thousands of times against one
+piece of state, so whatever it mutates has to be put back.** A rig borrowed
+from the instruction-count tier is where this bites, because that tier builds
+one and drives it once, so nothing about it needs to survive a second drive.
+Its backpressure rig moves a budget by relative amounts and resets nothing,
+which leaves each drive starting where the last one finished; within a few the
+case exercises a different branch of the state machine than its name claims,
+and it returns a stable number throughout. The routine resets before each
+drive, and `tests/bench_fixtures.rs` holds both halves — that a second drive
+matches the first, and that without the reset it does not, so the reset cannot
+quietly become a no-op. A case whose subject keeps state is worth driving twice
+in a test before it is worth measuring.
+
+That target is also where one binary carries two subjects. The rule of thumb is
+one per subject, because a metrics recorder is process-global; where neither
+subject registers a metric, the case-id prefix is what separates them, and the
+binary not added is a build every future comparison does not pay for.
+
 ## What this does not do
 
 Stated because a report that looks confident about them would be worse than

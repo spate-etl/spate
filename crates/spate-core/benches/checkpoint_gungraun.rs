@@ -107,10 +107,15 @@ fn drive(rig: &mut Rig) -> usize {
 
 // The checkpointer, its issuer and the epoch are built in the `#[bench]`
 // argument expression, which gungraun evaluates outside the collected region.
-// There is no warm-up drive: a drive leaves every tracker's ring empty and
-// its `head_seq` advanced, so a second drive is not the same work as the
-// first — the rig is measured in the state a fresh epoch starts in, which is
-// the state the runtime creates it in.
+// There is no warm-up drive, and the rig is therefore measured in the state a
+// fresh epoch starts in — which is the state the runtime creates it in, and
+// the one an instruction count is most legible against. A second drive would
+// cost the same: every batch a tick issues resolves inside it, so the rings
+// are empty either way, and `head_seq` advancing changes no branch, since
+// `resolve` indexes by `seq - head_seq` and `advance` reports `last_offset + 1`
+// without comparing it to anything. `tests/bench_fixtures.rs` is where that
+// equivalence is asserted; the wall tier depends on it, this target only
+// prefers the fresh state.
 //
 // Each case returns its rig rather than dropping it: a value moved into the
 // benchmark function is dropped inside the collected region, and tearing down

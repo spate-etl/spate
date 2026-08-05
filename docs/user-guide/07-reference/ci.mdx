@@ -345,11 +345,16 @@ sequence and is pinned by a test — `crates/<crate>/tests/bench_fixtures.rs`,
 in every benched crate. A count is only comparable when both legs of the
 comparison packed byte-identical input, so a generator free to drift between
 them is a difference the report would charge to the change. `spate-core`'s file
-pins both rigs under `crates/spate-core/benches/support/` and goes further than
-a digest: it also holds the claims those rigs' cases are named for — the row
-counts a declared throughput rests on, the chunk targets that land on a record
-boundary, and the tag distributions that make a fan-out case a match-rate case
-rather than a narrower one.
+pins all four rigs under `crates/spate-core/benches/support/` and goes further
+than a digest: it also holds the claims those rigs' cases are named for — the
+row counts a declared throughput rests on, the chunk targets that land on a
+record boundary, and the tag distributions that make a fan-out case a
+match-rate case rather than a narrower one. For the two control-plane rigs it
+holds one more property, which the wall tier needs and the counted tier does
+not: that a second drive is the same work as the first. A rig the counted tier
+builds once and discards is driven thousands of times against one piece of
+state there, so one that drifts reports a case whose name has stopped
+describing what it measures — and reports it as a stable number.
 
 The criterion benches beside them gate nothing. A pull request only
 type-checks them, through the same `clippy --all-targets` that covers the
@@ -359,10 +364,12 @@ previous week's run left in a cache. `spate-json`'s criterion bench is built
 and never run, because each criterion target needs its own step and it has
 none. The A/B harness in `bench/` is the third tier — the `*_wall.rs` targets,
 which no job runs at all — and [Benchmarking](benchmarking.mdx) is its account.
-`spate-core`'s per-record path is measured there rather than weekly. Two of its
-split cases are marked erratic there: they place occasional replicates well
-above their own mode on the machine they were developed on, which is enough to
-flag a change that never happened, so they are reported and never gated.
+`spate-core`'s per-record path and its control plane are both measured there
+rather than weekly. Five of its cases are marked erratic there and so are
+reported without ever being gated: two split cases place occasional replicates
+well above their own mode on the machine they were developed on, and the three
+control-plane cases that drive acking threads follow where the scheduler places
+those threads. Both are enough to flag a change that never happened.
 
 That comparison is drawn across two rented machines, so read it as evidence
 the benches still produce numbers rather than as a regression signal. Nothing

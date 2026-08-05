@@ -377,6 +377,26 @@ one per subject, because a metrics recorder is process-global; where neither
 subject registers a metric, the case-id prefix is what separates them, and the
 binary not added is a build every future comparison does not pay for.
 
+`crates/spate-json/benches/decode_wall.rs` is the fourth, for the case where a
+Cargo feature decides not how fast the subject is but *which subject it is*.
+The guarded `features` field records what was passed to cargo, which is not the
+same question: a change that moves a feature into the default set leaves both
+legs agreeing on it while the compiled code diverges. So a case whose subject
+is chosen that way absorbs the choice into its corpus — the crate exposes the
+compiled backend's identity as a constant, and every case folds it in — and the
+two tripwires are then independent. Comparing the two backends is a deliberate
+act rather than an accident: two legs of one commit, built with different
+features, compared with both `--allow features` and `--allow digest`, and the
+report says in its header that each was waived.
+
+The same target carries the other half of that rule. Where a crate wraps a
+third-party library, the library's own floor belongs beside the crate's path
+over the same bytes, so that a regression in the dependency is not read as one
+in the framework; and where the library is feature-selected, the leg that
+compiles the alternative carries its floor too. That puts the margin between
+two libraries inside one report, which is the reading a waiver would otherwise
+be needed for.
+
 ## What this does not do
 
 Stated because a report that looks confident about them would be worse than

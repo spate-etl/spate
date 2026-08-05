@@ -1,10 +1,13 @@
 //! Instruction counts for this crate's decode paths (gungraun).
 //!
-//! The sibling `benches/decode.rs` measures `serde_json` directly — the floor
-//! any JSON decoder is read against. These measure **this crate**: the
-//! framing the deserializer applies to a payload, the record emission, and the
-//! per-record error isolation that comes with it. A regression in
-//! `JsonSerdeDeserializer` would not show up in the floor.
+//! The sibling `benches/decode_wall.rs` carries the floor any JSON decoder is
+//! read against — cases calling the compiled parser directly. These measure
+//! **this crate**: the framing the deserializer applies to a payload, the
+//! record emission, and the per-record error isolation that comes with it. A
+//! regression in `JsonSerdeDeserializer` would not show up in the floor.
+//!
+//! The rig itself is `support/decode_rig.rs`, which both tiers compile, so the
+//! region counted here is the region the wall tier times.
 //!
 //! One shape — one payload through one deserializer — parameterised by the
 //! framing the payload carries, the target it decodes into, the shape of the
@@ -140,18 +143,18 @@
 
 use gungraun::{Dhat, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
 use serde_json::Value;
-use spate_core::checkpoint::AckRef;
-use spate_core::deser::{Deserializer, Owned, RecFamily};
-use spate_core::record::{PartitionId, RawPayload};
-use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
-use std::hint::black_box;
+use spate_core::deser::Owned;
+use spate_json::{JsonFraming, OnError};
 
+#[path = "support/decode_rig.rs"]
+mod decode_rig;
 #[path = "support/orders.rs"]
 mod orders;
 #[path = "support/shapes.rs"]
 mod shapes;
 
-use orders::{BAD_EVERY, Corruption, Order, RECORDS, Reading, Sink};
+use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, rig, shape_rig};
+use orders::{BAD_EVERY, Corruption, Order, RECORDS, Reading};
 
 /// The number of records the batch framings carry. Fifty is the same batch
 /// size the Avro decode bench uses, so the two are comparable per element.
@@ -159,258 +162,22 @@ const BATCH: u64 = 50;
 
 /// Labels for the connector-owned drop counters. Each case runs in its own
 /// process, so one pair serves them all.
-const PIPELINE: &str = "bench";
-const COMPONENT: &str = "json";
+const LABELS: (&str, &str) = ("bench", "json");
 
-/// One deserializer with the bytes it decodes.
-///
-/// The payload is owned rather than pre-wrapped in a `RawPayload`, because a
-/// `RawPayload` borrows it and a benchmark argument has to be a single owned
-/// value. Building the wrapper is a handful of stores inside the measured
-/// region; it is identical across the cases, so it cancels in any comparison.
-struct Rig<D> {
-    deser: D,
-    payload: Vec<u8>,
-    ack: AckRef,
-    sink: Sink,
-    /// How many records this payload must yield. Asserted rather than
-    /// returned: a framing that silently stopped splitting would otherwise
-    /// read as a large improvement.
-    expect: u64,
-}
-
-fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
-        offset: 1,
-        timestamp_ms: 0,
-    }
-}
-
-/// The measured work: one payload through one deserializer.
-fn decode_once<F, D>(rig: &mut Rig<D>)
-where
-    F: RecFamily,
-    D: Deserializer<F>,
-{
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
-    rig.deser
-        .deserialize(black_box(&raw), &rig.ack, &mut rig.sink)
-        .unwrap();
-    assert_eq!(rig.sink.0, rig.expect, "framing emitted a different count");
-}
-
-/// The measured work for the cases added after the reference four: one
-/// payload through one deserializer, returning how many records it emitted.
-///
-/// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
-/// fail anything — it silently empties the measurement. Callgrind toggles
-/// collection on the benchmark function's module, and a toggle flips
-/// collection rather than forcing it on, so work the optimiser reshapes across
-/// that boundary leaves the region holding whatever else was running — usually
-/// the allocator tearing down the corpus. `deserialize` is generic over the
-/// record family and monomorphises into this crate, which makes it an ordinary
-/// inlining candidate; a named frame the optimiser may not erase is what keeps
-/// the decode inside the region.
-///
-/// Returning the emitted count is what keeps the call alive: the records are
-/// otherwise unobserved, and without a use the optimiser is free to delete the
-/// decode this exists to count. The caller asserts it, so a fixture that
-/// silently stopped emitting — or started decoding cleanly — cannot pass as a
-/// fast one.
-#[inline(never)]
-fn decode_run<F, D>(rig: &mut Rig<D>) -> u64
-where
-    F: RecFamily,
-    D: Deserializer<F>,
-{
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
-    rig.deser
-        .deserialize(black_box(&raw), &rig.ack, &mut rig.sink)
-        .expect("the fixture decodes under its error policy");
-    rig.sink.0
-}
-
-/// The measured work for a case whose payload must fail.
-///
-/// Separate from [`decode_run`] rather than folded into it with a flag: the
-/// two differ in what they assert, and an `Ok` from an `on_error: fail`
-/// fixture is a fixture that stopped being broken — which would leave the case
-/// quietly measuring the happy path under an error-path name.
-#[inline(never)]
-fn decode_run_err<F, D>(rig: &mut Rig<D>) -> u64
-where
-    F: RecFamily,
-    D: Deserializer<F>,
-{
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
-    let res = rig
-        .deser
-        .deserialize(black_box(&raw), &rig.ack, &mut rig.sink);
-    assert!(
-        black_box(res).is_err(),
-        "the fixture decoded cleanly under on_error: fail"
-    );
-    rig.sink.0
-}
-
-/// Install a real recorder, once per process.
-///
-/// Without one the `metrics` facade hands back no-op handles, so the drop
-/// counters `Skip` increments cost nothing to increment and a case claiming to
-/// measure the skip path would be measuring it with half of it missing. A
-/// Prometheus recorder is what a deployed pipeline installs, and an increment
-/// against it is the atomic add production pays.
-///
-/// Metric handles are resolved at build time (INV-8), so this has to run
-/// before the builder is asked for them. Only counters are registered here, so
-/// nothing claims a gauge series and INV-10 has nothing to arbitrate.
-fn install_recorder() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        // Dropped rather than unwrapped: `Once` already rules out a second
-        // install from here, and a host that somehow arrives with a global
-        // recorder should degrade to no-op handles rather than abort the run.
-        let _ = metrics::set_global_recorder(recorder);
-    });
-}
-
-/// A rig whose decode backend, allocator and log limiter are already in the
-/// state a running pipeline's would be in.
-///
-/// The warm pass is the single most load-bearing line in this file for the
-/// `simd` arm. That backend keeps its mutable scratch buffer and the parser's
-/// own reusable buffers in a thread-local, allocated lazily on first use —
-/// which, because gungraun calls the benchmark function exactly once, would
-/// otherwise be allocated *inside* the collected region and charged to the
-/// case as if it were per-record cost. The heap counts say so directly:
-/// compiling this pass out takes `large_string` from 7 allocated blocks to 15
-/// and from 525 KB to 2.4 MB, and every other case here gains between eight
-/// and twenty-one blocks of the same scratch. The reference cases above still
-/// carry that charge and are the control that makes it visible — `simd`
-/// allocates 19 blocks against `serde_json`'s 8 on `single_typed`, and reads
-/// between 12% and 22% above it depending on the architecture, where the
-/// warmed cases differ by a single block. The block counts are a property of
-/// the backend and hold everywhere; the percentages are not, and are quoted
-/// only to say the charge is large relative to a small case.
-///
-/// Warming with the case's own payload rather than a token document is what
-/// makes it complete: both the scratch copy and the parser's buffers are sized
-/// to the input, so a small warm-up would leave the measured pass growing them
-/// — a smaller version of the same defect.
-///
-/// Two other things come warm with it, and both are wanted. The allocator has
-/// already served and been returned the case's working set, so the measured
-/// pass allocates against populated free lists rather than off the top of a
-/// heap nothing has used, which is the state a pipeline decoding its millionth
-/// payload is in. That is not automatically the cheaper of the two — for the
-/// allocation-heavy cases a virgin heap is measurably cheaper, because a bump
-/// off the top costs less than a bin lookup — which is the point: the
-/// alternative is not a neutral measurement, it is the *first* payload a
-/// process ever decodes, and no pipeline spends its life there.
-///
-/// And the rate limiter behind the skip warning has already seen whatever
-/// poison the payload carries. It allows five events per window, so what the
-/// warm pass leaves for the measured one depends on how much poison there is
-/// — and both regimes are wanted. A corpus dropping more than five records
-/// (`ndjson_syntax_10pct`, `ndjson_type_10pct`, `ndjson_syntax_all`) exhausts
-/// the window in the warm pass, so the measured pass suppresses every drop on
-/// the lock-free fast path: what a poison storm really costs after its first
-/// few records. A corpus dropping one (`array_bad_last`, `dup_guard_hit`)
-/// spends one of the five and leaves the measured drop taking the mutex and
-/// emitting an event, which is what an isolated bad record really costs.
-/// Neither depends on how long the process took to get here, which an unwarmed
-/// count would.
-fn warm_rig<F, D>(
-    settings: JsonSettings,
-    payload: Vec<u8>,
-    expect: u64,
-    build: impl FnOnce(&JsonDeserializerBuilder) -> D,
-) -> Rig<D>
-where
-    F: RecFamily,
-    D: Deserializer<F>,
-{
-    install_recorder();
-    let builder =
-        JsonDeserializerBuilder::from_settings(settings).with_metrics(PIPELINE, COMPONENT);
-    let deser = build(&builder);
-    // The receiver is dropped here, so when the last `AckRef` goes with the rig
-    // the batch resolves into a disconnected channel and the send is discarded.
-    // That happens in teardown, outside the collected region.
-    let (ack, _ack_rx) = AckRef::test_pair();
-    let mut rig = Rig {
-        deser,
-        payload,
-        ack,
-        sink: Sink(0),
-        expect,
-    };
-    let raw = raw_payload(&rig.payload);
-    // The result is deliberately ignored: an `on_error: fail` fixture returns
-    // here the very error its case is about, and the warm pass is not where
-    // that is asserted.
-    let _ = rig.deser.deserialize(&raw, &rig.ack, &mut rig.sink);
-    rig.sink.0 = 0;
-    rig
-}
-
-/// Settings for a case added after the reference four, which vary all three
-/// knobs rather than only the framing.
-fn full_settings(
+/// [`batch_rig`] and [`shape_rig`] under this binary's labels. The shared rig
+/// takes them per call because the wall tier runs every case in one process
+/// and needs a distinct pair each; here there is nothing to separate.
+fn batch(
     framing: JsonFraming,
     on_error: OnError,
-    reject_duplicate_keys: bool,
-) -> JsonSettings {
-    JsonSettings {
-        framing,
-        on_error,
-        reject_duplicate_keys,
-    }
-}
-
-fn settings(framing: JsonFraming) -> JsonSettings {
-    JsonSettings {
-        framing,
-        // Skip is the shipped default, so this is the path production takes.
-        // It is not the cheaper of the two by construction: on valid input
-        // Skip's error bookkeeping never runs, while ndjson under Fail buffers
-        // every decoded payload before emitting any of them. Measuring the
-        // default is the point; a Fail case would be a second shape, not a
-        // stricter version of this one.
-        on_error: OnError::Skip,
-        // Off: the structural check parses each document a second time, which
-        // would measure the guard rather than the decode.
-        reject_duplicate_keys: false,
-    }
-}
-
-fn rig<D>(
-    framing: JsonFraming,
     payload: Vec<u8>,
     expect: u64,
-    build: impl FnOnce(&JsonDeserializerBuilder) -> D,
-) -> Rig<D> {
-    let builder = JsonDeserializerBuilder::from_settings(settings(framing));
-    let deser = build(&builder);
-    // The receiver is dropped here, so when the last `AckRef` goes with the rig
-    // the batch resolves into a disconnected channel and the send is discarded.
-    // That happens in teardown, outside the collected region, which is why the
-    // ack path costs the measurement nothing beyond the per-record clone.
-    let (ack, _ack_rx) = AckRef::test_pair();
-    Rig {
-        deser,
-        payload,
-        ack,
-        sink: Sink(0),
-        expect,
-    }
+) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+    batch_rig(framing, on_error, payload, expect, LABELS)
+}
+
+fn shape(payload: Vec<u8>, guard: bool, expect: u64) -> Rig<spate_json::JsonValueDeserializer> {
+    shape_rig(payload, guard, expect, LABELS)
 }
 
 fn single_typed_rig() -> Rig<spate_json::JsonSerdeDeserializer<Order>> {
@@ -443,23 +210,8 @@ fn array_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
     )
 }
 
-/// A warmed rig decoding `Reading` records under one framing and policy.
-fn batch_rig(
-    framing: JsonFraming,
-    on_error: OnError,
-    payload: Vec<u8>,
-    expect: u64,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    warm_rig::<Owned<Reading>, _>(
-        full_settings(framing, on_error, false),
-        payload,
-        expect,
-        |b| b.build_serde::<Reading>(),
-    )
-}
-
 fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Ndjson,
         OnError::Skip,
         orders::readings_ndjson(RECORDS),
@@ -471,7 +223,7 @@ fn ndjson_bad_rig(
     bad_every: u64,
     how: Corruption,
 ) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Ndjson,
         OnError::Skip,
         orders::readings_ndjson_bad_every(RECORDS, bad_every, how),
@@ -480,7 +232,7 @@ fn ndjson_bad_rig(
 }
 
 fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Ndjson,
         OnError::Fail,
         orders::readings_ndjson(RECORDS),
@@ -489,7 +241,7 @@ fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
 }
 
 fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Ndjson,
         OnError::Fail,
         orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
@@ -498,7 +250,7 @@ fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>>
 }
 
 fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Array,
         OnError::Skip,
         orders::readings_array(RECORDS),
@@ -507,22 +259,11 @@ fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
 }
 
 fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    batch_rig(
+    batch(
         JsonFraming::Array,
         OnError::Skip,
         orders::readings_array_bad_last(RECORDS),
         0,
-    )
-}
-
-/// A warmed rig decoding one document of an arbitrary shape into a value,
-/// optionally through the duplicate-key guard.
-fn shape_rig(payload: Vec<u8>, guard: bool, expect: u64) -> Rig<spate_json::JsonValueDeserializer> {
-    warm_rig::<Owned<Value>, _>(
-        full_settings(JsonFraming::Single, OnError::Skip, guard),
-        payload,
-        expect,
-        JsonDeserializerBuilder::build_value,
     )
 }
 
@@ -597,13 +338,13 @@ fn decode_batch_failing(
 
 // The shape axis, and the duplicate-key guard over two of the same corpora.
 #[library_benchmark]
-#[bench::wide_flat(shape_rig(shapes::wide_flat(), false, 1))]
-#[bench::deep_nested(shape_rig(shapes::deep_nested(), false, 1))]
-#[bench::numeric_array(shape_rig(shapes::numeric_array(), false, 1))]
-#[bench::large_string(shape_rig(shapes::large_string(), false, 1))]
-#[bench::dup_guard_wide(shape_rig(shapes::wide_flat(), true, 1))]
-#[bench::dup_guard_deep(shape_rig(shapes::deep_nested(), true, 1))]
-#[bench::dup_guard_hit(shape_rig(shapes::wide_flat_duplicate_key(), true, 0))]
+#[bench::wide_flat(shape(shapes::wide_flat(), false, 1))]
+#[bench::deep_nested(shape(shapes::deep_nested(), false, 1))]
+#[bench::numeric_array(shape(shapes::numeric_array(), false, 1))]
+#[bench::large_string(shape(shapes::large_string(), false, 1))]
+#[bench::dup_guard_wide(shape(shapes::wide_flat(), true, 1))]
+#[bench::dup_guard_deep(shape(shapes::deep_nested(), true, 1))]
+#[bench::dup_guard_hit(shape(shapes::wide_flat_duplicate_key(), true, 0))]
 fn decode_shape(
     mut rig: Rig<spate_json::JsonValueDeserializer>,
 ) -> Rig<spate_json::JsonValueDeserializer> {

@@ -17,11 +17,15 @@
 //! for the wrong path. That is what is checked here.
 
 use spate_core::checkpoint::AckRef;
-use spate_core::deser::Deserializer;
+use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
 
+#[path = "../benches/support/decode_rig.rs"]
+mod decode_rig;
+#[path = "../benches/support/frame_rig.rs"]
+mod frame_rig;
 #[path = "../benches/support/lines.rs"]
 mod lines;
 #[path = "../benches/support/orders.rs"]
@@ -29,8 +33,9 @@ mod orders;
 #[path = "../benches/support/shapes.rs"]
 mod shapes;
 
+use decode_rig::Sink;
 use lines::Eol;
-use orders::{BAD_EVERY, Corruption, RECORDS, Reading, Sink};
+use orders::{BAD_EVERY, Corruption, RECORDS, Reading};
 
 /// FNV-1a over a corpus.
 ///
@@ -98,7 +103,7 @@ fn settings(framing: JsonFraming, on_error: OnError, reject_duplicate_keys: bool
 /// source does, and return the record count and the framed byte total — the
 /// pair `framing_gungraun.rs` asserts.
 fn frame(stream: &[u8], chunk: usize) -> (usize, usize) {
-    let mut framer = NdjsonFramer::new(lines::MAX_RECORD_BYTES);
+    let mut framer = NdjsonFramer::new(frame_rig::MAX_RECORD_BYTES);
     let (mut records, mut bytes) = (0usize, 0usize);
     for piece in stream.chunks(chunk) {
         framer.push(piece).expect("inside the record cap");
@@ -151,6 +156,11 @@ fn the_corpora_are_reproducible() {
 /// as measuring a different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
+    assert_eq!(
+        pin(&orders::order_document()),
+        (265, 0xed39_44fc_72ba_fb50),
+        "single_typed / decode_floor_serde_typed"
+    );
     assert_eq!(
         pin(&orders::readings_ndjson(RECORDS)),
         (253_787, 0xf116_9d1d_5776_def2),
@@ -574,7 +584,7 @@ fn every_framed_line_is_a_json_document_of_the_declared_width() {
         (lines::WIDE_RECORDS, lines::WIDE_LINE_BYTES),
     ] {
         let stream = lines::stream(records, width, Eol::Lf, 0);
-        let mut framer = NdjsonFramer::new(lines::MAX_RECORD_BYTES);
+        let mut framer = NdjsonFramer::new(frame_rig::MAX_RECORD_BYTES);
         framer.push(&stream).unwrap();
         framer.finish().unwrap();
         let mut seen = 0;
@@ -600,5 +610,127 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
     assert_eq!(
         lines::expect_bytes(lines::RECORDS, lines::LINE_BYTES),
         lines::expect_bytes(lines::WIDE_RECORDS, lines::WIDE_LINE_BYTES),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Repeatability
+// ---------------------------------------------------------------------------
+
+/// Every rig performs the same work on its third drive as on its first.
+///
+/// The counted tier never needed this: gungraun drives a rig once and throws
+/// it away. The wall harness calls a routine thousands of times against one
+/// piece of state, so a rig that drifts reports a case whose name has stopped
+/// describing what it measures — and reports it as a stable number, because
+/// the drift settles long before the measured region opens.
+///
+/// A rig with a distinct label pair each, because one process registers all of
+/// them and identically-labelled counters would be summed together.
+#[test]
+fn a_second_drive_is_the_same_work_as_the_first() {
+    let mut clean = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::readings_ndjson(RECORDS),
+        RECORDS,
+        ("fixtures-clean", "json"),
+    );
+    let mut poisoned = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
+        orders::good_lines(RECORDS, BAD_EVERY),
+        ("fixtures-poisoned", "json"),
+    );
+    for drive in 1..=3 {
+        assert_eq!(
+            decode_rig::decode_run::<Owned<Reading>, _>(&mut clean),
+            RECORDS,
+            "clean drive {drive}"
+        );
+        assert_eq!(
+            decode_rig::decode_run::<Owned<Reading>, _>(&mut poisoned),
+            orders::good_lines(RECORDS, BAD_EVERY),
+            "poisoned drive {drive}"
+        );
+    }
+
+    // The failing arm too: a rig whose call must return `Err` has to keep
+    // returning it, or the case quietly starts measuring the happy path.
+    let mut failing = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Ndjson,
+        OnError::Fail,
+        orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
+        0,
+        ("fixtures-failing", "json"),
+    );
+    for drive in 1..=3 {
+        assert_eq!(
+            decode_rig::decode_run_err::<Owned<Reading>, _>(&mut failing),
+            0,
+            "failing drive {drive}"
+        );
+    }
+
+    // And the guard, whose second parse is the one thing here that keeps
+    // per-call state of its own.
+    let mut guarded =
+        decode_rig::shape_rig(shapes::wide_flat(), true, 1, ("fixtures-guard", "json"));
+    for drive in 1..=3 {
+        assert_eq!(
+            decode_rig::decode_run::<Owned<serde_json::Value>, _>(&mut guarded),
+            1,
+            "guarded drive {drive}"
+        );
+    }
+
+    // Framing carries no state between drives at all — `frame_stream` builds
+    // its own framer — so the claim is the stronger one that every drive
+    // returns the identical pair.
+    let stream = lines::stream(lines::RECORDS, lines::LINE_BYTES, Eol::Lf, 0);
+    let rig = frame_rig::Rig {
+        chunks: lines::chunks(&stream, lines::FETCH_CHUNK_BYTES),
+        expect_records: lines::RECORDS,
+        expect_bytes: lines::expect_bytes(lines::RECORDS, lines::LINE_BYTES),
+    };
+    let first = frame_rig::frame_stream(&rig);
+    assert_eq!(
+        first,
+        (rig.expect_records, rig.expect_bytes),
+        "frame drive 1"
+    );
+    for drive in 2..=3 {
+        assert_eq!(frame_rig::frame_stream(&rig), first, "frame drive {drive}");
+    }
+}
+
+/// The sink reset inside `decode_run` is load-bearing, and cannot quietly
+/// become a no-op.
+///
+/// The mirror of the test above: driving the deserializer directly, without
+/// going through `decode_run`, must accumulate. If this ever reports `RECORDS`
+/// rather than twice it, the sink has started resetting itself somewhere else
+/// and the reset in `decode_run` has stopped being the thing that makes the
+/// wall tier's thousandth iteration the same as its first.
+#[test]
+fn the_decode_rig_would_accumulate_without_its_reset() {
+    let mut rig = decode_rig::batch_rig::<Reading>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::readings_ndjson(RECORDS),
+        RECORDS,
+        ("fixtures-noreset", "json"),
+    );
+    for _ in 0..2 {
+        let payload = decode_rig::raw_payload(&rig.payload);
+        rig.deser
+            .deserialize(&payload, &rig.ack, &mut rig.sink)
+            .expect("the corpus is clean");
+    }
+    assert_eq!(
+        rig.sink.0,
+        RECORDS * 2,
+        "two drives without a reset should have accumulated"
     );
 }

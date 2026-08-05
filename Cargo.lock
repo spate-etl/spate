@@ -4051,7 +4051,6 @@ dependencies = [
 name = "spate-json"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "gungraun",
  "metrics",
  "metrics-exporter-prometheus",
@@ -4059,6 +4058,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simd-json",
+ "spate-bench",
  "spate-core",
  "spate-test",
  "thiserror",

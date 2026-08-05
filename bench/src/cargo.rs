@@ -532,9 +532,10 @@ mod tests {
         let metadata: Metadata = serde_json::from_str(FIXTURE).expect("parses");
         let found = super::discovery_from(&metadata).expect("discovers");
 
-        // `decode_gungraun` belongs to the counter tier, `decode` to criterion,
-        // `wall_helper` is not a bench at all, and `someone_elses_wall` belongs
-        // to a dependency rather than to this workspace.
+        // `decode_gungraun` belongs to the counter tier, `decode` carries no
+        // tier suffix at all, `wall_helper` is not a bench, and
+        // `someone_elses_wall` belongs to a dependency rather than to this
+        // workspace.
         assert_eq!(
             found.targets,
             [super::BenchTarget {

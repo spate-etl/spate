@@ -1,0 +1,147 @@
+//! Wall time for streaming record framing.
+//!
+//! [`NdjsonFramer`] cuts a byte *stream* into newline-delimited records so a
+//! streaming source can hand the deserializer one document per payload. This
+//! is the wall-clock half of what `framing_gungraun.rs` counts, over the same
+//! streams through the same loop — both drive `frame_stream` from
+//! `support/frame_rig.rs`, so a counted regression and a wall-clock one are
+//! statements about one region.
+//!
+//! Four cases, where the counted tier runs six. Wall time cannot resolve what
+//! separates the two that are left out. `lf_line_chunks` sits between
+//! `lf_fetch_chunks` and `lf_split_chunks` on one axis both of those already
+//! fix, and `lf_blank_interleaved` is one branch per line — a per-line term
+//! the counted tier prices exactly and a 5% wall-clock floor would not see:
+//!
+//! - `frame_lf_fetch_chunks` — many lines per chunk, which is what a
+//!   fetch-sized read hands the framer. The regime production runs in, and the
+//!   denominator for the rest.
+//! - `frame_lf_split_chunks` — the same bytes in chunks far smaller than a
+//!   line, so almost every record is assembled across several pushes through
+//!   the partial-line buffer. The other end of that axis, and what a
+//!   small-read source or a chunked transfer encoding puts the framer in.
+//! - `frame_crlf_fetch_chunks` — the baseline stream terminated `\r\n`. The
+//!   framer strips exactly one trailing `\r`, so the delta is that strip plus
+//!   one more byte to scan per line.
+//! - `frame_lf_wide_lines` — an eighth as many lines, eight times as wide, so
+//!   the byte total is the same. Read against the baseline it separates the
+//!   framer's per-byte cost from its per-record cost, which no other pair
+//!   here can do.
+//!
+//! No metrics recorder. The framer registers nothing, which is why this is a
+//! second binary rather than four more cases in `decode_wall.rs`: a recorder
+//! is process-global, and the case-id prefix is only enough to separate two
+//! subjects when neither of them registers a metric.
+//!
+//! Run it with `make bench-ab REF=main FILTER=frame_`.
+//!
+//! [`NdjsonFramer`]: spate_json::NdjsonFramer
+
+use spate_bench::{Suite, bench_main};
+
+#[path = "support/frame_rig.rs"]
+mod frame_rig;
+#[path = "support/lines.rs"]
+mod lines;
+
+use frame_rig::{Rig, frame_stream};
+use lines::Eol;
+
+/// The iteration count every case is pinned to.
+///
+/// Calibrating to the harness's 50 ms target lands these between thirty and a
+/// hundred and twenty iterations, because one drive frames a megabyte and a
+/// half. The degenerate-region guard times an empty loop at whatever count the
+/// case settled on, and an empty loop of thirty iterations is a few tens of
+/// nanoseconds — at or under the clock's own granularity, which the guard
+/// reports as a case it cannot judge rather than as a number. That failure
+/// arrives minutes into a comparison, after both legs have been built, so it
+/// is worth spending a longer region to rule out.
+const FRAME_ITERS: u64 = 512;
+
+/// A rig over the standard stream, chunked at `chunk_bytes`.
+fn standard(eol: Eol, blank_every: usize, chunk_bytes: usize) -> Rig {
+    let stream = lines::stream(lines::RECORDS, lines::LINE_BYTES, eol, blank_every);
+    Rig {
+        chunks: lines::chunks(&stream, chunk_bytes),
+        expect_records: lines::RECORDS,
+        expect_bytes: lines::expect_bytes(lines::RECORDS, lines::LINE_BYTES),
+    }
+}
+
+fn wide() -> Rig {
+    let stream = lines::stream(lines::WIDE_RECORDS, lines::WIDE_LINE_BYTES, Eol::Lf, 0);
+    Rig {
+        chunks: lines::chunks(&stream, lines::FETCH_CHUNK_BYTES),
+        expect_records: lines::WIDE_RECORDS,
+        expect_bytes: lines::expect_bytes(lines::WIDE_RECORDS, lines::WIDE_LINE_BYTES),
+    }
+}
+
+/// One case over one rig.
+///
+/// The state is a plain [`Rig`] rather than a `RefCell`: [`frame_stream`]
+/// takes it by shared reference and builds its own framer, so nothing the
+/// routine touches survives the call and the thousandth drive is the first
+/// drive. `tests/bench_fixtures.rs` holds that as a property rather than
+/// leaving it to be inferred from this comment.
+///
+/// The assertion is what keeps the case honest under a name. A framer that
+/// stopped splitting, stopped stripping a `\r`, or started counting blank
+/// lines would otherwise report a large improvement rather than a failure —
+/// and the returned pair is also what `black_box` holds, so the loop cannot be
+/// optimised away.
+fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
+    suite
+        .case(
+            id,
+            move |corpus, _seed| {
+                let rig = build();
+                // The chunks are absorbed one at a time rather than
+                // concatenated: `absorb` folds each input's length in, so a
+                // stream re-cut at a different chunk size digests differently.
+                // That is wanted — the chunking is half of what the case is.
+                for chunk in &rig.chunks {
+                    corpus.absorb("chunk", chunk);
+                }
+                // The framer does not decode, so the backend cannot change
+                // what this measures. Absorbed anyway, so that both of this
+                // crate's wall targets refuse a cross-backend pairing on the
+                // same two tripwires rather than on one each.
+                corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+                rig
+            },
+            |b, rig: &Rig| {
+                b.iter(|| {
+                    let got = frame_stream(rig);
+                    assert_eq!(
+                        got,
+                        (rig.expect_records, rig.expect_bytes),
+                        "the framing changed; if that is intended, the fixture's \
+                         expectation is the contract being edited"
+                    );
+                    got
+                });
+            },
+        )
+        .items_of(|rig: &Rig| rig.expect_records as u64)
+        .bytes_of(|rig: &Rig| rig.expect_bytes as u64)
+        .iters(FRAME_ITERS)
+        .done()
+}
+
+fn suite() -> Suite {
+    let suite = spate_bench::suite("spate-json");
+    let suite = case(suite, "frame_lf_fetch_chunks", || {
+        standard(Eol::Lf, 0, lines::FETCH_CHUNK_BYTES)
+    });
+    let suite = case(suite, "frame_lf_split_chunks", || {
+        standard(Eol::Lf, 0, lines::SPLIT_CHUNK_BYTES)
+    });
+    let suite = case(suite, "frame_crlf_fetch_chunks", || {
+        standard(Eol::Crlf, 0, lines::FETCH_CHUNK_BYTES)
+    });
+    case(suite, "frame_lf_wide_lines", wide)
+}
+
+bench_main!(suite);

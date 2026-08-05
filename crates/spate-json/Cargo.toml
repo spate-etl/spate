@@ -43,13 +43,12 @@ spate-test = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 serde_yaml = { workspace = true }
-criterion = { workspace = true }
 proptest = { workspace = true }
+# Versionless by way of the workspace table, so cargo strips it when the crate
+# is packaged and the unpublished harness never reaches what a consumer
+# resolves.
+spate-bench = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
-[[bench]]
-name = "decode"
-harness = false
 
 # gungraun's `main!` is the harness; without this the default libtest one wraps
 # it and rejects the harness's own arguments at run time.
@@ -59,6 +58,20 @@ harness = false
 
 [[bench]]
 name = "framing_gungraun"
+harness = false
+
+# The wall-clock A/B tier, driven by `make bench-ab`. `harness = false` for the
+# same reason and one more: the runner protocol's arguments only reach the
+# target's own `main` when libtest is not in front of it, and the A/B driver
+# builds both legs before it starts a target, so a missing stanza would surface
+# several minutes into a comparison. `make check-wall-benches` catches it here
+# instead.
+[[bench]]
+name = "decode_wall"
+harness = false
+
+[[bench]]
+name = "framing_wall"
 harness = false
 
 [lints]

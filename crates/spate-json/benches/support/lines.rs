@@ -50,10 +50,6 @@ pub(crate) const FETCH_CHUNK_BYTES: usize = 64 * 1024;
 /// almost every one of them.
 pub(crate) const SPLIT_CHUNK_BYTES: usize = 32;
 
-/// The framer's per-record cap. Generous relative to every fixture here, so no
-/// case is measuring the cap rejecting anything.
-pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
-
 /// Which terminator the producer wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Eol {

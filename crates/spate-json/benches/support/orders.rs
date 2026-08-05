@@ -1,19 +1,20 @@
-//! Decode fixtures shared by `benches/decode.rs` (wall time) and
+//! Decode fixtures shared by `benches/decode_wall.rs` (wall time) and
 //! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record,
-//! a nested sensor batch, and the three payload framings the deserializer
-//! supports.
+//! a seven-field reading, and the three payload framings the deserializer
+//! supports, clean and corrupted.
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
 //! crate, so two targets can only agree on a workload by compiling the same
 //! source. If the two ever encoded different documents, a wall-clock result
 //! and an instruction count would not be talking about the same bytes.
+//!
+//! Corpora only. The rig that decodes them is `decode_rig.rs`.
 
 // Each bench target compiles this module separately and uses a different
-// subset of it — the wall-clock bench decodes a nested document the counted
-// one does not, and only the counted one needs a record sink. So an item is
-// legitimately dead in one target while live in the other, which is a
-// module-wide `allow` rather than per-item `expect`: an `expect` would itself
-// go unfulfilled in whichever target does use the item.
+// subset of it — the counted tier measures a case the wall tier leaves out.
+// So an item is legitimately dead in one target while live in the other,
+// which is a module-wide `allow` rather than per-item `expect`: an `expect`
+// would itself go unfulfilled in whichever target does use the item.
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use serde::{Deserialize, Serialize};
@@ -46,14 +47,6 @@ pub(crate) struct Reading {
     pub(crate) ok: bool,
     pub(crate) ratio: f64,
     pub(crate) tags: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct SensorBatch {
-    pub(crate) sensor: String,
-    pub(crate) batch_ts_ms: i64,
-    pub(crate) region: String,
-    pub(crate) readings: Vec<Reading>,
 }
 
 pub(crate) fn sample_order() -> Order {
@@ -96,15 +89,6 @@ pub(crate) fn sample_readings(n: u64) -> Vec<Reading> {
     (0..n).map(sample_reading).collect()
 }
 
-pub(crate) fn sample_batch(n: u64) -> SensorBatch {
-    SensorBatch {
-        sensor: "sensor-7".to_owned(),
-        batch_ts_ms: 1_772_000_000_000,
-        region: "emea".to_owned(),
-        readings: sample_readings(n),
-    }
-}
-
 pub(crate) fn ndjson(readings: &[Reading]) -> Vec<u8> {
     let mut out = Vec::new();
     for r in readings {
@@ -117,12 +101,6 @@ pub(crate) fn ndjson(readings: &[Reading]) -> Vec<u8> {
 /// One flat record as a single JSON document — the `single` framing's payload.
 pub(crate) fn order_document() -> Vec<u8> {
     serde_json::to_vec(&sample_order()).expect("encode an order")
-}
-
-/// A nested document holding `n` readings. Not a framing the deserializer
-/// splits: one payload, one record, whose cost is the nested decode.
-pub(crate) fn batch_document(n: u64) -> Vec<u8> {
-    serde_json::to_vec(&sample_batch(n)).expect("encode a batch")
 }
 
 /// `n` readings as a top-level JSON array — the `array` framing's payload.
@@ -272,15 +250,4 @@ pub(crate) fn readings_array_bad_last(records: u64) -> Vec<u8> {
     out.extend_from_slice(&bad_reading(records - 1, Corruption::TypeMismatch));
     out.push(b']');
     out
-}
-
-/// Counts emitted records, so the decode's output cannot be optimised away
-/// and a case that silently stops emitting is visible as a changed count.
-pub(crate) struct Sink(pub(crate) u64);
-
-impl<T> spate_core::deser::EmitRecord<'_, T> for Sink {
-    fn emit(&mut self, _rec: spate_core::record::Record<T>) -> spate_core::record::Flow {
-        self.0 += 1;
-        spate_core::record::Flow::Continue
-    }
 }

@@ -83,6 +83,8 @@
 //! tick width, one inline and one through the rendezvous, so the difference
 //! between them is what the fixture's synchronisation costs. Read it before
 //! reading the thread axis: it is the share of that axis which is harness.
+//! Every case that spawns a worker carries [`THREADED_ERRATIC`], so all of
+//! this is read rather than gated.
 //!
 //! A pipeline does not synchronise this way. Its threads issue continuously
 //! and the runtime drains on its commit interval, where these workers are held
@@ -95,11 +97,11 @@
 //! the machine decides — a second code path inside the region, appearing and
 //! disappearing between replicates.
 //!
-//! That rendezvous bounds the *work* but not the interleaving, and the
-//! interleaving is what decides how full an unbounded channel gets before the
-//! controller drains it — so how many blocks it allocates along the way. See
-//! [`CONCURRENT_ERRATIC`], which is why the two genuinely concurrent cases are
-//! reported and never flagged.
+//! What the rendezvous cannot pin is where the scheduler puts the threads, or
+//! the order concurrent sends land in. Both move these cases enough to flag a
+//! change that never happened, which is why all three carry
+//! [`THREADED_ERRATIC`] and the three inline cases are where this target
+//! gates.
 
 use spate_bench::{Suite, bench_main};
 use std::cell::RefCell;
@@ -138,31 +140,39 @@ const NARROW: usize = 16;
 /// deleted, and one of those would still sit at the floor whatever the count.
 const ACK_ITERS: u64 = 512;
 
-/// Why the two genuinely concurrent ack cases are reported but never flagged.
+/// Why every case that spawns a worker is reported but never flagged.
 ///
-/// Established from A/A runs — one commit on both legs, corpus digests
-/// matched. Every case here with at most one worker reports its allocation
-/// totals as *exactly* 0.00% different, to the byte and the allocation:
-/// `ack_wide_ticks`, `ack_narrow_ticks` and `ack_scrambled_ticks` drive
-/// inline, and `ack_wide_1thread` has a single worker whose interleaving with
-/// the controller the rendezvous fixes. At two workers and above that stops
-/// holding — `alloc_count_per_iter` moves by a few allocations in nine
-/// thousand and `alloc_bytes_per_iter` has been seen at +1.22% with an
-/// interval clear of zero, which is a flagged regression on a comparison where
-/// nothing changed.
+/// Established across four A/A runs — one commit on both legs, corpus digests
+/// matched. Two independent mechanisms, and between them they cover the whole
+/// threaded driver rather than only the concurrent part of it:
 ///
-/// The rendezvous bounds how much work each tick does, not the order the
-/// sends inside it land in, and that order decides how full each unbounded
-/// channel gets before the controller drains it — so how many blocks it
-/// allocates on the way. The 1% floor for allocation totals is set for
-/// near-deterministic counters, which these are not.
+/// - **Thread placement moves the wall clock.** `ack_wide_1thread` has one
+///   worker and one controller, an interleaving the rendezvous pins
+///   completely, and it still came back at +6.24% wall with an interval clear
+///   of zero. A drive is 32 handoffs and a replicate is 512 of those, so the
+///   figure is dominated by what a handoff costs — which is decided by where
+///   the scheduler puts two threads, fixed for a process's life, and a base
+///   leg and a head leg are separate processes. This platform exposes no
+///   affinity control to take that back.
+/// - **Interleaving moves the allocation totals**, once there is more than one
+///   worker. The rendezvous bounds the work in a tick, not the order the sends
+///   inside it land in, and that order decides how full each unbounded channel
+///   gets before the controller drains it — so how many blocks it allocates.
+///   `alloc_bytes_per_iter` has been seen at +1.22%, against a 1% floor set
+///   for near-deterministic counters.
 ///
-/// Their wall and CPU rows are informational for the same reason, which is the
-/// cost of the marking: a real regression in the ack path under contention
-/// will not flag here. The single-worker cases still gate, and a change to
-/// what a batch costs shows up in them.
-const CONCURRENT_ERRATIC: &str = "the interleaving of concurrent issuers decides how many blocks \
-     the unbounded channels allocate, which moves the allocation totals past their 1% floor";
+/// What is *not* affected is worth stating, because it is what still gates:
+/// the three inline cases report their allocation totals as exactly 0.00%
+/// different, to the byte and the allocation, and hold their wall time inside
+/// a percent. The checkpointer's per-batch and per-tick costs live there.
+///
+/// The cost of this marking is that a real regression in the ack path under
+/// contention does not flag; the curve is read rather than gated. Worth
+/// re-testing on dedicated hardware, where thread placement is controllable,
+/// before the marking is lifted.
+const THREADED_ERRATIC: &str = "wall time follows where the scheduler places the worker threads, \
+     and above one worker the interleaving also decides how many blocks the unbounded channels \
+     allocate";
 
 /// Transitions each poll profile's script produces.
 ///
@@ -299,19 +309,23 @@ fn suite() -> Suite {
     // rendezvous appearing. Read against `ack_wide_ticks`, which drives the
     // same schedule and the same tick width with no rendezvous at all, the
     // pair is also what the fixture's synchronisation costs — the one figure
-    // that says how much of this axis is the harness. It gates: one worker
-    // against one controller is an interleaving the rendezvous pins, and its
-    // allocation totals come back identical to the byte.
-    //
-    // The two above it do not, for the reason `CONCURRENT_ERRATIC` gives.
-    let suite = ack_threaded_case(suite, "ack_wide_1thread", WIDE, Order::Issued, 1, None);
+    // that says how much of this axis is the harness — read, not gated, since
+    // all three carry `THREADED_ERRATIC`.
+    let suite = ack_threaded_case(
+        suite,
+        "ack_wide_1thread",
+        WIDE,
+        Order::Issued,
+        1,
+        Some(THREADED_ERRATIC),
+    );
     let suite = ack_threaded_case(
         suite,
         "ack_wide_2threads",
         WIDE,
         Order::Issued,
         2,
-        Some(CONCURRENT_ERRATIC),
+        Some(THREADED_ERRATIC),
     );
     let suite = ack_threaded_case(
         suite,
@@ -319,7 +333,7 @@ fn suite() -> Suite {
         WIDE,
         Order::Issued,
         4,
-        Some(CONCURRENT_ERRATIC),
+        Some(THREADED_ERRATIC),
     );
 
     // The three pressure profiles. `quiet` never leaves the `Normal` arm,

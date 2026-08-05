@@ -25,11 +25,12 @@
 # Every target is a verb, not a file. Without this a target would be skipped if
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
-        check-features check-examples bench-check bench bench-gungraun \
+        check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
-        check-gungraun-benches check-collected-region check-invariants \
+        check-gungraun-benches check-wall-benches check-collected-region \
+        check-invariants \
         check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
@@ -106,12 +107,6 @@ check-examples: ## The examples still compile (subset of clippy)
 # release-only breakage — a link error, or a `cfg(not(debug_assertions))` path.
 bench-check: ## Every bench target still compiles (release profile, slow)
 	cargo bench --no-run --workspace --all-features --locked
-
-# Names the bench target explicitly, as the scheduled job does. Without
-# `--bench chain`, cargo also runs the lib's default libtest harness, which
-# rejects any forwarded criterion argument.
-bench: ## The divan chain bench only (criterion targets are named per step)
-	cargo bench -p spate-core --locked --bench chain
 
 # Instruction counts, not wall time. Runs only on a platform valgrind supports
 # — Linux here — with valgrind on PATH and `gungraun-runner` installed at the
@@ -215,6 +210,12 @@ check-invariants: ## The invariant lists still agree
 check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 	./scripts/gungraun-benches.sh --self-test
 
+# The same trap on the wall tier, where it costs more to find late: the A/B
+# driver builds both legs before it ever starts a target, so a missing stanza
+# surfaces as a runner-protocol error several minutes into a comparison.
+check-wall-benches: ## Every wall-clock bench declares a harness-free target
+	./scripts/wall-benches.sh --self-test
+
 # The guard that rejects a bench measuring the C runtime instead of itself.
 # Its rule is only exercised where valgrind runs, so the fixtures — real
 # profiles, captured under valgrind on Linux — are what holds it to its word
@@ -230,7 +231,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

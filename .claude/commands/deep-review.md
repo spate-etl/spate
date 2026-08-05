@@ -85,7 +85,7 @@ Run the full-reproduce gates, checking each by **explicit exit code** — a pipe
 here:
 ```sh
 make gates          # lint, check, test, doctest, check-features, deny, ci-lint
-make bench          # if a bench claim is in the ledger — confirms it measures
+make bench-ab REF=main  # if a wall-time claim is in the ledger
 make loom           # if sync/loom code was touched
 make test-docker    # the delivery-guarantee claims live here; opt-in, ~minutes
 ```

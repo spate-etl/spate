@@ -133,11 +133,10 @@ testcontainers-modules = "0.15"
 proptest = "1.11"
 loom = "0.7"
 criterion = "0.8"
-divan = "0.1.13"
 # The `bench` CLI's argument parser, behind `spate-bench`'s `driver` feature.
 # `default-features = false` with only the pieces a four-subcommand tool needs:
 # the derive macros, colours and wrapping are all unused here. Already in
-# Cargo.lock at this version through criterion and divan, so the harness adds no
+# Cargo.lock at this version through criterion, so the harness adds no
 # third-party package to the lockfile — it moves existing ones onto a normal
 # edge. That last part has a consequence worth naming: cargo-about ignores
 # dev-dependencies but not normal ones, so clap and its companions do reach

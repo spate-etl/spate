@@ -268,10 +268,10 @@ harness = false
 
 `harness = false` is required. Without it cargo runs the target under libtest,
 which rejects the runner protocol's arguments before the target's own `main` is
-reached — the driver detects that and says so, but the fix is one line of
-manifest. The dev-dependency is versionless, so cargo strips it when the crate
-is packaged and an unpublished harness never appears in what a consumer
-resolves.
+reached — the driver detects that and says so, but only once both legs have been
+built, so `make ci-lint` checks the manifest first and names the file. The
+dev-dependency is versionless, so cargo strips it when the crate is packaged and
+an unpublished harness never appears in what a consumer resolves.
 
 The target itself declares cases:
 
@@ -310,10 +310,19 @@ Five things that decide whether the numbers mean anything:
 - **Absorb everything built into the `Corpus`.** That digest is what proves both
   legs saw the same bytes; a case that absorbs nothing is comparable with
   anything, including a case that changed.
-- **Generate from the seed, with `SplitMix64`.** The two legs are two checkouts
-  that may straddle a dependency bump, and a generator whose output stream
-  changed between them would make every number incomparable while looking
-  healthy.
+- **Build byte-identical input on both legs.** They are two checkouts that may
+  straddle a dependency bump, and a generator whose output stream changed
+  between them would make every number incomparable while looking healthy.
+  `SplitMix64` in `spate_bench::rng` is the answer where a corpus wants
+  pseudo-random bytes — a few lines held to a known-answer test, so it cannot
+  drift the way a general-purpose generator's does. A corpus that is a pure
+  function of the record index satisfies the rule at least as strongly: there is
+  no seed for the two legs to disagree about, and such a case ignores the `seed`
+  argument. `crates/spate-core/benches/support/chain_rig.rs` is the worked
+  example, and it is shared with the instruction-count tier — which is the other
+  reason to build a corpus that way, since two tiers can only describe the same
+  bytes by compiling the same generator. What the rule rules out is anything
+  environmental: a hash map's iteration order, a clock, a file on disk.
 - **Declare `.items()` or `.bytes()` where an iteration covers a known amount.**
   That is what turns a duration into a throughput.
 
@@ -336,6 +345,18 @@ allocating workload, the same workload through `iter_batched`, a non-allocating
 one, and an erratic one. It is also
 what the A/A acceptance run drives — comparing it against itself must flag
 nothing, because a flag there means the harness is measuring itself.
+
+`crates/spate-core/benches/chain_wall.rs` is the second reference, for a case
+built on a rig the counted tier already compiles. Two shapes there are worth
+copying. A rig whose driving method takes `&mut self` has to be held in a
+`RefCell`, because a routine receives its state by shared reference; and a
+routine measuring something too small to time has to fold a whole corpus into
+one iteration rather than call it once, or the harness refuses it. A fold also
+has to keep its parameters opaque, which is the subtler of the two: a parameter
+written as a literal is a constant the optimiser sees through, so a routine that
+takes a shard count that way has its division folded into a mask and reports a
+figure several times cheaper than the code it stands in for. `black_box` around
+the parameter is what holds the routine to the shape production runs.
 
 ## What this does not do
 

@@ -1,10 +1,14 @@
-//! The operator-chain bench rigs, shared by `benches/chain.rs` (wall time)
-//! and `benches/chain_gungraun.rs` (instruction counts).
+//! The operator-chain bench rigs, shared by `benches/chain_wall.rs` (wall
+//! time), `benches/chain_gungraun.rs` (instruction counts) and
+//! `tests/bench_fixtures.rs` (the corpus pins).
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
-//! crate, so two targets can only agree on a workload by compiling the same
-//! source. If the two ever measured different rigs, a wall-time result and an
-//! instruction count would not be talking about the same code.
+//! crate, so several can only agree on a workload by compiling the same
+//! source. If they ever measured different rigs, a wall-time result and an
+//! instruction count would not be talking about the same code — and the test
+//! would be pinning bytes neither of them ran.
+
+#![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
@@ -133,6 +137,18 @@ pub(crate) struct Corpus {
     keys: Vec<Vec<u8>>,
 }
 
+impl Corpus {
+    /// The batch's payloads, in the order [`TestBatch`] yields them.
+    pub(crate) fn payloads(&self) -> &[Vec<u8>] {
+        &self.payloads
+    }
+
+    /// The parallel message keys, empty for a keyless corpus.
+    pub(crate) fn keys(&self) -> &[Vec<u8>] {
+        &self.keys
+    }
+}
+
 struct TestBatch<'a> {
     corpus: &'a Corpus,
     idx: usize,
@@ -180,7 +196,11 @@ const PAYLOAD_BYTES: usize = 49;
 
 /// Pure functions of the index — no `rand`, no `DefaultHasher` — so every
 /// run of every bench target encodes the same bytes and routes the same way.
-fn corpus(routing: Routing) -> Corpus {
+///
+/// Reachable on its own, not only through a rig: the wall tier's routing and
+/// hashing cases measure the corpus without a chain around it, and
+/// `tests/bench_fixtures.rs` pins its bytes.
+pub(crate) fn corpus(routing: Routing) -> Corpus {
     Corpus {
         payloads: (0..BATCH)
             .map(|i| format!("payload-{i:04}-abcdefgh|ijklmnop|qrstuvwx").into_bytes())
@@ -211,6 +231,18 @@ pub(crate) struct Rig {
 }
 
 impl Rig {
+    /// The bytes this rig drives, for a caller that has to prove two builds
+    /// measured the same ones — the wall tier folds these into its corpus
+    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    ///
+    /// Bytes only. The rig's other parameters — the shard count, the chunk
+    /// target, the queue depth — are not in the digest, so a change to one of
+    /// those passes the check and is charged to the diff as a performance
+    /// difference. `tests/bench_fixtures.rs` is what pins them instead.
+    pub(crate) fn corpus(&self) -> &Corpus {
+        &self.corpus
+    }
+
     /// One full batch through the chain, drained to encoded chunks. Returns
     /// the row count so a caller can keep the work observable.
     ///
@@ -299,10 +331,10 @@ fn assert_encodes_to(corpus: &Corpus) {
 ///
 /// Checked here, in the rig builder, which every caller runs outside its
 /// measured region: gungraun evaluates a `#[bench]` argument expression before
-/// it starts collecting, and divan builds the rig before `bench_local`. A
-/// corpus that stopped spreading — a different key shape, a wider shard count
-/// — therefore fails loudly instead of quietly reporting a number for work
-/// that is not happening.
+/// it starts collecting, and the wall harness builds the rig in a case's
+/// `setup`. A corpus that stopped spreading — a different key shape, a wider
+/// shard count — therefore fails loudly instead of quietly reporting a number
+/// for work that is not happening.
 fn assert_spreads(corpus: &Corpus, shards: usize) {
     let mut hit = vec![false; shards];
     for key in &corpus.keys {

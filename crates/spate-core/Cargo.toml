@@ -32,11 +32,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 
 [dev-dependencies]
-criterion = { workspace = true }
-divan = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+# Versionless by way of the workspace table, so cargo strips it when the crate
+# is packaged and the unpublished harness never reaches what a consumer
+# resolves.
+spate-bench = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 
@@ -46,14 +48,10 @@ tokio = { workspace = true, features = ["macros", "test-util"] }
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
-# divan provides its own main; without this the default libtest harness
-# wraps the file and `cargo bench` silently runs zero benchmarks.
-[[bench]]
-name = "chain"
-harness = false
-
-# Same reason: gungraun's `main!` is the harness. Runs only where valgrind and
-# a same-version `gungraun-runner` are installed — see `make bench-gungraun`.
+# gungraun's `main!` is the harness; without this the default libtest harness
+# wraps the file and `cargo bench` silently runs zero benchmarks. Runs only
+# where valgrind and a same-version `gungraun-runner` are installed — see
+# `make bench-gungraun`.
 [[bench]]
 name = "chain_gungraun"
 harness = false
@@ -68,6 +66,18 @@ harness = false
 
 [[bench]]
 name = "backpressure_gungraun"
+harness = false
+
+# The wall-clock A/B tier, driven by `make bench-ab`. `harness = false` for the
+# same reason and one more: the runner protocol's arguments only reach the
+# target's own `main` when libtest is not in front of it, and libtest rejects
+# them first. `make check-wall-benches` is what fails if a stanza goes missing.
+[[bench]]
+name = "chain_wall"
+harness = false
+
+[[bench]]
+name = "split_wall"
 harness = false
 
 [lints]

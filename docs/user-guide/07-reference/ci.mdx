@@ -342,21 +342,27 @@ predate it and carry a case per entry point.
 
 Where a bench generates its own corpus, that corpus comes from a fixed
 sequence and is pinned by a test — `crates/<crate>/tests/bench_fixtures.rs`,
-in six of the seven benched crates. A count is only comparable when both legs
-of the comparison packed byte-identical input, so a generator free to drift
-between them is a difference the report would charge to the change.
-`spate-core` is the gap in that rule rather than an exception to it: nothing
-pins what its rigs under `crates/spate-core/benches/support/` build.
+in every benched crate. A count is only comparable when both legs of the
+comparison packed byte-identical input, so a generator free to drift between
+them is a difference the report would charge to the change. `spate-core`'s file
+pins both rigs under `crates/spate-core/benches/support/` and goes further than
+a digest: it also holds the claims those rigs' cases are named for — the row
+counts a declared throughput rests on, the chunk targets that land on a record
+boundary, and the tag distributions that make a fan-out case a match-rate case
+rather than a narrower one.
 
-The wall-clock benches beside them gate nothing. A pull request only
+The criterion benches beside them gate nothing. A pull request only
 type-checks them, through the same `clippy --all-targets` that covers the
-examples; the weekly tier builds them all in the bench profile and then runs
-three by name — the divan chain bench, and two of the three criterion targets
-against a baseline the previous week's run left in a cache. `spate-json`'s
-criterion bench is built and never run, because each criterion target needs
-its own step and it has none. The A/B harness in `bench/` is a third tier and
-is run by hand rather than by any job — [Benchmarking](benchmarking.mdx) is its
-account.
+examples; the weekly tier builds every bench target in the bench profile and
+then runs two of the three criterion targets by name, against a baseline the
+previous week's run left in a cache. `spate-json`'s criterion bench is built
+and never run, because each criterion target needs its own step and it has
+none. The A/B harness in `bench/` is the third tier — the `*_wall.rs` targets,
+which no job runs at all — and [Benchmarking](benchmarking.mdx) is its account.
+`spate-core`'s per-record path is measured there rather than weekly. Two of its
+split cases are marked erratic there: they place occasional replicates well
+above their own mode on the machine they were developed on, which is enough to
+flag a change that never happened, so they are reported and never gated.
 
 That comparison is drawn across two rented machines, so read it as evidence
 the benches still produce numbers rather than as a regression signal. Nothing
@@ -378,7 +384,7 @@ cases time a flattening helper and a `memcpy`, neither of which is the Avro
 decoder.
 
 One bench carries a design claim alongside its costs.
-`crates/spate-core/benches/chain.rs` drives the production path — a boxed
+`crates/spate-core/benches/chain_wall.rs` drives the production path — a boxed
 chain fed borrowed payload batches through deserialize, filter, flat_map,
 encode and hand-off — against the owned-payload equivalent, and that contrast
 is what the zero-copy seam rests on: the borrowed chain allocates a fixed
@@ -397,7 +403,9 @@ comparison. `alloc-assertions` is the narrower gate beside it — the borrowed
 chain alone, against absolute bounds rather than a baseline — and it is what
 fails if allocations start scaling with record count. Neither asserts that the
 gap between the two arms stays open, so that part is re-established by running
-the rig rather than watched for.
+the rig: `make bench-ab REF=main FILTER=chain_` measures both arms against a
+reference, paired and interleaved on one machine, which is what makes the
+result something to act on rather than evidence the rig still runs.
 
 ### The shard matrix
 
@@ -509,6 +517,18 @@ rather than about the missing target. It also proves the feature arm reaches
 every cargo invocation and no other, by capturing the argument list a stub
 cargo was handed: a seam asserted only in prose is one that passes whether or
 not it is wired up.
+
+`make check-wall-benches` makes the same stanza check for the wall-clock tier,
+through `scripts/wall-benches.sh`. A separate reader rather than a second mode
+of the one above, because that script's discovery is what selects the counted
+tier's matrix shards — a wall target reaching that output would allocate a
+valgrind shard for a bench valgrind never runs. Only the stanza check is about
+build cost: a newly added target does not exist on the base ref, so the driver
+cannot reach the fault until it has built the head leg and started the target.
+The two other things the script rejects — a duplicate target name and a name
+that is not a valid identifier — the driver already refuses in its metadata
+read, before either leg is built; naming them at lint time turns a comparison
+that cannot start into a message beside the manifest that caused it.
 
 The numbers are advisory and the jobs are not. The rendering step carries
 `continue-on-error: true`, so a count that moved does not block a merge; all

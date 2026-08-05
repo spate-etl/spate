@@ -1,15 +1,18 @@
 //! The split-terminal bench rig: one poll batch through a chain whose
 //! terminal fans records out across several typed sink branches.
 //!
-//! A separate file for a different reason than `support/chain_rig.rs`, which
-//! is `#[path]`-included because *two* targets compile it — the wall-clock
-//! `benches/chain.rs` and the counted `benches/chain_gungraun.rs` — and a
-//! bench target is its own crate, so compiling one source is the only way the
-//! two can agree on a workload. The split terminal has no wall-clock sibling,
-//! so this file has exactly one consumer and shares nothing. It is split out
-//! because a rig read as a fixture is easier to check for the properties a
-//! count depends on than one interleaved with the benchmark macros, which is
-//! the convention the connector crates' `benches/support/` modules follow.
+//! Included with `#[path]` by `benches/split_wall.rs` (wall time),
+//! `benches/split_gungraun.rs` (instruction counts) and
+//! `tests/bench_fixtures.rs` (the corpus pins). A bench target is its own
+//! crate, so compiling one source is the only way several can agree on a
+//! workload — a wall-time result and an instruction count that measured
+//! different rigs would not be talking about the same code. It is a separate
+//! file rather than part of a target for the reason the connector crates'
+//! `benches/support/` modules are: a rig read as a fixture is easier to check
+//! for the properties a measurement depends on than one interleaved with the
+//! benchmark macros.
+
+#![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
@@ -193,7 +196,7 @@ impl Tags {
 /// route arm. The tag is the leading byte and the rest is fixed-width, so
 /// every case's corpus holds the same number of bytes and only the
 /// distribution of arms differs.
-fn corpus(tags: Tags) -> Vec<Vec<u8>> {
+pub(crate) fn corpus(tags: Tags) -> Vec<Vec<u8>> {
     assert!(
         PAYLOADS.is_multiple_of(QUARTER_UNROUTED_CYCLE.len()),
         "the corpus must hold whole tag cycles, or the unrouted share is not \
@@ -281,6 +284,18 @@ pub(crate) struct Rig {
 }
 
 impl Rig {
+    /// The bytes this rig drives, for a caller that has to prove two builds
+    /// measured the same ones — the wall tier folds these into its corpus
+    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    ///
+    /// Bytes only. The branch count, the chunk target and [`QUEUE_DEPTH`] are
+    /// not in the digest, so a change to one of those passes the check and is
+    /// charged to the diff as a performance difference.
+    /// `tests/bench_fixtures.rs` is what pins them instead.
+    pub(crate) fn corpus(&self) -> &[Vec<u8>] {
+        &self.corpus
+    }
+
     /// One full batch through the chain, drained to encoded chunks across
     /// every branch. Returns the row count so a caller can keep the work
     /// observable.

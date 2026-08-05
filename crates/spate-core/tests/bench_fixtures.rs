@@ -416,10 +416,25 @@ fn a_second_drive_is_the_same_work_as_the_first() {
     for profile in [Profile::Quiet, Profile::Congested, Profile::Flapping] {
         let expect = expected_transitions(profile);
         let mut rig = poll_traffic::rig(profile, expect);
+        let mut settled = Vec::new();
         for drive in 1..=3 {
             rig.reset();
+            // Zero after a reset, and the same non-zero level at the end of
+            // every drive. The transition count alone cannot carry this for
+            // `Quiet`, whose expectation is zero and whose drive would satisfy
+            // it by doing nothing at all.
+            assert_eq!(rig.usage(), 0, "poll budget after reset {drive}");
             assert_eq!(rig.drive(), expect, "poll drive {drive}");
+            settled.push(rig.usage());
         }
+        assert!(
+            settled[0] > 0,
+            "a drive left the budget at zero, so it moved nothing"
+        );
+        assert!(
+            settled.windows(2).all(|w| w[0] == w[1]),
+            "a drive left the budget somewhere its predecessor did not: {settled:?}"
+        );
     }
 }
 
@@ -441,12 +456,12 @@ fn the_backpressure_rig_drifts_without_a_reset() {
          survives a drive and `reset` may have stopped being needed"
     );
 
-    // The quiet script nets about 2 MB upward per drive, so it crosses the
-    // high watermark partway through the fourth and pauses there. It reports
-    // nothing on the drives after that — once paused it stays paused, because
-    // a resume needs the usage back under the *low* watermark — which is why
-    // this looks for a transition anywhere in the run rather than on the last
-    // drive.
+    // The quiet script nets 2,031,616 bytes upward per drive, so the fourth
+    // drive opens above the high watermark and pauses on its first iteration.
+    // It reports nothing on the drives after that — once paused it stays
+    // paused, because a resume needs the usage back under the *low* watermark
+    // — which is why this looks for a transition anywhere in the run rather
+    // than on the last drive.
     let mut quiet = poll_traffic::rig(Profile::Quiet, 0);
     let counts: Vec<usize> = (0..6).map(|_| quiet.drive()).collect();
     assert_eq!(
@@ -507,10 +522,46 @@ fn the_threaded_driver_agrees_with_the_single_threaded_one() {
 /// unbalanced by construction rather than by the code.
 #[test]
 fn a_thread_count_must_divide_the_partitions() {
+    let Err(panic) = std::panic::catch_unwind(|| ack_traffic::threaded(256, Order::Issued, 3))
+    else {
+        panic!("three threads over {PARTITIONS} partitions was accepted");
+    };
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    // Which panic, not merely that one happened. Raising `PARTITIONS` to six
+    // would make three threads legal, and a test that only counted panics
+    // would go on passing while proving nothing about divisibility.
     assert!(
-        std::panic::catch_unwind(|| ack_traffic::threaded(256, Order::Issued, 3)).is_err(),
-        "three threads over {PARTITIONS} partitions was accepted"
+        message.contains("do not divide"),
+        "the builder panicked for some other reason: {message}"
     );
+}
+
+/// A scrambled resolution order works when the window is a worker's share of
+/// a tick rather than the whole tick.
+///
+/// The shipped cases pair `Order::Scrambled` only with the single-threaded
+/// driver, so nothing else reaches the branch where `threaded` narrows the
+/// scramble window by the thread count. Without this, replacing that
+/// `per_tick / threads` with `per_tick` leaves every test green while the
+/// walk stops being a permutation — some batches resolving twice and others
+/// never, which is a panic on a worker thread rather than a wrong number.
+#[test]
+fn the_scramble_window_is_a_workers_share_of_a_tick() {
+    for threads in [1, 2, 4] {
+        let mut rig = ack_traffic::threaded(256, Order::Scrambled, threads);
+        for drive in 1..=2 {
+            assert_eq!(
+                rig.drive(),
+                rig.expect_watermarks,
+                "{threads} threads scrambled, drive {drive}"
+            );
+            assert_eq!(rig.pending(), 0, "{threads} threads scrambled");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -365,8 +365,8 @@ and never run, because each criterion target needs its own step and it has
 none. The A/B harness in `bench/` is the third tier — the `*_wall.rs` targets,
 which no job runs at all — and [Benchmarking](benchmarking.mdx) is its account.
 `spate-core`'s per-record path and its control plane are both measured there
-rather than weekly. Two of its
-split cases are marked erratic there: they place occasional replicates well
+rather than weekly. Two of its split cases are marked erratic there: they
+place occasional replicates well
 above their own mode on the machine they were developed on, which is enough to
 flag a change that never happened, so they are reported and never gated.
 

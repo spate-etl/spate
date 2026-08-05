@@ -25,7 +25,7 @@
 use spate_core::checkpoint::{AckIssuer, AckRef, Checkpointer};
 use spate_core::record::PartitionId;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -157,6 +157,14 @@ fn assert_shape(per_tick: usize, window: usize) {
         "a tick that does not divide evenly across {PARTITIONS} partitions \
          leaves some of them without a batch, and so without a watermark"
     );
+    // Cannot fire as the constants stand, and is kept for the edit that would
+    // change that rather than as a live guard. `BATCHES` is a power of two and
+    // `per_tick` must divide it, `threads` must divide `PARTITIONS`, so every
+    // reachable window is a power of two and 37 divides none of them. Move
+    // `BATCHES` off a power of two and this becomes the only thing standing
+    // between a scramble and a walk that resolves some batches twice and
+    // others never — with no evidence, at that point, that it ever worked.
+    // `tests/bench_fixtures.rs` is where that evidence lives instead.
     assert!(
         !window.is_multiple_of(37),
         "a resolution window of {window} is divisible by the scramble stride, \
@@ -289,19 +297,17 @@ pub(crate) fn rig(per_tick: usize, order: Order) -> Rig {
 /// work being measured. `yield_now` is the escape hatch for a party that has
 /// been preempted, not the steady state.
 ///
-/// The exact figure does not matter much: raising it to 50 000 moved no case
-/// in this rig outside its run-to-run spread, which says the rendezvous is
-/// not where these cases spend their time. It is kept modest so that a
-/// machine with fewer cores than parties reaches the fallback promptly rather
-/// than burning a scheduling quantum first.
+/// Kept modest rather than tuned: these cases do not spend their time here,
+/// and a machine with fewer cores than parties should reach the fallback
+/// promptly instead of burning a scheduling quantum first.
 const SPIN_LIMIT: u32 = 1024;
 
 /// How long a party waits before deciding the other side is never coming.
 ///
 /// A bench process that hangs is the worst outcome this rig has: it produces
 /// no record, so the leg has a missing replicate and the whole comparison
-/// aborts — but only after somebody notices. A worker that panicked mid-tick
-/// is the realistic cause, and [`ArriveOnUnwind`] already covers that one; this
+/// aborts — but only after somebody notices. [`ArriveOnUnwind`] handles the
+/// realistic cause, a worker panicking mid-tick, and reports it by name; this
 /// is the backstop for everything else.
 const GATE_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -331,6 +337,10 @@ struct Gate {
     release: Padded<AtomicUsize>,
     /// Workers to controller: total worker-ticks completed, ever.
     arrived: Padded<AtomicUsize>,
+    /// Set by a worker unwinding out of a tick. Without it a dead worker is
+    /// indistinguishable from a slow one until the deadline expires, and the
+    /// deadline's message describes the symptom rather than the cause.
+    poisoned: AtomicBool,
     threads: usize,
 }
 
@@ -339,6 +349,7 @@ impl Gate {
         Gate {
             release: Padded(AtomicUsize::new(0)),
             arrived: Padded(AtomicUsize::new(0)),
+            poisoned: AtomicBool::new(false),
             threads,
         }
     }
@@ -364,10 +375,22 @@ impl Gate {
 
     /// Controller: release generation `generation`, then wait for every
     /// worker to report it done.
+    ///
+    /// # Panics
+    ///
+    /// Panics as soon as a worker reports it has unwound, naming that rather
+    /// than waiting out the deadline — a worker that dies on the first of a
+    /// drive's ticks would otherwise leave the controller short by one more
+    /// arrival every tick, and the run would end thirty seconds later
+    /// complaining about a timeout.
     fn run_tick(&self, generation: usize) {
         self.release.0.store(generation + 1, Ordering::Release);
         let target = (generation + 1) * self.threads;
         self.spin_until("wait for its workers", || {
+            assert!(
+                !self.poisoned.load(Ordering::Acquire),
+                "an acking thread panicked; its own message is above this one"
+            );
             self.arrived.0.load(Ordering::Acquire) >= target
         });
     }
@@ -385,17 +408,23 @@ impl Gate {
     }
 }
 
-/// Reports a worker's tick as done however the tick ends.
+/// Reports a worker's tick as done however the tick ends, and says so when it
+/// ended badly.
 ///
-/// A worker that panics mid-tick would otherwise never increment `arrived`,
-/// and the controller would spin until the deadline above and report a
-/// timeout — which says nothing about the panic that caused it. Reporting
-/// from a destructor instead lets the controller drain a short tick and the
-/// routine's own watermark assertion fire, which names the real problem.
+/// A worker that panics mid-tick never increments `arrived` on its own, and
+/// every later tick leaves the controller short by one more — so the run ends
+/// at the deadline, reporting a timeout, which describes the symptom and not
+/// the cause. Reporting from a destructor closes the current tick; setting
+/// the poison flag is what makes the *next* one fail immediately and say
+/// which thing went wrong. The two together are why a dead worker surfaces
+/// promptly rather than thirty seconds later.
 struct ArriveOnUnwind<'a>(&'a Gate);
 
 impl Drop for ArriveOnUnwind<'_> {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.poisoned.store(true, Ordering::Release);
+        }
         self.0.arrived.0.fetch_add(1, Ordering::Release);
     }
 }
@@ -550,10 +579,31 @@ pub(crate) fn threaded(per_tick: usize, order: Order, threads: usize) -> Threade
                     p >= k * per_thread && p < (k + 1) * per_thread
                 })
                 .collect();
+            // Every batch this worker will touch, across every tick, falls in
+            // the partition run it owns. The worker maps a global partition
+            // onto its own list by subtracting `first_partition`, which
+            // underflows on a thread if the schedule's layout and the slot
+            // filter ever stop agreeing — and an underflow there surfaces as
+            // the gate's poison, several frames from the cause. Checked once
+            // in the builder, outside every measured region, so a shape change
+            // fails here instead.
+            let first_partition = k * per_thread;
+            for tick in 0..BATCHES / per_tick {
+                for &slot in &slots {
+                    let partition = schedule[tick * per_tick + slot].partition as usize;
+                    assert!(
+                        partition >= first_partition && partition < first_partition + per_thread,
+                        "thread {k} owns partitions {first_partition}..{} but its slot {slot} \
+                         in tick {tick} carries partition {partition}",
+                        first_partition + per_thread
+                    );
+                }
+            }
+
             let worker = Worker {
                 issuer: checkpointer.handle(),
                 partitions: owned,
-                first_partition: k * per_thread,
+                first_partition,
                 slots,
             };
             spawn_worker(

@@ -93,11 +93,22 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 fn record(size: usize) {
-    // Relaxed on both: the counters are read once, after the measured region
-    // has finished and the threads that wrote them have been joined, so there
-    // is no ordering for a stronger operation to establish. What is needed is
-    // that the additions do not get lost, which `fetch_add` gives at any
-    // ordering.
+    // Relaxed on both. What is needed here is only that the additions do not
+    // get lost, which `fetch_add` gives at any ordering; the ordering that
+    // makes a *snapshot* see another thread's additions has to come from
+    // somewhere else, and does.
+    //
+    // For a single-threaded case that somewhere is trivial — one thread both
+    // allocates and reads. For a case whose measured region spans several
+    // threads, the region cannot close until those threads have reported
+    // through whatever synchronisation the case uses to bound its own work,
+    // and that release/acquire pair carries every allocation before it. A case
+    // that let a thread keep allocating past the end of its region would have
+    // no defined allocation total to report at any ordering, so this is a
+    // property such a case must have regardless.
+    // `crates/spate-core/benches/support/ack_traffic.rs` is the worked example:
+    // its workers allocate inside the region and are joined only when the rig
+    // drops, long after the snapshot, and its gate is what closes the gap.
     BYTES.fetch_add(size as u64, Ordering::Relaxed);
     COUNT.fetch_add(1, Ordering::Relaxed);
 }

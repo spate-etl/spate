@@ -36,7 +36,7 @@
 //!   allocating is the regression these three cases are here to catch.
 //! - **The ack thread axis prices a degradation, not a speed-up.** Adding
 //!   acking threads makes this workload *slower* on the reference machine —
-//!   about 10.1 M batches/s at one thread against 5.4 M at two and 6.1 M at
+//!   around 10 M batches/s at one thread against 5 M at two and 6 M at
 //!   four — and the axis is worth measuring for exactly that reason. Issuing
 //!   is wait-free but not contention-free: a batch carries two sends on
 //!   unbounded MPSC channels, an `Arc` allocation, and a `Sender` clone whose
@@ -69,13 +69,20 @@
 //! method. It is one saturating subtraction, one `Cell` write and one struct
 //! write against 32 768 iterations of work.
 //!
-//! The threaded ack cases carry their rendezvous: two atomic operations per
-//! worker per commit tick, plus whatever each side spins through waiting for
-//! the other. It is small at this tick width — `ack_wide_1thread` runs through
-//! the same rendezvous and lands where a single-threaded drive of the same
-//! schedule does — but it is why the thread axis is measured only at the wide
-//! width. At the narrow one there are sixteen times as many ticks over the
-//! same batches, and the rendezvous would be most of what the case reported.
+//! The `ack_*threads` cases carry a rendezvous the others do not: two atomic
+//! operations per worker per commit tick, plus whatever each side spins
+//! through waiting for the other. That is why the thread axis is measured only
+//! at the wide tick width, and why the `_ticks` cases do not use the threaded
+//! driver at all. At the narrow width there are sixteen times as many ticks
+//! over the same batches, so a rendezvous costing on the order of a hundred
+//! nanoseconds a tick lands squarely inside the per-tick term the wide/narrow
+//! pair exists to isolate — which is a fixture measuring itself and calling
+//! the result `drain`.
+//!
+//! `ack_wide_ticks` and `ack_wide_1thread` drive the same schedule at the same
+//! tick width, one inline and one through the rendezvous, so the difference
+//! between them is what the fixture's synchronisation costs. Read it before
+//! reading the thread axis: it is the share of that axis which is harness.
 //!
 //! A pipeline does not synchronise this way. Its threads issue continuously
 //! and the runtime drains on its commit interval, where these workers are held
@@ -88,13 +95,13 @@
 //! the machine decides — a second code path inside the region, appearing and
 //! disappearing between replicates.
 //!
-//! `ack_wide_1thread` runs through the threaded driver too, with one worker,
-//! rather than through the single-threaded one. Otherwise the step from one
-//! thread to two would confound "a second thread appeared" with "the
-//! rendezvous appeared", and the axis would not be a scaling curve. It is
-//! therefore not comparable in absolute terms with the counted tier's
-//! `wide_ticks`; what the two share is the schedule, which the corpus digest
-//! carries.
+//! One consequence for the threaded cases' allocation totals: their workers
+//! allocate an `AckRef`'s shared state each, so the per-iteration figures are
+//! a sum across threads rather than one thread's tally, and they move by a
+//! fraction of a percent between runs where the single-threaded cases are
+//! identical to the byte. That sits inside the 1% floor, and a real change to
+//! what the ack path allocates is a whole `Arc` per batch rather than a
+//! fraction of one.
 
 use spate_bench::{Suite, bench_main};
 use std::cell::RefCell;
@@ -104,7 +111,7 @@ mod ack_traffic;
 #[path = "support/poll_traffic.rs"]
 mod poll_traffic;
 
-use ack_traffic::{BATCHES, Order, Threaded};
+use ack_traffic::{BATCHES, Order, Rig, Threaded};
 use poll_traffic::{ITERATIONS, Profile};
 
 /// Batches per commit tick for the wide cases — the tick width the thread
@@ -123,9 +130,9 @@ const NARROW: usize = 16;
 /// of a millisecond, so calibrating to the default 50 ms target lands on a few
 /// dozen iterations. An empty loop that short is a couple of dozen nanoseconds
 /// against a clock whose granularity is tens, so the floor reads as zero and
-/// the case is refused for being unmeasurable — *intermittently*, since
-/// whether it rounds to zero depends on where the read lands. One A/A run
-/// reached its second replicate before hitting it.
+/// the case is refused for being unmeasurable — and *intermittently*, since
+/// whether it rounds to zero depends on where the read lands, which makes it a
+/// run that dies several replicates in rather than one that never starts.
 ///
 /// Five hundred and twelve puts the reference loop a comfortable multiple
 /// above that granularity while keeping a replicate under a second. The
@@ -143,15 +150,50 @@ const QUIET_TRANSITIONS: usize = 0;
 const CONGESTED_TRANSITIONS: usize = 1;
 const FLAPPING_TRANSITIONS: usize = 2048;
 
-/// A case driving the whole schedule through a pinned number of acking
-/// threads.
+/// A case driving the whole schedule on the calling thread.
 ///
 /// The watermark assertion stays inside the measured region, as the counted
 /// tier's does: it is one comparison against 8192 batches of work, and it is
-/// what stops a rig that quietly stopped advancing a partition — or a worker
-/// that stopped issuing — passing as a fast case. The count is also what
-/// `black_box` holds.
-fn ack_case(suite: Suite, id: &str, per_tick: usize, order: Order, threads: usize) -> Suite {
+/// what stops a rig that quietly stopped advancing a partition passing as a
+/// fast case. The count is also what `black_box` holds.
+fn ack_case(suite: Suite, id: &str, per_tick: usize, order: Order) -> Suite {
+    suite
+        .case(
+            id,
+            move |corpus, _seed| {
+                let rig = ack_traffic::rig(per_tick, order);
+                corpus.absorb("schedule", &rig.corpus());
+                RefCell::new(rig)
+            },
+            |b, rig: &RefCell<Rig>| {
+                b.iter(|| {
+                    let mut rig = rig.borrow_mut();
+                    let watermarks = rig.drive();
+                    assert_eq!(watermarks, rig.expect_watermarks);
+                    watermarks
+                });
+            },
+        )
+        .items(BATCHES as u64)
+        .iters(ACK_ITERS)
+        .done()
+}
+
+/// A case driving the same schedule through a pinned number of acking
+/// threads.
+///
+/// Separate from [`ack_case`] rather than a parameter on it, because the two
+/// drivers are not interchangeable inside one comparison: this one crosses a
+/// rendezvous twice per commit tick and that one crosses nothing. Mixing them
+/// would put the fixture's own synchronisation inside an axis that claims to
+/// be about the checkpointer.
+fn ack_threaded_case(
+    suite: Suite,
+    id: &str,
+    per_tick: usize,
+    order: Order,
+    threads: usize,
+) -> Suite {
     suite
         .case(
             id,
@@ -205,26 +247,34 @@ fn poll_case(suite: Suite, id: &str, profile: Profile, transitions: usize) -> Su
 fn suite() -> Suite {
     let suite = spate_bench::suite("spate-core");
 
-    // The tick-width pair, at one thread. `narrow` pays the fixed per-tick
-    // cost — `drain`'s two-pass setup, and `take_watermarks` allocating a
-    // vector and sweeping every tracker — sixteen times as often over
-    // identical per-batch work, so the pair separates the per-tick term from
-    // the per-batch one.
-    let suite = ack_case(suite, "ack_wide_1thread", WIDE, Order::Issued, 1);
-    let suite = ack_case(suite, "ack_narrow_1thread", NARROW, Order::Issued, 1);
+    // The tick-width pair, on the calling thread. `narrow` pays the fixed
+    // per-tick cost — `drain`'s two-pass setup, and `take_watermarks`
+    // allocating a vector and sweeping every tracker — sixteen times as often
+    // over identical per-batch work, so the pair separates the per-tick term
+    // from the per-batch one. Both drive the single-threaded rig, so what
+    // stands between them is that term and nothing else.
+    let suite = ack_case(suite, "ack_wide_ticks", WIDE, Order::Issued);
+    let suite = ack_case(suite, "ack_narrow_ticks", NARROW, Order::Issued);
 
-    // Resolution order, against `ack_wide_1thread`. A resolution is an indexed
+    // Resolution order, against `ack_wide_ticks`. A resolution is an indexed
     // slot write rather than a search, so the tracker itself does not care;
     // what the pair prices is the allocator, since resolving out of order
     // frees a batch's shared state out of allocation order.
-    let suite = ack_case(suite, "ack_scrambled_1thread", WIDE, Order::Scrambled, 1);
+    let suite = ack_case(suite, "ack_scrambled_ticks", WIDE, Order::Scrambled);
 
     // The thread axis. Everything but the acking-thread count is held fixed —
     // the same schedule, the same tick width, the same four partitions — so
-    // `records_per_s` across these three and `ack_wide_1thread` is the
-    // scaling curve, and its ceiling is the serial drain.
-    let suite = ack_case(suite, "ack_wide_2threads", WIDE, Order::Issued, 2);
-    let suite = ack_case(suite, "ack_wide_4threads", WIDE, Order::Issued, 4);
+    // `records_per_s` across these three is the scaling curve.
+    //
+    // `ack_wide_1thread` runs one worker through the rendezvous rather than
+    // driving inline, so the step to two threads is not confounded with the
+    // rendezvous appearing. Read against `ack_wide_ticks`, which drives the
+    // same schedule and the same tick width with no rendezvous at all, the
+    // pair is also what the fixture's synchronisation costs — the one figure
+    // that says how much of this axis is the harness.
+    let suite = ack_threaded_case(suite, "ack_wide_1thread", WIDE, Order::Issued, 1);
+    let suite = ack_threaded_case(suite, "ack_wide_2threads", WIDE, Order::Issued, 2);
+    let suite = ack_threaded_case(suite, "ack_wide_4threads", WIDE, Order::Issued, 4);
 
     // The three pressure profiles. `quiet` never leaves the `Normal` arm,
     // `congested` pauses once and then finds a reason not to resume on every

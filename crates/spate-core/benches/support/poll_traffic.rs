@@ -225,29 +225,36 @@ impl Rig {
     /// Returns the rig to the state [`rig`] built it in, so a second drive is
     /// the same work as the first.
     ///
-    /// A drive is not idempotent on its own, and the counted tier never
-    /// noticed because gungraun drives once. The script's `add`/`sub` pairs
+    /// A drive is not idempotent on its own. The script's `add`/`sub` pairs
     /// are *relative* movements baked against a level trajectory that starts
     /// at zero, so re-running them against a budget the previous drive left
-    /// populated walks the reading upward — `Profile::Quiet` ends a drive at
-    /// 2,007,040 bytes and crosses its low watermark within a few more,
-    /// after which it is no longer the profile that never has a reason to
-    /// pause. `assert_in_band` runs in the builder and cannot see it.
+    /// populated walks the reading upward — [`Profile::Quiet`] nets 2,031,616
+    /// bytes per drive, and its fourth drive opens above the high watermark of
+    /// 6,710,886 and pauses on its first iteration, which is not the profile
+    /// that never has a reason to pause. [`assert_in_band`] runs in the builder
+    /// and cannot see any of it.
     ///
-    /// Three things have to move, and the controller is the one that is easy
-    /// to miss: zeroing the budget alone leaves `Profile::Congested` paused
-    /// from the previous drive, so it reports its single transition once and
-    /// zero every time after. Rebuilding it from its own parameters restores
-    /// the `Normal` arm without restating them here.
-    ///
-    /// Resetting the clock rather than letting it run on is what keeps every
-    /// drive bit-identical: this rig is documented as sensitive to which
-    /// instants its arithmetic lands on, and an offset that grew without
-    /// bound would eventually change the carries.
+    /// All three pieces of state move. Zeroing the budget alone leaves
+    /// [`Profile::Congested`] paused from the previous drive, reporting its
+    /// single transition once and zero every time after; rebuilding the
+    /// controller from its own parameters restores the `Normal` arm without
+    /// restating them here. Zeroing the clock rather than letting it run on is
+    /// what keeps every drive bit-identical, for the reason [`STEP`] gives: an
+    /// offset that grew without bound would eventually change the carries.
     ///
     /// The whole thing is one saturating subtraction, one `Cell` write and
     /// one struct write against [`ITERATIONS`] iterations of work, and both
     /// legs of a comparison pay it identically.
+    /// In-flight bytes the budget currently holds.
+    ///
+    /// The one piece of this rig's state a test can see. Without it the claim
+    /// that [`Rig::reset`] restores a profile whose expected transition count
+    /// is zero cannot be checked at all: a drive that did nothing whatsoever
+    /// also reports zero.
+    pub(crate) fn usage(&self) -> usize {
+        self.budget.usage()
+    }
+
     pub(crate) fn reset(&mut self) {
         self.budget.sub(usize::MAX);
         self.clock.reset();

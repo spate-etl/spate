@@ -8,9 +8,18 @@
 //! unit of work being counted is a poll iteration, which is what a pipeline
 //! thread runs millions of.
 //!
-//! Nothing else compiles this file — the controller has no wall-clock
-//! sibling, and would not be a candid one: a `tick` is tens of instructions,
-//! well under the resolution of the timer that would have to measure it.
+//! A single `tick` is tens of instructions, well under the resolution of any
+//! timer that could be pointed at it, so the wall tier measures a whole drive
+//! — all [`ITERATIONS`] of them folded into one iteration — rather than a
+//! call. What it adds over the instruction count is not a duration: it is
+//! [`Rig::reset`]-anchored allocation totals, which the poll loop must report
+//! as a flat zero, at a floor of 1% and on any machine rather than only where
+//! valgrind runs.
+//!
+//! Included with `#[path]` by `backpressure_gungraun.rs`,
+//! `control_plane_wall.rs` and `tests/bench_fixtures.rs`.
+
+#![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::backpressure::{BackpressureParams, Clock, InflightBudget, WatermarkController};
 use std::cell::Cell;
@@ -93,6 +102,12 @@ impl BenchClock {
 
     fn advance(&self, d: Duration) {
         self.offset.set(self.offset.get() + d);
+    }
+
+    /// Back to the origin, so a second drive advances through exactly the
+    /// instants the first one did.
+    fn reset(&self) {
+        self.offset.set(Duration::ZERO);
     }
 }
 
@@ -189,6 +204,57 @@ pub(crate) struct Rig {
 }
 
 impl Rig {
+    /// The bytes this rig drives, for a caller that has to prove two builds
+    /// measured the same ones — the wall tier folds these into its corpus
+    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    ///
+    /// The script *is* the corpus: each entry carries its own budget
+    /// movement, its own queue reading and its own rejection, and a change to
+    /// any profile's trajectory changes these bytes.
+    pub(crate) fn corpus(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.script.len() * (8 + 8 + 1 + 1));
+        for step in &self.script {
+            out.extend_from_slice(&(step.add as u64).to_le_bytes());
+            out.extend_from_slice(&(step.sub as u64).to_le_bytes());
+            out.push(u8::from(step.reject));
+            out.push(u8::from(step.queues_below_low));
+        }
+        out
+    }
+
+    /// Returns the rig to the state [`rig`] built it in, so a second drive is
+    /// the same work as the first.
+    ///
+    /// A drive is not idempotent on its own, and the counted tier never
+    /// noticed because gungraun drives once. The script's `add`/`sub` pairs
+    /// are *relative* movements baked against a level trajectory that starts
+    /// at zero, so re-running them against a budget the previous drive left
+    /// populated walks the reading upward — `Profile::Quiet` ends a drive at
+    /// 2,007,040 bytes and crosses its low watermark within a few more,
+    /// after which it is no longer the profile that never has a reason to
+    /// pause. `assert_in_band` runs in the builder and cannot see it.
+    ///
+    /// Three things have to move, and the controller is the one that is easy
+    /// to miss: zeroing the budget alone leaves `Profile::Congested` paused
+    /// from the previous drive, so it reports its single transition once and
+    /// zero every time after. Rebuilding it from its own parameters restores
+    /// the `Normal` arm without restating them here.
+    ///
+    /// Resetting the clock rather than letting it run on is what keeps every
+    /// drive bit-identical: this rig is documented as sensitive to which
+    /// instants its arithmetic lands on, and an offset that grew without
+    /// bound would eventually change the carries.
+    ///
+    /// The whole thing is one saturating subtraction, one `Cell` write and
+    /// one struct write against [`ITERATIONS`] iterations of work, and both
+    /// legs of a comparison pay it identically.
+    pub(crate) fn reset(&mut self) {
+        self.budget.sub(usize::MAX);
+        self.clock.reset();
+        self.controller =
+            WatermarkController::with_clock(*self.controller.params(), self.clock.clone());
+    }
+
     /// One drive: every iteration of the script, in order. Returns the number
     /// of transitions the controller reported so a caller can keep the work
     /// observable.

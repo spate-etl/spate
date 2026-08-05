@@ -24,12 +24,18 @@ use spate_core::record::{PartitionId, RawPayload, stable_key_hash};
 use spate_core::sink::{KeyHashRouter, ShardRouter};
 use std::collections::BTreeSet;
 
+#[path = "../benches/support/ack_traffic.rs"]
+mod ack_traffic;
 #[path = "../benches/support/chain_rig.rs"]
 mod chain_rig;
+#[path = "../benches/support/poll_traffic.rs"]
+mod poll_traffic;
 #[path = "../benches/support/split_rig.rs"]
 mod split_rig;
 
+use ack_traffic::{BATCHES, Order, PARTITIONS};
 use chain_rig::{BATCH, BORROWED_BATCH_BYTES, Routing};
+use poll_traffic::{ITERATIONS, Profile};
 use split_rig::{PAYLOADS, Tags};
 
 /// FNV-1a over a corpus.
@@ -74,6 +80,35 @@ fn split_payloads(tags: Tags) -> Vec<u8> {
     split_rig::corpus(tags).concat()
 }
 
+/// The checkpoint rig's schedule of poll batches, as the wall tier absorbs it.
+///
+/// Read off a built rig rather than from a generator of its own, so what is
+/// pinned here is what a drive actually issues. The tick width is passed
+/// because the builder takes it, not because the schedule depends on it —
+/// which is itself one of the claims below.
+fn ack_schedule(per_tick: usize, order: Order) -> Vec<u8> {
+    ack_traffic::rig(per_tick, order).corpus()
+}
+
+/// The backpressure rig's script of poll iterations.
+fn poll_script(profile: Profile) -> Vec<u8> {
+    poll_traffic::rig(profile, expected_transitions(profile)).corpus()
+}
+
+/// Transitions each profile's script produces, as `backpressure_gungraun.rs`
+/// declares them.
+///
+/// Restated here rather than imported because the rig deliberately takes the
+/// expectation from its caller: one that derived it from its own model of the
+/// state machine would agree with itself however the machine changed.
+fn expected_transitions(profile: Profile) -> usize {
+    match profile {
+        Profile::Quiet => 0,
+        Profile::Congested => 1,
+        Profile::Flapping => 2048,
+    }
+}
+
 /// The `RecordMeta` a payload with this key would carry, which is where the
 /// key is hashed on the production path.
 fn meta_for(key: Option<&[u8]>) -> spate_core::record::RecordMeta {
@@ -103,6 +138,12 @@ fn the_corpora_are_reproducible() {
         Tags::FourBranchesQuarterUnrouted,
     ] {
         assert_eq!(split_payloads(tags), split_payloads(tags));
+    }
+    for order in [Order::Issued, Order::Scrambled] {
+        assert_eq!(ack_schedule(256, order), ack_schedule(256, order));
+    }
+    for profile in [Profile::Quiet, Profile::Congested, Profile::Flapping] {
+        assert_eq!(poll_script(profile), poll_script(profile));
     }
 }
 
@@ -147,6 +188,87 @@ fn the_corpora_are_pinned_across_revisions() {
         (229_376, 0xab84_8eab_a083_7129),
         "split four_branches_quarter_unrouted"
     );
+    assert_eq!(
+        pin(&ack_schedule(256, Order::Issued)),
+        ACK_SCHEDULE_PIN,
+        "ack schedule"
+    );
+    assert_eq!(
+        pin(&poll_script(Profile::Quiet)),
+        POLL_QUIET_PIN,
+        "poll quiet script"
+    );
+    assert_eq!(
+        pin(&poll_script(Profile::Congested)),
+        POLL_CONGESTED_PIN,
+        "poll congested script"
+    );
+    assert_eq!(
+        pin(&poll_script(Profile::Flapping)),
+        POLL_FLAPPING_PIN,
+        "poll flapping script"
+    );
+}
+
+/// The control-plane corpora's pins, named rather than written inline because
+/// the length of each is also asserted from its own constants below — the
+/// digest says the bytes did not move, and the arithmetic beside it says why
+/// that length is the right one.
+const ACK_SCHEDULE_PIN: (usize, u64) = (98_304, 0xb805_bf3f_d145_a605);
+const POLL_QUIET_PIN: (usize, u64) = (589_824, 0x6605_f527_400e_e502);
+const POLL_CONGESTED_PIN: (usize, u64) = (589_824, 0x79e5_ec3b_66f3_72c5);
+const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xe3fb_64f3_9e0d_2545);
+
+/// Each corpus is the length its own constants imply.
+///
+/// The digests above would catch a changed corpus but say nothing about
+/// *why* the length is what it is. A schedule is one entry per batch, and a
+/// script one step per poll iteration, so these two products are what tie the
+/// pinned lengths to `BATCHES` and `ITERATIONS` — the same counts the wall
+/// cases declare as `.items()`. A corpus that grew while its `.items()` stayed
+/// put would report a throughput per record that no longer had that many
+/// records behind it.
+#[test]
+fn each_corpus_is_the_length_its_constants_imply() {
+    assert_eq!(
+        ACK_SCHEDULE_PIN.0,
+        BATCHES * (4 + 8),
+        "the schedule is one partition and one offset per batch"
+    );
+    assert_eq!(
+        POLL_QUIET_PIN.0,
+        ITERATIONS * (8 + 8 + 1 + 1),
+        "the script is one add, sub, rejection and queue reading per iteration"
+    );
+    assert_eq!(POLL_QUIET_PIN.0, POLL_CONGESTED_PIN.0);
+    assert_eq!(POLL_QUIET_PIN.0, POLL_FLAPPING_PIN.0);
+}
+
+/// Neither the tick width nor the driver changes which batches are issued.
+///
+/// The wall tier reads this as a licence to compare `ack_wide_*` against
+/// `ack_narrow_*` and against the threaded cases: the corpus digest that
+/// travels in every record is the same for all of them, so what separates
+/// those cases is how the batches are grouped and who issues them, not which
+/// batches there are. A generator that started keying on either would demote
+/// the pairs to *Not comparable* — but only after a full A/B run, and only if
+/// the two legs happened to differ.
+#[test]
+fn the_ack_schedule_is_independent_of_tick_width_and_driver() {
+    let wide = ack_schedule(256, Order::Issued);
+    assert_eq!(wide, ack_schedule(16, Order::Issued), "tick width");
+    assert_eq!(
+        wide,
+        ack_schedule(256, Order::Scrambled),
+        "resolution order is a property of the driver, not the corpus"
+    );
+    for threads in [1, 2, 4] {
+        assert_eq!(
+            wide,
+            ack_traffic::threaded(256, Order::Issued, threads).corpus(),
+            "the {threads}-thread driver issues a different schedule"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +374,142 @@ fn the_split_rigs_produce_the_rows_they_expect() {
         partial.expect_rows,
         PAYLOADS - PAYLOADS / 4,
         "the unrouted share is not the quarter the case name claims"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A drive is repeatable
+// ---------------------------------------------------------------------------
+
+/// Every control-plane rig performs the same work on its hundredth drive as
+/// on its first.
+///
+/// The counted tier never needed this: gungraun drives a rig once and throws
+/// it away. The wall harness calls a routine thousands of times against one
+/// state, so a rig that drifts reports a case whose name stops describing what
+/// it measures — and reports it as a clean, stable, entirely wrong number.
+///
+/// The backpressure rig drifts unless [`poll_traffic::Rig::reset`] is called,
+/// which is what that method exists for and what this pins. Its script holds
+/// *relative* budget movements baked against a trajectory starting at zero, so
+/// a second drive applies them to whatever the first left behind: `Quiet`
+/// climbs out of its band, and `Congested` reports its one transition once and
+/// zero thereafter because the controller is still paused. Both failures are
+/// silent — `assert_in_band` runs in the builder, and the drive returns a
+/// number either way.
+#[test]
+fn a_second_drive_is_the_same_work_as_the_first() {
+    for per_tick in [16, 256] {
+        for order in [Order::Issued, Order::Scrambled] {
+            let mut rig = ack_traffic::rig(per_tick, order);
+            for drive in 1..=3 {
+                assert_eq!(
+                    rig.drive(),
+                    rig.expect_watermarks,
+                    "ack drive {drive} at per_tick {per_tick}"
+                );
+                assert_eq!(rig.pending(), 0, "ack pending after drive {drive}");
+            }
+        }
+    }
+
+    for profile in [Profile::Quiet, Profile::Congested, Profile::Flapping] {
+        let expect = expected_transitions(profile);
+        let mut rig = poll_traffic::rig(profile, expect);
+        for drive in 1..=3 {
+            rig.reset();
+            assert_eq!(rig.drive(), expect, "poll drive {drive}");
+        }
+    }
+}
+
+/// Skipping the reset really does break the backpressure rig.
+///
+/// The test above would pass just as happily if `reset` were a no-op and the
+/// script had quietly become idempotent on its own — leaving a method the wall
+/// target calls every iteration with nothing to say for itself. This is the
+/// other half: the drift is real, so the reset is load-bearing.
+#[test]
+fn the_backpressure_rig_drifts_without_a_reset() {
+    let mut congested = poll_traffic::rig(Profile::Congested, 1);
+    assert_eq!(congested.drive(), 1, "the first drive crosses into a pause");
+    assert_eq!(
+        congested.drive(),
+        0,
+        "a second drive without a reset should find the controller still \
+         paused; if this now reports 1, the controller's state no longer \
+         survives a drive and `reset` may have stopped being needed"
+    );
+
+    // The quiet script nets about 2 MB upward per drive, so it crosses the
+    // high watermark partway through the fourth and pauses there. It reports
+    // nothing on the drives after that — once paused it stays paused, because
+    // a resume needs the usage back under the *low* watermark — which is why
+    // this looks for a transition anywhere in the run rather than on the last
+    // drive.
+    let mut quiet = poll_traffic::rig(Profile::Quiet, 0);
+    let counts: Vec<usize> = (0..6).map(|_| quiet.drive()).collect();
+    assert_eq!(
+        counts[0], 0,
+        "the first drive is the quiet profile by construction"
+    );
+    assert!(
+        counts.iter().any(|&n| n > 0),
+        "the quiet script should climb out of its band without a reset, and \
+         did not in six drives ({counts:?}); if the budget's movements are no \
+         longer relative, the reason `reset` exists has changed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The threaded driver drives what the single-threaded one drives
+// ---------------------------------------------------------------------------
+
+/// Sharding the acking across threads changes who issues a batch, not which
+/// batches are issued or what the checkpointer makes of them.
+///
+/// This is the claim the whole thread axis rests on. `AckIssuer` numbers
+/// sequences per issuer and `PartitionTracker::register` panics on a gap, so a
+/// partition issued from two threads inside one epoch is a crash — and a
+/// partition issued from *none* is a watermark that never arrives, which is
+/// silent. The watermark count catches the second; running at all catches the
+/// first.
+#[test]
+fn the_threaded_driver_agrees_with_the_single_threaded_one() {
+    let mut plain = ack_traffic::rig(256, Order::Issued);
+    let expect = plain.drive();
+    assert_eq!(expect, plain.expect_watermarks);
+
+    for threads in [1, 2, 4] {
+        let mut rig = ack_traffic::threaded(256, Order::Issued, threads);
+        for drive in 1..=3 {
+            assert_eq!(
+                rig.drive(),
+                expect,
+                "{threads} threads, drive {drive}: a different number of \
+                 watermark pairs than the single-threaded driver produces"
+            );
+            assert_eq!(rig.pending(), 0, "{threads} threads, drive {drive}");
+        }
+        assert_eq!(
+            rig.expect_watermarks, plain.expect_watermarks,
+            "the thread count moved the expected watermark total, so the \
+             cases are no longer measuring one axis"
+        );
+    }
+}
+
+/// Only thread counts that divide the partitions are accepted.
+///
+/// The rejection matters more than the acceptance. Three threads over four
+/// partitions would leave one thread owning two and the others one apiece,
+/// which still runs — and reports a contention figure for a workload that is
+/// unbalanced by construction rather than by the code.
+#[test]
+fn a_thread_count_must_divide_the_partitions() {
+    assert!(
+        std::panic::catch_unwind(|| ack_traffic::threaded(256, Order::Issued, 3)).is_err(),
+        "three threads over {PARTITIONS} partitions was accepted"
     );
 }
 

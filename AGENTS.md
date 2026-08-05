@@ -1,7 +1,8 @@
 # Spate
 
 High-performance, at-least-once ETL pipeline framework in Rust. Publishable
-crates under `crates/`.
+crates under `crates/`, plus the unpublished wall-clock benchmark harness in
+`bench/`.
 
 Four documents are normative. Read the relevant one before changing what it
 governs, because none of them is reconstructable from the code:
@@ -150,7 +151,7 @@ Two rules break by accident more than the rest:
 
 Conventional Commits. Scope = crate touched (`spate-core`, `spate-kafka`, …),
 comma-separated for several; use `workspace`, `ci`, `docs`, `examples`,
-`benchmarks` for non-crate areas. Dependabot raises bumps as `chore` scoped by
+`bench` for non-crate areas. Dependabot raises bumps as `chore` scoped by
 area, so prefer `fix` or `feat` for your own commits — `chore` should read as "a
 bot bumped a version".
 

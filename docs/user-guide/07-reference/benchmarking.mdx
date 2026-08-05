@@ -1,0 +1,392 @@
+# Benchmarking
+
+How this repository measures wall time, and what a measurement is allowed to
+conclude. The tool is `spate-bench`, an unpublished crate in `bench/`, driven
+by `make bench-list`, `make bench-ab` and `make bench-compare`.
+
+Benchmarks here answer one question — *did this change move it* — by measuring
+two builds against each other in one sitting, on one machine. **Nothing is
+stored.** There is no archive of results, no baseline learned from history, and
+no threshold derived from past runs. A comparison is produced, read, and thrown
+away.
+
+That is a deliberate limit rather than a gap. A stored figure is only
+comparable with a later one when the machine, the toolchain and the corpus were
+all the same, and none of those hold across time; keeping the archive honest
+costs more than the archive is worth. A comparison of two builds measured
+minutes apart needs none of it.
+
+Wall time gates nothing. No pull request passes or fails on a number from this
+tier, and no job runs it — see [Continuous integration](ci.mdx) for what does
+run, including the instruction-count tier, which counts rather than times and
+is therefore comparable across the shared machines CI uses.
+
+## What is measured
+
+One process per case per replicate, and one record out of each.
+
+| Metric | Unit | Better | Present |
+|---|---|---|---|
+| `wall_ns_per_iter` | ns | lower | always |
+| `cpu_ns_per_iter` | ns | lower | when the kernel reports the process's CPU accounting |
+| `records_per_s` | records/s | higher | when the case declares how many items an iteration covers |
+| `bytes_per_s` | bytes/s | higher | when the case declares how many bytes an iteration covers |
+| `peak_rss_bytes` | bytes | lower | when running the case took the process above what building its corpus left resident, and the case did not batch its inputs |
+| `alloc_bytes_per_iter` | bytes | lower | when the counting allocator is installed |
+| `alloc_count_per_iter` | allocations | lower | when the counting allocator is installed |
+
+Only wall time is unconditional, and **an absent metric is absent rather than
+zero**. The resident set is a high-water mark that cannot be reset, so a case
+that peaked while building its corpus reports no figure at all: the only number
+available would describe the setup rather than the code. A zero in its place
+would compare as a total collapse of the quantity. The figure reported is the
+process peak, not the growth — a high-water mark minus another high-water mark
+is not a quantity anything consumes — so whatever setup left resident is inside
+it.
+
+Allocation totals come from a counting global allocator that `bench_main!`
+installs. It costs two atomic additions per allocation, it is not behind a
+feature — gating it would mean the timings and the allocation figures came from
+two different binaries — and it perturbs both legs identically, so the cost sits
+inside the baseline rather than in the difference.
+
+The measured region excludes setup by construction: a case's input is built
+before the region opens, so neither the time nor the allocations of building it
+are attributed to the code under test. That is also why a case using
+`iter_batched` reports no resident set — the harness holds one prebuilt input
+per iteration, so the process's high-water mark would be about the batching
+rather than about the routine, and a figure that is mostly harness is worse than
+none.
+
+A case whose per-iteration cost does not clear twice an empty loop's is refused
+rather than reported. That is the failure this tier has to be built against: a routine whose
+result is discarded gives `black_box` nothing to hold, the optimiser deletes the
+call, and what comes back is a well-formed record of the loop.
+
+## The commands
+
+```sh
+make bench-list                              # every case, with its flags
+make bench-ab REF=main REPS=10               # compare this tree against a ref
+make bench-ab REF=main FILTER=decode         # only cases whose id contains this
+make bench-compare BASE=dir HEAD=dir FORMAT=markdown
+```
+
+The CLI underneath has four subcommands, and their separation is the point:
+
+| Command | Does | Deliberately does not |
+|---|---|---|
+| `bench list` | Names the targets; with `--cases`, builds them and asks each what it declares | Measure anything |
+| `bench run --out DIR` | Measures this tree and writes one leg | Resolve a git reference |
+| `bench compare BASE HEAD` | Renders two leg directories | Care how they were produced |
+| `bench ab REF` | All of it: worktree, build, interleave, compare | Modify the working tree |
+
+The case list lives in the compiled target rather than in a manifest, which is
+what stops the list and the run ever disagreeing — so `--cases` builds. `make
+bench-list` always passes it.
+
+Flags shared by `run` and `ab`:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--replicates` / `-n` | `10` | Measured replicates per case |
+| `--filter` | none | Only cases whose id contains this substring |
+| `--seed` | `20260804` | Corpus seed, identical on both legs and across replicates |
+| `--target-ms` | `50` | How long one calibrated measured region should take |
+| `--warmup-ms` | `50` | Unmeasured warm-up before each region |
+| `--features` / `--all-features` | none | Forwarded to cargo, identically on both legs |
+| `--out` | under the bench cache | Where to write the leg or legs |
+
+`--filter` and the feature flags also apply to `list --cases` — a filter is a
+filter on case ids, so it needs the case list to filter. `run` takes
+`--leg NAME` (default `head`) for the name stamped into every record, and
+`SPATE_BENCH_HOST` sets the machine label a report's header carries. That label
+is a guarded field: two runs from differently-labelled machines do not compare.
+
+`compare` and `ab` take `--format` — `table` (the default), `markdown` or
+`json` — and `--allow`, whose values are the guard names below. Exit code 2
+means the arguments were wrong: anything the parser rejects, plus a reference or
+directory that does not exist. Exit code 1 means something failed while running.
+
+Two refusals worth knowing before they happen: two packages declaring a
+`_wall` target of the same name, and an `ab` whose two legs share no case at all
+— which a `--filter` matching nothing looks exactly like.
+
+A leg is a directory of JSONL records and nothing else — no index, no manifest
+— because every record carries its own case identity, iteration count, corpus
+digest and build fingerprint. So a twenty-minute run can be re-rendered as
+Markdown, or as JSON for a script, without repeating it: `bench ab` prints both
+leg paths when it finishes.
+
+`--format markdown` produces the shape a pull-request comment carries: a header
+naming both builds, the significant-changes table, then the informational rows
+and the full table in collapsed sections, then anything that could not be
+compared, then the decision rule — also collapsed, because a reader who wants it
+knows to look and a reader who does not should see the table first.
+`--format json` carries every row with its interval and verdict.
+
+Legs, worktrees and the reference's build artifacts all live under
+`$TMPDIR/spate-bench`, or under `SPATE_BENCH_CACHE` when that is set — never
+inside the repository, where the build tooling would find them. The worktree is
+removed when a run ends; the legs and the reference's target directory are kept.
+Nothing prunes either. The target directory is keyed by the reference's commit,
+so a second `ab` against the same reference reuses its compiled dependencies —
+the workspace's own crates are recompiled either way, since the worktree is
+recreated. It is a cache: `rm -rf` on it costs a rebuild and nothing else.
+
+## How a difference is decided
+
+A metric is flagged only when **both** hold:
+
+1. a bootstrapped 90% confidence interval on the mean per-pair relative
+   difference excludes zero, **and**
+2. that difference is at least the metric's floor in magnitude.
+
+| Metric | Floor |
+|---|---|
+| Wall time, CPU time, throughput | 5% |
+| Peak resident set | 10% |
+| Allocation totals | 1% |
+
+The first condition asks whether the difference is distinguishable from the
+noise in the replicates; the second asks whether it is worth telling anybody. A
+rule with only the first flags a reliably-measured 0.3% on a quiet machine. A
+rule with only the second flags whatever the machine happened to be doing. The
+resident set gets a wider floor because it moves for allocator reasons unrelated
+to the change; allocation totals get a much narrower one because they are
+near-deterministic, and a 5% floor there would suppress a real regression.
+
+Fewer than five paired replicates prints the difference and declines to judge
+it: below that, the tail of a bootstrap is decided by which single pair was
+drawn least often. The default is ten.
+
+A case may declare itself `erratic`, with a reason. Such a case is measured and
+reported like any other and can never reach the significant-changes table — its
+rows are informational, and the reason is rendered beside them.
+
+The bootstrap draws 10 000 resamples, seeded from the case and metric names. So
+re-rendering the same two legs produces the same interval to the last digit: a
+report whose numbers move when it is regenerated is a report nobody can quote.
+
+## What makes a comparison valid
+
+Most of the harness is refusal. A comparator's worst failure is not an error —
+it is a well-formed table drawn from records that should never have been paired.
+
+**The two builds must be the same build.** The guarded fields are `protocol`,
+`rustc`, `host_triple`, `profile`, `codegen`, `features`, `host_os`, `host_cpu`,
+`host_cores` and `host_label`, and a difference in any of them is a hard error as soon as
+both legs have been built, before a single replicate is measured — a table drawn
+across two describes the toolchain rather than the change, and finding that out
+after ten minutes of measuring helps nobody.
+
+`codegen` is the one that is not obvious. Both legs are built with `cargo
+bench`, so the profile *name* agrees by construction; `codegen` is a digest over
+the settings behind it — every `[profile...]` table in the root manifest,
+every `.cargo/config.toml` from the leg's directory upward, and the rustflags
+environment. `$CARGO_HOME`'s own config is deliberately left out: cargo reads it
+for every invocation whatever the directory, so it applies to both legs and
+cannot separate them. A change that adds
+`lto = "fat"` is a plausible thing to want to measure, and it has to be
+acknowledged rather than absorbed into the result.
+
+Six of the ten are checked before either leg is measured. The four `host_*`
+fields are checked when the records are compared instead: one process builds
+both legs, so it is the same machine by construction, and that check exists for
+two legs that were *not* produced together — which `bench compare` accepts by
+design.
+
+`bench compare` also refuses two legs that share no case, and two directories
+that are not a base and a head in that order. The leg name is not a guarded field — it differs by construction —
+so nothing else could tell the arguments apart, and transposing them would
+render every difference with its sign inverted.
+
+`--allow <field>` waives one by name; an unrecognised name is rejected rather
+than accepted as a waiver that does nothing, and the report says in its header
+which guards were waived.
+
+**Both legs must have measured the same bytes.** Each case folds everything it
+built into a digest that travels in the record. A case whose digests differ is
+demoted to *Not comparable*; if *every* shared case differs and there is more
+than one of them, that is systemic — a changed generator or seed — and a hard
+error, because a report of nothing but demotions reads as "no cases" rather than
+as the finding it is. With a single case in scope, which `--filter` routinely
+produces, one case differing is not evidence about the corpora as a whole, so it
+is demoted like any other and the run succeeds with an empty table and the
+demotion beside it. `--allow digest` compares a mismatched case anyway and keeps
+the disclosure. One leg disagreeing with *itself*
+across its own replicates is a different failure and is not waivable: there is
+no single corpus left to compare against.
+
+**The iteration count is calibrated once, on the base leg, and pinned for
+both.** A self-calibrating head leg would answer a slowdown by running fewer
+iterations, which hides it, and would make the per-region figures — resident set
+and allocation totals — incomparable. Records whose counts disagree are not
+paired.
+
+**Replicates pair by index, never by position.** A leg that lost one process
+would otherwise shift every later replicate against its partner and fabricate a
+difference. An index present on one leg only is named in the report rather than
+dropped, as is a case that exists on one leg only.
+
+**The legs are interleaved, and the order flips on replicate parity.** Replicate
+*k* of both legs runs adjacent in time, so whatever the machine was doing at that
+moment is common to the pair and cancels when the pair is differenced — which is
+why the statistic is a mean of per-pair differences rather than a ratio of the
+two legs' means. Flipping the order stops a systematic "the second one is
+warmer" effect accruing to one leg.
+
+**Each case is primed once per leg before any replicate.** The first execution
+of a freshly written binary pays for page faults and, on some platforms, a
+first-run security scan. The priming record is written with `priming: true` and
+excluded from the comparison; discarding it silently would leave no way to tell
+a priming pass that ran from one that did not.
+
+**Both legs are built completely before anything is measured.** A build
+interleaved with measurement would put a compilation next to one leg's replicate
+and not the other's.
+
+## Adding a benchmark
+
+A wall-clock target is a bench target whose name ends in `_wall`, in any
+workspace member — conventionally `crates/<pkg>/benches/<name>_wall.rs`. The
+suffix is what keeps the tiers apart: `_gungraun` belongs to the
+instruction-count tier, and neither discovery can see the other's targets. The
+name has to be a valid Rust identifier, because the record carries the crate
+name cargo compiles the target under and a hyphen becomes an underscore there.
+
+The package needs a dev-dependency on the harness and a target stanza:
+
+```toml
+[dev-dependencies]
+spate-bench = { workspace = true }
+
+[[bench]]
+name = "decode_wall"
+harness = false
+```
+
+`harness = false` is required. Without it cargo runs the target under libtest,
+which rejects the runner protocol's arguments before the target's own `main` is
+reached — the driver detects that and says so, but the fix is one line of
+manifest. The dev-dependency is versionless, so cargo strips it when the crate
+is packaged and an unpublished harness never appears in what a consumer
+resolves.
+
+The target itself declares cases:
+
+```rust
+use spate_bench::rng::SplitMix64;
+use spate_bench::{Suite, bench_main};
+
+fn suite() -> Suite {
+    spate_bench::suite("spate-json")
+        .case(
+            "ndjson_1mib",
+            |corpus, seed| {
+                let mut rng = SplitMix64::new(seed);
+                let payload = rng.ascii(1 << 20);
+                corpus.absorb("payload", &payload);
+                payload
+            },
+            |b, payload| b.iter(|| payload.iter().filter(|byte| byte.is_ascii_digit()).count()),
+        )
+        .items(1 << 20)
+        .bytes(1 << 20)
+        .done()
+}
+
+bench_main!(suite);
+```
+
+Five things that decide whether the numbers mean anything:
+
+- **Build the input in `setup`, not in the routine.** Only the routine is
+  measured.
+- **Return the routine's result.** It is what is passed to `black_box`; a
+  routine written `|| { let _ = f(x); }` hands it `()`, and the call can be
+  optimised away. The harness refuses such a case rather than reporting it, but
+  the fix is to return the value.
+- **Absorb everything built into the `Corpus`.** That digest is what proves both
+  legs saw the same bytes; a case that absorbs nothing is comparable with
+  anything, including a case that changed.
+- **Generate from the seed, with `SplitMix64`.** The two legs are two checkouts
+  that may straddle a dependency bump, and a generator whose output stream
+  changed between them would make every number incomparable while looking
+  healthy.
+- **Declare `.items()` or `.bytes()` where an iteration covers a known amount.**
+  That is what turns a duration into a throughput.
+
+`.iters(n)` pins the iteration count for a case that cannot be calibrated
+meaningfully — `iter_batched` builds one input per iteration, so a case with a
+large input should pin rather than let calibration choose. `.erratic(why)` marks
+a case whose numbers are decided by something other than the code.
+
+`bench_main!` installs the counting allocator and the runner protocol. A target
+with a hand-written `main` still runs, and reports absent allocation metrics
+with a note saying why — the harness detects the allocator by watching it rather
+than by trusting a flag.
+
+The name passed to `suite()` must be the package cargo compiles the target in.
+The target refuses to start otherwise, rather than emitting records that
+intersect with nothing on the other leg.
+
+`bench/benches/selftest_wall.rs` is the worked reference: four cases covering an
+allocating workload, the same workload through `iter_batched`, a non-allocating
+one, and an erratic one. It is also
+what the A/A acceptance run drives — comparing it against itself must flag
+nothing, because a flag there means the harness is measuring itself.
+
+## What this does not do
+
+Stated because a report that looks confident about them would be worse than
+one that says nothing.
+
+**No multiplicity correction.** A run comparing twenty cases across seven
+metrics computes over a hundred intervals, and at 90% coverage a few will
+exclude zero by chance. The floors absorb most of that; a single flagged row on
+an otherwise quiet report is a reason to re-run rather than a result.
+
+**No latency percentiles.** They need rate control and a correction for
+coordinated omission, and a percentile taken without either describes the
+harness rather than the code.
+
+**No absolute claims.** Every number here is one machine on one afternoon.
+A figure only reaches the documentation carrying how it was established — see
+[CONTRIBUTING.md](https://github.com/spate-etl/spate/blob/main/CONTRIBUTING.md).
+
+**A change from nothing has no relative size.** A metric that is zero on the
+base leg and non-zero on the head — a path that begins allocating — appears
+under *Not comparable* rather than in the findings table, because there is no
+percentage to state. The entry names both values.
+
+**A growing reallocation is counted as its growth, and a shrinking one is not
+counted at all.** `alloc_bytes_per_iter`
+charges a `realloc` the difference rather than the new size, so a doubling
+push-loop does not report quadratic bytes — but a head that builds a buffer by
+repeated appends instead of reserving it reports roughly the same byte total.
+`alloc_count_per_iter` is what catches that one.
+
+**A metric can be absent for three reasons, and all-or-nothing when it is.** The
+resident set goes missing when the case batched its inputs, when running it
+never took the process above its setup, or when the platform reports no peak at
+all. And one replicate missing a metric removes that metric from the comparison
+entirely rather than shrinking its sample — disclosed under *Not comparable*,
+never silent.
+
+**CPU time is only as fine as the kernel's accounting.** `getrusage` reports it
+at the scheduler's tick on some platforms, which for a short region can be
+coarser than the 5% floor. Wall time is the metric to read when the two
+disagree.
+
+**The A/A acceptance is a procedure, not a test.** Comparing the self-test
+against itself must flag nothing, and it needs two builds and several minutes —
+so nothing runs it automatically. `make bench-ab REF=HEAD REPS=6` is the
+invocation.
+
+## Related
+
+- [Continuous integration](ci.mdx) — what actually gates a pull request, and the
+  instruction-count tier that does the job wall time cannot.
+- [Tuning](../05-deployment/tuning.mdx) — the knobs a measurement is usually
+  taken to inform.

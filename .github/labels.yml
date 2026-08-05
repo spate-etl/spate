@@ -76,9 +76,9 @@
   color: "5319e7"
   description: "Workflows, actions, and the scripts they run"
 
-- name: "area: benchmarks"
+- name: "area: bench"
   color: "5319e7"
-  description: "The benchmark harness and how a change is measured"
+  description: "The benchmark harness, its targets, and how a change is measured"
 
 - name: "area: examples"
   color: "5319e7"

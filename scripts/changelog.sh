@@ -61,7 +61,25 @@ TYPES="added changed deprecated removed fixed security"
 # `area:` labels in .github/labels.yml, because that list also contains
 # `supply-chain` — and a `fix(supply-chain):` closing an advisory is precisely a
 # release note.
-EXEMPT_SCOPES="ci docs examples benchmarks workspace website"
+#
+# `bench` is the benchmark tier: the unpublished `spate-bench` harness and the
+# `benches/` targets inside published crates. Both are exempt for the same
+# reason, and it is a semantic one rather than a convenience: neither reaches a
+# published crate's *surface*. The harness is `publish = false`, and a bench
+# target is compiled by `cargo bench` and by nothing a consumer runs — cargo
+# does not build `benches/` for a dependency, and a versionless path
+# dev-dependency on the harness is stripped when the crate is packaged. So a
+# change confined to the tier cannot be something a reader upgrading has to be
+# told.
+#
+# What that leaves open is generic and is not this gate's job. A change that
+# does reach a crate's surface, filed under `bench` because it also touched a
+# bench, is exempted by a subject that is not true — exactly as `feat(docs)`
+# would exempt a feature. The gate reads the subject; review reads the diff.
+# Deriving the exemption from changed paths instead would trade this for a worse
+# failure: a pull request that legitimately touches both would then need a
+# fragment for a change nobody upgrading can observe.
+EXEMPT_SCOPES="ci docs examples bench workspace website"
 
 fail() {
     echo "changelog.sh: $1" >&2
@@ -197,7 +215,7 @@ fix(spate-kafka): stop dropping offsets on revoke|need
 perf(spate-clickhouse): halve the encode cost|need
 feat(spate-core,docs): a thing and its page|need
 fix(spate-core,docs): stop the quarantine wait consuming the ladder|need
-feat(spate-avro,benchmarks): decode datums straight into typed records|need
+feat(spate-avro,bench): decode datums straight into typed records|need
 # --- crate-scoped, but the type says nobody upgrading cares ---
 docs(spate-core): rewrite the module documentation|exempt
 test(spate-kafka): retry the container suite once|exempt
@@ -212,7 +230,7 @@ build(spate-core): raise the MSRV floor to 1.95|need
 feat(docs): give Spate a mark that works on a square canvas|exempt
 feat(ci): a new job|exempt
 feat(website): restyle the navigation|exempt
-fix(benchmarks): make the run's host label opt-in|exempt
+fix(bench): pin the iteration count for both legs|exempt
 fix(ci,docs): lowercase the Pages project name|exempt
 # --- the automation's own subjects, verbatim from its config ---
 chore(workspace): bump the cargo-compatible group|exempt

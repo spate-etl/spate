@@ -354,7 +354,9 @@ examples; the weekly tier builds them all in the bench profile and then runs
 three by name — the divan chain bench, and two of the three criterion targets
 against a baseline the previous week's run left in a cache. `spate-json`'s
 criterion bench is built and never run, because each criterion target needs
-its own step and it has none.
+its own step and it has none. The A/B harness in `bench/` is a third tier and
+is run by hand rather than by any job — [Benchmarking](benchmarking.mdx) is its
+account.
 
 That comparison is drawn across two rented machines, so read it as evidence
 the benches still produce numbers rather than as a regression signal. Nothing

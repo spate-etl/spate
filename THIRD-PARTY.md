@@ -40,7 +40,7 @@ repository.
 
 | Licence | Crates |
 |---|---|
-| `MIT` | 296 |
+| `MIT` | 300 |
 | `Apache-2.0` | 22 |
 | `Unicode-3.0` | 19 |
 | `ISC` | 6 |
@@ -104,6 +104,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `adler2` | 2.0.1 | `MIT` |
 | `aho-corasick` | 1.1.4 | `MIT` |
 | `allocator-api2` | 0.2.21 | `MIT` |
+| `anstyle` | 1.0.14 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
 | `async-trait` | 0.1.91 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
@@ -130,6 +131,9 @@ reproducible. The elected licence ids are unaffected either way.
 | `chacha20` | 0.10.1 | `MIT` |
 | `chrono` | 0.4.45 | `MIT` |
 | `cityhash-rs` | 1.0.1 | `MIT` |
+| `clap` | 4.6.1 | `MIT` |
+| `clap_builder` | 4.6.0 | `MIT` |
+| `clap_lex` | 1.1.0 | `MIT` |
 | `clickhouse` | 0.15.1 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |
 | `clickhouse-types` | 0.1.2 | `MIT` |

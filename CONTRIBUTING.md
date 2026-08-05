@@ -46,7 +46,7 @@ round-trip and it is not a comment on your change.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org),
 scoped to the crate touched — `fix(spate-kafka): …`, comma-separated for
-several, and `workspace`, `ci`, `docs`, `examples` or `benchmarks` for the
+several, and `workspace`, `ci`, `docs`, `examples` or `bench` for the
 areas that are not crates. Breaking changes carry `!`. Messages should make
 sense to somebody who was not in the conversation: say what changed and why,
 not which iteration of a plan it belongs to.
@@ -62,7 +62,7 @@ make changelog-new TYPE=fixed SLUG=short-description
 In practice that means a `feat`, `fix`, `perf`, `revert` or `build` — and
 anything carrying `!`, whatever its scope, since that is you declaring a breaking
 change. Scoping the commit to one of the areas that is not a crate — `ci`,
-`docs`, `examples`, `benchmarks`, `workspace`, `website` — is what earns an
+`docs`, `examples`, `bench`, `workspace`, `website` — is what earns an
 exemption; leaving the scope off does not, and neither does a type this
 repository does not recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
 the conventions, `make check-changelog` is the gate, and there is deliberately
@@ -139,6 +139,7 @@ make loom          # the concurrency models
 make docs          # the documentation site
 make bench-check   # every bench target still compiles, in the release profile
 make bench-gungraun  # instruction counts, on Linux with valgrind installed
+make bench-ab REF=main  # wall time, this tree against a reference
 ```
 
 `make bench-gungraun` is the odd one out: it counts instructions under valgrind
@@ -310,6 +311,12 @@ whichever arm goes last otherwise, and the first repetition hands one arm the
 cold-start cost, which has been large enough here to decide which arm looked
 faster. Report an interval and the repetition count beside the value, so a
 reader can tell a difference from a spread.
+
+`make bench-ab REF=main` does all of that for a change against a reference —
+worktree, interleave, discard the priming pass, pair by replicate and state the
+rule it decided by. Nothing it produces is stored;
+[the benchmarking page](docs/user-guide/07-reference/benchmarking.mdx) says what
+it measures and how to add a case.
 
 ## Releases
 

@@ -222,7 +222,7 @@ Proven choreography spate-kafka must implement (spike-verified):
 
 ## Frozen v1 contracts
 
-Validated on the production chain (`crates/spate-core/benches/chain.rs`):
+Validated on the production chain (`crates/spate-core/benches/chain_wall.rs`):
 the borrowed arm emits a record roughly every 10 ns and allocates a fixed
 handful per *batch* — **none per record** — while the owned equivalent
 allocates once per record. `crates/spate-core/tests/chain_alloc.rs` is what
@@ -718,7 +718,7 @@ in the tree and a breaking `metrics` release is upgraded in a single edit.
 | Multi-sink | additive `add_sink` + a typed split terminal | per-type tables move fan-out off the DB onto the scalable ETL tier; +56%–212% throughput, 4–10× part size, 16–31% lower server CPU/row vs `Null`+MV on a skewed type mix (measured by a rig this repository no longer carries) |
 | Sink workers | per shard, replica rotation, max_inflight | full-size batches (ClickHouse merge pressure) + parallelism |
 | ClickHouse insert | pre-encoded RowBinary frames via `InsertFormatted` + dedup token | encode on pipeline threads; deterministic batch boundaries for acks and idempotent retries (spike-verified) |
-| Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; ~10 ns/rec and 0 allocs/rec borrowed against 1 alloc/rec owned (bench-measured, `crates/spate-core/benches/chain.rs`); 3.7× wall-clock on the prototype (spike-measured) |
+| Zero-copy seam | untyped payload batches cross the dyn boundary; `RecFamily` lifetime→type family | records live and die inside one `push_batch`; ~10 ns/rec and 0 allocs/rec borrowed against 1 alloc/rec owned (bench-measured, `crates/spate-core/benches/chain_wall.rs`); 3.7× wall-clock on the prototype (spike-measured) |
 | Metrics | `metrics` facade + prometheus exporter | facade *is* the MeterRegistry pattern; backend-pluggable |
 | Config | YAML (`yaml_serde`), opaque passthrough | serde_yaml archived; serde-yml has RUSTSEC advisory. Provenance verified: yaml_serde is the YAML org's successor (github.com/yaml/yaml-serde, published by ingydotnet, YAML's co-creator) |
 | Error policy | Skip / Fail only, metrics-surfaced | no owned DLQ topic in target environments |

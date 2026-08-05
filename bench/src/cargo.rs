@@ -12,10 +12,11 @@
 //! A wall-clock target is `crates/<pkg>/benches/<name>_wall.rs`. The suffix is
 //! what keeps three tiers of benchmark from colliding: `*_gungraun.rs` belongs
 //! to the instruction-count tier and its discovery script globs for exactly
-//! that, criterion and divan targets carry neither suffix, and this one globs
-//! for `_wall`. A target that forgets `harness = false` is caught by the
-//! protocol at list time rather than by a manifest lint, because the error it
-//! produces there can say what to do about it.
+//! that, the weekly criterion targets carry neither suffix, and this one globs
+//! for `_wall`. A target that forgets `harness = false` is refused by the
+//! protocol at list time as well as by `make check-wall-benches`, because the
+//! error it produces here can say what to do about it — but the lint is what
+//! reaches the mistake before two legs have been built.
 //!
 //! # Why not the `cargo_metadata` crate
 //!

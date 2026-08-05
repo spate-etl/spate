@@ -3,7 +3,7 @@
 //! One shape — one poll batch of 512 payloads through deserialize → filter →
 //! flat_map → encode → handoff, drained to encoded chunks — parameterised by
 //! the three things the terminal stage varies in production, plus the
-//! borrowed-versus-owned payload contrast `benches/chain.rs` times:
+//! borrowed-versus-owned payload contrast `benches/chain_wall.rs` times:
 //!
 //! - **The router.** `borrowed` pins a constant router over a keyless
 //!   corpus: no key is hashed and every record lands on shard 0.
@@ -34,8 +34,8 @@
 //! another. Both axes are linear in the stage by construction (a shard is a
 //! buffer and a seal; a smaller target is more seals of the same code), so
 //! their endpoints fix the slope and a midpoint only re-measures it. Six
-//! cases, not eighteen: callgrind runs the workload under emulation, and the
-//! divan sibling carries the fuller sweep at wall-clock prices.
+//! cases, not eighteen: callgrind runs the workload under emulation, and
+//! `benches/chain_wall.rs` carries the fuller sweep at wall-clock prices.
 //!
 //! DHAT runs alongside callgrind in the same invocation, so every case also
 //! reports deterministic heap counts. `tests/chain_alloc.rs` bounds the

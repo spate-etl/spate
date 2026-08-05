@@ -80,5 +80,9 @@ harness = false
 name = "split_wall"
 harness = false
 
+[[bench]]
+name = "control_plane_wall"
+harness = false
+
 [lints]
 workspace = true

@@ -284,12 +284,17 @@ pub(crate) fn rig(per_tick: usize, order: Order) -> Rig {
 ///
 /// The waits here are a worker's share of a tick and the controller's drain —
 /// microseconds, with every party runnable throughout. Spinning that out
-/// costs hundreds of nanoseconds where parking the thread costs microseconds
-/// on a kernel wake, and there are two waits per commit tick, so a parking
-/// primitive would be the same order of magnitude as the work being
-/// measured. `yield_now` is slower than spinning for the expected wait, so it
-/// is the escape hatch for a preempted party rather than the steady state.
-const SPIN_LIMIT: u32 = 256;
+/// costs far less than a kernel wake, and there are two waits per commit
+/// tick, so a parking primitive would be the same order of magnitude as the
+/// work being measured. `yield_now` is the escape hatch for a party that has
+/// been preempted, not the steady state.
+///
+/// The exact figure does not matter much: raising it to 50 000 moved no case
+/// in this rig outside its run-to-run spread, which says the rendezvous is
+/// not where these cases spend their time. It is kept modest so that a
+/// machine with fewer cores than parties reaches the fallback promptly rather
+/// than burning a scheduling quantum first.
+const SPIN_LIMIT: u32 = 1024;
 
 /// How long a party waits before deciding the other side is never coming.
 ///

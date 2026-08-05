@@ -692,6 +692,7 @@ checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
 dependencies = [
  "anstyle",
  "clap_lex",
+ "strsim",
  "terminal_size",
 ]
 
@@ -3981,6 +3982,18 @@ dependencies = [
  "tokio",
  "tracing",
  "yaml_serde",
+]
+
+[[package]]
+name = "spate-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "twox-hash",
 ]
 
 [[package]]

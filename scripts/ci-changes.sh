@@ -87,6 +87,14 @@ container_suites_for() {
         # so a change to the framer can break spate-s3's suite.
         spate-json) echo "spate spate-s3" ;;
         spate-avro | spate) echo "spate" ;;
+        # The wall-clock benchmark harness. Spelled out rather than left to the
+        # default arm, because it is the one member whose empty answer is a
+        # judgement rather than an absence: crates dev-depend on it for their
+        # `benches/*_wall.rs` targets, and a container suite is an `#[ignore]`d
+        # test that cargo never builds a bench target for. The self-test's
+        # traversal is given the same exclusion, or a single such dev-dependency
+        # would make this table and the graph disagree.
+        spate-bench) echo "" ;;
         *) echo "" ;;
     esac
 }
@@ -367,9 +375,17 @@ names = {p["name"] for p in meta["packages"]}
 # Forward edges, normal + dev, restricted to workspace-internal packages.
 # Self-edges are the `testing`-feature dev-dependencies and carry no
 # information about which other crate a change can reach.
+#
+# Edges *into* the wall-clock benchmark harness are dropped for the reason
+# stated beside its row in container_suites_for(): a crate dev-depends on it for
+# a bench target, and cargo builds no bench target for a container suite. Left
+# in, one such dev-dependency would make the harness look as though it could
+# break every suite its dependents can reach.
+HARNESS = "spate-bench"
 deps = {
     p["name"]: {d["name"] for d in p["dependencies"]
-                if d["name"] in names and d["name"] != p["name"]}
+                if d["name"] in names and d["name"] != p["name"]
+                and d["name"] != HARNESS}
     for p in meta["packages"]
 }
 
@@ -770,7 +786,7 @@ else
         case "$file" in
         # Source trees: always code, whatever the file extension. Empty body,
         # so control falls past the `case` to the classification below.
-        crates/* | scripts/*) ;;
+        crates/* | scripts/* | bench/*) ;;
         # CI definitions decide what every other job does, so a change to one
         # has to be exercised by the full set.
         .github/workflows/* | .github/actions/*) ;;

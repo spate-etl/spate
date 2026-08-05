@@ -80,6 +80,12 @@ ignore:
   - "**/tests/**"
   - "crates/spate-test/**" # the mock/test-harness crate shipped for users
   - "examples/**"
+  # The wall-clock benchmark harness. Unpublished, run by hand, and largely
+  # subprocess orchestration that a unit test cannot reach — the same reason
+  # `examples/` is here. Its own logic (statistics, pairing, the record schema)
+  # is unit-tested; counting the driver against the patch target would move the
+  # repository's figure without saying anything about the framework.
+  - "bench/**"
 
 # Per-crate visibility, so a regression is attributable rather than diffuse.
 component_management:

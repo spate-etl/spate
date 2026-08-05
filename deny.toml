@@ -36,6 +36,20 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# A `*` requirement on a *registry* dependency is still refused. What this
+# exempts is narrower than "path dependencies": for a crate we publish it covers
+# non-registry dependencies of **dev** kind only, and for one we do not publish,
+# any kind.
+#
+# It is what lets a published crate dev-depend on the unpublished benchmark
+# harness. `spate-bench = { path = "bench" }` carries no version deliberately,
+# because cargo strips a versionless path dev-dependency when the crate is
+# packaged — but cargo-deny reads a missing version as a wildcard whichever kind
+# of edge it is on, so without this the documented way to add a
+# `benches/*_wall.rs` fails `make deny` on the pull request that does it. The
+# guard that still matters survives: a versionless path dependency under
+# `[dependencies]` of a published crate is refused as before.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

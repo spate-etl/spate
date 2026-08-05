@@ -26,7 +26,7 @@
 # a same-named file ever appeared in the tree.
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
         check-features check-examples bench-check bench bench-gungraun \
-        bench-gungraun-check loom \
+        bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-collected-region check-invariants \
@@ -138,6 +138,40 @@ bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-ru
 
 bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind needed)
 	./scripts/gungraun-benches.sh --check
+
+# The wall-clock tier: `spate-bench`, in `bench/`. Nothing here is a gate and
+# nothing is stored. A wall-clock number answers "did this change move it",
+# which is a question somebody asks about a specific change on a machine they
+# control — not something a pull request passes.
+# `docs/user-guide/07-reference/benchmarking.mdx` is the full account.
+#
+# Plain variables rather than `$(or ...)`, so a command-line `REF=…` still wins
+# and a value containing a comma is not read as more arguments. Both legs of a
+# comparison are written under the bench cache — `$TMPDIR/spate-bench`, or
+# `SPATE_BENCH_CACHE` — never inside the repository, where cargo and git would
+# both find them.
+REF ?= main
+REPS ?= 10
+FILTER ?=
+FORMAT ?= table
+
+bench-list: ## Every wall-clock bench case, with its flags (FILTER=substr narrows it)
+	cargo run -p spate-bench --features driver --locked --bin bench -- list --cases \
+		$(if $(FILTER),--filter "$(FILTER)")
+
+# Builds the reference in a detached worktree, builds this tree, and interleaves
+# the two. Expect it to take a while: it is two full bench-profile builds before
+# the first measurement.
+bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=10 FILTER=substr
+	cargo run -p spate-bench --features driver --locked --bin bench -- ab "$(REF)" \
+		--replicates "$(REPS)" --format "$(FORMAT)" $(if $(FILTER),--filter "$(FILTER)")
+
+# Re-renders two legs a previous run left behind — in another format, say —
+# without measuring anything again. `bench-ab` prints the two paths when it
+# finishes.
+bench-compare: ## Re-render two legs: make bench-compare BASE=dir HEAD=dir FORMAT=markdown
+	cargo run -p spate-bench --features driver --locked --bin bench -- compare \
+		"$(BASE)" "$(HEAD)" --format "$(FORMAT)"
 
 ##@ Supply chain
 

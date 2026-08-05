@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "bench",
     "crates/spate",
     "crates/spate-core",
     "crates/spate-avro",
@@ -39,6 +40,12 @@ spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
 spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
 spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
 spate-test = { version = "=0.1.0", path = "crates/spate-test" }
+# The wall-clock benchmark harness. Deliberately versionless: a crate adding a
+# `benches/*_wall.rs` dev-depends on it by path alone, and cargo strips a
+# versionless path dev-dependency when the crate is packaged — so an unpublished
+# harness can be a dev-dependency of a published crate without appearing in what
+# consumers resolve.
+spate-bench = { path = "bench" }
 
 # Async runtime and I/O edge.
 tokio = { version = "1.52", default-features = false }
@@ -127,6 +134,39 @@ proptest = "1.11"
 loom = "0.7"
 criterion = "0.8"
 divan = "0.1.13"
+# The `bench` CLI's argument parser, behind `spate-bench`'s `driver` feature.
+# `default-features = false` with only the pieces a four-subcommand tool needs:
+# the derive macros, colours and wrapping are all unused here. Already in
+# Cargo.lock at this version through criterion and divan, so the harness adds no
+# third-party package to the lockfile — it moves existing ones onto a normal
+# edge. That last part has a consequence worth naming: cargo-about ignores
+# dev-dependencies but not normal ones, so clap and its companions do reach
+# THIRD-PARTY.md — the superset that file says it deliberately is.
+clap = { version = "4.6", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
+# Platform bindings. `libc` is here for one call: `getrusage`, which is how the
+# harness reads the peak resident set and the CPU time the kernel already
+# tracked for it. No published crate *declares* it — `spate-bench`
+# (`publish = false`) is the only one that does, though several reach it
+# transitively through tokio and core_affinity, so it is already in the lockfile
+# and the attribution inventory. The Linux-only alternative, reading `VmHWM` out
+# of `/proc/self/status`, does not exist on macOS.
+#
+# The patch floor is not ours. Nothing here needs anything recent — `getrusage`
+# has been in this crate since it existed — but `-Z direct-minimal-versions`
+# pins every *direct* requirement to its literal floor, and `libc = "0.2"` there
+# means 0.2.0, which nothing else in the graph can resolve alongside: rdkafka
+# asks for `^0.2.172` and mio for `^0.2.183`. A bare major would leave the
+# nightly minimal-versions job failing every night on a floor that is honest
+# about our needs and false about the graph's. Raise this only when that job
+# says to; this crate is `publish = false`, so the figure constrains nobody
+# downstream.
+libc = "0.2.183"
 # Instruction-count benches. Deterministic counters rather than wall time, so
 # they compare across the shared runners CI actually uses; running them needs
 # valgrind and a same-version `gungraun-runner`, which is why `bench-gungraun`

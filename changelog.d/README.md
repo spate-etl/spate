@@ -22,7 +22,7 @@ present for the next change.
 practice that is a `feat`, `fix` or `perf` commit, or anything carrying `!`.
 
 You are exempt when the scope names one of the areas that is not a crate —
-`ci`, `docs`, `examples`, `benchmarks`, `workspace`, `website` — or when the
+`ci`, `docs`, `examples`, `bench`, `workspace`, `website` — or when the
 type says nobody upgrading is affected: `docs`, `test`, `chore`, `style`, `ci`,
 `refactor`.
 

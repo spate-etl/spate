@@ -46,7 +46,7 @@ round-trip and it is not a comment on your change.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org),
 scoped to the crate touched — `fix(spate-kafka): …`, comma-separated for
-several, and `workspace`, `ci`, `docs`, `examples` or `benchmarks` for the
+several, and `workspace`, `ci`, `docs`, `examples` or `bench` for the
 areas that are not crates. Breaking changes carry `!`. Messages should make
 sense to somebody who was not in the conversation: say what changed and why,
 not which iteration of a plan it belongs to.
@@ -62,7 +62,7 @@ make changelog-new TYPE=fixed SLUG=short-description
 In practice that means a `feat`, `fix`, `perf`, `revert` or `build` — and
 anything carrying `!`, whatever its scope, since that is you declaring a breaking
 change. Scoping the commit to one of the areas that is not a crate — `ci`,
-`docs`, `examples`, `benchmarks`, `workspace`, `website` — is what earns an
+`docs`, `examples`, `bench`, `workspace`, `website` — is what earns an
 exemption; leaving the scope off does not, and neither does a type this
 repository does not recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
 the conventions, `make check-changelog` is the gate, and there is deliberately

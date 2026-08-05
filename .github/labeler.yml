@@ -92,6 +92,17 @@
   - changed-files:
       - any-glob-to-any-file: examples/**
 
+# Both benchmark tiers: the unpublished harness in `bench/`, and the targets it
+# and the instruction-count runner drive from inside each crate. A `benches/`
+# change also carries its crate's label, which is right — it is that crate's
+# bench — and this one says the change is about measurement rather than about
+# what is measured.
+"area: bench":
+  - changed-files:
+      - any-glob-to-any-file:
+          - bench/**
+          - crates/*/benches/**
+
 # The licence and advisory surface, all of it CODEOWNED. Worth seeing apart from
 # the rest of CI: these are the files where a change is a supply-chain decision
 # rather than a build tweak.

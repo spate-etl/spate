@@ -328,53 +328,30 @@ counts.
 
 ### What the benches measure
 
-The counted benches follow the hot paths: the operator chain and its split
-terminal, the checkpoint and backpressure bookkeeping around it, payload
-decoding and record framing, row and message encoding for the wire with the
-routing in front of it, and the planning, assignment, claim scanning and
-descriptor decoding a coordinated backfill does. A new one is written as a
-single workload shape parameterised over the axis that changes its cost — a
-listing profile, a codec, an entry point — rather than one case per function,
-because attribution below the shape comes from the callgrind profile the run
-already writes, and a finer set of cases would only duplicate it. That is the
-rule for a new bench rather than a description of every existing one — several
-predate it and carry a case per entry point.
+The counted benches follow the hot paths. A new one is written as a single
+workload shape parameterised over the axis that changes its cost — a listing
+profile, a codec, an entry point — rather than one case per function, because
+attribution below the shape comes from the callgrind profile the run already
+writes, and a finer set of cases would only duplicate it. That is the rule for
+a new bench rather than a description of every existing one — several predate
+it and carry a case per entry point.
 
 Where a bench generates its own corpus, that corpus comes from a fixed
 sequence and is pinned by a test — `crates/<crate>/tests/bench_fixtures.rs`,
 in every benched crate. A count is only comparable when both legs of the
 comparison packed byte-identical input, so a generator free to drift between
-them is a difference the report would charge to the change. `spate-core`'s file
-pins all four rigs under `crates/spate-core/benches/support/` and goes further
-than a digest: it also holds the claims those rigs' cases are named for — the
-row counts a declared throughput rests on, the chunk targets that land on a
-record boundary, and the tag distributions that make a fan-out case a
-match-rate case rather than a narrower one. For a rig that keeps state across a
-drive it holds one more property, which the wall tier needs and the counted
-tier does not: that a second drive emits what the first did. A rig the counted
-tier builds once and discards is driven hundreds of times against one piece of
-state there, so one that drifts reports a case whose name has stopped
-describing what it measures — and reports it as a stable number. `spate-core`
-carries it for its two control-plane rigs, whose budget and watermark state
-survives a drive; `spate-json` carries it for its decode rigs, alongside the
-mirror that the sink reset the property rests on has not quietly become a
-no-op.
+them is a difference the report would charge to the change. Those files go
+further than a digest: they also hold the claims a rig's cases are named for,
+so a case cannot keep its name while measuring something else. For a rig that
+keeps state across a drive they hold one more property, which the wall tier
+needs and the counted tier does not — that a second drive emits what the first
+did.
 
 The criterion benches beside them gate nothing. A pull request only
 type-checks them, through the same `clippy --all-targets` that covers the
 examples; the weekly tier builds every bench target in the bench profile and
 then runs both criterion targets by name, against a baseline the previous
-week's run left in a cache. The A/B harness in `bench/` is the third tier — the
-`*_wall.rs` targets, which no job runs at all — and
-[`bench/README.md`](https://github.com/spate-etl/spate/blob/main/bench/README.md)
-is its account. `spate-core`'s per-record path
-and its control plane are measured there, as are `spate-json`'s decode and
-framing paths, rather than weekly. Five of `spate-core`'s cases are marked
-erratic there and so are reported without ever being gated: two split cases
-place occasional replicates well above their own mode on the machine they were
-developed on, and three control-plane cases that drive acking threads follow
-where the scheduler places those threads. Both are enough to flag a change that
-never happened.
+week's run left in a cache.
 
 That comparison is drawn across two rented machines, so read it as evidence
 the benches still produce numbers rather than as a regression signal. Nothing
@@ -382,45 +359,19 @@ blocks on the delta. The rotation step after it fails when *no* criterion
 target wrote a baseline at all — the case where the comparison was vacuous —
 which means one target silently dropping out is not what it catches.
 
-Where a format crate wraps a third-party parser, the parser's own floor
-belongs in the wall-clock bench: cases that call it directly, beside the cases
-measuring the crate's path over the same bytes. The first is what the
-underlying library costs and the second is what the framework adds to it, and
-reading the second without the first turns a parser's regression into an
-unexplained framework one. `crates/spate-json/benches/decode_wall.rs` is the
-worked example. Its floor cases share a binary with its framework ones, so one
-run carries both; there is one per parser entry point rather than one per case,
-over the same corpus as the framework case it pairs with; and a build with the
-optional decode backend compiled in carries that backend's floors beside the
-default one's, so no pairing crosses two parsers and the margin between the two
-libraries reads without comparing across two legs.
-`crates/spate-avro/benches/decode.rs` has no floor at all — its non-crate
-cases time a flattening helper and a `memcpy`, neither of which is the Avro
-decoder.
+The A/B harness in `bench/` is the third tier — the `*_wall.rs` targets, which
+no job runs at all. It is contributor tooling rather than part of the gate, and
+[`bench/README.md`](https://github.com/spate-etl/spate/blob/main/bench/README.md)
+is its account.
 
-One bench carries a design claim alongside its costs.
-`crates/spate-core/benches/chain_wall.rs` drives the production path — a boxed
-chain fed borrowed payload batches through deserialize, filter, flat_map,
-encode and hand-off — against the owned-payload equivalent, and that contrast
-is what the zero-copy seam rests on: the borrowed chain allocates a fixed
-number of times per batch and nothing per record, while the owned one
-allocates once per record. Read the arms' allocation counts against each
-other, not their wall clocks — they fan out differently, so only the
-allocation contrast is like-for-like. Where the type erasure sits
-was settled on a prototype of the same seam rather than by this rig: one
-virtual call per batch is what the chain is built to, because a boundary per
-stage scales with the stage count and blocks vectorisation, while a per-batch
-boundary's own cost amortises away once each stage does realistic per-record
-work. What holds the first claim true afterwards is the counted sibling
-`chain_gungraun.rs`: it carries both arms as cases and runs DHAT alongside
-callgrind, so each arm's heap shape and instruction count move under one
-comparison. `alloc-assertions` is the narrower gate beside it — the borrowed
-chain alone, against absolute bounds rather than a baseline — and it is what
-fails if allocations start scaling with record count. Neither asserts that the
-gap between the two arms stays open, so that part is re-established by running
-the rig: `make bench-ab REF=main FILTER=chain_` measures both arms against a
-reference, paired and interleaved on one machine, which is what makes the
-result something to act on rather than evidence the rig still runs.
+The zero-copy seam is the design claim a counted bench holds open rather than
+merely costing. `chain_gungraun.rs` carries the borrowed and owned arms as
+cases and runs DHAT alongside callgrind, so each arm's heap shape and
+instruction count move under one comparison. `alloc-assertions` is the narrower
+gate beside it — the borrowed chain alone, against absolute bounds rather than
+a baseline — and it is what fails if allocations start scaling with record
+count. Neither asserts that the gap between the two arms stays open; that part
+is re-established by running the rig rather than by a job.
 
 ### The shard matrix
 

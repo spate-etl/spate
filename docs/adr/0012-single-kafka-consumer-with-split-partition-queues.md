@@ -36,8 +36,9 @@ Consumption parallelism is unchanged — it is still bounded by partition count,
 exactly as with per-thread consumers. What changes is group scale, and the fact
 that shutdown, revocation and commit all happen once per process.
 
-The choreography this obliges us to implement was verified on a spike before the
-decision was taken, because the failure modes are not obvious from the API:
+The choreography this obliged us to implement was verified on a spike before the
+decision was taken, because the failure modes are not obvious from the API. As
+understood at the time:
 
 - **Assign.** The rebalance callback runs on the controller's main-queue poll and
   only receives a `&BaseConsumer`, so it pauses all assigned partitions there —
@@ -87,5 +88,13 @@ couple of percent. Measured by a rig this repository no longer carries.
 ## More information
 
 - Landed in `c8973e6`; the teardown and startup-deadline findings in `e062465`.
+- **The choreography above is the 2026-07-05 understanding, not a current
+  spec.** The implementation has since moved to deferred completion — the
+  revocation spans two `poll_events` calls and finishes at `unassign()`, and a
+  message that reaches the main queue is rewound with `seek` rather than merely
+  routed. The living specification is the module documentation on
+  `crates/spate-kafka/src/source.rs`, which is kept beside the code it
+  describes; this record says why the topology was chosen, not how it currently
+  works.
 - [Kafka source](../user-guide/04-connectors/sources/kafka/README.mdx) — the
   connector's configuration and the trade as an operator sees it.

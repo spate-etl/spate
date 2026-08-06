@@ -94,7 +94,7 @@ target tables to tolerate duplicates. See
 
 The deadline is **cooperative**: each sink worker watches it and, when it
 fires, aborts its in-flight writes and abandons what is left. Underneath
-that sits a **hard backstop** — a worker that has not returned two seconds
+that sits a **hard backstop** — a worker that has not returned one second
 past the deadline is force-aborted by the pool. The backstop should never
 fire; it exists so that an unforeseen stall degrades shutdown to a lost
 drain report rather than an unbounded hang, and it says so on
@@ -104,6 +104,14 @@ bug worth reporting.
 One thing the framework cannot do for you: a `write_batch` that blocks its
 thread between await points cannot be aborted by anyone. Give your sink's
 client a request timeout and let the retry policy handle the failure.
+
+The cooperative layer is only sound because **nothing on a worker's intake path
+blocks outside the `select!` that arms the deadline.** Anything a worker waits
+on sits in a branch alongside the deadline branch — otherwise the deadline is
+not being polled while the worker waits, and shutdown deadlocks rather than
+degrading. That is why dispatch parks a sealed batch waiting for a permit
+instead of awaiting one: an await there would be outside the `select!`, and the
+backstop would become the normal path instead of the never-fires path.
 
 ### Leaked queues {#leaked-queues-bounded-loud-contained}
 

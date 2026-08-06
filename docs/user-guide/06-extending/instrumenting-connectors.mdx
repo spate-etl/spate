@@ -250,6 +250,15 @@ handle method shapes exist to make them the path of least resistance:
   — with the single exception of `spate_source_lag_records`, which is ungated
   because it has no aggregate series to fall back to (see the box above).
   Don't attach an unbounded label (a key, an offset) to any series.
+- **One live owner per gauge series.** A handle struct claims its series when it
+  is constructed, and a duplicate claim on the same key is refused rather than
+  shared — two live owners would be two writers racing to describe one piece of
+  state, and the exposition cannot show that happened. Through the builder a
+  collision is fatal (`BuildError` / `StartError`). Direct construction cannot
+  fail a build, so it logs and the loser becomes a **shadow**: it still counts,
+  because counters sum, but it publishes no gauge. A shadow is the failure you
+  are most likely to meet in tests — see [Testing](#testing) below for why your
+  fixtures need per-test labels.
 
 :::warning
 The exporter installs a **process-global** recorder, and a handle binds to
@@ -269,6 +278,14 @@ rendered exposition — no global install, so tests stay isolated and parallel.
 `handle.render()` gives you the scrape text to `assert!(...contains(...))`
 against, exactly as `crates/spate/examples/custom_metrics.rs` and the `metrics`
 module's own tests do.
+
+**Give each test its own `pipeline` and `component` labels.** A local recorder
+isolates the *exposition*, but it does not isolate the gauge-ownership claim
+described above, which is process-wide. `cargo test` runs a binary's tests in
+one process, so two tests building the same handle with the same labels have the
+second one become a shadow — its counters still sum, but its gauges publish
+nothing, and the assertion fails somewhere unrelated to the change that broke
+it. Distinct labels per test avoid the collision entirely.
 
 ## From a built-in source or sink
 

@@ -55,6 +55,26 @@ factory — each call receives a `ChainCtx` carrying that thread's queue
 clones, the shared byte budget, and the pipeline name. See
 [Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx).
 
+### Lane count is read concurrency, not decode parallelism
+
+Because every lane is polled by the thread that owns it, effective decode
+parallelism is:
+
+```text
+min(lanes, pipeline.threads)
+```
+
+Lanes beyond the thread count add read-ahead memory and open connections
+**without adding throughput** — they are more places to read from, not more
+capacity to decode. Size a source's lane count near `pipeline.threads` rather
+than raising it in the hope of going faster.
+
+:::note Connector specifics
+What a lane is, and the knob that sets how many there are:
+[Kafka](../04-connectors/sources/kafka/README.mdx) ·
+[S3](../04-connectors/sources/s3/README.mdx).
+:::
+
 ## The I/O runtime: where bytes leave
 
 A single shared multi-thread tokio runtime (default 2 workers,

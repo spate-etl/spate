@@ -366,7 +366,8 @@ examples; the weekly tier builds every bench target in the bench profile and
 then runs both criterion targets by name, against a baseline the previous
 week's run left in a cache. The A/B harness in `bench/` is the third tier — the
 `*_wall.rs` targets, which no job runs at all — and
-[Benchmarking](benchmarking.mdx) is its account. `spate-core`'s per-record path
+[`bench/README.md`](https://github.com/spate-etl/spate/blob/main/bench/README.md)
+is its account. `spate-core`'s per-record path
 and its control plane are measured there, as are `spate-json`'s decode and
 framing paths, rather than weekly. Five of `spate-core`'s cases are marked
 erratic there and so are reported without ever being gated: two split cases

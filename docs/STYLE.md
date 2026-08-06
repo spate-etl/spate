@@ -88,7 +88,7 @@ Each is a decision, not drift. Nothing else is exempt.
 | Area | Why | Bound |
 |---|---|---|
 | `01-getting-started/**` | A tutorial must be concrete — a reader cannot follow an abstract pipeline. | Declares its stack in the first paragraph. |
-| `07-reference/ci.mdx`, `supply-chain.mdx`, `licensing.mdx`, `benchmarking.mdx` | These document *this repository*, not framework behaviour. Real crate names are the subject matter. | Facts about the repo only; no connector usage guidance. |
+| `07-reference/ci.mdx`, `supply-chain.mdx`, `licensing.mdx` | These document *this repository*, not framework behaviour. Real crate names are the subject matter. | Facts about the repo only; no connector usage guidance. |
 | `06-extending/**` | Teaching someone to write a connector needs a real one to point at. | Shipped connectors appear as marked worked references (`worked reference: crates/spate-kafka/src/metrics.rs`), never as the normative prose. |
 | Index pages — `04-connectors/README.mdx`, the role card indexes, `user-guide/README.mdx`, `07-reference/README.mdx`, the appendix's component mapping table | Indexing connectors and crates by name is their entire job. | Name and one-line summary; no behaviour. |
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |

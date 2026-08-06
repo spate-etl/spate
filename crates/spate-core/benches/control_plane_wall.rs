@@ -69,6 +69,16 @@
 //! method. It is one saturating subtraction, one `Cell` write and one struct
 //! write against 32 768 iterations of work.
 //!
+//! Without it the rig is wrong in the way that is hardest to notice. It came
+//! from the instruction-count tier, which builds one and drives it once, so
+//! nothing about it needed to survive a second drive; here a routine runs
+//! thousands of times against the one piece of state, and each drive would start
+//! where the last one finished. Within a few, the case exercises a different
+//! branch of the state machine than its name claims — and reports a stable
+//! number the whole time. `tests/bench_fixtures.rs` holds both halves: that a
+//! second drive matches the first, and that without the reset it does not, so
+//! the reset cannot quietly become a no-op.
+//!
 //! The `ack_*threads` cases carry a rendezvous the others do not: two atomic
 //! operations per worker per commit tick, plus whatever each side spins
 //! through waiting for the other. That is why the thread axis is measured only

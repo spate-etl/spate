@@ -11,6 +11,24 @@
 //! with only the first flags a reliably-measured 0.3% on a quiet machine; a
 //! rule with only the second flags whatever the machine happened to do.
 //!
+//! # The floors, and why they differ
+//!
+//! | Metric | Floor |
+//! |---|---|
+//! | Wall time, CPU time, throughput | 5% |
+//! | Peak resident set | 10% |
+//! | Allocation totals | 1% |
+//!
+//! The resident set gets a wider floor because it moves for allocator reasons
+//! unrelated to the change. Allocation totals get a much narrower one because
+//! they are near-deterministic, and a five-percent floor there would suppress a
+//! real regression.
+//!
+//! Fewer than five paired replicates prints the difference and declines to judge
+//! it. Below that, the tail of a bootstrap is decided by which single pair was
+//! drawn least often, so an interval would be an assertion about the resampler
+//! rather than about the code. The default is ten.
+//!
 //! # Pairing, and why it is not a ratio of means
 //!
 //! An A/B run interleaves the legs, so replicate *k* of each ran adjacent in
@@ -31,7 +49,17 @@
 //!
 //! The resampling is seeded from the case and metric names, so re-rendering the
 //! same two legs produces the same interval to the last digit. A report whose
-//! numbers move when it is regenerated is a report nobody can quote.
+//! numbers move when it is regenerated is a report nobody can quote. It draws
+//! 10 000 resamples.
+//!
+//! # No multiplicity correction
+//!
+//! A run comparing twenty cases across seven metrics computes over a hundred
+//! intervals, and at 90% coverage a few will exclude zero by chance. The floors
+//! absorb most of that, and correcting properly would need a family definition
+//! this tier has no basis to pick. The consequence belongs to whoever reads the
+//! report: a single flagged row on an otherwise quiet one is a reason to re-run,
+//! not a result.
 
 use std::hash::Hasher as _;
 

@@ -39,6 +39,34 @@
 //! The seed is the driver's too, and it seeds the *corpus only*. Replicates
 //! deliberately share it: a per-replicate corpus would inject variance into the
 //! very quantity the paired bootstrap exists to resolve.
+//!
+//! # What comes out
+//!
+//! | Metric | Unit | Better | Present |
+//! |---|---|---|---|
+//! | `wall_ns_per_iter` | ns | lower | always |
+//! | `cpu_ns_per_iter` | ns | lower | when the kernel reports the process's CPU accounting |
+//! | `records_per_s` | records/s | higher | when the case declared how many items an iteration covers |
+//! | `bytes_per_s` | bytes/s | higher | when the case declared how many bytes an iteration covers |
+//! | `peak_rss_bytes` | bytes | lower | when running the case took the process above what building its corpus left resident, and the case did not batch its inputs |
+//! | `alloc_bytes_per_iter` | bytes | lower | when the counting allocator is installed |
+//! | `alloc_count_per_iter` | allocations | lower | when the counting allocator is installed |
+//!
+//! Only wall time is unconditional, and an absent metric is absent rather than
+//! zero — see [`crate::record`] for why that distinction is load-bearing.
+//!
+//! A case using `iter_batched` reports no resident set at all. The harness holds
+//! one prebuilt input per iteration, so the process's high-water mark would be
+//! about the batching rather than about the routine, and a figure that is mostly
+//! harness is worse than none.
+//!
+//! # The refusal
+//!
+//! A case whose per-iteration cost does not clear twice an empty loop's is
+//! refused rather than reported. That is the failure this surface has to be
+//! built against: a routine whose result is discarded gives `black_box` nothing
+//! to hold, the optimiser deletes the call, and what comes back is a well-formed
+//! record of the loop. The routine returning its result is what prevents it.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

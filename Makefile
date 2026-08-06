@@ -138,7 +138,7 @@ bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind
 # nothing is stored. A wall-clock number answers "did this change move it",
 # which is a question somebody asks about a specific change on a machine they
 # control — not something a pull request passes.
-# `docs/user-guide/07-reference/benchmarking.mdx` is the full account.
+# `bench/README.md` and the crate's own docs are the full account.
 #
 # Plain variables rather than `$(or ...)`, so a command-line `REF=…` still wins
 # and a value containing a comma is not read as more arguments. Both legs of a

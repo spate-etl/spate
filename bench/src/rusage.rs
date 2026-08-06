@@ -36,6 +36,13 @@
 //! taken over ten replicates is not comparable with a peak taken over one, and
 //! a second case in the same process would inherit the first one's high-water
 //! mark.
+//!
+//! # How fine the CPU figure is
+//!
+//! Only as fine as the kernel's accounting. `getrusage` reports CPU time at the
+//! scheduler's tick on some platforms, which for a short measured region can be
+//! coarser than the five-percent floor a difference has to clear. Wall time is
+//! the figure to read when the two disagree.
 
 /// Peak resident set size of this process, in bytes, or `None` if the kernel
 /// declined to say.

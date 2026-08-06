@@ -15,6 +15,46 @@
 //! The separation is the point. A run that took twenty minutes can be rendered
 //! as Markdown afterwards without repeating it, and a leg can be kept and
 //! compared against something else.
+//!
+//! `list --cases` is the exception to "no build": the case list lives in the
+//! compiled target rather than in a manifest, which is what stops the list and
+//! the run ever disagreeing, so asking each target what it declares means
+//! building it. A bare `list` names the targets and does not.
+//!
+//! # Flags shared by `run` and `ab`
+//!
+//! | Flag | Default | Meaning |
+//! |---|---|---|
+//! | `--replicates` / `-n` | `10` | Measured replicates per case |
+//! | `--filter` | none | Only cases whose id contains this substring |
+//! | `--seed` | `20260804` | Corpus seed, identical on both legs and across replicates |
+//! | `--target-ms` | `50` | How long one calibrated measured region should take |
+//! | `--warmup-ms` | `50` | Unmeasured warm-up before each region |
+//! | `--features` / `--all-features` | none | Forwarded to cargo, identically on both legs |
+//! | `--out` | under the bench cache | Where to write the leg or legs |
+//!
+//! `--filter` and the feature flags also apply to `list --cases`: a filter is a
+//! filter on case ids, so it needs the case list to filter. `run` takes
+//! `--leg NAME` (default `head`) for the name stamped into every record.
+//!
+//! `compare` and `ab` take `--format` — `table`, `markdown` or `json` — and
+//! `--allow`, whose values are the guarded field names. `--format markdown`
+//! produces the shape a pull-request comment carries: a header naming both
+//! builds, the significant-changes table, then the informational rows and the
+//! full table in collapsed sections, then anything that could not be compared,
+//! then the decision rule — also collapsed, because a reader who wants it knows
+//! to look and a reader who does not should see the table first. `--format json`
+//! carries every row with its interval and verdict.
+//!
+//! # Exit codes, and two refusals worth knowing in advance
+//!
+//! Exit code 2 means the arguments were wrong: anything the parser rejects, plus
+//! a reference or directory that does not exist. Exit code 1 means something
+//! failed while running.
+//!
+//! Two refusals are easier to recognise than to diagnose: two packages declaring
+//! a `_wall` target of the same name, and an `ab` whose two legs share no case at
+//! all — which a `--filter` matching nothing looks exactly like.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

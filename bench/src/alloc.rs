@@ -13,8 +13,16 @@
 //! another. It would also double the build cost of an A/B run, which is already
 //! two full compilations. The counter perturbs both legs identically, and the
 //! comparison is between legs, so the cost is inside the baseline rather than
-//! in the difference. `docs/user-guide/07-reference/benchmarking.mdx` states
-//! that caveat for the reader of a report.
+//! in the difference.
+//!
+//! # How a `realloc` is charged
+//!
+//! A growing reallocation is counted as its *growth*, and a shrinking one is not
+//! counted at all. So a doubling push-loop does not report quadratic bytes —
+//! but a build that grows a buffer by repeated appends instead of reserving it
+//! once reports roughly the same byte total as one that reserves.
+//! `alloc_count_per_iter` is what catches that one, which is the reason both
+//! figures are reported rather than only the bytes.
 //!
 //! # Why `installed` allocates rather than reading a flag
 //!

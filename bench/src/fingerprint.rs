@@ -5,6 +5,36 @@
 //! comparator refuses on a mismatch rather than rendering the difference, so
 //! these fields are the ones that decide whether a report exists at all.
 //!
+//! # The guarded fields
+//!
+//! `protocol`, `rustc`, `host_triple`, `profile`, `codegen`, `features`,
+//! `host_os`, `host_cpu`, `host_cores` and `host_label`.
+//!
+//! Six of the ten are checked as soon as both legs have been built, before a
+//! single replicate is measured — a table drawn across two builds describes the
+//! toolchain rather than the change, and finding that out after ten minutes of
+//! measuring helps nobody. The four `host_*` fields are checked when the records
+//! are compared instead: one process builds both legs, so it is the same machine
+//! by construction, and that check exists for two legs that were *not* produced
+//! together, which a bare `compare` accepts by design. `host_label` comes from
+//! `SPATE_BENCH_HOST`, and two runs from differently-labelled machines do not
+//! compare.
+//!
+//! `codegen` is the one that is not obvious. Both legs are built with `cargo
+//! bench`, so the profile *name* agrees by construction; `codegen` is a digest
+//! over the settings behind it — every `[profile...]` table in the root
+//! manifest, every `.cargo/config.toml` from the leg's directory upward, and the
+//! rustflags environment. `$CARGO_HOME`'s own config is deliberately left out:
+//! cargo reads it for every invocation whatever the directory, so it applies to
+//! both legs and cannot separate them. A change that adds `lto = "fat"` is a
+//! plausible thing to want to measure, and it has to be acknowledged rather than
+//! absorbed into the result.
+//!
+//! `--allow <field>` waives one by name. An unrecognised name is rejected rather
+//! than accepted as a waiver that does nothing, and the report says in its header
+//! which guards were waived — so comparing two feature arms of one commit is a
+//! deliberate act with a disclosure attached, rather than an accident.
+//!
 //! # Who fills them in
 //!
 //! The driver, not the bench binary. A bench target compiled by cargo cannot

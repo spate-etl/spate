@@ -24,6 +24,24 @@
 //!    that moment is common to the pair and cancels when the pair is
 //!    differenced. Flipping the order stops a systematic "second one is
 //!    warmer" effect accruing to one leg.
+//!
+//! # Where the run puts things
+//!
+//! Legs, worktrees and the reference's build artifacts all live under
+//! `$TMPDIR/spate-bench`, or under `SPATE_BENCH_CACHE` when that is set — never
+//! inside the repository, where cargo and git would both find them. The worktree
+//! is removed when a run ends; the legs and the reference's target directory are
+//! kept, and nothing prunes either.
+//!
+//! The target directory is keyed by the reference's commit, so a second run
+//! against the same reference reuses its compiled dependencies. The workspace's
+//! own crates are recompiled either way, since the worktree is recreated. It is
+//! a cache in the ordinary sense: `rm -rf` on it costs a rebuild and nothing
+//! else.
+//!
+//! Because a leg is a directory of self-describing records, a run that took
+//! twenty minutes can be re-rendered as Markdown, or as JSON for a script,
+//! without repeating it — an `ab` prints both leg paths when it finishes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;

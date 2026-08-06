@@ -26,6 +26,33 @@
 //!   unit and direction come from the records rather than from a table here, so
 //!   a throughput cannot be rendered as a regression because the renderer
 //!   guessed.
+//!
+//! # Three more that produce a number rather than an error
+//!
+//! **The two directories are a base and a head, in that order.** The leg name is
+//! not a guarded field — it differs by construction — so nothing else could tell
+//! the arguments apart, and transposing them would render every difference with
+//! its sign inverted. Two directories that are not a base and a head in that
+//! order are refused.
+//!
+//! **A change from nothing has no relative size.** A metric that is zero on the
+//! base leg and non-zero on the head — a path that begins allocating — goes to
+//! *Not comparable* rather than into the findings table, because there is no
+//! percentage to state. The entry names both values, which is the information a
+//! reader actually wanted.
+//!
+//! **One replicate missing a metric removes that metric entirely**, rather than
+//! shrinking its sample. A mean over nine pairs and a mean over ten are not the
+//! same estimate, and silently mixing them would put the difference between two
+//! sample sizes into a column labelled as a difference between two builds. The
+//! removal is disclosed under *Not comparable*, never silent.
+//!
+//! A single case whose corpus digest differs is demoted like any other, and the
+//! run succeeds with an empty table and the demotion beside it — which matters
+//! because a `--filter` routinely puts exactly one case in scope, and one case
+//! differing is not evidence about the corpora as a whole. One leg disagreeing
+//! with *itself* across its own replicates is a different failure and is not
+//! waivable: there is no single corpus left to compare against.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

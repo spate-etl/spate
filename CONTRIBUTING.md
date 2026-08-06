@@ -314,9 +314,8 @@ reader can tell a difference from a spread.
 
 `make bench-ab REF=main` does all of that for a change against a reference —
 worktree, interleave, discard the priming pass, pair by replicate and state the
-rule it decided by. Nothing it produces is stored;
-[the benchmarking page](docs/user-guide/07-reference/benchmarking.mdx) says what
-it measures and how to add a case.
+rule it decided by. Nothing it produces is stored; [`bench/README.md`](bench/README.md)
+and the harness's own crate docs say what it measures and how to add a case.
 
 ## Releases
 

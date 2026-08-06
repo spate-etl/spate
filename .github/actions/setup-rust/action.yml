@@ -79,7 +79,7 @@ runs:
     # from has to be filled by the job that compiled the most, so the shards
     # consume and never produce.
     - if: inputs.shared-key != ''
-      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         shared-key: ${{ inputs.shared-key }}
         save-if: ${{ inputs.cache-save != 'never' && github.ref == 'refs/heads/main' }}

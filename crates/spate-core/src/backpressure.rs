@@ -1,7 +1,7 @@
 //! Backpressure: the global in-flight byte budget and the watermark
 //! pause/resume controller with hysteresis.
 //!
-//! Invariant (see `docs/DESIGN.md` § Backpressure): source threads never
+//! Invariant (INV-2, see `docs/INVARIANTS.md`): source threads never
 //! block on sends. When a `try_send` is rejected or the in-flight budget
 //! crosses its high watermark, the poll loop pauses its source lanes and
 //! *keeps polling*; it resumes only under hysteresis — usage back below the

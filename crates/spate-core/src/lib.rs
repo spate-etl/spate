@@ -8,8 +8,8 @@
 //! Applications should depend on the [`spate`](https://crates.io/crates/spate)
 //! facade crate rather than on `spate-core` directly.
 //!
-//! The architecture and its invariants are documented in `docs/DESIGN.md`;
-//! the metric taxonomy in `docs/METRICS.md`.
+//! The invariants are documented in `docs/INVARIANTS.md`, the decisions
+//! behind them in `docs/adr/`, and the metric taxonomy in `docs/METRICS.md`.
 
 // tokio's own sources change shape under `--cfg loom` (net disappears), so
 // anything touching tokio::net is compiled out of loom model builds.

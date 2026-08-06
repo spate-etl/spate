@@ -22,7 +22,7 @@
 //!
 //! # Anatomy of a pipeline
 //!
-//! One process runs one pipeline (see `docs/DESIGN.md` in the repository
+//! One process runs one pipeline (see `docs/user-guide/` in the repository
 //! for the full architecture and its rationale):
 //!
 //! ```text

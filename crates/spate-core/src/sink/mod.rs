@@ -1,7 +1,7 @@
 //! Sink abstraction: pipeline threads encode, shard workers batch and
 //! write.
 //!
-//! The division of labour (see `docs/DESIGN.md` § Sink):
+//! The division of labour (see `docs/adr/0006-per-shard-sink-workers.md`):
 //!
 //! - **Pipeline threads** route each record to a shard — two tiers share
 //!   one seam: meta-only [`ShardRouter`] (the default [`KeyHashRouter`]:

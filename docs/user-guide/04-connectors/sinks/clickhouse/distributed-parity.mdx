@@ -238,7 +238,7 @@ dedup tokens and the collapse pattern apply as usual. See
   [why the sink writes direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table).
 - [Permissions](./permissions.mdx) — the `system.clusters` / `system.tables`
   grants the `distributed_check` guard needs.
-- [docs/DESIGN.md](../../../../DESIGN.md) § Sink — the routing seam and the
+- [ADR-0006](../../../../adr/0006-per-shard-sink-workers.md) — the routing seam and the
   two-tier router model.
 - [Performance tuning](./performance-tuning.mdx) — sizing shards, batches, and
   in-flight concurrency once the topology is set.

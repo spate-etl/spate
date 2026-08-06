@@ -65,8 +65,8 @@ pub use error::ConfigError;
 /// [`ComponentConfig`]. `serde_yaml` is a 0.x dependency, so exposing its
 /// `Value` directly in `spate-core`'s public API would tie our semver to
 /// theirs; this alias is the documented exemption (mirroring the [`bytes`]
-/// and `AvroValue` re-export pattern — see `docs/DESIGN.md` § Dependency
-/// policy). A major bump of the YAML crate becomes a breaking change here,
+/// and `AvroValue` re-export pattern — see INV-6 in `docs/INVARIANTS.md`).
+/// A major bump of the YAML crate becomes a breaking change here,
 /// and only here.
 ///
 /// [`bytes`]: crate::bytes

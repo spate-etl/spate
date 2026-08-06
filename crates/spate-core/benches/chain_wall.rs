@@ -30,7 +30,7 @@
 //!   ratio between them is not a quantity this rig measures. The shared input
 //!   denominator makes `bytes_per_s` read as though it were; it is not. What
 //!   the pair establishes is the **allocation** contrast — a fixed handful per
-//!   batch against one per record — which is what `docs/DESIGN.md` records the
+//!   batch against one per record — which is what `docs/adr/` records the
 //!   zero-copy seam on. Each arm is read against its own history across two
 //!   builds, which is all an A/B comparison ever claims.
 //! - **The keyed arms declare payload bytes only**, not payload plus key.

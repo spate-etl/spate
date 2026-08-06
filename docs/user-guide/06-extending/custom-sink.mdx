@@ -194,7 +194,7 @@ impl SinkBundle for MySink {
 itself implements it, which is why hand-rolled sinks skip the impl. The
 only bound anywhere is `ShardWriter`, so your connector's client types
 never appear in framework APIs (the dependency policy in
-[docs/DESIGN.md](../../DESIGN.md)). Connector-specific flows the framework
+[ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)). Connector-specific flows the framework
 cannot name — a pre-flight schema check that produces the encoder's row
 schema, say — stay concrete pre-steps in your factory, before `into_parts`.
 

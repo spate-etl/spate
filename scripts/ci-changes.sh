@@ -675,7 +675,7 @@ if len(set(keys)) != len(keys):
         check_paths false "" "a crate without a bench selects nothing" \
             "crates/$unbenched/src/lib.rs"
     fi
-    check_paths false "" "docs select nothing" docs/DESIGN.md
+    check_paths false "" "docs select nothing" docs/METRICS.md
     # Every file that can change what the counter tier measures, in the same
     # order as the `case` arm it mirrors. A file added to one and not the other
     # silently stops forcing a full re-measurement, which is how a change to

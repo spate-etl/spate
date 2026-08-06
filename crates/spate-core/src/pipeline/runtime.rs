@@ -79,7 +79,7 @@ pub enum StartError {
 }
 
 /// One pipeline process: source, per-thread chains, and a sink, assembled
-/// per `docs/DESIGN.md` § Process anatomy.
+/// per `docs/user-guide/02-concepts/01-architecture.mdx`.
 ///
 /// The caller creates the shared [`InflightBudget`] first and wires it into
 /// the chain terminals (which `add` on enqueue) and the sink workers (which

@@ -93,12 +93,11 @@ Each is a decision, not drift. Nothing else is exempt.
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |
 | `07-reference/glossary.mdx` | Definitions need anchors. | The mapping line above, nothing looser. |
 
-`docs/DESIGN.md` and `docs/adr/` sit outside `user-guide/` and outside this
-rule: they record why decisions were made, including vendor-specific ones. A
-decision about a connector cannot be stated in neutral vocabulary without
-becoming a different decision. Neither should grow connector *usage* guidance —
-that belongs on the connector page. See § 9 for the rest of what governs
-`docs/adr/`.
+`docs/adr/` sits outside `user-guide/` and outside this rule: it records why
+decisions were made, including vendor-specific ones. A decision about a
+connector cannot be stated in neutral vocabulary without becoming a different
+decision. It should not grow connector *usage* guidance — that belongs on the
+connector page. See § 9 for the rest of what governs `docs/adr/`.
 
 ## 2. Connector layout — group by role
 

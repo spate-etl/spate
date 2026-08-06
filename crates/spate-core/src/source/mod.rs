@@ -6,7 +6,8 @@
 //! pause/resume; each lane is a pollable unit pinned to one pipeline thread
 //! (for Kafka: a partition queue), yielding payloads that **borrow** the
 //! source's buffers for the duration of one `push_batch` call. See
-//! `docs/DESIGN.md` (§ Source abstraction, § Frozen v1 contracts).
+//! `docs/adr/0003-poll-based-source-api.md` and
+//! `docs/user-guide/06-extending/contracts.mdx`.
 
 mod barrier;
 

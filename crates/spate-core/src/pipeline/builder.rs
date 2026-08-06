@@ -251,7 +251,8 @@ impl ChainCtx {
 #[non_exhaustive]
 pub struct SinkOptions {
     /// Per-shard chunk queue capacity, in chunks. The default suits most
-    /// pipelines; see `docs/DESIGN.md` § Backpressure for the sizing rule.
+    /// pipelines; see `docs/user-guide/02-concepts/03-backpressure.mdx` for the
+    /// sizing rule.
     pub queue_capacity: usize,
     /// Programmatic override for this sink's terminal-stage chunking. `None`
     /// (the default) defers to the per-sink YAML `chunk:` block, or to

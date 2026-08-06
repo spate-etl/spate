@@ -331,7 +331,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         }
     }
 
-    // ---- Drain sequence (shutdown or failure; DESIGN.md § Shutdown) ----
+    // ---- Drain sequence (shutdown or failure; see graceful-shutdown.mdx) ----
     // Failure-initiated drains must set the process shutdown flag too:
     // drivers wedged in the blocked-batch retry loop only observe that flag,
     // and main joins them without a timeout — without this store, a chain

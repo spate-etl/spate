@@ -79,7 +79,7 @@ discarded rather than advancing a watermark that is no longer its own.
 That fence is the reason revocation is safe rather than merely fast: it does
 not rely on the outgoing owner finishing in time, only on it being unable to
 succeed afterwards. The choreography is in
-[docs/DESIGN.md](../../DESIGN.md) § Source abstraction, and the
+[ADR-0012](../../adr/0012-single-kafka-consumer-with-split-partition-queues.md), and the
 fleet-level view in [Work assignment](08-work-assignment.mdx).
 
 :::note Connector specifics
@@ -139,8 +139,8 @@ destination or at the query layer.
 
 ## Further reading
 
-- [docs/DESIGN.md](../../DESIGN.md) § Records and checkpointing, § Delivery
-  semantics — the canonical treatment.
+- [Writing a sink](../06-extending/custom-sink.mdx) — the `Drop` obligation on
+  anything holding acknowledgement handles for data not yet written.
 - [ADR-0005](../../adr/0005-refcounted-per-batch-acknowledgements.md) — why
   acknowledgements are refcounted per poll batch, and why the fail-by-default
   inversion was adopted for collections but rejected for records.

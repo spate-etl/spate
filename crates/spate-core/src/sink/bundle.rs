@@ -7,7 +7,7 @@
 //! `Pipeline::sink` accepts either. The only bound is [`ShardWriter`]:
 //! connector-specific types appear solely as the implementor's associated
 //! types, keeping 0.x dependencies out of this crate's public bounds
-//! (`docs/DESIGN.md` § Dependency policy).
+//! (INV-6; `docs/adr/0011-msrv-and-dependency-policy.md`).
 
 use super::{ShardWriter, SinkPoolConfig, SinkProbeFn};
 

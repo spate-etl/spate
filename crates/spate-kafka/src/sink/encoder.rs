@@ -296,7 +296,8 @@ impl MessageEncoder<Owned<Vec<u8>>> for KafkaBytesEncoder {
 
 /// Key extractor for [`KafkaJsonEncoder`]: derives an optional message key
 /// from the record payload. A plain `fn` item — borrowing families hit the
-/// same closure-inference limit as `map_rec` (see `docs/DESIGN.md`), and
+/// same closure-inference limit as `map_rec` (see
+/// `docs/adr/0004-static-operator-chain.md`), and
 /// `fn` items are naturally higher-ranked.
 pub type KeyFn<F> = for<'r, 'buf> fn(&'r <F as RecFamily>::Rec<'buf>) -> Option<&'r [u8]>;
 

@@ -8,7 +8,7 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
  * and the existing `NN-` prefixes drive both ordering and pretty labels (via
  * each folder's `_category_.json`).
  *
- * The two canonical long-form documents (`docs/DESIGN.md`, `METRICS.md`) are
+ * The canonical long-form documents (`docs/INVARIANTS.md`, `METRICS.md`) are
  * grouped separately so they don't collide with the user guide's own
  * `07-reference/` section.
  */
@@ -55,7 +55,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Design & Internals',
       collapsed: false,
-      items: ['INVARIANTS', 'DESIGN', 'METRICS'],
+      items: ['INVARIANTS', 'METRICS'],
     },
   ],
 };

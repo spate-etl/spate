@@ -332,7 +332,7 @@ impl<W: ShardWriter> ShardWorker<W> {
             }
         }
 
-        // ---- Drain (DESIGN.md § Shutdown) ----
+        // ---- Drain (see graceful-shutdown.mdx) ----
         // Intake is gated on `waiting`, and the deadline arm can win while it
         // is gated off, so the queue may still hold chunks the drivers handed
         // over — closed but not empty. Consume them here. A chunk dropped

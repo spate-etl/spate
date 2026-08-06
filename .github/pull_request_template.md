@@ -15,7 +15,7 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 Tick the ones this change touches. Ticking one is not a problem — it means
 the description above should say how the property still holds.
 
-The numbers are canonical and defined in docs/DESIGN.md; CONTRIBUTING.md
+The numbers are canonical and defined in docs/INVARIANTS.md; CONTRIBUTING.md
 states the same list with the reasoning attached.
 -->
 

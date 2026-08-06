@@ -40,7 +40,7 @@ Never post PR comments, never commit, never push without being asked.
 ## Process
 
 ### 1. Establish ground truth
-Read, before judging anything: `docs/DESIGN.md` — the canonical `## Invariants`
+Read, before judging anything: `docs/INVARIANTS.md` — the canonical `## Invariants`
 section in full, plus the sections the diff touches — then `AGENTS.md` (its
 Invariants section carries the implementation detail) and `docs/METRICS.md`.
 Findings are judged against *this repo's* invariants, not generic Rust intuition.

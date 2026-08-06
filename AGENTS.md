@@ -15,7 +15,7 @@ reads well.
 
 ## Invariants (do not break)
 
-The numbers are canonical and defined in [`docs/DESIGN.md`](docs/DESIGN.md).
+The numbers are canonical and defined in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
 Cite them: "this touches INV-5" is a reviewable claim in a way that restating
 the property is not.
 

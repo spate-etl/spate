@@ -55,7 +55,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Design & Internals',
       collapsed: false,
-      items: ['DESIGN', 'METRICS'],
+      items: ['INVARIANTS', 'DESIGN', 'METRICS'],
     },
   ],
 };

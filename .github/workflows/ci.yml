@@ -221,6 +221,12 @@ jobs:
       - run: make check-labels
       - run: make check-invariants
 
+      # The decision records and their index drift apart silently: the index is
+      # hand-maintained, and a record that never reaches it is invisible to
+      # every reader who starts there. Also catches a record scaffolded from the
+      # template and committed before its placeholders were filled in.
+      - run: make check-adr
+
       # The report script and perf-label.yml share a one-file contract that
       # no pull request can execute end to end — the label workflow runs the
       # default branch's definition — so the write side runs here: the flag

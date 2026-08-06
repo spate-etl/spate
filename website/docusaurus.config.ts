@@ -191,6 +191,11 @@ const config: Config = {
           position: 'left',
         },
         {
+          to: '/docs/adr/',
+          label: 'Decisions',
+          position: 'left',
+        },
+        {
           // Generated third-party licence texts, published under
           // <baseUrl>/licenses/ by CI alongside the rustdoc.
           to: 'pathname:///licenses/',

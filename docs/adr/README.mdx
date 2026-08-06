@@ -1,0 +1,39 @@
+# Decisions
+
+Architecture Decision Records: one file per decision, recording what was chosen,
+what else was on the table, and what the choice cost.
+
+These are **historical records, not documentation**. Each one describes the
+decision as it stood when it was taken, and an accepted record is never
+rewritten to say something different. When a decision changes, a new record
+supersedes the old one and both stay — the superseded record keeps its body and
+gains a pointer to its replacement, so the reasoning that was abandoned remains
+readable next to the reasoning that replaced it. For how the system behaves
+today, read the [user guide](../user-guide/README.mdx); for why it is that way,
+read here.
+
+A decision earns a record when it affects the structure of the system, a key
+quality attribute, or is hard to reverse — and does not otherwise. The full rule
+lives in the template, which is also this section's documentation:
+`docs/adr/_template.md`. Add one with:
+
+```sh
+make adr-new SLUG=short-description
+```
+
+That allocates the next number, fills in today's date, and copies the template
+with its rules attached. `make ci-lint` checks the mechanical half — unique
+numbers, permitted status values, no unfilled placeholders, and that every
+record appears in the table below.
+
+## The records
+
+| ADR | Decision | Status | Date |
+| --- | --- | --- | --- |
+| [0001](0001-record-architecture-decisions-in-adrs.md) | Record architecture decisions in ADRs | accepted | 2026-08-06 |
+
+## Related
+
+- [`docs/adr/_template.md`](https://github.com/spate-etl/spate/blob/main/docs/adr/_template.md) — the template, which states the rules for writing one and what does not warrant a record
+- [User guide](../user-guide/README.mdx) — how the system behaves, as opposed to why it was built that way
+- [Contributing](https://github.com/spate-etl/spate/blob/main/CONTRIBUTING.md) — the gates a change has to pass, including when a decision needs a record

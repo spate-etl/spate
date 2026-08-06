@@ -413,8 +413,8 @@ for crate in sorted(names):
     # Bench selection is derived from discovery, which makes "everything
     # selected has a bench" true by construction and therefore worth nothing as
     # an assertion. What is checked instead is the shape of the three rules —
-    # each of them a claim this file, CONTRIBUTING.md and the CI reference all
-    # make in prose, and none of them guaranteed by the derivation alone.
+    # each of them a claim this file and CONTRIBUTING.md both make in prose, and
+    # none of them guaranteed by the derivation alone.
     discover_bench_pkgs
     discovered=$(all_bench_pkgs)
     all_pkgs=$(all_bench_pkgs | tr '\n' ' ')
@@ -597,9 +597,9 @@ if len(set(keys)) != len(keys):
 
     # What each path arm selects. The checks above cannot see this: they test
     # the selection functions, and the arms are what consult them. Every row
-    # here is a rule stated in prose somewhere — in the comments below, in
-    # CONTRIBUTING.md or in the CI reference — so a rule that stops holding
-    # fails here instead of going quietly false in three documents at once.
+    # here is a rule stated in prose somewhere — in the comments below or in
+    # CONTRIBUTING.md — so a rule that stops holding fails here instead of going
+    # quietly false in two documents at once.
     path_case_failed=0
     #
     # `$2` is still a package list, and the expectation is the matrix that

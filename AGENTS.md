@@ -103,20 +103,6 @@ Three traps that have cost real time here:
   you push, so run `actionlint .github/workflows/*.yml` and `make zizmor`
   yourself after touching one.
 
-## CI
-
-`ci.yml` gates the pull request; `scheduled.yml` detects the world changing
-underneath a static tree. The full account — the gate's `always()` trap, the
-merge-base diff rules, the nextest profiles, the coverage split — is
-[`docs/user-guide/07-reference/ci.mdx`](docs/user-guide/07-reference/ci.mdx).
-Read it before changing a workflow.
-
-- `ci-gate` is the only job that should ever be a required status check.
-- `scripts/ci-changes.sh` picks the expensive jobs from the changed paths. It is
-  an ignore-list and **fails closed** on purpose: the `ci: docker`, `ci: loom`
-  and `ci: bench` labels can force a suite on, and nothing can force one off.
-- Every action is pinned to a full commit SHA.
-
 ## Testing
 
 proptest for tracker and codec invariants, loom for the sync primitives, rdkafka

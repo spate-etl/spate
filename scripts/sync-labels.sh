@@ -8,8 +8,7 @@
 # action. The organisation restricts Actions to GitHub-owned, verified-publisher
 # and an explicit pattern list, so a third-party action here needs an allowlist
 # entry — and a refused one does not fail the job, it reports `startup_failure`
-# with nothing naming the action. See "The Actions allowlist" in
-# docs/user-guide/07-reference/ci.mdx.
+# with nothing naming the action.
 #
 # Deleting is deliberately not implemented. Left to prune, this would remove
 # GitHub's stock labels that open issues still carry, and deleting a label

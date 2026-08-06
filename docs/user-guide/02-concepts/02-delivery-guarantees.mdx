@@ -140,8 +140,12 @@ destination or at the query layer.
 ## Further reading
 
 - [docs/DESIGN.md](../../DESIGN.md) § Records and checkpointing, § Delivery
-  semantics — the canonical treatment, including the evaluated alternative
-  ack designs.
+  semantics — the canonical treatment.
+- [ADR-0005](../../adr/0005-refcounted-per-batch-acknowledgements.md) — why
+  acknowledgements are refcounted per poll batch, and why the fail-by-default
+  inversion was adopted for collections but rejected for records.
+- [ADR-0002](../../adr/0002-at-least-once-delivery.md) — why the guarantee is
+  at-least-once, and what exactly-once would have cost.
 - [Error handling](04-error-handling.mdx) — what happens to the watermark
   when records fail.
 - [Testing pipelines](../03-guides/testing-pipelines.mdx) — asserting on

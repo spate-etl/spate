@@ -288,36 +288,12 @@ there is no lint gate for it. Before you push, run
 `cd website && npm run build`: that one *is* gated, and it is what catches a
 link you broke by moving a page.
 
-### Decision records
-
-`docs/adr/` holds one record per architectural decision: what was chosen, what
-else was on the table, and what the choice cost. Scaffold one with
-`make adr-new SLUG=short-description`, which allocates the next number and
-copies the template.
-
-A decision earns a record when it **affects the structure of the system, a key
-quality attribute, or is hard to reverse** — and not otherwise. Most pull
-requests need none, and that is the intended rate: decision logs die by filling
-with records nobody needed, not by missing one.
-
-The rule that catches people out is that **an accepted record is immutable**.
-When a decision changes you write a *new* record that supersedes the old one,
-and the old one keeps its body — so the reasoning that was abandoned stays
-readable next to the reasoning that replaced it. Editing the original to say
-something different destroys exactly what the record existed to keep. Fixing a
-typo or a stale link is not that; changing what the record claims was decided
-is.
-
-[`docs/adr/_template.md`](docs/adr/_template.md) is normative and states the
-rest inline, section by section. `make check-adr` holds the mechanical half —
-unique numbers, known statuses, no unfilled placeholders, and every record
-listed in the index.
-
 **A performance figure in the docs carries how it was established.** The
-decision log in [`docs/DESIGN.md`](docs/DESIGN.md) is where the load-bearing
-ones live, most carrying a parenthetical for what stands behind them. Match the
-wording already there rather than inventing a stronger-sounding one. A figure
-nobody can place is one nobody can later check. If a change makes something
+load-bearing ones live in the `Evidence` section of the decision record they
+justify, each with a line saying what measured it — down to "measured by a rig
+this repository no longer carries", which is a real provenance and an honest
+one. Match the wording already there rather than inventing a stronger-sounding
+one. A figure nobody can place is one nobody can later check. If a change makes something
 faster, say so in the pull request and say what you measured it on, because a
 number from a busy laptop is not comparable to one taken on a quiet machine.
 

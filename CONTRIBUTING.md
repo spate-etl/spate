@@ -289,10 +289,11 @@ there is no lint gate for it. Before you push, run
 link you broke by moving a page.
 
 **A performance figure in the docs carries how it was established.** The
-decision log in [`docs/DESIGN.md`](docs/DESIGN.md) is where the load-bearing
-ones live, most carrying a parenthetical for what stands behind them. Match the
-wording already there rather than inventing a stronger-sounding one. A figure
-nobody can place is one nobody can later check. If a change makes something
+load-bearing ones live in the `Evidence` section of the decision record they
+justify, each with a line saying what measured it — down to "measured by a rig
+this repository no longer carries", which is a real provenance and an honest
+one. Match the wording already there rather than inventing a stronger-sounding
+one. A figure nobody can place is one nobody can later check. If a change makes something
 faster, say so in the pull request and say what you measured it on, because a
 number from a busy laptop is not comparable to one taken on a quiet machine.
 

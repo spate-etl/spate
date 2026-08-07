@@ -30,6 +30,6 @@ trait, so a backend is a few hundred lines rather than a fork.
   the facade must never enable it — a test clock in production stops the
   control loop dead.
 
-The algorithm is normative and documented in the repository's
-`docs/user-guide/02-concepts/08-work-assignment.mdx`, whose numbered
-invariants name the property tests that enforce them.
+The algorithm is normative and documented under
+[Work assignment](https://spate.kainth.dev/docs/user-guide/concepts/work-assignment),
+whose numbered invariants name the property tests that enforce them.

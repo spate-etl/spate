@@ -686,6 +686,42 @@ if len(set(keys)) != len(keys):
         check_paths true "$all_pkgs" "$apparatus selects every benched crate" \
             "$apparatus"
     done
+
+    # The transclusion rule, which `check_paths` cannot see: it reads `bench=`
+    # and `bench-shards=` only, and this arm is about `site=`. A sibling helper
+    # rather than a fifth parameter, because threading a `site` expectation
+    # through the twelve cases above would obscure the bench rule each one is
+    # there to state.
+    #
+    # What it holds: a page's Rust snippets are regions of a file under
+    # `crates/`, so an edit there can change a rendered page. If that stops
+    # selecting the site, a broken region reaches the deployed site with every
+    # job green — see the `crates/*` arm.
+    check_site() {
+        local want="$1" desc="$2"
+        shift 2
+        local list out got
+        list=$(mktemp)
+        out=$(mktemp)
+        printf '%s\0' "$@" >"$list"
+        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
+            "$0" --classify-paths "$list" >/dev/null
+        got=$(sed -n 's/^site=//p' "$out")
+        rm -f "$list" "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected site=$want, got site=$got for: $*"
+            path_case_failed=1
+        fi
+    }
+
+    check_site true "an example selects the site" \
+        crates/spate/examples/memory_pipeline.rs
+    check_site true "a crate library source selects the site" \
+        crates/spate-core/src/lib.rs
+    check_site true "docs select the site" docs/METRICS.md
+    check_site true "the site tree selects the site" website/docusaurus.config.ts
+    check_site false "a bench source does not select the site" bench/src/lib.rs
+
     [[ "$path_case_failed" == "0" ]] || exit 1
 
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
@@ -786,7 +822,25 @@ else
         case "$file" in
         # Source trees: always code, whatever the file extension. Empty body,
         # so control falls past the `case` to the classification below.
-        crates/* | scripts/* | bench/*) ;;
+        #
+        # `crates/*` is split out because it selects the site as well. A docs
+        # page's Rust snippets are not written in the page — they are regions of
+        # a file under `crates/`, resolved at site-build time by
+        # website/src/remark/transclude.ts. An edit under `crates/` can
+        # therefore change a rendered page without touching `docs/` at all, and
+        # before this arm existed such a pull request never built the site.
+        #
+        # Deliberately the whole tree rather than the paths some page names
+        # today. A `file=` attribute may point anywhere under `crates/`, so a
+        # narrower list goes stale the first time a page quotes something new —
+        # and it goes stale by failing OPEN, which is the failure mode the
+        # ignore-list shape at the top of this file exists to avoid. The site
+        # build is the cheap tier; a Rust pull request already pays for the
+        # test, feature and MSRV matrices, which dwarf it.
+        crates/*)
+            site=true
+            ;;
+        scripts/* | bench/*) ;;
         # CI definitions decide what every other job does, so a change to one
         # has to be exercised by the full set.
         .github/workflows/* | .github/actions/*) ;;

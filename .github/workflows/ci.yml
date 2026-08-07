@@ -239,6 +239,14 @@ jobs:
       # nothing would say so until the next benched change.
       - run: make check-collected-region
 
+      # A page's Rust snippets are slices of sources under `crates/`, resolved
+      # when the site builds. That build is path-filtered and carries a
+      # persistent bundler cache, so "the site job was green" is not the same
+      # statement as "every region still resolves" — and on a pull request that
+      # touches no page, the site job may not run at all. This reads both sides
+      # off disk and needs neither cargo nor node, which is why it belongs here.
+      - run: make check-transclusions
+
   deny:
     name: Licences and advisories
     runs-on: ubuntu-latest

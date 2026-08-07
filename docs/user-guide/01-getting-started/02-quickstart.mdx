@@ -21,13 +21,7 @@ Framework tuning comes from YAML. The `source` and `sink` sections are
 opaque bags that each connector's factory reads — here the in-memory pieces
 are built programmatically, so the tags are informational:
 
-```rust
-const CONFIG: &str = r#"
-pipeline: { name: memory-demo, threads: 1 }
-checkpoint: { interval: 200ms }
-source: { memory: {} }
-sink: { capture: {} }
-"#;
+```rust file=crates/spate/examples/memory_pipeline.rs region=config
 ```
 
 Real configs add backpressure budgets, metrics exporters, and connector
@@ -36,11 +30,14 @@ and the [configuration reference](../07-reference/configuration.mdx).
 
 ## 2. Construct the builder
 
-```rust
-use spate::prelude::*;
+Everything from here on needs these imports:
 
-spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
-let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
+```rust file=crates/spate/examples/memory_pipeline.rs region=imports
+```
+
+Then the builder itself:
+
+```rust file=crates/spate/examples/memory_pipeline.rs region=init
 ```
 
 `Pipeline::from_config` owns process initialization: it installs the
@@ -57,19 +54,7 @@ The `spate-test` mocks come paired with scripting handles — the source handle
 pushes records and reads back committed watermarks, the sink script reads
 back every durable write:
 
-```rust
-use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
-use std::time::Duration;
-
-let (source, handle) = memory_source();
-
-let (sink, script) = capture_sink(1, 1); // one shard, one replica
-let pool_cfg = {
-    let mut cfg = SinkPoolConfig::default();
-    cfg.batch.linger = Duration::from_millis(50); // flush quickly for the demo
-    cfg
-};
-let sink = sink.with_pool_config(pool_cfg);
+```rust file=crates/spate/examples/memory_pipeline.rs region=mocks
 ```
 
 A Kafka source gets its lane assignments from the broker instead of a
@@ -84,34 +69,7 @@ terminal `.sink(...)` stage encodes rows and routes them to the shard
 queues. The factory closure runs once per pipeline thread; `ChainCtx`
 carries that thread's plumbing (queues, byte budget, pipeline name):
 
-```rust
-let runtime = pipeline
-    .sink(sink)?
-    .chains(|ctx| {
-        // Resolve the sink's chunking up front — the per-sink YAML `chunk:`
-        // block, or the 64 KiB default. Bind it before `with_metrics` moves
-        // `ctx.pipeline`, so the later `ctx.chunk()` doesn't borrow a moved ctx.
-        let chunk_cfg = ctx.chunk();
-        chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
-            .with_metrics(ctx.pipeline, "main")
-            .filter(|word: &Vec<u8>| !word.is_empty())
-            .map(|word: Vec<u8>| word.to_ascii_uppercase())
-            .sink(
-                TestEncoder,
-                KeyHashRouter,
-                chunk_cfg,
-                ctx.queues,
-                ctx.budget,
-            )
-            .build()
-    })
-    .runtime_options(RuntimeOptions {
-        handle_signals: false, // the demo triggers shutdown itself
-        ..RuntimeOptions::default()
-    })
-    .into_runtime(source)?;
-let shutdown = runtime.shutdown_handle();
-let join = std::thread::spawn(move || runtime.run());
+```rust file=crates/spate/examples/memory_pipeline.rs region=chain
 ```
 
 Two things to notice:
@@ -130,25 +88,7 @@ Two things to notice:
 Assign a lane, push three payloads (nine words, one empty), and wait for the
 committed watermark to cover the last offset:
 
-```rust
-use spate::source::LaneId;
-
-let p0 = PartitionId(0);
-handle.assign_lanes(&[(LaneId(0), p0)]);
-let mut last = 0;
-for payload in [
-    &b"alpha,beta,gamma"[..],
-    b"delta,,epsilon",
-    b"zeta,eta,theta",
-] {
-    last = handle.push(p0, Some(b"demo"), payload);
-}
-
-while handle.last_committed(p0) != Some(last + 1) {
-    std::thread::sleep(Duration::from_millis(20));
-}
-shutdown.trigger();
-let report = join.join().expect("pipeline thread")?;
+```rust file=crates/spate/examples/memory_pipeline.rs region=drive
 ```
 
 That wait loop *is* the at-least-once contract in action: the watermark
@@ -159,14 +99,7 @@ explains the machinery.
 
 Finally, read back what the sink captured:
 
-```rust
-let rows: Vec<String> = script
-    .writes()
-    .iter()
-    .flat_map(|w| spate_test::decode_rows(&w.payload))
-    .map(|r| String::from_utf8_lossy(&r).into_owned())
-    .collect();
-assert_eq!(rows.len(), 8, "nine words minus one filtered empty");
+```rust file=crates/spate/examples/memory_pipeline.rs region=capture
 ```
 
 ## Where next

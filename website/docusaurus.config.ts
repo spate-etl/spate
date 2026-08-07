@@ -1,6 +1,11 @@
 import type { Config, PluginConfig } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import { themes as prismThemes } from 'prism-react-renderer';
+// Extensionless on purpose: `moduleResolution: bundler` rejects an explicit
+// `.ts`, and Docusaurus loads this config through jiti, which transpiles
+// nested TypeScript imports and resolves `.ts` itself.
+import transclude from './src/remark/transclude';
+import transcludeDeps from './src/plugins/transcludeDeps';
 
 // The site is deployed to Cloudflare Pages on a dedicated subdomain:
 // https://spate.kainth.dev/ (Direct Upload from CI — see the nightly
@@ -121,6 +126,10 @@ const config: Config = {
     // CI-only, as a standing precaution rather than for any entry currently
     // in the set (see clientRedirects above).
     process.env.CI === 'true' ? clientRedirects : false,
+    // Not conditional. What it registers is a cache-correctness fact — which
+    // sources a page's fences are rendered from — and a rebuild that is only
+    // correct in CI is the wrong half of the problem to solve.
+    transcludeDeps,
   ],
 
   themes: [
@@ -162,6 +171,15 @@ const config: Config = {
             '**/__tests__/**',
             'STYLE.md',
           ],
+          // Renders `file=`/`region=` fences from the compiled sources under
+          // `crates/` (docs/STYLE.md § 10). Registered BEFORE the defaults
+          // rather than after them (`remarkPlugins`) for two reasons: the
+          // default list ends with plugins that mutate the tree and can throw
+          // first under this site's `onBrokenMarkdownLinks: 'throw'`, so a
+          // stale region should report as a stale region; and the mermaid
+          // plugin *replaces* a fenced node, so a ```mermaid fence carrying
+          // `file=` would never reach a plugin registered after it.
+          beforeDefaultRemarkPlugins: [transclude],
         },
         blog: false,
         theme: {

@@ -232,10 +232,10 @@ changes ship in a minor bump and are called out in
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the invariants, the gates, and how
-changes land; the [Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
-[AI_POLICY.md](AI_POLICY.md) covers what a contribution has to withstand,
-whatever wrote it.
+[CONTRIBUTING.md](CONTRIBUTING.md) has what is worth contributing, how to build
+and test it, and how changes land. The [Code of Conduct](CODE_OF_CONDUCT.md)
+applies throughout. [AI_POLICY.md](AI_POLICY.md) covers what a contribution has
+to withstand, whatever wrote it.
 
 Vulnerabilities go through
 [GitHub's private advisory flow](https://github.com/spate-etl/spate/security/advisories/new),

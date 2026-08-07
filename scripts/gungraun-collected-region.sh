@@ -435,7 +435,7 @@ check_dir() {
             echo "  rather than measured — the same defect as a runtime-dominated region, wearing the other face."
             echo "  Profile: $where"
             echo "  Move the measured work into a named #[inline(never)] function the benchmark calls,"
-            echo "  and see CONTRIBUTING.md."
+            echo "  and see DEVELOPING.md."
             failed=1
             checked=$((checked + 1))
             continue
@@ -449,7 +449,7 @@ check_dir() {
             echo "  Profile: $where"
             echo "  The usual cause is the measured work being written inline in the #[library_benchmark]"
             echo "  function, where the optimiser may reshape it out of the collected region. Move it into a"
-            echo "  named #[inline(never)] function the benchmark calls — see CONTRIBUTING.md."
+            echo "  named #[inline(never)] function the benchmark calls — see DEVELOPING.md."
             failed=1
         fi
         checked=$((checked + 1))

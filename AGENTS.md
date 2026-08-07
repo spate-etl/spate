@@ -4,8 +4,11 @@ High-performance, at-least-once ETL pipeline framework in Rust. Publishable
 crates under `crates/`, plus the unpublished wall-clock benchmark harness in
 `bench/`.
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point.
-[`AI_POLICY.md`](AI_POLICY.md) covers what any contribution has to withstand;
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point and
+[`DEVELOPING.md`](DEVELOPING.md) carries the build, test and benchmark mechanics
+in full — reach for the latter when a target, a profile or a bench convention is
+what you need. [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution has to
+withstand;
 the part that most often applies here is that a delivery-correctness change is
 judged on a failing test, not on reasoning that reads well.
 
@@ -32,9 +35,11 @@ make clippy
 cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 ```
 
-`make help` lists every target; `make gates` is what a pull request must pass,
-and the workflows call the same targets, so a command that works here is the
-command CI runs.
+`make help` lists every target; `make gates` is what a pull request must pass.
+CI calls the same targets for lint, type check, doctests, the feature matrix,
+licences and every `ci-lint` member — but the test, container, site and MSRV jobs
+spell out invocations of their own, so green gates locally is necessary and not
+sufficient.
 
 Three traps that have cost real time here:
 

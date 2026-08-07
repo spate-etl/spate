@@ -8,6 +8,29 @@ configuration keys.
 
 This file is a contributor reference; it is excluded from the rendered site.
 
+## Who this is for
+
+The reader of `docs/user-guide/` is a **Rust developer new to Spate but not new
+to streaming**. Assume they are comfortable with async Rust, and that they
+already hold the concepts the field shares — at-least-once delivery, consumer
+groups, backpressure, partitioning. Assume they know nothing Spate-specific.
+
+Two consequences, because both get broken by well-meaning edits:
+
+- **Re-explaining a concept the reader already has buries the thing they came
+  for**, which is how *this* system expresses it. A paragraph defining
+  backpressure in general costs the paragraph describing what our source does
+  when a queue rejects.
+- **A Spate term used before § 7 has defined it loses them**, and nothing later
+  on the page recovers it.
+
+**The site and the rustdoc divide the work.** The site owns tutorial, how-to
+and explanation; the rustdoc owns per-item reference — signatures, trait
+contracts, `Errors` / `Panics` / `Safety`. A fact belongs to exactly one of
+them. Where a page needs a signature, it links to the rustdoc rather than
+restating it: a restated signature is a claim that rots silently, and nothing
+gates it.
+
 ## 1. The framework/connector boundary
 
 Two layers, and prose must not cross from the first into the second:
@@ -33,7 +56,7 @@ In framework **prose**, a connector or vendor name may appear only:
   path is a pointer to code, like a link, not prose about a vendor.
 
 Never in framework prose: vendor setting keys (`max.poll.interval.ms`), vendor
-tuning numbers, vendor troubleshooting, or vendor client-library behaviour.
+tuning numbers, vendor troubleshooting, or vendor client-library behavior.
 State the rule in framework vocabulary and let the connector page carry the
 mechanism. Usually the neutral statement is the *truer* one — "a source that
 stops servicing its liveness protocol loses its work assignment" holds for a
@@ -42,7 +65,7 @@ vendor-specific version holds for one of them.
 
 **Connector pages name one vendor: their own.** A connector page must not
 explain another connector — link to it. An end-to-end example that necessarily
-spans connectors is fine; describing another connector's behaviour is not.
+spans connectors is fine; describing another connector's behavior is not.
 
 **The rule governs prose, not fenced code and YAML blocks.** A config example
 has to say `kafka:`; there is no fictional tag that resolves. Code blocks are
@@ -72,7 +95,7 @@ How each source expresses this: [Kafka](…) · [S3](…).
 ### The glossary mapping line
 
 A definition often needs a concrete anchor to land. In the glossary — and only
-there — a term may carry one standardised trailing line:
+there — a term may carry one standardized trailing line:
 
 ```markdown
 *Connector mapping:* [Kafka](…) — one partition queue · [S3](…) — one in-flight split.
@@ -89,7 +112,7 @@ Each is a decision, not drift. Nothing else is exempt.
 |---|---|---|
 | `01-getting-started/**` | A tutorial must be concrete — a reader cannot follow an abstract pipeline. | Declares its stack in the first paragraph. |
 | `06-extending/**` | Teaching someone to write a connector needs a real one to point at. | Shipped connectors appear as marked worked references (`worked reference: crates/spate-kafka/src/metrics.rs`), never as the normative prose. |
-| Index pages — `04-connectors/README.mdx`, the role card indexes, `user-guide/README.mdx`, `07-reference/README.mdx`, the appendix's component mapping table | Indexing connectors and crates by name is their entire job. | Name and one-line summary; no behaviour. |
+| Index pages — `04-connectors/README.mdx`, the role card indexes, `user-guide/README.mdx`, `07-reference/README.mdx`, the appendix's component mapping table | Indexing connectors and crates by name is their entire job. | Name and one-line summary; no behavior. |
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |
 | `07-reference/glossary.mdx` | Definitions need anchors. | The mapping line above, nothing looser. |
 
@@ -155,7 +178,7 @@ Copy `04-connectors/_template.mdx`. The heading order is fixed:
    Connector-specific auth/TLS, linking back to the
    [securing hub](user-guide/03-guides/securing-connections.mdx). Shared prose
    goes in an MDX partial (see §5).
-6. Behavioural sections (delivery semantics, backpressure, …).
+6. Behavioral sections (delivery semantics, backpressure, …).
 7. `## Metrics` — the families this connector registers, with their labels.
    This is the only home for them; `docs/METRICS.md` carries the taxonomy and
    the framework families, not connector registries.
@@ -241,11 +264,47 @@ Voice follows the quadrant, so there is one rule to remember rather than two:
 Everywhere:
 
 - **Present-tense declarative.** "Unknown fields are rejected", not "will be".
+- **The page reads as the present, never as a changelog.** No "now", "recently",
+  "as of", "has been changed to". If something moved, the page describes what
+  is and the commit message says what moved. (§ 9 suspends this for `docs/adr/`.)
+- **American English** — `serialize`, `behavior`, `normalize`. The API surface
+  is permanently American, because serde owns `Serializer` and `serialize`, so
+  British prose mismatches the identifier in the code block beside it. The
+  site's search index matches tokens literally, so a page written "behaviour"
+  is invisible to a reader who searches the spelling every other Rust crate
+  taught them.
+  `cancelled` is the one deliberate exception: it is a metric label value
+  (`outcome="cancelled"`), and the prose matches the exposition.
+- **No first-person plural on a rendered page.** No "we recommend", no "our
+  design" — the framework has no voice of its own, so state the thing. This
+  file, `CLAUDE.md` and `CONTRIBUTING.md` are contributor files and exempt,
+  which is why this one opens "How we structure `docs/`".
 - **Sentence case for headings**, except product nouns and identifiers
   (`ClickHouse Native format`, `` `SinkBundle` and the readiness probe ``).
+- **Conditions before the instruction they govern.** "If the sink is remote,
+  raise the timeout" — not "raise the timeout if the sink is remote". A reader
+  who acts on the first half of that sentence has already acted wrongly.
+- **Link text names its destination.** Never "here", "this page", "see this".
+  The words under the link say what is on the other side, so it still works
+  read out of context — which is how a skimming reader meets it.
+- **Open with the subject, not with the page.** "This page explains how
+  sharding works" spends the most valuable line in the document on nothing.
+  Start with sharding.
 - **Every `## Related` entry carries an em-dash gloss** saying why to follow it.
   A bare link list is not a Related section.
 - **Define a term once**, in the glossary, and use it consistently after.
+- **Identifiers keep the spelling the compiler uses**, in backticks: a type as
+  `` `SinkBundle` ``, a method as `` `Sink::write` ``, a crate as
+  `` `spate-kafka` ``, a facade feature as `` feature `kafka` ``. The concept
+  is unbackticked and lowercase — "the sink bundle" is the idea, `SinkBundle`
+  is the type. Do not mix the two in one sentence.
+- **Admonitions are `:::note`, `:::warning` and `:::danger`, and nothing else.**
+  `:::note` for the pointer block above and for an aside a reader may skip;
+  `:::warning` for a footgun that costs time; `:::danger` only for what costs
+  *data* — a delivery caveat, a setting that drops records, an operation with
+  no undo. `:::tip` and `:::caution` are unused: a tip is either worth a
+  sentence of prose or is not worth the reader's eye. Never stack two, and
+  never open a section with one.
 - **A performance figure carries how it was established.** The load-bearing ones
   sit in the `Evidence` section of the decision record they justify, each with a
   line saying what measured it — down to "measured by a rig this repository no
@@ -265,16 +324,17 @@ Everywhere:
 - **Pages carry no YAML frontmatter.** The H1 is the title; a frontmatter
   `title:` alongside an H1 renders twice.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
-  `onBrokenLinks: 'throw'` fails the build on a stale link, so `npm run build`
-  is the correctness gate for any move or rename.
+  `onBrokenLinks: 'throw'` fails the build on a stale link, so `make docs` is
+  the correctness gate for any move or rename.
 - **Moving or renaming a page changes its URL** (URLs are path-derived). Add a
   `{ from, to }` entry to the `clientRedirects` plugin in
   `website/docusaurus.config.ts` for every moved page to keep old links alive.
   That plugin only registers under `CI=true`, so test redirects that way.
-- **Run the gate before pushing:** `cd website && npm run build`, checking the
-  **exit code explicitly** — piped `grep`/`tail` chains have masked real
-  failures here. Scan the log for anchor warnings (`onBrokenAnchors: 'warn'`),
-  which do not fail the build.
+- **Run the gate before pushing:** `make docs`, checking the **exit code
+  explicitly** — piped `grep`/`tail` chains have masked real failures here.
+  `onBrokenLinks`, `onBrokenAnchors` and `onBrokenMarkdownLinks` are all
+  `'throw'`, so a stale link *or* a stale `#anchor` fails the build outright
+  rather than warning.
 
 ## 9. Decision records
 
@@ -314,3 +374,52 @@ extension-qualified links, and an em-dash gloss on every `## Related` entry.
 statuses from the permitted set, no unfilled placeholders, and every record
 present in `docs/adr/README.mdx`. Whether a decision warranted a record at all
 is review's job.
+
+## 10. Code examples
+
+A snippet is the part of the page a reader pastes, so it is the highest-rot
+surface on it. Prose that goes stale reads oddly; an example that goes stale
+fails to compile in someone else's editor.
+
+- **Every fence carries a language tag** — `rust`, `yaml`, `toml`, `sh`, `text`.
+  Use `text` for output, logs and trees. Never leave a fence blank to avoid
+  choosing: it loses highlighting and tells the reader nothing about what they
+  are looking at.
+- **Shell blocks carry no `$` prompt.** The reader copies the line, and a
+  prompt makes them edit it before it runs.
+- **Names carry meaning** — `orders`, `order_id`, `clickhouse_sink`, never
+  `foo`, `bar` or `my_thing`. A worked example doubles as a naming example
+  whether it was meant to or not.
+- **`?` over `unwrap()`.** Example code is copied verbatim into places where a
+  panic is not acceptable, so error handling in an example is a correctness
+  matter rather than a style one. Where `?` needs a signature to return into,
+  show the signature.
+- **A snippet names what it needs to build** — the facade features it requires,
+  and the runtime if it is async. One that compiles only under a feature the
+  reader has not enabled reads as a bug in the framework.
+
+### Rust snippets come from compiled sources
+
+**A non-trivial Rust snippet on a site page is transcluded from a compiled
+source under `crates/spate/examples/`, not hand-written into the Markdown.**
+Nothing compiles a fenced block in an `.mdx` file — the site build does not
+type-check it and `cargo test` never sees it — so a wrong one survives every
+gate this repository has. An example under `crates/spate/examples/` carries a
+`[[example]]` entry, builds under its `required-features`, and breaks the build
+when the API moves, which is the whole point.
+
+Exempt, because transcluding them costs more than it protects:
+
+- A fragment of two or three lines illustrating a single call or signature.
+- A type or trait definition quoted to be read rather than run.
+- A deliberately non-compiling snippet showing what the type system rejects —
+  say so in the surrounding prose.
+
+YAML, TOML and shell blocks are unaffected; their correctness is checked
+against the config structs by review (§ 3), not by a compiler.
+
+The transclusion mechanism is not built yet. Until it lands, a snippet that
+would need it is verified against the real API by review and called out in the
+pull request — and a *new* non-trivial snippet is written into
+`crates/spate/examples/` first regardless, so adopting the mechanism is a move
+rather than a rewrite.

@@ -93,9 +93,12 @@ Each is a decision, not drift. Nothing else is exempt.
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |
 | `07-reference/glossary.mdx` | Definitions need anchors. | The mapping line above, nothing looser. |
 
-`docs/DESIGN.md` sits outside `user-guide/` and outside this rule: it records
-why decisions were made, including vendor-specific ones. It should not grow
-connector *usage* guidance — that belongs on the connector page.
+`docs/DESIGN.md` and `docs/adr/` sit outside `user-guide/` and outside this
+rule: they record why decisions were made, including vendor-specific ones. A
+decision about a connector cannot be stated in neutral vocabulary without
+becoming a different decision. Neither should grow connector *usage* guidance —
+that belongs on the connector page. See § 9 for the rest of what governs
+`docs/adr/`.
 
 ## 2. Connector layout — group by role
 
@@ -267,3 +270,42 @@ Everywhere:
   **exit code explicitly** — piped `grep`/`tail` chains have masked real
   failures here. Scan the log for anchor warnings (`onBrokenAnchors: 'warn'`),
   which do not fail the build.
+
+## 9. Decision records
+
+`docs/adr/` holds one Architecture Decision Record per decision.
+**`docs/adr/_template.md` is normative for their contents** — it states the
+rules inline beside the section each governs, and there is no separate how-to
+page, precisely so the two cannot drift. This section covers only where they sit
+relative to everything else in `docs/`.
+
+Decision records are **not documentation, and not a Diátaxis quadrant**. A page
+in `user-guide/` says how the system behaves; a record says why that was chosen
+and what else was considered. A reader who needs the first should be sent to the
+guide, and a record that starts explaining how to configure something has become
+the wrong kind of document.
+
+Three of the rules above are deliberately suspended here, and each is a decision
+rather than an oversight:
+
+| Rule | Status in `docs/adr/` | Why |
+|---|---|---|
+| § 1 vendor neutrality | Suspended | A decision about a connector cannot be restated in neutral vocabulary without becoming a different decision. |
+| § 7 present-tense, "never a changelog" | Suspended | A record is a point-in-time artifact by construction. It describes the decision as it stood, and dates it. |
+| § 8 no YAML frontmatter | **Applies** | Records are published pages, so a frontmatter `title:` would render twice. Status is a body line instead. |
+
+**Accepted records are immutable.** Never rewrite one to say something
+different — that is the failure this section exists to prevent, and it is not
+hypothetical: the decision-log table it replaced recorded reversals by
+overwriting the rows they reversed, so the superseded reasoning was lost. A
+changed decision is a new record; the old one keeps its body and gains a pointer
+to its replacement. Correcting a typo, a broken link or a wrong path is not
+rewriting; changing what the record claims was decided is.
+
+Everything else follows the rest of this file: sentence case, relative
+extension-qualified links, and an em-dash gloss on every `## Related` entry.
+
+`make check-adr` holds the mechanical half — numbers unique and never reused,
+statuses from the permitted set, no unfilled placeholders, and every record
+present in `docs/adr/README.mdx`. Whether a decision warranted a record at all
+is review's job.

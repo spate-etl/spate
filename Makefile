@@ -30,7 +30,7 @@
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-wall-benches check-collected-region \
-        check-invariants \
+        check-invariants check-adr adr-new \
         check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
@@ -223,6 +223,15 @@ check-wall-benches: ## Every wall-clock bench declares a harness-free target
 check-collected-region: ## The degenerate-region guard still recognises both shapes
 	./scripts/gungraun-collected-region.sh --self-test
 
+check-adr: ## The decision records stay consistent with their index
+	./scripts/adr.sh --check
+
+# SLUG rather than a positional argument, for the same reason changelog-new
+# takes named variables: a bare `make adr-new leader-assignment` reads the slug
+# as another target to build.
+adr-new: ## Scaffold a decision record: make adr-new SLUG=short-description
+	./scripts/adr.sh --new "$(SLUG)"
+
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
 
@@ -231,7 +240,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-invariants check-adr check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

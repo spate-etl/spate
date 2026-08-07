@@ -4,16 +4,6 @@ High-performance, at-least-once ETL pipeline framework in Rust. Publishable
 crates under `crates/`, plus the unpublished wall-clock benchmark harness in
 `bench/`.
 
-Four documents are normative. Read the relevant one before changing what it
-governs, because none of them is reconstructable from the code:
-
-| Document | Governs |
-| --- | --- |
-| [`docs/DESIGN.md`](docs/DESIGN.md) | The architecture, its rationale, and the canonical invariants below |
-| [`docs/METRICS.md`](docs/METRICS.md) | The metric taxonomy |
-| [`docs/STYLE.md`](docs/STYLE.md) | Everything under `docs/` |
-| [`docs/user-guide/02-concepts/08-work-assignment.mdx`](docs/user-guide/02-concepts/08-work-assignment.mdx) | Coordinated work distribution — its numbered invariants name the property tests that enforce them, so changing the balancer means changing that page in the same commit |
-
 [`CONTRIBUTING.md`](CONTRIBUTING.md) states the same gates and invariants for a
 human contributor, with the reasoning attached. The overlap is deliberate — one
 audience needs them in every session, the other once — and `make ci-lint`
@@ -131,7 +121,17 @@ Two rules break by accident more than the rest:
   *usage* guidance either.
 - **Docs read as the present, never as a changelog.** No "now", "recently", "as
   of". If something changed, the page describes what is and the commit says what
-  moved.
+  moved. The one exception is `docs/adr/`, which is a historical log by
+  construction — see below.
+
+Decision records live in `docs/adr/`, one file per decision, and are the only
+place under `docs/` that reads as history. Scaffold one with
+`make adr-new SLUG=…`. Two things about them differ from everything else here:
+an **accepted record is immutable** — a changed decision is a *new* record that
+supersedes the old one, never an edit to it — and a decision only earns a record
+if it affects structure, a key quality attribute, or is hard to reverse.
+`docs/adr/_template.md` states both rules in full and is normative;
+`make check-adr` holds the mechanical half.
 
 ## Commits and pull requests
 

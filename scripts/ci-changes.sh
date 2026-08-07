@@ -607,26 +607,39 @@ if len(set(keys)) != len(keys):
     # above own it — so reusing it to build the expectation keeps each case
     # readable as "which crates does this path select", which is the rule each
     # one states.
+    # Classify a synthetic path list, leaving the child's outputs in $1.
+    #
+    # Shared by the assertions below rather than written into each of them: they
+    # differ only in which key they read, and a second copy of this spawn is a
+    # second place for the `env -u` guards to drift out of step.
+    #
+    # A subprocess, because classification runs at the bottom of this file
+    # rather than in a function. Read the answers from the child's own
+    # `GITHUB_OUTPUT` rather than its stdout: the classifier `tee`s to both, so
+    # stdout carries every line twice when the variable is unset. Giving it a
+    # temporary file also keeps synthetic answers out of the calling job's real
+    # output. `PR_LABELS` and `EVENT_NAME` are unset so that neither a label nor
+    # an event can decide what the arms should.
+    classify_into() { # dest, paths...
+        local dest=$1 list
+        shift
+        list=$(mktemp)
+        printf '%s\0' "$@" >"$list"
+        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$dest" \
+            "$0" --classify-paths "$list" >/dev/null
+        rm -f "$list"
+    }
+
     check_paths() {
         local want_bench="$1" want_pkgs="$2" desc="$3"
         shift 3
-        local list out got_bench got_pkgs
+        local out got_bench got_pkgs
         want_pkgs=$(bench_shards_json "$want_pkgs")
-        list=$(mktemp)
         out=$(mktemp)
-        printf '%s\0' "$@" >"$list"
-        # A subprocess, because classification runs at the bottom of this file
-        # rather than in a function. Read the answers from the child's own
-        # `GITHUB_OUTPUT` rather than its stdout: the classifier `tee`s to both,
-        # so stdout carries every line twice when the variable is unset. Giving
-        # it a temporary file also keeps synthetic answers out of the calling
-        # job's real output. `PR_LABELS` and `EVENT_NAME` are unset so that
-        # neither a label nor an event can decide what the arms should.
-        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
-            "$0" --classify-paths "$list" >/dev/null
+        classify_into "$out" "$@"
         got_bench=$(sed -n 's/^bench=//p' "$out")
         got_pkgs=$(sed -n 's/^bench-shards=//p' "$out")
-        rm -f "$list" "$out"
+        rm -f "$out"
         if [[ "$got_bench" != "$want_bench" || "$got_pkgs" != "$want_pkgs" ]]; then
             echo "::error::$desc: expected bench=$want_bench bench-shards='$want_pkgs',"
             echo "got bench=$got_bench bench-shards='$got_pkgs' for: $*"
@@ -687,40 +700,48 @@ if len(set(keys)) != len(keys):
             "$apparatus"
     done
 
-    # The transclusion rule, which `check_paths` cannot see: it reads `bench=`
-    # and `bench-shards=` only, and this arm is about `site=`. A sibling helper
-    # rather than a fifth parameter, because threading a `site` expectation
-    # through the twelve cases above would obscure the bench rule each one is
-    # there to state.
+    # The two coarse outputs, asserted together because the arm that decides
+    # them decides both and the regression worth catching turns off exactly one.
     #
-    # What it holds: a page's Rust snippets are regions of a file under
-    # `crates/`, so an edit there can change a rendered page. If that stops
-    # selecting the site, a broken region reaches the deployed site with every
-    # job green — see the `crates/*` arm.
-    check_site() {
-        local want="$1" desc="$2"
-        shift 2
-        local list out got
-        list=$(mktemp)
+    # `site` is the transclusion rule: a page's Rust snippets are regions of a
+    # file under `crates/`, so an edit there can change a rendered page, and an
+    # arm that stops selecting the site lets a broken region reach the deployed
+    # site with every job green.
+    #
+    # `rust` is here because nothing else in this file asserts it, and the
+    # `crates/*` arm now has a body. An arm that sets `site` and then `continue`s
+    # — plausible enough as "an example is only input to the docs" — turns off
+    # clippy and the whole test suite for an examples-only pull request. The
+    # bench cases above do not speak for that path: `spate` owns no gungraun
+    # bench, so nothing there selects on it, and the general `crates/*` case is
+    # only covered by them incidentally, under an error message about the bench
+    # table rather than the arm actually broken.
+    check_flags() { # want_rust, want_site, desc, paths...
+        local want_rust="$1" want_site="$2" desc="$3"
+        shift 3
+        local out got_rust got_site
         out=$(mktemp)
-        printf '%s\0' "$@" >"$list"
-        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
-            "$0" --classify-paths "$list" >/dev/null
-        got=$(sed -n 's/^site=//p' "$out")
-        rm -f "$list" "$out"
-        if [[ "$got" != "$want" ]]; then
-            echo "::error::$desc: expected site=$want, got site=$got for: $*"
+        classify_into "$out" "$@"
+        got_rust=$(sed -n 's/^rust=//p' "$out")
+        got_site=$(sed -n 's/^site=//p' "$out")
+        rm -f "$out"
+        if [[ "$got_rust" != "$want_rust" || "$got_site" != "$want_site" ]]; then
+            echo "::error::$desc: expected rust=$want_rust site=$want_site,"
+            echo "got rust=$got_rust site=$got_site for: $*"
             path_case_failed=1
         fi
     }
 
-    check_site true "an example selects the site" \
+    check_flags true true "an example builds Rust and rebuilds the site" \
         crates/spate/examples/memory_pipeline.rs
-    check_site true "a crate library source selects the site" \
+    check_flags true true "a crate source builds Rust and rebuilds the site" \
         crates/spate-core/src/lib.rs
-    check_site true "docs select the site" docs/METRICS.md
-    check_site true "the site tree selects the site" website/docusaurus.config.ts
-    check_site false "a bench source does not select the site" bench/src/lib.rs
+    check_flags false true "a docs page rebuilds the site and needs no Rust build" \
+        docs/METRICS.md
+    check_flags false true "the site tree rebuilds the site and needs no Rust build" \
+        website/docusaurus.config.ts
+    check_flags true false "a bench source builds Rust and does not rebuild the site" \
+        bench/src/lib.rs
 
     [[ "$path_case_failed" == "0" ]] || exit 1
 

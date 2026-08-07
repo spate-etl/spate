@@ -74,8 +74,13 @@ Restore the canonical wording; do not improve it here.
 - A connector with a raw passthrough has a **section**, not a row. A denylist
   table appearing under `## Configuration` with no section of its own is the
   failure shape.
-- The section says why each denied property is denied — which framework
-  guarantee overriding it would break — not merely that it is denied.
+- **The section carries a `| Denied property | Why |` table**, one row per
+  entry in the crate's `DENYLIST`. `_template.mdx` mandates it. A section that
+  describes the denial in a sentence passes both bullets above and is still
+  wrong: prose cannot enumerate four rejected aliases, and the reader hitting a
+  load failure needs the exact key.
+- Each `Why` names which framework guarantee overriding it would break, not
+  merely that it is denied.
 
 ## 6. Security (§ 3, § 5)
 
@@ -121,9 +126,13 @@ inbound links breaks no link.
 - `04-connectors/README.mdx`'s matrix has the connector. Index pages are exempt
   from § 1 by name and one-line summary only — a row that grew behavior is a
   boundary defect on an exempt page.
-- The appendix's `source:/deserializer:/sink:/coordination:` mapping table has a
-  row pointing at the new page (§ 4). This is what makes the connector findable
-  from the reference rather than only from the connector tree.
+- The appendix's mapping table lists the connector (§ 4). The table is under
+  `## `source:`, `deserializer:`, `sink:`` with columns
+  `Section | Required | Body documented in`, so it is **one row per section, not
+  per connector** — the check is that the connector appears as a link inside its
+  section's `Body documented in` cell. There is no `coordination:` row and there
+  should not be: coordination is assembled in code, and the appendix files it
+  under its code-level knobs instead.
 - Framework-owned keys were **not** duplicated onto the connector page by the
   same change (§ 4) — the mirror of the § 4 check above, worth running from the
   appendix side when keys moved.
@@ -131,6 +140,20 @@ inbound links breaks no link.
   explanation of when to reach for it has turned a row into a walkthrough. That
   belongs in `03-guides/configuring-pipelines.mdx`, and the non-exhaustive
   disclaimer stays.
+
+## Tuning sections are not a quadrant defect
+
+§ 6 says Reference contains no teaching or opinions, and a connector page with a
+`### Sizing …` section reads like a violation. It is not. Connector tuning lives
+on the connector's own page — the framework's tuning page is for framework
+knobs, and splitting a connector's guidance away from its keys is the drift this
+layout exists to prevent. Judge such a section on whether it is *about this
+connector*: sizing its splits against a framework knob belongs here; a general
+lesson on how backpressure works does not.
+
+What is still a defect in these sections is editorializing — "losing a whole
+object silently is not a policy, it's an incident" is an argument, and the
+argument belongs in the decision record the page should link instead.
 
 ## What this file does not cover
 

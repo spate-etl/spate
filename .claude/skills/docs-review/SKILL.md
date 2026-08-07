@@ -41,23 +41,51 @@ ordering here follows: a page that reads beautifully and states a false default
 is worse than a clumsy one that is true. Verify first, and never trade a claim
 check for a prose fix.
 
+**Do the step 3 cold read first and hold the marks.** By the end of this step
+you will have read the page four times while checking things, and the cold read
+is unrecoverable after that. Read it once as a reader, note where you stall,
+then start verifying.
+
 Open the source. For each of these, if the page asserts it:
 
 - **Config keys**, against the config struct. It is `deny_unknown_fields`, so a
   key that does not exist is not a documentation typo — it is a paste that
   fails at startup naming the offending key. Read the YAML example as if you
-  were the deserializer.
+  were the deserializer. Check `validate()` too: a constraint *between* two
+  keys fails at load and is invisible in a table of independent defaults.
 - **`Default` cells**, against the `Default` impl or the serde default — not
   against the prose beside them.
-- **Metric families and labels**, against the `names.rs` constants and the call
-  that registers them.
+- **Metric families and labels.** Framework families are constants in
+  `crates/spate-core/src/metrics/names.rs`. **Connector families are not
+  constants anywhere** — they are minted at runtime in the connector's own
+  `src/metrics.rs` (`meter.counter("objects_listed_total", …)`), and the
+  `spate_<crate>_<role>_` prefix comes from the `Meter` scope, not from any
+  string you can grep for whole.
 - **Rust snippets**, against the real API (§ 10): names, signatures, and the
   feature flags the snippet needs to build.
 - **Performance figures.** § 7 requires provenance. A figure carrying none is a
   defect even when it happens to be true.
+- **Link glosses**, against the page each one points at. `make docs` proves a
+  link *resolves*; nothing proves the sentence describing it is *true*. § 7 puts
+  a gloss on every cross-link in the tree, so these rot exactly like a `Default`
+  cell and are just as unguarded.
 
 A `Default` column and a YAML example are the two things in this tree that rot
 fastest, and no gate covers either.
+
+**Check the page against its siblings, not only against the code.** A formula, a
+shared default or a figure that appears on three pages has three chances to be
+the outlier, and a single-page read cannot see divergence — grep the tree for
+the value before trusting the copy in front of you. Step 3 structurally cannot
+catch this, because repetition across pages is an explicit non-defect there; it
+has to be caught here or not at all.
+
+On a connector page the claim sources are five, and only the first is obvious:
+`src/config.rs` for keys, defaults and `validate()`; `src/metrics.rs` for the
+families; `src/<component>.rs` for every builder method a snippet calls; the
+internals a specific claim names; and `crates/spate/examples/*.rs` for the
+runnable version the page cites — the last is where a page and a working
+program most often disagree.
 
 ## 2. Structure
 
@@ -85,7 +113,15 @@ there, delete rather than move.
 **Shape.** Connector pages go to
 [references/connector-page.md](references/connector-page.md). Every page: no
 YAML frontmatter, sentence-case headings, relative extension-qualified links
-(§ 8).
+(§ 8) — all cheap, and mostly gated by step 4 anyway. The one that needs
+judgment: **a framework page matches the section-heading convention of its
+directory siblings.** `## Further reading` and `## Related` are not
+interchangeable, and § 3 scopes `## Related` to connector pages, so check the
+neighbors before calling a heading wrong.
+
+Site pages do not cite invariant numbers — `docs/INVARIANTS.md` is where the
+properties are stated, and a concepts page restating one in its own terms is
+correct. Do not raise a missing `INV-N` citation on a user-guide page.
 
 ## 3. Prose — read it as the reader
 
@@ -94,6 +130,10 @@ fluent in async Rust, already holding the streaming concepts, knowing nothing
 Spate-specific. Note every place you would stall, re-read, or give up and open
 the rustdoc instead. **That list is the finding.** The catalog only helps you
 name what you already felt.
+
+**This read happens before step 1**, even though the pass is reported third. A
+page you have already verified cannot be read cold, and there is no way back to
+a first impression. Take the marks early, work them here.
 
 [references/prose.md](references/prose.md) carries the failure modes, and — just
 as load-bearing — the things that are explicitly **not** defects here. Read the
@@ -112,6 +152,13 @@ make check-adr; echo "EXIT=$?"   # whenever docs/adr/ was touched
 **Check the exit code explicitly**, here and everywhere. Piped `grep`/`tail`
 chains report the status of the last command in the pipeline and have masked
 real failures in this repository more than once.
+
+`make docs` begins with `npm ci`, which deletes and rebuilds
+`website/node_modules`. In a **report-only review that must not touch the tree**,
+run `cd website && CI=true npm run build; echo "EXIT=$?"` instead — same gate,
+no dependency churn, and `CI=true` is what registers the redirects. If even that
+is out of scope, say the gate was deferred and resolve every link and anchor on
+the page by hand; do not report a gate you did not run.
 
 - `onBrokenLinks`, `onBrokenAnchors` and `onBrokenMarkdownLinks` are all
   `'throw'`. A stale link *or* a stale `#anchor` fails the build outright;
@@ -135,6 +182,10 @@ reintroduce one.
 **Reviewing a change.** Steps 0–4 over the diff. Also read each changed page
 whole: a boundary or quadrant defect is a property of the page, and a diff that
 adds three sound sentences to the wrong page shows nothing wrong in isolation.
+If the diff touches `docs/adr/`, settle immutability
+([references/adr.md](references/adr.md) § 1) *before* reading for quality —
+against an accepted record most findings resolve to "this needs a new record"
+rather than to an edit, and that changes how you read.
 
 **Authoring a page.** Route first (step 0), then write, then run steps 1–4
 against your own draft. For a connector page, start from

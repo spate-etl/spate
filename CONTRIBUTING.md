@@ -85,8 +85,9 @@ them. A change that does touch one is not automatically wrong — but it needs t
 say how the property still holds, and that is the conversation.
 
 They are numbered, and the numbers are the canonical ones from
-[`docs/DESIGN.md`](docs/DESIGN.md), where the reasoning behind each lives. Cite
-the number in a pull request and everyone is looking at the same property.
+[`docs/INVARIANTS.md`](docs/INVARIANTS.md); the reasoning behind each lives in
+the decision record that established it. Cite the number in a pull request and
+everyone is looking at the same property.
 
 - **INV-1 — delivery is at-least-once.** A source watermark is never committed
   past unacknowledged data, including across rebalances and shutdown.

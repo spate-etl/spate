@@ -83,7 +83,7 @@ body:
       label: Does this touch any of these?
       description: >-
         The engine's load-bearing invariants, numbered as they are in
-        `docs/DESIGN.md`. Ticking one is not a problem — it just means the
+        `docs/INVARIANTS.md`. Ticking one is not a problem — it just means the
         proposal needs to say how the invariant still holds.
       options:
         - label: INV-1 — delivery semantics, or anything that could commit a watermark past unacknowledged data

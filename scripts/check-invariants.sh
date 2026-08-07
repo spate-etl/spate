@@ -2,12 +2,12 @@
 #
 # Checks that the four places stating the engine's invariants still agree.
 #
-# docs/DESIGN.md defines them; AGENTS.md, CONTRIBUTING.md and the pull request
-# template each restate the list for their own audience.
+# docs/INVARIANTS.md defines them; AGENTS.md, CONTRIBUTING.md and the pull
+# request template each restate the list for their own audience.
 #
 # Two rules, because the files are not all the same kind of statement:
 #
-#   * a FULL restatement must cite exactly the set DESIGN.md defines;
+#   * a FULL restatement must cite exactly the set INVARIANTS.md defines;
 #   * a SUBSET may cite fewer — the feature form asks "does this touch any of
 #     these?", not "here are the invariants" — but may not cite a number that
 #     does not exist.
@@ -17,7 +17,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-source_of_truth=docs/DESIGN.md
+source_of_truth=docs/INVARIANTS.md
 full=(AGENTS.md CONTRIBUTING.md .github/pull_request_template.md)
 # Anywhere else that names invariants by number. A module doc restating a few of
 # them is a subset restatement like any other, and drifts the same way.
@@ -37,9 +37,9 @@ cites() {
 
 [ -f "$source_of_truth" ] || fail "$source_of_truth not found"
 
-# The definitions are the bold-led bullets in the Invariants section, not every
-# mention: DESIGN.md cites numbers in its prose too, and a cross-reference must
-# not be able to define an invariant by accident.
+# The definitions are the bold-led bullets, not every mention: the file cites
+# numbers in its own prose too, and a cross-reference must not be able to define
+# an invariant by accident.
 defined=$(grep -oE '^- \*\*INV-[0-9]+ —' "$source_of_truth" | grep -oE 'INV-[0-9]+' | sort -uV)
 [ -n "$defined" ] || fail "no invariants defined in $source_of_truth — is the format still \`- **INV-n — \`?"
 

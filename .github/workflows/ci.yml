@@ -216,7 +216,7 @@ jobs:
       # these check a class of drift nothing else would notice: a label
       # referenced by an issue form or by Dependabot that does not exist (GitHub
       # drops it silently), and the invariant lists in AGENTS.md, CONTRIBUTING.md
-      # and the pull request template falling out of step with docs/DESIGN.md.
+      # and the pull request template falling out of step with docs/INVARIANTS.md.
       # Both are pure file reads — no network, no toolchain.
       - run: make check-labels
       - run: make check-invariants

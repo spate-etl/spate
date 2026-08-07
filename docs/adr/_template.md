@@ -127,7 +127,7 @@ Chosen option: "REPLACE-ME", because REPLACE-ME.
 <!--
   At least one of each. A record with no `Bad, because` line is either not
   finished or not honest — every decision worth recording cost something, and
-  naming the cost is what lets a future reader recognise when the trade has
+  naming the cost is what lets a future reader recognize when the trade has
   stopped paying.
 
   `Neutral, because` is available where an argument weighs neither way.
@@ -160,7 +160,7 @@ REPLACE-ME
   measurement. An empty Evidence section reads as though a number was lost.
 
   Measured claims only, each with its provenance. A figure with no provenance
-  is an assertion, and this repository has learnt to tell the difference: some
+  is an assertion, and this repository has learned to tell the difference: some
   of our load-bearing numbers came from rigs that no longer exist, and saying
   so is what keeps them usable. Acceptable provenance lines look like:
 
@@ -178,7 +178,7 @@ REPLACE-ME
 <!--
   The commit or pull request that landed the decision — this is what makes the
   `Date` above citable rather than asserted. Then related ADRs, and the user
-  guide pages that describe the resulting behaviour.
+  guide pages that describe the resulting behavior.
 
   Rationale belongs here; usage guidance does not. If a reader needs to know
   how to configure the thing, that is a user-guide page, and this section links

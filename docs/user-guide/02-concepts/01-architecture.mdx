@@ -108,7 +108,7 @@ A controller thread services source events (rebalances, statistics), runs
 commit ticks, owns shutdown, and enforces liveness policies (e.g. failing
 the pipeline when a partition's watermark stays stalled behind a failed
 batch). The **checkpointer** it drives is a synchronous, tokio-free module:
-acknowledgements arrive over an unbounded channel — the ack path can never
+acknowledgments arrive over an unbounded channel — the ack path can never
 block behind data — and per-partition contiguity tracking turns them into
 committable watermarks. [Delivery guarantees](02-delivery-guarantees.mdx)
 covers that machinery.

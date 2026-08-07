@@ -32,7 +32,7 @@ Chosen for teardown: "Rely on rdkafka's own `Drop`", because it already does the
 right thing and the purge closes the loop for free — **purged messages' delivery
 reports still fire, and those reports reclaim the countdown opaques.** A custom
 `Drop` would duplicate that logic and then have to be kept correct as the client
-changes, for no behaviour we do not already get. The whole sequence is bounded at
+changes, for no behavior we do not already get. The whole sequence is bounded at
 roughly 600 ms.
 
 Chosen for statistics: "Aggregate only, deferred". Not because per-partition
@@ -48,7 +48,7 @@ concrete rather than anticipated.
 - Good, because deferring per-partition series keeps sink cardinality
   independent of topic partition count, which is the axis that grows without
   warning.
-- Bad, because teardown behaviour is inherited rather than owned: a change to
+- Bad, because teardown behavior is inherited rather than owned: a change to
   rdkafka's `Drop` semantics would change ours silently, and the 600 ms bound is
   theirs to move.
 - Bad, because a hot partition is currently invisible from the sink's metrics —

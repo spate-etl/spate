@@ -19,7 +19,7 @@ advisory.
 ## Considered options
 
 - A single typed schema covering the framework and every connector
-- A typed top-level section plus **opaque** per-component sections, deserialised
+- A typed top-level section plus **opaque** per-component sections, deserialized
   by each connector itself
 - TOML or JSON instead of YAML
 - Configuration in code only, with no file
@@ -28,10 +28,10 @@ advisory.
 
 Chosen option: "A typed top-level section plus opaque per-component sections",
 because it puts each schema in the crate that owns it. The framework
-deserialises threads, checkpointing, backpressure and metrics with
+deserializes threads, checkpointing, backpressure and metrics with
 `deny_unknown_fields`, humantime durations and byte sizes; everything under a
 component's key is passed through untouched to that component's factory, which
-deserialises its own type. `serde_path_to_error` wraps the result so a typo
+deserializes its own type. `serde_path_to_error` wraps the result so a typo
 reports the offending YAML path rather than a position.
 
 YAML over TOML because deeply nested configuration is what this is, and TOML's
@@ -40,10 +40,10 @@ the operational reason: a rebuild to change a broker address is not viable in a
 container image.
 
 The topology stays in code regardless — YAML configures connectors and tuning,
-never the operator graph. That boundary is what keeps the chain monomorphised.
+never the operator graph. That boundary is what keeps the chain monomorphized.
 
 Library choice: **`yaml_serde`**, whose provenance was verified rather than
-assumed. It is the YAML organisation's own successor, at
+assumed. It is the YAML organization's own successor, at
 `github.com/yaml/yaml-serde`, published by the maintainer who co-created YAML.
 Given that both obvious candidates were unusable — one archived, one with an
 advisory — checking who actually publishes the replacement was the minimum due
@@ -66,7 +66,7 @@ diligence.
 `deny_unknown_fields` at every level of the typed section, and a validation
 denylist for passthrough properties that would break framework guarantees — for
 example `enable.auto.offset.store`, which would let the client commit offsets the
-checkpointer has not authorised.
+checkpointer has not authorized.
 
 ## More information
 

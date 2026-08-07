@@ -33,7 +33,7 @@ instruction to hold nothing.** A worker that has never seen a record — a
 cold start, a leader gap, a withdrawn assignment — keeps what it holds and
 waits. Only a record that *exists and omits a split* means give it up.
 
-### The store is the acknowledgement
+### The store is the acknowledgment
 
 There is no ack protocol between leader and worker, and no barrier. The
 leader publishes the new assignment immediately — it does not wait for the
@@ -42,9 +42,9 @@ take the split until the previous owner's lease key has disappeared, which
 it observes directly through its watch. An assignment is permission to try,
 not a promise the split is free yet.
 
-Other designs resolve the same dependency with an explicit acknowledgement:
+Other designs resolve the same dependency with an explicit acknowledgment:
 a unit of work is only assigned to its new owner once the old owner has
-confirmed the revocation. We do not need that acknowledgement, because
+confirmed the revocation. We do not need that acknowledgment, because
 the store already publishes the fact one would have carried: the lease key
 is either there or it is not. That is the single property that removes the
 entire class of state which is visible to neither side of a negotiation —
@@ -93,7 +93,7 @@ self-corrects. Having no rounds means there is nothing to fall between.
 
 That last point is why this design needs no consensus algorithm. Raft was
 rejected for this system on the grounds that the problem needs
-linearizability only at the per-split commit; centralising the *assignment*
+linearizability only at the per-split commit; centralizing the *assignment*
 does not weaken that argument, because the assignment carries no
 correctness.
 
@@ -135,7 +135,7 @@ number of splits can be holding wildly different numbers of bytes. The
 planner already reports a weight per split; balancing uses it.
 
 `max_in_flight` still caps the split *count* per worker. It is a lane
-budget — a materialisation limit — not a fairness knob.
+budget — a materialization limit — not a fairness knob.
 
 Each worker advertises its **own** budget on its presence key and the
 leader balances against that, so a fleet of unequally-sized pods works. The
@@ -256,7 +256,7 @@ minutes. The only floor is `op_timeout`: a deadline below one store
 round-trip would force every revocation before its final commit could
 land.
 
-## Failure behaviour
+## Failure behavior
 
 | Failure | Consequence |
 |---|---|

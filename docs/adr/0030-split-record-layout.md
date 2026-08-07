@@ -46,7 +46,7 @@ what actually exists.
 - Good, because commit cost is constant in descriptor size, so a coarse packing
   does not make commits expensive.
 - Good, because a leader crash mid-publish heals on the next publish instead of
-  desynchronising terminal detection permanently.
+  desynchronizing terminal detection permanently.
 - Bad, because a split is now two keys that must be created and cleaned up
   together, and a spec without progress — or the reverse — is a state the code
   has to tolerate.

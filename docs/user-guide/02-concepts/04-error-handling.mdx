@@ -14,7 +14,7 @@ metrics. There are no dead-letter queues and no silent drops.
 
 ## Record-level policy: Skip or Fail — nothing else
 
-- **Skip**: count the record on a metric, resolve its acknowledgement as
+- **Skip**: count the record on a metric, resolve its acknowledgment as
   delivered (so the watermark advances past it — an intentional drop must
   never stall commits), and continue.
 - **Fail**: stop the pipeline. The batch resolves as failed, the watermark

@@ -10,7 +10,7 @@ A sink is two pieces, split across the process's two halves
 
 Everything between is the framework's: chunking, per-shard batching to
 `max_rows`/`max_bytes`/`linger`, replica rotation, circuit breakers,
-retries, acknowledgements, backpressure. You write the two edges.
+retries, acknowledgments, backpressure. You write the two edges.
 
 This page mirrors the sink half of
 `crates/spate/examples/custom_source_sink.rs` (a JSON-lines-to-stdout sink)
@@ -58,7 +58,7 @@ Contracts:
   [Error handling](../02-concepts/04-error-handling.mdx).
 - **The terminal stage clones one encoder per shard**, which is why the type is
   `Clone`. Shards never share encoder state, so anything you buffer is private
-  to one shard and you do not need to synchronise it.
+  to one shard and you do not need to synchronize it.
 
 ### Buffering: encoders that are not row-at-a-time
 
@@ -99,7 +99,7 @@ impl ShardWriter for StdoutWriter {
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
   system has durably accepted the batch — a synchronous server ack, a
   delivery confirmation, or here, after printing. The framework releases the batch's
-  acknowledgements on `Ok`, which is what lets the source watermark advance
+  acknowledgments on `Ok`, which is what lets the source watermark advance
   past that data — return `Ok` early and a crash loses records, violating
   at-least-once.
 - **Retries reuse the sealed batch unchanged**, rotating across healthy
@@ -115,9 +115,9 @@ impl ShardWriter for StdoutWriter {
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
 
-### If you hold acknowledgement handles, fail them on teardown
+### If you hold acknowledgment handles, fail them on teardown
 
-Dropping a record's acknowledgement means *delivered* — that default is what
+Dropping a record's acknowledgment means *delivered* — that default is what
 makes `filter` and `flat_map` correct for free. It also means any component
 holding handles for data it has **not** durably written must explicitly fail
 them in its `Drop`, or teardown silently reports unwritten data as delivered and

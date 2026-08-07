@@ -15,7 +15,7 @@ two ways.
 A worker that merely *gains* a split would have to drain and reassign every lane
 it already holds, so a routine gain crashes commits that are mid-flight and costs
 a re-read of every uncommitted tail. And a split that finishes has to wait for
-its final acknowledgements to be noticed on a commit tick, so completion costs a
+its final acknowledgments to be noticed on a commit tick, so completion costs a
 tick quantum — with several splits in flight, that is a meaningful fraction of a
 short job.
 
@@ -33,9 +33,9 @@ problems come from forcing a coordinated source through a protocol designed for
 a different event.
 
 A gain mints a **fresh, never-reused lane** per tenancy and extends the current
-epoch, so in-flight acknowledgements on other lanes are untouched. A lane that
+epoch, so in-flight acknowledgments on other lanes are untouched. A lane that
 reaches end of input surfaces as ready to commit, and the runtime chases its
-final acknowledgements within one commit interval rather than waiting for the
+final acknowledgments within one commit interval rather than waiting for the
 tick that would have noticed. A completed split then leaves without a barrier,
 because the terminal commit has already proved nothing is in flight.
 

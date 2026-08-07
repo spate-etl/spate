@@ -7,8 +7,8 @@
 
 ## Context and problem statement
 
-[ADR-0016](0016-kafka-sink-ack-wiring.md) resolves acknowledgements from delivery
-reports, and the framework commits source offsets once acknowledgements resolve.
+[ADR-0016](0016-kafka-sink-ack-wiring.md) resolves acknowledgments from delivery
+reports, and the framework commits source offsets once acknowledgments resolve.
 That is only sound if a delivery report means the data is durable.
 
 With `acks=1` a report means the leader wrote it, and a leader failover before
@@ -63,7 +63,7 @@ build with the key named. INV-1 is what it protects.
 ## More information
 
 - Landed in `6af6861` (#24).
-- [ADR-0016](0016-kafka-sink-ack-wiring.md) — the acknowledgement path this makes
+- [ADR-0016](0016-kafka-sink-ack-wiring.md) — the acknowledgment path this makes
   sound.
 - [Kafka sink](../user-guide/04-connectors/sinks/kafka/README.mdx) — the
   passthrough denylist table.

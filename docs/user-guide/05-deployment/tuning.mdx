@@ -178,7 +178,7 @@ Raising it never strands rows or delays commits: a chunk that has not
 reached `target_bytes` is sealed anyway on every commit tick
 (`checkpoint.interval`), and by the driver's idle timer during a lull. This
 matters most for uneven fan-out — a low-volume `split` branch whose buffer
-would take minutes to fill holds the acknowledgements (and therefore the
+would take minutes to fill holds the acknowledgments (and therefore the
 source watermark) of every batch that contributed a row to it, so the commit
 tick is what bounds that hold to the checkpoint period.
 
@@ -254,7 +254,7 @@ not `chunk.target_bytes`.
 - `interval` (default **5s**): how often committable watermarks flush to
   the source, **and** the cadence at which partial chunk buffers are sealed
   (every tick broadcasts a chain flush, so a below-target chunk — a
-  low-volume `split` branch, say — can hold acknowledgements for at most
+  low-volume `split` branch, say — can hold acknowledgments for at most
   one interval). This is *not* a durability boundary — the sink write is —
   so shortening it narrows the replay window after a crash and tightens
   worst-case commit lag (≈ two intervals + the sink `linger`), at the cost

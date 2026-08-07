@@ -9,8 +9,8 @@
 
 [ADR-0004](0004-static-operator-chain.md) puts exactly one erasure boundary in
 the pipeline, so the chain can be stored as a trait object. That runs into a
-Rust limitation: a trait object cannot be parameterised by a lifetime that
-varies per call, and the record type here *is* lifetime-parameterised, because
+Rust limitation: a trait object cannot be parameterized by a lifetime that
+varies per call, and the record type here *is* lifetime-parameterized, because
 records borrow from the source's buffers ([ADR-0003](0003-poll-based-source-api.md)).
 
 Storing `Box` of a chain whose record type is `Record<'buf, T>` is not
@@ -28,15 +28,15 @@ record, which is the thing the borrowing design exists to avoid.
 
 Chosen option: "Pass untyped payload batches across the boundary", because it
 sidesteps the limitation instead of paying for it. The boundary trait takes a
-`PayloadBatch` and returns an outcome; **no lifetime-parameterised type is ever
-stored across the call.** Records are deserialised, transformed and serialised
+`PayloadBatch` and returns an outcome; **no lifetime-parameterized type is ever
+stored across the call.** Records are deserialized, transformed and serialized
 into shard frames entirely inside one `push_batch`, so by the time the call
 returns there is nothing borrowed left to name. That makes `Box` of the boundary
 trait legal.
 
 The remaining problem is that a chain still needs to *name* its record type in
 its own generic parameters. That is solved by a lifetime-to-type family: a
-`'static` marker type with an associated type parameterised by the borrow. The
+`'static` marker type with an associated type parameterized by the borrow. The
 family crosses generic and `dyn` boundaries because the marker is `'static`;
 the borrowed type is recovered by projection at each use. An `Owned` family is
 provided for records that do not borrow.
@@ -50,7 +50,7 @@ naming it.
 
 - Good, because records live and die inside one call, so the borrowed design
   survives contact with a trait object.
-- Good, because the boundary costs one virtual call per batch, amortised over
+- Good, because the boundary costs one virtual call per batch, amortized over
   every record in it.
 - Bad, because the family indirection is genuinely hard to read: a connector
   author writes a marker type whose only job is to carry an associated type, and

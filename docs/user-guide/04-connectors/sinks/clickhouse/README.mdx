@@ -73,7 +73,7 @@ the delivery guarantees are defined in terms of them:
 |---|---|
 | `insert_deduplication_token` | Minted deterministically per sealed batch; overriding it breaks same-batch retry idempotence. |
 | `insert_deduplicate` | Must stay on for the token to mean anything. |
-| `wait_end_of_query` | Forced to `1` — the synchronous server acknowledgement *is* the durable-ack point the checkpointer commits behind. |
+| `wait_end_of_query` | Forced to `1` — the synchronous server acknowledgment *is* the durable-ack point the checkpointer commits behind. |
 
 ## Security (TLS)
 
@@ -176,7 +176,7 @@ wanted, `insert_quorum_parallel` / `insert_quorum_timeout`) through the sink's
 the three reserved settings, so
 they work today without framework changes. Quorum composes correctly with
 the deduplication the sink always enables: when a retried batch is
-recognised as a duplicate of an already-committed part, ClickHouse still
+recognized as a duplicate of an already-committed part, ClickHouse still
 waits for quorum on that *existing* part before acknowledging, and throws
 `UNKNOWN_STATUS_OF_INSERT` if it cannot verify — a deduplicated retry cannot
 silently bypass the quorum (verified against the `ReplicatedMergeTreeSink`
@@ -208,7 +208,7 @@ as `spate_sink_shard_healthy == 0` (with per-replica
 Writes go to shard-local tables (with `internal_replication=true` topology)
 rather than through a `Distributed` table: bigger blocks, less merge
 pressure, and — crucially for checkpointing — a **synchronous server
-acknowledgement**. The sink always sets `wait_end_of_query=1`, so a
+acknowledgment**. The sink always sets `wait_end_of_query=1`, so a
 successful write means the server fully processed the insert, materialized
 views included; that success is the durable-ack point that lets watermarks
 advance. Sharding across shards is the pipeline's job (the chain's router,
@@ -229,8 +229,8 @@ keeps its connections warm. Manual assemblies hand `probe_fn()` to
 
 ## Metrics
 
-This sink registers no families of its own: its behaviour is fully described by
-the framework's `spate_sink_*` stage families, labelled `component_type="clickhouse"`
+This sink registers no families of its own: its behavior is fully described by
+the framework's `spate_sink_*` stage families, labeled `component_type="clickhouse"`
 and carrying `shard` and `replica` (both bounded by the configured topology, so
 both are always on).
 

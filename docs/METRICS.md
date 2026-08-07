@@ -59,7 +59,7 @@ beneath `spate_`.
 | `spate_custom_*` | Whatever registered it — the default namespace for pipeline-author metrics. |
 
 A connector that registers no families of its own is fully described by the
-framework families below, labelled with its `component_type`.
+framework families below, labeled with its `component_type`.
 
 ## Source (`spate_source_*`)
 
@@ -191,7 +191,7 @@ Two consequences worth stating outright:
 
 ## Queues (pipeline → sink handoff) (`spate_queue_*`)
 
-Queues are labelled by edge: `queue` = `<upstream>-><downstream>` (e.g.
+Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 `chain->sink/shard-3`).
 
 | Metric | Type | Extra labels | Description |
@@ -234,7 +234,7 @@ series carry its name as the `component` label (a single sink uses
 | `spate_sink_replica_errors_total` | counter | `shard`, `replica` | Failed write attempts attributed to a replica — which endpoint is erroring (`spate_sink_errors_total` gives the class breakdown per shard). |
 | `spate_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing. The probe cadence is `open_for` **plus** the probe's own duration — the re-open deadline is stamped when a failure is reported, not when the attempt began. Concurrency while half-open is budgeted by `breaker.half_open_probes` (default 1) per probe episode, not globally: a failure reported by an earlier attempt re-opens the replica and ends the episode, so a probe still in flight from it can overlap the next one. Size a replica's capacity for that, not for exactly one. |
 | `spate_sink_abandoned_batches_total` | counter | `shard` | Batches abandoned at drain deadline (will replay after restart). |
-| `spate_sink_drain_overrun_total` | counter | `shard` | Shard workers force-aborted for failing to return by the drain deadline. **Non-zero is a framework bug, not an operating condition** — a worker is supposed to abandon at the deadline under its own power. Shutdown still terminated and the data still replays (the acknowledgements fail with the worker), but that shard's batches are missing from `abandoned` above and from the `ExitReport`'s drain counts, so the two disagree by an unknown amount. Alert on `> 0`. |
+| `spate_sink_drain_overrun_total` | counter | `shard` | Shard workers force-aborted for failing to return by the drain deadline. **Non-zero is a framework bug, not an operating condition** — a worker is supposed to abandon at the deadline under its own power. Shutdown still terminated and the data still replays (the acknowledgments fail with the worker), but that shard's batches are missing from `abandoned` above and from the `ExitReport`'s drain counts, so the two disagree by an unknown amount. Alert on `> 0`. |
 
 ### What a flush contains
 
@@ -320,7 +320,7 @@ way to reason about where a flush went, not an identity to compute.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabelled series is the max across partitions. |
+| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabeled series is the max across partitions. |
 | `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |

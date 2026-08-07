@@ -45,7 +45,7 @@ machinery entirely, along with the concurrency the workers provide.
 
 - Good, because there is one client, so its statistics are meaningful and its
   connection pool is shared as librdkafka intends.
-- Good, because the framework's breaker and health signalling work unchanged,
+- Good, because the framework's breaker and health signaling work unchanged,
   with no Kafka-specific backpressure path.
 - Bad, because replica rotation is dead code in this connector — present,
   exercised by no Kafka deployment, and potentially confusing to read.

@@ -11,7 +11,7 @@ The framework moves records from a source that tracks consumption by offset to a
 sink that acknowledges writes. A failure between those two points — a crash, a
 rebalance, a shutdown — leaves a window where it is not known whether the data
 arrived. What the framework promises about that window determines almost every
-other structure in it: how acknowledgements are tracked, when watermarks commit,
+other structure in it: how acknowledgments are tracked, when watermarks commit,
 what a sink connector must implement, and what a destination schema has to
 tolerate.
 
@@ -59,13 +59,13 @@ must never imply exactly-once.
 INV-1 — a source watermark is never committed past unacknowledged data,
 including across rebalances and shutdown. Enforced structurally by the
 checkpoint tracker's contiguous-prefix rule, and by the collection-level
-acknowledgement contract that fails handles on teardown rather than delivering
+acknowledgment contract that fails handles on teardown rather than delivering
 them.
 
 ## More information
 
 - Landed in `c8973e6`.
-- [ADR-0005](0005-refcounted-per-batch-acknowledgements.md) — the acknowledgement
+- [ADR-0005](0005-refcounted-per-batch-acknowledgements.md) — the acknowledgment
   design this promise rests on.
 - [Delivery guarantees](../user-guide/02-concepts/02-delivery-guarantees.mdx) —
   what the guarantee means when operating a pipeline, including the exact

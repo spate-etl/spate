@@ -185,7 +185,7 @@ documented way to break fetches after raising `fetch.max.bytes`
 :::warning[Property-name trap]
 librdkafka spells it **`fetch.wait.max.ms`**. Apache/Java spells it
 `fetch.max.wait.ms` — the words are transposed. The `rdkafka` map takes
-librdkafka names, and an unrecognised property is not silently ignored, so copy
+librdkafka names, and an unrecognized property is not silently ignored, so copy
 settings from librdkafka's documentation rather than from Java tuning guides.
 :::
 
@@ -293,7 +293,7 @@ argument for extracting vertical throughput first.
 ### Compression
 
 Decompression happens on the **per-broker fetch thread** — the same thread doing
-that broker's network I/O — so it is parallelised per broker, not per partition.
+that broker's network I/O — so it is parallelized per broker, not per partition.
 A broker leading many hot partitions decompresses all of them on one core.
 
 If you control the producers and consumption is decompression-bound, **lz4**

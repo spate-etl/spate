@@ -1,4 +1,4 @@
-# ADR-0005 — Refcounted per-batch acknowledgements, resolved by drop
+# ADR-0005 — Refcounted per-batch acknowledgments, resolved by drop
 
 - **Status:** accepted
 - **Date:** 2026-07-05 (recorded 2026-08-06 from the decision log)
@@ -17,7 +17,7 @@ runs on the per-record path, so it has to be close to free.
 
 ## Considered options
 
-- Per-record acknowledgement objects, one allocation each
+- Per-record acknowledgment objects, one allocation each
 - A refcounted handle created per source poll batch, cloned by fan-out, resolved
   when the last clone drops — drop meaning *delivered*
 - The same, inverted: drop meaning *failed*, with an explicit `deliver()` call
@@ -26,7 +26,7 @@ runs on the per-record path, so it has to be close to free.
 
 Chosen option: "A refcounted handle created per source poll batch, resolved when
 the last clone drops", because it makes every chain operation correct without
-any of them knowing about acknowledgements. A `filter` drop resolves as success
+any of them knowing about acknowledgments. A `filter` drop resolves as success
 because the record legitimately ended its life; `flat_map` children clone the
 same handle, so the parent is satisfied only when every child is; a split clones
 per destination and merges with worst-status. None of those needed special
@@ -45,7 +45,7 @@ framework-mediated and
 zero-ceremony today, and inverting would turn each into explicit bookkeeping
 whose failure mode — a forgotten `deliver()` — is a watermark stall that halts a
 pipeline on correct data. Teardown loss, the thing the inversion would have
-fixed, only materialises where acknowledgements travel in **bulk**, so the
+fixed, only materializes where acknowledgments travel in **bulk**, so the
 inversion is applied there instead: every *collection* of handles on the sink
 path is an `AckSet`, which fails its handles on drop and delivers only after a
 durable write.
@@ -53,7 +53,7 @@ durable write.
 ### Consequences
 
 - Good, because `filter`, `flat_map` and multi-sink routing need no
-  acknowledgement-specific code, and a new operator gets correct behaviour by
+  acknowledgment-specific code, and a new operator gets correct behavior by
   default.
 - Good, because the per-record cost is roughly two atomics, not an allocation.
 - Bad, because "drop means delivered" is a silent default, so any component
@@ -62,13 +62,13 @@ durable write.
   buffers, and sink workers for abandoned batches. Over-failing is always safe;
   it costs replay, never loss.
 - Bad, because two different defaults now exist — records deliver on drop,
-  collections fail on drop — and which applies has to be learnt rather than
+  collections fail on drop — and which applies has to be learned rather than
   inferred.
 
 ### Confirmation
 
 INV-1 and INV-4. The checkpoint tracker is loom-tested (INV-3), which is what
-holds the contiguous-prefix logic under concurrent acknowledgement arrival.
+holds the contiguous-prefix logic under concurrent acknowledgment arrival.
 Regression tests cover each teardown seam individually: handoff drop, queue
 drop, and worker or runtime teardown.
 
@@ -80,4 +80,4 @@ drop, and worker or runtime teardown.
   the outcome — records deliver, collections fail — is one decision with two
   halves.
 - [Delivery guarantees](../user-guide/02-concepts/02-delivery-guarantees.mdx) —
-  the acknowledgement chain from record to watermark.
+  the acknowledgment chain from record to watermark.

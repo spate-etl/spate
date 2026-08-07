@@ -78,7 +78,7 @@ prefers `?`.
 
 If the sink cannot flush everything by the deadline — a destination outage
 mid-shutdown, say — the remaining batches are **abandoned loudly**: a log
-line and a metric, their acknowledgements are failed, and their partitions'
+line and a metric, their acknowledgments are failed, and their partitions'
 watermarks never advance past them. The final commit therefore commits only
 what was actually written, and the abandoned data **replays after restart**.
 That is at-least-once holding under the worst case: an abandon costs

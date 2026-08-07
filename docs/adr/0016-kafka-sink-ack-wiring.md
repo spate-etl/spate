@@ -1,4 +1,4 @@
-# ADR-0016 — Kafka sink acknowledgements resolve from a per-batch delivery-report countdown
+# ADR-0016 — Kafka sink acknowledgments resolve from a per-batch delivery-report countdown
 
 - **Status:** accepted
 - **Date:** 2026-07-13 (recorded 2026-08-06 from the decision log)
@@ -8,7 +8,7 @@
 ## Context and problem statement
 
 The frozen sink contract says a write returns when the batch is durably written,
-and the framework resolves acknowledgements from that outcome. Kafka does not
+and the framework resolves acknowledgments from that outcome. Kafka does not
 work that way: a produce call enqueues a message locally and returns, and
 durability is reported later, per message, through a delivery-report callback.
 
@@ -21,7 +21,7 @@ and without allocating per message at batch sizes reaching hundreds of thousands
 - One future per message, awaited together
 - A `ThreadedProducer` with a per-batch countdown carried as each message's
   opaque pointer, awaited once inside the write
-- Fire and forget, resolving acknowledgements when produce returns
+- Fire and forget, resolving acknowledgments when produce returns
 
 ## Decision outcome
 
@@ -32,9 +32,9 @@ apparatus.
 
 Each message carries a shared countdown as its librdkafka opaque. The callback
 decrements and never blocks. The write awaits the countdown once, and returning
-`Ok` is the durable-acknowledgement point.
+`Ok` is the durable-acknowledgment point.
 
-Fire-and-forget was rejected outright: it would resolve acknowledgements from a
+Fire-and-forget was rejected outright: it would resolve acknowledgments from a
 local enqueue, so offsets would commit ahead of durability, which is
 at-most-once wearing at-least-once's clothes. Per-message futures were rejected
 on cost — at 500,000 messages in a batch, that is 500,000 allocations and wakers
@@ -42,7 +42,7 @@ for one outcome.
 
 ### Consequences
 
-- Good, because acknowledgement state is a single counter per batch regardless
+- Good, because acknowledgment state is a single counter per batch regardless
   of message count.
 - Good, because the delivery-report callback stays non-blocking, so librdkafka's
   poll thread is never held up by our accounting.
@@ -50,7 +50,7 @@ for one outcome.
   lifetime and the countdown's lifetime are coupled by hand rather than by the
   type system.
 - Bad, because a batch resolves only when its slowest message reports, so one
-  straggler holds the whole batch's acknowledgement.
+  straggler holds the whole batch's acknowledgment.
 
 ### Confirmation
 

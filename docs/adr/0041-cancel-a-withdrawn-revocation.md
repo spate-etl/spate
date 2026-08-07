@@ -17,7 +17,7 @@ Letting it fire charges a replay for nothing.
 
 ## Considered options
 
-- Let the forced release fire anyway; the deadline was set, so honour it
+- Let the forced release fire anyway; the deadline was set, so honor it
 - Cancel the revocation and drop the pending forced release entirely
 - Cancel the revocation but keep a weaker timeout over the drain it left behind
 

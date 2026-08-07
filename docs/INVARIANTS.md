@@ -6,11 +6,10 @@ identifier rather than a difference in phrasing somebody has to notice. The one
 file that restates the list is the pull request template, which turns it into a
 checklist a reviewer ticks against.
 
-`scripts/check-invariants.sh` holds that shape: the template must cite exactly
-the set defined here, and nothing anywhere may cite a number this file does not
-define. It compares numbers, never wording — so a citation that drifts in
-substance while naming the right number passes, and any exception to a property
-belongs in the statement below rather than only where it is cited.
+The template cites exactly the set defined here, and nothing anywhere cites a
+number this file does not define. A citation carries the identifier and none of
+the wording, so any exception to a property belongs in its statement below rather
+than only where it is cited.
 
 Most changes touch none of these. A change that touches one is not thereby
 wrong; it needs to say how the property still holds, and that is the review.

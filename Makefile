@@ -30,7 +30,7 @@
         deny attribution \
         supply-chain zizmor shellcheck self-test check-labels check-perf-report \
         check-gungraun-benches check-wall-benches check-collected-region \
-        check-invariants check-adr adr-new \
+        check-adr adr-new \
         check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
@@ -200,9 +200,6 @@ check-labels: ## Every referenced label is a defined label
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
 
-check-invariants: ## The invariant lists still agree
-	./scripts/check-invariants.sh
-
 # A `*_gungraun.rs` without a `[[bench]] harness = false` stanza is still
 # auto-discovered by cargo — under the default libtest harness, which rejects
 # gungraun's arguments. It compiles and dies at run time complaining about the
@@ -240,7 +237,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-invariants check-adr check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-adr check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

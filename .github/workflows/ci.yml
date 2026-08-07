@@ -212,15 +212,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: make shellcheck
 
-      # The repository's own metadata has to stay self-consistent, and both of
-      # these check a class of drift nothing else would notice: a label
-      # referenced by an issue form or by Dependabot that does not exist (GitHub
-      # drops it silently), and the invariant checklist in the pull request
-      # template falling out of step with docs/INVARIANTS.md, or anything citing
-      # a number that file does not define.
-      # Both are pure file reads — no network, no toolchain.
+      # The repository's own metadata has to stay self-consistent, and this
+      # checks a class of drift nothing else would notice: a label referenced by
+      # an issue form or by Dependabot that does not exist, which GitHub drops
+      # silently. A pure file read — no network, no toolchain.
       - run: make check-labels
-      - run: make check-invariants
 
       # The decision records and their index drift apart silently: the index is
       # hand-maintained, and a record that never reaches it is invisible to

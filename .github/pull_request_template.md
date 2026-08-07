@@ -15,8 +15,9 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 Tick the ones this change touches. Ticking one is not a problem — it means
 the description above should say how the property still holds.
 
-The numbers are canonical and defined in docs/INVARIANTS.md; CONTRIBUTING.md
-states the same list with the reasoning attached.
+The numbers are canonical and defined in docs/INVARIANTS.md, which states each
+property in full and is the only place that does. What follows is the short
+form — read that file before ticking a box you are unsure about.
 -->
 
 - [ ] **INV-1 — delivery is at-least-once.** A source watermark is never
@@ -76,5 +77,5 @@ Tick by exit code, not by memory.
 <!--
 If you measured something, say what you measured it on, and on how quiet a
 machine. A figure only reaches the docs carrying how it was established — see
-CONTRIBUTING.md — because a number nobody can place is one nobody can check.
+docs/STYLE.md § 7 — because a number nobody can place is one nobody can check.
 -->

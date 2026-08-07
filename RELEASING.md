@@ -1,7 +1,7 @@
 # Releasing
 
-Maintainer reference. Contributors want
-[CONTRIBUTING.md](CONTRIBUTING.md) instead.
+Maintainer reference. Contributors want [CONTRIBUTING.md](CONTRIBUTING.md)
+instead, or [DEVELOPING.md](DEVELOPING.md) for the build and benchmark mechanics.
 
 ## The normal case
 

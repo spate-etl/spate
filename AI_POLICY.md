@@ -42,7 +42,7 @@ thing that does not scale with it. One clear problem and one clear solution per
 pull request gets read and merged faster than a large change that does several
 things.
 
-Some practical shape, most of which is in `CONTRIBUTING.md` too:
+Some practical shape:
 
 - Tie it to a real need — ideally an open issue.
 - Run `make gates` and check it by exit code.

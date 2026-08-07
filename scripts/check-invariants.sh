@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# Checks that the four places stating the engine's invariants still agree.
+# Checks that everywhere naming the engine's invariants still agrees with the
+# one file that defines them.
 #
-# docs/INVARIANTS.md defines them; AGENTS.md, CONTRIBUTING.md and the pull
-# request template each restate the list for their own audience.
+# docs/INVARIANTS.md states them in full. The pull request template is the only
+# other place that carries the whole list, because a reviewer ticks against it.
 #
 # Two rules, because the files are not all the same kind of statement:
 #
 #   * a FULL restatement must cite exactly the set INVARIANTS.md defines;
-#   * a SUBSET may cite fewer — the feature form asks "does this touch any of
-#     these?", not "here are the invariants" — but may not cite a number that
+#   * a SUBSET may cite fewer — a page pointing at one property asks "does this
+#     touch it?", not "here are the invariants" — but may not cite a number that
 #     does not exist.
 #
 # Usage: ./scripts/check-invariants.sh
@@ -18,10 +19,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 source_of_truth=docs/INVARIANTS.md
-full=(AGENTS.md CONTRIBUTING.md .github/pull_request_template.md)
-# Anywhere else that names invariants by number. A module doc restating a few of
-# them is a subset restatement like any other, and drifts the same way.
+full=(.github/pull_request_template.md)
+# Anywhere else that names invariants by number. A prose page or module doc
+# citing a few of them is a subset restatement, and drifts the same way.
 subset=(
+    AGENTS.md
+    CONTRIBUTING.md
     .github/ISSUE_TEMPLATE/4-feature.yml
     crates/spate-core/src/checkpoint/mod.rs
 )

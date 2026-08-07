@@ -246,6 +246,12 @@ Everywhere:
 - **Every `## Related` entry carries an em-dash gloss** saying why to follow it.
   A bare link list is not a Related section.
 - **Define a term once**, in the glossary, and use it consistently after.
+- **A performance figure carries how it was established.** The load-bearing ones
+  sit in the `Evidence` section of the decision record they justify, each with a
+  line saying what measured it — down to "measured by a rig this repository no
+  longer carries", which is a real provenance and an honest one. Match the
+  wording already there rather than inventing a stronger-sounding one: a figure
+  nobody can place is one nobody can later check.
 
 ## 8. Docusaurus hygiene
 

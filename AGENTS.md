@@ -4,66 +4,26 @@ High-performance, at-least-once ETL pipeline framework in Rust. Publishable
 crates under `crates/`, plus the unpublished wall-clock benchmark harness in
 `bench/`.
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) states the same gates and invariants for a
-human contributor, with the reasoning attached. The overlap is deliberate — one
-audience needs them in every session, the other once — and `make ci-lint`
-is what keeps the two honest, so prefer fixing a drift it reports over
-rewording around it. [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution
-has to withstand; the part that most often applies here is that a
-delivery-correctness change is judged on a failing test, not on reasoning that
-reads well.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point and
+[`DEVELOPING.md`](DEVELOPING.md) carries the build, test and benchmark mechanics
+in full — reach for the latter when a target, a profile or a bench convention is
+what you need. [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution has to
+withstand;
+the part that most often applies here is that a delivery-correctness change is
+judged on a failing test, not on reasoning that reads well.
 
 ## Invariants (do not break)
 
-The numbers are canonical and defined in [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
-Cite them: "this touches INV-5" is a reviewable claim in a way that restating
-the property is not.
+The engine's invariants are numbered and stated in full in
+[`docs/INVARIANTS.md`](docs/INVARIANTS.md), which is the only place they are
+stated at all. **Read it before changing engine behaviour.** It is seventy lines,
+it is where any exception to a property is recorded, and nothing here substitutes
+for it.
 
-Most changes touch none of these. Touching one is not automatically wrong — it
-means the change has to say how the property still holds.
-
-- **INV-1 — delivery is at-least-once.** Never commit a source watermark past
-  unacknowledged data, including across rebalances and shutdown.
-- **INV-2 — source threads never block on a channel send.** Backpressure is
-  `try_send` + `Source::pause` + keep polling. A blocked poll loop gets the
-  consumer evicted from its group (`max.poll.interval.ms`).
-- **INV-3 — the checkpoint tracker stays synchronous and tokio-free**
-  (`spate-core`'s `checkpoint` module). It is loom-tested and must remain
-  something loom can model.
-- **INV-4 — acks can never block behind data.** The ack path is
-  unbounded/atomic.
-- **INV-5 — the sink worker's intake path never awaits outside a `select!`
-  arm.** Anything it blocks on must sit in a branch position alongside the
-  drain-deadline branch, or the deadline is not polled while it waits and
-  shutdown deadlocks. `ShardWorker::dispatch` is deliberately not `async`: it
-  parks a sealed batch for a permit instead of awaiting one. `SinkPool::drain`
-  force-aborts a worker `BACKSTOP_GRACE` (1s) past the deadline as a backstop,
-  but that loses the worker's drain report — it is not a licence to add a
-  blocking await.
-- **INV-6 — no connector-crate types in `spate-core` public APIs**, and no
-  rdkafka/clickhouse/apache-avro types in any public trait bounds — those are
-  0.x dependencies and must not leak into our semver surface. The **one
-  sanctioned exception is the `metrics` facade**: `Meter`, `ComponentLabels`,
-  and the re-exported `Counter`/`Gauge`/`Histogram`/`SharedString` are public
-  because the framework's instrumentation API *is* that facade. It is
-  re-exported from `spate-core` (never depended on directly by connectors) so a
-  breaking `metrics` bump is one coordinated change, not per-crate drift.
-- **INV-7 — record error policies are Skip or Fail only**, always surfaced
-  through metrics (`*_dropped_total{reason}` / `*_errors_total{error_type}`).
-- **INV-8 — all metrics handles are pre-registered at build time.** Never
-  resolve metric names or labels on the per-record path.
-- **INV-9 — all metrics live under the `spate_` umbrella.** The framework owns
-  the reserved stage roots (`spate_source_`, `spate_sink_`, …); connector and
-  user families register through a `Meter`, which auto-prefixes
-  `spate_<namespace>_` (default `custom`) and rejects a namespace that shadows a
-  reserved root. Raw-facade metrics are the opt-out for names deliberately
-  outside `spate_`.
-- **INV-10 — a gauge series has exactly one live owner per process.** Handle
-  structs claim their series at construction (`metrics::ownership`); a duplicate
-  handle set on the same key becomes a *shadow* that still counts (counters sum)
-  but publishes no gauge. Assembly fails on a collision
-  (`BuildError`/`StartError`); direct construction logs and shadows. See "Series
-  ownership" in `docs/METRICS.md`.
+Most changes touch none of them. Touching one is not automatically wrong — it
+means the change has to say how the property still holds. Cite the number when it
+does: "this touches INV-5" is a reviewable claim in a way that restating the
+property is not, and `.github/pull_request_template.md` asks per number.
 
 ## Working loop
 
@@ -75,9 +35,11 @@ make clippy
 cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 ```
 
-`make help` lists every target; `make gates` is what a pull request must pass,
-and the workflows call the same targets, so a command that works here is the
-command CI runs.
+`make help` lists every target; `make gates` is what a pull request must pass.
+CI calls the same targets for lint, type check, doctests, the feature matrix,
+licences and every `ci-lint` member — but the test, container, site and MSRV jobs
+spell out invocations of their own, so green gates locally is necessary and not
+sufficient.
 
 Three traps that have cost real time here:
 

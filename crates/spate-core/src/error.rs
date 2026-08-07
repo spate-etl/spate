@@ -1,6 +1,6 @@
 //! Error taxonomy and per-stage error policies.
 //!
-//! Three classes of failure exist in a pipeline (see `docs/adr/0010-skip-or-fail-record-error-policies.md`):
+//! Three classes of failure exist in a pipeline (ADR-0010):
 //! *retryable* (transient I/O — handled by the sink retry layer),
 //! *record-level* (a bad payload or failed user code — subject to
 //! [`ErrorPolicy`]), and *fatal* (invariant violations — the pipeline

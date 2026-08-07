@@ -5,9 +5,11 @@
 //! lane assignment and revocation as events and owns commits and
 //! pause/resume; each lane is a pollable unit pinned to one pipeline thread
 //! (for Kafka: a partition queue), yielding payloads that **borrow** the
-//! source's buffers for the duration of one `push_batch` call. See
-//! `docs/adr/0003-poll-based-source-api.md` and
-//! `docs/user-guide/06-extending/contracts.mdx`.
+//! source's buffers for the duration of one `push_batch` call (ADR-0003).
+//! The obligations an implementor takes on are spelled out in
+//! [the connector contracts][contracts].
+//!
+//! [contracts]: https://spate.kainth.dev/docs/user-guide/extending/contracts
 
 mod barrier;
 

@@ -78,8 +78,7 @@ pub enum StartError {
     Io(#[from] std::io::Error),
 }
 
-/// One pipeline process: source, per-thread chains, and a sink, assembled
-/// per `docs/user-guide/02-concepts/01-architecture.mdx`.
+/// One pipeline process: source, per-thread chains, and a sink.
 ///
 /// The caller creates the shared [`InflightBudget`] first and wires it into
 /// the chain terminals (which `add` on enqueue) and the sink workers (which

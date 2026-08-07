@@ -3,11 +3,10 @@
 //!
 //! The [`RecFamily`] lifetime→type family is what lets a
 //! lifetime-parameterized record type cross generic and dyn boundaries
-//! (validated by the seam prototype — see
-//! `docs/adr/0013-zero-copy-seam.md`). Deserializers for borrowing record
-//! types implement `Deserializer<F>` for a family `F` whose `Rec<'buf>`
-//! borrows the payload
-//! buffer; owned record types use the provided [`Owned`] family.
+//! (validated by the seam prototype — ADR-0013). Deserializers for
+//! borrowing record types implement `Deserializer<F>` for a family `F`
+//! whose `Rec<'buf>` borrows the payload buffer; owned record types use
+//! the provided [`Owned`] family.
 
 use crate::checkpoint::AckRef;
 use crate::error::DeserError;

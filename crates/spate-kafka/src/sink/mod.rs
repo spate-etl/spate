@@ -1,8 +1,7 @@
 //! Kafka producer sink: pipelines terminate in a Kafka topic.
 //!
-//! The framework owns batching, retry, backpressure, and drain (see
-//! `docs/adr/0006-per-shard-sink-workers.md`); this connector supplies the two halves of the
-//! seam:
+//! The framework owns batching, retry, backpressure, and drain (ADR-0006);
+//! this connector supplies the two halves of the seam:
 //!
 //! - **CPU half** ([`KafkaEncoder`] over a [`MessageEncoder`]): on pipeline
 //!   threads, each record becomes one Kafka message — key, headers,

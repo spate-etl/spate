@@ -6,7 +6,7 @@
 //! [`RunnableChain::push_batch`], once per poll batch. Records are born
 //! (deserialized) and die (encoded into shard frames, filtered, or skipped)
 //! inside a single `push_batch` call, so borrowed payloads never cross or
-//! outlive the boundary. See `docs/adr/0013-zero-copy-seam.md`.
+//! outlive the boundary (ADR-0013).
 
 mod builder;
 mod chain;

@@ -61,13 +61,13 @@ Open the source. For each of these, if the page asserts it:
   `src/metrics.rs` (`meter.counter("objects_listed_total", …)`), and the
   `spate_<crate>_<role>_` prefix comes from the `Meter` scope, not from any
   string you can grep for whole.
-- **Rust snippets** (§ 10). A rendered fence is compiled, so the question moves:
-  open the source at that anchor and ask whether the region is the code the
-  sentence introducing it promises. A region that compiles is not the same as
-  one that answers the paragraph above it. A hand-written fence is an implicit
-  claim of exemption — name the clause; if none fits, that is the finding. The
-  feature flags stay yours either way, because a region compiles under *some*
-  feature set, not necessarily the one the page tells the reader to enable.
+- **Rust snippets** (§ 10). A rendered fence is compiled, so the question is not
+  whether the code is right but whether it is the right code: open the source at
+  that anchor and ask whether the region answers the sentence introducing it. A
+  hand-written fence is an implicit claim of exemption — name the clause; if none
+  fits, that is the finding. Feature flags are yours either way, because a region
+  compiles under *some* feature set, not necessarily the one the page tells the
+  reader to enable.
 - **Performance figures.** § 7 requires provenance. A figure carrying none is a
   defect even when it happens to be true.
 - **Link glosses**, against the page each one points at. `make docs` proves a
@@ -90,12 +90,10 @@ On a connector page the claim sources are five, and only the first is obvious:
 families; `src/<component>.rs` for every builder method a snippet calls; the
 internals a specific claim names; and the sources the page renders fences from.
 
-That last one used to be where a page and a working program most often
-disagreed. § 10 moved the disagreement rather than removing it: a rendered fence
-cannot drift, because the build breaks first, so what is left unguarded is the
-prose *around* it. Read the region and the paragraph introducing it as one unit,
-distrust any walkthrough that counts lines instead of naming them, and treat
-every fence that opted out as owing you a clause.
+A rendered fence cannot drift — the build breaks first — so the unguarded half
+is the prose *around* it. Read the region and the paragraph introducing it as one
+unit, distrust any walkthrough that counts lines instead of naming them, and
+treat every fence that opted out as owing you a clause.
 
 ## 2. Structure
 

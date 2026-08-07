@@ -191,12 +191,13 @@ component_type)` there (it uses the `custom` namespace):
 
 ```rust
 .chains(move |ctx| {
+    let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
     // Registers `spate_custom_enrich_hits_total` — you pass the local name.
     let hits = ctx.meter("enrich", "map").counter("enrich_hits_total", &[]);
-    chain(deser)
+    chain(deser.clone())
         .with_metrics(ctx.pipeline, "enrich")
         .inspect(move |r| if is_hit(r) { hits.increment(1); })
-        .sink(ctx.sink("default"))
+        .sink(encoder.clone(), KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
         .build()
 })
 ```

@@ -454,6 +454,12 @@ region outlives the heading above it. A region is one contiguous stretch, so a
 page wanting to stitch two apart wants two fences with the sentence that belongs
 between them.
 
+A fence renders with no header. Say where the code comes from once, in prose,
+where the sentence can also say how to run it — a reader holding the published
+crate has no `crates/` directory to look in, so a path on every fence is
+repetition they cannot act on. Add `title="…"` to a single fence when *which*
+source it is matters to the reader, which is usually a page drawing on two.
+
 Exempt, because transcluding them costs more than it protects:
 
 - A fragment of two or three lines illustrating a single call or signature.

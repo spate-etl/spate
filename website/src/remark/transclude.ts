@@ -95,8 +95,9 @@ function parseMeta(meta: string): [string, string | null][] {
  *
  * Not cosmetic: Docusaurus parses a code-block title with
  * `/title=(?<quote>["'])(?<title>.*?)\1/` (theme-common's `codeBlockUtils`),
- * which *requires* the quotes. An unquoted `title=crates/…/memory_pipeline.rs`
- * parses as no title at all and the header silently does not render.
+ * which *requires* the quotes. An author who writes a bare `title=something`
+ * gets no title at all and no diagnostic, so quoting on the way out repairs it
+ * rather than passing the silence through.
  */
 function serializeMeta(pairs: [string, string | null][]): string {
   return pairs
@@ -357,14 +358,19 @@ export default function remarkTransclude() {
       node.value = value;
 
       // `file` and `region` are ours and mean nothing to @theme/CodeBlock,
-      // which parses what is left (title, showLineNumbers, ...). A title is
-      // filled in when the author gave none, because where a snippet came from
-      // is the reason a reader can trust it.
-      const rest = pairs.filter(([k]) => k !== 'file' && k !== 'region');
-      if (!rest.some(([k]) => k === 'title')) {
-        rest.push(['title', fileAttr]);
-      }
-      node.meta = serializeMeta(rest);
+      // which parses what is left (title, showLineNumbers, ...).
+      //
+      // No title is synthesised from the path. The reader of a page is not
+      // holding this repository — someone who depends on the published crate
+      // has no `crates/spate/examples/` to look in — so the path describes a
+      // layout only a contributor can act on, and a contributor already reads
+      // it off the `file=` attribute in the page source. Where a snippet came
+      // from is worth saying once in prose, next to how to run it, rather than
+      // on every fence. An author who needs it on a specific fence writes
+      // `title="…"` and it survives untouched.
+      node.meta = serializeMeta(
+        pairs.filter(([k]) => k !== 'file' && k !== 'region'),
+      );
     });
   };
 }

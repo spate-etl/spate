@@ -184,6 +184,12 @@ Copy `04-connectors/_template.mdx`. The heading order is fixed:
    the framework families, not connector registries.
 8. `## Related` — cross-links, each with an em-dash gloss.
 
+The canonical wording above must **open** its sentence, verbatim. A paraphrase
+is a defect; a continuation is not — "Construct it from the pipeline's opaque
+section, with the runtime handle and a framer:" is fine, because a reader
+scanning the connector pages still meets the same opening clause on each. Do
+not improve the canonical part; do not lose information to preserve it.
+
 **Defaults notation — exactly three forms, no others:**
 
 | Form | Means |
@@ -195,6 +201,11 @@ Copy `04-connectors/_template.mdx`. The heading order is fixed:
 Never put prose in the Default cell ("framework defaults", "unset"). If the
 default is owned elsewhere, say so in the Description and link to
 [`#sink-pool`](user-guide/07-reference/configuration.mdx#sink-pool).
+
+A key whose default is an **empty map or list** takes the backticked literal —
+`` `{}` ``, `` `[]` `` — not `none`. Both readings are defensible; the literal
+wins because it says what the deserializer produces, and `none` cannot
+distinguish an absent section from an empty one.
 
 ## 4. Configuration appendix
 
@@ -305,12 +316,16 @@ Everywhere:
   no undo. `:::tip` and `:::caution` are unused: a tip is either worth a
   sentence of prose or is not worth the reader's eye. Never stack two, and
   never open a section with one.
-- **A performance figure carries how it was established.** The load-bearing ones
-  sit in the `Evidence` section of the decision record they justify, each with a
-  line saying what measured it — down to "measured by a rig this repository no
-  longer carries", which is a real provenance and an honest one. Match the
-  wording already there rather than inventing a stronger-sounding one: a figure
-  nobody can place is one nobody can later check.
+- **A quantitative claim carries how it was established.** Throughput and
+  latency figures, and equally any number a reader sizes infrastructure from —
+  "roughly 100 bytes per key" is a memory budget somebody will provision
+  against, so it needs a source as much as a benchmark does. The load-bearing
+  ones sit in the `Evidence` section of the decision record they justify, each
+  with a line saying what measured it — down to "measured by a rig this
+  repository no longer carries", which is a real provenance and an honest one.
+  Match the wording already there rather than inventing a stronger-sounding
+  one: a figure nobody can place is one nobody can later check, and the same
+  figure worded two ways on two pages is worse than either.
 
 ## 8. Docusaurus hygiene
 

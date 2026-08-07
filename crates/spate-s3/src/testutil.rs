@@ -12,7 +12,7 @@ use std::io;
 
 /// Newline-delimited [`RecordFramer`]: split on `\n`, strip one trailing `\r`,
 /// skip whitespace-only lines, keep an unterminated final line, bounded per
-/// record. Behaviourally identical to `spate-json`'s `NdjsonFramer`, so the
+/// record. Behaviorally identical to `spate-json`'s `NdjsonFramer`, so the
 /// resume-by-record-index tests exercise the same record boundaries.
 pub(crate) struct TestLineFramer {
     partial: Vec<u8>,

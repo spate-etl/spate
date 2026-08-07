@@ -1,11 +1,11 @@
 //! Instruction counts for the row encoders (gungraun).
 //!
 //! One shape — encode a block of rows and finish the chunk, exactly as the
-//! sink's terminal stage does — parameterised by wire format and row schema.
+//! sink's terminal stage does — parameterized by wire format and row schema.
 //!
 //! The two formats are the choice a deployment actually makes.
 //! [`Native`](spate_clickhouse::NativeEncoder) buffers column-wise and emits a
-//! block; RowBinary serialises each row in place. Their relative cost is
+//! block; RowBinary serializes each row in place. Their relative cost is
 //! published on the ClickHouse format page from a wall-clock measurement; this
 //! is the counted number underneath it.
 //!

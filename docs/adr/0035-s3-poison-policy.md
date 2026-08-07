@@ -32,7 +32,7 @@ distinguishes them, and it is knowable at the point of failure. A failure that
 can only affect this object poisons this split, via the driver's failure path,
 consuming an attempt and eventually quarantining it
 ([ADR-0027](0027-split-delivery-attempts-and-quarantine.md)). A failure that
-would affect every object — authentication, authorisation, endpoint
+would affect every object — authentication, authorization, endpoint
 configuration — fails the pipeline, because no amount of reassignment will help
 and a fleet retrying it is a fleet doing nothing loudly.
 
@@ -50,7 +50,7 @@ quarantined and nothing indicating why.
 - Good, because one corrupt object costs one split rather than a whole backfill.
 - Good, because a misconfiguration fails immediately with the actual error rather
   than as mass quarantine.
-- Bad, because the classification is a judgement encoded in a match: a storage
+- Bad, because the classification is a judgment encoded in a match: a storage
   error whose scope is genuinely ambiguous — a transient permission denial during
   a credential rotation — gets classified one way and will sometimes be wrong.
 - Bad, because a job with one bad object ends `Stalled` and needs intervention,

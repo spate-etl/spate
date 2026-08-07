@@ -23,25 +23,25 @@ pub trait RunnableChain: Send {
 }
 ```
 
-The constraint that produced it: a trait object cannot be parameterised by a
+The constraint that produced it: a trait object cannot be parameterized by a
 lifetime that varies per call, and records here *borrow* from the source's
-buffers, so their type is lifetime-parameterised. `Box<dyn RunnableChain>` is
-only legal because **no lifetime-parameterised type is ever stored across the
-call.** Records are deserialised, transformed and serialised into shard frames
+buffers, so their type is lifetime-parameterized. `Box<dyn RunnableChain>` is
+only legal because **no lifetime-parameterized type is ever stored across the
+call.** Records are deserialized, transformed and serialized into shard frames
 entirely inside one `push_batch` — born and dead within it — so by the time it
 returns there is nothing borrowed left to name.
 
 Two things follow that are worth knowing before you design around them:
 
-- Dispatch costs one virtual call **per batch**, amortised over every record in
-  it. Everything inside the chain is monomorphised and inlines freely.
+- Dispatch costs one virtual call **per batch**, amortized over every record in
+  it. Everything inside the chain is monomorphized and inlines freely.
 - Nothing can hold a record beyond the call. Windowing, sorting and stateful
   aggregation are structurally impossible rather than merely unimplemented.
 
 ## Naming a borrowed record: `RecFamily`
 
 A chain still has to name its record type in its own generic parameters, and
-that type borrows. `RecFamily` is how a lifetime-parameterised type crosses
+that type borrows. `RecFamily` is how a lifetime-parameterized type crosses
 generic and `dyn` boundaries:
 
 ```rust
@@ -58,7 +58,7 @@ This is the least intuitive part of the framework, and its error messages are
 poor. If a chain will not compile and the message mentions an associated type
 projection, this is usually why.
 
-## Deserialising: one payload in, many records out
+## Deserializing: one payload in, many records out
 
 ```rust
 /// Push-style, so a payload yielding many records allocates nothing to
@@ -84,7 +84,7 @@ pub struct Record<T> {
 ```
 
 `RecordMeta` is `Copy`, so passing it around costs nothing. The `AckRef` is a
-clone of the batch's acknowledgement handle — see
+clone of the batch's acknowledgment handle — see
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for what
 happens when it drops.
 
@@ -131,10 +131,10 @@ pub trait ShardWriter: Send + Sync + 'static {
 ```
 
 A `SealedBatch` carries pre-encoded wire frames, row and byte counts, a
-deterministic deduplication token, and the acknowledgement handles. Rows are
+deterministic deduplication token, and the acknowledgment handles. Rows are
 encoded on the **pipeline threads** by your `RowEncoder`, not here — see
 [Writing a sink](custom-sink.mdx) for both halves and for the `Drop` obligation
-that comes with holding acknowledgement handles.
+that comes with holding acknowledgment handles.
 
 ## Related
 

@@ -37,7 +37,7 @@ to change.
 Widening the contract was rejected because it would push a Kafka-shaped concept
 into a trait every sink implements, for the benefit of one. Bypassing the pool
 was rejected because it would give up batching, breaker quarantine, health
-signalling and drain choreography — all of which work unchanged.
+signaling and drain choreography — all of which work unchanged.
 
 ### Consequences
 
@@ -46,7 +46,7 @@ signalling and drain choreography — all of which work unchanged.
 - Good, because the framing can evolve freely; nothing outside the crate can
   depend on it.
 - Bad, because the connector encodes and immediately re-decodes its own data, so
-  there is a serialisation round trip that exists only to satisfy the seam's
+  there is a serialization round trip that exists only to satisfy the seam's
   shape.
 - Bad, because a reader of the sealed batch cannot tell what is in it; the frames
   are genuinely opaque and only the owning connector can interpret them.

@@ -202,7 +202,7 @@ fn suite() -> Suite {
     // rather than measuring a single call: a lone `stable_key_hash` is a few
     // nanoseconds, which the harness refuses as indistinguishable from an empty
     // loop — and rightly, since a timer cannot resolve it. Folding is also what
-    // gives `black_box` a value to hold, so neither call can be optimised away.
+    // gives `black_box` a value to hold, so neither call can be optimized away.
     suite
         .case(
             "chain_stable_key_hash",

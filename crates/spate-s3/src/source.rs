@@ -410,7 +410,7 @@ fn build_store(
     // stays valid.
     let (scheme, path) = ObjectStoreScheme::parse(url)?;
     // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
-    // tests) keeps the stock, scheme-generic behaviour.
+    // tests) keeps the stock, scheme-generic behavior.
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
         return object_store::parse_url_opts(url, opts(options));
     }
@@ -453,7 +453,7 @@ fn harden_client_defaults(builder: AmazonS3Builder) -> AmazonS3Builder {
 }
 
 /// Overlay the raw `store` passthrough options onto an S3 builder. Keys that
-/// are not recognised object_store configuration are ignored (matching
+/// are not recognized object_store configuration are ignored (matching
 /// `parse_url_opts`); a later key wins, so these override any environment
 /// value seeded by [`AmazonS3Builder::from_env`].
 fn apply_options(

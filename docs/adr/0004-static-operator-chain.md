@@ -23,18 +23,18 @@ dispatch dynamic.
 
 - Per-operator dynamic dispatch: each stage a `Box` of a trait object
 - Pull-based iterator composition
-- Push-based composition, monomorphised, with type erasure at the chain boundary
+- Push-based composition, monomorphized, with type erasure at the chain boundary
   only — one dynamic call per *batch*
 
 ## Decision outcome
 
 Chosen option: "Push-based composition with erasure at the chain boundary",
-because it puts the erasure where its cost amortises over a whole batch instead
+because it puts the erasure where its cost amortizes over a whole batch instead
 of over one record, and because push composition is what makes `flat_map`
 allocation-free.
 
 Each operator implements a push interface and calls its downstream inline, so
-the whole chain compiles to one loop and the optimiser can inline and vectorise
+the whole chain compiles to one loop and the optimizer can inline and vectorize
 across operator boundaries. `flat_map` emits through a stack-borrowed emitter,
 so fan-out allocates nothing. Erasure happens exactly once, at the boundary,
 where a single virtual call delivers an entire batch.
@@ -49,7 +49,7 @@ reintroduces the per-record allocation the design exists to avoid.
 - Good, because adding a stage costs an inlined function call rather than a
   dispatch, so chain length is close to free.
 - Good, because fan-out allocates nothing — the emitter lives on the stack.
-- Bad, because the chain is monomorphised, so compile time and binary size grow
+- Bad, because the chain is monomorphized, so compile time and binary size grow
   with the number of distinct chains in a program.
 - Bad, because higher-ranked lifetimes hit a language limit for borrowing
   families: `map` and `try_map` closures cannot be inferred (E0582 — the
@@ -72,6 +72,6 @@ measured by `crates/spate-core/benches/chain_wall.rs`.
 
 - Landed in `c8973e6`.
 - [ADR-0013](0013-zero-copy-seam.md) — the boundary this erases at, and why a
-  lifetime-parameterised record can cross it.
+  lifetime-parameterized record can cross it.
 - [Writing operators](../user-guide/06-extending/custom-operators.mdx) —
   including the `map_rec` tier and when it is needed.

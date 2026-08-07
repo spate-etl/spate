@@ -813,7 +813,7 @@ mod tests {
         }
 
         /// There is no aggregate series: readers aggregate in the query layer.
-        /// An unlabelled series sharing this family name would make
+        /// An unlabeled series sharing this family name would make
         /// `sum(spate_source_lag_records)` double-count.
         #[test]
         fn no_unlabelled_aggregate_series_is_published() {

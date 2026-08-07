@@ -3,7 +3,7 @@
 //!
 //! Supported forms (Vector-compatible):
 //!
-//! | Form | Behaviour |
+//! | Form | Behavior |
 //! |---|---|
 //! | `${VAR}` | Substitute the variable; **error** if unset (empty is allowed). |
 //! | `${VAR:-default}` | Substitute the variable; use `default` if unset **or empty**. |

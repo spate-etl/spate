@@ -52,7 +52,7 @@ in the process wants it.
   - `component_type` — the implementation, which for a connector is the system
     it talks to and for an operator is its kind (`map`, `filter`); custom sinks
     set it via `SinkParts::with_component_type`.
-- **Cardinality is mostly opt-in**: `partition`-labelled series appear only
+- **Cardinality is mostly opt-in**: `partition`-labeled series appear only
   with `metrics.per_partition_detail: true` (default `false`), because their
   cardinality grows with the assignment. The one exception is
   `spate_source_lag_records`, which is always per partition — consumer lag has

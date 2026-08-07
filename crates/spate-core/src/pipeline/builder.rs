@@ -216,7 +216,7 @@ impl ChainCtx {
         self.chunk
     }
 
-    /// A [`Meter`] for a pipeline author's own metrics, pre-labelled with the
+    /// A [`Meter`] for a pipeline author's own metrics, pre-labeled with the
     /// pipeline name plus the `component` / `component_type` you name and
     /// scoped to the `spate_custom_` namespace. Resolve handles from it **once
     /// here** (the factory runs once per thread, before data flows) and move

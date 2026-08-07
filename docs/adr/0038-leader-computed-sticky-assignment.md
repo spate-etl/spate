@@ -14,7 +14,7 @@ converge to within one split and cannot oscillate.
 
 Four days of building on it produced a series of defects, and they all had the
 same shape: **state visible to neither side of a negotiation.** Splits promised
-but not yet leased. Grant acknowledgements lost on a failed compare-and-set.
+but not yet leased. Grant acknowledgments lost on a failed compare-and-set.
 Annotations that nothing retired. Each was fixed individually; the shape kept
 recurring, because it is inherent to distributing the *decision* along with the
 work — every worker negotiates from a partial view, and the gaps between those
@@ -40,9 +40,9 @@ named for, cooperatively draining what they are not.
 Balance is on split **weight** rather than count, sticky, and converges by
 strictly-improving moves. Because the leader sees everything, the balance
 calculation becomes a **pure function** that can be property-tested, instead of
-behaviour emerging from concurrent negotiation.
+behavior emerging from concurrent negotiation.
 
-Centralising costs nothing in safety, and that is the load-bearing claim: an
+Centralizing costs nothing in safety, and that is the load-bearing claim: an
 assignment **is not a fence**. A stale, split-brained or simply wrong leader can
 produce bad balance but never two owners, because the durable record's
 compare-and-set still decides ownership
@@ -51,7 +51,7 @@ no correctness guarantees at all
 ([ADR-0025](0025-embedded-consensus-rejected.md)).
 
 Mature implementations of this shape are unanimous the other way: planning is
-centralised in an elected leader. The designs that were genuinely peer-to-peer
+centralized in an elected leader. The designs that were genuinely peer-to-peer
 have since moved to one, having accumulated the same symptoms — an unraisable
 steal cap and an uncorrected disbalance. Arriving independently at a design those
 have abandoned is a signal worth acting on.
@@ -59,7 +59,7 @@ have abandoned is a signal worth acting on.
 ### Consequences
 
 - Good, because the balance logic is a pure function with property tests, rather
-  than emergent behaviour in an async task.
+  than emergent behavior in an async task.
 - Good, because the partial-view defect class is gone: there is one view, and it
   belongs to the leader.
 - Bad, because there is now a leader, and its failure — while never a correctness

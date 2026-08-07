@@ -1,4 +1,4 @@
-//! Multi-table (multi-sink) behaviour at the connector level: several
+//! Multi-table (multi-sink) behavior at the connector level: several
 //! config-built ClickHouse sinks, each writing to its own table, with a
 //! failure on one isolated from the rest.
 //!

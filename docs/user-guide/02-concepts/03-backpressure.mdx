@@ -23,7 +23,7 @@ converted into a churning fleet. Pausing lanes while keeping the loop
 running keeps the protocol serviced and confines the slowdown to exactly
 where it belongs.
 
-The same reasoning protects the ack path: acknowledgements travel over an
+The same reasoning protects the ack path: acknowledgments travel over an
 unbounded channel and atomic counters, so a full data path can never block
 a completion signal (see
 [Delivery guarantees](02-delivery-guarantees.mdx)).

@@ -34,7 +34,7 @@ fleet exists to have. No comparable worker framework embeds consensus for work
 distribution, and that agreement across otherwise different designs is worth
 weighing.
 
-**Centralising assignment does not reopen this.** A later change made the leader
+**Centralizing assignment does not reopen this.** A later change made the leader
 compute the whole assignment rather than workers negotiating it
 ([ADR-0038](0038-leader-computed-sticky-assignment.md)), which looks like it
 needs the leader to be authoritative — and therefore like it needs consensus to
@@ -66,6 +66,6 @@ assignment ever became safety-relevant, this decision would need revisiting.
 ## More information
 
 - Landed in `d92b3d4` (#40); the leader-assignment argument was added in
-  `e79dfc2` (#64) when centralising assignment made the question live again.
+  `e79dfc2` (#64) when centralizing assignment made the question live again.
 - [ADR-0026](0026-coordination-fencing.md) — the fence that provides the
   guarantee consensus would have bought.

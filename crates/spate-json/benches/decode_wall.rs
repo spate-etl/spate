@@ -132,7 +132,7 @@ fn payload_bytes<D>(rig: &RefCell<Rig<D>>) -> u64 {
 ///
 /// The emitted count is asserted and returned: asserted so a fixture that
 /// stopped being broken cannot pass as a fast one, returned so `black_box` has
-/// something to hold and the decode cannot be optimised away.
+/// something to hold and the decode cannot be optimized away.
 ///
 /// No resident-set figure reaches these records. `warm_rig` drives a full pass
 /// before the region opens, so the process's high-water mark is already set by
@@ -471,10 +471,10 @@ fn serde_floors(suite: Suite) -> Suite {
 /// library it calls.
 ///
 /// The crate reaches the same pair through a `thread_local!`, where this holds
-/// it in a struct field. That leaves the floor a lazy-initialisation check and
+/// it in a struct field. That leaves the floor a lazy-initialization check and
 /// a thread-local read per document lighter than the crate's path — a sliver
 /// of the measured margin that is the access, not the framework. Holding it in
-/// a real thread-local here would mean either a `const`-initialised one, which
+/// a real thread-local here would mean either a `const`-initialized one, which
 /// `simd_json::Buffers` is not, or reproducing the crate's lazy cell, at which
 /// point the floor stops being the library and starts being a copy of the
 /// backend module.

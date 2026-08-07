@@ -1,4 +1,4 @@
-# ADR-0014 — A non-generic `Pipeline` builder that owns initialisation
+# ADR-0014 — A non-generic `Pipeline` builder that owns initialization
 
 - **Status:** accepted
 - **Date:** 2026-07-07 (recorded 2026-08-06 from the decision log)
@@ -20,13 +20,13 @@ somebody's responsibility to remember.
 
 - Keep manual assembly as the only path, and document the ordering
 - A builder using typestate generics, with each stage a distinct type parameter
-- A non-generic builder whose constructor performs initialisation, with the
+- A non-generic builder whose constructor performs initialization, with the
   source supplied at the terminal call
 - A configuration-driven registry mapping tags to constructors
 
 ## Decision outcome
 
-Chosen option: "A non-generic builder whose constructor performs initialisation",
+Chosen option: "A non-generic builder whose constructor performs initialization",
 because it converts the ordering hazards from documented into
 **unconstructible**. `Pipeline::from_config` installs telemetry and the exporter
 and builds the I/O runtime before it returns, so a builder cannot be held without
@@ -57,7 +57,7 @@ YAML out of.
 
 Nothing in the builder touches the data path. It assembles the cold path and
 passes the user's chain factory through unchanged, so the chain stays fully
-monomorphised behind the same one-call-per-batch boundary.
+monomorphized behind the same one-call-per-batch boundary.
 
 ### Consequences
 
@@ -75,7 +75,7 @@ monomorphised behind the same one-call-per-batch boundary.
 
 ### Confirmation
 
-Structural for the ordering bug: `from_config` returns an initialised builder or
+Structural for the ordering bug: `from_config` returns an initialized builder or
 nothing. The desugaring is held to the manual primitives by the rustdoc on
 `Pipeline`, which shows the exact equivalent sequence.
 

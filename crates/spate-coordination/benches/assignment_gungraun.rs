@@ -1,7 +1,7 @@
 //! Instruction counts for the leader's balance decision (gungraun).
 //!
 //! One shape — compute the desired assignment for a fleet from an observed
-//! store state — parameterised by the state the fleet is in, because what
+//! store state — parameterized by the state the fleet is in, because what
 //! changes the decision's cost is which of its three passes has work to do,
 //! not which function is called:
 //!
@@ -124,7 +124,7 @@ fn skewed_joined_member() -> Rig {
 /// both halves of that are load-bearing rather than stylistic. Collection is
 /// bounded by a callgrind toggle on the module the benchmark macro wraps the
 /// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimiser leaves in an unstable shape inside that module can
+/// so work the optimizer leaves in an unstable shape inside that module can
 /// end up outside the collected region entirely, and a bench that measures
 /// nothing still reports a plausible number. The decision itself is a
 /// cross-crate call into `bench_seams`, which is a frame the toggle cannot

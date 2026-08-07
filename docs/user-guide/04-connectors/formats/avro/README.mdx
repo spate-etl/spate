@@ -78,7 +78,7 @@ The builder hands out three deserializer flavors:
 
 - `build_serde_datum::<T>()` (and the record-family form `build_datum::<F>()`)
   — decodes each datum **directly** into `T` in a single pass, driven by the
-  writer schema, never materialising an intermediate value tree. This is the
+  writer schema, never materializing an intermediate value tree. This is the
   throughput path. With a borrowed record family, string and bytes fields
   point straight into the payload buffer (zero-copy;
   `crates/spate-avro/tests/zero_copy_flat_map.rs` is the worked example).

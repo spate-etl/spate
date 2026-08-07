@@ -1,7 +1,7 @@
 //! Instruction counts for chunk-fed record framing (gungraun).
 //!
 //! One shape — drive a run of objects through one framer, as a lane does over
-//! the members of its split — parameterised by codec and by how the object is
+//! the members of its split — parameterized by codec and by how the object is
 //! entered:
 //!
 //! - `plain_whole` — one 4 MiB NDJSON object in fetch-sized chunks. The
@@ -16,7 +16,7 @@
 //!   which is what an export key appended to by a run of upload sessions
 //!   holds. Decoded content is byte-identical to the `_whole` pair, so the
 //!   difference between them is the per-stream term those fixtures never
-//!   charge — trailer validation, decoder reinitialisation, the next stream's
+//!   charge — trailer validation, decoder reinitialization, the next stream's
 //!   header parse — **plus** whatever the compressed input's own shape
 //!   contributes, since sixteen streams each starting from a cleared window
 //!   do not compress to the same bytes as one. The pair bounds that term

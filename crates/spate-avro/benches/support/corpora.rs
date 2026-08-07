@@ -266,7 +266,7 @@ pub(crate) const EVENT_DEFAULTED: &str = r#"{"type":"record","name":"Event","fie
 /// registered when the schema is parsed and then never consulted, so this
 /// reader rejects every payload the other four resolve.
 /// `tests/bench_fixtures.rs` pins that, so the case can be added the day the
-/// dependency starts honouring it — which is also why this reader is `allow`ed
+/// dependency starts honoring it — which is also why this reader is `allow`ed
 /// rather than deleted: it is the input that pin needs.
 #[allow(dead_code, reason = "used only by the fixtures test's alias pin")]
 pub(crate) const EVENT_ALIASED: &str = r#"{"type":"record","name":"Event","fields":[

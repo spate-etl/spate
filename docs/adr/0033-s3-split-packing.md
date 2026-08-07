@@ -12,7 +12,7 @@ bucket vary by orders of magnitude, and the number of objects can be very large,
 so the packing algorithm decides both how even the work is and how much memory
 the planner needs.
 
-The obvious quality-maximising approach is to sort by size and pack
+The obvious quality-maximizing approach is to sort by size and pack
 largest-first. That requires the whole listing in memory before packing can
 start, which makes planner memory a function of object count, and it destroys
 **prefix locality** — objects that share a key prefix, and therefore usually

@@ -1,5 +1,5 @@
 //! The checkpoint bench rig: a fixed corpus of source poll batches, issued
-//! and resolved through the public acknowledgement path and drained into
+//! and resolved through the public acknowledgment path and drained into
 //! per-partition watermarks a commit tick at a time.
 //!
 //! Everything here goes through `spate_core::checkpoint`'s public API —
@@ -13,7 +13,7 @@
 //! thread, and is what the counted tier measures. [`threaded`] spreads the
 //! same schedule across a pinned number of worker threads, and is what the
 //! wall tier measures: what a thread count moves is contention on the two
-//! unbounded channels rather than arithmetic, and callgrind serialises
+//! unbounded channels rather than arithmetic, and callgrind serializes
 //! threads, so the counted tier cannot see it at all.
 //!
 //! Included with `#[path]` by `checkpoint_gungraun.rs`, `control_plane_wall.rs`
@@ -193,7 +193,7 @@ pub(crate) struct Rig {
     /// Batches one commit tick issues and resolves before draining.
     per_tick: usize,
     order: Order,
-    /// Live acknowledgement handles for the tick under way. Held so the tick
+    /// Live acknowledgment handles for the tick under way. Held so the tick
     /// can resolve them in an order of its choosing; reused across ticks so
     /// the drive does not measure a `Vec` growing.
     live: Vec<Option<AckRef>>,
@@ -219,7 +219,7 @@ impl Rig {
     /// [`AckRef`] per poll batch and drops it when the batch's records have
     /// all resolved, and the controller thread drains and takes watermarks on
     /// its commit interval. Both channels are unbounded, so nothing here can
-    /// block — the acknowledgement path never waits on data, by invariant.
+    /// block — the acknowledgment path never waits on data, by invariant.
     ///
     /// **Repeatable**, which the wall tier requires and the counted tier does
     /// not: every batch a tick issues resolves inside that tick, so each

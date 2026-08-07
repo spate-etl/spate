@@ -118,7 +118,7 @@ fn every_planned_split_has_a_distinct_id() {
 
 /// The profiles have to stay *different* from each other, or the parameter is
 /// decorative. `big_objects` in particular must keep landing one object per
-/// split — that is the behaviour a byte-range subdivision change alters, and
+/// split — that is the behavior a byte-range subdivision change alters, and
 /// the reason the profile exists.
 #[test]
 fn the_profiles_pack_differently() {
@@ -142,7 +142,7 @@ fn the_profiles_pack_differently() {
 
 /// `deep_keys` exists to move key length and nothing else. If it drifted into
 /// varying the sizes or the ETags too, its count would no longer attribute to
-/// key length, and the profile would be measuring an unlabelled mixture.
+/// key length, and the profile would be measuring an unlabeled mixture.
 #[test]
 fn the_deep_key_profile_varies_only_the_key() {
     let deep = listing::deep_keys();

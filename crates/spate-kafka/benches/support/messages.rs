@@ -13,7 +13,7 @@
 //! length, and holding it constant is what makes the keyless case a usable
 //! denominator for the keyed and header-stamped ones — the only thing that
 //! differs between the three is work the connector itself does. [`events`] is
-//! the typed shape a JSON encoder serialises, sized so its documents land near
+//! the typed shape a JSON encoder serializes, sized so its documents land near
 //! [`PAYLOAD_LEN`].
 //!
 //! [`HeaderStamp`] lives here rather than in the bench because the fixture
@@ -152,7 +152,7 @@ pub(crate) fn payloads(n: usize) -> Vec<Vec<u8>> {
 const KINDS: &[&str] = &["click", "view", "purchase", "signup", "search", "share"];
 const COUNTRIES: &[&str] = &["US", "GB", "DE", "FR", "JP", "BR", "IN", "CA"];
 
-/// The typed record the JSON encoder serialises: a flat page-view event whose
+/// The typed record the JSON encoder serializes: a flat page-view event whose
 /// documents land near [`PAYLOAD_LEN`], so its count and the passthrough
 /// counts describe a comparable quantity of payload.
 ///
@@ -184,7 +184,7 @@ pub(crate) struct Event {
 ///
 /// Unused by the cases as they stand — the key axis is measured once, on the
 /// cheaper passthrough encoder, where the difference is not buried under
-/// serialisation — but it is the extractor the fixture test uses to prove the
+/// serialization — but it is the extractor the fixture test uses to prove the
 /// typed corpus can be keyed at all.
 pub(crate) fn event_key(event: &Event) -> Option<&[u8]> {
     Some(event.user.as_bytes())

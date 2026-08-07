@@ -7,7 +7,7 @@
 
 ## Context and problem statement
 
-A record can be individually bad — a payload that will not deserialise, a `map`
+A record can be individually bad — a payload that will not deserialize, a `map`
 that returns an error — while every other record in the batch is fine. Failing
 the pipeline on each one makes it unusable against real data; ignoring them
 silently loses data without anyone noticing. Some framework in this space would
@@ -28,7 +28,7 @@ inside the framework, for a case the target environments already handle with a
 topic they own.
 
 Skip counts the record and continues; Fail stops the pipeline. Defaults follow
-where the error came from: deserialisation defaults to Skip, because a malformed
+where the error came from: deserialization defaults to Skip, because a malformed
 payload on a shared topic is expected, and operators default to Fail, because a
 `map` that errors is usually a bug in the pipeline rather than in the data.
 

@@ -39,7 +39,7 @@ reverses, at a scale one maintainer can sustain.
 
 Chosen option: "Architecture Decision Records, one file per decision, in the
 MADR format", because one decision per file makes supersession structural rather
-than a convention somebody has to honour — a superseded record is a file nobody
+than a convention somebody has to honor — a superseded record is a file nobody
 edits, so it cannot be overwritten by the decision that replaced it, which is
 the specific failure being fixed.
 
@@ -78,7 +78,7 @@ change rather than by decision: they answer "what did this commit do" and not
 - Bad, because a per-decision format invites recording decisions that do not
   warrant one, which is how decision logs die. The exclusion rule in
   `docs/adr/_template.md` exists against that, and it is a rule requiring
-  judgement rather than a gate that can enforce itself.
+  judgment rather than a gate that can enforce itself.
 - Bad, because ADRs are uncommon in comparable projects, so the format is
   unfamiliar to most contributors arriving from other data-infrastructure
   codebases. The template carrying its own rules is the mitigation.
@@ -88,7 +88,7 @@ change rather than by decision: they answer "what did this commit do" and not
 `scripts/adr.sh --check`, run by `make ci-lint` and therefore by CI. It holds
 the mechanical half: numbers unique and never reused, status values from the
 permitted set, no unfilled `REPLACE-ME` placeholder, and every record present in
-the index. The judgement half — whether a decision warranted a record at all,
+the index. The judgment half — whether a decision warranted a record at all,
 and whether `Considered options` is honest — is review, and cannot be automated.
 
 ## More information

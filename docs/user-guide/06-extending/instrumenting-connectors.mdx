@@ -322,7 +322,7 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 ```
 
 `SourceCtx` also carries `per_partition_detail` (the `metrics` config flag), so
-a connector's own per-partition families honour the operator's cardinality
+a connector's own per-partition families honor the operator's cardinality
 choice. It gates your families and the framework's `spate_checkpoint_*` detail;
 it does **not** gate `spate_source_lag_records`, which is ungated by design.
 

@@ -292,7 +292,7 @@ fn drain_rows(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<Vec<u8>
     while let Ok(chunk) = rx.try_recv() {
         rows.extend(decode_rows(&chunk.frame));
         // These tests play the sink: consuming a chunk here stands in for
-        // a durable write, so resolve its acknowledgements as delivered
+        // a durable write, so resolve its acknowledgments as delivered
         // (an AckSet fails them on plain drop — teardown safety).
         chunk.acks.deliver();
     }
@@ -1243,7 +1243,7 @@ fn stages_flush_batch_metrics() {
     );
     assert!(
         rendered.contains(r#"component="main.0_filter""#),
-        "filter stage labelled: {rendered}"
+        "filter stage labeled: {rendered}"
     );
     assert!(
         rendered.contains(r#"reason="filtered""#),

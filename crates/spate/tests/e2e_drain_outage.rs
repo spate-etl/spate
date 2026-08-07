@@ -45,7 +45,7 @@ fn shutdown_during_a_sink_outage_still_exits_under_its_deadline() {
     params.chunk_bytes = 2 * 1024;
     params.batch_max_rows = 500;
     params.linger = "200ms";
-    // Short enough that "honoured the deadline" and "hung" are far apart.
+    // Short enough that "honored the deadline" and "hung" are far apart.
     params.drain_timeout = "10s";
     let partitions = 3;
     let total = 30_000;
@@ -105,7 +105,7 @@ fn shutdown_during_a_sink_outage_still_exits_under_its_deadline() {
     );
     println!("drain-during-outage: exited in {exited_in:?}, report {report:?}");
 
-    // The drain honoured its own budget, not merely some bound.
+    // The drain honored its own budget, not merely some bound.
     assert!(
         exited_in < Duration::from_secs(30),
         "exit took {exited_in:?} against a 10s drain_timeout"

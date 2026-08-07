@@ -260,7 +260,7 @@ impl std::fmt::Debug for SplitEmitter<'_> {
 
 impl SplitEmitter<'_> {
     /// Route one derived record to `handle`'s branch, inheriting the parent's
-    /// metadata and acknowledgement handle. Emitting to no branch (returning
+    /// metadata and acknowledgment handle. Emitting to no branch (returning
     /// from the closure without any `emit`) invokes the `unmatched` policy.
     ///
     /// # Panics

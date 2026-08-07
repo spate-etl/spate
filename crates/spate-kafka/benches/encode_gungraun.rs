@@ -2,7 +2,7 @@
 //!
 //! One shape — drive a run of records through
 //! [`KafkaEncoder`](spate_kafka::sink::KafkaEncoder), exactly as the sink's
-//! terminal stage does between seals — parameterised by the message encoder
+//! terminal stage does between seals — parameterized by the message encoder
 //! underneath it and by the shape of the message that comes out.
 //!
 //! This is the pipeline-thread half of the sink: the message encoder fills
@@ -42,14 +42,14 @@
 //!   path a stream of oversized records under the default Skip policy actually
 //!   runs, and the only case here that produces no bytes.
 //! - `json_typed` — a flat typed struct through `serde_json`, sized so its
-//!   documents land near the passthrough payload length. Serialisation
+//!   documents land near the passthrough payload length. Serialization
 //!   dominates, which is the point: read against `bytes_keyless` it says what
 //!   fraction of a JSON sink's per-record cost the connector's own accumulator
 //!   and framing are.
 //!
 //! The matrix is deliberately sparse. The key axis is exercised once, on the
 //! passthrough encoder, where it stands out against a small denominator
-//! instead of disappearing into serialisation; the guard axis is exercised
+//! instead of disappearing into serialization; the guard axis is exercised
 //! once, on the header case, because header bytes are what make this guard
 //! differ from librdkafka's key-plus-payload check. Callgrind runs under
 //! emulation, and a case that only re-measures a combination two others
@@ -94,14 +94,14 @@ struct Rig<T: Send + 'static, M> {
 /// collection on the benchmark function, and `KafkaEncoder::encode` is generic
 /// over both the record family and the message encoder, so it monomorphises
 /// into *this* crate and is an ordinary inlining candidate. Without a frame
-/// the optimiser may not erase, the loop is reshaped across the toggle
+/// the optimizer may not erase, the loop is reshaped across the toggle
 /// boundary and the region no longer contains the work: dropping the attribute
 /// takes `bytes_keyless` from 3,500,338 instructions to **22**, and three of
 /// the other four cases with it, while every one of them still runs and still
 /// reports a number.
 ///
 /// Counting the accepted records is what keeps the loop alive: every case's
-/// output is otherwise unobserved, and without a use the optimiser is free to
+/// output is otherwise unobserved, and without a use the optimizer is free to
 /// delete the call this exists to count. The caller asserts the count, so a
 /// case that silently stopped encoding — or started failing — cannot pass as a
 /// fast one.
@@ -125,7 +125,7 @@ where
 ///
 /// One `AckRef` cloned across the corpus rather than one per record: at this
 /// record count a pair each would be ten thousand live channels built in
-/// setup. Nothing on this path touches an acknowledgement — the encoder never
+/// setup. Nothing on this path touches an acknowledgment — the encoder never
 /// resolves one — so the only traffic is the single message the last handle
 /// sends as it drops, and leaking the receiver keeps the channel connected so
 /// that send is delivered rather than discarded. Either way it costs the

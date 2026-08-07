@@ -109,7 +109,7 @@
 //!   [`source::SourceLane`], [`sink::RowEncoder`], [`sink::ShardWriter`])
 //!   and the framework-owned sink pool.
 //! - [`pipeline`] — the runtime: pinned threads, controller, shutdown.
-//! - [`checkpoint`] / [`backpressure`] — acknowledgements and flow control.
+//! - [`checkpoint`] / [`backpressure`] — acknowledgments and flow control.
 //! - [`config`] — YAML with `${VAR:-default}` interpolation and opaque
 //!   per-connector sections.
 //! - [`metrics`] / [`admin`] / [`telemetry`] — observability (the

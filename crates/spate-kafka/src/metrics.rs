@@ -89,7 +89,7 @@ pub(crate) struct KafkaStatsMetrics {
     partitions: HashMap<i32, PartitionHandles>,
 }
 
-/// Per-broker series, labelled `broker="<host:port/id>"` — bounded by
+/// Per-broker series, labeled `broker="<host:port/id>"` — bounded by
 /// cluster topology. The window gauges register lazily on the first
 /// non-empty window: an eagerly-registered gauge renders `0`, which for a
 /// latency reads as "no latency" rather than "no data".
@@ -201,7 +201,7 @@ impl KafkaStatsMetrics {
             self.group_rebalances.absolute(to_u64(cgrp.rebalance_cnt));
             self.group_assignment_size
                 .set(f64::from(cgrp.assignment_size.max(0)));
-            // Boolean health rather than a state-labelled family: the state
+            // Boolean health rather than a state-labeled family: the state
             // string sets are librdkafka-version-dependent and would mint
             // unbounded label values.
             let healthy = cgrp.state == "up" && cgrp.join_state == "steady";

@@ -30,7 +30,7 @@
 //!   more byte to scan per line.
 //! - `lf_blank_interleaved` — the baseline stream with a blank line after
 //!   every record. A blank line is skipped and consumes no record index, so
-//!   this is the cost of recognising and discarding one — the case that says
+//!   this is the cost of recognizing and discarding one — the case that says
 //!   what a pretty-printed or double-spaced export costs.
 //! - `lf_wide_lines` — an eighth as many lines, eight times as wide, so the
 //!   byte total is the same. Read against the baseline it separates the

@@ -30,7 +30,7 @@
 //!
 //! Wire semantics are rewritten from `clickhouse` 0.15.1's `src/serde.rs`,
 //! which is `MIT OR Apache-2.0`; this crate takes the Apache-2.0 branch, the
-//! same licence it is itself distributed under. Compatibility is proven by
+//! same license it is itself distributed under. Compatibility is proven by
 //! round-tripping through that crate's deserializer in the mock tests.
 
 #[cfg(feature = "chrono")]

@@ -3,7 +3,7 @@
 Connectors are the technology-specific edges of a pipeline: a **source**
 feeds it, a **format** (deserializer) decodes payloads into records, and a
 **sink** writes them out. Everything between — batching, routing, retries,
-acknowledgements, backpressure — is framework-owned, so each connector is a
+acknowledgments, backpressure — is framework-owned, so each connector is a
 thin implementation of a small trait. Configuration reaches every connector
 the same way: an opaque single-key section in the pipeline YAML, handed to
 the connector's factory (see

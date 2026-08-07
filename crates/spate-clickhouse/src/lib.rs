@@ -7,7 +7,7 @@
 //! per sealed batch with a deterministic `insert_deduplication_token`.
 //! Direct-to-shard writes beat `Distributed`-table inserts for an ETL
 //! writer: bigger blocks, less merge pressure, and — crucially for
-//! checkpointing — a synchronous server acknowledgement
+//! checkpointing — a synchronous server acknowledgment
 //! (`wait_end_of_query=1`; `write_batch` returning `Ok` covers
 //! materialized views too).
 //!

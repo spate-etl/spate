@@ -11,7 +11,7 @@
 //! The sink here is not hung, merely *down*: every write fails retryably and
 //! `retry.max_attempts` defaults to 0 (unbounded), so each write task retries
 //! for the length of the outage and never releases its in-flight permit. That
-//! is the routine reachability of #83 — no exotic client behaviour needed.
+//! is the routine reachability of #83 — no exotic client behavior needed.
 
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
@@ -116,7 +116,7 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
     shutdown.trigger();
     // `wait_exit` bounds this: a bare `join` would hang the suite on a
     // regression instead of failing it. Well above the 2s drain_timeout, so a
-    // deadline-honouring drain is never a flake and a wedge is unambiguous.
+    // deadline-honoring drain is never a flake and a wedge is unambiguous.
     let report = run
         .wait_exit(Duration::from_secs(30))
         .expect("pipeline did not exit while its sink was down (#83)")

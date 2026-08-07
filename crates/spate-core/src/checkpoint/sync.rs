@@ -1,5 +1,5 @@
 //! Synchronization-primitive shim: `std` types normally, `loom` types under
-//! `--cfg loom` so the acknowledgement primitives can be model-checked.
+//! `--cfg loom` so the acknowledgment primitives can be model-checked.
 
 #[cfg(not(loom))]
 pub(crate) use std::sync::Arc;

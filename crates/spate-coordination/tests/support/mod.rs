@@ -447,7 +447,7 @@ pub fn drive_pair<C: SplitCoordinator>(
 /// *without* consenting — if a request arrives, the fleet was not settled,
 /// so it consents and goes back to converging. Because the quiet rounds
 /// drain nothing, an empty slate on exit is a measurement rather than an
-/// artefact of having just drained it.
+/// artifact of having just drained it.
 ///
 /// The clock step matches [`drive_clocked`]'s: a fraction of a
 /// renew-interval, so both workers stay live across it (advance to settle).

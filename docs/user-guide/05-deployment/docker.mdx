@@ -117,7 +117,7 @@ replay after restart — delivery stays at-least-once either way.
 ## Resources and scaling
 
 - `pipeline.threads` defaults to `available_parallelism` minus the I/O
-  reserve, and `available_parallelism` honours cgroup CPU limits. **Set a
+  reserve, and `available_parallelism` honors cgroup CPU limits. **Set a
   CPU limit or set `pipeline.threads` explicitly** — a pod without limits
   sees the node's cores and spawns a thread per core. See
   [Tuning](tuning.mdx).

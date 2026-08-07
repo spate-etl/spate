@@ -8,7 +8,7 @@
 ## Context and problem statement
 
 The ClickHouse sink has to get rows from the pipeline into a table. The obvious
-route is the client crate's typed insert path, which serialises a Rust value per
+route is the client crate's typed insert path, which serializes a Rust value per
 row. That puts encoding on whichever thread calls it — an async I/O thread — and
 makes the batch boundary a property of the client's internal buffering rather
 than something the framework controls.
@@ -29,10 +29,10 @@ own where a batch begins and ends.
 
 Chosen option: "Encode RowBinary frames on the pipeline threads and write direct
 to shard-local tables", because it is the only option where the framework owns
-the batch boundary, which is what makes both acknowledgement accounting and
+the batch boundary, which is what makes both acknowledgment accounting and
 idempotent retry possible.
 
-Rows are encoded by the connector's own serialiser — the client crate's is
+Rows are encoded by the connector's own serializer — the client crate's is
 private, so writing our own is also a semver win — and shipped through
 `Client::insert_formatted_with` and `InsertFormatted::send`, the same transport
 the crate's typed path uses internally. Each sealed batch becomes one `INSERT`
@@ -41,7 +41,7 @@ after a timeout is idempotent.
 
 Writing direct to shard-local tables rather than through a Distributed table
 gives bigger blocks, less merge pressure, and — decisively — a **synchronous
-server acknowledgement**, which checkpointing requires. A Distributed insert can
+server acknowledgment**, which checkpointing requires. A Distributed insert can
 return before the data is durable anywhere the framework can observe.
 
 The durability model is that one healthy replica accepts the write and
@@ -57,7 +57,7 @@ shard write availability.
   moves bytes.
 - Good, because a retry re-sends identical bytes with an identical token, so the
   server deduplicates it.
-- Bad, because the connector carries its own serialiser and has to track the
+- Bad, because the connector carries its own serializer and has to track the
   wire format itself rather than inheriting the client crate's.
 - Bad, because the durability boundary is real and asynchronous replication can
   lose an acknowledged batch. It is documented rather than closed, because
@@ -66,7 +66,7 @@ shard write availability.
 
 ### Confirmation
 
-Round-trip verified against a live server. The deduplication behaviour has a
+Round-trip verified against a live server. The deduplication behavior has a
 sharp edge that testing found rather than reasoning: on plain `MergeTree`,
 deduplication **silently no-ops** unless the table sets
 `non_replicated_deduplication_window` above zero, which the server defaults to

@@ -1,4 +1,4 @@
-//! Structured logging: `tracing` initialisation (JSON for Kubernetes) and
+//! Structured logging: `tracing` initialization (JSON for Kubernetes) and
 //! rate-limited hot-path logging helpers.
 //!
 //! # Rate limiting on the hot path
@@ -46,7 +46,7 @@ pub enum LogFormat {
     Pretty,
 }
 
-/// Initialise the global `tracing` subscriber.
+/// Initialize the global `tracing` subscriber.
 ///
 /// The filter comes from `RUST_LOG` when set, else `default_filter`
 /// (e.g. `"info,spate_core=debug"`). Idempotent: returns `true` if this call
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn init_is_idempotent() {
-        // Whichever test initialises first wins; both calls must be safe.
+        // Whichever test initializes first wins; both calls must be safe.
         let _ = init(LogFormat::Pretty, "warn");
         let second = init(LogFormat::Json, "warn");
         assert!(!second, "second init reports already-installed");

@@ -58,7 +58,7 @@ and merging them makes every source implement locking it does not need.
 ### Confirmation
 
 Structural: `SourceLane::poll` returns `Option` of an associated batch type
-parameterised by the borrow, so an implementation that copied would have to
+parameterized by the borrow, so an implementation that copied would have to
 change the signature to do it. INV-2 separately holds the control plane to
 never blocking on a channel send.
 

@@ -2,7 +2,7 @@
 //!
 //! One shape — a poll batch deserialized straight into a
 //! [`split`](spate_core::ops::ChainBuilder::split) terminal and dispatched to
-//! typed branches, drained to encoded chunks — parameterised by the two things
+//! typed branches, drained to encoded chunks — parameterized by the two things
 //! the terminal varies: how many branches it fans out to, and what share of
 //! records match one. This is where the split's per-record cost lives: an
 //! `Any` downcast to discriminate the branch, an `AckRef` clone, and a boxed

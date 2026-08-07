@@ -1906,7 +1906,7 @@ mod tests {
 
     #[test]
     fn skipped_negative_block_trusts_its_size() {
-        // Documented corner: the fast skip honours the declared byte size;
+        // Documented corner: the fast skip honors the declared byte size;
         // the decode paths walk the items and ignore it. A payload whose
         // size field lies therefore skips differently than it decodes.
         const SCH: &str = r#"{"type":"record","name":"R","fields":[

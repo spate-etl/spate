@@ -54,7 +54,7 @@ declares what it needs, and the deployer's binary decides what supplies it.
 ### Confirmation
 
 The driver has its own test suite, including a scripted coordinator in
-`spate-test` so a source's behaviour under revocation and loss can be exercised
+`spate-test` so a source's behavior under revocation and loss can be exercised
 without a store.
 
 ## More information

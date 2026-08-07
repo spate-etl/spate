@@ -159,7 +159,7 @@ pub struct SplitSpec {
     /// that emits wildly uneven splits (an object-store planner gives any
     /// object at or above its packing target a split to itself) still
     /// balances correctly. A planner that leaves every weight at the
-    /// default degrades to count-balancing, which is the right behaviour
+    /// default degrades to count-balancing, which is the right behavior
     /// when splits really are uniform. `0` is treated as `1`.
     pub weight: u64,
 }

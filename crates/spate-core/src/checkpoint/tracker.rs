@@ -1,4 +1,4 @@
-//! Per-partition contiguity tracking of batch acknowledgements.
+//! Per-partition contiguity tracking of batch acknowledgments.
 //!
 //! A [`PartitionTracker`] receives batch registrations in sequence order
 //! and resolutions in *any* order, and computes the committable watermark:

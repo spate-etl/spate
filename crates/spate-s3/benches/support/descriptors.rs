@@ -3,7 +3,7 @@
 //! What a worker is handed is the leader's `encode` output, so the corpora
 //! are **encoded here**, outside the measured region — the same discipline
 //! the framing corpora follow by compressing in the fixture: a bench that
-//! serialised inside the region would count the serialiser instead of the
+//! serialized inside the region would count the serializer instead of the
 //! parser it is supposed to be measuring.
 //!
 //! # Member grouping

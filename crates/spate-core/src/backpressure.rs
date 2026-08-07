@@ -66,7 +66,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// modification order); relaxation only permits *stale reads* in
 /// [`InflightBudget::usage`], which the hysteresis absorbs. Both directions
 /// saturate — `sub` can never underflow past zero even if an
-/// acknowledgement races ahead of the bookkeeping that added its bytes.
+/// acknowledgment races ahead of the bookkeeping that added its bytes.
 #[derive(Debug, Default)]
 pub struct InflightBudget {
     bytes: AtomicUsize,

@@ -749,7 +749,7 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
     {
         let idx = self.next_idx;
         self.next_idx += 1;
-        // Per-branch operator meter, labelled by the sink name so each branch's
+        // Per-branch operator meter, labeled by the sink name so each branch's
         // `spate_operator_*` series is distinct.
         let meter = OpMeterSlot(OpMeter::new(self.builder.metrics.as_ref().map(|m| {
             let labels = ComponentLabels::new(

@@ -521,7 +521,7 @@ fn the_shape_corpora_have_the_shapes_their_cases_name() {
         .sum();
     assert!(
         text.len() > 1000 * others,
-        "the text field ({} bytes) no longer dwarfs its neighbours ({others} \
+        "the text field ({} bytes) no longer dwarfs its neighbors ({others} \
          bytes), which is the whole premise of the case",
         text.len()
     );
@@ -634,7 +634,7 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 /// in — `warm_rig`'s own documentation is where it is accounted for.
 ///
 /// A distinct label pair per rig, because this is one process and
-/// identically-labelled counters would be summed together.
+/// identically-labeled counters would be summed together.
 #[test]
 fn a_second_drive_emits_what_the_first_did() {
     // Both framings, since only ndjson decodes line by line.

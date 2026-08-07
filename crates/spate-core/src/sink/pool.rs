@@ -17,7 +17,7 @@ use tokio::time::Instant;
 pub struct DrainReport {
     /// Batches durably written over the pool's lifetime.
     pub flushed: u64,
-    /// Batches abandoned (failed acknowledgements; replay after restart).
+    /// Batches abandoned (failed acknowledgments; replay after restart).
     pub abandoned: u64,
 }
 
@@ -41,7 +41,7 @@ pub struct SinkPool<W: ShardWriter> {
 ///
 /// The deadline itself is cooperative: workers watch it, abort their in-flight
 /// writes and abandon what is left, loudly. This is the backstop under that,
-/// so a worker that cannot honour it — a framework bug — degrades shutdown to
+/// so a worker that cannot honor it — a framework bug — degrades shutdown to
 /// a lost drain report rather than an unbounded hang (#83).
 ///
 /// Sized by the tightest constraint, which is not the pod's
@@ -189,7 +189,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// writes get until `deadline` before being aborted and abandoned.
     ///
     /// Always returns. A worker that does not stop by `deadline` is
-    /// force-aborted [`BACKSTOP_GRACE`] later; its acknowledgements fail with
+    /// force-aborted [`BACKSTOP_GRACE`] later; its acknowledgments fail with
     /// it (so at-least-once holds and the data replays), but its counts are
     /// missing from the returned report.
     ///
@@ -228,7 +228,7 @@ impl<W: ShardWriter> SinkPool<W> {
                             grace = ?BACKSTOP_GRACE,
                             "sink shard worker did not return by the drain deadline and was \
                              force-aborted — a framework bug, not an operating condition. Its \
-                             acknowledgements fail and that data replays after restart, but its \
+                             acknowledgments fail and that data replays after restart, but its \
                              flushed/abandoned counts are missing from the drain report."
                         );
                     } else {
@@ -236,7 +236,7 @@ impl<W: ShardWriter> SinkPool<W> {
                             shard,
                             "sink shard worker force-aborted: the drain budget was already spent \
                              by an earlier shard, so this one was given no time of its own. It \
-                             may have been healthy. Same consequence — its acknowledgements fail \
+                             may have been healthy. Same consequence — its acknowledgments fail \
                              and that data replays — but diagnose the first shard reported above."
                         );
                     }

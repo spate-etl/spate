@@ -37,7 +37,7 @@ pub trait PayloadBatch<'buf> {
     /// The next payload, or `None` when the batch is exhausted.
     fn next_payload(&mut self) -> Option<RawPayload<'buf>>;
 
-    /// The acknowledgement handle covering every payload in this batch.
+    /// The acknowledgment handle covering every payload in this batch.
     fn ack(&self) -> &AckRef;
 }
 
@@ -103,7 +103,7 @@ pub enum SourceEvent<L> {
     /// them. The runtime removes them without a drain barrier — pure
     /// bookkeeping, no pipeline stall. Sources must use
     /// [`SourceEvent::LanesRevoked`] instead whenever any in-flight data
-    /// or uncommitted acknowledgement may remain.
+    /// or uncommitted acknowledgment may remain.
     LanesRetired {
         /// The finished lanes.
         lanes: Vec<LaneId>,
@@ -144,12 +144,12 @@ pub enum SourceEvent<L> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SourceCtx {
-    /// Issuer for batch acknowledgement handles. Sources clone it into
+    /// Issuer for batch acknowledgment handles. Sources clone it into
     /// every lane they construct; each lane issues one [`AckRef`] per poll
     /// batch (`issue(partition, last_offset)`).
     pub issuer: AckIssuer,
     /// A [`Meter`] scoped `spate_<component_type>_source_*` for the source's own
-    /// metric families (e.g. consumer lag, broker statistics), pre-labelled
+    /// metric families (e.g. consumer lag, broker statistics), pre-labeled
     /// with the standard `pipeline`/`component`/`component_type`. `None` unless
     /// the source declared a [`Source::component_type`] that is a usable,
     /// non-reserved namespace — a reserved default (`"source"`) opts out

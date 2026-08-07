@@ -107,7 +107,7 @@ fn assign_one_lane(h: &Harness, ranges: &[std::ops::Range<i64>]) {
 // ---------------------------------------------------------------- tests --
 
 /// The controller broadcasts `FlushNow` on every commit tick, so a partial
-/// terminal buffer can never hold acknowledgements (and with them the
+/// terminal buffer can never hold acknowledgments (and with them the
 /// partition watermark) longer than the checkpoint interval just because
 /// polls keep returning data. The idle flush is pushed out of reach (60s
 /// against a 20ms commit interval), so every flush observed here can only
@@ -226,7 +226,7 @@ fn revocation_drains_flushes_and_commits_in_order() {
 }
 
 /// Revocation must flush the chain *before* committing — the drain is what
-/// turns parked acknowledgements into committable watermarks. The chain here
+/// turns parked acknowledgments into committable watermarks. The chain here
 /// parks every batch's ack until it is flushed, as a real terminal's partial
 /// chunk buffer does, and both periodic flush paths are out of reach (60s
 /// commit interval, 60s idle flush, sub-second test), so the only thing that
@@ -303,7 +303,7 @@ fn blocked_chain_pauses_then_resumes() {
 
 /// A batch that can never unblock must not hold shutdown hostage until the
 /// barrier deadline: the driver's retry loop observes the shutdown flag,
-/// abandons the batch (failing its acknowledgement so the data replays),
+/// abandons the batch (failing its acknowledgment so the data replays),
 /// and exits promptly.
 #[test]
 fn shutdown_during_permanently_blocked_batch_exits_promptly_and_fails_the_batch() {
@@ -408,7 +408,7 @@ fn permanent_watermark_stall_fails_pipeline_as_checkpoint() {
 }
 
 /// When per-partition pending batches exceed `max_pending_batches`, the
-/// controller pauses the assigned lanes; once acknowledgements drain the
+/// controller pauses the assigned lanes; once acknowledgments drain the
 /// pending count below half the limit, it resumes them.
 #[test]
 fn pending_batch_limit_pauses_then_resumes_lanes() {
@@ -638,7 +638,7 @@ fn drained_before_any_data_completes_with_empty_watermarks() {
 }
 
 /// `Completed` after `Drained` must mean every batch was acknowledged and
-/// committed. If acknowledgements never resolve (a wedged sink abandoning
+/// committed. If acknowledgments never resolve (a wedged sink abandoning
 /// batches at the drain deadline), the backstop converts the exit into a
 /// failure instead of reporting a silently incomplete backfill as done.
 #[test]

@@ -7,8 +7,8 @@
 //!
 //! The records are shaped like the `orders` payload the other decode benches
 //! use, so a byte count here is comparable with one there, but they are
-//! written by hand rather than serialised: this bench measures framing, and
-//! pulling in a serialiser would put its cost in the fixture builder.
+//! written by hand rather than serialized: this bench measures framing, and
+//! pulling in a serializer would put its cost in the fixture builder.
 
 use std::io::Write as _;
 
@@ -25,13 +25,13 @@ pub(crate) const RECORDS: usize = 16_000;
 
 /// Independently-encoded streams inside one compressed object — gzip calls
 /// them members, zstd frames, and the decoders treat them alike: read to the
-/// end of one, validate its trailer, reinitialise, continue.
+/// end of one, validate its trailer, reinitialize, continue.
 ///
 /// Sixteen because that is what a run of upload sessions appending to one
 /// export key produces, and because it makes the multi-part cases the
 /// per-member counterpart of `plain_many_small`'s sixteen *objects*: one
 /// charges sixteen framer resets across object boundaries, the other sixteen
-/// decoder reinitialisations inside a single object.
+/// decoder reinitializations inside a single object.
 pub(crate) const MEMBERS: usize = 16;
 
 /// Objects in the multi-object profile, and records in each. Shared with the

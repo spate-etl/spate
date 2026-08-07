@@ -4,21 +4,21 @@
 //! One shape — 32,768 poll iterations, each a movement of the
 //! [`InflightBudget`](spate_core::backpressure::InflightBudget) plus one
 //! [`WatermarkController::tick`](spate_core::backpressure::WatermarkController::tick)
-//! over it — parameterised by the pressure the pipeline is under, because
+//! over it — parameterized by the pressure the pipeline is under, because
 //! what changes the cost is which arm of the state machine runs, not which
 //! function is called.
 //!
 //! This is the most frequently executed synchronous code the framework has:
 //! `tick` runs once per poll iteration on every pipeline thread, whether or
 //! not anything is happening, and the budget is touched on every seal and
-//! every acknowledgement. It is also the code an instruction count describes
+//! every acknowledgment. It is also the code an instruction count describes
 //! better than a wall clock — one iteration is tens of instructions, well
 //! under the resolution of the timer that would have to measure it, and the
 //! path is atomics and branches with no allocation anywhere in it.
 //!
 //! - `quiet_traffic` — in-flight bytes ride at a fraction of the low
 //!   watermark, climbing a chunk at a time as fifteen seals land and dropping
-//!   back in one as their acknowledgements return; queues stay drained,
+//!   back in one as their acknowledgments return; queues stay drained,
 //!   nothing bounces. Every iteration moves the reading, so this is not a
 //!   `tick` over a static budget — and both of the budget's saturating
 //!   read-modify-writes run on every one of them whichever way it moved,
@@ -96,7 +96,7 @@ const FLAPPING_TRANSITIONS: usize = 2048;
 /// both halves of that are load-bearing rather than stylistic. Collection is
 /// bounded by a callgrind toggle on the module the benchmark macro wraps the
 /// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimiser leaves in an unstable shape inside that module can
+/// so work the optimizer leaves in an unstable shape inside that module can
 /// end up outside the collected region entirely, and a bench that measures
 /// nothing still reports a plausible number. This loop is the most exposed
 /// of any in the suite: every call it makes is a small, inlinable,

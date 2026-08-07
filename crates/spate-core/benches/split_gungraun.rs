@@ -2,7 +2,7 @@
 //!
 //! One shape — one poll batch of 8,192 payloads deserialized straight into a
 //! [`split`](spate_core::ops::ChainBuilder::split) terminal and dispatched to
-//! typed branches, drained to encoded chunks — parameterised by the two
+//! typed branches, drained to encoded chunks — parameterized by the two
 //! things a split varies that a single-sink chain cannot express at all.
 //! `benches/chain_gungraun.rs` measures the framework's *other* terminal, one
 //! table with one encoder; this one measures the terminal that fans a
@@ -71,7 +71,7 @@ fn warmed(mut rig: Rig) -> Rig {
 /// both halves of that are load-bearing rather than stylistic. Collection is
 /// bounded by a callgrind toggle on the module the benchmark macro wraps the
 /// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimiser leaves in an unstable shape inside that module can
+/// so work the optimizer leaves in an unstable shape inside that module can
 /// end up outside the collected region entirely, and a bench that measures
 /// nothing still reports a plausible number. The batch reaches the chain
 /// through the boxed `RunnableChain` seam, which is a frame the toggle cannot

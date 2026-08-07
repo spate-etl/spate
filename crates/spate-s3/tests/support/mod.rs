@@ -117,7 +117,7 @@ pub(crate) fn test_tuning() -> CoordinationConfig {
         reconcile_interval: Duration::from_millis(300),
         // Zero: these suites assert that a dead instance's splits flow back
         // promptly, and a grace window is pure latency on every one of them.
-        // No spate-s3 test asserts the withhold behaviour — the two arms that
+        // No spate-s3 test asserts the withhold behavior — the two arms that
         // do are `spate-coordination`'s, and they set the window themselves.
         rebalance_delay: Duration::ZERO,
         // NOT scaled with the lease. This one bounds how long a *data

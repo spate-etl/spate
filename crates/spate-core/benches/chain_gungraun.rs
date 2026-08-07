@@ -1,7 +1,7 @@
 //! Instruction counts for the operator-chain hot path (gungraun).
 //!
 //! One shape — one poll batch of 512 payloads through deserialize → filter →
-//! flat_map → encode → handoff, drained to encoded chunks — parameterised by
+//! flat_map → encode → handoff, drained to encoded chunks — parameterized by
 //! the three things the terminal stage varies in production, plus the
 //! borrowed-versus-owned payload contrast `benches/chain_wall.rs` times:
 //!
@@ -98,7 +98,7 @@ fn sealing(divisor: usize) -> Rig {
 // `#[doc]` attribute, which `#[library_benchmark]` rejects.
 //
 // Every per-record cost is `spate_core`'s and reached through the boxed
-// `RunnableChain` seam — a cross-crate virtual call the optimiser cannot
+// `RunnableChain` seam — a cross-crate virtual call the optimizer cannot
 // reshape into this module. What the rig itself contributes to the region is
 // the batch's payload callbacks and the drain sweep in `Rig::drive`; both have
 // side effects the compiler must keep, and `black_box` holds the row count.

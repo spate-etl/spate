@@ -1,4 +1,4 @@
-//! Loom model checks for the acknowledgement primitives.
+//! Loom model checks for the acknowledgment primitives.
 //!
 //! Run with:
 //!

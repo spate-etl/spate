@@ -107,7 +107,7 @@ pub struct EncodedChunk {
     pub frame: Bytes,
     /// Number of rows in `frame`.
     pub rows: u32,
-    /// Acknowledgement handles of the source batches represented in
+    /// Acknowledgment handles of the source batches represented in
     /// `frame`. Consecutive records usually share a batch, so this stays
     /// short (the encoder dedupes consecutive identical handles).
     pub acks: AckSet,
@@ -157,7 +157,7 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// columnar encoder's buffered rows are never silently dropped.
     ///
     /// An `Err` is fatal (a broken encoder, not a bad record): the stage
-    /// ships no partial frame and the buffered rows' acknowledgements fail on
+    /// ships no partial frame and the buffered rows' acknowledgments fail on
     /// teardown, so the data replays. Because a Native block concatenates
     /// with the blocks around it, each `finish_chunk` frame is independently
     /// valid — workers still accumulate frames without re-encoding.
@@ -188,13 +188,13 @@ pub struct SealedBatch {
 
 /// The I/O half of a sink connector: writes one sealed batch to one
 /// replica endpoint. Returning `Ok` is the durable-ack point — only then
-/// may the framework resolve the batch's acknowledgements.
+/// may the framework resolve the batch's acknowledgments.
 pub trait ShardWriter: Send + Sync + 'static {
     /// A connected replica endpoint (e.g. one HTTP client per replica).
     type Endpoint: Send + Sync + 'static;
 
     /// Receive a [`Meter`] scoped `spate_<component_type>_sink_*` for the sink's
-    /// own metric families, pre-labelled with the standard
+    /// own metric families, pre-labeled with the standard
     /// `pipeline`/`component`/`component_type`. Called once by the builder
     /// before the writer is shared across shard workers; resolve handles here
     /// and store them (they are `Arc`-backed, so `write_batch`'s `&self` can

@@ -15,7 +15,7 @@
 //! surface. So the seam exists because the public API is unmeasurable *by
 //! that instrument*, not because finer detail is wanted.
 //!
-//! Consequences of that reasoning, which a future seam has to honour:
+//! Consequences of that reasoning, which a future seam has to honor:
 //!
 //! - It is behind the off-by-default `testing` feature and `#[doc(hidden)]`,
 //!   so it is not part of this crate's semver surface and no consumer of the
@@ -55,10 +55,10 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 ///
 /// The three stages are one function because the planner does them as one
 /// pass per split and a change to any of them moves the others: the id
-/// digests the member keys and ETags, and the descriptor serialises the same
+/// digests the member keys and ETags, and the descriptor serializes the same
 /// members immediately afterwards. Splitting them would measure the parts
 /// while missing the per-split loop that carries all three — and the
-/// serialisation is the term most likely to dominate, so a seam that skipped
+/// serialization is the term most likely to dominate, so a seam that skipped
 /// it would answer a different question than the planner asks.
 ///
 /// # Panics

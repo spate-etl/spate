@@ -8,10 +8,10 @@
 //! stream is blank. Every fixture here is a pure function of those parameters,
 //! so a case names its regime rather than describing a payload.
 //!
-//! Lines are written by hand rather than serialised. This bench measures
-//! framing, and pulling a serialiser into the fixture builder would put its
+//! Lines are written by hand rather than serialized. This bench measures
+//! framing, and pulling a serializer into the fixture builder would put its
 //! cost in the corpus rather than leave the corpus a fixed quantity of bytes —
-//! and, more importantly, a serialiser cannot be asked for a line of an exact
+//! and, more importantly, a serializer cannot be asked for a line of an exact
 //! width, which is what makes "the chunk is smaller than a line" a statement
 //! about the framer rather than about the record generator.
 //!

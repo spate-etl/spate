@@ -436,7 +436,7 @@ fn each_reader_schema_resolves_its_rule() {
 ///
 /// This is pinned rather than worked around because the crate's own
 /// documentation lists aliases among the resolution rules a `reader_schema`
-/// applies (issue #74). If the dependency starts honouring them, this test
+/// applies (issue #74). If the dependency starts honoring them, this test
 /// fails, and the bench gains the case it is missing.
 #[test]
 fn a_reader_field_alias_does_not_resolve() {

@@ -73,7 +73,7 @@ pub(crate) struct ControllerContext<S: Source> {
     /// non-reserved `component_type`.
     pub source_meter: Option<Meter>,
     /// `metrics.per_partition_detail`, forwarded to the source so its own
-    /// per-partition families honour the same cardinality gate.
+    /// per-partition families honor the same cardinality gate.
     pub per_partition_detail: bool,
     pub pipeline_metrics: PipelineMetrics,
 }
@@ -152,7 +152,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         // 2. Commit tick.
         if last_commit.elapsed() >= commit_interval {
             last_commit = Instant::now();
-            // Seal partial chain buffers before harvesting acknowledgements.
+            // Seal partial chain buffers before harvesting acknowledgments.
             // A below-target chunk — a low-volume split branch under
             // sustained load — otherwise holds its records' acks, and with
             // them the partition watermark, until it happens to fill:
@@ -323,7 +323,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 // Stand down when the unit of work is actually done — its
                 // lane left the assignment — not merely because its acks
                 // look quiet for an instant. A momentary lull between the
-                // flush and the sink's acknowledgement would otherwise end
+                // flush and the sink's acknowledgment would otherwise end
                 // the chase early and leave the final watermark to the
                 // periodic tick, costing a full commit interval.
                 fast_commit.retain(|&p, _| state.assignment.values().any(|&(part, _)| part == p));
@@ -369,7 +369,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         tracing::error!("sink drain did not report before the deadline");
     }
 
-    // Step 3: final acknowledgement drain and synchronous commit. Only
+    // Step 3: final acknowledgment drain and synchronous commit. Only
     // durably-written batches advanced watermarks; abandoned data replays.
     commit_cycle(
         &mut source,
@@ -574,7 +574,7 @@ fn handle_driver_event<S: Source>(event: DriverEvent, source: &mut S, state: &mu
     }
 }
 
-/// Drain acknowledgements, publish checkpoint health, and commit what
+/// Drain acknowledgments, publish checkpoint health, and commit what
 /// advanced. Failed commits are retried next tick (positions merge by
 /// max, so nothing regresses).
 fn commit_cycle<S: Source>(
@@ -590,7 +590,7 @@ fn commit_cycle<S: Source>(
         tracing::debug!(
             stale = stats.stale_epoch,
             unknown = stats.unknown,
-            "discarded stale acknowledgements"
+            "discarded stale acknowledgments"
         );
     }
     for (p, offset) in checkpointer.take_watermarks() {
@@ -858,7 +858,7 @@ fn handle_retired<S: Source>(
         state.pending_paused.remove(lane);
     }
     // Drop tracking only for partitions with no remaining lanes; their
-    // late acknowledgements (none exist by contract) would be stale.
+    // late acknowledgments (none exist by contract) would be stale.
     let live_partitions: HashSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = retired_parts
@@ -941,7 +941,7 @@ fn revoke_lanes<S: Source>(
         state.pending_paused.remove(lane);
     }
     // Drop tracking only for partitions with no remaining lanes; their
-    // late acknowledgements are then discarded as stale.
+    // late acknowledgments are then discarded as stale.
     let live_partitions: HashSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = revoked_parts

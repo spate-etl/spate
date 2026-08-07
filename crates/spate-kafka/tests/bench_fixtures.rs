@@ -178,7 +178,7 @@ fn the_corpora_are_pinned_across_revisions() {
 /// within a few percent.
 ///
 /// That is what lets the JSON count be read against the passthrough ones as
-/// "what serialisation costs over copying the same quantity of payload". A
+/// "what serialization costs over copying the same quantity of payload". A
 /// corpus that drifted to half or twice the size would still run, still be
 /// pinned, and quietly stop supporting that reading — so the comparability is
 /// asserted rather than assumed.

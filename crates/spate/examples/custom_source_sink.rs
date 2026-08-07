@@ -6,7 +6,7 @@
 //! two pieces: a CPU half ([`RowEncoder`]: record → wire bytes, runs on
 //! pipeline threads) and an I/O half ([`ShardWriter`]: sealed batch →
 //! endpoint, runs on sink workers). The framework owns everything between —
-//! batching, retries, replica rotation, acknowledgements, backpressure.
+//! batching, retries, replica rotation, acknowledgments, backpressure.
 //!
 //! Here: a generator source counting to a limit per partition, and a sink
 //! printing JSON lines to stdout.
@@ -102,7 +102,7 @@ impl SourceLane for CounterLane {
             .extend((base..end).map(|n| n.to_string().into_bytes()));
         self.next = end;
 
-        // One acknowledgement handle per batch: the checkpointer commits
+        // One acknowledgment handle per batch: the checkpointer commits
         // `end` (one past the last offset) only after every derived record
         // is durably written.
         let ack = self.issuer.issue(self.partition, end - 1);

@@ -1,7 +1,7 @@
 //! The per-shard worker: merge chunks into big batches, seal, write with
-//! replica rotation and retries, resolve acknowledgements.
+//! replica rotation and retries, resolve acknowledgments.
 //!
-//! Acknowledgement handles never enter a write task: they stay in the
+//! Acknowledgment handles never enter a write task: they stay in the
 //! worker's pending map and are resolved from task *outcomes*. This makes
 //! aborting write tasks at the drain deadline safe — an aborted task can
 //! never accidentally resolve a batch as delivered.
@@ -63,12 +63,12 @@ const QUARANTINE_BACKSTOP_MAX: Duration = Duration::from_secs(30);
 /// every state that *can* resolve, and re-picking cannot repair one that
 /// cannot. The identity at every default, where the clamp does not bind.
 ///
-/// Deliberately unpinned by any behavioural test, because it has no reachable
+/// Deliberately unpinned by any behavioral test, because it has no reachable
 /// signature. Every exit from "half-open, budget spent" runs through
 /// `on_success`, `on_failure` or `release_probe`, and all three publish a
 /// wake — the one path that used to leave without publishing was a probe task
 /// dying silently, which `ProbeGuard` now closes. Widening this constant
-/// therefore changes no observable behaviour, and a test claiming otherwise
+/// therefore changes no observable behavior, and a test claiming otherwise
 /// would be pinning its own scaffolding.
 ///
 /// Narrowing it is a different matter, and the reason to be careful before
@@ -89,7 +89,7 @@ fn quarantine_backstop(open_for: Duration) -> Duration {
 pub(crate) struct WorkerReport {
     /// Batches durably written.
     pub(crate) flushed: u64,
-    /// Batches abandoned (acknowledgements failed; data replays after
+    /// Batches abandoned (acknowledgments failed; data replays after
     /// restart).
     pub(crate) abandoned: u64,
 }
@@ -102,7 +102,7 @@ impl WorkerReport {
 }
 
 /// A batch awaiting resolution: everything the worker needs to resolve
-/// acknowledgements and bookkeeping once its write task reports.
+/// acknowledgments and bookkeeping once its write task reports.
 struct Pending {
     acks: AckSet,
     rows: u64,
@@ -336,7 +336,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         // Intake is gated on `waiting`, and the deadline arm can win while it
         // is gated off, so the queue may still hold chunks the drivers handed
         // over — closed but not empty. Consume them here. A chunk dropped
-        // unsealed with the receiver fails its acknowledgements with no
+        // unsealed with the receiver fails its acknowledgments with no
         // `abandoned` count, no log and no `DrainReport` entry: the one way
         // this worker could lose work silently.
         while let Ok(chunk) = self.rx.try_recv() {

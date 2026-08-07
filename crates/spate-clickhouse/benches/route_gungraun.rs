@@ -3,7 +3,7 @@
 //! One shape — route a run of records through
 //! [`DistributedRouter`](spate_clickhouse::DistributedRouter), exactly as the
 //! shard-affinity terminal stage does before anything is batched —
-//! parameterised by the sharding key's type and the cluster's weights.
+//! parameterized by the sharding key's type and the cluster's weights.
 //!
 //! Routing sits ahead of every other per-record cost in this sink: a record
 //! is hashed and placed before it reaches an encoder, so the count here is
@@ -67,7 +67,7 @@ struct Rig<T: Send + 'static> {
 /// and all six cases counted bit-identically either way.
 ///
 /// Summing the shard indices is what keeps the loop alive: the routing
-/// decision is otherwise unobserved, and without a use the optimiser is free
+/// decision is otherwise unobserved, and without a use the optimizer is free
 /// to delete the call this exists to count.
 fn route_all<T: Send + 'static>(rig: &Rig<T>) -> usize {
     let mut acc = 0usize;
@@ -85,7 +85,7 @@ fn route_all<T: Send + 'static>(rig: &Rig<T>) -> usize {
 /// The encoder bench gives every record its own [`AckRef::test_pair`]; at
 /// this record count that would be a hundred thousand live channels built in
 /// setup, so these clone a single ref instead. Nothing routes an
-/// acknowledgement — the router never touches the ack — and the receiver is
+/// acknowledgment — the router never touches the ack — and the receiver is
 /// leaked rather than dropped so that a resolved batch could not enqueue on a
 /// live channel and make the count depend on how many records a case built.
 fn records<T>(payloads: Vec<T>) -> Vec<Record<T>> {

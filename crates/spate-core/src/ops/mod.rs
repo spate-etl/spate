@@ -84,7 +84,7 @@ pub trait RunnableChain: Send {
     fn flush(&mut self) -> PushOutcome;
 
     /// Discard any per-batch replay/resume state after the driver failed the
-    /// current batch's acknowledgement (a shutdown-time abandonment of a
+    /// current batch's acknowledgment (a shutdown-time abandonment of a
     /// batch blocked mid-push). Terminal parked chunks — which carry their
     /// own acks — are unaffected; only the chain's own mid-batch cursor and
     /// any stashed not-ready payload are cleared, so the next `push_batch` of

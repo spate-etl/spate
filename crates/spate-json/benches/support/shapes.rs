@@ -15,10 +15,10 @@
 //! verbatim, which makes the guard-on and guard-off counts a controlled pair
 //! whose difference is the guard and nothing else.
 //!
-//! Written as bytes rather than serialised from a type: none of these shapes
-//! has a Rust type to serialise from — that is what makes them the shapes a
+//! Written as bytes rather than serialized from a type: none of these shapes
+//! has a Rust type to serialize from — that is what makes them the shapes a
 //! struct cannot express — and building them by hand keeps the corpus a fixed
-//! quantity of bytes rather than whatever a serialiser happens to emit.
+//! quantity of bytes rather than whatever a serializer happens to emit.
 
 // Each target that includes this module uses a different subset of it, so an
 // item is legitimately dead in one while live in another. A module-wide
@@ -210,7 +210,7 @@ pub(crate) fn numeric_array() -> Vec<u8> {
 ///
 /// The other fields are there so the document is a record rather than a bare
 /// string: what the case isolates is one field being three orders of magnitude
-/// larger than its neighbours, which is what a log line, a stack trace or an
+/// larger than its neighbors, which is what a log line, a stack trace or an
 /// embedded document looks like on the wire.
 pub(crate) fn large_string() -> Vec<u8> {
     let mut next = lcg(0x5EED_0004);

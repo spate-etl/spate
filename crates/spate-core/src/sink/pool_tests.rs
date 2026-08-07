@@ -1,4 +1,4 @@
-//! Behavioural tests for the sink worker pool, driven through a scriptable
+//! Behavioral tests for the sink worker pool, driven through a scriptable
 //! mock writer.
 
 use super::*;
@@ -766,7 +766,7 @@ async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
         f.pool.drain(Duration::from_millis(200)),
     )
     .await
-    .expect("drain must honour its deadline, not wait on the held permit");
+    .expect("drain must honor its deadline, not wait on the held permit");
 
     assert_eq!(
         report,
@@ -784,7 +784,7 @@ async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
 /// Intake is gated off while a sealed batch waits for a permit, so the drain
 /// can begin with the shard queue **closed but not empty**. Those chunks must
 /// still be sealed and accounted: dropped unsealed with the receiver they
-/// would fail their acknowledgements with no `abandoned` count, no log and no
+/// would fail their acknowledgments with no `abandoned` count, no log and no
 /// `DrainReport` entry — a silent loss of work, and the one regression the
 /// `waiting` gate introduced.
 #[tokio::test(start_paused = true)]
@@ -880,7 +880,7 @@ async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
         f.pool.drain(Duration::from_millis(200)),
     )
     .await
-    .expect("drain must honour its deadline against an endlessly retrying sink");
+    .expect("drain must honor its deadline against an endlessly retrying sink");
 
     assert_eq!(
         report,
@@ -1164,7 +1164,7 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
 
 /// Teardown without drain (a Failed exit dropping the I/O runtime) must
 /// never resolve un-written data as delivered: pending batches and queued
-/// chunks hold their acknowledgements in fail-on-drop sets.
+/// chunks hold their acknowledgments in fail-on-drop sets.
 #[test]
 fn runtime_teardown_without_drain_fails_unwritten_acks() {
     let rt = tokio::runtime::Builder::new_multi_thread()

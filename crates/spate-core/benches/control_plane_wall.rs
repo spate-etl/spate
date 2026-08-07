@@ -1,8 +1,8 @@
-//! Wall-clock A/B cases for the control plane: the acknowledgement and
+//! Wall-clock A/B cases for the control plane: the acknowledgment and
 //! checkpoint path, and the backpressure poll loop.
 //!
 //! These run *beside* the per-record path rather than on it. A record crosses
-//! the operator chain; a poll batch's acknowledgement crosses the checkpointer
+//! the operator chain; a poll batch's acknowledgment crosses the checkpointer
 //! once, and the watermark controller is consulted once per poll iteration
 //! whether or not anything moved. `chain_wall.rs` and `split_wall.rs` are the
 //! per-record half.
@@ -91,12 +91,12 @@
 //!
 //! `ack_wide_ticks` and `ack_wide_1thread` drive the same schedule at the same
 //! tick width, one inline and one through the rendezvous, so the difference
-//! between them is what the fixture's synchronisation costs. Read it before
+//! between them is what the fixture's synchronization costs. Read it before
 //! reading the thread axis: it is the share of that axis which is harness.
 //! Every case that spawns a worker carries [`THREADED_ERRATIC`], so all of
 //! this is read rather than gated.
 //!
-//! A pipeline does not synchronise this way. Its threads issue continuously
+//! A pipeline does not synchronize this way. Its threads issue continuously
 //! and the runtime drains on its commit interval, where these workers are held
 //! to a tick boundary so that the drain count, the watermark count and the
 //! batches per worker per tick are all fixed rather than decided by the
@@ -146,7 +146,7 @@ const NARROW: usize = 16;
 ///
 /// Five hundred and twelve puts the reference loop a comfortable multiple
 /// above that granularity while keeping a replicate under a second. The
-/// guard's real job is unaffected: it exists to catch a routine the optimiser
+/// guard's real job is unaffected: it exists to catch a routine the optimizer
 /// deleted, and one of those would still sit at the floor whatever the count.
 const ACK_ITERS: u64 = 512;
 
@@ -229,7 +229,7 @@ fn ack_case(suite: Suite, id: &str, per_tick: usize, order: Order) -> Suite {
 /// Separate from [`ack_case`] rather than a parameter on it, because the two
 /// drivers are not interchangeable inside one comparison: this one crosses a
 /// rendezvous twice per commit tick and that one crosses nothing. Mixing them
-/// would put the fixture's own synchronisation inside an axis that claims to
+/// would put the fixture's own synchronization inside an axis that claims to
 /// be about the checkpointer.
 fn ack_threaded_case(
     suite: Suite,
@@ -318,7 +318,7 @@ fn suite() -> Suite {
     // driving inline, so the step to two threads is not confounded with the
     // rendezvous appearing. Read against `ack_wide_ticks`, which drives the
     // same schedule and the same tick width with no rendezvous at all, the
-    // pair is also what the fixture's synchronisation costs — the one figure
+    // pair is also what the fixture's synchronization costs — the one figure
     // that says how much of this axis is the harness — read, not gated, since
     // all three carry `THREADED_ERRATIC`.
     let suite = ack_threaded_case(

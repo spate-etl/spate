@@ -77,7 +77,7 @@ impl KafkaLane {
 /// SAFETY: `BorrowedMessage<'a>` is `{ ptr: NativePtr<RDKafkaMessage>,
 /// _event: Arc<NativeEvent>, _owner: PhantomData<&'a u8> }` (rdkafka
 /// 0.39.0) — the `'a` parameter is phantom only: it affects no layout and
-/// no drop behaviour, so transmuting the lifetime is sound. Validity of
+/// no drop behavior, so transmuting the lifetime is sound. Validity of
 /// the message memory is self-contained: the message holds an `Arc` of its
 /// owning native event, and destruction happens in the `BorrowedMessage`
 /// drop. The lane additionally keeps the consumer alive through its

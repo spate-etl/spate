@@ -73,7 +73,7 @@ pub(crate) struct KafkaSinkStatsMetrics {
     brokers: HashMap<String, BrokerHandles>,
 }
 
-/// Per-broker series, labelled `broker="<host:port/id>"` — bounded by
+/// Per-broker series, labeled `broker="<host:port/id>"` — bounded by
 /// cluster topology. Window gauges register lazily on the first non-empty
 /// window (see the module docs).
 #[derive(Debug)]

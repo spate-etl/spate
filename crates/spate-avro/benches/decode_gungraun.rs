@@ -34,7 +34,7 @@
 //! across a poll batch, and a one-payload region only ever measures the walk
 //! that populates them.
 //!
-//! - **`confluent`** — the production default framing, parameterised by what
+//! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo
 //!   holds the id, so `SchemaCache::lookup` never touches the shared lock —
 //!   the memo exists precisely because taking a read lock per payload
@@ -188,7 +188,7 @@ where
 /// `*::__gungraun_wrapper_mod::*`, which the macro wraps each benchmark
 /// function in — and a toggle *flips* collection rather than forcing it on.
 /// A loop written inline in the benchmark function can be reshaped by the
-/// optimiser into a symbol under that same module path, and entering it turns
+/// optimizer into a symbol under that same module path, and entering it turns
 /// collection back **off**: the case then reports a plausible number that is
 /// pure allocator bookkeeping and does not move when the corpus size does.
 /// A named, never-inlined function at the crate root cannot be outlined

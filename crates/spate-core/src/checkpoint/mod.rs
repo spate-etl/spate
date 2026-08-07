@@ -1,4 +1,4 @@
-//! Checkpointing: acknowledgement tracking and watermark commits.
+//! Checkpointing: acknowledgment tracking and watermark commits.
 //!
 //! One [`AckRef`] is created per source poll batch (by an [`AckIssuer`] on
 //! the polling thread) and cloned into every record derived from that batch
@@ -14,7 +14,7 @@
 //! - the ack path never blocks (unbounded channels, atomics only);
 //! - a watermark never advances past an unacknowledged or failed batch,
 //!   including across rebalances (assignment epochs make stale
-//!   acknowledgements harmless).
+//!   acknowledgments harmless).
 //!
 //! The concurrency-bearing primitives are model-checked with
 //! [loom](https://docs.rs/loom):

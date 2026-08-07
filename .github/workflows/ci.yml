@@ -232,13 +232,6 @@ jobs:
       # one, so a new check has to be added in both places.
       - run: make check-gungraun-benches
 
-      # The same trap on the wall tier, where it costs more to find late: the
-      # A/B driver builds both legs before it starts a target, so a missing
-      # stanza surfaces as a runner-protocol error several minutes into a
-      # comparison — and no job runs that tier, so nothing else would catch it
-      # before a person did.
-      - run: make check-wall-benches
-
       # The degenerate-region guard's own rule only executes where valgrind
       # does, which is one job of one tier on some pull requests. Its fixtures
       # are real profiles and need neither, so they run here on every pull

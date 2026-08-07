@@ -177,9 +177,10 @@ make bench-ab REF=main REPS=10  # this tree against a reference
 ```
 
 Targets follow the same rule as the counted tier — `benches/<name>_wall.rs` plus
-a `[[bench]]` with `harness = false`, held by `make check-wall-benches`. There a
-missing stanza surfaces minutes in, as a runner-protocol error, because the A/B
-driver builds both legs before starting a target.
+a `[[bench]]` with `harness = false`. Without the stanza cargo builds the target
+under libtest, which rejects the runner protocol's arguments, and the driver says
+so with the stanza to add. Expect that minutes in rather than at the start: it
+builds both legs before it starts either.
 
 When you measure two arms by hand, **interleave them** — every arm once per
 repetition, rather than one arm finished before the next starts — and throw the

@@ -3,8 +3,8 @@
 //! Measures the production path: `Box<dyn RunnableChain>` fed borrowed payload
 //! batches through deserialize → filter → flat_map → encode → handoff, against
 //! the owned-payload equivalent. The boundary is one virtual call per batch by
-//! construction; what that contrast establishes is recorded in the decision log
-//! in `docs/DESIGN.md`, under "Zero-copy seam".
+//! construction; what that contrast establishes is recorded in ADR-0013, the
+//! zero-copy seam.
 //!
 //! Beyond that contrast, the borrowed rig sweeps the three parameters the
 //! terminal stage varies in production: the router (a constant stub against the
@@ -30,7 +30,7 @@
 //!   ratio between them is not a quantity this rig measures. The shared input
 //!   denominator makes `bytes_per_s` read as though it were; it is not. What
 //!   the pair establishes is the **allocation** contrast — a fixed handful per
-//!   batch against one per record — which is what `docs/adr/` records the
+//!   batch against one per record — which is what ADR-0013 records the
 //!   zero-copy seam on. Each arm is read against its own history across two
 //!   builds, which is all an A/B comparison ever claims.
 //! - **The keyed arms declare payload bytes only**, not payload plus key.

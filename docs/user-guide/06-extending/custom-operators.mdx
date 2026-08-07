@@ -7,7 +7,7 @@ a full-blown custom operator. The combinators compose **statically**: the
 whole chain monomorphizes into one loop, with a single virtual call per
 *batch* at the chain boundary (never per record), so adding a stage costs
 an inlined function call, not a dispatch. Rationale in
-[docs/DESIGN.md](../../DESIGN.md) (§ Operator chain).
+[ADR-0004](../../adr/0004-static-operator-chain.md).
 
 This page mirrors `crates/spate/examples/custom_operator.rs`, which drives a
 chain by hand exactly the way a pipeline thread does. Run it:

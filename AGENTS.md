@@ -117,8 +117,9 @@ Two rules break by accident more than the rest:
   vocabulary. A connector name may appear only as a link label, a `## Related`
   entry, or inside a `:::note Connector specifics` block — never carrying the
   explanation. Fenced code and YAML are exempt; the prose around them is not.
-  `docs/DESIGN.md` sits outside the rule, but it should not grow connector
-  *usage* guidance either.
+  `docs/adr/` sits outside the rule — a decision about a connector cannot be
+  stated neutrally without becoming a different decision — but it should not
+  grow connector *usage* guidance either.
 - **Docs read as the present, never as a changelog.** No "now", "recently", "as
   of". If something changed, the page describes what is and the commit says what
   moved. The one exception is `docs/adr/`, which is a historical log by

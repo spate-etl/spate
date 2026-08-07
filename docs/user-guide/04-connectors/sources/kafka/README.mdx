@@ -9,7 +9,7 @@ per-partition queues (`split_partition_queue`) and fanned across pipeline
 threads as lanes. Payload borrows stay local to the polling thread — zero
 copies out of librdkafka's buffers. Rationale and the validated trade-offs
 (group scale, unified drain choreography, ~3% vs per-thread consumers) are
-in [docs/DESIGN.md](../../../../DESIGN.md) § Source abstraction.
+in [ADR-0012](../../../../adr/0012-single-kafka-consumer-with-split-partition-queues.md).
 
 Construct it from the pipeline's opaque section:
 
@@ -128,7 +128,7 @@ framework invariant, not a tuning choice — see
 
 `spate-kafka` deliberately re-exports nothing from `rdkafka`: its types stay
 out of public signatures so `rdkafka` major bumps are not breaking changes
-here ([docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
+here ([ADR-0011](../../../../adr/0011-msrv-and-dependency-policy.md)).
 
 ## Metrics
 

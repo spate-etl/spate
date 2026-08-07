@@ -83,7 +83,7 @@ max_inflight_bytes x low_ratio >= 2 x ( shards x inflight.max_per_shard x batch.
 ```
 
 Raise the budget or cap `batch.max_bytes` accordingly; the full rule and a
-worked example live in `docs/DESIGN.md` § Backpressure.
+worked example live in the Backpressure concept page.
 
 ## Scaling and rebalances
 

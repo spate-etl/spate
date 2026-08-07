@@ -10,5 +10,6 @@ threads, controller, graceful drain).
 Applications should depend on the [`spate`](https://crates.io/crates/spate)
 facade crate instead; connector authors implement
 `source::{Source, SourceLane}` and `sink::{RowEncoder, ShardWriter}` from
-here. The architecture and its invariants are documented in the
-repository's `docs/DESIGN.md`.
+here. The properties the engine is arranged around are documented under
+[Invariants](https://spate.kainth.dev/docs/INVARIANTS), and the decisions
+behind them under [Decisions](https://spate.kainth.dev/docs/adr/).

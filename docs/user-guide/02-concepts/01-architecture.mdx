@@ -42,7 +42,7 @@ Two decisions define this stage:
   virtual call per **batch**. Per-record dynamic dispatch would defeat
   cross-operator inlining; the chain bench measures this design at roughly ten
   nanoseconds and zero allocations per record (see
-  [docs/DESIGN.md](../../DESIGN.md) § Frozen v1 contracts).
+  [ADR-0013](../../adr/0013-zero-copy-seam.md)).
 
 The chain's terminal stage encodes records into the sink's wire format
 (encoding is CPU work, so it happens *on the pipeline thread*) and routes them to
@@ -131,12 +131,12 @@ engineer around:
 
 Pipelines are linear — source → chain → sharded sink — with routing across
 shards at the sink end. General DAGs, windowing, and stateful operators are
-explicit non-goals for v1 (see [docs/DESIGN.md](../../DESIGN.md) §
+explicit non-goals for v1 (see the guide's [overview](../README.mdx) §
 Non-goals).
 
 ## Further reading
 
-- [docs/DESIGN.md](../../DESIGN.md) § Process anatomy, § Source
+- [ADR-0003](../../adr/0003-poll-based-source-api.md) and [ADR-0004](../../adr/0004-static-operator-chain.md) — the source
   abstraction, § Operator chain — the canonical version, with the trade-offs
   and the measurements behind them.
 - [Custom sources](../06-extending/custom-source.mdx) /

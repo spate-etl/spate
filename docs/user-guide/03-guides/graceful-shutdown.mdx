@@ -4,9 +4,9 @@ A pipeline drains on SIGTERM (or SIGINT, or a programmatic
 `ShutdownHandle::trigger`): it stops taking new data, flushes what it has,
 commits exactly what was durably written, and exits with a meaningful code.
 This guide covers the choreography, how to size the one timeout that
-governs it, and what happens when the deadline is not met. The canonical
-description is [docs/DESIGN.md](../../DESIGN.md) § Errors, panics,
-shutdown, health.
+governs it, and what happens when the deadline is not met. For what a failure
+during the drain means for your data, see
+[Error handling](../02-concepts/04-error-handling.mdx).
 
 ## The drain choreography
 

@@ -277,7 +277,8 @@ land.
   never lose.
 - **Not work stealing.** Workers do not select work for themselves and
   cannot take a split from a peer. An earlier design did; the record of
-  why it was replaced is in the design log (`docs/DESIGN.md`).
+  why it was replaced is [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md),
+which supersedes [ADR-0023](../../adr/0023-dynamic-work-stealing-coordination.md).
 
 ## Where this lives in the code
 

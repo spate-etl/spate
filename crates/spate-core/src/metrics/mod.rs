@@ -80,7 +80,8 @@ pub use source::SourceMetrics;
 // handle types are part of this crate's public surface — a connector storing
 // a [`Meter`]-minted handle in its own struct names them without taking a
 // direct `metrics` dependency, keeping one facade version across the tree.
-// This is the one sanctioned 0.x public-API exception (see `docs/DESIGN.md`).
+// This is the one sanctioned 0.x public-API exception (INV-6; see
+// `docs/adr/0008-metrics-facade.md`).
 pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};

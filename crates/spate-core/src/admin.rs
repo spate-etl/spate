@@ -1,7 +1,7 @@
 //! Admin HTTP server: `/metrics`, `/healthz`, and `/readyz`.
 //!
 //! One small hyper server per process, running on the I/O runtime. Probe
-//! semantics (see `docs/DESIGN.md` § Errors, panics, shutdown, health):
+//! semantics:
 //!
 //! - **`/readyz`** — 200 once the source has received its assignment and
 //!   the sinks are connected.

@@ -82,7 +82,7 @@ under `sources/` or `sinks/`.
 
 For the semantics behind these notes, read
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) and
-[docs/DESIGN.md](../../DESIGN.md).
+[ADR-0002](../../adr/0002-at-least-once-delivery.md).
 
 ## Writing your own
 
@@ -90,7 +90,7 @@ The traits are public and small: a source is `Source` + `SourceLane`, a
 sink is `RowEncoder` + `ShardWriter`. Start with
 [Extending](../06-extending/README.mdx); the dependency policy that keeps
 third-party connector crates viable (no 0.x types in public trait bounds)
-is in [docs/DESIGN.md](../../DESIGN.md) § Dependency policy. For wiring your
+is [ADR-0011](../../adr/0011-msrv-and-dependency-policy.md). For wiring your
 component into the metrics taxonomy — feeding a framework handle, labels, and
 naming rules — see
 [Instrumenting connectors](../06-extending/instrumenting-connectors.mdx).

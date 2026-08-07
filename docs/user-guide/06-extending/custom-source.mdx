@@ -12,7 +12,7 @@ The API is poll-based rather than a `futures::Stream`, deliberately: real
 source clients typically already own their network I/O on their own
 threads, and a Stream wrapper only adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
-[docs/DESIGN.md](../../DESIGN.md) (§ Source abstraction); trait docs in
+[ADR-0003](../../adr/0003-poll-based-source-api.md); trait docs in
 `crates/spate-core/src/source/mod.rs` and on
 [docs.rs](../07-reference/README.mdx).
 

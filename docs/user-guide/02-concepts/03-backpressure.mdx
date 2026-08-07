@@ -69,9 +69,8 @@ source's own page is the reference when sizing a container.
 ## Sizing the budget
 
 This is the one backpressure knob that regularly needs thought. The rule,
-from [docs/DESIGN.md](../../DESIGN.md) § Backpressure — motivated by a
-**24× throughput collapse** under an unthrottled source with default settings,
-hand-recorded during the tuning investigation:
+motivated by a **24× throughput collapse** under an unthrottled source with
+default settings, hand-recorded during the tuning investigation:
 
 ```text
 max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
@@ -120,7 +119,7 @@ waits at the source, not in process memory.
 
 ## Further reading
 
-- [docs/DESIGN.md](../../DESIGN.md) § Backpressure — the canonical sizing
+- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — the sink worker model the sizing
   rule and what motivated it.
 - [Architecture](01-architecture.mdx) — where the queues and budget sit in
   the process.

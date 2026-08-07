@@ -7,7 +7,7 @@
 //! `push_batch` call (deserialization) and die inside the same call
 //! (serialized into shard frames, filtered out, or failed) — they are never
 //! stored across the chain boundary, which is what makes borrowed payloads
-//! sound. See `docs/DESIGN.md` (§ Frozen v1 contracts).
+//! sound (ADR-0013).
 
 use crate::checkpoint::AckRef;
 

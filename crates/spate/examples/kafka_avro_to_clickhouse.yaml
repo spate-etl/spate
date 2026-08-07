@@ -14,7 +14,7 @@ checkpoint:
   drain_timeout: 25s    # keep below terminationGracePeriodSeconds
 
 backpressure:
-  # Sizing rule (docs/DESIGN.md § Backpressure): the budget's low watermark
+  # Sizing rule (see the Backpressure concept page): the budget's low watermark
   # must hold ~2x (shards x inflight x batch.max_bytes + queued chunks), or
   # a saturated source lives above the high watermark and throughput
   # collapses into min_pause duty cycles. With one shard and the batch

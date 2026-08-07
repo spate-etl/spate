@@ -109,7 +109,7 @@ rdkafka = "0.39"
 clickhouse = "0.15"
 apache-avro = "0.21"
 # Object-storage client for spate-s3. 0.x like rdkafka/clickhouse: internal
-# only, no types in public APIs (dependency policy in docs/DESIGN.md).
+# only, no types in public APIs (dependency policy: INV-6).
 object_store = "0.14"
 # NATS client for spate-coordination's JetStream KV backend. 0.x policy as
 # above: single minor, internal only, never in public signatures. The

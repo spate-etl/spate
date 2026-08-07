@@ -1,7 +1,7 @@
 //! Pipeline runtime: pinned driver threads, the source controller, and
 //! process assembly.
 //!
-//! Thread anatomy (see `docs/DESIGN.md` § Process anatomy):
+//! Thread anatomy:
 //!
 //! ```text
 //! main (run())          controller (std thread)      driver 0..N (std threads)
@@ -17,7 +17,7 @@
 //! unbounded crossbeam channels: control traffic is rare and must never
 //! block a poll loop.
 //!
-//! Shutdown (also the full-revocation path, per DESIGN.md § Shutdown):
+//! Shutdown (also the full-revocation path):
 //! SIGTERM → controller stops event polling and sends `Shutdown` to every
 //! driver → each driver flushes its chain, drops its lanes, and arrives at
 //! the barrier → main joins driver threads (dropping chains closes the

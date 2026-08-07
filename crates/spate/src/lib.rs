@@ -22,8 +22,10 @@
 //!
 //! # Anatomy of a pipeline
 //!
-//! One process runs one pipeline (see `docs/DESIGN.md` in the repository
-//! for the full architecture and its rationale):
+//! One process runs one pipeline (the [user guide] carries the full
+//! architecture and its rationale):
+//!
+//! [user guide]: https://spate.kainth.dev/docs/user-guide/
 //!
 //! ```text
 //!                     ┌───────────────────────────────────────────────┐

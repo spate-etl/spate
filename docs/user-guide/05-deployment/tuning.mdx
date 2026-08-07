@@ -112,7 +112,7 @@ above `high_ratio` (default **0.8**) and may resume below `low_ratio`
 lane is not free for every source, which is what the hysteresis is for). See
 [Backpressure](../02-concepts/03-backpressure.mdx) for the model.
 
-**The sizing rule** (from [docs/DESIGN.md](../../DESIGN.md) § Backpressure,
+**The sizing rule** (see [Backpressure](../02-concepts/03-backpressure.mdx),
 motivated by a measured 24x throughput collapse): the budget's low
 watermark must comfortably hold everything the sink legitimately keeps in
 flight, or a saturated pipeline lives above the high watermark and

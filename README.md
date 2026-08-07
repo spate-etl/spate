@@ -51,7 +51,7 @@ The name is the workload: more water arriving than the channel was built for.
 ## How it works
 
 One process runs one pipeline, in four stages. The property each stage holds
-to is stated and numbered in [docs/DESIGN.md](docs/DESIGN.md), so a claim
+to is stated and numbered in [docs/INVARIANTS.md](docs/INVARIANTS.md), so a claim
 below is something you can go and check.
 
 **Extract** — one consumer per process. Partitions fan out across CPU-pinned
@@ -216,8 +216,10 @@ The full documentation site — the user guide plus the generated API reference 
 is published at **<https://spate.kainth.dev/>** (source in
 [`website/`](website), content in [`docs/`](docs)).
 
-- [docs/DESIGN.md](docs/DESIGN.md) — architecture, the numbered invariants,
-  and the decision log.
+- [docs/INVARIANTS.md](docs/INVARIANTS.md) — the numbered properties the
+  engine is arranged around.
+- [docs/adr/](docs/adr/README.mdx) — one record per architectural decision,
+  with the alternatives that were rejected and why.
 - [docs/METRICS.md](docs/METRICS.md) — every metric, its labels, and
   alerting starting points.
 - [examples/docker](examples/docker) — containers and Kubernetes.

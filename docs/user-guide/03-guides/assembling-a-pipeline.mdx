@@ -60,7 +60,7 @@ the exporter exists silently records into the void — no error, just missing
 series. By making the constructor install the exporter, holding a `Pipeline`
 *guarantees* a live recorder: every handle built afterwards, framework or
 custom, is live. The ordering bug is not documented away; it is made
-unconstructible. (Rationale: [docs/DESIGN.md](../../DESIGN.md) § Assembly and
+unconstructible. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
 § Metrics.)
 
 :::warning
@@ -114,7 +114,7 @@ equivalent of the per-sink YAML
 exactly one of the two places, not both). `queue_capacity` participates in the
 backpressure sizing rule — see
 [Backpressure](../02-concepts/03-backpressure.mdx) and
-[docs/DESIGN.md](../../DESIGN.md) § Backpressure before raising it.
+[Backpressure](../02-concepts/03-backpressure.mdx) before raising it.
 
 `.sink(bundle)` is sugar for `.add_sink("default", bundle)`, so calling it
 twice is an error (`BuildError::DuplicateSinkName`). A pipeline that writes

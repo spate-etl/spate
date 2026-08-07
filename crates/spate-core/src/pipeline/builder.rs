@@ -251,7 +251,15 @@ impl ChainCtx {
 #[non_exhaustive]
 pub struct SinkOptions {
     /// Per-shard chunk queue capacity, in chunks. The default suits most
-    /// pipelines; see `docs/DESIGN.md` § Backpressure for the sizing rule.
+    /// pipelines, but the knob is not free: queued chunks are charged to the
+    /// in-flight byte budget, so `shards × queue_capacity × chunk.target_bytes`
+    /// has to fit under the budget's low watermark *alongside* pending writes.
+    /// When it does not, a saturated pipeline sits permanently above the high
+    /// watermark and the pause controller duty-cycles at its minimum pause —
+    /// throughput collapses with nothing otherwise wrong. [The backpressure
+    /// page][bp] carries the full sizing rule and a worked example.
+    ///
+    /// [bp]: https://spate.kainth.dev/docs/user-guide/concepts/backpressure
     pub queue_capacity: usize,
     /// Programmatic override for this sink's terminal-stage chunking. `None`
     /// (the default) defers to the per-sink YAML `chunk:` block, or to

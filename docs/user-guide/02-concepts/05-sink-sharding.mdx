@@ -204,7 +204,7 @@ absorbs them.
 - [ClickHouse Distributed parity](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
   — making the router's placement bit-for-bit identical to the destination
   cluster's own sharding expression, so cluster reads can prune shards.
-- [docs/DESIGN.md](../../DESIGN.md) § Sink — the canonical treatment of the
+- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — the reasoning behind the
   routing seam, the two tiers, and the shard-worker model.
 - [docs/METRICS.md](../../METRICS.md) — the shard-labeled sink metrics that
   make skew and per-shard throughput visible.

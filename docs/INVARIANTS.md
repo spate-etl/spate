@@ -1,15 +1,16 @@
 # Spate invariants
 
-The properties the engine is arranged around. This list is canonical: the
-statements below are what `AGENTS.md`, `CONTRIBUTING.md` and the pull request
-template each restate for their own audience, and they cite these numbers so a
-disagreement between them is a mismatched identifier rather than a difference in
-phrasing somebody has to notice.
+The properties the engine is arranged around, and the only place they are stated
+in full. Everywhere else cites them by number, so a disagreement is a mismatched
+identifier rather than a difference in phrasing somebody has to notice. The one
+file that restates the list is the pull request template, which turns it into a
+checklist a reviewer ticks against.
 
-`scripts/check-invariants.sh` compares the *set of numbers* across those files.
-It cannot compare their wording, so a restatement that drifts in substance while
-citing the right number passes — the statements here are what the others must
-mean, and any exception belongs in this list rather than only in the restatement.
+`scripts/check-invariants.sh` holds that shape: the template must cite exactly
+the set defined here, and nothing anywhere may cite a number this file does not
+define. It compares numbers, never wording — so a citation that drifts in
+substance while naming the right number passes, and any exception to a property
+belongs in the statement below rather than only where it is cited.
 
 Most changes touch none of these. A change that touches one is not thereby
 wrong; it needs to say how the property still holds, and that is the review.

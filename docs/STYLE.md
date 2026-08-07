@@ -415,26 +415,63 @@ fails to compile in someone else's editor.
 
 ### Rust snippets come from compiled sources
 
-**A non-trivial Rust snippet on a site page is transcluded from a compiled
-source under `crates/spate/examples/`, not hand-written into the Markdown.**
-Nothing compiles a fenced block in an `.mdx` file — the site build does not
-type-check it and `cargo test` never sees it — so a wrong one survives every
-gate this repository has. An example under `crates/spate/examples/` carries a
-`[[example]]` entry, builds under its `required-features`, and breaks the build
-when the API moves, which is the whole point.
+**A non-trivial Rust snippet on a site page is rendered from a compiled source
+under `crates/`, not hand-written into the Markdown.** Nothing compiles a fenced
+block in an `.mdx` file — the site build does not type-check it and `cargo test`
+never sees it — so a wrong one survives every gate this repository has. What it
+is rendered from does not: `cargo clippy --workspace --all-targets` compiles
+everything under `crates/`, so a region breaks the build when the API moves,
+which is the whole point.
+
+Leave the fence empty and name the source and the region on the info string:
+
+````
+```rust file=crates/spate/examples/memory_pipeline.rs region=chain
+```
+````
+
+Mark the region in the source with mdBook's anchor comments. They are stripped
+from what renders, so they cost the reader nothing:
+
+```rust
+// ANCHOR: chain
+// ANCHOR_END: chain
+```
+
+A file that does not exist, a region with no matching pair of markers, and a
+fence carrying both `file=` and hand-written content each fail the build
+outright — the same tier as a stale link (§ 8), and for the same reason: a
+pointer nobody checks is a pointer that rots. `make check-transclusions` holds
+the same rule without a site build.
+
+Prefer a source under `crates/spate/examples/`, because a reader can run it.
+Reach past that only for something an example cannot show — a connector's own
+wiring, or a test whose subject is testing.
+
+Name a region for what the code *is*, never for where it sits on a page:
+`chain`, `encoder`, `coordinator`, not `step_3`. Pages get reorganized and the
+region outlives the heading above it. A region is one contiguous stretch, so a
+page wanting to stitch two apart wants two fences with the sentence that belongs
+between them.
+
+A fence renders with no header. Say where the code comes from once, in prose,
+where the sentence can also say how to run it — a reader holding the published
+crate has no `crates/` directory to look in, so a path on every fence is
+repetition they cannot act on. Add `title="…"` to a single fence when *which*
+source it is matters to the reader, which is usually a page drawing on two.
 
 Exempt, because transcluding them costs more than it protects:
 
 - A fragment of two or three lines illustrating a single call or signature.
-- A type or trait definition quoted to be read rather than run.
-- A deliberately non-compiling snippet showing what the type system rejects —
-  say so in the surrounding prose.
+- A type or trait definition quoted to be read rather than run, including one
+  abridged to the members under discussion.
+- A snippet that deliberately does not compile — one showing what the type
+  system rejects, or a skeleton with a part elided to expose a shape. Say which
+  in the surrounding prose: an elision nobody announced is indistinguishable
+  from a snippet that is simply wrong, and that is what this exemption most
+  often decays into.
+
+An exemption is a claim review checks, not a default.
 
 YAML, TOML and shell blocks are unaffected; their correctness is checked
 against the config structs by review (§ 3), not by a compiler.
-
-The transclusion mechanism is not built yet. Until it lands, a snippet that
-would need it is verified against the real API by review and called out in the
-pull request — and a *new* non-trivial snippet is written into
-`crates/spate/examples/` first regardless, so adopting the mechanism is a move
-rather than a rewrite.

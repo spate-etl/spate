@@ -30,6 +30,7 @@
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
+        check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
         ci-lint docs docs-serve gates
@@ -211,6 +212,14 @@ check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 check-collected-region: ## The degenerate-region guard still recognises both shapes
 	./scripts/gungraun-collected-region.sh --self-test
 
+# The remark plugin resolves every `file=`/`region=` fence when the site builds
+# and throws on a miss. This runs the same resolution straight off disk, which
+# matters twice: the site build carries a persistent bundler cache, and the
+# `site` job is path-filtered, so "the site built" is a weaker statement than it
+# looks. Needs neither cargo nor node.
+check-transclusions: ## Every transcluded region a docs page names exists
+	./scripts/transclude.sh --check
+
 check-adr: ## The decision records stay consistent with their index
 	./scripts/adr.sh --check
 
@@ -228,7 +237,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
 
 ##@ Docs
 

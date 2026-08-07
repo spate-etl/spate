@@ -607,26 +607,39 @@ if len(set(keys)) != len(keys):
     # above own it — so reusing it to build the expectation keeps each case
     # readable as "which crates does this path select", which is the rule each
     # one states.
+    # Classify a synthetic path list, leaving the child's outputs in $1.
+    #
+    # Shared by the assertions below rather than written into each of them: they
+    # differ only in which key they read, and a second copy of this spawn is a
+    # second place for the `env -u` guards to drift out of step.
+    #
+    # A subprocess, because classification runs at the bottom of this file
+    # rather than in a function. Read the answers from the child's own
+    # `GITHUB_OUTPUT` rather than its stdout: the classifier `tee`s to both, so
+    # stdout carries every line twice when the variable is unset. Giving it a
+    # temporary file also keeps synthetic answers out of the calling job's real
+    # output. `PR_LABELS` and `EVENT_NAME` are unset so that neither a label nor
+    # an event can decide what the arms should.
+    classify_into() { # dest, paths...
+        local dest=$1 list
+        shift
+        list=$(mktemp)
+        printf '%s\0' "$@" >"$list"
+        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$dest" \
+            "$0" --classify-paths "$list" >/dev/null
+        rm -f "$list"
+    }
+
     check_paths() {
         local want_bench="$1" want_pkgs="$2" desc="$3"
         shift 3
-        local list out got_bench got_pkgs
+        local out got_bench got_pkgs
         want_pkgs=$(bench_shards_json "$want_pkgs")
-        list=$(mktemp)
         out=$(mktemp)
-        printf '%s\0' "$@" >"$list"
-        # A subprocess, because classification runs at the bottom of this file
-        # rather than in a function. Read the answers from the child's own
-        # `GITHUB_OUTPUT` rather than its stdout: the classifier `tee`s to both,
-        # so stdout carries every line twice when the variable is unset. Giving
-        # it a temporary file also keeps synthetic answers out of the calling
-        # job's real output. `PR_LABELS` and `EVENT_NAME` are unset so that
-        # neither a label nor an event can decide what the arms should.
-        env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$out" \
-            "$0" --classify-paths "$list" >/dev/null
+        classify_into "$out" "$@"
         got_bench=$(sed -n 's/^bench=//p' "$out")
         got_pkgs=$(sed -n 's/^bench-shards=//p' "$out")
-        rm -f "$list" "$out"
+        rm -f "$out"
         if [[ "$got_bench" != "$want_bench" || "$got_pkgs" != "$want_pkgs" ]]; then
             echo "::error::$desc: expected bench=$want_bench bench-shards='$want_pkgs',"
             echo "got bench=$got_bench bench-shards='$got_pkgs' for: $*"
@@ -686,6 +699,50 @@ if len(set(keys)) != len(keys):
         check_paths true "$all_pkgs" "$apparatus selects every benched crate" \
             "$apparatus"
     done
+
+    # The two coarse outputs, asserted together because the arm that decides
+    # them decides both and the regression worth catching turns off exactly one.
+    #
+    # `site` is the transclusion rule: a page's Rust snippets are regions of a
+    # file under `crates/`, so an edit there can change a rendered page, and an
+    # arm that stops selecting the site lets a broken region reach the deployed
+    # site with every job green.
+    #
+    # `rust` is here because nothing else in this file asserts it, and the
+    # `crates/*` arm now has a body. An arm that sets `site` and then `continue`s
+    # — plausible enough as "an example is only input to the docs" — turns off
+    # clippy and the whole test suite for an examples-only pull request. The
+    # bench cases above do not speak for that path: `spate` owns no gungraun
+    # bench, so nothing there selects on it, and the general `crates/*` case is
+    # only covered by them incidentally, under an error message about the bench
+    # table rather than the arm actually broken.
+    check_flags() { # want_rust, want_site, desc, paths...
+        local want_rust="$1" want_site="$2" desc="$3"
+        shift 3
+        local out got_rust got_site
+        out=$(mktemp)
+        classify_into "$out" "$@"
+        got_rust=$(sed -n 's/^rust=//p' "$out")
+        got_site=$(sed -n 's/^site=//p' "$out")
+        rm -f "$out"
+        if [[ "$got_rust" != "$want_rust" || "$got_site" != "$want_site" ]]; then
+            echo "::error::$desc: expected rust=$want_rust site=$want_site,"
+            echo "got rust=$got_rust site=$got_site for: $*"
+            path_case_failed=1
+        fi
+    }
+
+    check_flags true true "an example builds Rust and rebuilds the site" \
+        crates/spate/examples/memory_pipeline.rs
+    check_flags true true "a crate source builds Rust and rebuilds the site" \
+        crates/spate-core/src/lib.rs
+    check_flags false true "a docs page rebuilds the site and needs no Rust build" \
+        docs/METRICS.md
+    check_flags false true "the site tree rebuilds the site and needs no Rust build" \
+        website/docusaurus.config.ts
+    check_flags true false "a bench source builds Rust and does not rebuild the site" \
+        bench/src/lib.rs
+
     [[ "$path_case_failed" == "0" ]] || exit 1
 
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
@@ -786,7 +843,25 @@ else
         case "$file" in
         # Source trees: always code, whatever the file extension. Empty body,
         # so control falls past the `case` to the classification below.
-        crates/* | scripts/* | bench/*) ;;
+        #
+        # `crates/*` is split out because it selects the site as well. A docs
+        # page's Rust snippets are not written in the page — they are regions of
+        # a file under `crates/`, resolved at site-build time by
+        # website/src/remark/transclude.ts. An edit under `crates/` can
+        # therefore change a rendered page without touching `docs/` at all, and
+        # before this arm existed such a pull request never built the site.
+        #
+        # Deliberately the whole tree rather than the paths some page names
+        # today. A `file=` attribute may point anywhere under `crates/`, so a
+        # narrower list goes stale the first time a page quotes something new —
+        # and it goes stale by failing OPEN, which is the failure mode the
+        # ignore-list shape at the top of this file exists to avoid. The site
+        # build is the cheap tier; a Rust pull request already pays for the
+        # test, feature and MSRV matrices, which dwarf it.
+        crates/*)
+            site=true
+            ;;
+        scripts/* | bench/*) ;;
         # CI definitions decide what every other job does, so a change to one
         # has to be exercised by the full set.
         .github/workflows/* | .github/actions/*) ;;

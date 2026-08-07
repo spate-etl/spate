@@ -3,8 +3,8 @@
 //! Measures the production path: `Box<dyn RunnableChain>` fed borrowed payload
 //! batches through deserialize → filter → flat_map → encode → handoff, against
 //! the owned-payload equivalent. The boundary is one virtual call per batch by
-//! construction; what that contrast establishes is recorded under "Performance
-//! gates" in `docs/user-guide/07-reference/ci.mdx`.
+//! construction; what that contrast establishes is recorded in the decision log
+//! in `docs/DESIGN.md`, under "Zero-copy seam".
 //!
 //! Beyond that contrast, the borrowed rig sweeps the three parameters the
 //! terminal stage varies in production: the router (a constant stub against the

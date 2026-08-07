@@ -7,10 +7,9 @@ name: Labels
 # label quietly missing. Merging to main applies it.
 #
 # The work is a script rather than a labeling action because the organisation
-# allows only GitHub-owned, verified-publisher and explicitly listed actions —
-# see "The Actions allowlist" in docs/user-guide/07-reference/ci.mdx. `gh` is
-# preinstalled on the runners, so this needs no allowlist entry and adds no
-# dependency, and the same script runs locally.
+# allows only GitHub-owned, verified-publisher and explicitly listed actions.
+# `gh` is preinstalled on the runners, so this needs no allowlist entry and adds
+# no dependency, and the same script runs locally.
 on:
   push:
     branches: [main]

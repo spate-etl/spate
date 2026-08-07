@@ -63,9 +63,9 @@ what is in scope.
   capacity larger than available memory.
 - Advisories against a dependency where the vulnerable code path is not
   reachable from this framework. Those are still worth reporting — they are just
-  triaged as maintenance rather than as an incident. See
-  [Supply chain](docs/user-guide/07-reference/supply-chain.mdx)
-  for how dependency advisories are handled.
+  triaged as maintenance rather than as an incident. `deny.toml` records every
+  advisory this project has accepted, each with its reason and the condition for
+  removing it.
 - Anything requiring an attacker who already has the ability to run code in your
   pipeline process.
 
@@ -92,9 +92,8 @@ for every one of them.
 
 ## How the project defends itself
 
-Detail and rationale live in
-[Supply chain](docs/user-guide/07-reference/supply-chain.mdx);
-in short:
+Each control below is recorded where it is enforced — in `deny.toml`, in the
+workflow that runs it, or in the script it calls. In short:
 
 - `Cargo.lock` and `package-lock.json` are committed, and CI builds `--locked` /
   `npm ci`, so a build cannot silently resolve a different graph. Two

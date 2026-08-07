@@ -91,6 +91,10 @@ name = "kafka_to_kafka_split"
 required-features = ["kafka"]
 
 [[example]]
+name = "clickhouse_aggregating_mv"
+required-features = ["clickhouse"]
+
+[[example]]
 name = "json_ndjson_memory"
 required-features = ["json"]
 

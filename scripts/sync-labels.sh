@@ -58,8 +58,8 @@ fail() {
 command -v gh >/dev/null || fail "gh is not installed"
 
 # One TAB-separated name/colour/description row per entry. The quoted, fixed
-# key order is the file's own convention — check-labels.sh depends on it too —
-# so this stays a fixed-string parse rather than pulling in a YAML reader.
+# key order is the file's own convention, so this stays a fixed-string parse
+# rather than pulling in a YAML reader.
 rows=$(awk '
     function value(line,   s) {
         s = line

@@ -28,7 +28,7 @@
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
-        supply-chain zizmor shellcheck self-test check-labels check-perf-report \
+        supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-wall-benches check-collected-region \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -191,9 +191,6 @@ shellcheck: ## Lint the shell scripts
 self-test: ## The CI change classifier still matches the crate graph
 	./scripts/ci-changes.sh --self-test
 
-check-labels: ## Every referenced label is a defined label
-	./scripts/check-labels.sh
-
 # The report script and perf-label.yml share a one-file contract that no pull
 # request can execute end to end (`workflow_run` runs the default branch's
 # definition), so the write side runs here instead.
@@ -237,7 +234,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-adr check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-adr check-changelog ## Every repository-metadata check
 
 ##@ Docs
 

@@ -63,9 +63,8 @@ harness = false
 # The wall-clock A/B tier, driven by `make bench-ab`. `harness = false` for the
 # same reason and one more: the runner protocol's arguments only reach the
 # target's own `main` when libtest is not in front of it, and the A/B driver
-# builds both legs before it starts a target, so a missing stanza would surface
-# several minutes into a comparison. `make check-wall-benches` catches it here
-# instead.
+# builds both legs before it starts a target, so a missing stanza surfaces
+# several minutes into a comparison.
 [[bench]]
 name = "decode_wall"
 harness = false

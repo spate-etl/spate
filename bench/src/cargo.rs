@@ -13,10 +13,10 @@
 //! what keeps three tiers of benchmark from colliding: `*_gungraun.rs` belongs
 //! to the instruction-count tier and its discovery script globs for exactly
 //! that, the weekly criterion targets carry neither suffix, and this one globs
-//! for `_wall`. A target that forgets `harness = false` is refused by the
-//! protocol at list time as well as by `make check-wall-benches`, because the
-//! error it produces here can say what to do about it — but the lint is what
-//! reaches the mistake before two legs have been built.
+//! for `_wall`. A target that forgets `harness = false` is invisible to this
+//! module — `cargo metadata` reports no harness setting — and is refused later,
+//! at the runner protocol's handshake, with an error naming the stanza to add.
+//! Both legs are built by the time it arrives.
 //!
 //! # Why not the `cargo_metadata` crate
 //!

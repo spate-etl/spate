@@ -147,7 +147,7 @@ REPLACE-ME
 
   Examples of the shape wanted:
     INV-3, and `crates/spate-core/src/checkpoint/` is loom-tested.
-    `scripts/check-invariants.sh`, run by `make ci-lint`.
+    `make check-adr`, run by `make ci-lint`.
     Structural — `ShardWorker::dispatch` is not `async`, so the await cannot
     be added without changing the signature.
     Nothing yet.

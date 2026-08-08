@@ -27,13 +27,16 @@ Two distinct steps turn source bytes into records:
 
 When a streaming source is given a framer it frames one record per payload, and
 the framework derives the deserializer's granularity from the source's contract.
-So the `deserializer:` section carries only decode knobs — no `framing:`:
+The framer is wired onto the source in code, so the `deserializer:` section
+carries only decode knobs — no `framing:`:
 
-```rust
-// The framer is wired on the source in code (framing is a format concern):
-let source = S3Source::from_component_config(section, io)?
-    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
+```rust file=crates/spate/examples/s3_backfill.rs region=framer
 ```
+
+That wiring comes from `crates/spate/examples/s3_backfill.rs`, which runs
+against a staged local directory with
+`cargo run -p spate --features s3,json --example s3_backfill`. The matching
+configuration names the format and nothing about framing:
 
 ```yaml
 source:

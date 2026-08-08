@@ -64,14 +64,18 @@ sink: {{ capture: {{}} }}
 
 /// One full pipeline run; returns the rows the sink durably wrote.
 fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
     // The S3 source is a transport; the format supplies the framer. Wire in
     // `spate-json`'s NDJSON framer (bounded at 64 MiB per record) so each line
     // becomes one payload. The `deserializer: { json: {} }` section carries
     // only decode knobs — no `framing:` — and the framework derives the
     // granularity from the source.
+    // ANCHOR: source
+    let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
+    // ANCHOR: framer
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
         .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
+    // ANCHOR_END: framer
+    // ANCHOR_END: source
     let deser_section = pipeline
         .config()
         .deserializer
@@ -92,11 +96,13 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             // The S3 lane already frames NDJSON (one line = one payload), so
             // `for_source_framing` derives `single` from the source and would
             // reject a `framing:` that double-frames it.
+            // ANCHOR: deserializer
             let deser = JsonDeserializerBuilder::from_component(&deser_section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .with_metrics(ctx.pipeline.clone(), "main")
                 .build_serde::<Reading>();
+            // ANCHOR_END: deserializer
             chain_owned::<Reading, _>(deser)
                 .with_metrics(ctx.pipeline, "main")
                 .filter(|r: &Reading| r.value.is_finite())

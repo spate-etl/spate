@@ -72,10 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Each `sinks:` entry is a full `kafka:` sink section (topic, tuning,
     // rdkafka passthrough). `encoder_with` bakes the sink's configured
     // `max_message_bytes` guard into the encoder.
+    // ANCHOR: encoder
     let eu_sink = spate::kafka::sink::from_component_config(pipeline.config().sink_config("eu")?)?;
     let us_sink = spate::kafka::sink::from_component_config(pipeline.config().sink_config("us")?)?;
     let eu_enc = eu_sink.encoder_with(KafkaBytesEncoder::with_key_fn(customer_key));
     let us_enc = us_sink.encoder_with(KafkaBytesEncoder::with_key_fn(customer_key));
+    // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
     let report = pipeline

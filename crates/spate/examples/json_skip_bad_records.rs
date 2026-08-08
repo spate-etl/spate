@@ -11,7 +11,7 @@
 //! cargo run -p spate --features json --example json_skip_bad_records
 //! ```
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-RANK:  20
 // INDEX-TIER:  getting-started
 // INDEX-GOAL:  decode many records from one NDJSON payload and skip malformed lines rather than stop

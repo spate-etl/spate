@@ -53,7 +53,7 @@
 //! The `ANCHOR` comments below mark the regions the site renders. They are
 //! stripped from what it shows, and they nest; see `docs/STYLE.md` § 10.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  load an Avro order stream from Kafka into ClickHouse
 // INDEX-TECH:  Kafka, Avro and ClickHouse

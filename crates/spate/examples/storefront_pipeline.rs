@@ -42,7 +42,7 @@
 //!   before the run starts — curl them while it is going, or delete `count:`
 //!   and take your time.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-RANK:  15
 // INDEX-TIER:  getting-started
 // INDEX-GOAL:  run a realistic order stream to completion or to SIGTERM

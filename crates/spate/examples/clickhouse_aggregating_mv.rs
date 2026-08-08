@@ -56,7 +56,7 @@
 //! view would then use `sumMapState(map(metric, value))`. The whole-`Map`
 //! shape used here exercises the sink's `Map(String, UInt64)` encoding.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  feed an AggregatingMergeTree rollup through a Null landing table
 // INDEX-TECH:  ClickHouse

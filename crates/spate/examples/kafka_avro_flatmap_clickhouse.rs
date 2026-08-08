@@ -85,7 +85,7 @@
 //!
 //! SIGTERM drains gracefully; probes: `curl localhost:9090/readyz`.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  fan a nested batch into one row per event and shard them by sensor
 // INDEX-TECH:  Kafka, Avro and ClickHouse Native

@@ -20,7 +20,7 @@
 //! cargo run -p spate --example custom_operator
 //! ```
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
 // INDEX-GOAL:  drive a chain of stateful operators over owned and borrowed records by hand
 // INDEX-TECH:  no infrastructure

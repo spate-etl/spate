@@ -18,6 +18,8 @@
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
 //! | `coordination` | [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `spate::coordination` without any feature |
 //! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11) on top of [`coordination`]; pulls the async-nats dependency tree |
+//! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker, bucket or coordination store. A demo and test source: it keeps no durable progress, which is why it is not part of `full` |
+//! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
 //! | `full` | All connectors (`avro`, `json`, `kafka`, `clickhouse`, `coordination-nats`, `s3`) |
 //!
 //! # Anatomy of a pipeline
@@ -162,6 +164,11 @@ pub use spate_clickhouse as clickhouse;
 /// Bounded object-storage (S3) backfill source.
 #[cfg(feature = "s3")]
 pub use spate_s3 as s3;
+
+/// Synthetic storefront-event source — a pipeline with no prerequisites. A
+/// demo and test source; it keeps no durable progress.
+#[cfg(feature = "datagen")]
+pub use spate_datagen as datagen;
 
 // Without the feature, `spate::coordination` resolves to the seam module
 // (traits, events, the driver) through the `spate_core::*` glob above. With

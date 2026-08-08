@@ -15,6 +15,7 @@ categories.workspace = true
 spate-core = { workspace = true }
 spate-avro = { workspace = true, optional = true }
 spate-coordination = { workspace = true, optional = true }
+spate-datagen = { workspace = true, optional = true }
 spate-json = { workspace = true, optional = true }
 spate-kafka = { workspace = true, optional = true }
 spate-clickhouse = { workspace = true, optional = true }
@@ -22,6 +23,10 @@ spate-s3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 apache-avro = { workspace = true }
+# Unconditional, unlike the optional dependency above: an example that needs no
+# infrastructure should need no `required-features` either, and a dev-dependency
+# is stripped from what a consumer resolves.
+spate-datagen = { workspace = true }
 flate2 = { workspace = true }
 bytes = { workspace = true }
 clickhouse = { workspace = true }
@@ -153,6 +158,15 @@ coordination = ["dep:spate-coordination"]
 # `coordination`; this is what pulls the async-nats dependency tree.
 coordination-nats = ["coordination", "spate-coordination/nats"]
 s3 = ["dep:spate-s3"]
+# The synthetic storefront-event source: a pipeline that runs with no broker,
+# bucket or coordination store. Deliberately excluded from `full`, on the same
+# principle as `json-simd` and `kafka-tls` — `full` means every connector a
+# production deployment might use, and this one is explicitly not that. It
+# keeps no durable progress and says so on startup; somebody who wants it asks
+# for it by name.
+datagen = ["dep:spate-datagen"]
+# Avro payloads from the generator instead of JSON (implies `datagen`).
+datagen-avro = ["datagen", "spate-datagen/avro"]
 # Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) for the Kafka connector (implies
 # `kafka`). Deliberately excluded from `full`: it compiles OpenSSL from source
 # (rdkafka's `ssl-vendored`), so `full` stays buildable without the extra

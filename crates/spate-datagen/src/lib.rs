@@ -4,7 +4,7 @@
 //! Every other source in this workspace needs infrastructure before it says
 //! anything: a broker, a bucket, a coordination store. That prerequisite is
 //! the first thing between a reader and a running pipeline, and it is the only
-//! thing this crate removes. Point a pipeline at a `DatagenSource` and it
+//! thing this crate removes. Point a pipeline at a [`DatagenSource`] and it
 //! produces a stream of storefront events — orders, their payments, and
 //! refunds against those payments — on as many partitions as you ask for, at a
 //! rate you set, for as long as you want.
@@ -83,25 +83,23 @@
 //! on whether `count` was set — a metric that appears and disappears with a
 //! configuration key is worse than one that is absent.
 
-// TEMPORARY, and it must not outlive this stack. The crate lands as three
-// stacked pull requests; until the one that adds the lane wires the generator
-// to a `SourceLane`, the dimension tables, the PRNG and the config helpers
-// below have no caller outside the tests beside them — which `dead_code`
-// cannot see. Removed by the pull request that adds `lane.rs`.
-#![cfg_attr(not(test), allow(dead_code))]
-
 mod config;
 mod dims;
 mod encode;
 mod events;
+mod lane;
+mod metrics;
 mod plan;
 mod rng;
+mod source;
 
 pub use config::{Clock, DatagenSourceConfig, Dataset, Encoding};
 pub use dims::{CUSTOMERS, REGIONS, SKUS};
 pub use events::{
     EVENT_SCHEMA_JSON, OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent,
 };
+pub use lane::{DatagenBatch, DatagenLane};
+pub use source::DatagenSource;
 
 /// The storefront dataset's event model, under the name a pipeline assembly
 /// reads best:

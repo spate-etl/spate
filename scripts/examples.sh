@@ -67,7 +67,7 @@ example_tier() {
         memory_pipeline | custom_operator | custom_source_sink | custom_metrics) echo "free" ;;
         manual_assembly) echo "free" ;;
         storefront_pipeline) echo "free" ;;
-        json_ndjson_memory | s3_backfill) echo "free" ;;
+        json_skip_bad_records | s3_backfill) echo "free" ;;
         instrumented_operator) echo "free" ;;
         avro_schema_evolution) echo "free" ;;
         custom_coordinated_source | s3_coordinated_backfill) echo "free" ;;

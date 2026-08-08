@@ -134,7 +134,7 @@ name = "sink_failures"
 test = true
 
 [[example]]
-name = "json_ndjson_memory"
+name = "json_skip_bad_records"
 required-features = ["json"]
 test = true
 

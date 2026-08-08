@@ -1,13 +1,14 @@
-//! NDJSON pipeline entirely in memory — no external systems.
+//! A malformed record is skipped and counted, not fatal.
 //!
 //! Shows the JSON deserializer decoding **N records from one payload** (JSON
 //! Lines), with a malformed line skipped-and-counted
 //! (`spate_json_deser_records_dropped_total`) and a filtered record dropped,
 //! while the source offset only commits once every surviving record is durably
-//! written (at-least-once). Runs anywhere via `spate-test`'s in-memory pieces:
+//! written (at-least-once). Runs anywhere via `spate-test`'s in-memory pieces —
+//! no external systems:
 //!
 //! ```sh
-//! cargo run -p spate --example json_ndjson_memory
+//! cargo run -p spate --features json --example json_skip_bad_records
 //! ```
 
 // The examples index renders these four fields; see scripts/examples-index.sh.

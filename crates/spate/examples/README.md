@@ -63,7 +63,7 @@ No infrastructure. Read them in this order.
 |---|---|---|---|
 | [`memory_pipeline`](memory_pipeline.rs) | How to build, drive and assert on a whole pipeline with **no infrastructure** | — | nothing |
 | [`storefront_pipeline`](storefront_pipeline.rs) | How to run a realistic order stream to completion or to SIGTERM with **no infrastructure** | — | nothing |
-| [`json_ndjson_memory`](json_ndjson_memory.rs) | How to decode an NDJSON order stream and skip malformed records rather than stop with **JSON** | `json` | nothing |
+| [`json_skip_bad_records`](json_skip_bad_records.rs) | How to decode an NDJSON order stream and skip malformed records rather than stop with **JSON** | `json` | nothing |
 
 ## 2. Production pipelines
 

@@ -22,7 +22,7 @@ recommended = "0.9.140"
 # a `PipelineRuntime`. The runtime binds `metrics.listen` whatever the exporter
 # is set to, and a bind failure is fatal — while `MetricsSettings::default()` is
 # `0.0.0.0:9090`. `memory_pipeline`, `custom_source_sink` and
-# `json_ndjson_memory` declare no `metrics:` block at all and `s3_backfill`
+# `json_skip_bad_records` declare no `metrics:` block at all and `s3_backfill`
 # names an exporter but no address, so all four land on the same port and two in
 # flight at once is `EADDRINUSE` — reported as a failed example rather than as
 # the port clash it is. One at a time; they are seconds each.

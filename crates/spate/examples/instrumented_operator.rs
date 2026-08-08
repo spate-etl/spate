@@ -25,7 +25,7 @@
 //!
 //! [`ChainCtx::meter`]: spate::pipeline::ChainCtx::meter
 
-// The examples index renders these four fields; see scripts/examples-index.sh.
+// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  operating
 // INDEX-GOAL:  count what an operator you wrote is doing
 // INDEX-TECH:  the Meter API

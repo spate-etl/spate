@@ -101,7 +101,7 @@ because a demo source that appears to resume durably is one somebody builds a
 pipeline on.
 
 A bounded run — one with `count` set — reaches `ExitState::Completed` only
-after every batch has been acknowledged and the final watermark committed, so
+only once every batch is acknowledged and the final watermark committed, so
 a clean exit from a bounded run is a real end-to-end delivery assertion. That
 is the one durability claim this source makes.
 

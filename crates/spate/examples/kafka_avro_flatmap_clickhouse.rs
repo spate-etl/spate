@@ -101,6 +101,7 @@ use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
 
+// ANCHOR: record
 /// One Kafka datum: a sensor's batch of readings. The nested event array is
 /// exploded downstream by `flat_map`.
 #[derive(Debug, Deserialize)]
@@ -131,13 +132,16 @@ struct SensorEvent {
     value: i64,
     unit: String,
 }
+// ANCHOR_END: record
 
+// ANCHOR: shard_key
 /// Sharding key: the `sensor` column — one sensor always lands on one shard,
 /// matching a `Distributed` DDL of `xxHash64(sensor)`. A fn item, not a
 /// closure: the extractor is higher-ranked over the payload lifetime.
 fn sensor_key(row: &SensorEvent) -> ShardKey<'_> {
     ShardKey::Str(&row.sensor)
 }
+// ANCHOR_END: shard_key
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Constructor owns init: logs, the metrics exporter (installed before any
@@ -164,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `format: native` fetches `system.columns` and hands the encoder the
     // real column types (so `batch_ts_ms`'s `DateTime64(3)` is laid out as an
     // Int64). The encoder is `Clone`: the terminal stage mints one per shard.
+    // ANCHOR: router
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
     )?;
@@ -174,8 +179,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // drift. With a single shard this routes identically to the default
     // (everything to shard 0); with N it matches `xxHash64(sensor)`.
     let router = sink.router::<Owned<SensorEvent>>(sensor_key);
+    // ANCHOR_END: router
+    // ANCHOR: encoder
     let native = pipeline.block_on(sink.native_schema())?;
     let encoder = NativeEncoder::<Owned<SensorEvent>>::new(native);
+    // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
     // `flat_map` explodes each batch's event array into one row per event;

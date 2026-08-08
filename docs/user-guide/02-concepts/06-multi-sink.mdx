@@ -3,15 +3,15 @@
 A pipeline can write to **more than one destination**, routing each record to
 exactly one of several typed sinks — each with its own schema, encoder, router,
 and batch/linger tuning. Where [sink sharding](05-sink-sharding.mdx) fans one
-table's writes across a cluster, the **split terminal** fans a heterogeneous
-stream across *different tables*: one physical table per record kind, so each
-carries indexes and an `ORDER BY` tuned to its own shape.
+destination's writes across a cluster, the **split terminal** fans a
+heterogeneous stream across *different destinations*: one per record kind, so
+each is laid out and indexed for the shape of the records it holds.
 
-This is the framework's answer to "should I write per-type tables in the ETL, or
-land everything in one table and let a `MATERIALIZED VIEW` split it?". Splitting
-in the ETL moves the fan-out CPU off the (scarce, hard-to-scale) database and
-onto the horizontally-scalable pipeline tier, and gives you per-table control of
-part size.
+The alternative is to land every kind in one destination and let the receiving
+system derive the per-kind ones itself. Splitting in the pipeline moves that
+fan-out CPU off the destination — usually the scarce, hard-to-scale tier — and
+onto the horizontally-scalable pipeline tier, and it puts each destination's
+write sizing under its own configuration.
 
 ## The shape
 
@@ -22,38 +22,32 @@ source → deserialize →   ├─ branch "text"   → encoder → router → t
 ```
 
 Each branch is an ordinary sink — the same route → encode → per-shard queue →
-worker path as a single `.sink(...)`, just one per destination. What's new is
+worker path as a single `.sink(...)`, just one per destination. The addition is
 the **classifier**: a single closure that inspects each record and dispatches it
 to one branch. Classification and the (per-branch, differently-typed) row
-extraction are the *same* `match` arm, so there's no double-dispatch.
+extraction are the *same* `match` arm, so there is no double-dispatch.
 
 ## The routing DSL
 
-Declare each destination with `add`, which returns a `Copy`, typed handle, then
-`route` with a closure that emits each record to one branch. The closure mirrors
-[`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter — familiar, and one `match`:
+Each destination is declared with `add`, which returns a `Copy`, typed handle;
+`route` then takes a closure that emits each record to one of them. The closure
+mirrors [`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter — one
+`match`, doing classification and row extraction in the same arm.
 
-```rust
-// Two destinations with genuinely different columns.
-let mut split = chain::<SampleFam, _>(deserializer.clone())
-    .with_metrics(ctx.pipeline.clone(), "main")
-    .split(ErrorPolicy::Skip);
+The chain below is the one in `crates/spate/examples/multi_table_split.rs`,
+which splits a stream of typed metric readings across two destinations:
 
-// `ctx.sink("<name>")` resolves the sink installed with that name — its queues
-// **and** its own resolved chunking (from that sink's `chunk:` block, so each
-// branch tunes independently). `add` returns a typed handle; declaration order
-// fixes the handle indices.
-let gauge = split.add::<GaugeFam, _, _>(gauge_enc.clone(), gauge_router.clone(), ctx.sink("gauge"));
-let text  = split.add::<TextFam,  _, _>(text_enc.clone(),  text_router.clone(),  ctx.sink("text"));
-
-let chain = split
-    .route(move |s: Sample<'_>, out| match s.kind {
-        "gauge" => out.emit(gauge, GaugeRow { host: s.host, ts_ms: DateTime64Millis(s.ts_ms), name: s.name, value: s.value }),
-        "text"  => out.emit(text,  TextRow  { host: s.host, ts_ms: DateTime64Millis(s.ts_ms), name: s.name, text:  s.text  }),
-        _       => {}  // matches no branch → the `unmatched` policy fires
-    })
-    .build();
+```rust file=crates/spate/examples/multi_table_split.rs region=split
 ```
+
+The record family is explicit at every seam. The chain deserializes into
+`Owned<MetricBatch>`; `flat_map` fans each batch out into `Owned<Sample>`
+readings, which is what the classifier sees; and each `add` fixes its own
+branch's row family — `Owned<GaugeRow>` and `Owned<TextRow>` here, two rows
+with genuinely different columns. `ctx.sink("<name>")` resolves the sink
+installed under that name, handing the branch that sink's queues **and** its
+own resolved chunking (from that sink's `chunk:` block, so each branch tunes
+independently). Declaration order fixes the handle indices.
 
 `out.emit(handle, row)` type-checks per arm (the handle fixes the row's family)
 and dispatches in O(1) — a branch index and one downcast, no per-record name
@@ -61,17 +55,12 @@ lookup. Each branch stores its encoder and router boxed (that is what lets
 branches with different encoders share one split), so relative to a single
 `.sink()` — whose encoder and router are concrete types — a split pays one
 `Any` downcast plus a virtual call into the branch's router and encoder per
-record. No allocation, no locks; your routing closure itself stays monomorphic.
+record. No allocation, no locks; the routing closure itself stays monomorphic.
 
-The sinks themselves are installed by name at assembly time, and configured as a
-[`sinks:` map](../07-reference/configuration.mdx#sinks):
+The sinks themselves are installed by name before the chain is built, and
+configured as a [`sinks:` map](../07-reference/configuration.mdx#sinks):
 
-```rust
-let report = pipeline
-    .add_sink("gauge", gauge_sink)?
-    .add_sink("text",  text_sink)?
-    .chains(move |ctx| { /* the split above */ })
-    .run(source)?;
+```rust file=crates/spate/examples/multi_table_split.rs region=install_sinks
 ```
 
 ## Unmatched records: an explicit policy, not a silent drop
@@ -80,97 +69,103 @@ A record that reaches no branch (the closure emits to none) follows the
 `unmatched` [`ErrorPolicy`](04-error-handling.mdx) passed to `.split(...)`:
 
 - **`Fail`** (the operator default): the pipeline stops — the same fail-stop a
-  `Fail`-policy encoder or `try_map` triggers. Use it when an unroutable record
-  means your classifier is wrong and you'd rather halt than lose data.
+  `Fail`-policy encoder or `try_map` triggers. It fits where an unroutable
+  record means the classifier is wrong and halting beats losing data.
 - **`Skip`**: the record is dropped, its ack share released as success (exactly
   like a [`filter`](../03-guides/assembling-a-pipeline.mdx) drop), and counted on
-  `spate_operator_records_dropped_total{reason="unrouted"}`. Use it when unknown
-  kinds are expected and discardable.
+  `spate_operator_records_dropped_total{reason="unrouted"}`. It fits where
+  unknown kinds are expected and discardable.
 
-There is **no built-in catch-all**. A catch-all *table* is just another branch
-you `add` and route to on purpose — it is not framework-special.
+There is **no built-in catch-all**. A catch-all *destination* is just another
+branch, added and routed to on purpose — it is not framework-special.
 
 :::note
 The per-branch shard routers are unchanged and still **total** (see
 [sink sharding](05-sink-sharding.mdx)): they always return a shard for a record
-they're given. The Skip/Fail policy lives only on the new classifier tier —
+they're given. The Skip/Fail policy lives only on the classifier tier —
 the one place routing can legitimately produce "no destination".
 :::
 
-## At-least-once across tables is free
+## At-least-once across destinations is free
 
 The split adds **no new delivery machinery**. Each branch clones the source poll
 batch's ack handle, so — exactly as with [`flat_map` fan-out](02-delivery-guarantees.mdx)
-— a source batch's offsets commit only once **every** table its records landed
-in has durably written. Two properties fall straight out of the shared ack:
+— a source batch's offsets commit only once **every** destination its records
+landed in has durably written. Two properties fall straight out of the shared
+ack:
 
-- **Worst-status merge.** If the write to any one table fails, that batch
-  resolves `Failed` and its watermark stalls — even if every other table wrote
-  successfully. A failure anywhere replays the whole batch. Nothing commits
-  past unacknowledged data.
-- **Held until all.** A batch whose records fan across three tables is not
+- **Worst-status merge.** If the write to any one destination fails, that batch
+  resolves `Failed` and its watermark stalls — even if every other destination
+  wrote successfully. A failure anywhere replays the whole batch. Nothing
+  commits past unacknowledged data.
+- **Held until all.** A batch whose records fan across three destinations is not
   committable until all three have flushed the batches those records landed in.
 
-## The trade you're making: part size vs. checkpoint lag
+## The trade: write size vs. checkpoint lag
 
-Per-table part size is governed by each sink's [`batch`](../04-connectors/sinks/clickhouse/README.mdx)
-(`max_rows` / `max_bytes` / `linger`). To build **big parts** on a low-volume
-table you raise its `linger`. But the watermark is **poll-batch-granular**, and
+Per-destination write size is governed by each sink's
+[`batch`](../07-reference/configuration.mdx#sink-pool) (`max_rows` /
+`max_bytes` / `linger`). Building **large writes** on a low-volume destination
+means raising its `linger`. But the watermark is **poll-batch-granular**, and
 a batch is held until every destination it touched has flushed. The hold has
-two halves: the chain-side chunk buffer, which the framework bounds for you
+two halves: the chain-side chunk buffer, which the framework bounds
 (partial chunks are sealed on every commit tick, so while the pipeline is
 unblocked this half stays within ~`checkpoint.interval` — even for a branch
 too cold to ever fill a chunk), and
-the sink-side batch `linger`, which is the trade you are choosing here:
+the sink-side batch `linger`, which is the trade being made here:
 
 :::info
 If a source batch mixes hot and rare records, its offsets are held until the
-**rare** table's `linger` fires. Rare records are sprinkled across many
-batches, so a long rare-table `linger` inflates checkpoint lag and
-restart-replay volume. **You cannot simultaneously have huge rare-type parts
-and low checkpoint lag when rare and hot records co-occur in the same source
-batches.**
+**rare** destination's `linger` fires. Rare records are sprinkled across many
+batches, so a long rare-destination `linger` inflates checkpoint lag and
+restart-replay volume. **Huge rare-kind writes and low checkpoint lag cannot
+coexist while rare and hot records occur in the same source batches.**
 :::
 
 Two levers soften it:
 
-- **Seal on `max_rows` too, not just `linger`.** Size `max_rows` to your target
-  part; then `linger` only bites in genuine lulls, and steady-state a rare table
-  still emits target-size parts without paying the full linger hold every time.
-- **Segregate the source.** The tracker is per-partition: if a source partition
-  carries one record kind, its watermark advances at that table's own cadence
-  and the tension largely dissolves. Interleaved partitions pay it in full.
+- **Seal on `max_rows` too, not just `linger`.** With `max_rows` sized to the
+  target write, `linger` only bites in genuine lulls, and steady-state a rare
+  destination still emits target-size writes without paying the full linger
+  hold every time.
+- **Segregate the source.** The tracker is per-partition: where a source
+  partition carries one record kind, its watermark advances at that
+  destination's own cadence and the tension largely dissolves. Interleaved
+  partitions pay it in full.
 
-## One dead table stalls the pipeline
+## One dead destination stalls the pipeline
 
-Because the source is shared and records are typed to their table, a table that
-is **hard-down** (its shard unreachable, circuit breaker open past retries)
-correctly stalls the whole pipeline: its records can't be written, their batches
-can't resolve, and the source can't advance past them. This is fail-stop, not
-data loss — the same behavior as a dead `MATERIALIZED VIEW` target failing an
-INSERT — and `checkpoint.stalled_fail_after` converts a permanent stall into a
-clean `Failed` exit and a restart. Transient failures are absorbed by the sink's
-retry + circuit breaker; only a genuine outage halts progress.
+Because the source is shared and records are typed to their destination, a
+destination that is **hard-down** (its shard unreachable, circuit breaker open
+past retries) correctly stalls the whole pipeline: its records cannot be
+written, their batches cannot resolve, and the source cannot advance past them.
+This is fail-stop, not data loss, and `checkpoint.stalled_fail_after` converts
+a permanent stall into a clean `Failed` exit and a restart. Transient failures
+are absorbed by the sink's retry + circuit breaker; only a genuine outage halts
+progress.
 
-## Split vs. `Null` + materialized views
+## Split vs. fan-out at the destination
 
-Both fan a stream into per-type tables; they differ in **who** does the fan-out.
+A receiving system that can derive per-kind destinations from one landing
+stream offers the same end state. Both fan a stream into per-kind destinations;
+they differ in **who** does the fan-out.
 
-| | ETL split (this page) | `Null` table + `MATERIALIZED VIEW` |
+| | Split in the pipeline | Fan-out at the destination |
 |---|---|---|
-| Fan-out CPU | on the scalable ETL tier | on the database server, per inserted block |
-| Per-table part size | tuned per sink (`batch`/`linger`) | coupled to the landing table's INSERT blocks — rare types get tiny parts you can't decouple |
-| Checkpoint cadence | poll-batch, held across tables (see the trade above) | single-cadence (one landing INSERT) |
-| At-least-once | held until all tables + worst-status merge | one INSERT's durability covers the MV targets |
-| Distinct schemas | one record family + encoder per table | one MV `SELECT` per target |
+| Fan-out CPU | on the scalable pipeline tier | on the receiving system, per write it accepts |
+| Per-destination write size | tuned per sink (`batch`/`linger`) | coupled to the landing stream's writes — rare kinds get small writes that cannot be decoupled |
+| Checkpoint cadence | poll-batch, held across destinations (see the trade above) | single-cadence (one landing write) |
+| At-least-once | held until all destinations + worst-status merge | the landing write's durability covers what it derives |
+| Distinct schemas | one record family + encoder per destination | one derivation per target |
 
-The split wins when the database is the scarce resource and you want per-table
-part control; the MV approach keeps a simpler single-cadence checkpoint.
+The split wins where the destination is the scarce resource and per-destination
+write sizing matters; leaving the fan-out to the destination keeps a simpler
+single-cadence checkpoint.
 
 ## Further reading
 
-- [Sink sharding](05-sink-sharding.mdx) — the per-table shard tier each branch still uses.
+- [Sink sharding](05-sink-sharding.mdx) — the per-destination shard tier each branch still uses.
 - [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) — the connector-specific end-to-end (config, encoders, per-table tuning).
 - [Configuration reference](../07-reference/configuration.mdx#sinks) — the `sinks:` map.
-- [Delivery guarantees](02-delivery-guarantees.mdx) — the shared-ack model the cross-table hold builds on.
+- [Delivery guarantees](02-delivery-guarantees.mdx) — the shared-ack model the cross-destination hold builds on.
 - [Error handling](04-error-handling.mdx) — the `Skip`/`Fail` policy the `unmatched` case reuses.

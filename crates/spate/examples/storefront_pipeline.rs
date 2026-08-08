@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("running; SIGTERM (Ctrl-C) drains gracefully\n");
 
-    let report = pipeline
+    let pipeline = pipeline
         .add_sink("orders", quick(orders_sink))?
         .add_sink("payments", quick(payments_sink))?
         .add_sink("refunds", quick(refunds_sink))?
@@ -217,12 +217,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 })
                 .build()
-        })
-        // `RuntimeOptions::default()` leaves `handle_signals` on: SIGTERM and
-        // Ctrl-C trigger the same drain the exhausted source triggers below.
-        .run(source)?;
+        });
 
+    // ANCHOR: run
+    // `RuntimeOptions::default()` leaves `handle_signals` on, so SIGTERM and
+    // Ctrl-C run the same drain a source that exhausts its input runs.
+    let report = pipeline.run(source)?;
     report.log();
+    // ANCHOR_END: run
 
     // ── What the three sinks captured ───────────────────────────────────
     let (order_rows, order_shards) = captured(&orders);

@@ -55,7 +55,7 @@ instead, and then the granularity is derived rather than configured — see
 - `build_serde::<T>()` — decodes each document into a
   `T: serde::de::DeserializeOwned` struct. No `serde_json` types leak into the
   pipeline. This is the flagship path — see
-  `crates/spate/examples/json_ndjson_memory.rs`.
+  `crates/spate/examples/json_skip_bad_records.rs`.
 - `build_value()` — decodes into dynamically-typed `serde_json::Value` records,
   for pipelines that inspect or route on structure not known at compile time.
 

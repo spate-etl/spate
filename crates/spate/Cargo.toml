@@ -91,6 +91,11 @@ name = "custom_source_sink"
 test = true
 
 [[example]]
+name = "avro_schema_evolution"
+required-features = ["avro"]
+test = true
+
+[[example]]
 name = "custom_metrics"
 test = true
 

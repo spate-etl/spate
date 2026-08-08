@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime = pipeline
         .sink(sink)?
+        // ANCHOR: chain
         .chains(|ctx| {
             let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
 
@@ -167,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .build()
         })
+        // ANCHOR_END: chain
         .runtime_options(RuntimeOptions {
             handle_signals: false, // the demo triggers shutdown itself
             ..RuntimeOptions::default()

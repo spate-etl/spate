@@ -240,23 +240,10 @@ impl SplitSource for LedgerCtx {
         })
     }
 
-    /// The drift check: carried progress against the split as it exists
-    /// *now*, before the driver trusts a byte of it. The two disagree
-    /// whenever a replan moves an id's bounds under progress already
-    /// committed against them — a job restarted with a different `ROWS`, a
-    /// planner whose ranges shift — and the resume point then counts rows
-    /// this split no longer covers.
-    ///
-    /// **Rejecting is terminal, so the class has to be `Fatal`.** The
-    /// driver raises this before it records the tenancy or stages the
-    /// opening, so the split is never opened: no lane, no partition id, and
-    /// the rest of that batch of coordination events goes unapplied. The
-    /// error leaves `CoordinationDriver::poll_events` through this source's
-    /// `poll_events`, and the controller classifies it — a `Fatal` one
-    /// becomes the pipeline's `FatalError` and the run ends
-    /// `ExitState::Failed`. Any other class is logged as a retryable
-    /// control-plane error and the gain is simply dropped, leaving a split
-    /// this instance neither reads nor hands back.
+    /// Reject carried progress that no longer describes this split. Both
+    /// halves have to hold: the pin `encode_commit` wrote still matches the
+    /// descriptor, and the watermark is a position inside it. Rejections
+    /// are classed `Fatal`, the class that ends the run.
     // ANCHOR: validate_resume
     fn validate_resume(
         &self,
@@ -369,9 +356,10 @@ impl Source for LedgerSource {
         self.driver.commit(&mut self.ctx, watermarks)
     }
     // flush_commits stays the default no-op: an Ok commit is durable in
-    // the store, or (after a transient store failure) cached by the
-    // driver and recommitted next tick — replay can widen, data cannot
-    // be lost.
+    // the store, or deferred after a transient store failure and carried
+    // out on this split's next commit. The previous durable state stays
+    // authoritative until then, so replay can widen and data cannot be
+    // lost.
 }
 
 impl Drop for LedgerSource {

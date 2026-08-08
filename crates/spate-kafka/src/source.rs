@@ -278,6 +278,7 @@ impl KafkaSource {
 /// [`SourceMetrics::retain_partitions`](spate_core::metrics::SourceMetrics::retain_partitions),
 /// which zeroes what the member lost — the exporter cannot delete a series,
 /// so a partition left alone renders its last value forever.
+// ANCHOR: lag
 fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: &SourceMetrics) {
     let Some(topic) = stats.topics.get(topic) else {
         return;
@@ -294,6 +295,7 @@ fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: 
         }
     }
 }
+// ANCHOR_END: lag
 
 fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceError {
     move |e| SourceError::Client {

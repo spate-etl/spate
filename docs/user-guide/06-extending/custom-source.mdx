@@ -396,10 +396,12 @@ back.
   epoch and marks the pipeline running while the claims race, and the splits
   then arrive additively as `SourceEvent::LanesAdded`.
 - **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
-  either durable in the store or, after a transient store failure, cached by
-  the driver and recommitted on the next tick; the previous durable state stays
-  authoritative meanwhile, so a crash before the recommit widens replay rather
-  than losing data.
+  either durable in the store or deferred after a transient store failure. A
+  deferred one does not go out again on a bare tick: it rides that split's next
+  commit — the next watermark it acks, which merges past the deferred one, or
+  the terminal progress `sweep` returns if no watermark follows. The previous
+  durable state stays authoritative meanwhile, so a crash before the recommit
+  widens replay rather than losing data.
 - **Your `Drop` calls `driver.release()`.** The driver has no `Drop` of its
   own, so a source that omits this leaves its splits to expire: releasing
   hands them back and peers claim them immediately instead of waiting out the
@@ -415,8 +417,8 @@ with the drain barrier, while a split that reached its terminal commit and
 one that finished a cooperative handoff both leave barrier-less through
 `LanesRetired` (in either case a landed commit already proved nothing is in
 flight); fenced-commit triage (`Fenced` → quarantine the tenancy, surface
-the loss; `Retryable` → recommit next tick); completion sweeps and the
-`take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
+the loss; `Retryable` → defer to the split's next commit); completion sweeps
+and the `take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
 `Drained`. A **stalled** job
 (quarantined splits blocking completion) is a fatal error by default —
 build the driver with `CoordinationDriver::new(...).stall_drains(true)`

@@ -104,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (queues, mut receivers) = shard_queues(1, 16);
     let budget = Arc::new(InflightBudget::new());
 
+    // ANCHOR: chain
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
         // Custom operator #1: stateful deduplication. `flat_map` emits
@@ -136,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             budget,
         )
         .build();
+    // ANCHOR_END: chain
 
     // Drive it exactly like a pipeline thread: poll a batch from a lane,
     // push it through the chain, flush the terminal buffers.
@@ -186,15 +188,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     G: for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>
     //
     // puts `'buf` only inside associated types and rustc rejects it at the
-    // *definition* site with E0582 — the `spate::ops` module docs carry the
-    // desugaring. Nothing to do with ownership or with borrowck: the bound
-    // cannot be written.
+    // *definition* site with E0582. Nothing to do with ownership or with
+    // borrowck: the bound cannot be written.
     //
     // A borrowing family transforms through `map_rec`/`try_map_rec`
-    // instead, whose bound goes through `spate::ops::MapFn<In, Out>`: `In`
-    // and `Out` are ordinary trait parameters rather than an
-    // associated-type binding, so `for<'buf>` over them is legal. Same
-    // transformation, a bound the compiler accepts.
+    // instead, whose bound goes through the helper trait `MapFn<In, Out>`
+    // visible in `map_rec`'s signature: `In` and `Out` are ordinary trait
+    // parameters rather than an associated-type binding, so `for<'buf>`
+    // over them is legal. Same transformation, a bound the compiler
+    // accepts.
     //
     // Pass a `fn` item, as the builder's docs advise: it is higher-ranked
     // by construction and satisfies the bound at every lifetime, where a

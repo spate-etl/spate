@@ -10,6 +10,10 @@ the shape and, where it is not obvious, why it is that shape — because several
 of these look stranger than they are until you know what they are working
 around.
 
+Every fence below is therefore a trait or a struct quoted to be read rather
+than run, abridged to the members under discussion rather than rendered whole
+from the compiled source.
+
 ## The seam
 
 A pipeline stores its chain as a trait object, so the chain's type is erased
@@ -18,7 +22,8 @@ exactly once. That single boundary is `RunnableChain`:
 ```rust
 /// The one erasure boundary. One virtual call per batch.
 pub trait RunnableChain: Send {
-    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>) -> PushOutcome;
+    /// `from` is the resume cursor: where a blocked push left off.
+    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>, from: usize) -> PushOutcome;
     // + flush/drain lifecycle hooks
 }
 ```
@@ -78,8 +83,8 @@ hand them over.
 ```rust
 pub struct Record<T> {
     pub payload: T,
-    meta: RecordMeta, // Copy: partition, offset, event time, key hash
-    ack: AckRef,
+    pub meta: RecordMeta, // Copy: partition, offset, event time, key hash
+    pub ack: AckRef,
 }
 ```
 
@@ -115,7 +120,8 @@ pub trait Collector<T> { fn push(&mut self, rec: Record<T>) -> Flow; }
 `CollectorFor<F>` is the family-erased, dyn-compatible form, used by
 `flat_map`'s stack-borrowed emitter — which is what makes fan-out allocate
 nothing. [Writing operators](custom-operators.mdx) covers this, including the
-language limitation that makes `map` and `try_map` need a `map_rec` tier.
+language limitation that keeps `map` and `try_map` off a borrowing family and
+puts a `map_rec` tier there instead.
 
 ## Sinks
 
@@ -140,6 +146,6 @@ that comes with holding acknowledgment handles.
 
 - [Writing a source](custom-source.mdx) — `Source`, `SourceLane` and the framing seam, with the contracts that keep a source live under backpressure
 - [Writing a sink](custom-sink.mdx) — `RowEncoder` and `ShardWriter` together, and what a connector owes on teardown
-- [Writing operators](custom-operators.mdx) — composing the chain, and the closure-inference limit on borrowing families
+- [Writing operators](custom-operators.mdx) — composing the chain, and why a borrowing family reaches for `map_rec` instead of `map`
 - [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — what an `AckRef` means and when it resolves
 - [ADR-0013](../../adr/0013-zero-copy-seam.md) — why the boundary is shaped this way, and the measurements behind it

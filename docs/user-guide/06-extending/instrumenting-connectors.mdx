@@ -12,9 +12,17 @@ facade the framework uses.
 The taxonomy every framework series belongs to is [docs/METRICS.md](../../METRICS.md);
 the operator's-eye view of the model is
 [Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
-second for the hot-path rules. This page mirrors
-`crates/spate/examples/custom_metrics.rs`
-(`cargo run -p spate --example custom_metrics`).
+second for the hot-path rules.
+
+Two runnable examples carry most of the Rust on this page —
+`crates/spate/examples/custom_metrics.rs` for the registration patterns and
+`crates/spate/examples/instrumented_operator.rs` for the operator one. Either
+runs as-is:
+
+```sh
+cargo run -p spate --example custom_metrics
+cargo run -p spate --example instrumented_operator
+```
 
 ## What you get for free
 
@@ -34,22 +42,17 @@ only the client can compute, an assignment callback firing. The framework
 defines the handle
 ([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
 drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
-through a builder of your own:
+through a builder of your own — and what follows is a translation from what the
+client reports into what the series means. A shipped source's translation, as a
+worked reference (`crates/spate-kafka/src/source.rs`):
 
-```rust
-// crates/spate-kafka/src/source.rs
-fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-    // The runtime shares the same handles it uses itself.
-    self.metrics = ctx.stage_metrics.clone();
-    // ...
-}
-
-// ...later, inside the poll/statistics path:
-if let Some(m) = &self.metrics {
-    // Only for partitions whose lag the client actually measured.
-    m.set_partition_lag(partition, lag);
-}
+```rust file=crates/spate-kafka/src/source.rs region=lag title="spate-kafka/src/source.rs"
 ```
+
+`publish_lag` takes the handle as an argument rather than reaching for one, and
+two of the rules stated below are already visible in it: a partition whose lag
+the client has not measured is skipped rather than published as `0`, and
+publication is restricted to the partitions this member still owns.
 
 The handle is resolved once at build time and injected; the connector never
 looks up a metric name on the hot path, it only calls methods on a handle it was
@@ -131,24 +134,18 @@ handle it mints inherits them, and its name is **auto-prefixed under the `spate_
 umbrella**, so your series sit right alongside the framework's and an operator
 finds the whole pipeline's telemetry under one greppable `spate_` root.
 
-```rust
-use spate_core::metrics::Meter;
+A connector claims a namespace segment of its own; a pipeline author reaches
+for `Meter::new` and the shared `spate_custom_` bucket instead. Either way you
+pass the local name and the scope supplies the prefix:
 
-// A connector claims its namespace; a pipeline author uses `Meter::new`.
-let meter = Meter::with_namespace("kafka", "orders", "orders_kafka", "kafka");
-// Pass the LOCAL name — the Meter prepends `spate_kafka_` for you.
-let schema_fetches = meter.counter("schema_fetches_total", &[("registry", "prod".into())]);
-let fetch_seconds = meter.histogram("fetch_duration_seconds", &[]);
-
-// Hot path: touch only the handles, per batch.
-schema_fetches.increment(n);
-fetch_seconds.record(elapsed);
+```rust file=crates/spate/examples/custom_metrics.rs region=namespace title="custom_metrics.rs"
 ```
 
-This renders:
+That counter renders as one series, carrying the scope's three standard labels
+alongside the extra one it was minted with:
 
 ```text
-spate_kafka_schema_fetches_total{pipeline="orders",component="orders_kafka",component_type="kafka",registry="prod"}
+spate_storefront_orders_fetched_total{pipeline="metrics-demo",component="orders-in",component_type="storefront",shop="eu-west"}
 ```
 
 The rules the `Meter` enforces so you don't have to think about them:
@@ -182,30 +179,19 @@ series belong.
 
 ### From a pipeline author's operators
 
-A `Meter` is also how you instrument an **operator** you write. Operator
-closures are pure (`.map` / `.inspect` take a bare function — there is no
-per-record context, by design), so the pattern is *mint at build time, close the
-handle over the closure*. The chain factory hands you a
+A `Meter` is also how you instrument an **operator** you write. An operator
+closure is handed a record and nothing else — there is no per-record context,
+by design — so the pattern is *mint at build time, close the handle over the
+closure*. The chain factory hands you a
 [`ChainCtx`](../07-reference/README.mdx); call `ctx.meter(component,
 component_type)` there (it uses the `custom` namespace):
 
-```rust
-.chains(move |ctx| {
-    let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
-    // Registers `spate_custom_enrich_hits_total` — you pass the local name.
-    let hits = ctx.meter("enrich", "map").counter("enrich_hits_total", &[]);
-    chain(deser.clone())
-        .with_metrics(ctx.pipeline, "enrich")
-        .inspect(move |r| if is_hit(r) { hits.increment(1); })
-        .sink(encoder.clone(), KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
-        .build()
-})
+```rust file=crates/spate/examples/instrumented_operator.rs region=chain title="instrumented_operator.rs"
 ```
 
-`ctx.meter(...)` fills in the pipeline name for you; you name the component and
-its type. `Counter` is `Arc`-backed, so closing it over a closure that the
-runtime clones once per pipeline thread is correct — every thread feeds one
-series.
+The example carries on past this region to scrape its own exposition and assert
+each series by name, label set and value — the assertion worth copying, and the
+one [Testing](#testing) below is about.
 
 ## Dropping to the raw facade
 
@@ -215,15 +201,15 @@ third-party library's own naming, say — record it straight onto the
 and no namespace enforcement, so the collision-avoidance is yours: prefix with
 your own name, **not** `spate_` (that umbrella belongs to the `Meter`).
 
-```rust
-// Pre-register once, at build time; you own the whole name.
-let schema_fetches = metrics::counter!("myconn_schema_fetches_total", "registry" => "prod");
-schema_fetches.increment(n);
+```rust file=crates/spate/examples/custom_metrics.rs region=facade title="custom_metrics.rs"
 ```
 
-[Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx) and the
-`custom_metrics.rs` example own this pattern in full. Prefer the `Meter` above
-unless you specifically want to live outside the `spate_` taxonomy.
+Pre-registration and batch-boundary counting bind here exactly as they do
+through a `Meter`; what changes is that these series carry only the labels
+typed into the macro.
+[Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx#the-hot-path-discipline)
+states those two rules in full. Prefer the `Meter` above unless you
+specifically want to live outside the `spate_` taxonomy.
 
 ## Contracts
 
@@ -310,6 +296,10 @@ connector never wires the pipeline name, the labels, or the prefix.
   `spate_<namespace>_source_*` and its sink families under
   `spate_<namespace>_sink_*`, under distinct names. The connector's code is
   identical at either end.
+
+Both methods together are a shape rather than a program: the `impl Source for`
+header is left out and the rest of `open` is elided at the `// ...`, so this
+fence is written to be read rather than compiled.
 
 ```rust
 // A source, in open():

@@ -124,6 +124,7 @@ fn text_key(row: &TextRow) -> ShardKey<'_> {
     ShardKey::Str(&row.host)
 }
 
+// ANCHOR: assembly
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = std::env::var("SPATE_CONFIG")
         .unwrap_or_else(|_| "crates/spate/examples/multi_table_split.yaml".to_string());
@@ -158,13 +159,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NativeEncoder::<Owned<TextRow>>::new(pipeline.block_on(text_sink.native_schema())?);
 
     // ── The chain, and run ──────────────────────────────────────────────
+    // ANCHOR: install_sinks
     let report = pipeline
         .add_sink("gauge", gauge_sink)?
         .add_sink("text", text_sink)?
+        // ANCHOR_END: install_sinks
         .chains(move |ctx| {
             // deserialize → explode readings (enriched with host/time) → split
             // by `kind` into the two tables. `ErrorPolicy::Skip`: an unknown
             // kind is dropped and counted, not fatal.
+            // ANCHOR: split
             let mut split = chain::<Owned<MetricBatch>, _>(deserializer.clone())
                 // Clone: `ctx.sink(...)` below borrows `ctx`, so `ctx.pipeline`
                 // must not be moved out of it.
@@ -221,9 +225,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => {}
                 })
                 .build()
+            // ANCHOR_END: split
         })
         .run(source)?;
 
     report.log();
     std::process::exit(report.exit_code());
 }
+// ANCHOR_END: assembly

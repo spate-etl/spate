@@ -128,28 +128,28 @@ the sink account needs `SELECT` on both — see
 
 ### 4. The router
 
-Supply a key extractor — a plain `fn` item, not a closure (the extractor is
-higher-ranked over the payload lifetime) — returning a `ShardKey`. The
-router owns the `xxHash64(seed 0)` and the weight-interval selection:
+The key extractor is a plain `fn` item, not a closure — it is higher-ranked
+over the payload lifetime — and it returns a `ShardKey`. The router owns the
+`xxHash64(seed 0)` and the weight-interval selection. Both blocks below come
+from `crates/spate/examples/kafka_avro_flatmap_clickhouse.rs`, a sharded
+Native pipeline that runs with
+`cargo run --release -p spate --features full --example kafka_avro_flatmap_clickhouse`:
 
-```rust
-use spate::clickhouse::ShardKey;
-
-/// Sharding key: the `sensor` column. One sensor always lands on one shard,
-/// matching the Distributed DDL's `xxHash64(sensor)`.
-fn sensor_key<'a>(row: &'a SensorEvent<'_>) -> ShardKey<'a> {
-    ShardKey::Str(row.sensor)
-}
+```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=shard_key
 ```
 
-```rust
-let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
-// No-op unless the YAML opts into `distributed_check`; with it, startup fails
-// fast if the sink topology drifts from the cluster + DDL.
-pipeline.block_on(sink.validate_distributed())?;
-// Weights come from the validated YAML — router and endpoints can't drift.
-let router = sink.router::<EventFam>(sensor_key);
+`SensorEvent` is the row the chain emits, and `ShardKey::Str` borrows its
+`sensor` field, so extraction allocates nothing on the per-record path.
+
+The router is minted from the sink itself, which is where the validated
+weights live:
+
+```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=router
 ```
+
+`sink.router::<F>` is parameterized by the record family the terminal stage
+carries — `Owned<SensorEvent>` for an owned row struct, matching the family the
+encoder is built over.
 
 `router` then drops into the chain's terminal stage in place of
 `KeyHashRouter` (`.sink(encoder.clone(), router.clone(), ...)`). It is

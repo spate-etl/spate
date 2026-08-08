@@ -75,16 +75,11 @@ custom metrics as much as the framework's:
    (duration divided by n), never per record.
 
 The runnable pattern — custom handles side by side with a framework stage
-handle — is `crates/spate/examples/custom_metrics.rs`:
+handle — is `crates/spate/examples/custom_metrics.rs`, which prints the
+exposition it produced and runs as-is with
+`cargo run -p spate --example custom_metrics`:
 
-```rust
-// Pre-register once, at build time.
-let orders_enriched = metrics::counter!("myapp_orders_enriched_total", "region" => "eu");
-let enrich_seconds = metrics::histogram!("myapp_enrich_duration_seconds");
-
-// Hot loop: touch only the handles, count per batch.
-orders_enriched.increment(batch_size);
-enrich_seconds.record(0.012);
+```rust file=crates/spate/examples/custom_metrics.rs region=facade
 ```
 
 ## Starting alerts

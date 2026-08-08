@@ -10,6 +10,12 @@ the shape and, where it is not obvious, why it is that shape — because several
 of these look stranger than they are until you know what they are working
 around.
 
+Every fence on this page is therefore a trait or a struct quoted to be read
+rather than run, abridged to the members under discussion. That is what keeps
+them written out here instead of rendered from the compiled source: rendering
+one would put a full item on a page whose subject is the shape of it, and the
+full item is what docs.rs is for.
+
 ## The seam
 
 A pipeline stores its chain as a trait object, so the chain's type is erased
@@ -18,7 +24,8 @@ exactly once. That single boundary is `RunnableChain`:
 ```rust
 /// The one erasure boundary. One virtual call per batch.
 pub trait RunnableChain: Send {
-    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>) -> PushOutcome;
+    /// `from` is the resume cursor: where a blocked push left off.
+    fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>, from: usize) -> PushOutcome;
     // + flush/drain lifecycle hooks
 }
 ```
@@ -78,8 +85,8 @@ hand them over.
 ```rust
 pub struct Record<T> {
     pub payload: T,
-    meta: RecordMeta, // Copy: partition, offset, event time, key hash
-    ack: AckRef,
+    pub meta: RecordMeta, // Copy: partition, offset, event time, key hash
+    pub ack: AckRef,
 }
 ```
 
@@ -140,6 +147,6 @@ that comes with holding acknowledgment handles.
 
 - [Writing a source](custom-source.mdx) — `Source`, `SourceLane` and the framing seam, with the contracts that keep a source live under backpressure
 - [Writing a sink](custom-sink.mdx) — `RowEncoder` and `ShardWriter` together, and what a connector owes on teardown
-- [Writing operators](custom-operators.mdx) — composing the chain, and the closure-inference limit on borrowing families
+- [Writing operators](custom-operators.mdx) — composing the chain, and why a borrowing family reaches for `map_rec` instead of `map`
 - [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — what an `AckRef` means and when it resolves
 - [ADR-0013](../../adr/0013-zero-copy-seam.md) — why the boundary is shaped this way, and the measurements behind it

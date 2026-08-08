@@ -104,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (queues, mut receivers) = shard_queues(1, 16);
     let budget = Arc::new(InflightBudget::new());
 
+    // ANCHOR: chain
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
         // Custom operator #1: stateful deduplication. `flat_map` emits
@@ -136,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             budget,
         )
         .build();
+    // ANCHOR_END: chain
 
     // Drive it exactly like a pipeline thread: poll a batch from a lane,
     // push it through the chain, flush the terminal buffers.

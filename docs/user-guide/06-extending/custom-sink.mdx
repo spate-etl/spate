@@ -12,31 +12,23 @@ Everything between is the framework's: chunking, per-shard batching to
 `max_rows`/`max_bytes`/`linger`, replica rotation, circuit breakers,
 retries, acknowledgments, backpressure. You write the two edges.
 
-This page mirrors the sink half of
-`crates/spate/examples/custom_source_sink.rs` (a JSON-lines-to-stdout sink)
-and the bundle seam in `crates/spate-core/src/sink/bundle.rs`.
+Every Rust block below but the last comes from the sink half of
+`crates/spate/examples/custom_source_sink.rs` — a JSON-lines-to-stdout sink fed
+by a generator source, which needs no infrastructure and no facade feature
+beyond the default:
+
+```sh
+cargo run -p spate --example custom_source_sink
+```
+
+The last one is a shipped connector's own wiring and carries its path.
 
 ## The CPU half: `RowEncoder`
 
-```rust
-#[derive(Clone)]
-struct JsonLinesEncoder;
+One record in, wire bytes appended to the shard's buffer. The example encodes
+each order line as a JSON object on a line of its own:
 
-impl RowEncoder<Owned<Vec<u8>>> for JsonLinesEncoder {
-    fn encode<'buf>(
-        &mut self,
-        rec: &Record<Vec<u8>>,
-        buf: &mut bytes::BytesMut,
-    ) -> Result<(), SinkError> {
-        use bytes::BufMut;
-        buf.put_slice(b"{\"partition\":");
-        buf.put_slice(rec.meta.partition.0.to_string().as_bytes());
-        buf.put_slice(b",\"value\":");
-        buf.put_slice(&rec.payload);
-        buf.put_slice(b"}\n");
-        Ok(())
-    }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=encoder
 ```
 
 Contracts:
@@ -77,23 +69,14 @@ chunk and cannot interleave with another's.
 
 ## The I/O half: `ShardWriter`
 
-```rust
-struct StdoutWriter;
+One sealed batch out to one replica endpoint. The example's endpoint is a shard
+name and its write is a `print!`, so returning `Ok` after it is honest; it also
+keeps the rows it printed, which is how the example asserts on placement without
+a destination to query. Note the shape: `write_batch` returns a future rather
+than being an `async fn`, so whatever runs before that future — here, joining
+the frames — happens when the worker calls it, not when the future is polled:
 
-impl ShardWriter for StdoutWriter {
-    type Endpoint = String; // a real sink holds a connected client here
-
-    fn write_batch(
-        &self,
-        endpoint: &String,
-        batch: &SealedBatch,
-    ) -> impl Future<Output = Result<(), SinkError>> + Send {
-        async move {
-            /* write batch.frames to the endpoint */
-            Ok(())
-        }
-    }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=writer
 ```
 
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
@@ -135,19 +118,15 @@ anywhere stalls the watermark rather than committing data nobody wrote.
 
 ## Handing it to the builder: `SinkParts`
 
-Hand-rolled sinks need no trait impl — `SinkParts` is the bundle:
+Hand-rolled sinks need no trait impl — `SinkParts` is the bundle. The example
+builds one endpoint per shard, each named for its own index, and shortens the
+pool's linger so a demo does not wait a second for its first batch:
 
-```rust
-let sink = SinkParts::new(
-    StdoutWriter,
-    // [shard][replica]: two shards, one replica each.
-    vec![vec!["shard-0".to_string()], vec!["shard-1".to_string()]],
-    SinkPoolConfig::default(),
-)
-.with_component_type("stdout");
-
-let runtime = pipeline.sink(sink)?/* .chains(...) ... */;
+```rust file=crates/spate/examples/custom_source_sink.rs region=bundle
 ```
+
+Hand the result to `pipeline.sink(sink)?` and the builder derives the shard
+workers, their queues and their metric labels from the topology it carries.
 
 - `SinkParts::new(writer, shard_endpoints, pool)` — the endpoints are
   indexed `[shard][replica]` and must be non-empty with at least one
@@ -175,19 +154,14 @@ pipeline threads and shard workers is the builder's knob, not the bundle's:
 ## The connector pattern: implementing `SinkBundle`
 
 A reusable connector exposes a config-built sink type and implements
-`SinkBundle` on it, so applications write one line (worked reference:
-`crates/spate-clickhouse`):
+`SinkBundle` on it, so applications write one line. A shipped sink does exactly
+that (worked reference: `crates/spate-clickhouse/src/config.rs`, rendered
+below): `into_parts` moves the writer and the topology its config produced into
+`SinkParts::new`, then chains the three refinements — the metric
+`component_type`, per-replica labels derived from the endpoints themselves, and
+the connectivity probe a hand-rolled sink most often leaves unset:
 
-```rust
-impl SinkBundle for MySink {
-    type Writer = MyShardWriter;
-
-    fn into_parts(self) -> SinkParts<MyShardWriter> {
-        SinkParts::new(self.writer, self.shard_endpoints, self.pool)
-            .with_component_type("mydb")
-            .with_probe(self.probe)
-    }
-}
+```rust title="crates/spate-clickhouse/src/config.rs" file=crates/spate-clickhouse/src/config.rs region=bundle
 ```
 
 `Pipeline::sink` accepts anything implementing `SinkBundle` — `SinkParts`

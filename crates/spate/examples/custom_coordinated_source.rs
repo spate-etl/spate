@@ -67,6 +67,7 @@ const SPLITS: i64 = 8;
 /// Plans the ledger as balanced id ranges. Deterministic split ids make
 /// replanning and leader failover idempotent: re-emitting an
 /// already-planned split is a store-side no-op.
+// ANCHOR: planner
 struct LedgerPlanner;
 
 impl SplitPlanner for LedgerPlanner {
@@ -98,6 +99,7 @@ impl SplitPlanner for LedgerPlanner {
         Ok(SplitPlan::new(splits, PlanFinality::Final))
     }
 }
+// ANCHOR_END: planner
 
 // ─── The data plane: one lane per in-flight split ───────────────────────
 
@@ -203,6 +205,7 @@ fn decode_range(descriptor: &[u8], split: &SplitId) -> Result<(i64, i64), Source
 
 /// The lane-assembly context: what materializing a split needs, kept as a
 /// sibling field of the driver so both borrow disjointly.
+// ANCHOR: split_source
 struct LedgerCtx {
     issuer: Option<AckIssuer>,
     /// Per live split: (range length, the exact descriptor bytes the split
@@ -254,6 +257,7 @@ impl SplitSource for LedgerCtx {
     /// `ExitState::Failed`. Any other class is logged as a retryable
     /// control-plane error and the gain is simply dropped, leaving a split
     /// this instance neither reads nor hands back.
+    // ANCHOR: validate_resume
     fn validate_resume(
         &self,
         split: &SplitSpec,
@@ -290,6 +294,7 @@ impl SplitSource for LedgerCtx {
         }
         Ok(())
     }
+    // ANCHOR_END: validate_resume
 
     fn encode_commit(
         &mut self,
@@ -318,9 +323,11 @@ impl SplitSource for LedgerCtx {
         self.ranges.remove(split.as_str());
     }
 }
+// ANCHOR_END: split_source
 
 // ─── The source: driver + ctx glued into the Source contract ────────────
 
+// ANCHOR: driver
 struct LedgerSource {
     driver: CoordinationDriver,
     ctx: LedgerCtx,
@@ -374,6 +381,7 @@ impl Drop for LedgerSource {
         self.driver.release();
     }
 }
+// ANCHOR_END: driver
 
 // ─── Assembly: two instances over one shared store ──────────────────────
 
@@ -405,6 +413,7 @@ fn run_instance(
 ) -> Result<(ExitState, Vec<i64>), Box<dyn std::error::Error + Send + Sync>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&config_yaml(instance))?)?;
 
+    // ANCHOR: coordinator
     let coordinator = StoreCoordinator::new(
         store,
         CoordinationConfig {
@@ -422,6 +431,7 @@ fn run_instance(
         None,
     )?;
     let source = LedgerSource::new(Box::new(coordinator));
+    // ANCHOR_END: coordinator
 
     let (sink, script) = capture_sink(1, 1);
     let pool_cfg = {
@@ -517,7 +527,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The shared store stands in for the NATS cluster both instances
     // would point at in production.
+    // ANCHOR: store
     let store = MemoryStore::new(LEASE);
+    // ANCHOR_END: store
 
     let workers: Vec<_> = ["instance-a", "instance-b"]
         .into_iter()

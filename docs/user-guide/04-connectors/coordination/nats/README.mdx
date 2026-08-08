@@ -12,19 +12,21 @@ Construct it and hand it to a `StoreCoordinator`, which the source takes as
 assembly wiring — there is no `coordination:` section in the pipeline YAML
 ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
 
-```rust
-use spate::coordination::store::nats::{NatsConfig, NatsStore};
-use spate::coordination::{CoordinationConfig, StoreCoordinator};
+```rust file=crates/spate/examples/nats_coordinated_backfill.rs region=coordinator
+```
 
-let tuning = CoordinationConfig {
-    instance_id: std::env::var("POD_NAME").ok(), // unique per live replica
-    ..CoordinationConfig::default()              // lease 30s, max_in_flight 8, …
-};
-let store = NatsStore::new(
-    NatsConfig::new(vec![std::env::var("NATS_URL")?], "exports-backfill"),
-    tuning.lease_duration, // one value drives store TTL and lease — must match
-)?;
-let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
+`servers` is the URL list and `JOB` the job name, the two required fields of
+`NatsConfig`; `tuning` is the `CoordinationConfig` the coordinator runs on,
+whose `lease_duration` is the TTL the store is handed. That code comes from
+`crates/spate/examples/nats_coordinated_backfill.rs`, one instance per process
+against a JetStream server on `nats://127.0.0.1:4222` (override with `NATS_URL`)
+meeting the [Requirements](#requirements) below. Two terminals, each with a
+distinct `POD_NAME` — the example's `instance_id` — divide one backfill between
+them, and two live workers claiming one identity is detected and fatal:
+
+```sh
+POD_NAME=worker-a cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
+POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 ```
 
 Construction is synchronous and lazy: the connection and bucket provisioning
@@ -38,6 +40,12 @@ is fatal at startup with an actionable message rather than surfacing later.
 Construct it with `NatsConfig::new(servers, job)` and set the optional fields;
 the struct is `#[non_exhaustive]`, so new knobs are added without breaking
 callers. `Debug` is safe to log — every secret field redacts itself.
+
+{/*
+  Two lines — a constructor and the one optional field being set — so this
+  fence claims docs/STYLE.md §10's first exemption and stays hand-written.
+  Outgrow that and render it from a region of a compiled source instead.
+*/}
 
 ```rust
 let mut cfg = NatsConfig::new(vec!["nats://nats:4222".into()], "exports-backfill");
@@ -72,8 +80,9 @@ split descriptor cannot grow into an unwritable record.
 | `CredsFile(PathBuf)` | A `.creds` file (NKey + JWT) — the NATS-native mechanism, and the right choice for a managed cluster. |
 
 `NatsTls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
-`client_key` for mutual TLS. Setting the `tls` field at all requires TLS on
-every server in `servers`.
+`client_key` for mutual TLS. Those two are set together or not at all — half a
+client identity fails at startup rather than connecting without mutual TLS.
+Setting the `tls` field at all requires TLS on every server in `servers`.
 
 Auth failure is fatal at startup, not retried — see
 [Securing connections](../../../03-guides/securing-connections.mdx) for the

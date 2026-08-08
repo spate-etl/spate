@@ -77,6 +77,7 @@ fn run_instance(
 ) -> Result<(ExitState, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml)?)?;
 
+    // ANCHOR: coordinator
     let coordinator = StoreCoordinator::new(
         store,
         CoordinationConfig {
@@ -92,6 +93,7 @@ fn run_instance(
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
         .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
         .with_coordinator(Box::new(coordinator));
+    // ANCHOR_END: coordinator
 
     let (sink, script) = capture_sink(1, 1);
     let pool_cfg = {

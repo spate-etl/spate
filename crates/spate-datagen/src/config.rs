@@ -20,6 +20,12 @@ use std::time::Duration;
 /// a round instant a reader recognizes as synthetic.
 pub(crate) const DEFAULT_EPOCH_MS: i64 = 1_767_225_600_000;
 
+/// What `encoding: avro` reports when the feature that implements it is off.
+/// One string for both the load-time rejection below and the `open`-time one
+/// in [`crate::encode`], which answer for the same condition.
+pub(crate) const AVRO_FEATURE_OFF: &str = "source.datagen.encoding: avro needs spate-datagen's `avro` feature \
+     (the `datagen-avro` feature on the spate facade); it is off in this build";
+
 fn default_partitions() -> u32 {
     4
 }
@@ -187,11 +193,7 @@ impl DatagenSourceConfig {
             }
         }
         if self.encoding == Encoding::Avro && !cfg!(feature = "avro") {
-            return Err(ConfigError::Validation(
-                "source.datagen.encoding: avro needs spate-datagen's `avro` feature \
-                 (the `datagen-avro` feature on the spate facade); it is off in this build"
-                    .into(),
-            ));
+            return Err(ConfigError::Validation(AVRO_FEATURE_OFF.into()));
         }
         Ok(())
     }

@@ -41,12 +41,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-register handles once, at build time — never resolve names or
     // labels on the per-record path (that is the framework convention its
     // own stages follow). These series carry ONLY the labels typed here.
+    // ANCHOR: facade
     let orders_enriched = metrics::counter!("myapp_orders_enriched_total", "region" => "eu");
     let enrich_seconds = metrics::histogram!("myapp_enrich_duration_seconds");
 
     // Hot loop: touch only the handles, count per batch.
     orders_enriched.increment(batch_size);
     enrich_seconds.record(0.012);
+    // ANCHOR_END: facade
 
     // ── A Meter-owned family: standard labels + the spate_ umbrella ───────
     // A `Meter` is a scope bound to one component's pipeline/component/
@@ -77,9 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `spate::metrics::names::RESERVED_ROOTS`). Every framework metric lives
     // under one of those roots, so a namespace that constructs at all cannot
     // collide with the taxonomy, present or future.
+    // ANCHOR: namespace
     let storefront = Meter::with_namespace("storefront", "metrics-demo", "orders-in", "storefront");
     let orders_fetched = storefront.counter("orders_fetched_total", &[("shop", "eu-west".into())]);
     orders_fetched.increment(batch_size);
+    // ANCHOR_END: namespace
 
     // Assembled by hand like this, the scope renders `spate_storefront_*`. The
     // runtime builds a *component's* Meter differently: it appends the wiring

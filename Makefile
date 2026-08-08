@@ -30,7 +30,7 @@
         bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
-        check-gungraun-benches check-collected-region \
+        check-gungraun-benches check-collected-region check-examples-declared \
         check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -247,7 +247,14 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
+# An example whose `required-features` names a feature that does not exist is
+# skipped by cargo rather than rejected, so `cargo check --examples` passes
+# having built one fewer target than the manifest asked for. Nothing else in
+# this file would ever notice.
+check-examples-declared: ## Every example has a stanza, real features and a tier
+	./scripts/examples.sh --check
+
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-examples-declared ## Every repository-metadata check
 
 ##@ Docs
 

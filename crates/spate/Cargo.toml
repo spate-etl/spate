@@ -148,7 +148,7 @@ required-features = ["s3", "json"]
 test = true
 
 [[example]]
-name = "coordinated_pipeline"
+name = "custom_coordinated_source"
 required-features = ["coordination"]
 test = true
 

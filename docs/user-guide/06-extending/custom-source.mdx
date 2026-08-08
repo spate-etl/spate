@@ -261,7 +261,7 @@ You implement two small traits — *what the work is* and *how to read one
 piece of it* — and embed the framework's `CoordinationDriver`, which owns
 all of the assignment choreography, fencing bookkeeping, and completion
 tracking. Everything below is the complete wiring; the runnable version
-is `crates/spate/examples/coordinated_pipeline.rs`.
+is `crates/spate/examples/custom_coordinated_source.rs`.
 
 ### 1. Plan the work: `SplitPlanner`
 
@@ -642,4 +642,4 @@ failure reports, and releases; `take_planner()` hands back the planner
 your source registered so a test can run it directly and feed its plan
 back through `gain(...)`. For the real protocol end to end, run two
 sources over one shared `MemoryStore` in a test — the pattern of
-`crates/spate/examples/coordinated_pipeline.rs`.
+`crates/spate/examples/custom_coordinated_source.rs`.

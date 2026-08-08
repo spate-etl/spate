@@ -9,6 +9,7 @@ members = [
     "crates/spate-kafka",
     "crates/spate-clickhouse",
     "crates/spate-coordination",
+    "crates/spate-datagen",
     "crates/spate-s3",
     "crates/spate-test",
 ]
@@ -38,6 +39,7 @@ spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
 # behind its own `coordination-nats` feature (memory-only embedding must
 # not drag async-nats in).
 spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
+spate-datagen = { version = "=0.1.0", path = "crates/spate-datagen" }
 spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
 spate-test = { version = "=0.1.0", path = "crates/spate-test" }
 # The wall-clock benchmark harness. Deliberately versionless: a crate adding a

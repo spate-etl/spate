@@ -108,6 +108,9 @@ component_management:
     - component_id: codecs
       name: codecs (avro, json)
       paths: ["crates/spate-avro/**", "crates/spate-json/**"]
+    - component_id: datagen
+      name: spate-datagen
+      paths: ["crates/spate-datagen/**"]
     - component_id: facade
       name: spate
       paths: ["crates/spate/**"]

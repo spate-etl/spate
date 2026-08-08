@@ -1,0 +1,38 @@
+[package]
+name = "spate-datagen"
+description = "Synthetic commerce-event source for the Spate framework: a built-in storefront dataset with referentially consistent orders, payments and refunds, so an example or a test runs with no broker and no object store. A demo and test source — it keeps no durable progress."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# Avro payloads (`encoding: avro`) instead of JSON. The datum matches
+# `EVENT_SCHEMA_JSON`; without the feature that encoding is rejected at load
+# time rather than silently downgraded.
+avro = ["dep:apache-avro"]
+
+[dependencies]
+spate-core = { workspace = true }
+apache-avro = { workspace = true, optional = true }
+humantime-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+serde_yaml = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

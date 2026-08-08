@@ -24,6 +24,7 @@ body:
         - JSON deserializer (spate-json)
         - Avro deserializer (spate-avro)
         - Coordination (spate-coordination)
+        - Synthetic data source (spate-datagen)
         - Test doubles (spate-test)
         - Metrics or the admin endpoint (spate-core)
         - Configuration loading (spate-core)

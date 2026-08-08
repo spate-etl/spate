@@ -288,21 +288,33 @@ impl Drop for LedgerSource {
 
 // ─── Assembly: two instances over one shared store ──────────────────────
 
-// Two pipelines in one process: each admin server binds an ephemeral
-// port (a real deployment runs one pipeline per process on the default).
-const CONFIG: &str = r#"
-pipeline: { name: ledger-demo, threads: 2 }
-checkpoint: { interval: 100ms }
-metrics: { listen: 127.0.0.1:0 }
-source: { ledger: {} }
-sink: { capture: {} }
-"#;
+// Two pipelines in one process, which costs two things a real deployment
+// never pays. Each admin server binds an ephemeral port rather than the
+// default, and each pipeline carries the instance in its name — a gauge
+// series has exactly one live owner per process (INV-10), so two instances
+// under one name is the same series claimed twice. In production each
+// instance is its own process and they share a name; here the label has to
+// do what the process boundary would.
+//
+// The planner fingerprint is deliberately *not* instance-scoped: it is how
+// the two agree they are planning the same job.
+fn config_yaml(instance: &str) -> String {
+    format!(
+        r#"
+pipeline: {{ name: ledger-demo-{instance}, threads: 2 }}
+checkpoint: {{ interval: 100ms }}
+metrics: {{ listen: 127.0.0.1:0 }}
+source: {{ ledger: {{}} }}
+sink: {{ capture: {{}} }}
+"#
+    )
+}
 
 fn run_instance(
     instance: &str,
     store: MemoryStore,
 ) -> Result<(ExitState, Vec<i64>), Box<dyn std::error::Error + Send + Sync>> {
-    let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
+    let pipeline = Pipeline::from_config(PipelineConfig::from_str(&config_yaml(instance))?)?;
 
     let coordinator = StoreCoordinator::new(
         store,
@@ -400,4 +412,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_captured as i64 - ROWS
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The example is the test. `cargo run --example` still runs `main`;
+    /// under `--test` the harness makes `main` an ordinary function and this
+    /// its only caller, so the assertions above stop being decorative.
+    #[test]
+    fn runs_to_completion() {
+        super::main().expect("the example must run clean");
+    }
 }

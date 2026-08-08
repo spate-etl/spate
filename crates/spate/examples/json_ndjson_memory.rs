@@ -122,3 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(rows.contains(&"gamma=30".to_string()));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// The example is the test. `cargo run --example` still runs `main`;
+    /// under `--test` the harness makes `main` an ordinary function and this
+    /// its only caller, so the assertions above stop being decorative.
+    #[test]
+    fn runs_to_completion() {
+        super::main().expect("the example must run clean");
+    }
+}

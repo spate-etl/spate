@@ -165,3 +165,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(rows.len(), 4);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// The example is the test. `cargo run --example` still runs `main`;
+    /// under `--test` the harness makes `main` an ordinary function and this
+    /// its only caller, so the assertions above stop being decorative.
+    #[test]
+    fn runs_to_completion() {
+        super::main().expect("the example must run clean");
+    }
+}

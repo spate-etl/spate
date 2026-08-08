@@ -66,6 +66,7 @@ example_tier() {
     case "$1" in
         memory_pipeline | custom_operator | custom_source_sink | custom_metrics) echo "free" ;;
         json_ndjson_memory | s3_backfill) echo "free" ;;
+        instrumented_operator) echo "free" ;;
         coordinated_pipeline | s3_coordinated_backfill) echo "free" ;;
         kafka_avro_to_clickhouse | kafka_avro_flatmap_clickhouse) echo "infra" ;;
         multi_table_split | kafka_to_kafka_split | clickhouse_aggregating_mv) echo "infra" ;;

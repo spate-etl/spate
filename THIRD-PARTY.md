@@ -41,7 +41,7 @@ repository.
 | Licence | Crates |
 |---|---|
 | `MIT` | 300 |
-| `Apache-2.0` | 22 |
+| `Apache-2.0` | 23 |
 | `Unicode-3.0` | 19 |
 | `ISC` | 6 |
 | `BSD-3-Clause` | 5 |
@@ -83,6 +83,7 @@ reproducible. The elected licence ids are unaffected either way.
 | `spate-clickhouse` | 0.1.0 | `Apache-2.0` |
 | `spate-coordination` | 0.1.0 | `Apache-2.0` |
 | `spate-core` | 0.1.0 | `Apache-2.0` |
+| `spate-datagen` | 0.1.0 | `Apache-2.0` |
 | `spate-json` | 0.1.0 | `Apache-2.0` |
 | `spate-kafka` | 0.1.0 | `Apache-2.0` |
 | `spate-s3` | 0.1.0 | `Apache-2.0` |

@@ -56,6 +56,7 @@ beneath `spate_`.
 | `spate_kafka_sink_*` | [Kafka sink](user-guide/04-connectors/sinks/kafka/README.mdx#metrics) |
 | `spate_s3_source_*` | [S3 source](user-guide/04-connectors/sources/s3/README.mdx#metrics) |
 | `spate_json_deser_*` | [JSON format](user-guide/04-connectors/formats/json/README.mdx#metrics) |
+| `spate_datagen_source_*` | [Datagen source](user-guide/04-connectors/sources/datagen/README.mdx#metrics) |
 | `spate_custom_*` | Whatever registered it — the default namespace for pipeline-author metrics. |
 
 A connector that registers no families of its own is fully described by the

@@ -1,0 +1,161 @@
+# Datagen (source)
+
+The datagen source (`spate-datagen`, feature `datagen` on the `spate` facade)
+generates a synthetic storefront event stream in process, so a pipeline can be
+assembled, run and measured with no broker, bucket or coordination store behind
+it. **It keeps no durable progress**: every run regenerates its stream from the
+beginning, which makes it reproducible and not resumable. It is a demo and test
+source, and a pipeline that depends on it for delivery is depending on
+something that replays in full after any restart. It is not part of the `full`
+feature; the reasoning is in
+[ADR-0042](../../../../adr/0042-first-party-load-generator-source.md), which
+also records why it ships one named dataset rather than a schema language.
+
+Construct it from the pipeline's opaque section:
+
+```rust
+let source = DatagenSource::from_component_config(&pipeline.config().source)?;
+```
+
+## Configuration
+
+The `source: { datagen: ... }` section deserializes into `DatagenSourceConfig`
+(`crates/spate-datagen/src/config.rs`); unknown fields are rejected with the
+offending key.
+
+```yaml
+source:
+  datagen:
+    dataset: storefront
+    encoding: json
+    partitions: 4
+    seed: 42
+    tick_interval: 100ms
+    events_per_tick: 25
+    count: 20000
+    clock: fixed
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | string | `storefront` | The built-in model to generate. `storefront` is the only value. |
+| `encoding` | string | `json` | Payload wire format: `json`, or `avro` under the `datagen-avro` facade feature (`avro` on the crate). |
+| `partitions` | int | `4` | Lanes, and therefore the partitions the pipeline sees. Each owns a disjoint slice of the order-id space, so changing it reshuffles which lane mints which order. Between 1 and 1024. |
+| `seed` | int | `0` | Seed of the whole stream. Each lane derives its own from it. |
+| `tick_interval` | duration | `100ms` | How often a lane releases a batch. `0s` means unthrottled — generate as fast as the pipeline consumes. |
+| `events_per_tick` | int | `10` | Events released per lane per tick. Ignored when unthrottled. At least 1. |
+| `count` | int | `none` | Stop after this many events **across all lanes**, then drain to a clean exit. Absent means the stream never ends. |
+| `clock` | string | `fixed` | Timestamp source: `fixed` derives them from `epoch_ms` and the record's offset; `wall` reads the clock. |
+| `epoch_ms` | int | `1767225600000` | Base instant for the `fixed` clock, in milliseconds since the Unix epoch. Ignored by `wall`. |
+
+`partitions × events_per_tick ÷ tick_interval` is the release ceiling, 400
+events per second at the defaults. It is a ceiling rather than a delivered
+rate: a lane polled a whole interval late re-anchors to the present instead of
+replaying the ticks it missed, so a pipeline that cannot absorb the configured
+rate runs below it and counts the shortfall in
+`spate_datagen_source_tick_overrun_total`. There is no `rate` key.
+
+Validation rejects `partitions` outside 1 to 1024, `events_per_tick` at zero,
+`count` at zero, and a `count` smaller than `partitions` — the budget is split
+across lanes, so the last lanes would be born exhausted.
+
+## What it generates
+
+Three event kinds under one envelope, so a single deserializer target decodes
+the whole stream. Under `encoding: json` the envelope is a `type` discriminator
+on each document:
+
+```text
+{"type": "order_placed",     "order_id", "customer_id", "region", "placed_at",
+                             "lines": [{"sku", "qty", "unit_cents"}]}
+{"type": "payment_captured", "order_id", "amount_cents"}
+{"type": "refund_issued",    "order_id", "amount_cents", "reason"}
+```
+
+Under `encoding: avro` the same three records are a bare datum against a
+top-level union, selected by branch index — there is no `type` field, and
+neither encoding derives from the other. The schema a downstream reader is
+pinned to is `spate_datagen::EVENT_SCHEMA_JSON`, also reachable as
+`DatagenSource::avro_schema()`. The Rust types for both encodings are
+`spate_datagen::storefront`.
+
+`region` and `sku` are drawn from fixed tables (5 regions, a 32-entry catalog)
+and `customer_id` from a fixed space of 1024 ids, all uniformly. That bounds
+the cardinality rather than skewing the distribution: a `GROUP BY` downstream
+has a legible number of groups instead of one per record. The nested `lines`
+array is what a fan-out stage expands.
+
+**A referencing event never arrives before the order it references.** Each lane
+mints order ids from a disjoint slice and only captures or refunds orders it
+placed itself, so a payment always lands on the same partition, at a strictly
+greater offset, than its order. That holds with no coordination between lanes,
+which is what lets the guarantee survive lanes running on different threads.
+
+The record key carries the order id — unique per order, so it is the key that
+decides routing, not the dimension fields above. A key-hashing router therefore
+colocates an order, its payment and its refund on one shard.
+
+## Determinism
+
+Under `clock: fixed`, the stream is a pure function of `seed`, `partitions`,
+`dataset`, `encoding` and `epoch_ms` — the same configuration produces
+byte-identical payloads on every run, which is what lets a test assert an exact
+count. `epoch_ms` is in that set because a `fixed` timestamp is `epoch_ms` plus
+the record's offset, and it reaches the payload as `placed_at`. `count`,
+`tick_interval` and `events_per_tick` bound or pace the stream without changing
+a byte of it.
+
+`clock: wall` reads the system clock instead. Counts stay deterministic;
+payload bytes do not.
+
+## Delivery semantics
+
+`commit` records watermarks in memory and nowhere else. There is no durable
+upstream to resume from: a restart begins every lane at offset 0, so with a
+fixed seed the entire stream replays — strictly more duplication than a real
+source would produce, not less. There is no `resume_from` key.
+
+A bounded run — one with `count` set — reaches `ExitState::Completed` only
+after every batch has been acknowledged and the final watermark committed, so
+a clean exit from a bounded run is a real end-to-end delivery assertion. That
+is the one durability claim this source makes.
+
+Payloads are framed one record each, so a deserializer takes its granularity
+from the source rather than from a `framing` key.
+
+## Metrics
+
+Registered through a `Meter` under the `datagen` namespace in its source role,
+so every family is prefixed `spate_datagen_source_`. Standard labels
+(`pipeline`, `component`, `component_type`) are on all of them; extras are
+noted per family.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `spate_datagen_source_events_generated_total` | counter | `event` | Events emitted, by kind: `order_placed`, `payment_captured`, `refund_issued`. |
+| `spate_datagen_source_ticks_total` | counter | — | Release cadences that fired, summed across lanes — `partitions` per cadence. Stays at zero when unthrottled. |
+| `spate_datagen_source_tick_overrun_total` | counter | — | Cadences that fired a whole interval or more late, summed across lanes: the lane re-anchors to the present and the missed ticks are not replayed. A lane merely late within one interval counts nothing. Stays at zero when unthrottled. |
+| `spate_datagen_source_events_remaining` | gauge | — | Events left in a bounded budget across all lanes. Zero when unbounded. |
+| `spate_datagen_source_open_orders` | gauge | — | Orders placed but not yet captured, summed across lanes. Rises for as long as the run lasts — the mix places faster than it captures, and an order the lane's ring evicts is never captured — so it is not a backlog that settles. |
+| `spate_datagen_source_committed_offset` | gauge | `partition` | The last watermark committed. Registered only when `metrics.per_partition_detail` is on. |
+
+Counters are incremented by the lanes and gauges are published by the control
+plane, which is how each gauge series keeps one live owner.
+
+There is no consumer-lag family; `spate_datagen_source_events_remaining`
+carries the bounded case instead.
+
+See [Metrics](../../../../METRICS.md) for the taxonomy, the reserved roots and
+the series-ownership rules.
+
+## Related
+
+- [ADR-0042](../../../../adr/0042-first-party-load-generator-source.md) — the
+  decision behind one named dataset, and the alternatives it turned down.
+- [Sources](../README.mdx) — the other sources, and which role each fills.
+- [Memory connectors](../../memory.mdx) — the test doubles, for a pipeline
+  driven record by record from a test rather than by a generated stream.
+- [Configuration reference](../../../07-reference/configuration.mdx) — every
+  framework-owned key this page does not restate.
+- [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — what
+  at-least-once means for a source that cannot resume.

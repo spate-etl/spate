@@ -26,7 +26,9 @@ tree, and never resolves `rdkafka` into its lockfile.
 | `json` | JSON deserialization ([`spate-json`](https://crates.io/crates/spate-json)) |
 | `coordination` | Multi-instance work assignment, in-memory store |
 | `coordination-nats` | The same over NATS JetStream KV |
-| `full` | All of the above |
+| `datagen` | Synthetic storefront source, no infrastructure ([`spate-datagen`](https://crates.io/crates/spate-datagen)) — keeps no durable progress |
+| `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`) |
+| `full` | Every connector above except `datagen`, which a production build should not enable |
 
 `examples/README.md` indexes every example by what it shows, in five tiers,
 with what each one needs in order to run. Start with

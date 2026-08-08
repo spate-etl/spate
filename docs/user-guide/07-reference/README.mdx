@@ -17,7 +17,7 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 
 | Crate | Role |
 |---|---|
-| [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `s3`, `avro`, `json`, `coordination`, `full`). |
+| [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `s3`, `avro`, `json`, `coordination`, `datagen`, `full`). |
 | [spate-core](https://docs.rs/spate-core) | The engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline builder and runtime, config, metrics, admin server. |
 | [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues) and producer sink. |
 | [spate-clickhouse](https://docs.rs/spate-clickhouse) | ClickHouse `ShardWriter` with Native and RowBinary encoders. |
@@ -25,6 +25,7 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 | [spate-avro](https://docs.rs/spate-avro) | Avro deserializer: Confluent wire format, schema-registry client. |
 | [spate-json](https://docs.rs/spate-json) | JSON deserializer: single, NDJSON and array framings, optional SIMD backend. |
 | [spate-coordination](https://docs.rs/spate-coordination) | Distributed work assignment: leader-elected planner, leases and fenced commits over a pluggable store. |
+| [spate-datagen](https://docs.rs/spate-datagen) | Synthetic storefront source: one built-in dataset, generated in process, keeping no durable progress. |
 | [spate-test](https://docs.rs/spate-test) | In-memory source/sink mocks with scripting handles, for testing pipelines. |
 
 Applications should import through `spate` (which re-exports the connector

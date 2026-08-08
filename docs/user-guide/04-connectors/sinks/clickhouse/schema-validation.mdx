@@ -12,17 +12,13 @@ can be sent.
 
 The sink sends `INSERT INTO t (col1, col2, ...) FORMAT RowBinary` with each
 row serialized field by field, in declaration order. The server maps bytes to
-columns purely by position:
+columns purely by position, so the row struct's field order is the wire
+contract. The struct below matches `columns: [id, customer, amount_cents,
+ts_ms]`, and comes — like the wiring further down — from
+`crates/spate/examples/kafka_avro_to_clickhouse.rs`, which runs end to end
+under the `full` facade feature:
 
-```rust
-/// Field order here MUST match `columns: [id, customer, amount_cents, ts_ms]`.
-#[derive(Serialize)]
-struct Order {
-    id: u64,
-    customer: String,
-    amount_cents: i64,
-    ts_ms: i64,
-}
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
 
 Reordering either the struct fields or the `columns` list is a breaking
@@ -50,19 +46,11 @@ not a judgment call.
 Validation is an async pre-flight step that runs on the builder's I/O runtime
 via `pipeline.block_on`, **after** building the sink and **before** handing
 it to `.sink(...)`. A failure exits the process before any pipeline thread
-or sink worker exists. From
-`crates/spate/examples/kafka_avro_to_clickhouse.rs`:
+or sink worker exists. In `off` mode the call returns `Ok(None)` instantly
+and issues no queries, which is why the encoder is built from a `match`
+rather than behind a flag:
 
-```rust
-let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
-
-// `off` returns Ok(None) instantly and issues no queries.
-let encoder = match pipeline.block_on(sink.validate_schema())? {
-    Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
-    None => ClickHouseEncoder::<Owned<Order>>::new(),
-};
-
-let report = pipeline.sink(sink)?/* .chains(...).run(...) */;
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=encoder
 ```
 
 with the matching YAML:

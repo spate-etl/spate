@@ -9,12 +9,14 @@ sealed batch with a deterministic `insert_deduplication_token`.
 Construct it from the pipeline's opaque section; the result is a
 `SinkBundle` that drops straight into the builder:
 
-```rust
-let sink = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?;
-// optional pre-flight — see the schema validation guide
-let schema = pipeline.block_on(sink.validate_schema())?;
-let pipeline = pipeline.sink(sink)?;
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```
+
+That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, which runs
+end to end under the `full` facade feature. The single `sink:` section is
+addressed as `"default"`; a named sink resolves under its own name. Between
+this line and `pipeline.sink(sink)?` sits the optional pre-flight check —
+see [Schema validation](./schema-validation.mdx).
 
 To write to **several tables** from one pipeline (one per record kind), see
 [multi-table split](./multi-table.mdx).

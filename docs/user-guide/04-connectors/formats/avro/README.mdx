@@ -9,11 +9,13 @@ itself.
 Construct it from the pipeline's opaque section, handing it the builder's
 I/O runtime handle (the registry fetcher lives there):
 
-```rust
-let deserializer =
-    AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-        .build_serde::<Order>()?;
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=deserializer
 ```
+
+That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, which runs
+end to end under the `full` facade feature. The `deserializer:` section is
+optional in the framework's config, so the factory takes the unwrapped
+section: a pipeline whose source emits ready-made records configures none.
 
 ## Configuration
 
@@ -95,7 +97,7 @@ The builder hands out three deserializer flavors:
   `T: serde::de::DeserializeOwned` struct via an intermediate `AvroValue`,
   applying Avro's full schema-resolution rules when a `reader_schema` is
   configured (field reordering, type promotions, defaults, aliases).
-  `crates/spate/examples/kafka_avro_to_clickhouse.rs` is the worked example.
+  This is the flavor the construction snippet above builds.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
 

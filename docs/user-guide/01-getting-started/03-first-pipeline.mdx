@@ -3,9 +3,10 @@
 This tutorial builds the flagship shape: consume Confluent-framed Avro from
 Kafka, validate and transform records in an operator chain, and write them
 to ClickHouse in large batches — at-least-once, drained gracefully on
-SIGTERM. It mirrors `crates/spate/examples/kafka_avro_to_clickhouse.rs` and
-its YAML (`crates/spate/examples/kafka_avro_to_clickhouse.yaml`); every
-snippet below is lifted from those files.
+SIGTERM. It is `crates/spate/examples/kafka_avro_to_clickhouse.rs` and the
+YAML beside it (`crates/spate/examples/kafka_avro_to_clickhouse.yaml`):
+every Rust block below is rendered from that source, so what you read is
+what compiles.
 
 You need Kafka, a Confluent-compatible schema registry, and ClickHouse, plus
 the `full` feature (see [Installation](01-installation.mdx)). From the
@@ -43,19 +44,11 @@ choosing a table engine for production.
 
 ## 2. The record type
 
-One struct travels end to end. `Deserialize` reads it from Avro (field
-names match the writer schema); `Serialize` writes it as RowBinary:
+One struct travels end to end, carrying both serde derives: `Deserialize`
+reads it from Avro (field names match the writer schema), `Serialize`
+writes it as RowBinary:
 
-```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Order {
-    id: u64,
-    customer: String,
-    amount_cents: i64,
-    ts_ms: i64,
-}
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
 
 :::info
@@ -141,82 +134,10 @@ undersized budget collapses throughput. The rule and the arithmetic are in
 The builder owns the process plumbing (telemetry, metrics exporter, the
 shared I/O runtime, shard queues, sink workers, probes). The code you write
 is only what is genuinely *this* pipeline's: connector construction, schema
-validation, and the chain.
+validation, and the chain. That is all of `main`; the record type above and
+the imports it needs sit at the top of the same source:
 
-```rust
-use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::ClickHouseEncoder;
-use spate::kafka::KafkaSource;
-use spate::prelude::*;
-use std::path::Path;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = std::env::var("SPATE_CONFIG")
-        .unwrap_or_else(|_| "pipeline.yaml".to_string());
-    let pipeline = Pipeline::from_path(Path::new(&config_path))?;
-
-    // Source: one Kafka consumer per process; partitions become lanes
-    // fanned across pipeline threads.
-    let source = KafkaSource::from_component_config(&pipeline.config().source)?;
-
-    // Deserializer: Confluent-framed Avro. Schemas arrive via an async
-    // fetcher on the I/O runtime; a cache miss never blocks a pipeline
-    // thread — the batch retries once the schema lands.
-    let deser_section = pipeline
-        .config()
-        .deserializer
-        .as_ref()
-        .ok_or("this pipeline requires a `deserializer` section")?;
-    let deserializer =
-        AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<Order>()?;
-
-    // Sink: the connector turns its YAML section into everything the
-    // builder needs — writer, per-shard replica endpoints, pool tuning,
-    // readiness probe.
-    let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
-
-    // Opt-in fail-fast schema validation (validate_schema: names|full):
-    // checks the configured columns against every replica's live table
-    // NOW, before any thread spawns.
-    let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
-        None => ClickHouseEncoder::<Owned<Order>>::new(),
-    };
-
-    // One identical chain per pipeline thread, fully monomorphized.
-    let report = pipeline
-        .sink(sink)?
-        .chains(move |ctx| {
-            // The sink's chunking (per-sink YAML `chunk:`, or the default),
-            // bound before `with_metrics` moves `ctx.pipeline`.
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Order, _>(deserializer.clone())
-                .with_metrics(ctx.pipeline, "main")
-                .try_map(
-                    |order: Order| {
-                        if order.amount_cents >= 0 {
-                            Ok(order)
-                        } else {
-                            Err("negative amount")
-                        }
-                    },
-                    ErrorPolicy::Skip,
-                )
-                .sink(
-                    encoder.clone(),
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .run(source)?;
-
-    report.log();
-    std::process::exit(report.exit_code());
-}
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=assembly
 ```
 
 Walking the assembly:
@@ -230,7 +151,8 @@ Walking the assembly:
   I/O runtime *before* `run` — the schema-registry fetcher and the
   `validate_schema` pre-flight both use it.
 - **`.sink(sink)`** spawns the sharded sink workers and wires the drain and
-  the `/readyz` probe.
+  the `/readyz` probe. The single `sink:` section above is addressed as
+  `"default"`; a pipeline with several named sinks resolves each by name.
 - **`.chains(..)`** installs the per-thread chain factory. The `try_map`
   with `ErrorPolicy::Skip` drops bad records, counts them on
   `spate_operator_records_dropped_total`, and keeps going — see

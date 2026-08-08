@@ -49,6 +49,11 @@
 //! SIGTERM drains gracefully: lanes stop, chains flush, sink batches
 //! complete (bounded by `checkpoint.drain_timeout`), offsets commit —
 //! at-least-once end to end. Probes: `curl localhost:9090/readyz`.
+//!
+//! The `ANCHOR` comments below mark the regions the site renders — the
+//! getting-started tutorial, the error-handling and assembly pages, and the
+//! Kafka, Avro and ClickHouse connector pages. They are stripped from what
+//! renders, and they nest; see `docs/STYLE.md` § 10.
 
 // The examples index renders these four fields; see scripts/examples-index.sh.
 // INDEX-TIER:  production
@@ -70,6 +75,7 @@ use std::path::Path;
 /// match the writer schema), `Serialize` writes it as RowBinary — where
 /// **field order must match the `columns` list in the YAML** (RowBinary
 /// carries no names; order is the wire contract).
+// ANCHOR: record
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Order {
     id: u64,
@@ -77,7 +83,9 @@ struct Order {
     amount_cents: i64,
     ts_ms: i64,
 }
+// ANCHOR_END: record
 
+// ANCHOR: assembly
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Constructor owns init: JSON logs (RUST_LOG overrides the filter; call
     // `spate::telemetry::init` first to customize), the metrics exporter —
@@ -90,12 +98,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One consumer per process; partitions become lanes fanned across
     // pipeline threads. The `source: { kafka: ... }` section is the
     // connector's own schema.
+    // ANCHOR: source
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
+    // ANCHOR_END: source
 
     // ── Deserializer: Confluent-framed Avro ─────────────────────────────
     // Schemas come from the registry via an async fetcher on the I/O
     // runtime; a cache miss never blocks a pipeline thread — the batch
     // retries once the schema lands.
+    // ANCHOR: deserializer
     let deser_section = pipeline
         .config()
         .deserializer
@@ -104,23 +115,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
             .build_serde::<Order>()?;
+    // ANCHOR_END: deserializer
 
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
     // The connector turns its section into everything the builder needs:
     // writer, per-shard replica endpoints, pool tuning, readiness probe.
+    // ANCHOR: sink
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
     )?;
+    // ANCHOR_END: sink
 
     // Opt-in fail-fast schema validation (`validate_schema: names|full` in
     // the YAML): checks the configured columns against every replica's
     // live table NOW — before any thread spawns — and hands the encoder
     // the expected schema so the row struct is checked against it on the
     // first record. `off` (the default) returns None and issues no queries.
+    // ANCHOR: encoder
     let encoder = match pipeline.block_on(sink.validate_schema())? {
         Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
         None => ClickHouseEncoder::<Owned<Order>>::new(),
     };
+    // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
     // One identical chain per pipeline thread, fully monomorphized; the
@@ -130,10 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fatal error.
     let report = pipeline
         .sink(sink)?
+        // ANCHOR: chain
         .chains(move |ctx| {
+            // The sink's chunking — per-sink `chunk:` in the YAML, or the
+            // default — bound before `with_metrics` moves `ctx.pipeline`.
             let chunk_cfg = ctx.chunk();
             chain_owned::<Order, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
+                // ANCHOR: validate
                 .try_map(
                     |order: Order| {
                         if order.amount_cents >= 0 {
@@ -144,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     ErrorPolicy::Skip,
                 )
+                // ANCHOR_END: validate
                 .sink(
                     encoder.clone(),
                     KeyHashRouter,
@@ -153,8 +174,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .build()
         })
+        // ANCHOR_END: chain
         .run(source)?;
 
     report.log();
     std::process::exit(report.exit_code());
 }
+// ANCHOR_END: assembly

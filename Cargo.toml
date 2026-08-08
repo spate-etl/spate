@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -30,18 +30,18 @@ categories = ["asynchronous", "data-structures"]
 
 [workspace.dependencies]
 # Internal crates — exact pins, versions move in lockstep via workspace.package.
-spate-core = { version = "=0.1.0", path = "crates/spate-core" }
-spate-avro = { version = "=0.1.0", path = "crates/spate-avro" }
-spate-json = { version = "=0.1.0", path = "crates/spate-json" }
-spate-kafka = { version = "=0.1.0", path = "crates/spate-kafka" }
-spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
+spate-core = { version = "=0.2.0", path = "crates/spate-core" }
+spate-avro = { version = "=0.2.0", path = "crates/spate-avro" }
+spate-json = { version = "=0.2.0", path = "crates/spate-json" }
+spate-kafka = { version = "=0.2.0", path = "crates/spate-kafka" }
+spate-clickhouse = { version = "=0.2.0", path = "crates/spate-clickhouse" }
 # default-features = false so the spate facade can gate the NATS tree
 # behind its own `coordination-nats` feature (memory-only embedding must
 # not drag async-nats in).
-spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
-spate-datagen = { version = "=0.1.0", path = "crates/spate-datagen" }
-spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
-spate-test = { version = "=0.1.0", path = "crates/spate-test" }
+spate-coordination = { version = "=0.2.0", path = "crates/spate-coordination", default-features = false }
+spate-datagen = { version = "=0.2.0", path = "crates/spate-datagen" }
+spate-s3 = { version = "=0.2.0", path = "crates/spate-s3" }
+spate-test = { version = "=0.2.0", path = "crates/spate-test" }
 # The wall-clock benchmark harness. Deliberately versionless: a crate adding a
 # `benches/*_wall.rs` dev-depends on it by path alone, and cargo strips a
 # versionless path dev-dependency when the crate is packaged — so an unpublished

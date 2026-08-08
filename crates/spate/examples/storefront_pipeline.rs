@@ -217,11 +217,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .build()
         })
+        // ANCHOR: run
         // `RuntimeOptions::default()` leaves `handle_signals` on: SIGTERM and
         // Ctrl-C trigger the same drain the exhausted source triggers below.
         .run(source)?;
 
     report.log();
+    // ANCHOR_END: run
 
     // ── What the three sinks captured ───────────────────────────────────
     let (order_rows, order_shards) = captured(&orders);

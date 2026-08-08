@@ -176,11 +176,7 @@ defaults suit production. The one you will actually touch is
 `handle_signals: false` in tests and demos, where you drive shutdown
 yourself:
 
-```rust
-.runtime_options(RuntimeOptions {
-    handle_signals: false,
-    ..RuntimeOptions::default()
-})
+```rust file=crates/spate/examples/memory_pipeline.rs region=options
 ```
 
 ## Step 6: `.run(source)` or `.into_runtime(source)`
@@ -195,14 +191,12 @@ non-generic, nameable, and storable.
   running it, for callers that need a `shutdown_handle()` before a spawned
   `run` — tests and embedded pipelines:
 
-```rust
-let runtime = pipeline.into_runtime(source)?;
-let shutdown = runtime.shutdown_handle();
-let join = std::thread::spawn(move || runtime.run());
-// ... drive data, assert, then:
-shutdown.trigger();
-let report = join.join().expect("pipeline thread")?;
+```rust file=crates/spate/examples/memory_pipeline.rs region=handoff
 ```
+
+From there you drive data, trigger the shutdown and join the spawned run
+for its `ExitReport` — [Testing pipelines](testing-pipelines.mdx) walks the
+rest of that path.
 
 Skipping a step is caught here: `BuildError::MissingSink` /
 `BuildError::MissingChains`.

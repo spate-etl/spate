@@ -6,9 +6,13 @@ APIs that are themselves public, semver-committed, and documented. Nothing
 in the builder is magic or privileged; this page desugars every step into
 the primitives it calls, so you can drop below the builder at any point —
 for exotic wiring, for embedding, or just to understand what you are
-running. The rustdoc on `spate::pipeline::Pipeline` carries the same mapping
-and is kept in lockstep with the code; rationale in
+running. The same mapping is in the `spate::pipeline` module rustdoc;
+rationale in
 [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md).
+
+Every snippet below comes from `crates/spate/examples/manual_assembly.rs`,
+which assembles and drives a whole pipeline this way and runs as-is with
+`cargo run -p spate --example manual_assembly`.
 
 :::note
 Prefer the builder. Manual assembly re-exposes exactly the footguns the
@@ -21,136 +25,91 @@ runtimes, leaked queue clones. Use it when you need it, not by default.
 | Builder step | Public primitives |
 |---|---|
 | `Pipeline::from_config(config)` | `telemetry::init` → `metrics::install(&metrics_settings(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → `InflightBudget::new` |
-| `.sink(bundle)` | `SinkBundle::into_parts` → `shard_queues` → `ComponentLabels` + `SinkShardMetrics::new` per shard → `SinkPool::spawn` → a boxed drain closure |
+| `.sink(bundle)` | `SinkBundle::into_parts` → `shard_queues` → `ComponentLabels` + `SinkShardMetrics::new` per shard → `SinkPool::spawn` → a boxed drain closure. It also resolves this sink's `ChunkConfig` from the YAML `chunk:` block — the one step with no manual equivalent, since the config layer is what carries `chunk:`, so by hand you pass a `ChunkConfig` yourself. |
 | `.chains(f)` | the chain factory handed to `PipelineRuntime::new`, with queue/budget/name plumbing pre-threaded per call |
 | `.into_runtime(source)` / `.run(source)` | `PipelineRuntime::new(config, source, factory, SinkRuntime, budget)` + `with_options` + `with_io_runtime` + `run` |
 
 Module paths (all under the `spate` facade, which re-exports `spate_core` at
 the root): `spate::telemetry`, `spate::metrics`, `spate::pipeline`
-(`PipelineRuntime`, `SinkRuntime`, `metrics_settings`, `RuntimeOptions`),
-`spate::sink` (`shard_queues`, `SinkPool`, `SinkBundle`, `SinkParts`), and
-`spate::backpressure` (`InflightBudget`).
+(`PipelineRuntime`, `SinkRuntime`, `metrics_settings`, `RuntimeOptions`,
+`SinkOptions`), `spate::sink` (`shard_queues`, `SinkPool`, `SinkBundle`,
+`SinkParts`), and `spate::backpressure` (`InflightBudget`).
+
+## The two scopes the primitives do not reach
+
+The mapping above is exact but for its metrics: two scopes the builder
+wires are attached through crate-internal seams, so an assembly below the
+builder runs without them.
+
+- **The queue-depth series** (`spate_queue_*`), which the builder attaches
+  to the shard queues before any chain terminal clones them.
+- **The sink writer's own `spate_<component_type>_sink_*` scope** — the
+  `Meter` a connector registers its own families through, whose namespace
+  the builder derives from the bundle's `component_type` and the writer's
+  wiring position.
+
+Everything else in [docs/METRICS.md](../../METRICS.md) is identical: the
+stage metrics, the per-shard sink metrics, the process metrics, and
+whatever your own components register through a `Meter` of their own. A
+dashboard or an alert that reads either family above needs a builder
+assembly to produce it.
 
 ## Step by step
 
-The sketch below mirrors what the builder's own implementation does
-(`crates/spate-core/src/pipeline/builder.rs`); construction of your
-connectors and chain is elided.
+### Process init — what `from_config` does
 
-### 1. Process init (what `from_config` does)
+The config, telemetry, the exporter, the I/O runtime and the in-flight
+byte budget, in that order. The order is the entire reason the builder owns
+this step:
 
-```rust
-use spate::config::PipelineConfig;
-use spate::pipeline::metrics_settings;
-use spate::telemetry::{self, LogFormat};
-use spate::backpressure::InflightBudget;
-use std::sync::Arc;
-
-let config = PipelineConfig::from_path(std::path::Path::new("pipeline.yaml"))?;
-
-// Order matters and is the whole point of the builder:
-telemetry::init(LogFormat::Json, "info");            // idempotent, first init wins
-
-// Exporter BEFORE any metric handle exists — handles bind to the recorder
-// present at construction; one built earlier records into the void.
-let metrics = spate::metrics::install(&metrics_settings(&config))?;
-
-// ONE I/O runtime for the whole process. run() adopts it later via
-// with_io_runtime; building a second one doubles io_threads silently.
-let io = tokio::runtime::Builder::new_multi_thread()
-    .worker_threads(config.pipeline.io_threads)
-    .thread_name("spate-io")
-    .enable_all()
-    .build()?;
-
-let budget = Arc::new(InflightBudget::new());
+```rust file=crates/spate/examples/manual_assembly.rs region=init
 ```
 
-Do this from a plain thread — the runtime you just built must not be
-dropped inside async context.
+Do this from a plain thread, usually `main`: a tokio runtime dropped inside
+async context panics. The builder refuses that case up front with
+`BuildError::AsyncContext`; by hand there is nothing to refuse it.
 
-### 2. Connectors
+### Connectors
 
-Exactly as with the builder: your factories read the opaque sections.
-Connectors needing async pre-steps use `io.handle()` / `io.block_on(...)`
-directly — that is all `Pipeline::io_handle`/`block_on` forward to.
+Exactly as under the builder: your factories read the opaque `source:`,
+`deserializer:` and `sink:` sections of the config. A connector that needs
+an async pre-step takes `io.handle()` or `io.block_on(...)` directly —
+that is all `Pipeline::io_handle` and `Pipeline::block_on` forward to.
 
-### 3. The sink (what `.sink(bundle)` does)
+### The sink — what `.sink(bundle)` does
 
-```rust
-use spate::metrics::{ComponentLabels, SinkShardMetrics};
-use spate::sink::{SinkBundle, SinkPool, shard_queues};
+`SinkBundle::into_parts` is the seam every sink crosses. Out of the parts
+come the shard queues the chain terminals send into, the per-shard metric
+handles, the worker pool, and the drain hook the runtime calls once at
+shutdown:
 
-let parts = bundle.into_parts();                 // SinkParts { writer, shard_endpoints, pool, ... }
-let num_shards = parts.shard_endpoints.len();
-
-// One bounded chunk queue per shard: senders for the chain terminals,
-// receivers for the workers. Capacity is SinkOptions::queue_capacity (8).
-let (queues, receivers) = shard_queues(num_shards, 8);
-
-// Pre-registered metric handles, one set per shard — never resolved on the
-// per-record path. Must run after metrics::install (step 1).
-let name = config.pipeline.name.clone();
-let labels = ComponentLabels::new(name.clone(), "sink", parts.component_type.clone());
-let e2e_basis = metrics_settings(&config).e2e_basis;
-let shard_metrics: Vec<SinkShardMetrics> = parts
-    .effective_replica_labels()
-    .iter()
-    .enumerate()
-    .map(|(shard, replicas)| SinkShardMetrics::new(&labels, shard as u32, replicas, e2e_basis))
-    .collect();
-
-// Spawn one worker per shard onto the I/O runtime.
-let pool = SinkPool::spawn(
-    Arc::new(parts.writer),
-    parts.shard_endpoints,
-    receivers,
-    parts.pool,
-    Arc::clone(&budget),
-    shard_metrics,
-    &name,
-    io.handle(),
-);
-
-// The drain hook the runtime invokes once at shutdown.
-let drain = Box::new(move |deadline| Box::pin(async move { pool.drain(deadline).await }));
+```rust file=crates/spate/examples/manual_assembly.rs region=sink
 ```
 
-The builder also validates the topology here (no empty shards, label shape
-matching endpoint shape) — manual assemblies get panics from
-`SinkPool::spawn` instead of `BuildError::Sink`.
+`SinkRuntime::queues` takes one entry per installed sink, so a single-sink
+assembly passes a one-element vector. Writing to several destinations means
+repeating this step per sink and passing one entry each — see
+[Multi-sink split](../02-concepts/06-multi-sink.mdx).
 
-### 4. The runtime (what `.chains` + `.into_runtime` do)
+### The runtime — what `.chains` + `.into_runtime` do
 
-```rust
-use spate::pipeline::{PipelineRuntime, RuntimeOptions, SinkRuntime};
+The chain factory takes a bare thread index, and you thread the queues, the
+budget and the pipeline name into it yourself; that is the whole of what
+`ChainCtx` does for you. `PipelineRuntime::new` then takes the config, the
+source, that factory, the `SinkRuntime` and the budget:
 
-let sink_runtime = SinkRuntime {
-    queues: queues.clone(),
-    drain,
-    probe: parts.probe,           // drives /readyz; None reports connected
-};
-
-// The chain factory takes a bare thread index — you thread the queues,
-// budget, and pipeline name yourself (the builder's ChainCtx does exactly
-// this). CONTRACT: every queue clone must die with the chains; a clone
-// held elsewhere degrades shutdown to a deadline-bounded abandon.
-let chains = move |thread: usize| {
-    build_my_chain(thread, queues.clone(), Arc::clone(&budget), name.clone())
-};
-
-let report = PipelineRuntime::new(config, source, chains, sink_runtime, budget)
-    .with_options(RuntimeOptions::default())
-    .with_io_runtime(io)          // adopt the ONE runtime from step 1
-    .run()?;
-report.log();
-std::process::exit(report.exit_code());
+```rust file=crates/spate/examples/manual_assembly.rs region=runtime
 ```
 
-`with_io_runtime` matters: without it, `run()` builds its own runtime and
-your process silently runs `2 x io_threads` workers. `run()` owns the
-runtime's shutdown either way; tasks you spawned on it earlier keep running
-until then.
+`with_io_runtime` is not optional in practice: without it `run` builds a
+runtime of its own and the process quietly carries `2 × io_threads`
+workers. `run` owns that runtime's shutdown either way, so tasks you
+spawned on it earlier keep running until then.
+
+From the shutdown handle on, a manual assembly drives exactly as a builder
+assembly does — push records, wait for the watermark, trigger the drain and
+join for the `ExitReport`. [Testing pipelines](testing-pipelines.mdx) walks
+that half.
 
 ## What you take responsibility for
 
@@ -164,15 +123,18 @@ impossibility; manually, they are yours again:
 - **Queue drop ordering** — the sink drains only when every `ShardQueues`
   clone is gone; audit every clone you make (see
   [Graceful shutdown](graceful-shutdown.mdx)).
-- **Topology validation** — shard/label/receiver counts must agree.
+- **Topology validation** — shard/label/receiver counts must agree. The
+  builder checks them and returns `BuildError::Sink`; by hand a mismatch is
+  a panic out of `SinkPool::spawn`.
 
 ## The layering contract
 
-Both layers are public and semver-committed. The builder will never grow a
-capability the primitives cannot express — it is a composition, not a
-gatekeeper — and the primitives will not break under you to make the
-builder prettier. If you outgrow one builder step, desugar *that step* and
-keep the rest; the two paths compose because they are the same path.
+Both layers are public and semver-committed. The builder is a composition
+rather than a gatekeeper: with the two metric scopes above as the standing
+exception, it grows no capability the primitives cannot express, and the
+primitives will not break under you to make the builder prettier. If you
+outgrow one builder step, desugar *that step* and keep the rest; the two
+paths compose because they are the same path.
 
 ## Related
 

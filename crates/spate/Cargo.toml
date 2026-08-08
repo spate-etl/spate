@@ -98,6 +98,10 @@ name = "instrumented_operator"
 test = true
 
 [[example]]
+name = "sink_failures"
+test = true
+
+[[example]]
 name = "kafka_avro_to_clickhouse"
 required-features = ["full"]
 

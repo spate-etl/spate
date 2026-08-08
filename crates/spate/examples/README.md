@@ -61,6 +61,7 @@ No infrastructure. Read them in this order.
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
 | [`memory_pipeline`](memory_pipeline.rs) | How to build, drive and assert on a whole pipeline with **no infrastructure** | — | nothing |
+| [`storefront_pipeline`](storefront_pipeline.rs) | How to run a realistic order stream to completion or to SIGTERM with **no infrastructure** | — | nothing |
 | [`json_ndjson_memory`](json_ndjson_memory.rs) | How to decode many records from one NDJSON payload and skip malformed lines rather than stop with **JSON** | `json` | nothing |
 
 ## 2. Production pipelines

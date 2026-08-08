@@ -23,9 +23,14 @@ spate-s3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 apache-avro = { workspace = true }
-# Also a dev-dependency, so examples and tests reach it with no
-# `required-features`. Dev-dependencies do not reach a consumer's resolve.
+# Unconditional, unlike the optional dependencies above: the examples using
+# them carry no `required-features`, and reach them as `spate_datagen` and
+# `spate_json` rather than through the facade's feature-gated `spate::datagen`
+# and `spate::json`. A dev-dependency is stripped from what a consumer
+# resolves. `storefront_pipeline` pairs the generator with the JSON
+# deserializer, so both are here.
 spate-datagen = { workspace = true }
+spate-json = { workspace = true }
 flate2 = { workspace = true }
 bytes = { workspace = true }
 clickhouse = { workspace = true }
@@ -83,6 +88,10 @@ test = true
 
 [[example]]
 name = "custom_operator"
+test = true
+
+[[example]]
+name = "storefront_pipeline"
 test = true
 
 [[example]]

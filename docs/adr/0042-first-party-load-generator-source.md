@@ -90,7 +90,7 @@ an ignored key. The referential property is a test: generated events are
 checked to reference only orders placed earlier on the same lane, and a lane's
 stream is asserted to replay identically from the same seed. And the absence of
 a durable progress store is what makes the no-resumability claim checkable —
-`commit` writes to a `HashMap` and nothing else.
+`commit` writes to an in-memory map and nothing else.
 
 ## More information
 

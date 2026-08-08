@@ -83,10 +83,6 @@ impl Ring {
         }
     }
 
-    fn len(&self) -> usize {
-        self.slots.len()
-    }
-
     fn push(&mut self, entry: Pending) {
         if self.slots.len() < RING_CAPACITY {
             self.slots.push(entry);
@@ -451,9 +447,9 @@ mod tests {
         let mut high_water = 0;
         for _ in 0..100_000 {
             plan.next();
-            assert!(plan.open.len() <= RING_CAPACITY);
-            assert!(plan.captured.len() <= RING_CAPACITY);
-            high_water = high_water.max(plan.open.len());
+            assert!(plan.open.slots.len() <= RING_CAPACITY);
+            assert!(plan.captured.slots.len() <= RING_CAPACITY);
+            high_water = high_water.max(plan.open.slots.len());
         }
         // Exactly at the bound, never past it. A ring sitting below its
         // capacity would mean the eviction was never reached, and the flat

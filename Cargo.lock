@@ -3916,6 +3916,7 @@ dependencies = [
  "spate-clickhouse",
  "spate-coordination",
  "spate-core",
+ "spate-datagen",
  "spate-json",
  "spate-kafka",
  "spate-s3",

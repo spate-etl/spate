@@ -86,6 +86,10 @@ container_suites_for() {
         # framing bench frames with `NdjsonFramer` rather than a local copy,
         # so a change to the framer can break spate-s3's suite.
         spate-json) echo "spate spate-s3" ;;
+        # spate-datagen reaches the facade twice: as an optional dependency
+        # behind the `datagen` feature, and as a dev-dependency. Either edge is
+        # enough to break the facade's container suite.
+        spate-datagen) echo "spate" ;;
         spate-avro | spate) echo "spate" ;;
         # The wall-clock benchmark harness. Spelled out rather than left to the
         # default arm, because it is the one member whose empty answer is a

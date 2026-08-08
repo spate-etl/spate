@@ -139,6 +139,10 @@ required-features = ["json"]
 test = true
 
 [[example]]
+name = "nats_coordinated_backfill"
+required-features = ["s3", "json", "coordination-nats"]
+
+[[example]]
 name = "s3_backfill"
 required-features = ["s3", "json"]
 test = true

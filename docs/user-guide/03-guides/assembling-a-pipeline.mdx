@@ -7,10 +7,17 @@ primitives you can drop down to at any point (see
 [Manual assembly](manual-assembly.mdx) for the full desugaring).
 
 The complete, compiling reference for everything below is
-`crates/spate/examples/kafka_avro_to_clickhouse.rs` with its YAML next to it;
-the zero-infrastructure variant is `crates/spate/examples/memory_pipeline.rs`.
+`crates/spate/examples/kafka_avro_to_clickhouse.rs` with its YAML next to it,
+built under the `full` facade feature; the connector, encoder and chain
+blocks below are rendered from it. The zero-infrastructure variant is
+`crates/spate/examples/memory_pipeline.rs`.
 
 ## The shape of an assembly
+
+The block below is the exception: it is a shape, not a program. `deserializer`
+and `encoder` are used without ever being bound, so it does not compile — an
+assembly with nothing left out is the example, and the steps that follow fill
+each elision in with the code that does compile.
 
 ```rust
 use spate::prelude::*;
@@ -21,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connector construction: yours, one explicit line each.
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
-    let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
+    let sink = spate::clickhouse::config::from_component_config(
+        pipeline.config().sink_config("default")?,
+    )?;
 
     let report = pipeline
         .sink(sink)?
@@ -76,9 +85,11 @@ The framework never interprets the `source`, `deserializer`, and `sink`
 sections of your YAML; `pipeline.config()` hands them to *your* connector
 factories as opaque `ComponentConfig`s:
 
-```rust
-let source = KafkaSource::from_component_config(&pipeline.config().source)?;
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=source
 ```
+
+A sink section resolves the same way, through `config().sink_config(name)` —
+the single `sink:` form is addressed as `"default"`.
 
 Some connectors need async edge work before the pipeline runs. The builder's
 I/O runtime is already alive, so:
@@ -91,11 +102,7 @@ I/O runtime is already alive, so:
   sink's pre-flight schema check
   (see [Schema validation](../04-connectors/sinks/clickhouse/schema-validation.mdx)):
 
-```rust
-let encoder = match pipeline.block_on(sink.validate_schema())? {
-    Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
-    None => ClickHouseEncoder::<Owned<Order>>::new(),
-};
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=encoder
 ```
 
 ## Step 3: `.sink(bundle)` / `.sink_with(bundle, options)`
@@ -112,8 +119,7 @@ chunk queue depth in chunks (default 8), and `with_chunk`, the install-time
 equivalent of the per-sink YAML
 [`chunk:` block](../07-reference/configuration.mdx#chunk) (set the chunking in
 exactly one of the two places, not both). `queue_capacity` participates in the
-backpressure sizing rule — see
-[Backpressure](../02-concepts/03-backpressure.mdx) and
+backpressure sizing rule — read
 [Backpressure](../02-concepts/03-backpressure.mdx) before raising it.
 
 `.sink(bundle)` is sugar for `.add_sink("default", bundle)`, so calling it
@@ -142,18 +148,7 @@ Each call receives a `ChainCtx` **by value** with everything the terminal
 
 Move the fields into the chain you build:
 
-```rust
-.chains(move |ctx| {
-    let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
-    chain_owned::<Order, _>(deserializer.clone())
-        .with_metrics(ctx.pipeline, "main")
-        .try_map(|order: Order| {
-            if order.amount_cents >= 0 { Ok(order) } else { Err("negative amount") }
-        }, ErrorPolicy::Skip)
-        .sink(encoder.clone(), KeyHashRouter, chunk_cfg,
-              ctx.queues, ctx.budget)
-        .build()
-})
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=chain
 ```
 
 `KeyHashRouter` is the default meta-only router; to route on a record's own

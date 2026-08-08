@@ -20,7 +20,7 @@
 //! the union is complete; overlap is possible and fine).
 //!
 //! ```sh
-//! cargo run -p spate --features coordination --example coordinated_pipeline
+//! cargo run -p spate --features coordination --example custom_coordinated_source
 //! ```
 
 // The examples index renders these fields; see scripts/examples-index.sh.

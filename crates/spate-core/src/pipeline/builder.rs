@@ -38,7 +38,7 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::new`](crate::metrics::SinkShardMetrics::new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`] — the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`] — the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!

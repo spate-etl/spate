@@ -25,8 +25,7 @@ revocation — one choreography, tested constantly by every rebalance:
    force-seal partial batches, and get the remaining deadline to finish
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
-   that is force-aborted a couple of seconds later, so this step always
-   terminates.
+   that is force-aborted a second later, so this step always terminates.
 4. **Offsets commit.** The controller drains the checkpointer and runs a
    final synchronous commit + `flush_commits` — only watermarks covering
    durably written data, per the at-least-once invariant.
@@ -42,9 +41,11 @@ kubelet sends SIGKILL. The rule:
 
 :::info
 Keep `drain_timeout` comfortably **below**
-`terminationGracePeriodSeconds`. The gap must absorb steps 1, 2, and 4
-plus process teardown, so the final commit always runs before SIGKILL.
-The defaults (25s vs 30s) encode this; if you raise one, raise the other.
+`terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
+gap has to absorb what follows it — the pool's one-second backstop, the
+final commit (step 4) and process teardown — so the commit always runs
+before SIGKILL. The defaults (25s vs 30s) encode this; if you raise one,
+raise the other.
 :::
 
 ```yaml
@@ -58,21 +59,28 @@ than it needed to.
 
 ## Exit codes via `ExitReport`
 
-`run` returns an `ExitReport`; wire it to the process exit so your
-orchestrator can tell a drain from a failure:
+`run` returns an `ExitReport` describing how the pipeline stopped. This
+terminal call is from `crates/spate/examples/storefront_pipeline.rs`
+(`cargo run -p spate --example storefront_pipeline`), which keeps the
+signal handling a deployed process wants: as shipped its source exhausts a
+fixed budget and drains on its own, and SIGTERM runs that same drain at
+whatever point it arrives.
 
-```rust
-let report = pipeline.run(source)?;
-report.log();                          // info if clean, error if failed
-std::process::exit(report.exit_code()); // 0 = Completed, 1 = Failed
+```rust file=crates/spate/examples/storefront_pipeline.rs region=run title="storefront_pipeline.rs"
 ```
 
-`ExitState::Completed` means the drain finished and the final commit ran —
-including runs where the sink deadline expired and batches were abandoned
-(see below; the report's `sink_drain` field says so). `ExitState::Failed`
-carries the failing component and reason; Kubernetes restarts the pod and
-the data replays. `report.ok()` converts to a `Result` when your `main`
-prefers `?`.
+`report.log()` logs the outcome at the matching level — `info` when clean,
+`error` when failed. Pair `report.exit_code()` with `std::process::exit`
+(`0` for a clean drain, `1` for a failure) so your orchestrator can tell one
+from the other, or take `report.ok()` when your `main` prefers `?`.
+
+`ExitState::Completed` means the drain finished and the final commit ran. A
+signal-initiated drain reports it even where the sink deadline expired and
+batches were abandoned (see below; the report's `sink_drain` field says so).
+A source that reaches the end of its input is held to more — every batch
+acknowledged and the final commit persisted, or the run exits `Failed`.
+`ExitState::Failed` carries the failing component and reason; Kubernetes
+restarts the pod and the data replays.
 
 ## Abandoned batches: replay, not loss
 
@@ -128,22 +136,18 @@ because every shutdown until then replays data unnecessarily.
 
 ## Testing shutdown
 
-Disable signal handling and drive the drain yourself — the
-`into_runtime` + `shutdown_handle` pattern in
-[Testing pipelines](testing-pipelines.mdx):
+Disable signal handling with `handle_signals: false` in `runtime_options`
+and drive the drain yourself — the `into_runtime` + `shutdown_handle`
+pattern in [Testing pipelines](testing-pipelines.mdx). From
+`crates/spate/examples/memory_pipeline.rs`
+(`cargo run -p spate --example memory_pipeline`):
 
-```rust
-let runtime = pipeline./* ... */.runtime_options(RuntimeOptions {
-    handle_signals: false,
-    ..RuntimeOptions::default()
-}).into_runtime(source)?;
-let shutdown = runtime.shutdown_handle();
-let join = std::thread::spawn(move || runtime.run());
-// drive data, wait for commits...
-shutdown.trigger();
-let report = join.join().unwrap()?;
-assert_eq!(report.exit_code(), 0);
+```rust file=crates/spate/examples/memory_pipeline.rs region=handoff title="memory_pipeline.rs"
 ```
+
+Push records through the source handle and wait for the commit, then
+`shutdown.trigger()` and join the spawned run. The `ExitReport` it hands
+back is the one a SIGTERM produces, because it is the same drain.
 
 ## Related
 

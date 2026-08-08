@@ -6,10 +6,10 @@ infrastructure. Every mock pairs with a scripting/observation handle (the
 `tower-test` philosophy) — you drive the source side, script the sink side,
 and assert on what actually got written and committed.
 
-The two canonical references this guide mirrors are
-`crates/spate-test/tests/bundle.rs` (a whole-assembly test) and
-`crates/spate/examples/memory_pipeline.rs` (the same pattern as a runnable
-demo).
+Everything below comes from `crates/spate/examples/memory_pipeline.rs` —
+the same pattern as a runnable demo, which runs as-is with
+`cargo run -p spate --example memory_pipeline`. In your own project you
+need `spate` and `spate-test`, the latter as a dev-dependency.
 
 ## The pieces
 
@@ -22,54 +22,56 @@ demo).
 
 ## The pattern: `into_runtime` + `shutdown_handle` + a spawned run
 
-Build with the ordinary `Pipeline` builder, but finish with
-`into_runtime` instead of `run` so you hold the shutdown handle, then spawn
-the blocking `run` on a thread. From `crates/spate-test/tests/bundle.rs`:
+A test imports the `spate` prelude and the mocks it drives:
 
-```rust
-use spate_core::config::PipelineConfig;
-use spate_core::ops::chain_owned;
-use spate_core::pipeline::{Pipeline, RuntimeOptions};
-use spate_core::record::PartitionId;
-use spate_core::sink::KeyHashRouter;
-use spate_core::source::LaneId;
-use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
-
-const CONFIG: &str = r#"
-pipeline: { name: bundle-test, threads: 1, io_threads: 1 }
-metrics: { exporter: none }
-source: { memory: {} }
-sink: { capture: {} }
-"#;
-
-let (source, handle) = memory_source();
-let (sink, script) = capture_sink(1, 1);
-
-let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?
-    .sink(sink)?
-    .chains(|ctx| {
-        let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
-        chain_owned::<Vec<u8>, _>(BytesPassthrough)
-            .with_metrics(ctx.pipeline, "main")
-            .sink(TestEncoder, KeyHashRouter, chunk_cfg,
-                  ctx.queues, ctx.budget)
-            .build()
-    })
-    .runtime_options(RuntimeOptions {
-        handle_signals: false,          // the test triggers shutdown itself
-        ..RuntimeOptions::default()
-    })
-    .into_runtime(source)?;
-
-let shutdown = runtime.shutdown_handle();
-let join = std::thread::spawn(move || runtime.run());
+```rust file=crates/spate/examples/memory_pipeline.rs region=imports
 ```
 
-Notes on the config: `metrics: { exporter: none }` installs no
-process-global recorder, so parallel tests stay isolated from each other's
-metrics; the `memory`/`capture` tags in `source:`/`sink:` are
-informational — the in-memory pieces are built programmatically, not from
-their sections.
+A test config is an ordinary config:
+
+```rust file=crates/spate/examples/memory_pipeline.rs region=config
+```
+
+The `memory` and `capture` tags in `source:` and `sink:` are informational
+here — the in-memory pieces are built programmatically, not from those
+sections. Two things bite once a second pipeline runs beside this one,
+because both are process-wide:
+
+- **The admin server's address.** The runtime binds `metrics.listen`
+  whatever the exporter is set to, and a bind failure stops the run — so
+  the default `0.0.0.0:9090` collides. Give each test
+  `metrics: { listen: "127.0.0.1:0" }` and let the kernel pick the port,
+  or `metrics: { exporter: none, listen: "127.0.0.1:0" }` where the test
+  wants no process-global recorder at all.
+- **Metric series ownership.** A gauge series has one live owner per
+  process, keyed on the pipeline and component labels — so two pipelines
+  alive at once under the same `pipeline.name` fail to build rather than
+  quietly describing one series from two writers. Name each one for its
+  test. A claim is released when its handles drop, so pipelines built one
+  after another may share a name.
+
+Each mock comes back paired with its handle — the source handle pushes
+records and reads committed watermarks back, the sink script reads every
+durable write back:
+
+```rust file=crates/spate/examples/memory_pipeline.rs region=mocks
+```
+
+The batch `linger` defaults to 1s, which is a long time to wait for a
+flush. Shrinking it on the sink's pool config, as above, is what lets a
+test finish in milliseconds.
+
+Assemble with the ordinary `Pipeline` builder — the sink, the chain factory
+and the chunking are the production steps unchanged, and
+[Assembling a pipeline](assembling-a-pipeline.mdx) walks them. Two things
+differ. Turn signal handling off with `handle_signals: false` in
+`runtime_options`, because the test triggers shutdown itself rather than
+raising SIGTERM at its own process. Then finish with `into_runtime` instead
+of `run`, so you hold the shutdown handle before anything starts, and spawn
+the blocking `run` on a thread:
+
+```rust file=crates/spate/examples/memory_pipeline.rs region=handoff
+```
 
 :::note
 `Pipeline::from_config` must run outside any async runtime, so write
@@ -78,13 +80,11 @@ these as plain `#[test]` functions, not `#[tokio::test]`.
 
 ## Driving the source: `SourceHandle`
 
-```rust
-let p = PartitionId(0);
-handle.assign_lanes(&[(LaneId(0), p)]);        // one lane on partition 0
-let mut last = 0;
-for payload in [&b"alpha"[..], b"beta", b"gamma"] {
-    last = handle.push(p, Some(b"key"), payload);   // returns the offset
-}
+Assign a lane, push payloads, wait for the committed watermark to cover the
+last offset, then trigger the drain and join the spawned run for its
+`ExitReport`:
+
+```rust file=crates/spate/examples/memory_pipeline.rs region=drive
 ```
 
 - `assign_lanes` queues an assignment event, exactly as a real rebalance
@@ -100,38 +100,26 @@ for payload in [&b"alpha"[..], b"beta", b"gamma"] {
 
 ## Asserting the commit: one-past-last watermarks
 
-Watermarks advance only after the sink durably acknowledged every record —
-that is the at-least-once contract itself, so waiting on the commit is the
-strongest assertion a test can make. **Committed positions are one past the
-last offset** — the "next position to read", the same convention the
-framework commits everywhere:
+Waiting for the watermark is the strongest assertion a test can make,
+because watermarks advance only after the sink durably acknowledged every
+record — the at-least-once contract itself. **Committed positions are one past the last
+offset** — the "next position to read", the same convention the framework
+commits everywhere, which is why the target is `last + 1`.
 
-```rust
-let deadline = Instant::now() + Duration::from_secs(10);
-while handle.last_committed(p) != Some(last + 1) {
-    assert!(Instant::now() < deadline, "commit not observed in time");
-    std::thread::sleep(Duration::from_millis(10));
-}
-shutdown.trigger();
-let report = join.join().expect("join").expect("run");
-assert_eq!(report.exit_code(), 0, "clean drain");
-```
-
-`handle.committed()` returns every watermark ever committed, in call order,
-when you need more than the latest.
+Bound the wait, whichever way you write it: an unbounded one turns a broken
+pipeline into a hung test rather than a failing one.
+`handle.wait_committed(partition, last + 1, timeout)` is the blocking
+equivalent of the poll loop, waking on each commit instead of sleeping, and
+returns whether the target was met. `handle.committed()` returns every
+watermark ever committed, in call order, when you need more than the
+latest.
 
 ## Asserting the writes: `SinkScript` and `decode_rows`
 
 Everything the sink wrote is captured, in order, with shard/replica
 targeting, row and byte counts, and the batch's dedup token:
 
-```rust
-let rows: Vec<Vec<u8>> = script
-    .writes()
-    .iter()
-    .flat_map(|w| decode_rows(&w.payload))
-    .collect();
-assert_eq!(rows, vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]);
+```rust file=crates/spate/examples/memory_pipeline.rs region=capture
 ```
 
 `decode_rows` inverts `TestEncoder`'s length-prefixed framing back into the
@@ -149,15 +137,6 @@ failure paths:
 - `script.enqueue_global(...)` — same, for the next write to any endpoint.
 - `script.fail_probe(shard, replica, "down")` / `heal_probe` — drive the
   readiness probe, and with it `/readyz`.
-
-Speed tip: the default batch `linger` is 1s; shrink it so tests flush fast,
-as the example does:
-
-```rust
-let mut cfg = SinkPoolConfig::default();
-cfg.batch.linger = Duration::from_millis(50);
-let sink = sink.with_pool_config(cfg);
-```
 
 ## Testing stages in isolation
 

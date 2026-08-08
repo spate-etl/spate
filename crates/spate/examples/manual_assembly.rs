@@ -17,6 +17,9 @@
 //! commented below is a rule the builder makes structurally impossible to
 //! break, and manual assembly hands all of them back.
 //!
+//! The `ANCHOR` comments below mark the regions the manual-assembly guide
+//! renders. They are stripped from what it shows; see `docs/STYLE.md` § 10.
+//!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 
 // The examples index renders these four fields; see scripts/examples-index.sh.
@@ -53,6 +56,7 @@ sink: { capture: {} }
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ANCHOR: init
     let config = PipelineConfig::from_str(CONFIG)?;
     let pipeline_name = config.pipeline.name.clone();
 
@@ -89,7 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminals charge it on enqueue, sink workers credit it on durable
     // write, and the backpressure controller pauses the source off it.
     let budget = Arc::new(InflightBudget::new());
+    // ANCHOR_END: init
 
+    // ANCHOR: sink
     // ── The layer above ─────────────────────────────────────────────────
     // `SinkOptions` is the builder's home for wiring knobs that are neither
     // connector config nor framework YAML. At that layer the whole of step
@@ -120,8 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the endpoints — and returns `BuildError::Sink`. By hand the first two
     // are panics instead (an empty topology out of `shard_queues`, a shard
     // with no replicas out of `SinkPool::spawn`), and the third is caught
-    // nowhere: replica labels longer than their shard's endpoints publish
-    // `spate_sink_replica_healthy` for a replica that does not exist.
+    // nowhere: a surplus replica label publishes `spate_sink_replica_healthy`
+    // for a replica that does not exist, and a missing one drops a live
+    // replica's health updates.
     let parts = sink.into_parts();
     let shards = parts.shard_endpoints.len();
     let component_type = parts.component_type.clone();
@@ -152,13 +159,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Result<_, _>>()?;
 
-    // Two seams the builder wires that a manual assembly runs without. The
+    // Two metric seams the builder wires and this file does not. The
     // `spate_queue_*` handles attach through a crate-internal seam on
-    // `ShardQueues`. The sink writer's own `spate_<component_type>_sink_*`
-    // scope attaches through the public `ShardWriter::attach_metrics`, but
-    // the `Meter` that carries the prefix — `Meter::for_component`, which
-    // appends the sink role to the component type — is crate-internal.
-    // Everything else in the taxonomy is identical.
+    // `ShardQueues`, so an assembly below the builder publishes no queue
+    // series at all. The sink writer's own `spate_<component_type>_sink_*`
+    // scope attaches through the public `ShardWriter::attach_metrics`; only
+    // the derivation of its prefix is crate-internal — `Meter::for_component`
+    // appends the sink role to the component type — so by hand the namespace
+    // is one you name yourself with `Meter::with_namespace`. Everything else
+    // in the taxonomy is identical.
 
     // One worker per shard, spawned onto the runtime from step 2.
     let pool = SinkPool::spawn(
@@ -184,7 +193,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Drives the sinks half of `/readyz`; `None` reports connected.
         probe: parts.probe,
     };
+    // ANCHOR_END: sink
 
+    // ANCHOR: runtime
     // ── 4. The runtime — what `.chains` + `.into_runtime` do ────────────
     // The factory takes a bare thread index and threads the queues, budget
     // and pipeline name itself — most of what `ChainCtx` carries. The rest is
@@ -235,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // builder produce the same runtime, so they drive the same way.
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
+    // ANCHOR_END: runtime
 
     let orders = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), orders)]);

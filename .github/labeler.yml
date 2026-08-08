@@ -43,6 +43,10 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-coordination/**
 
+"crate: spate-datagen":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-datagen/**
+
 "crate: spate-test":
   - changed-files:
       - any-glob-to-any-file: crates/spate-test/**

@@ -66,6 +66,25 @@ job. Framework users test with `spate-test` mocks — keep those first-class.
   per-test `pipeline`/`component` labels. A local recorder does not isolate the
   process-wide gauge claim in INV-10.
 
+## Comments
+
+A comment says what the code does and what a caller may rely on. Why it is this
+way and not the alternative belongs in the commit message, where it is dated and
+attached to the diff — in the tree it becomes an argument the reader has to
+finish before reaching the description.
+
+- **A module header names what the module provides** and its role in the crate.
+  Not the dependency it replaces, not the failure that motivated it.
+- **State a property as a contract, not as a verdict.** "The same seed yields the
+  same stream on any build" is something a caller can use; "a pinned generator
+  cannot drift" is the closing line of a decision.
+- **Constraints on use stay** — not cryptographic, not cancel-safe, panics on X.
+  That is the reader's business.
+- **Guardrails stay**: a comment explaining why a line must not be "simplified"
+  is preventing the next edit, not narrating the last one.
+- **Present tense.** No "now", "previously", "used to". If it changed, the
+  comment describes what is.
+
 ## Documentation
 
 `docs/STYLE.md` is normative; the `docs-review` skill

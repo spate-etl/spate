@@ -54,6 +54,10 @@
   color: "0052cc"
   description: "Leader election, work assignment, and the store backends"
 
+- name: "crate: spate-datagen"
+  color: "0052cc"
+  description: "The synthetic storefront-event source"
+
 - name: "crate: spate-test"
   color: "0052cc"
   description: "The test doubles framework users build against"

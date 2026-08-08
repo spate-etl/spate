@@ -62,17 +62,28 @@ required-features = ["full"]
 name = "e2e_poison"
 required-features = ["full"]
 
+# `test = true` makes each example a one-test binary: the `#[cfg(test)]` runner
+# at its foot calls `main`, so the assertions an example already carries become
+# a gate instead of decoration. Only the examples that need no infrastructure
+# and terminate on their own carry it; the rest are driven by the container
+# suite. `harness` stays at its default — nextest lists every binary it
+# collects with `--list --format terse`, which a custom `main` would answer by
+# running the whole example and having its stdout parsed as a test list.
 [[example]]
 name = "memory_pipeline"
+test = true
 
 [[example]]
 name = "custom_operator"
+test = true
 
 [[example]]
 name = "custom_source_sink"
+test = true
 
 [[example]]
 name = "custom_metrics"
+test = true
 
 [[example]]
 name = "kafka_avro_to_clickhouse"
@@ -97,18 +108,22 @@ required-features = ["clickhouse"]
 [[example]]
 name = "json_ndjson_memory"
 required-features = ["json"]
+test = true
 
 [[example]]
 name = "s3_backfill"
 required-features = ["s3", "json"]
+test = true
 
 [[example]]
 name = "coordinated_pipeline"
 required-features = ["coordination"]
+test = true
 
 [[example]]
 name = "s3_coordinated_backfill"
 required-features = ["s3", "json", "coordination"]
+test = true
 
 [features]
 default = []

@@ -39,13 +39,19 @@ const LEASE: Duration = Duration::from_secs(1);
 const OBJECTS: usize = 48;
 const RECORDS_PER_OBJECT: usize = 50;
 
-fn config_yaml(data: &std::path::Path) -> String {
+fn config_yaml(data: &std::path::Path, instance: &str) -> String {
     // `split_target_bytes` at its floor keeps the per-object cost at
     // 64KiB, so 48 small objects pack into three splits — enough for the
     // two workers to share. Real deployments keep the 64 MiB default.
+    //
+    // The pipeline name carries the instance because both run in *this*
+    // process, and a gauge series has exactly one live owner per process
+    // (INV-10). Two instances under one name is the same series claimed
+    // twice. In production each instance is its own process and they share
+    // a name; here the label has to do what the process boundary would.
     format!(
         r#"
-pipeline: {{ name: s3-coordinated-demo, threads: 2 }}
+pipeline: {{ name: s3-coordinated-demo-{instance}, threads: 2 }}
 checkpoint: {{ interval: 100ms }}
 metrics: {{ listen: "127.0.0.1:0" }}
 source:
@@ -139,13 +145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The shared store stands in for the durable coordination backend
     // both instances would point at in production.
     let store = MemoryStore::new(LEASE);
-    let yaml = config_yaml(&data);
 
     let workers: Vec<_> = ["instance-a", "instance-b"]
         .into_iter()
         .map(|instance| {
             let store = store.clone();
-            let yaml = yaml.clone();
+            let yaml = config_yaml(&data, instance);
             std::thread::spawn(move || run_instance(instance, yaml, store))
         })
         .collect();
@@ -175,4 +180,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_captured - expected.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The example is the test. `cargo run --example` still runs `main`;
+    /// under `--test` the harness makes `main` an ordinary function and this
+    /// its only caller, so the assertions above stop being decorative.
+    #[test]
+    fn runs_to_completion() {
+        super::main().expect("the example must run clean");
+    }
 }

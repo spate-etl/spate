@@ -419,11 +419,16 @@ jobs:
       # spate-coordination's `testing` feature, so `TestClock` is counted as
       # library code; it is exercised hard by the suites that drive it, so it
       # inflates the number slightly rather than hiding anything.
+      #
+      # `examples` joins `tests` in that exclusion. The examples now run as
+      # tests, so every line of them executes — counting them would move the
+      # number by teaching nobody anything, since an example is documentation
+      # that happens to compile rather than shipped code.
       - name: Test and coverage
         run: >
           cargo llvm-cov nextest --profile ci --workspace --all-features --locked
           --lcov --output-path lcov.info
-          --ignore-filename-regex '/tests/'
+          --ignore-filename-regex '/(tests|examples)/'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

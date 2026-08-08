@@ -69,6 +69,7 @@ example_tier() {
         json_ndjson_memory | s3_backfill) echo "free" ;;
         instrumented_operator) echo "free" ;;
         coordinated_pipeline | s3_coordinated_backfill) echo "free" ;;
+        sink_failures) echo "free" ;;
         kafka_avro_to_clickhouse | kafka_avro_flatmap_clickhouse) echo "infra" ;;
         multi_table_split | kafka_to_kafka_split | clickhouse_aggregating_mv) echo "infra" ;;
         *) echo "" ;;

@@ -119,6 +119,10 @@ name = "clickhouse_aggregating_mv"
 required-features = ["clickhouse"]
 
 [[example]]
+name = "sink_failures"
+test = true
+
+[[example]]
 name = "json_ndjson_memory"
 required-features = ["json"]
 test = true

@@ -15,6 +15,11 @@
 //!   in-memory store; in production over NATS
 //!   (`NatsCoordinator`, feature `coordination-nats`).
 //!
+//! Progress carried in the store is checked before it is believed: every
+//! commit pins the descriptor it was produced against, and
+//! [`SplitSource::validate_resume`] re-reads that pin — and the watermark's
+//! place in the range — when a split is handed to its next owner.
+//!
 //! Both instances exit `Completed` once every split is done, and the
 //! union of their sink captures is exactly the 1,000 rows (at-least-once:
 //! the union is complete; overlap is possible and fine).
@@ -173,32 +178,53 @@ impl SourceLane for LedgerLane {
 
 // ─── The SplitSource callbacks (the driver's view of this source) ───────
 
+/// Reads a planner descriptor back as its `start..end` bounds. Both
+/// [`SplitSource::open_split`] and the drift check below go through here on
+/// purpose: a descriptor one accepted and the other rejected would be a lane
+/// reading bounds nothing had validated.
+fn decode_range(descriptor: &[u8], split: &SplitId) -> Result<(i64, i64), SourceError> {
+    let text = String::from_utf8_lossy(descriptor);
+    let reject = |reason: String| SourceError::Client {
+        class: spate::error::ErrorClass::Fatal,
+        reason: format!("split {split}: {reason}"),
+    };
+    let (start, end) = text
+        .split_once("..")
+        .and_then(|(a, b)| Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?)))
+        .ok_or_else(|| reject(format!("undecodable ledger descriptor {text:?}")))?;
+    if start < 0 || end < start {
+        return Err(reject(format!(
+            "ledger descriptor {text:?} is not an ascending non-negative range"
+        )));
+    }
+    Ok((start, end))
+}
+
 /// The lane-assembly context: what materializing a split needs, kept as a
 /// sibling field of the driver so both borrow disjointly.
 struct LedgerCtx {
     issuer: Option<AckIssuer>,
-    /// Per live split: (range length, split-local resume offset last
-    /// handed to a lane) — enough to encode commits and spot completion.
-    ranges: BTreeMap<String, (i64, i64)>,
+    /// Per live split: (range length, the exact descriptor bytes the split
+    /// was opened against) — the length spots completion, and the
+    /// descriptor is echoed into every commit as the resume pin that
+    /// [`SplitSource::validate_resume`] re-checks under the next owner.
+    ranges: BTreeMap<String, (i64, Vec<u8>)>,
 }
 
 impl SplitSource for LedgerCtx {
     type Lane = LedgerLane;
 
     fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<LedgerLane, SourceError> {
-        let descriptor = String::from_utf8_lossy(&opening.split.descriptor);
-        let (start, end) = descriptor
-            .split_once("..")
-            .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-            .ok_or_else(|| SourceError::Client {
-                class: spate::error::ErrorClass::Fatal,
-                reason: format!("undecodable ledger descriptor {descriptor:?}"),
-            })?;
+        let (start, end) = decode_range(&opening.split.descriptor, &opening.split.id)?;
         // Resume exactly at the committed watermark: rows before it were
-        // durably written by a previous tenancy (possibly ours).
+        // durably written by a previous tenancy (possibly ours). It is
+        // trustworthy without re-checking here — the driver already put it
+        // through `validate_resume` before staging this opening.
         let resume = opening.resume.map_or(0, |p| p.watermark);
-        self.ranges
-            .insert(opening.split.id.as_str().to_string(), (end - start, resume));
+        self.ranges.insert(
+            opening.split.id.as_str().to_string(),
+            (end - start, opening.split.descriptor.clone()),
+        );
         Ok(LedgerLane {
             lane: opening.lane,
             partition: opening.partition,
@@ -210,17 +236,74 @@ impl SplitSource for LedgerCtx {
         })
     }
 
+    /// The drift check: carried progress against the split as it exists
+    /// *now*, before the driver trusts a byte of it. The two disagree
+    /// whenever a replan moves an id's bounds under progress already
+    /// committed against them — a job restarted with a different `ROWS`, a
+    /// planner whose ranges shift — and the resume point then counts rows
+    /// this split no longer covers.
+    ///
+    /// **Rejecting is terminal, so the class has to be `Fatal`.** The
+    /// driver raises this before it records the tenancy or stages the
+    /// opening, so the split is never opened: no lane, no partition id, and
+    /// the rest of that batch of coordination events goes unapplied. The
+    /// error leaves `CoordinationDriver::poll_events` through this source's
+    /// `poll_events`, and the controller classifies it — a `Fatal` one
+    /// becomes the pipeline's `FatalError` and the run ends
+    /// `ExitState::Failed`, which is the only honest outcome for progress
+    /// nothing can reconcile. Any other class is logged as a retryable
+    /// control-plane error and the gain is simply dropped, leaving a split
+    /// this instance neither reads nor hands back.
+    fn validate_resume(
+        &self,
+        split: &SplitSpec,
+        progress: &SplitProgress,
+    ) -> Result<(), SourceError> {
+        let reject = |detail: String| SourceError::Client {
+            class: spate::error::ErrorClass::Fatal,
+            reason: format!(
+                "split {}: carried progress no longer describes this split ({detail}) — \
+                 unrecoverable divergence; requeue the split or start a fresh job",
+                split.id
+            ),
+        };
+        let (start, end) = decode_range(&split.descriptor, &split.id)?;
+
+        // The pin `encode_commit` wrote: the descriptor bytes the progress
+        // was produced against. Same id, different rows behind it is drift
+        // an in-range watermark cannot reveal on its own.
+        if progress.state != split.descriptor {
+            return Err(reject(format!(
+                "progress is pinned to {:?}, the descriptor says {start}..{end}",
+                String::from_utf8_lossy(&progress.state)
+            )));
+        }
+        // Watermarks are split-local, so the legal band is `[0, len]`: the
+        // length itself means the split was read to its end, one past it
+        // means the range shrank under a resume point that outran it.
+        let len = end - start;
+        if !(0..=len).contains(&progress.watermark) {
+            return Err(reject(format!(
+                "watermark {} is not a position in the {len} row(s) this split covers",
+                progress.watermark
+            )));
+        }
+        Ok(())
+    }
+
     fn encode_commit(
         &mut self,
         split: &SplitId,
         watermark: i64,
     ) -> Result<SplitProgress, SourceError> {
-        let (len, _) = self.ranges[split.as_str()];
-        // No extra resume state needed: the watermark IS the position.
-        Ok(if watermark >= len {
-            SplitProgress::completed(watermark, vec![])
+        let (len, pin) = &self.ranges[split.as_str()];
+        // The watermark IS the position, so the state carries no offset —
+        // only the descriptor this progress was produced against, which is
+        // what makes the check above able to tell drift from a resume.
+        Ok(if watermark >= *len {
+            SplitProgress::completed(watermark, pin.clone())
         } else {
-            SplitProgress::new(watermark, vec![])
+            SplitProgress::new(watermark, pin.clone())
         })
     }
 
@@ -376,8 +459,59 @@ fn run_instance(
     Ok((report.state, rows))
 }
 
+/// Drives the drift check both ways, because a healthy run only ever
+/// produces one of its two answers. The driver calls it on every gain that
+/// carries progress — every takeover in the run below — but this plan is
+/// `Final` and its split ids are deterministic, so a descriptor never moves
+/// under committed progress and the rejecting branch is unreachable from
+/// here. That branch stops a pipeline, which is precisely why it is asserted
+/// rather than merely written.
+fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = LedgerCtx {
+        issuer: None,
+        ranges: BTreeMap::new(),
+    };
+    let descriptor = b"250..375".to_vec();
+    let spec = SplitSpec::new(SplitId::new("rows-000250-000375")?, descriptor.clone());
+    let len = 125;
+
+    // Accepted — what a takeover actually hands over: a split-local
+    // watermark inside the range, pinned to the descriptor it was read
+    // against. `len` itself is a resume point too (the split was read to
+    // its end and the tail's commit had not landed yet), and so is 0.
+    ctx.validate_resume(&spec, &SplitProgress::new(0, descriptor.clone()))?;
+    ctx.validate_resume(&spec, &SplitProgress::new(64, descriptor.clone()))?;
+    ctx.validate_resume(&spec, &SplitProgress::new(len, descriptor.clone()))?;
+
+    // Rejected — the watermark is not a position in this split. A range
+    // that shrank under a resume point that already passed its new end, and
+    // a store value no encoding of ours produces.
+    assert!(
+        ctx.validate_resume(&spec, &SplitProgress::new(len + 1, descriptor.clone()))
+            .is_err(),
+        "a watermark past the range end must be rejected"
+    );
+    assert!(
+        ctx.validate_resume(&spec, &SplitProgress::new(-1, descriptor.clone()))
+            .is_err(),
+        "a negative watermark must be rejected"
+    );
+
+    // Rejected — the pin disagrees with the descriptor: this id covers a
+    // different 125 rows than the ones the watermark counted, and no
+    // in-range check would have caught it.
+    assert!(
+        ctx.validate_resume(&spec, &SplitProgress::new(64, b"500..625".to_vec()))
+            .is_err(),
+        "progress pinned to another range must be rejected"
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
+
+    check_resume_drift()?;
 
     // The shared store stands in for the NATS cluster both instances
     // would point at in production.

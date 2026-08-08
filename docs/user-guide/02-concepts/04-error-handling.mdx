@@ -23,23 +23,17 @@ metrics. There are no dead-letter queues and no silent drops.
 Defaults follow the likely blast radius: **deserializers default to Skip**
 (one poison message on a topic shouldn't take the pipeline down),
 **operators default to Fail** (an error in your own transform is a bug you
-want to see immediately). Both are overridable per stage:
+want to see immediately). Both are overridable per stage — the policy is the
+second argument, and this validation stage counts and drops what it rejects
+rather than stopping:
 
-```rust
-.try_map(
-    |order: Order| {
-        if order.amount_cents >= 0 {
-            Ok(order)
-        } else {
-            Err("negative amount")
-        }
-    },
-    ErrorPolicy::Skip, // count, drop, continue
-)
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=validate
 ```
 
-(From `crates/spate/examples/kafka_avro_to_clickhouse.rs`; see
-[Your first pipeline](../01-getting-started/03-first-pipeline.mdx).)
+The stage comes from `crates/spate/examples/kafka_avro_to_clickhouse.rs`,
+which builds under the `full` facade feature;
+[Your first pipeline](../01-getting-started/03-first-pipeline.mdx) runs that
+example end to end.
 
 There is deliberately no dead-letter queue in v1: the target environments
 have no owned DLQ topic, and a half-owned one is worse than none. If you

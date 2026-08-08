@@ -13,9 +13,11 @@ in [ADR-0012](../../../../adr/0012-single-kafka-consumer-with-split-partition-qu
 
 Construct it from the pipeline's opaque section:
 
-```rust
-let source = KafkaSource::from_component_config(&pipeline.config().source)?;
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=source
 ```
+
+That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, a complete
+program that builds under the `full` facade feature.
 
 ## Configuration
 

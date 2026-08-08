@@ -10,6 +10,13 @@
 //! cargo run -p spate --example json_ndjson_memory
 //! ```
 
+// The examples index renders these fields; see scripts/examples-index.sh.
+// INDEX-RANK:  20
+// INDEX-TIER:  getting-started
+// INDEX-GOAL:  decode many records from one NDJSON payload and skip malformed lines rather than stop
+// INDEX-TECH:  JSON
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -28,9 +28,11 @@ tree, and never resolves `rdkafka` into its lockfile.
 | `coordination-nats` | The same over NATS JetStream KV |
 | `full` | All of the above |
 
-Start with `examples/memory_pipeline.rs`, which runs without any
-infrastructure. `examples/kafka_avro_to_clickhouse.rs` is the flagship
-assembly and ships with its YAML alongside it.
+`examples/README.md` indexes every example by what it shows, in five tiers,
+with what each one needs in order to run. Start with
+`examples/memory_pipeline.rs`, which runs without any infrastructure;
+`examples/kafka_avro_to_clickhouse.rs` is the flagship assembly and ships with
+its YAML alongside it.
 
 ## Delivery semantics
 

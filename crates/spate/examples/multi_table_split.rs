@@ -50,7 +50,7 @@
 //! bare-datum Avro `MetricBatch` messages, and both target tables. SIGTERM
 //! drains gracefully; probes: `curl localhost:9090/readyz`.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  route gauge and text readings to a table each from one stream
 // INDEX-TECH:  Kafka and ClickHouse

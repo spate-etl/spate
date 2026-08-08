@@ -19,7 +19,7 @@
 //! how-to guides render, and nest where a page shows part of a step. They
 //! are stripped from what those pages show; see `docs/STYLE.md` § 10.
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-RANK:  10
 // INDEX-TIER:  getting-started
 // INDEX-GOAL:  build, drive and assert on a whole pipeline

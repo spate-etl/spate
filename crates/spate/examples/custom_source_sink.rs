@@ -19,7 +19,7 @@
 //! [`AckRef`]: spate::checkpoint::AckRef
 //! [`RecordRouter`]: spate::sink::RecordRouter
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
 // INDEX-GOAL:  write a source, a payload-aware router and a sink from scratch
 // INDEX-TECH:  no infrastructure

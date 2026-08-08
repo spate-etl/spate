@@ -55,7 +55,7 @@
 //! stays at-least-once (INV-1): no record is dropped, and the pipeline thread
 //! never performs the I/O itself.
 
-// The examples index renders these four fields; see scripts/examples-index.sh.
+// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  add a field to a producer's schema without breaking a running pipeline
 // INDEX-TECH:  Avro

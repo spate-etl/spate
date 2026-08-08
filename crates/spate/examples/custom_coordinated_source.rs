@@ -29,7 +29,7 @@
 //! cargo run -p spate --features coordination --example custom_coordinated_source
 //! ```
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
 // INDEX-GOAL:  write a coordination-aware source — planner, splits and driver
 // INDEX-TECH:  the coordination seam

@@ -17,6 +17,11 @@ Construct it from the pipeline's opaque section:
 let source = DatagenSource::from_component_config(&pipeline.config().source)?;
 ```
 
+One runnable example drives this source end to end and needs nothing installed:
+`crates/spate/examples/storefront_pipeline.rs` runs a bounded stream through a
+whole pipeline — deserializer, filter, split terminal, admin server — and exits
+`Completed` on its own (`cargo run -p spate --example storefront_pipeline`).
+
 ## Configuration
 
 The `source: { datagen: ... }` section deserializes into `DatagenSourceConfig`
@@ -116,9 +121,9 @@ fixed seed the entire stream replays — strictly more duplication than a real
 source would produce, not less. There is no `resume_from` key.
 
 A bounded run — one with `count` set — reaches `ExitState::Completed` only
-after every batch has been acknowledged and the final watermark committed, so
-a clean exit from a bounded run is a real end-to-end delivery assertion. That
-is the one durability claim this source makes.
+once every batch is acknowledged and the final watermark committed, so a clean
+exit from a bounded run is a real end-to-end delivery assertion. That is the
+one durability claim this source makes.
 
 Payloads are framed one record each, so a deserializer takes its granularity
 from the source rather than from a `framing` key.

@@ -18,7 +18,7 @@
 //!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  operating
 // INDEX-GOAL:  register your own metrics beside the framework's
 // INDEX-TECH:  the Meter API

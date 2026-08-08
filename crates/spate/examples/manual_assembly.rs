@@ -22,7 +22,7 @@
 //!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 
-// The examples index renders these four fields; see scripts/examples-index.sh.
+// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
 // INDEX-GOAL:  drop below the builder to the primitives it composes
 // INDEX-TECH:  no infrastructure

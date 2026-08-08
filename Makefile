@@ -30,8 +30,7 @@
         bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
-        check-gungraun-benches check-collected-region check-examples-declared \
-        examples-index check-examples-index \
+        check-gungraun-benches check-collected-region \
         check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -248,25 +247,12 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-# An example whose `required-features` names a feature that does not exist is
-# skipped by cargo rather than rejected, so `cargo check --examples` passes
-# having built one fewer target than the manifest asked for. Nothing else in
-# this file would ever notice.
-check-examples-declared: ## Every example has a stanza, real features and a tier
-	./scripts/examples.sh --check
+# The examples answer to `crates/spate/tests/examples_{manifest,index}.rs`,
+# which the `test` target already runs. Accept an index change with:
+#
+#     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index
 
-# The root README sends a reader straight to the examples directory, so an
-# example missing from the index is one nobody finds — and nothing else breaks
-# when that happens. Generated from four fields in each example's header rather
-# than from its prose, so editing the commentary around them never reddens this.
-examples-index: ## Regenerate crates/spate/examples/README.md
-	./scripts/examples-index.sh --write
-
-check-examples-index: ## The examples index still matches the tree
-	./scripts/examples-index.sh --self-test
-	./scripts/examples-index.sh --check
-
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-examples-declared check-examples-index ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
 
 ##@ Docs
 

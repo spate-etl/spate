@@ -22,7 +22,7 @@
 //! cargo run -p spate --features s3,json --example s3_backfill
 //! ```
 
-// The examples index renders these fields; see scripts/examples-index.sh.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  bounded-jobs
 // INDEX-GOAL:  backfill historical records from object storage and stop when the prefix is done
 // INDEX-TECH:  object storage

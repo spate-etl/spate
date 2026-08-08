@@ -203,6 +203,7 @@ impl Source for CounterSource {
 /// shards — the dedup token is per shard, so nothing downstream collapses
 /// them. Keep the hash below explicit rather than reaching for
 /// `DefaultHasher`, whose output is seeded and not stable across releases.
+// ANCHOR: router
 struct ByCustomer;
 
 impl RecordRouter<Owned<Vec<u8>>> for ByCustomer {
@@ -238,6 +239,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     }
     hash
 }
+// ANCHOR_END: router
 
 // ─── The sink ───────────────────────────────────────────────────────────
 

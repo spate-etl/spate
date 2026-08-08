@@ -20,13 +20,13 @@ A shard is one lane of the sink's write topology, identified by an index in
 
 The route → encode → queue path and the per-shard workers that drain those
 queues are the terminal stage in [Architecture](01-architecture.mdx). Because
-the index means the same thing everywhere, the order you list shards
-in config is load-bearing: shard `i` is the config's `i`-th entry, the `i`-th
+the index means the same thing everywhere, the order the shards are listed in
+config is load-bearing: shard `i` is the config's `i`-th entry, the `i`-th
 worker, and the `i`-th endpoint. Reordering the list re-homes data. A
 connector that mirrors an external cluster's placement can verify parts of
 this contract at startup and warn (advisorily) on apparent mis-ordering —
 see the [ClickHouse `distributed_check`](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
-— but the ordering itself stays yours to get right.
+— but the ordering itself is the deployment's to get right.
 
 ## Routing happens once, at the terminal stage
 
@@ -45,19 +45,21 @@ has to look at each child's own payload.
 
 ## Two router tiers
 
-One builder seam accepts either tier; you implement exactly one.
+One builder seam accepts either tier, and a router implements exactly one.
 
 - **Meta-only** — `ShardRouter`, routing on `RecordMeta` alone (key hash,
   source partition). The default `KeyHashRouter` lives here: it routes by the
   record's key hash and falls back to a stable per-partition hash for keyless
   records, keeping a partition's keyless records together and the
   distribution stable. This is the right default and stays front and center.
-- **Record-aware** — `RecordRouter<F>`, routing on the payload itself.
-  Reach for it when shard affinity derives from a field of the terminal
-  record type (matching a destination cluster's own sharding expression, for
-  instance), or when you need `flat_map` children routed by their own fields.
+- **Record-aware** — `RecordRouter<F>`, routing on the payload itself. It
+  earns its place where shard affinity derives from a field of the terminal
+  record type — matching a destination cluster's own sharding expression, for
+  instance — or where `flat_map` children have to be routed by their own
+  fields.
 
-The record-aware trait mirrors the row encoder's family-generic shape:
+The record-aware trait mirrors the row encoder's family-generic shape. The
+definition is quoted here to be read rather than run:
 
 ```rust
 pub trait RecordRouter<F: RecFamily>: Send + Sync {
@@ -65,29 +67,24 @@ pub trait RecordRouter<F: RecFamily>: Send + Sync {
 }
 ```
 
-A minimal implementation over your own record family (here a borrowing
-family whose row is `Event<'buf>`; an owned family would read
-`Record<Event>`):
+An implementation over the owned family `Owned<Vec<u8>>` comes from the router
+half of `crates/spate/examples/custom_source_sink.rs`, a generator source
+feeding a stdout sink that needs no infrastructure and runs with
+`cargo run -p spate --example custom_source_sink`. The chain there explodes
+each upload into its order lines, so the placement of one upload's children is
+exactly the case the record-aware tier exists for:
 
-```rust
-use spate::record::Record;
-use spate::sink::RecordRouter;
-
-struct BySensor;
-
-impl RecordRouter<EventF> for BySensor {
-    fn route_record<'buf>(&self, rec: &Record<Event<'buf>>, num_shards: usize) -> usize {
-        // Any deterministic, stable hash of the routing field — determinism
-        // across retries is a correctness requirement, not a nicety.
-        (stable_hash(rec.payload.sensor) % num_shards as u64) as usize
-    }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=router
 ```
+
+`DefaultHasher` is the trap the spelled-out FNV-1a avoids: that hasher is
+seeded, and its output is not guaranteed stable across releases, so two
+processes given the same record can disagree about where it belongs.
 
 Every `ShardRouter` is automatically a `RecordRouter` for every family
 through a blanket bridge, so meta-only routers plug into the same seam
-unchanged. The bridge is also why you implement **one** tier, never both:
-implementing both is a coherence overlap the compiler rejects.
+unchanged. The bridge is also why a router implements **one** tier, never
+both: implementing both is a coherence overlap the compiler rejects.
 
 :::note
 Routers are on the per-record hot path: pure, cheap, no I/O, no blocking,
@@ -122,8 +119,8 @@ attempts **park** until the earliest of three things:
 The second exists because a shard whose every replica is *already* probing has
 no next window to wait for — without it, such a shard would wait out the
 heartbeat despite an answer being seconds away. The heartbeat itself is a
-backstop against a wake that never arrives, not the recovery path; if it is
-what is waking your shard, something else has gone wrong.
+backstop against a wake that never arrives, not the recovery path; a shard
+woken by it has something else wrong with it.
 
 Parked attempts **hold their in-flight permits**, which is precisely how the
 stall reaches the source: intake blocks, the queue fills, and lanes pause. The
@@ -134,31 +131,30 @@ watermark stalls either way.
 ## The honest part: hot shards
 
 :::info
-**A hot shard is your data's shape, not the router's choice.** Any router
+**A hot shard is the data's shape, not the router's choice.** Any router
 that gives a key stable shard affinity — which is the entire point of
-payload routing — sends every record for a hot key to the same shard. If
-one key (or a handful) dominates your volume, that shard runs hot, and no
+payload routing — sends every record for a hot key to the same shard. Where
+one key (or a handful) dominates the volume, that shard runs hot, and no
 router setting fixes it: affinity makes the skew *irreducible* by design.
 :::
 
-What you can do:
+Three responses remain:
 
-- **Choose a high-cardinality routing key.** Skew comes from few, heavy key
+- **Choosing a high-cardinality routing key.** Skew comes from few, heavy key
   values. A key with many roughly-even values spreads naturally; a low-
   cardinality key (a region code, a status flag) concentrates.
-- **Watch the skew.** It is already observable per shard via
+- **Watching the skew.** It is already observable per shard via
   `spate_sink_records_total{shard}` and `spate_sink_bytes_total{shard}` — a
   persistent imbalance across shard labels is a hot shard (see
   [docs/METRICS.md](../../METRICS.md)).
-- **Reshard deliberately.** Adding or removing shards changes `num_shards`
+- **Resharding deliberately.** Adding or removing shards changes `num_shards`
   and therefore reshuffles which shard each key maps to. It rebalances, but
   it is a topology change, not a live knob — it re-homes keys, with the
   consequences below.
 
 CPU is not the victim here: routing runs after transform, per lane, so the
-hot path stays spread across pipeline threads. It is the one shard's write
-throughput, and the pipeline-wide backpressure it induces, that a hot shard
-costs you.
+hot path stays spread across pipeline threads. What a hot shard costs is the
+one shard's write throughput, and the pipeline-wide backpressure it induces.
 
 ## Deterministic routing is a correctness requirement
 

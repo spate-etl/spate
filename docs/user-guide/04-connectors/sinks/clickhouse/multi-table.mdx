@@ -6,10 +6,10 @@ and part tuning. This is the connector-specific side of the
 [multi-sink split](../../../02-concepts/06-multi-sink.mdx) concept: the split
 terminal is generic; here is how the pieces line up for ClickHouse.
 
-Reach for it when your stream carries genuinely different record types (each
-wanting its own columns and `ORDER BY`) and you'd rather the ETL fan them out
-than a `Null` table + one `MATERIALIZED VIEW` per type. The trade-off is
-ETL-side fan-out CPU and part control against server-side fan-out.
+It applies to a stream carrying genuinely different record types, each wanting
+its own columns and `ORDER BY`: the pipeline fans them out instead of a `Null`
+table with one `MATERIALIZED VIEW` per type. The trade is pipeline-side fan-out
+CPU and part control against server-side fan-out.
 
 ## Configuration: a `sinks:` map
 
@@ -49,45 +49,25 @@ per-entry.
 
 ## Wiring: one sink, encoder, and router per table
 
-Each table is an ordinary `ClickHouseSink` — build it from its named config
-section, mint its Native encoder (from *its* `system.columns`) and its shard
-router, then install it with `add_sink(name, ...)`. This is exactly the
-single-sink wiring, N times:
+Each table is an ordinary `ClickHouseSink`, built from its named config section,
+minting its own Native encoder (from *its* `system.columns`) and its own shard
+router before `add_sink(name, ...)` moves it into its worker pool. That is the
+single-sink wiring, N times. The whole program is
+`crates/spate/examples/multi_table_split.rs`; it needs a Kafka topic of Avro
+`MetricBatch` messages and both target tables, and runs with
+`cargo run --release -p spate --features full --example multi_table_split`:
 
-```rust
-// One sink per table, from the `sinks:` map.
-let gauge_sink = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("gauge")?)?;
-let text_sink  = spate::clickhouse::config::from_component_config(pipeline.config().sink_config("text")?)?;
-
-// Each table's own columnar encoder (its Native schema) and shard router.
-let gauge_router = gauge_sink.router::<GaugeFam>(host_key);
-let text_router  = text_sink.router::<TextFam>(host_key);
-let gauge_enc = NativeEncoder::<GaugeFam>::new(pipeline.block_on(gauge_sink.native_schema())?);
-let text_enc  = NativeEncoder::<TextFam>::new(pipeline.block_on(text_sink.native_schema())?);
-
-let report = pipeline
-    .add_sink("gauge", gauge_sink)?
-    .add_sink("text",  text_sink)?
-    .chains(move |ctx| {
-        let mut split = chain::<SampleFam, _>(deserializer.clone())
-            .with_metrics(ctx.pipeline.clone(), "main")
-            // Each branch's chunking comes from its own `ctx.sink(name)` below
-            // (that sink's `chunk:` block); the split itself takes only the
-            // unmatched-record policy.
-            .split(ErrorPolicy::Skip);
-        let gauge = split.add::<GaugeFam, _, _>(gauge_enc.clone(), gauge_router.clone(), ctx.sink("gauge"));
-        let text  = split.add::<TextFam,  _, _>(text_enc.clone(),  text_router.clone(),  ctx.sink("text"));
-        split.route(move |s: Sample<'_>, out| match s.kind {
-            "gauge" => out.emit(gauge, GaugeRow { /* … */ }),
-            "text"  => out.emit(text,  TextRow  { /* … */ }),
-            _       => {}
-        }).build()
-    })
-    .run(source)?;
+```rust file=crates/spate/examples/multi_table_split.rs region=assembly
 ```
 
-The complete, compiling program is `crates/spate/examples/multi_table_split.rs`
-(`--features full`). See the concept page for the
+`gauge_sink` and `text_sink` come from the `sinks:` map's `gauge` and `text`
+entries, resolved by `sink_config(name)`. Each mints a `NativeEncoder` over the
+row family that table receives — `Owned<GaugeRow>` and `Owned<TextRow>`, two
+structs with different columns — from its own fetched schema, and a
+`DistributedRouter` over the same family from the `ShardKey` extractors
+`gauge_key` and `text_key`, which shard both tables on `host`. The split's
+input family is `Owned<Sample>`, the enriched reading `flat_map` produces from
+each decoded `Owned<MetricBatch>`. See the concept page for the
 [routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
 ## What carries over per table, unchanged
@@ -100,7 +80,7 @@ Each branch is a full ClickHouse sink, so everything on the
   chooses its own.
 - **Direct-to-shard writes** with `wait_end_of_query=1`; a table's write is its
   own durable-ack point. The split holds the source batch until *every* table it
-  touched has acked (see [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-tables-is-free)).
+  touched has acked (see [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-destinations-is-free)).
 - **Per-batch `insert_deduplication_token`** per table. The same
   [window warning](README.mdx#deduplication-tokens--and-the-window-warning)
   applies: set `non_replicated_deduplication_window` on **every** target table,
@@ -113,25 +93,25 @@ Each branch is a full ClickHouse sink, so everything on the
 
 ## Per-table part tuning — and the checkpoint-lag cost
 
-The whole point of splitting in the ETL is per-table part control: size each
-table's `batch.max_rows`/`max_bytes`/`linger` for *its* volume. A hot table
-seals on rows in milliseconds; a rare table would trickle, so you raise its
-`linger` to build bigger parts.
+The whole point of splitting in the pipeline is per-table part control: each
+table's `batch.max_rows`/`max_bytes`/`linger` is sized for *its* volume. A hot
+table seals on rows in milliseconds; a rare table would trickle, so a longer
+`linger` builds bigger parts for it.
 
 :::info
 `linger` on a rare table is **not free**: because the source watermark is
 held until every table a batch touched has flushed, a long rare-table
 `linger` holds the offsets of every source batch that carried even one rare
 record — inflating checkpoint lag and restart replay. The framework bounds
-the *pre-batch* half of that hold for you: a rare table's below-target chunk
+the *pre-batch* half of that hold: a rare table's below-target chunk
 buffer is sealed on every commit tick, so worst-case checkpoint lag is
 `checkpoint.interval` (chunk seal) + that table's `linger` (batch close) +
-the write. The `linger` half is yours to size: prefer sealing on a modest
-`max_rows` so `linger` only bites in genuine lulls. (A *pending* batch never
+the write. The `linger` half is sized in config: sealing on a modest
+`max_rows` keeps `linger` biting only in genuine lulls. (A *pending* batch never
 trips `checkpoint.stalled_fail_after` — that watchdog fires only when a
 batch has permanently **failed**.) The full reasoning — including
 segregating the source by kind to dissolve the tension — is in the
-[concept page's trade-off section](../../../02-concepts/06-multi-sink.mdx#the-trade-youre-making-part-size-vs-checkpoint-lag).
+[concept page's trade-off section](../../../02-concepts/06-multi-sink.mdx#the-trade-write-size-vs-checkpoint-lag).
 :::
 
 ## `distributed_check` per table
@@ -143,6 +123,6 @@ with its cluster.
 
 ## Related
 
-- [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once + part-size trade.
+- [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once and write-size trade.
 - [ClickHouse sink](README.mdx) — everything a single sink does, which each branch inherits.
 - [Configuration reference](../../../07-reference/configuration.mdx#sinks) — the `sinks:` map.

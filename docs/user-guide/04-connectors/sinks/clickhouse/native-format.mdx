@@ -46,24 +46,35 @@ RowBinary's row encode is near-memcpy-fast and hard to beat.
 
 `format: native` is **type-driven**: the encoder needs each column's
 ClickHouse type to lay bytes out columnar, so selecting it always fetches
-`system.columns` (it upgrades `validate_schema: off` to `names`). Build the
-encoder from the fetched schema:
+`system.columns` (it upgrades `validate_schema: off` to `names`).
 
-```rust
-let sink = spate::clickhouse::config::from_component_config(&pipeline.config().sink)?;
-let native_schema = pipeline.block_on(sink.native_schema())?; // Arc<NativeSchema>
-let encoder = spate::clickhouse::NativeEncoder::<Owned<MyRow>>::new(native_schema);
-// hand `encoder` to the chain's terminal `.sink(...)` stage
+The row is an ordinary `serde::Serialize` struct — the same one RowBinary
+takes. `crates/spate/examples/kafka_avro_flatmap_clickhouse.rs` decodes a
+nested batch and fans it out into one such row per reading; it needs a Kafka
+topic of Avro batches and the target table, and runs with
+`cargo run --release -p spate --features full --example kafka_avro_flatmap_clickhouse`:
+
+```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=record
+```
+
+`SensorEvent` is the row the terminal stage encodes. Its field order is the
+positional contract against the configured `columns`, and `DateTime64Millis`
+declares the timestamp's scale, which is what lets `validate_schema: full`
+check it against the column's declared precision.
+
+The encoder is built from the schema that sink fetched — `sink` here is the
+[ClickHouse sink](./README.mdx) constructed from its config section:
+
+```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=encoder
 ```
 
 The type parameter is the record *family*, not the row type: an owned row
-struct is wrapped as `Owned<MyRow>` (a zero-copy borrowed row uses its own
-family type). `MyRow` is otherwise the same `serde::Serialize` struct
-RowBinary uses — its field order must match the configured `columns`. Because
-Native blocks are larger per unit of work, set a larger terminal-stage chunk
-target (the sink's YAML
+struct is wrapped as `Owned<SensorEvent>` (a zero-copy borrowed row uses its
+own family type). The encoder goes to the chain's terminal `.sink(...)` stage,
+which clones one per shard. Because Native blocks are larger per unit of work,
+a larger terminal-stage chunk target (the sink's YAML
 [`chunk.target_bytes`](../../../07-reference/configuration.mdx#chunk), e.g.
-512 KiB) so each block is substantial; the sink still merges blocks up to
+512 KiB) keeps each block substantial; the sink still merges blocks up to
 `batch.max_bytes` per insert.
 
 ## Supported column types

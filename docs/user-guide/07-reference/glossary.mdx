@@ -136,7 +136,9 @@ renumbers them per assignment cycle. `spate_source_lanes_active` counts them.
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
 — one partition queue ·
 [S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads)
-— one in-flight split.
+— one in-flight split ·
+[Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
+one generator, `partitions` of them.
 
 ### Lease
 
@@ -217,7 +219,9 @@ Watermarks, epochs, and the contiguity tracker are all per-partition.
 partition ·
 [S3 source](../04-connectors/sources/s3/README.mdx#offsets-progress-resume) —
 one per [split](#split), with the offset packing member ordinal and record
-index.
+index ·
+[Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
+one per generated lane, set by `partitions`.
 
 ### Pipeline thread
 

@@ -312,6 +312,12 @@ jobs:
       # added in both places.
       - run: make check-examples-declared
 
+      # The examples index is generated from four fields in each example's
+      # header. An example missing from it is one a reader cannot find, and
+      # nothing else in this repository breaks when that happens — the root
+      # README links the directory, not the individual files.
+      - run: make check-examples-index
+
   changelog:
     name: Changelog entry
     runs-on: ubuntu-latest

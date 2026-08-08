@@ -23,6 +23,12 @@
 //! cargo run -p spate --features coordination --example coordinated_pipeline
 //! ```
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  extending
+// INDEX-GOAL:  write a coordination-aware source — planner, splits and driver
+// INDEX-TECH:  the coordination seam
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

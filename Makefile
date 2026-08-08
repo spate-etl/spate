@@ -31,6 +31,7 @@
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region check-examples-declared \
+        examples-index check-examples-index \
         check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -254,7 +255,17 @@ changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-
 check-examples-declared: ## Every example has a stanza, real features and a tier
 	./scripts/examples.sh --check
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-examples-declared ## Every repository-metadata check
+# The root README sends a reader straight to the examples directory, so an
+# example missing from the index is one nobody finds — and nothing else breaks
+# when that happens. Generated from four fields in each example's header rather
+# than from its prose, so editing the commentary around them never reddens this.
+examples-index: ## Regenerate crates/spate/examples/README.md
+	./scripts/examples-index.sh --write
+
+check-examples-index: ## The examples index still matches the tree
+	./scripts/examples-index.sh --check
+
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-examples-declared check-examples-index ## Every repository-metadata check
 
 ##@ Docs
 

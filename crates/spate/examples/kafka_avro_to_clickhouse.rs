@@ -50,6 +50,12 @@
 //! complete (bounded by `checkpoint.drain_timeout`), offsets commit —
 //! at-least-once end to end. Probes: `curl localhost:9090/readyz`.
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  production
+// INDEX-GOAL:  load an Avro order stream from Kafka into ClickHouse
+// INDEX-TECH:  Kafka, Avro and ClickHouse
+// INDEX-NEEDS: Kafka, a schema registry and ClickHouse
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

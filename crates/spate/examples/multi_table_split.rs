@@ -50,6 +50,12 @@
 //! bare-datum Avro `MetricBatch` messages, and both target tables. SIGTERM
 //! drains gracefully; probes: `curl localhost:9090/readyz`.
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  production
+// INDEX-GOAL:  route orders, payments and refunds to three tables from one stream
+// INDEX-TECH:  Kafka and ClickHouse
+// INDEX-NEEDS: Kafka and ClickHouse
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

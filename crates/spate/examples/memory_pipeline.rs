@@ -18,6 +18,13 @@
 //! The `ANCHOR` comments below mark the regions the quickstart page renders.
 //! They are stripped from what it shows; see `docs/STYLE.md` § 10.
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-RANK:  10
+// INDEX-TIER:  getting-started
+// INDEX-GOAL:  build, drive and assert on a whole pipeline
+// INDEX-TECH:  no infrastructure
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -85,6 +85,12 @@
 //!
 //! SIGTERM drains gracefully; probes: `curl localhost:9090/readyz`.
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  production
+// INDEX-GOAL:  fan an order's line items into rows and shard them by customer
+// INDEX-TECH:  Kafka, Avro and ClickHouse Native
+// INDEX-NEEDS: Kafka and ClickHouse
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -17,6 +17,12 @@
 //!
 //! [`AckRef`]: spate::checkpoint::AckRef
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  extending
+// INDEX-GOAL:  write a source and a sink from scratch
+// INDEX-TECH:  no infrastructure
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

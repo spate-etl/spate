@@ -137,11 +137,13 @@ what the sink captured runs from the repository:
 cargo run -p spate --example memory_pipeline
 ```
 
-Start at [`crates/spate/examples`](crates/spate/examples):
-`kafka_avro_to_clickhouse` is the fully-commented production assembly,
-`custom_source_sink` is the connector-author tutorial, and
+Start at [`crates/spate/examples`](crates/spate/examples/README.md), which
+indexes every example by what it shows, in five tiers, with what each one needs
+in order to run. `kafka_avro_to_clickhouse` is the fully-commented production
+assembly, `custom_source_sink` is the connector-author tutorial, and
 `s3_coordinated_backfill` runs two instances sharing one bounded backfill
-without either duplicating it.
+without either duplicating it. Every example decodes the same storefront
+records, so moving between them costs a connector rather than a domain.
 [`examples/docker`](examples/docker) covers containers and Kubernetes —
 probes, drain timeouts, sizing.
 

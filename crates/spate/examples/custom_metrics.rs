@@ -17,6 +17,12 @@
 //!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 
+// The examples index renders these four fields; see scripts/examples-index.sh.
+// INDEX-TIER:  operating
+// INDEX-GOAL:  register your own metrics beside the framework's
+// INDEX-TECH:  the Meter API
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

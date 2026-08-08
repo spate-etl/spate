@@ -732,8 +732,19 @@ if len(set(keys)) != len(keys):
         fi
     }
 
-    check_flags true true "an example builds Rust and rebuilds the site" \
-        crates/spate/examples/memory_pipeline.rs
+    # Derived, not named. `classify_into` classifies a path list and never
+    # stats a file, so a literal here keeps passing after the example it names
+    # is renamed away — asserting nothing, and saying so to nobody. The
+    # empty-set guard is the point: an all-derived assertion that can go
+    # vacuous is the failure this file warns about in three other places.
+    example_path="$(find crates/spate/examples -maxdepth 1 -name '*.rs' | sort | head -1)"
+    if [[ -z "$example_path" ]]; then
+        echo "::error::no example under crates/spate/examples; the case below asserts nothing."
+        path_case_failed=1
+    else
+        check_flags true true "an example builds Rust and rebuilds the site" \
+            "$example_path"
+    fi
     check_flags true true "a crate source builds Rust and rebuilds the site" \
         crates/spate-core/src/lib.rs
     check_flags false true "a docs page rebuilds the site and needs no Rust build" \

@@ -35,6 +35,12 @@
 //! cargo run --release -p spate --example kafka_to_kafka_split --features kafka
 //! ```
 
+// The examples index renders these fields; see scripts/examples-index.sh.
+// INDEX-TIER:  production
+// INDEX-GOAL:  fan an order stream out to per-region topics
+// INDEX-TECH:  Kafka
+// INDEX-NEEDS: Kafka
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

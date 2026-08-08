@@ -16,6 +16,12 @@
 //! cargo run -p spate --example custom_operator
 //! ```
 
+// The examples index renders these fields; see scripts/examples-index.sh.
+// INDEX-TIER:  extending
+// INDEX-GOAL:  write stateful operators and drive a chain by hand
+// INDEX-TECH:  no infrastructure
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

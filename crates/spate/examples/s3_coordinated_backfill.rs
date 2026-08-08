@@ -18,6 +18,12 @@
 //! cargo run -p spate --features s3,json,coordination --example s3_coordinated_backfill
 //! ```
 
+// The examples index renders these fields; see scripts/examples-index.sh.
+// INDEX-TIER:  bounded-jobs
+// INDEX-GOAL:  split one backfill across two instances without either duplicating it
+// INDEX-TECH:  object storage and coordination
+// INDEX-NEEDS: nothing
+
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

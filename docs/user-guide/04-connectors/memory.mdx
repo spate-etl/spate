@@ -28,6 +28,13 @@ driven entirely by the test that owns it.
 
 ## The source: `memory_source()` + `SourceHandle`
 
+{/*
+  This fence and the `capture_sink` one below are each two or three lines — an
+  import and the call it illustrates — so both claim docs/STYLE.md §10's first
+  exemption and stay hand-written. Either outgrowing that gets a region of
+  `crates/spate/examples/memory_pipeline.rs` rendered here instead.
+*/}
+
 ```rust
 use spate_test::memory_source;
 

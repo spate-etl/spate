@@ -27,13 +27,16 @@ Construct it from the pipeline's opaque section, with the pipeline's I/O
 runtime handle and a framer (the framer is **required** — see
 [Decoding records](#decoding-records)):
 
-```rust
-let pipeline = Pipeline::from_config(config)?;
-let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
-let report = pipeline.sink(sink)?.chains(/* … */).run(source)?;
-// report.state == ExitState::Completed ⇒ the backfill is done and committed.
+```rust file=crates/spate/examples/s3_backfill.rs region=source
 ```
+
+Two runnable examples carry the Rust on this page, and neither needs
+infrastructure — both stage a `file://` bucket in a temporary directory.
+`crates/spate/examples/s3_backfill.rs` runs the solo backfill
+(`cargo run -p spate --features s3,json --example s3_backfill`), and
+`crates/spate/examples/s3_coordinated_backfill.rs` runs two instances over one
+shared store
+(`cargo run -p spate --features s3,json,coordination --example s3_coordinated_backfill`).
 
 ## Configuration
 
@@ -59,8 +62,8 @@ source:
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
-| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. |
-| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. |
+| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. Must be at least `chunk_bytes`; a smaller value fails at load. |
+| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
 | `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment — see [below](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
@@ -76,10 +79,12 @@ owns no framing. The format's framer is wired into the source in code (see
 [Decoding records](#decoding-records)); the per-record size bound lives on the
 framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
 
-Removed in the coordinated rework (a stale config fails at load with the
-offending key): `lanes` (read parallelism is the coordinator's
-`max_in_flight` — one data lane per in-flight split) and the entire
-`checkpoint:` section (progress lives in the coordination store).
+A stale config still carrying `lanes` (read parallelism is the coordinator's
+`max_in_flight` — one data lane per in-flight split) or the source's own
+`checkpoint:` block (progress lives in the coordination store) fails at load
+with the offending key. The pipeline-level
+[`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint) section is
+unaffected and still governs commit cadence.
 
 ### Sizing splits against `pipeline.threads`
 
@@ -161,18 +166,15 @@ replica of the same pipeline shares the backfill — splits are leased, moved
 between live instances by the elected leader, and taken over from dead ones,
 with per-split fenced commits making revocations replay-safe.
 
-```rust
-let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
-let source = S3Source::from_component_config(&source_section, pipeline.io_handle())?
-    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)))
-    .with_coordinator(Box::new(coordinator));
+```rust file=crates/spate/examples/s3_coordinated_backfill.rs region=coordinator title="s3_coordinated_backfill.rs"
 ```
 
-Building the `store` and `tuning` values is the store's business — see
-[NATS JetStream](../../coordination/nats/README.mdx) for the production
-backend. Deployment shape, tuning, and failure modes are in
-[Scaling out](../../../05-deployment/scaling-out.mdx). The runnable
-two-instance version is `crates/spate/examples/s3_coordinated_backfill.rs`.
+`store` is the coordination store the fleet meets in, and building it is the
+store's business — [NATS JetStream](../../coordination/nats/README.mdx) is the
+production backend. The `CoordinationConfig` literal is that example's
+demo-fast tuning, chosen so two instances trade splits within seconds;
+deployment shape, the production values, and failure modes are in
+[Scaling out](../../../05-deployment/scaling-out.mdx).
 
 :::warning No coordinator ⇒ solo, with **ephemeral** progress
 
@@ -243,9 +245,11 @@ Framing a byte stream is a format concern, so the framer is owned by the format
 crate: for NDJSON, that is
 [`spate-json`](../../formats/json/README.mdx)'s `NdjsonFramer`.
 
-```rust
-let source = S3Source::from_component_config(source_section, io)?
-    .with_framer(|| Box::new(NdjsonFramer::new(64 << 20))); // 64 MiB/record cap
+`with_framer` takes a factory rather than a framer, because framers are
+per-object stateful and each object gets a fresh one; the bound the framer is
+built with (`64 << 20` here) caps a single record's decoded bytes:
+
+```rust file=crates/spate/examples/s3_backfill.rs region=framer
 ```
 
 A framed source emits one record per payload, so its framing contract is
@@ -254,11 +258,11 @@ A framed source emits one record per payload, so its framing contract is
 `ctx.source_framing` — no hand-set `framing: single`, and a `framing:` that
 would double-frame is rejected at startup:
 
-```rust
-let deser = JsonDeserializerBuilder::from_component(deser_section)?
-    .for_source_framing(ctx.source_framing)? // → single, or reject double-framing
-    .build_serde::<MyRecord>();
+```rust file=crates/spate/examples/s3_backfill.rs region=deserializer
 ```
+
+`deser_section` is the pipeline's `deserializer:` section, cloned before the
+chain factory so each thread's closure owns it.
 
 A different object layout needs a different `RecordFramer` — a custom one via
 `S3Source::with_framer`, or another format's framer — no fork required. The
@@ -283,9 +287,9 @@ backfill finish first.
 ## Testing
 
 The whole coordinated lifecycle runs against `file://` URLs with no
-infrastructure: solo (`crates/spate/examples/s3_backfill.rs`) and
-two-instance (`crates/spate/examples/s3_coordinated_backfill.rs`, over a
-shared in-process store). The Docker-gated suites run against a
+infrastructure, which is what the two examples this page draws on do — solo,
+and two-instance over a shared in-process store. The Docker-gated suites run
+against a
 **SeaweedFS** S3 gateway, and — for durable resume and multi-instance
 over the production backend — SeaweedFS plus a NATS 2.11 container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).

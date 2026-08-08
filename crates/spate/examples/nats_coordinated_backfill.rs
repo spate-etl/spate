@@ -261,8 +261,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // happen on the coordinator's startup probe, so a wrong URL rides the
     // startup retry budget and a wrong server version is fatal with an
     // actionable message rather than surfacing later.
+    // ANCHOR: coordinator
     let store = NatsStore::new(NatsConfig::new(servers, JOB), tuning.lease_duration)?;
     let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
+    // ANCHOR_END: coordinator
 
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
         .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))

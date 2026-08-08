@@ -7,6 +7,10 @@
 //! `StageLifecycle` traits in [`spate::ops`] are public for advanced stages,
 //! but closures are the intended API.)
 //!
+//! Two chains are driven here: one over owned records, where bare closures
+//! infer everywhere, and one over records that borrow the source buffer,
+//! which is what the `map_rec` tier exists for.
+//!
 //! This example drives a chain by hand — poll a batch, push it through,
 //! flush — which is exactly what a pipeline thread does in production. It
 //! deliberately bypasses the runtime; for a full assembly around a chain
@@ -26,17 +30,71 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use spate::backpressure::InflightBudget;
-use spate::checkpoint::Checkpointer;
-use spate::deser::Owned;
-use spate::error::ErrorPolicy;
+use spate::checkpoint::{AckRef, Checkpointer};
+use spate::deser::{Deserializer, EmitRecord, Owned, RecFamily};
+use spate::error::{DeserError, ErrorPolicy};
 use spate::ops::{ChunkConfig, PushOutcome, chain_owned};
-use spate::record::PartitionId;
+use spate::record::{PartitionId, RawPayload, Record};
 use spate::sink::{KeyHashRouter, shard_queues};
 use spate::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::{TestDeserializer, TestEncoder, memory_source};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+
+// ─── A borrowing record family ──────────────────────────────────────────
+
+/// One order line, still pointing into the payload buffer the source lane
+/// handed the chain — decoding copies nothing out of it.
+#[derive(Debug)]
+struct OrderLine<'buf> {
+    order_id: &'buf str,
+    customer_id: &'buf str,
+}
+
+/// The family tag: a type-level function from a buffer lifetime to the
+/// record type. It is what lets a lifetime-parameterized record cross the
+/// chain's generic boundaries.
+struct OrderLineF;
+
+impl RecFamily for OrderLineF {
+    type Rec<'buf> = OrderLine<'buf>;
+}
+
+/// Splits `<order_id>|<customer_id>` payloads into borrowed order lines.
+struct OrderLineDeser;
+
+impl Deserializer<OrderLineF> for OrderLineDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, OrderLine<'buf>>,
+    ) -> Result<(), DeserError> {
+        let text = std::str::from_utf8(raw.bytes).map_err(|e| DeserError::Malformed {
+            reason: e.to_string(),
+        })?;
+        let (order_id, customer_id) = text.split_once('|').ok_or(DeserError::Malformed {
+            reason: "order line has no customer field".to_string(),
+        })?;
+        let _ = out.emit(Record {
+            payload: OrderLine {
+                order_id,
+                customer_id,
+            },
+            meta: raw.meta(),
+            ack: ack.clone(),
+        });
+        Ok(())
+    }
+}
+
+/// The `map_rec` stage: a borrowed order line in, the owned billing key the
+/// sink stores out. A `fn` item, which satisfies the stage's higher-ranked
+/// bound at every buffer lifetime — the call site explains the bound.
+fn billing_key(line: OrderLine<'_>) -> Vec<u8> {
+    format!("{}/{}", line.customer_id, line.order_id).into_bytes()
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
@@ -115,8 +173,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("deduped + validated + uppercased: {rows:?}");
     assert_eq!(rows, ["HELLO", "WORLD", "RUST"]);
 
+    // ─── The borrowed tier: what `map_rec` is for ───────────────────────
+    //
+    // The chain above is over an *owned* family: `Owned<Vec<u8>>` means
+    // `Rec<'buf> = Vec<u8>` whatever `'buf` is, so `map`'s bound is a plain
+    // `FnMut(T) -> U` with no lifetime to quantify over and bare closures
+    // infer. The chain below decodes into records that borrow the lane's
+    // payload buffer, and for those `map` is not merely awkward — it is not
+    // offered at all. `map`/`try_map` are defined only on a builder whose
+    // current family is `Owned<T>`, because the family-generic bound they
+    // would need,
+    //
+    //     G: for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>
+    //
+    // does not compile at the *definition* site: `FnMut(A) -> B` desugars
+    // to `FnMut<(A,), Output = B>`, so the output is an associated-type
+    // binding mentioning `'buf`, while every appearance of `'buf` among
+    // the trait's inputs is itself inside an associated type the compiler
+    // cannot see through. rustc rejects the signature with E0582. Nothing
+    // to do with ownership or with borrowck: the bound cannot be written.
+    //
+    // `map_rec` gets the same transformation past that by routing through
+    // `spate::ops::MapFn<In, Out>`, whose input and output are ordinary
+    // type parameters rather than an associated-type binding, so
+    // `for<'buf> MapFn<CurF::Rec<'buf>, NF::Rec<'buf>>` is a bound that can
+    // be written. Hence the tier: not a different capability, the same
+    // transformation under a bound the compiler accepts.
+    //
+    // The stage takes a `fn` item, as the builder's docs advise. A `fn`
+    // item is higher-ranked by construction and satisfies the bound at
+    // every lifetime; a closure only does so when the compiler infers a
+    // higher-ranked signature for it, which is inference the target family
+    // has to make obvious. `filter`, `inspect` and `flat_map` need none of
+    // this: they bind no output family, so one method serves both tiers,
+    // and the `filter` below takes an ordinary closure.
+    let (order_queues, mut order_receivers) = shard_queues(1, 16);
+    let order_budget = Arc::new(InflightBudget::new());
+    // (`chain` by its full path: the owned chain above already took the
+    // name.)
+    let mut orders = spate::ops::chain::<OrderLineF, _>(OrderLineDeser)
+        .filter(|line: &OrderLine<'_>| !line.order_id.is_empty())
+        .map_rec::<Owned<Vec<u8>>, _>(billing_key)
+        .sink(
+            TestEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            order_queues,
+            order_budget,
+        )
+        .build();
+
+    // Same drive loop, same lane: three order lines, the middle one with no
+    // order id for the `filter` to drop.
+    for line in ["o-17|cust-2", "|cust-2", "o-18|cust-3"] {
+        handle.push(p0, None, line.as_bytes());
+    }
+    let mut batch = lanes[0]
+        .poll(64, Duration::from_millis(200))?
+        .expect("order lines queued");
+    assert!(matches!(
+        orders.push_batch(&mut batch, 0),
+        PushOutcome::Done
+    ));
+    drop(batch);
+    assert!(matches!(orders.flush(), PushOutcome::Done));
+
+    let mut billed = Vec::new();
+    while let Ok(chunk) = order_receivers[0].try_recv() {
+        billed.extend(
+            spate_test::decode_rows(&chunk.frame)
+                .into_iter()
+                .map(|r| String::from_utf8_lossy(&r).into_owned()),
+        );
+    }
+    println!("billing keys off borrowed records: {billed:?}");
+    assert_eq!(billed, ["cust-2/o-17", "cust-3/o-18"]);
+
     // The checkpoint side saw everything resolve (drops included).
     drop(chain); // releases the acks parked in received-but-undropped chunks
+    drop(orders);
     cp.drain();
     println!("committable watermarks: {:?}", cp.take_watermarks());
     Ok(())

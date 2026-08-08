@@ -92,7 +92,9 @@
 
 mod config;
 mod dims;
+mod encode;
 mod events;
+mod plan;
 mod rng;
 
 pub use config::{Clock, DatagenSourceConfig, Dataset, Encoding};

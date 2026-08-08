@@ -57,6 +57,15 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # a genuine hang, and can orphan the container. Warn late, never terminate: CI
 # already bounds these with `timeout-minutes`.
 [profile.docker]
+# The example container tier is opt-in, not part of this profile's default set.
+# `scripts/ci-changes.sh` selects `-p spate` for any `crates/spate/**` change, so
+# without this line `e2e_examples` would join ci.yml's per-pull-request container
+# job — where it does not belong: it spawns the shipped example binaries and
+# drives each through a full drain, which is minutes of wall time whose failures
+# are about the examples rather than about the change under review. It reports
+# nightly instead, from scheduled.yml, which selects it back with an explicit
+# `-E 'binary(e2e_examples)' --ignore-default-filter`.
+default-filter = 'not binary(e2e_examples)'
 slow-timeout = { period = "120s" }
 # One retry, for a failure that measurement puts outside the code under test.
 #

@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sink(sink)?
         .chains(|ctx| {
             let chunk_cfg = ctx.chunk();
+            // ANCHOR: deserializer
             let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
                 framing: JsonFraming::Ndjson,
                 on_error: OnError::Skip,
@@ -69,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .with_metrics(ctx.pipeline.clone(), "main")
             .build_serde::<Event>();
+            // ANCHOR_END: deserializer
             chain_owned::<Event, _>(deser)
                 .with_metrics(ctx.pipeline, "main")
                 .filter(|e: &Event| e.value >= 0)

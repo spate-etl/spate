@@ -5,13 +5,20 @@ JSON payloads carried by a source into records — either serde types or
 dynamically-typed values. Three framings map onto the framework's "one payload →
 0..N records" contract, and `serde_json` (stable 1.x) does the parsing.
 
-Construct it from the pipeline's opaque section:
+Construct it from the pipeline's opaque section with
+`JsonDeserializerBuilder::from_component`, or from settings built in code with
+`from_settings`, which is what the runnable NDJSON example does:
 
-```rust
-let deserializer = JsonDeserializerBuilder::from_component(deser_section)?
-    .with_metrics(ctx.pipeline, "main")
-    .build_serde::<Order>();
+```rust file=crates/spate/examples/json_skip_bad_records.rs region=deserializer
 ```
+
+That example is `crates/spate/examples/json_skip_bad_records.rs` — one payload
+of four lines, one of them malformed, over the in-memory connectors, so it
+needs nothing running:
+`cargo run -p spate --features json --example json_skip_bad_records`.
+`from_component` yields that same builder behind a `Result`, and `with_metrics`
+is what mints the family under [Metrics](#metrics) — a builder given no metrics
+scope records nothing.
 
 ## Configuration
 
@@ -54,8 +61,8 @@ instead, and then the granularity is derived rather than configured — see
 
 - `build_serde::<T>()` — decodes each document into a
   `T: serde::de::DeserializeOwned` struct. No `serde_json` types leak into the
-  pipeline. This is the flagship path — see
-  `crates/spate/examples/json_skip_bad_records.rs`.
+  pipeline. This is the flagship path, and the one the example on this page
+  takes.
 - `build_value()` — decodes into dynamically-typed `serde_json::Value` records,
   for pipelines that inspect or route on structure not known at compile time.
 

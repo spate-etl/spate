@@ -11,19 +11,23 @@ which is what lets the framework commit source offsets past it. Rationale
 and the ack wiring are in [ADR-0016](../../../../adr/0016-kafka-sink-ack-wiring.md).
 
 Construct it from the pipeline's opaque section, and terminate the chain
-with one of the sink's encoder helpers (they bake the configured
-`max_message_bytes` guard into the encoder):
+with one of the sink's encoder helpers — `encoder_bytes` for payload
+passthrough, `encoder_json::<Owned<MyRow>>` for `serde_json`, and
+`encoder_with` for a custom `MessageEncoder` (keys, headers, tombstones). All
+three bake the configured `max_message_bytes` guard into the encoder:
 
-```rust
-let sink = spate::kafka::sink::from_component_config(pipeline.config().sink_config("default")?)?;
-let encoder = sink.encoder_bytes();      // payload passthrough
-// or: sink.encoder_json::<Owned<MyRow>>()             — serde_json
-// or: sink.encoder_with(MyMessageEncoder)             — keys/headers/tombstones
+```rust file=crates/spate/examples/kafka_to_kafka_split.rs region=encoder
 ```
 
-One topic per sink instance: fan-out to multiple topics is the chain's
+One topic per sink instance, which is why two sinks are constructed there:
+fan-out to multiple topics is the chain's
 [`split`](../../../02-concepts/06-multi-sink.mdx) terminal with one Kafka sink
-per topic — see the `kafka_to_kafka_split` example.
+per topic. `"eu"` and `"us"` name entries in the pipeline's `sinks:` map, and
+`customer_key` is a plain `fn` pulling the produce key out of the payload.
+
+That code is `crates/spate/examples/kafka_to_kafka_split.rs`, which needs a
+broker on `KAFKA_BROKERS`:
+`cargo run --release -p spate --features kafka --example kafka_to_kafka_split`.
 
 ## Configuration
 

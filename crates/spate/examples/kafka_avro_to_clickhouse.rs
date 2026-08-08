@@ -55,7 +55,7 @@
 //! Kafka, Avro and ClickHouse connector pages. They are stripped from what
 //! renders, and they nest; see `docs/STYLE.md` § 10.
 
-// The examples index renders these four fields; see scripts/examples-index.sh.
+// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  load an Avro order stream from Kafka into ClickHouse
 // INDEX-TECH:  Kafka, Avro and ClickHouse

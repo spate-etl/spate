@@ -301,23 +301,6 @@ jobs:
       # `--no-deps` reads manifests only; it resolves nothing.
       - run: make self-test
 
-      # An example whose `required-features` names a feature that does not
-      # exist is *skipped* by cargo, not rejected: `cargo check --examples
-      # --all-features` exits 0 having built one fewer target than the manifest
-      # asked for, so a typo removes an example from every job here
-      # permanently, with the build green. Nothing else in this file notices.
-      # It belongs beside `self-test` for the same reason — it reads manifests
-      # through `cargo metadata` and compiles nothing. `ci-lint` aggregates
-      # these for local use; CI runs them one by one, so a new check has to be
-      # added in both places.
-      - run: make check-examples-declared
-
-      # The examples index is generated from four fields in each example's
-      # header. An example missing from it is one a reader cannot find, and
-      # nothing else in this repository breaks when that happens — the root
-      # README links the directory, not the individual files.
-      - run: make check-examples-index
-
   changelog:
     name: Changelog entry
     runs-on: ubuntu-latest

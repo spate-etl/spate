@@ -35,7 +35,7 @@
 //! cargo run --release -p spate --example kafka_to_kafka_split --features kafka
 //! ```
 
-// The examples index renders these four fields; see scripts/examples-index.sh.
+// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
 // INDEX-GOAL:  fan an order stream out to per-region topics
 // INDEX-TECH:  Kafka

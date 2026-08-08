@@ -61,7 +61,19 @@ Three profiles, in `.config/nextest.toml`:
   timeout indistinguishable from a genuine hang. One retry, JUnit report.
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
-skips them. `make test-docker` is the only thing that selects them.
+skips them. `make test-docker` is what selects them.
+
+One suite sits outside even that. `spate`'s `e2e_examples` drives the shipped
+example binaries — the ones `scripts/examples.sh --tiers` calls `infra` — against
+real servers, stopping each with `SIGTERM` and asserting the drain. It costs
+minutes and reports nightly, so the `docker` profile's `default-filter` holds it
+back from every other invocation. Selecting it takes saying so:
+
+```sh
+cargo nextest run --profile docker -p spate --all-features --locked \
+  --run-ignored ignored-only -E 'binary(e2e_examples)' \
+  --ignore-default-filter --test-threads 1
+```
 
 `--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
 Drop it when you are not touching the TLS surface.

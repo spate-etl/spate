@@ -90,6 +90,10 @@ name = "custom_metrics"
 test = true
 
 [[example]]
+name = "instrumented_operator"
+test = true
+
+[[example]]
 name = "kafka_avro_to_clickhouse"
 required-features = ["full"]
 

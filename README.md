@@ -167,6 +167,7 @@ ClickHouse pattern).
 | [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
 | [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |
 | [`spate-coordination`](https://crates.io/crates/spate-coordination) | `coordination` | Multi-instance work assignment: leader-computed sticky assignment over a pluggable store. |
+| [`spate-datagen`](https://crates.io/crates/spate-datagen) | `datagen` | Synthetic storefront-event source: referentially consistent orders, payments and refunds, with no broker or bucket to stand up first. A demo and test source — it keeps no durable progress. |
 
 And the framework itself:
 

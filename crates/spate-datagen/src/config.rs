@@ -20,6 +20,11 @@ use std::time::Duration;
 /// a round instant a reader recognizes as synthetic.
 pub(crate) const DEFAULT_EPOCH_MS: i64 = 1_767_225_600_000;
 
+/// Most lanes a source will build. Every lane commits a generator, its rings
+/// and a batch-sized arena at `open`, so the count is bounded rather than left
+/// to a typo in a `u32` field.
+const MAX_PARTITIONS: u32 = 1_024;
+
 /// What `encoding: avro` reports when the feature that implements it is off.
 /// One string for both the load-time rejection below and the `open`-time one
 /// in [`crate::encode`], which answer for the same condition.
@@ -101,7 +106,7 @@ pub struct DatagenSourceConfig {
     /// How many lanes to run, and therefore how many framework partitions
     /// the pipeline sees. Each lane owns a disjoint slice of the order-id
     /// space and generates independently — no lane ever reads another's
-    /// state. At least 1.
+    /// state. At least 1, and at most 1024.
     #[serde(default = "default_partitions")]
     pub partitions: u32,
     /// Seed of the whole stream. Lane `i` derives its own stream from it, so
@@ -164,6 +169,14 @@ impl DatagenSourceConfig {
             return Err(ConfigError::Validation(
                 "source.datagen.partitions must be at least 1".into(),
             ));
+        }
+        if self.partitions > MAX_PARTITIONS {
+            return Err(ConfigError::Validation(format!(
+                "source.datagen.partitions ({}) is above the {MAX_PARTITIONS} this source \
+                 builds: every lane holds its own generator, its rings and an arena sized \
+                 to one batch, and all of it is committed at open",
+                self.partitions,
+            )));
         }
         if self.events_per_tick == 0 {
             return Err(ConfigError::Validation(
@@ -271,6 +284,7 @@ mod tests {
     fn degenerate_values_are_rejected() {
         for (body, wanted) in [
             ("  partitions: 0\n", "partitions"),
+            ("  partitions: 1025\n", "partitions"),
             ("  events_per_tick: 0\n", "events_per_tick"),
             ("  count: 0\n", "count"),
             ("  partitions: 8\n  count: 4\n", "count"),

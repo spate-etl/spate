@@ -23,6 +23,7 @@ Connectors are grouped by role:
 |---|---|---|---|---|
 | [Kafka](sources/kafka/README.mdx) | Source | `spate-kafka` | `kafka` | `source: { kafka: ... }` |
 | [S3 (object storage)](sources/s3/README.mdx) | Source (bounded backfill) | `spate-s3` | `s3` | `source: { s3: ... }` |
+| [Datagen](sources/datagen/README.mdx) | Source (synthetic) | `spate-datagen` | `datagen` | `source: { datagen: ... }` |
 | [Kafka](sinks/kafka/README.mdx) | Sink (producer) | `spate-kafka` | `kafka` | `sink: { kafka: ... }` (or `sinks:` for multi-topic fan-out) |
 | [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `spate-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `spate-avro` | `avro` | `deserializer: { avro: ... }` |
@@ -53,6 +54,13 @@ under `sources/` or `sinks/`.
   was acknowledged and committed. Scales horizontally by running more
   replicas with a shared coordinator — see
   [the connector page](sources/s3/README.mdx).
+- **Datagen (source)** — no durable upstream, so it claims no resumability:
+  a restart begins every lane at offset 0 and the whole stream replays, which
+  is strictly more duplication than a real source produces. Its one durability
+  claim is the bounded case — a run with `count` set reaches `Completed` only
+  after every record was acknowledged and the final watermark committed, so a
+  clean exit is a real end-to-end assertion. A demo and test source, and
+  deliberately outside the `full` feature.
 - **Kafka (sink)** — a batch acknowledges only after **every** message's
   delivery report confirms, under forced `acks=all` + idempotence; a failed
   or timed-out report stalls the watermark and the batch replays.

@@ -203,7 +203,7 @@ to it. The framework requires exactly one `source`, exactly one of `sink` **or**
 
 | Section | Required | Body documented in |
 |---|---|---|
-| `source` | yes | [Kafka](../04-connectors/sources/kafka/README.mdx), [S3](../04-connectors/sources/s3/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sources](../06-extending/custom-source.mdx)) |
+| `source` | yes | [Kafka](../04-connectors/sources/kafka/README.mdx), [S3](../04-connectors/sources/s3/README.mdx), [Datagen](../04-connectors/sources/datagen/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sources](../06-extending/custom-source.mdx)) |
 | `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/formats/avro/README.mdx), [JSON](../04-connectors/formats/json/README.mdx) |
 | `sink` **or** `sinks` | yes (exactly one) | [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx), [Kafka](../04-connectors/sinks/kafka/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sinks](../06-extending/custom-sink.mdx)) |
 

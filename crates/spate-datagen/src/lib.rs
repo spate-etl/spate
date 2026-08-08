@@ -45,8 +45,15 @@
 //!
 //! - the same lane minted, and therefore the **same partition**;
 //! - at a **strictly greater offset**, because the lane released the order
-//!   first;
-//! - with an amount recomputed from that order's lines.
+//!   first.
+//!
+//! A payment settles the order's line total exactly. A refund is that total,
+//! or its half, third or quarter rounded down — never more than was captured,
+//! which is what a balance check downstream rests on.
+//!
+//! The mix places faster than it captures, so orders placed and never paid
+//! accumulate for as long as the pipeline runs; `open_orders` reports how
+//! many. A check reconciles the orders that were captured, not all of them.
 //!
 //! No lane reads another lane's state, so nothing is shared on the record
 //! path and the whole property survives the CPU-pinned fan-out. The payload
@@ -92,7 +99,9 @@
 
 mod config;
 mod dims;
+mod encode;
 mod events;
+mod plan;
 mod rng;
 
 pub use config::{Clock, DatagenSourceConfig, Dataset, Encoding};

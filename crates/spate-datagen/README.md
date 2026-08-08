@@ -33,9 +33,15 @@ Each lane owns a disjoint slice of the order-id space
 (`order_id = n × partitions + lane_index`) and keeps its own bounded ring of the
 orders it has placed and captured. A payment or refund is drawn from that ring,
 so it always references an order the same lane minted — same partition,
-strictly greater offset, amount recomputed from the order's lines. No lane
-reads another's state, so nothing is shared on the record path. The payload key
-carries the order id, so `KeyHashRouter` colocates an order and its payment.
+strictly greater offset. A payment settles the order's line total exactly; a
+refund is that total or a rounded-down half, third or quarter of it, never
+more. No lane reads another's state, so nothing is shared on the record path.
+The payload key carries the order id, so `KeyHashRouter` colocates an order and
+its payment.
+
+The mix places faster than it captures, so orders placed and never paid
+accumulate for as long as the pipeline runs — `open_orders` reports how many.
+A balance check reconciles the orders that were captured, not every order.
 
 ## Configuration
 

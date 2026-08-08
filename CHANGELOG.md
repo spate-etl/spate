@@ -5,7 +5,7 @@ All notable changes are recorded here. The format follows
 [semantic versioning](https://semver.org/) — with the pre-1.0 caveat that a
 breaking change ships in a **minor** bump, not a major one.
 
-All nine crates version in lockstep, so one entry covers the whole release.
+All ten crates version in lockstep, so one entry covers the whole release.
 There is a single supported version at a time: the newest `0.x` minor.
 
 Entries are written by hand, one per change, as fragments under

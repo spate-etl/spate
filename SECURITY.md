@@ -87,7 +87,7 @@ If a specific older version genuinely blocks you, say so on the advisory and a
 branch can be cut from its tag. That is a conversation, not a standing
 commitment.
 
-All nine crates version in lockstep, so "the newest minor" means the same thing
+All ten crates version in lockstep, so "the newest minor" means the same thing
 for every one of them.
 
 ## How the project defends itself

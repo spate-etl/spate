@@ -4048,6 +4048,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spate-datagen"
+version = "0.1.0"
+dependencies = [
+ "apache-avro",
+ "humantime-serde",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "spate-core",
+ "tracing",
+ "yaml_serde",
+]
+
+[[package]]
 name = "spate-json"
 version = "0.1.0"
 dependencies = [

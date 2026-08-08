@@ -2,12 +2,12 @@
 //!
 //! A [`Record`] is what moves through an operator chain: a payload (which
 //! may borrow from the source's buffers), a [`Copy`] metadata struct, and a
-//! clone of the source batch's acknowledgement handle
+//! clone of the source batch's acknowledgment handle
 //! ([`AckRef`](crate::checkpoint::AckRef)). Records are born inside a chain's
 //! `push_batch` call (deserialization) and die inside the same call
 //! (serialized into shard frames, filtered out, or failed) — they are never
 //! stored across the chain boundary, which is what makes borrowed payloads
-//! sound. See `docs/DESIGN.md` (§ Frozen v1 contracts).
+//! sound (ADR-0013).
 
 use crate::checkpoint::AckRef;
 
@@ -48,7 +48,7 @@ pub struct Record<T> {
     pub payload: T,
     /// Copyable metadata, preserved automatically by operators.
     pub meta: RecordMeta,
-    /// Acknowledgement handle shared by every record derived from the same
+    /// Acknowledgment handle shared by every record derived from the same
     /// source poll batch. Dropping it (filter, error-skip, or successful
     /// write) resolves this record's share of the batch.
     pub ack: AckRef,

@@ -770,7 +770,7 @@ mod tests {
     fn a_members_own_lane_budget_bounds_what_it_is_given() {
         // A worker configured with a smaller `max_in_flight` than the
         // leader's must not be handed more than it will claim. It reports
-        // its budget on its presence key; the leader honours it. Without
+        // its budget on its presence key; the leader honors it. Without
         // this, w2 looks permanently least-loaded (it holds one split
         // against w1's three), so the fill pass keeps assigning to a worker
         // whose own cap refuses the work and the splits never run.

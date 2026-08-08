@@ -244,7 +244,7 @@ fn assert_hits_every_branch(corpus: &[Vec<u8>], branches: u8) {
     }
 }
 
-/// One poll batch over a corpus, carrying the batch's acknowledgement handle.
+/// One poll batch over a corpus, carrying the batch's acknowledgment handle.
 struct TestBatch<'a> {
     corpus: &'a [Vec<u8>],
     idx: usize,

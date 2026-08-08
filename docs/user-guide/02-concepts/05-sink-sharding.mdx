@@ -110,6 +110,27 @@ limit — trades a bounded, observable slowdown for an unbounded memory leak
 and an ever-widening watermark gap. See [Backpressure](03-backpressure.mdx)
 for the pause/resume machinery and the sizing rule.
 
+### When every replica of a shard is unhealthy
+
+If no replica has a closed circuit breaker, there is nowhere to write. New
+attempts **park** until the earliest of three things:
+
+1. the next half-open probe window,
+2. an in-flight probe reporting its result,
+3. a re-check heartbeat, clamped to `[100ms, 30s]`.
+
+The second exists because a shard whose every replica is *already* probing has
+no next window to wait for — without it, such a shard would wait out the
+heartbeat despite an answer being seconds away. The heartbeat itself is a
+backstop against a wake that never arrives, not the recovery path; if it is
+what is waking your shard, something else has gone wrong.
+
+Parked attempts **hold their in-flight permits**, which is precisely how the
+stall reaches the source: intake blocks, the queue fills, and lanes pause. The
+shard reports `spate_sink_shard_healthy == 0` throughout. With a bounded
+`retry.max_attempts` the batch instead fails and replays after restart — the
+watermark stalls either way.
+
 ## The honest part: hot shards
 
 :::info
@@ -183,7 +204,7 @@ absorbs them.
 - [ClickHouse Distributed parity](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
   — making the router's placement bit-for-bit identical to the destination
   cluster's own sharding expression, so cluster reads can prune shards.
-- [docs/DESIGN.md](../../DESIGN.md) § Sink — the canonical treatment of the
+- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — the reasoning behind the
   routing seam, the two tiers, and the shard-worker model.
 - [docs/METRICS.md](../../METRICS.md) — the shard-labeled sink metrics that
   make skew and per-shard throughput visible.

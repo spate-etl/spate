@@ -3,7 +3,7 @@
 //! The framework needs rebalances to complete only after the pipeline has
 //! drained and committed, but librdkafka runs the rebalance callback inside
 //! `poll()` on the controller thread — the same thread that must orchestrate
-//! the drain. The escape hatch is librdkafka's deferred-acknowledgement
+//! the drain. The escape hatch is librdkafka's deferred-acknowledgment
 //! protocol: the callback may return **without** calling `assign`/`unassign`;
 //! the rebalance then stays in progress until the application calls them
 //! later. [`SourceContext::rebalance`] therefore only records an intent, and

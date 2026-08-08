@@ -40,7 +40,7 @@ pub struct DrainStats {
     pub unknown: usize,
 }
 
-/// Creates acknowledgement handles on pipeline threads.
+/// Creates acknowledgment handles on pipeline threads.
 ///
 /// One issuer per pipeline thread. Within an epoch, a partition must be
 /// issued from exactly one issuer (the runtime guarantees this: a partition
@@ -69,7 +69,7 @@ impl Clone for AckIssuer {
 }
 
 impl AckIssuer {
-    /// Issue the acknowledgement handle for a new source poll batch whose
+    /// Issue the acknowledgment handle for a new source poll batch whose
     /// highest contained offset is `last_offset`.
     ///
     /// Wait-free: one atomic load, one unbounded send, one allocation for
@@ -613,7 +613,7 @@ mod proptests {
 
     proptest! {
         /// Watermarks are per-partition monotonic, never move for
-        /// unassigned partitions, and acknowledgements issued under an old
+        /// unassigned partitions, and acknowledgments issued under an old
         /// epoch never affect a newer epoch's watermarks.
         #[test]
         fn epoch_churn_never_leaks_stale_acks(ops in ops()) {

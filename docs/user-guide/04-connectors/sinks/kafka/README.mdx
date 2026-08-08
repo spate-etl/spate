@@ -8,7 +8,7 @@ producer half of the Kafka connector: pipelines terminate in a Kafka topic
 on `rdkafka` with exactly **one producer per sink instance**, and a batch
 acknowledges only once **every** message's delivery report has confirmed —
 which is what lets the framework commit source offsets past it. Rationale
-and the ack wiring are in [docs/DESIGN.md](../../../../DESIGN.md) § Sink.
+and the ack wiring are in [ADR-0016](../../../../adr/0016-kafka-sink-ack-wiring.md).
 
 Construct it from the pipeline's opaque section, and terminate the chain
 with one of the sink's encoder helpers (they bake the configured
@@ -162,7 +162,7 @@ in-flight messages and joins its poll thread (≲1s).
 
 `spate-kafka` deliberately re-exports nothing from `rdkafka`: its types stay out
 of public signatures so `rdkafka` major bumps are not breaking changes here (see
-[docs/DESIGN.md](../../../../DESIGN.md) § Dependency policy).
+[ADR-0011](../../../../adr/0011-msrv-and-dependency-policy.md)).
 
 ## Metrics
 

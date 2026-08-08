@@ -71,7 +71,7 @@ harness = false
 # The wall-clock A/B tier, driven by `make bench-ab`. `harness = false` for the
 # same reason and one more: the runner protocol's arguments only reach the
 # target's own `main` when libtest is not in front of it, and libtest rejects
-# them first. `make check-wall-benches` is what fails if a stanza goes missing.
+# them first.
 [[bench]]
 name = "chain_wall"
 harness = false

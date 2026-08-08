@@ -187,7 +187,7 @@ impl KafkaSourceConfig {
         }
         // Prefetch depth is deliberately left at librdkafka's own defaults
         // (`queued.min.messages` 100000, `queued.max.messages.kbytes` 65536)
-        // so behaviour is predictable and reasoning transfers from librdkafka's
+        // so behavior is predictable and reasoning transfers from librdkafka's
         // documentation like it does for every other Kafka client.
         //
         // Forcing `queued.min.messages` to 1000 as a memory backstop cost,

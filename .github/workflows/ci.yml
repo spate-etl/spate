@@ -212,14 +212,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: make shellcheck
 
-      # The repository's own metadata has to stay self-consistent, and both of
-      # these check a class of drift nothing else would notice: a label
-      # referenced by an issue form or by Dependabot that does not exist (GitHub
-      # drops it silently), and the invariant lists in AGENTS.md, CONTRIBUTING.md
-      # and the pull request template falling out of step with docs/DESIGN.md.
-      # Both are pure file reads — no network, no toolchain.
-      - run: make check-labels
-      - run: make check-invariants
+      # The decision records and their index drift apart silently: the index is
+      # hand-maintained, and a record that never reaches it is invisible to
+      # every reader who starts there. Also catches a record scaffolded from the
+      # template and committed before its placeholders were filled in.
+      - run: make check-adr
 
       # The report script and perf-label.yml share a one-file contract that
       # no pull request can execute end to end — the label workflow runs the
@@ -235,19 +232,20 @@ jobs:
       # one, so a new check has to be added in both places.
       - run: make check-gungraun-benches
 
-      # The same trap on the wall tier, where it costs more to find late: the
-      # A/B driver builds both legs before it starts a target, so a missing
-      # stanza surfaces as a runner-protocol error several minutes into a
-      # comparison — and no job runs that tier, so nothing else would catch it
-      # before a person did.
-      - run: make check-wall-benches
-
       # The degenerate-region guard's own rule only executes where valgrind
       # does, which is one job of one tier on some pull requests. Its fixtures
       # are real profiles and need neither, so they run here on every pull
       # request — otherwise the guard could stop recognising either shape and
       # nothing would say so until the next benched change.
       - run: make check-collected-region
+
+      # A page's Rust snippets are slices of sources under `crates/`, resolved
+      # when the site builds. That build is path-filtered and carries a
+      # persistent bundler cache, so "the site job was green" is not the same
+      # statement as "every region still resolves" — and on a pull request that
+      # touches no page, the site job may not run at all. This reads both sides
+      # off disk and needs neither cargo nor node, which is why it belongs here.
+      - run: make check-transclusions
 
   deny:
     name: Licences and advisories

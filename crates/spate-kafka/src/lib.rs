@@ -49,7 +49,7 @@
 //!
 //! This crate deliberately re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
-//! changes here (see `docs/DESIGN.md` § Dependency policy).
+//! changes here (INV-6; ADR-0011).
 
 mod config;
 mod context;

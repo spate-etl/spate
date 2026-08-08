@@ -421,7 +421,7 @@ fn drive_batch(
                 from = resume_at;
                 // A batch that can never unblock must not hold shutdown
                 // hostage until the barrier deadline: abandon it (fail its
-                // acknowledgement — the data replays after restart) and
+                // acknowledgment — the data replays after restart) and
                 // hand control back so the Shutdown message is processed.
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::warn!(
@@ -500,7 +500,7 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
 
 /// Best-effort chain flush with a deadline (revocation and shutdown).
 /// A flush still blocked at the deadline is abandoned: the terminal
-/// stage's Drop contract fails any parked acknowledgements, so abandoned
+/// stage's Drop contract fails any parked acknowledgments, so abandoned
 /// data replays instead of being committed.
 fn flush_until(
     chain: &mut dyn RunnableChain,

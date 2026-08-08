@@ -6,7 +6,7 @@
 //! [`RunnableChain::push_batch`], once per poll batch. Records are born
 //! (deserialized) and die (encoded into shard frames, filtered, or skipped)
 //! inside a single `push_batch` call, so borrowed payloads never cross or
-//! outlive the boundary. See `docs/DESIGN.md` (§ Frozen v1 contracts).
+//! outlive the boundary (ADR-0013).
 
 mod builder;
 mod chain;
@@ -84,7 +84,7 @@ pub trait RunnableChain: Send {
     fn flush(&mut self) -> PushOutcome;
 
     /// Discard any per-batch replay/resume state after the driver failed the
-    /// current batch's acknowledgement (a shutdown-time abandonment of a
+    /// current batch's acknowledgment (a shutdown-time abandonment of a
     /// batch blocked mid-push). Terminal parked chunks — which carry their
     /// own acks — are unaffected; only the chain's own mid-batch cursor and
     /// any stashed not-ready payload are cleared, so the next `push_batch` of

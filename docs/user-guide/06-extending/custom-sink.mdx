@@ -10,7 +10,7 @@ A sink is two pieces, split across the process's two halves
 
 Everything between is the framework's: chunking, per-shard batching to
 `max_rows`/`max_bytes`/`linger`, replica rotation, circuit breakers,
-retries, acknowledgements, backpressure. You write the two edges.
+retries, acknowledgments, backpressure. You write the two edges.
 
 This page mirrors the sink half of
 `crates/spate/examples/custom_source_sink.rs` (a JSON-lines-to-stdout sink)
@@ -56,6 +56,24 @@ Contracts:
   type can never match the target schema) and every subsequent record would
   fail identically. See
   [Error handling](../02-concepts/04-error-handling.mdx).
+- **The terminal stage clones one encoder per shard**, which is why the type is
+  `Clone`. Shards never share encoder state, so anything you buffer is private
+  to one shard and you do not need to synchronize it.
+
+### Buffering: encoders that are not row-at-a-time
+
+A columnar format cannot emit bytes per row — it transposes a block and writes
+it whole. Two defaulted hooks make that fit the same trait:
+
+| Hook | What it is for |
+| --- | --- |
+| `buffered_bytes()` | Report how much you are holding, so the framework's size accounting stays accurate while nothing has been written to `buf` |
+| `finish_chunk()` | Flush your buffered block; called when the chunk seals |
+
+Implement both and `encode` becomes "accumulate a row"; leave them defaulted and
+your encoder stays row-at-a-time, which is what most formats want. Because each
+shard has its own encoder clone, a buffered block belongs to exactly one shard's
+chunk and cannot interleave with another's.
 
 ## The I/O half: `ShardWriter`
 
@@ -81,7 +99,7 @@ impl ShardWriter for StdoutWriter {
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
   system has durably accepted the batch — a synchronous server ack, a
   delivery confirmation, or here, after printing. The framework releases the batch's
-  acknowledgements on `Ok`, which is what lets the source watermark advance
+  acknowledgments on `Ok`, which is what lets the source watermark advance
   past that data — return `Ok` early and a crash loses records, violating
   at-least-once.
 - **Retries reuse the sealed batch unchanged**, rotating across healthy
@@ -96,6 +114,24 @@ impl ShardWriter for StdoutWriter {
   data replays after restart).
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
+
+### If you hold acknowledgment handles, fail them on teardown
+
+Dropping a record's acknowledgment means *delivered* — that default is what
+makes `filter` and `flat_map` correct for free. It also means any component
+holding handles for data it has **not** durably written must explicitly fail
+them in its `Drop`, or teardown silently reports unwritten data as delivered and
+the watermark advances past it.
+
+The framework does this for its own seams: the chain's terminal stage fails
+parked chunks and partial buffers, and sink workers fail abandoned batches. If
+your connector holds handles anywhere the framework cannot see — an internal
+queue, a retry buffer of your own — it owes the same.
+
+**Over-failing is always safe.** It costs a replay, never a loss, so when in
+doubt, fail. Collections on the sink path already work this way: an `AckSet`
+fails its handles on drop and delivers only after a durable write, so teardown
+anywhere stalls the watermark rather than committing data nobody wrote.
 
 ## Handing it to the builder: `SinkParts`
 
@@ -158,7 +194,7 @@ impl SinkBundle for MySink {
 itself implements it, which is why hand-rolled sinks skip the impl. The
 only bound anywhere is `ShardWriter`, so your connector's client types
 never appear in framework APIs (the dependency policy in
-[docs/DESIGN.md](../../DESIGN.md)). Connector-specific flows the framework
+[ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)). Connector-specific flows the framework
 cannot name — a pre-flight schema check that produces the encoder's row
 schema, say — stay concrete pre-steps in your factory, before `into_parts`.
 

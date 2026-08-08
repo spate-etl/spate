@@ -31,7 +31,7 @@ pub struct ChunkConfig {
     /// indefinitely: the controller flushes partial chunks on every commit
     /// tick (`checkpoint.interval`), and the driver flushes them on an idle
     /// lull, so while the pipeline is unblocked a partial buffer holds its
-    /// acknowledgements for at most ~one checkpoint interval. (A driver
+    /// acknowledgments for at most ~one checkpoint interval. (A driver
     /// wedged retrying a blocked batch defers the flush until the sink
     /// drains — but nothing commits during that time anyway.)
     pub target_bytes: usize,
@@ -203,7 +203,7 @@ where
 }
 
 /// Teardown safety: un-sent output (parked chunks after a drain deadline,
-/// partial shard buffers) holds its acknowledgements in fail-on-drop
+/// partial shard buffers) holds its acknowledgments in fail-on-drop
 /// [`AckSet`]s, so tearing the handoff down stalls those watermarks and the
 /// records replay after restart — at-least-once over completeness, always.
 /// This `Drop` only reconciles the in-flight byte budget for parked chunks

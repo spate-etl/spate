@@ -80,7 +80,8 @@ pub use source::SourceMetrics;
 // handle types are part of this crate's public surface — a connector storing
 // a [`Meter`]-minted handle in its own struct names them without taking a
 // direct `metrics` dependency, keeping one facade version across the tree.
-// This is the one sanctioned 0.x public-API exception (see `docs/DESIGN.md`).
+// This is the one sanctioned 0.x public-API exception (INV-6; see
+// `docs/adr/0008-metrics-facade.md`).
 pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
@@ -724,7 +725,7 @@ mod tests {
         assert_eq!(divergence, None, "gauge stranded off the live backoff set");
     }
 
-    /// The value of an unlabelled-or-single-series gauge in a rendered
+    /// The value of an unlabeled-or-single-series gauge in a rendered
     /// exposition (the value is the line's last space-separated token).
     fn gauge_value(rendered: &str, name: &str) -> f64 {
         let line = rendered
@@ -891,8 +892,8 @@ mod tests {
     fn per_partition_series_are_gated_and_retained() {
         // Distinct component labels: both instances share a family name, so
         // the gated one needs its own series to be provably absent. Its
-        // *unlabelled* aggregate is registered eagerly either way — only the
-        // `partition`-labelled series are gated.
+        // *unlabeled* aggregate is registered eagerly either way — only the
+        // `partition`-labeled series are gated.
         let gated_labels = ComponentLabels::new("orders", "gated_checkpoint", "checkpoint");
         let rendered = render_with_local_recorder(|| {
             let gated = CheckpointMetrics::new(&gated_labels, false);

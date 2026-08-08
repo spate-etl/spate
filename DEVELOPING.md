@@ -1,0 +1,198 @@
+# Developing
+
+Maintainer and returning-contributor reference: the build, test and benchmark
+mechanics.
+
+## Targets
+
+`make help` lists every target, grouped. `make gates` is the pull request bar and
+covers formatting, clippy, the type check, the test suite, doctests, the feature
+matrix, licences and advisories, and `make ci-lint` — the repository-metadata
+checks, which read files and need no toolchain.
+
+Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
+status of the last command in the pipeline and have masked real failures here
+more than once, which is why no target contains a pipe.
+
+CI calls the same targets for lint, type check, doctests, the feature matrix,
+licences and every `ci-lint` member. Four jobs spell out invocations of their own
+instead — test and coverage, containers, the site, and the allocation
+assertions — so a green `make gates` locally does not mean CI has nothing left
+to say.
+
+These sit outside `gates`, by cost or by dependency:
+
+| Target | Why it is outside |
+| --- | --- |
+| `make test-docker` | Needs Docker and pulls real images |
+| `make loom` | Exhaustive interleaving; minutes, not seconds |
+| `make docs` | Needs Node; runs nightly and on documentation changes |
+| `make bench-check` | Builds the whole tree again in the release profile |
+| `make bench-gungraun` | Needs Linux and valgrind |
+| `make bench-gungraun-check` | Proves only that the benches build, not what they count |
+| `make bench-ab`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
+| `make attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
+
+Two commands deliberately omit `--locked`, which everything else passes because
+CI does. `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a
+locked build refuses; `cargo fmt` resolves nothing, reading only `.rs` files.
+
+`make docs` sets `CI=true`, which is load-bearing: the client-redirects plugin
+only registers under it, so a plain `npm run build` silently skips redirect
+validation — and a redirect pointing at a page you deleted is a hard failure.
+
+## The test suite
+
+Tests run under [cargo-nextest](https://nexte.st), one process per test
+concurrently, where `cargo test` runs one binary at a time. Plain
+`cargo test --workspace` still works and is many times slower. nextest does not
+run doctests; `make doctest` does.
+
+Three profiles, in `.config/nextest.toml`:
+
+- **`default`** — `fail-fast = false`, and a 30-second slow warning that
+  terminates after four periods, so a hard kill at 120s. The container suites are
+  excluded here and nothing left should take that long.
+- **`ci`** — what actually runs on a pull request. 60 seconds, terminating after
+  four, plus one retry and a JUnit report, so a retried test surfaces as a flaky
+  annotation rather than a silently green run.
+- **`docker`** — warns at 120 seconds and **never terminates**, because a cold
+  image pull can exceed any figure worth setting and a SIGKILL reports as a
+  timeout indistinguishable from a genuine hang. One retry, JUnit report.
+
+Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
+skips them. `make test-docker` is the only thing that selects them.
+
+`--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
+Drop it when you are not touching the TLS surface.
+
+**On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
+its first exec** while Gatekeeper scans it. Across this workspace that alone
+costs about half an hour per edit-test cycle. Add your terminal to *System
+Settings → Privacy & Security → Developer Tools* to exempt it.
+
+### What CI selects, and how to widen it
+
+CI picks the container suites from the paths a pull request changed. Which
+counted benches run is derived the same way, from the benches themselves: a crate
+with a bench selects its own, `spate-core` selects every benched crate because
+everything depends on it, and a crate without one selects nothing.
+
+For a change whose reach those paths do not show — a refactor moving code between
+crates, or a dependency swap — a maintainer can label the pull request
+`ci: docker`, `ci: loom` or `ci: bench`. All three only ever add work; none can
+switch a suite off. `make self-test` checks the classifier against the crate
+graph.
+
+## Testing conventions
+
+Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's
+`tests/`, doc tests on public APIs. proptest for tracker and codec invariants,
+loom for the synchronisation primitives, rdkafka's `MockCluster` and the
+ClickHouse mocks for connector behaviour that does not need a container.
+
+Framework users test their pipelines with `spate-test`'s in-memory source and
+capture sink — keep those first-class, and prefer them for reproductions. A test
+written against them needs no infrastructure and runs in milliseconds.
+
+One trap worth knowing: `cargo test` runs a binary's tests in one process, and
+metric series ownership is process-wide (INV-10). Fixtures therefore need
+per-test `pipeline` and `component` labels; a local recorder does not isolate the
+claim.
+
+## Benchmarks
+
+Three tiers, answering different questions. Only the counted tier gates a pull
+request.
+
+None of them sweeps this framework's own settings against each other end to end,
+and neither does the
+[benchmark repository](https://github.com/spate-etl/benchmark), which runs one
+fixed pipeline across several frameworks. The tiers here measure inside a single
+component. A claim that needs the rig nobody has is a claim to state as
+unmeasured rather than to dress in a figure nothing can reproduce.
+
+### The counted tier
+
+`make bench-gungraun` counts instructions under valgrind rather than measuring
+wall time, which is what makes a number comparable across machines instead of a
+property of the one that produced it. It needs Linux, valgrind, and a
+`gungraun-runner` at the version `Cargo.lock` pins for `gungraun`; a mismatch is
+a hard error. On macOS the most you can check is that the benches build, which is
+`make bench-gungraun-check`.
+
+Adding one is two steps: name the file `benches/<something>_gungraun.rs`, and
+declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
+Nothing else registers it — `scripts/gungraun-benches.sh` discovers it by that
+name, and the Makefile target, both CI legs and `scripts/ci-changes.sh` all read
+from that one place, so there is no list to add yourself to. Running that script
+bare prints what would run. Skipping the `harness = false` stanza is the mistake
+worth knowing about: cargo auto-discovers the file anyway under the default
+libtest harness, so the bench compiles cleanly and fails at run time complaining
+about arguments. `make check-gungraun-benches` catches it.
+
+**Put the measured work in a named `#[inline(never)]` function and have the
+benchmark function call it.** This is the one rule about a counted bench that
+cannot be inferred from a working example, and getting it wrong produces a number
+rather than an error. Collection is bounded by a callgrind toggle on the module
+the `#[library_benchmark]` macro wraps the function in, and a toggle *flips*
+collection rather than forcing it on — so work written inline in that function
+can be reshaped by the optimiser until it falls outside the collected region, and
+whatever runs while collection happens to be on is counted instead. What that
+turns out to be is glibc tearing down the corpus the fixture built. One bench
+here reported 858,925 instructions that way, every one of them in
+`malloc_consolidate` and `unlink_chunk`, with no application frame at all and the
+same total whether its corpus held 400 documents or 6,400; moving the loop behind
+a named callee took it to 30,086,540. The benches that never hit this were not
+written more carefully — each happened to reach its workload through a single
+cross-crate call, which is a frame the toggle cannot lose. A named
+`#[inline(never)]` callee is how a bench gets that property on purpose.
+
+`scripts/gungraun-collected-region.sh` enforces it, from the callgrind profile
+rather than from the source: a case must attribute at least 10% of its collected
+instructions to the binary under measurement — against a real spread that bottoms
+out at 33.35% on the runner architecture and 28.67% on arm64 — and must collect
+at least 1,000 of them, since a region can also be lost by leaving almost nothing
+rather than by leaving the allocator. `make bench-gungraun` runs it after the
+benches, and CI runs it per shard as a *gate*: the counts are advisory, a bench
+measuring the allocator is not. `make check-collected-region` checks the guard
+itself against captured profiles of both shapes, and needs no valgrind.
+
+Measuring a crate under more than one compiled feature arm *is* a second edit:
+CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
+`scripts/ci-changes.sh`. Add an arm when a feature swaps an implementation the
+benches execute, not for every feature key — each arm is another pair of builds
+and valgrind runs. `make self-test` checks the table against `cargo metadata`.
+
+### The wall-clock tier
+
+`spate-bench`, in [`bench/`](bench/README.md), plus `*_wall.rs` targets in the
+crates themselves. Nothing it produces is stored and nothing here is a gate: a
+wall-clock number answers "did this change move it", which is a question somebody
+asks about a specific change on a machine they control.
+
+```sh
+make bench-list                 # every case, with its flags
+make bench-ab REF=main REPS=10  # this tree against a reference
+```
+
+Targets follow the same rule as the counted tier — `benches/<name>_wall.rs` plus
+a `[[bench]]` with `harness = false`. Without the stanza cargo builds the target
+under libtest, which rejects the runner protocol's arguments, and the driver says
+so with the stanza to add. Expect that minutes in rather than at the start: it
+builds both legs before it starts either.
+
+When you measure two arms by hand, **interleave them** — every arm once per
+repetition, rather than one arm finished before the next starts — and throw the
+first pass away. Anything that drifts over a run otherwise lands entirely on
+whichever arm goes last, and the first repetition hands one arm the cold-start
+cost, which has been large enough here to decide which arm looked faster. Report
+an interval and the repetition count beside the value, so a reader can tell a
+difference from a spread. `make bench-ab` does all of that.
+
+### Criterion
+
+`crates/spate-avro/benches/decode.rs` and
+`crates/spate-clickhouse/benches/encode.rs` are criterion targets, outside both
+conventions above. `make bench-check` compiles them and the nightly job runs
+them.

@@ -4,9 +4,9 @@ A pipeline drains on SIGTERM (or SIGINT, or a programmatic
 `ShutdownHandle::trigger`): it stops taking new data, flushes what it has,
 commits exactly what was durably written, and exits with a meaningful code.
 This guide covers the choreography, how to size the one timeout that
-governs it, and what happens when the deadline is not met. The canonical
-description is [docs/DESIGN.md](../../DESIGN.md) § Errors, panics,
-shutdown, health.
+governs it, and what happens when the deadline is not met. For what a failure
+during the drain means for your data, see
+[Error handling](../02-concepts/04-error-handling.mdx).
 
 ## The drain choreography
 
@@ -78,7 +78,7 @@ prefers `?`.
 
 If the sink cannot flush everything by the deadline — a destination outage
 mid-shutdown, say — the remaining batches are **abandoned loudly**: a log
-line and a metric, their acknowledgements are failed, and their partitions'
+line and a metric, their acknowledgments are failed, and their partitions'
 watermarks never advance past them. The final commit therefore commits only
 what was actually written, and the abandoned data **replays after restart**.
 That is at-least-once holding under the worst case: an abandon costs
@@ -94,7 +94,7 @@ target tables to tolerate duplicates. See
 
 The deadline is **cooperative**: each sink worker watches it and, when it
 fires, aborts its in-flight writes and abandons what is left. Underneath
-that sits a **hard backstop** — a worker that has not returned two seconds
+that sits a **hard backstop** — a worker that has not returned one second
 past the deadline is force-aborted by the pool. The backstop should never
 fire; it exists so that an unforeseen stall degrades shutdown to a lost
 drain report rather than an unbounded hang, and it says so on
@@ -104,6 +104,14 @@ bug worth reporting.
 One thing the framework cannot do for you: a `write_batch` that blocks its
 thread between await points cannot be aborted by anyone. Give your sink's
 client a request timeout and let the retry policy handle the failure.
+
+The cooperative layer is only sound because **nothing on a worker's intake path
+blocks outside the `select!` that arms the deadline.** Anything a worker waits
+on sits in a branch alongside the deadline branch — otherwise the deadline is
+not being polled while the worker waits, and shutdown deadlocks rather than
+degrading. That is why dispatch parks a sealed batch waiting for a permit
+instead of awaiting one: an await there would be outside the `select!`, and the
+backstop would become the normal path instead of the never-fires path.
 
 ### Leaked queues {#leaked-queues-bounded-loud-contained}
 

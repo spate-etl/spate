@@ -22,8 +22,10 @@
 //!
 //! # Anatomy of a pipeline
 //!
-//! One process runs one pipeline (see `docs/DESIGN.md` in the repository
-//! for the full architecture and its rationale):
+//! One process runs one pipeline (the [user guide] carries the full
+//! architecture and its rationale):
+//!
+//! [user guide]: https://spate.kainth.dev/docs/user-guide/
 //!
 //! ```text
 //!                     ┌───────────────────────────────────────────────┐
@@ -107,7 +109,7 @@
 //!   [`source::SourceLane`], [`sink::RowEncoder`], [`sink::ShardWriter`])
 //!   and the framework-owned sink pool.
 //! - [`pipeline`] — the runtime: pinned threads, controller, shutdown.
-//! - [`checkpoint`] / [`backpressure`] — acknowledgements and flow control.
+//! - [`checkpoint`] / [`backpressure`] — acknowledgments and flow control.
 //! - [`config`] — YAML with `${VAR:-default}` interpolation and opaque
 //!   per-connector sections.
 //! - [`metrics`] / [`admin`] / [`telemetry`] — observability (the

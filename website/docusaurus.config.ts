@@ -1,6 +1,11 @@
 import type { Config, PluginConfig } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import { themes as prismThemes } from 'prism-react-renderer';
+// Extensionless on purpose: `moduleResolution: bundler` rejects an explicit
+// `.ts`, and Docusaurus loads this config through jiti, which transpiles
+// nested TypeScript imports and resolves `.ts` itself.
+import transclude from './src/remark/transclude';
+import transcludeDeps from './src/plugins/transcludeDeps';
 
 // The site is deployed to Cloudflare Pages on a dedicated subdomain:
 // https://spate.kainth.dev/ (Direct Upload from CI — see the nightly
@@ -27,6 +32,10 @@ const githubUrl = `https://github.com/${organizationName}/${projectName}`;
 //   - guides/schema-validation -> connectors/sinks/clickhouse/schema-validation
 //     (the page was entirely ClickHouse-specific, so it moved to the connector
 //     it documents; see docs/STYLE.md § the framework/connector boundary).
+//   - DESIGN -> user-guide/concepts (the design document was dissolved: its
+//     rationale became docs/adr/, its invariants docs/INVARIANTS.md, and its
+//     architecture prose the Concepts section, which is where a reader
+//     following an old link is looking).
 //
 // A redirect whose `to` names a page that no longer exists FAILS the build.
 // Deleting a page therefore means deleting any redirect aimed at it — the
@@ -51,6 +60,7 @@ const clientRedirects: PluginConfig = [
         from: '/docs/user-guide/guides/schema-validation',
         to: `${chConnector}/sinks/clickhouse/schema-validation`,
       },
+      { from: '/docs/DESIGN', to: '/docs/user-guide/concepts' },
     ],
   },
 ];
@@ -116,6 +126,10 @@ const config: Config = {
     // CI-only, as a standing precaution rather than for any entry currently
     // in the set (see clientRedirects above).
     process.env.CI === 'true' ? clientRedirects : false,
+    // Not conditional. What it registers is a cache-correctness fact — which
+    // sources a page's fences are rendered from — and a rebuild that is only
+    // correct in CI is the wrong half of the problem to solve.
+    transcludeDeps,
   ],
 
   themes: [
@@ -140,7 +154,7 @@ const config: Config = {
       'classic',
       {
         docs: {
-          // Read the existing repo docs/ tree in place — keeps docs/DESIGN.md,
+          // Read the existing repo docs/ tree in place — keeps docs/INVARIANTS.md,
           // docs/METRICS.md, etc. at the paths AGENTS.md and the README rely on.
           path: '../docs',
           routeBasePath: 'docs',
@@ -157,6 +171,15 @@ const config: Config = {
             '**/__tests__/**',
             'STYLE.md',
           ],
+          // Renders `file=`/`region=` fences from the compiled sources under
+          // `crates/` (docs/STYLE.md § 10). Registered BEFORE the defaults
+          // rather than after them (`remarkPlugins`) for two reasons: the
+          // default list ends with plugins that mutate the tree and can throw
+          // first under this site's `onBrokenMarkdownLinks: 'throw'`, so a
+          // stale region should report as a stale region; and the mermaid
+          // plugin *replaces* a fenced node, so a ```mermaid fence carrying
+          // `file=` would never reach a plugin registered after it.
+          beforeDefaultRemarkPlugins: [transclude],
         },
         blog: false,
         theme: {
@@ -186,8 +209,8 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/DESIGN',
-          label: 'Design',
+          to: '/docs/adr/',
+          label: 'Decisions',
           position: 'left',
         },
         {
@@ -218,7 +241,8 @@ const config: Config = {
           title: 'Docs',
           items: [
             { label: 'User Guide', to: '/docs/user-guide/' },
-            { label: 'Architecture (Design)', to: '/docs/DESIGN' },
+            { label: 'Decisions', to: '/docs/adr/' },
+            { label: 'Invariants', to: '/docs/INVARIANTS' },
             { label: 'Metrics', to: '/docs/METRICS' },
           ],
         },

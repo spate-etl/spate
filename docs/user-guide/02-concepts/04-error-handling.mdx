@@ -14,7 +14,7 @@ metrics. There are no dead-letter queues and no silent drops.
 
 ## Record-level policy: Skip or Fail — nothing else
 
-- **Skip**: count the record on a metric, resolve its acknowledgement as
+- **Skip**: count the record on a metric, resolve its acknowledgment as
   delivered (so the watermark advances past it — an intentional drop must
   never stall commits), and continue.
 - **Fail**: stop the pipeline. The batch resolves as failed, the watermark
@@ -59,6 +59,19 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 | `spate_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |
 | `spate_operator_errors_total` | `error_type` | User-code errors by taxonomy class. |
 | `spate_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
+| `spate_deser_not_ready_total` | — | Deserialization deferred because an upstream dependency was not yet available. |
+
+That last one is not an error, and it is worth knowing why it has its own
+series. A deserializer can report that it is **not ready** rather than that it
+failed — waiting on a schema fetch, say. The framework retries it **without
+pausing the source**, because the source is not the problem and pausing it
+would slow a pipeline that is merely waiting on a lookup. A rising count is
+normal during a cold start and suspicious in steady state: it means something
+upstream is repeatedly not answering in time.
+
+This is distinct from the sink being full, which *does* pause the source. Both
+report the push as blocked; only the reason differs. See
+[Backpressure](03-backpressure.mdx).
 
 A useful alert from [docs/METRICS.md](../../METRICS.md): a non-zero
 `rate(spate_deser_records_dropped_total[5m])` means schema drift or poison
@@ -98,7 +111,7 @@ messages are being skipped — Skip keeps you up, not uninformed. See
 
 ## Further reading
 
-- [docs/DESIGN.md](../../DESIGN.md) § Errors, panics, shutdown, health —
+- [ADR-0010](../../adr/0010-skip-or-fail-record-error-policies.md) —
   the canonical policy statement.
 - [docs/METRICS.md](../../METRICS.md) — the full metric taxonomy.
 - [Graceful shutdown](../03-guides/graceful-shutdown.mdx) — what a

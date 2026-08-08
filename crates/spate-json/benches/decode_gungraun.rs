@@ -9,7 +9,7 @@
 //! The rig itself is `support/decode_rig.rs`, which both tiers compile, so the
 //! region counted here is the region the wall tier times.
 //!
-//! One shape — one payload through one deserializer — parameterised by the
+//! One shape — one payload through one deserializer — parameterized by the
 //! framing the payload carries, the target it decodes into, the shape of the
 //! document, and what the deserializer is asked to do when a record does not
 //! decode.
@@ -66,7 +66,7 @@
 //! - `deep_nested` — documents nested to the decoder's practical depth.
 //! - `numeric_array` — almost nothing but number conversion.
 //! - `large_string` — one field three orders of magnitude larger than its
-//!   neighbours. This is the case the `simd` backend's mandatory copy of the
+//!   neighbors. This is the case the `simd` backend's mandatory copy of the
 //!   payload into its scratch buffer is large enough to show in; the crate's
 //!   claim that the copy is negligible rests on flat records, which is not
 //!   where a copy would ever have been visible.

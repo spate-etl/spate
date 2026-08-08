@@ -9,7 +9,7 @@ destinations). All sinks share the framework's
 
 | Sink | Config tag | Summary |
 |---|---|---|
-| [Kafka](kafka/README.mdx) | `sink: { kafka: ... }` | Producer on `rdkafka`; forced `acks=all` + idempotence, per-batch delivery-report acknowledgement, one topic per sink. |
+| [Kafka](kafka/README.mdx) | `sink: { kafka: ... }` | Producer on `rdkafka`; forced `acks=all` + idempotence, per-batch delivery-report acknowledgment, one topic per sink. |
 | [ClickHouse](clickhouse/README.mdx) | `sink: { clickhouse: ... }` | Sharded RowBinary/Native insert; end-to-end `wait_end_of_query` acks, dedup tokens, circuit-breaker replica rotation. |
 
 The [Memory / Capture](../memory.mdx) test connector also acts as a sink

@@ -4,13 +4,21 @@ This section is for library users building their own components: connector
 authors and anyone whose pipeline needs more than the shipped connectors.
 The framework's abstractions were sized for exactly
 this — small, stable traits at the edges, with batching, retries,
-acknowledgements, checkpointing, and backpressure all owned by the engine so
+acknowledgments, checkpointing, and backpressure all owned by the engine so
 your component doesn't have to be.
 
-The frozen v1 contracts these pages implement are specified in
-[docs/DESIGN.md](../../DESIGN.md) (§ Frozen v1 contracts); exact signatures
-live on [docs.rs](../07-reference/README.mdx). Every page mirrors a runnable
+The contracts these pages implement are specified in
+[The v1 contracts](contracts.mdx), which also covers the erasure boundary they
+all meet at; exact signatures live on
+[docs.rs](../07-reference/README.mdx). Every page mirrors a runnable
 example under `crates/spate/examples/`.
+
+## [The v1 contracts](contracts.mdx)
+
+The traits every component here implements, and the single erasure boundary
+that shapes them: why a record can borrow from the source's buffers and still
+cross into a trait object, how a blocked push distinguishes sink pressure from
+an upstream dependency, and what `RecFamily` is working around.
 
 ## [Custom sources](custom-source.mdx)
 

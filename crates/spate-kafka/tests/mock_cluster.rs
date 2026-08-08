@@ -135,7 +135,7 @@ fn full_lifecycle_polls_acks_and_commits() {
         assert!(rows[3].0.starts_with(format!("a-p{p}-").as_bytes()));
         assert!(rows[3].1.starts_with(format!("k{p}-").as_bytes()));
     }
-    // Batches were dropped in drain_lane: acknowledgements resolve.
+    // Batches were dropped in drain_lane: acknowledgments resolve.
     drop(lanes);
     cp.drain();
     let mut watermarks = cp.take_watermarks();
@@ -720,7 +720,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
     }
 
     // No aggregate series shares the family name: readers aggregate with
-    // `sum`/`max`, which double-counts if an unlabelled series exists.
+    // `sum`/`max`, which double-counts if an unlabeled series exists.
     assert!(
         !rendered
             .lines()

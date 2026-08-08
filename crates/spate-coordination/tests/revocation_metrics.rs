@@ -294,7 +294,7 @@ fn a_real_revocation_moves_every_metric_seam() {
 ///
 /// `outcome=cancelled` is written from exactly one place, so nothing else in
 /// the suite would notice if it were recorded as `drained`, or not recorded
-/// at all — the behavioural tests in `multi_worker` assert events and held
+/// at all — the behavioral tests in `multi_worker` assert events and held
 /// sets, which are identical either way. This drives a real cancellation and
 /// reads the exposition.
 ///

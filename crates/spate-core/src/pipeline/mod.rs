@@ -1,7 +1,7 @@
 //! Pipeline runtime: pinned driver threads, the source controller, and
 //! process assembly.
 //!
-//! Thread anatomy (see `docs/DESIGN.md` § Process anatomy):
+//! Thread anatomy:
 //!
 //! ```text
 //! main (run())          controller (std thread)      driver 0..N (std threads)
@@ -17,7 +17,7 @@
 //! unbounded crossbeam channels: control traffic is rare and must never
 //! block a poll loop.
 //!
-//! Shutdown (also the full-revocation path, per DESIGN.md § Shutdown):
+//! Shutdown (also the full-revocation path):
 //! SIGTERM → controller stops event polling and sends `Shutdown` to every
 //! driver → each driver flushes its chain, drops its lanes, and arrives at
 //! the barrier → main joins driver threads (dropping chains closes the
@@ -59,11 +59,11 @@ pub(crate) enum ThreadControl<L> {
     /// A lane that reached genuine end-of-input has no more data coming, so
     /// its tail would otherwise sit in the chain until `idle_flush` elapses
     /// — unacknowledged, and therefore blocking the completion of whatever
-    /// unit of work it belongs to. Best-effort and unsynchronised: the
+    /// unit of work it belongs to. Best-effort and unsynchronized: the
     /// controller does not wait, and a blocked chain simply retries on the
     /// ordinary lull check.
     FlushNow,
-    /// Drop the listed lanes without flushing or synchronising
+    /// Drop the listed lanes without flushing or synchronizing
     /// ([`SourceEvent::LanesRetired`](crate::source::SourceEvent::LanesRetired)):
     /// their input is fully delivered, acknowledged *and* committed, so
     /// nothing of theirs can sit unflushed in the chain. Pure bookkeeping —
@@ -108,7 +108,7 @@ pub struct SinkRuntime {
     /// A single-sink pipeline has one entry.
     pub queues: Vec<ShardQueues>,
     /// Drain the sinks: flush what's pending within the budget, fail the
-    /// acknowledgements of anything abandoned, and report. For multi-sink
+    /// acknowledgments of anything abandoned, and report. For multi-sink
     /// pipelines this is the composed hook that drains every sink.
     pub drain: SinkDrainFn,
     /// Optional connectivity probe (e.g. `SinkPool::probe_all`). The

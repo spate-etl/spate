@@ -97,11 +97,11 @@ where
 /// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
 /// fail anything — it silently empties the measurement. Callgrind toggles
 /// collection on the benchmark function's module, and a toggle flips
-/// collection rather than forcing it on, so work the optimiser reshapes across
+/// collection rather than forcing it on, so work the optimizer reshapes across
 /// that boundary leaves the region holding whatever else was running — usually
 /// the allocator tearing down the corpus. `deserialize` is generic over the
 /// record family and monomorphises into this crate, which makes it an ordinary
-/// inlining candidate; a named frame the optimiser may not erase is what keeps
+/// inlining candidate; a named frame the optimizer may not erase is what keeps
 /// the decode inside the region.
 ///
 /// The wall tier does not need the attribute and is not harmed by it: it times
@@ -115,7 +115,7 @@ where
 /// counter that accumulated would fail the assertion on the second iteration.
 ///
 /// Returning the emitted count is what keeps the call alive: the records are
-/// otherwise unobserved, and without a use the optimiser is free to delete the
+/// otherwise unobserved, and without a use the optimizer is free to delete the
 /// decode this exists to count. The caller asserts it, so a fixture that
 /// silently stopped emitting — or started decoding cleanly — cannot pass as a
 /// fast one.

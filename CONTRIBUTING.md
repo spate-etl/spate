@@ -1,340 +1,127 @@
 # Contributing
 
 The most useful contribution this project can receive is one that proves a
-delivery guarantee wrong. At-least-once is the promise everything else is
-arranged around, and a framework that quietly loses records is worth less than
-no framework at all — so a report or a failing test that shows the watermark
-advancing past unacknowledged data goes to the front of the queue, ahead of
-any feature.
+delivery guarantee wrong — a report, or better a failing test, showing a source
+watermark advancing past unacknowledged data. At-least-once is the promise
+everything else is arranged around, so that goes ahead of any feature. After it:
+connectors, because the abstractions exist so third parties can write them, and
+anything measurably faster that does not weaken what the engine promises.
 
-After that: connectors, because the abstractions exist so third parties can
-write them; and anything that makes the engine measurably faster without
-weakening what it promises.
+## Before you start
 
-## Reporting something
+For anything large, and for anything breaking, open an issue first — it tells you
+whether the change will be accepted before you write it. A maintainer should
+comment on or review a pull request within a few days, though depending on
+circumstances it can take longer.
 
-There are four forms, and the first one is the point of the list: a delivery
-guarantee that did not hold. The others are an ordinary bug, a performance
-problem, and a proposal. Blank issues are off deliberately — each form asks the
-question somebody would have to ask you anyway, and asking it once beats a
-round-trip.
+There are four issue forms: a delivery guarantee that did not hold, an ordinary
+bug, a performance problem, and a proposal. Blank issues are off deliberately,
+because each form asks the question somebody would have to ask you anyway. A
+vulnerability is the exception and never goes in an issue — see
+[Security and legal](#security-and-legal).
 
-Two things the delivery form says before you start, because they are the common
-answers and neither is a bug: duplicates after a crash are expected, since replay
-re-batches with new boundaries; and records dropped by `ErrorPolicy::Skip` are
-counted rather than lost, so check `spate_*_dropped_total{reason}` before
-concluding they vanished.
+## Building and testing
 
-Issues are labelled at triage. `crate:` says where — the same vocabulary as the
-commit scopes, so no translation — and `area:` covers what is not a crate.
-`delivery-correctness` and `performance` mark the two classes with their own
-priority. The whole taxonomy is defined in
-[`.github/labels.yml`](.github/labels.yml) rather than in the web UI, so it is
-reviewable like anything else; pull requests get their `crate:` and `area:`
-labels automatically from the paths they touch.
-
-## How changes land
-
-Fork the repository and open a pull request against `main`. That is the only
-route — nobody pushes to `main` directly, including the maintainers, and the
-branch rules enforce it.
-
-CI on a pull request from a fork waits for an explicit approval before it runs.
-That is deliberate: a workflow runs as it exists in the pull request, so an
-unreviewed run is an unreviewed change to what CI proves. It costs you one
-round-trip and it is not a comment on your change.
-
-Commits follow [Conventional Commits](https://www.conventionalcommits.org),
-scoped to the crate touched — `fix(spate-kafka): …`, comma-separated for
-several, and `workspace`, `ci`, `docs`, `examples` or `bench` for the
-areas that are not crates. Breaking changes carry `!`. Messages should make
-sense to somebody who was not in the conversation: say what changed and why,
-not which iteration of a plan it belongs to.
-
-If the change reaches a crate and somebody upgrading would care, it also needs a
-**changelog fragment** — a short file under [`changelog.d/`](changelog.d), which
-is assembled into the changelog at release time:
+A Rust toolchain at **1.94** or newer — that is the MSRV, and CI checks it — and
+nothing else for the default suites.
 
 ```sh
-make changelog-new TYPE=fixed SLUG=short-description
+make gates   # everything a pull request must pass
+make help    # every target, grouped
 ```
 
-In practice that means a `feat`, `fix`, `perf`, `revert` or `build` — and
-anything carrying `!`, whatever its scope, since that is you declaring a breaking
-change. Scoping the commit to one of the areas that is not a crate — `ci`,
-`docs`, `examples`, `bench`, `workspace`, `website` — is what earns an
-exemption; leaving the scope off does not, and neither does a type this
-repository does not recognise. [`changelog.d/README.md`](changelog.d/README.md) has the format and
-the conventions, `make check-changelog` is the gate, and there is deliberately
-no label to switch it off — the exemption is derived from the type and scope you
-write, so the way out is a subject that is true.
+`make gates` covers formatting, clippy, the type check, the test suite, doctests,
+the feature matrix, licences and advisories, and the repository's own consistency
+checks. CI calls those same targets, so a target that passes here is what runs
+there. It is necessary rather than sufficient: the test, container, site and MSRV
+jobs spell out invocations of their own.
 
-Contributions are accepted under Apache-2.0 §5, inbound under the same terms as
-outbound. There is no CLA and nothing to sign.
+Containers, benchmarks, nextest profiles and the opt-in suites are in
+[`DEVELOPING.md`](DEVELOPING.md).
 
-AI tools are welcome here, and [`AI_POLICY.md`](AI_POLICY.md) says what a
-contribution has to withstand regardless of how it was produced. The short
-version: be able to answer questions about your own change in your own words,
-and back a delivery-correctness fix with a failing test rather than an
-explanation.
+## Adding a connector
+
+The source and sink traits are public because third parties are meant to
+implement them, so a new connector is a first-class contribution rather than a
+special case. [`docs/user-guide/06-extending/`](docs/user-guide/06-extending/) is
+the guide, `crates/spate-json` is the smallest complete crate to read as a shape,
+and `crates/spate-test` is how you exercise one without standing up
+infrastructure.
+
+Two things belong in the change rather than in a follow-up: the connector page
+built from the template in [`docs/STYLE.md`](docs/STYLE.md) § 3, and keeping your
+own types out of `spate-core`'s public API (INV-6).
+
+## Opening a pull request
+
+Fork and open a pull request against `main`. That is the only route — nobody
+pushes to `main` directly, maintainers included, and the branch rules enforce it.
+
+CI on a pull request from a fork waits for an explicit approval before it runs. A
+workflow runs as it exists in the pull request, so an unreviewed run is an
+unreviewed change to what CI proves. It costs you one round-trip and it is not a
+comment on your change.
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org),
+scoped to the crate touched — `fix(spate-kafka): …`, comma-separated for several,
+and `workspace`, `ci`, `docs`, `examples`, `bench` or `website` for the areas
+that are not crates. Breaking changes carry `!`. Messages should make sense to
+somebody who was not in the conversation: say what changed and why, not which
+iteration of a plan it belongs to.
+
+A change that reaches a crate and that somebody upgrading would care about also
+needs a **changelog fragment** — a `feat`, `fix`, `perf`, `revert` or `build`,
+and anything carrying `!` whatever its scope. Scoping to one of the areas that is
+not a crate is what earns an exemption; leaving the scope off does not.
+`make changelog-new TYPE=fixed SLUG=…` scaffolds one,
+[`changelog.d/README.md`](changelog.d/README.md) has the conventions, and
+`make check-changelog` is the gate — a miss is a red CI rather than a review
+comment.
+
+[`.github/pull_request_template.md`](.github/pull_request_template.md) is the
+body structure. Tick its boxes by exit code, not by memory.
 
 ## The invariants
 
-These are the properties the engine is built around. Most changes touch none of
-them. A change that does touch one is not automatically wrong — but it needs to
-say how the property still holds, and that is the conversation.
+The properties the engine is arranged around are numbered and stated in
+[`docs/INVARIANTS.md`](docs/INVARIANTS.md), which is the only place they are
+stated in full. Most changes touch none of them.
 
-They are numbered, and the numbers are the canonical ones from
-[`docs/DESIGN.md`](docs/DESIGN.md), where the reasoning behind each lives. Cite
-the number in a pull request and everyone is looking at the same property.
-
-- **INV-1 — delivery is at-least-once.** A source watermark is never committed
-  past unacknowledged data, including across rebalances and shutdown.
-- **INV-2 — source threads never block on a channel send.** Backpressure is
-  `try_send` plus `Source::pause` plus continuing to poll. A blocked poll loop
-  gets the consumer evicted from its group, which is a worse failure than the
-  one it was avoiding.
-- **INV-3 — the checkpoint tracker stays synchronous and free of async
-  runtimes.** It is loom-tested, and it must stay something loom can model.
-- **INV-4 — acks can never block behind data.** The ack path is unbounded and
-  atomic.
-- **INV-5 — the sink worker's intake path never awaits outside its `select!`.**
-  Anything it blocks on has to sit in a branch alongside the drain-deadline
-  branch, or the deadline is not polled while it waits and shutdown deadlocks.
-- **INV-6 — no connector types in `spate-core`'s public API**, and no 0.x
-  dependency types in any public trait bound — those cannot be allowed into our
-  semver surface. The `metrics` facade is the one sanctioned exception, because
-  the instrumentation API *is* that facade.
-- **INV-7 — record error policies are Skip or Fail only**, and both are
-  surfaced through metrics rather than only logged. There is deliberately no
-  third policy that drops a record without counting it.
-- **INV-8 — metrics handles are pre-registered at build time.** Never resolve a
-  metric name or label on the per-record path.
-- **INV-9 — every metric lives under the `spate_` umbrella.**
-- **INV-10 — a gauge series has exactly one live owner per process.**
-
-One documentation page is normative rather than descriptive:
-[`docs/user-guide/02-concepts/08-work-assignment.mdx`](docs/user-guide/02-concepts/08-work-assignment.mdx).
-Its numbered invariants name the property tests that enforce them, so a change
-to the balancer means a change to that page in the same commit.
-
-## Running the gates
-
-Everything CI runs, you can run — and it is the same command, because the
-workflows call these targets rather than spelling out invocations of their own.
-
-```sh
-make gates      # everything a pull request must pass
-make help       # the full list
-```
-
-`make gates` covers formatting, clippy, the type check, the test suite,
-doctests, the feature matrix, licences and advisories, and the repository's own
-consistency checks. A few things sit outside it because they need Docker or
-minutes:
-
-```sh
-make test-docker   # container-backed suites
-make loom          # the concurrency models
-make docs          # the documentation site
-make bench-check   # every bench target still compiles, in the release profile
-make bench-gungraun  # instruction counts, on Linux with valgrind installed
-make bench-ab REF=main  # wall time, this tree against a reference
-```
-
-`make bench-gungraun` is the odd one out: it counts instructions under valgrind
-rather than measuring wall time, which is what makes the number comparable
-across machines instead of a property of the one that produced it. It needs
-valgrind and a `gungraun-runner` at the same version as the pinned `gungraun`,
-so it does not run on macOS at all — CI runs it, and locally the most you can
-check is that the benches build.
-
-Adding one is two steps: name the file `benches/<something>_gungraun.rs`, and
-declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
-Nothing else registers it — `scripts/gungraun-benches.sh` discovers it by that
-name, and the Makefile target, both CI legs and `scripts/ci-changes.sh` all read
-from that one place, so there is no list of benches to add yourself to and no
-second edit to make it run on a pull request. `./scripts/gungraun-benches.sh` on
-its own prints what would run, which is the quickest way to confirm a new bench
-is visible. Skipping the `harness = false` stanza is the mistake worth knowing
-about: cargo auto-discovers the file anyway, under the default libtest harness,
-and the bench then compiles cleanly and fails at run time complaining about
-arguments. `make check-gungraun-benches` (part of `make ci-lint`) catches it.
-
-**Put the measured work in a named `#[inline(never)]` function and have the
-benchmark function call it.** This is the one rule about a counted bench that
-cannot be inferred from a working example, and getting it wrong produces a
-number rather than an error. Collection is bounded by a callgrind toggle on the
-module the `#[library_benchmark]` macro wraps the function in, and a toggle
-*flips* collection rather than forcing it on — so work written inline in that
-function can be reshaped by the optimiser until it falls outside the collected
-region, and whatever runs while collection happens to be on is counted instead.
-What that turns out to be is glibc tearing down the corpus the fixture built.
-One bench here reported 858,925 instructions that way, every one of them in
-`malloc_consolidate` and `unlink_chunk`, with no application frame at all and
-the same total whether its corpus held 400 documents or 6,400; moving the loop
-behind a named callee took it to 30,086,540. The benches that never hit this
-were not written more carefully — each happened to reach its workload through a
-single cross-crate call, which is a frame the toggle cannot lose. A named
-`#[inline(never)]` callee is how a bench gets that property on purpose.
-
-`scripts/gungraun-collected-region.sh` enforces it, from the callgrind profile
-rather than from the source: a case must attribute at least 10% of its
-collected instructions to the binary under measurement — against a real spread
-that bottoms out at 33.35% on the runner architecture and 28.67% on arm64 — and
-must collect at least 1,000 of them, since a region can also be lost by leaving
-almost nothing rather than by leaving the allocator. `make bench-gungraun` runs
-it after the benches, and CI runs it per shard as a *gate* — the counts are
-advisory, a bench measuring the allocator is not. `make check-collected-region`
-checks the guard itself against captured profiles of both shapes, and needs no
-valgrind.
-
-Measuring a crate under more than one compiled feature arm *is* a second edit:
-CI runs one job per (package, arm), and the arm table lives in
-`feature_arms_for` in `scripts/ci-changes.sh`. Add an arm when a feature swaps
-an implementation the benches execute — not for every feature key, since each
-arm is another pair of builds and valgrind runs. `make self-test` checks the
-table against `cargo metadata`, so an arm naming a feature the package does not
-declare fails before it burns a job.
-
-If you changed dependencies, add `make attribution` to regenerate
-`THIRD-PARTY.md`. It is checked nightly and regenerated at release rather than
-gated on your pull request, so it is welcome but not required.
-
-Three things the targets encode that are worth knowing before you run a cargo
-command by hand:
-
-- **Pass `--locked` — CI does.** Without it a command can resolve a different
-  dependency graph and hide a failure CI will then find. Every target that
-  resolves one passes it.
-- **Two commands do not take it.** `cargo hack --no-dev-deps` rewrites each
-  `Cargo.toml` as it runs and a locked build refuses; `cargo fmt` resolves
-  nothing at all, reading only `.rs` files.
-- **The site build needs `CI=true`.** The client-redirects plugin is only
-  registered when it is set, so a plain build silently skips redirect validation
-  — and a redirect pointing at a page you deleted is a hard failure. `make docs`
-  sets it, and also runs the typecheck that CI runs.
-
-Verify a gate by its **exit code**. Piped `grep` and `tail` chains have masked
-real failures in this repository more than once, which is why no target contains
-a pipe.
-
-The MSRV is **1.94** and CI checks it, so nothing newer than that.
-
-### Two things about the test suite
-
-Tests run under [cargo-nextest](https://nexte.st), which runs one process per
-test concurrently where `cargo test` runs one binary at a time. Plain `cargo
-test --workspace` still works and is many times slower.
-
-`--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
-Drop it when you are not touching the TLS surface.
-
-**On macOS, every freshly linked binary stalls for tens of seconds at 0% CPU on
-its first exec** while Gatekeeper scans it. Across this workspace that alone
-costs about half an hour per edit-test cycle. Add your terminal to *System
-Settings → Privacy & Security → Developer Tools* to exempt it.
-
-Docker-backed tests use testcontainers and are `#[ignore]`d by default. `make
-test-docker` selects them and uses the docker nextest profile; the default
-profile hard-kills a test at 120s, which a cold image pull can exceed, and the
-kill reports as a timeout indistinguishable from a real hang.
-
-CI picks the container suites from the paths you changed. If your change is one
-whose reach those paths do not show — a refactor moving code between crates, say
-— a maintainer can label the pull request `ci: docker` to run them all,
-`ci: loom` for the concurrency models, or `ci: bench` for the
-instruction-count benches. All three only ever add work; none can switch a
-suite off.
-
-Which counters run comes from the changed paths too, and it is derived from the
-benches themselves: a crate with a bench selects its own, `spate-core` selects
-every benched crate because everything depends on it, and a crate without one
-selects nothing. `ci: bench` is for the change those paths cannot speak for — a
-dependency swap, or code moving between crates.
-
-## Testing conventions
-
-Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's
-`tests/`, doc tests on public APIs. proptest for tracker and codec invariants,
-loom for the synchronisation primitives, rdkafka's `MockCluster` and the
-ClickHouse mocks for connector behaviour that does not need a container.
-
-Framework users test their pipelines with `spate-test`'s in-memory source and
-capture sink — keep those first-class, and prefer them for reproductions. A
-test written against them needs no infrastructure and runs in milliseconds.
-
-One trap worth knowing: `cargo test` runs a binary's tests in one process, and
-metric series ownership is process-wide. Test fixtures therefore need per-test
-`pipeline` and `component` labels; a local recorder does not isolate the claim.
+A change that does touch one is not thereby wrong — it needs to say how the
+property still holds, and that is the review. Cite the number when you do: "this
+touches INV-5" is a reviewable claim in a way that restating the property is not.
 
 ## Documentation
 
-Documentation lives in `docs/` and the site renders that tree in place, so a
-docs change is a change to the published site. The structure, prose and voice
-rules are in [`docs/STYLE.md`](docs/STYLE.md).
+`docs/` is the published site, rendered in place, so a documentation change is a
+change to what readers see. [`docs/STYLE.md`](docs/STYLE.md) is normative, and
+`make docs` is the gate that catches a link you broke by moving a page.
 
-**The one rule to know before writing a line:** framework pages
-(`docs/user-guide/`, everything outside `04-connectors/`) are vendor-neutral
-prose. A connector name belongs in a link, a `## Related` entry, or a
-`:::note Connector specifics` pointer block — never in the explanation itself,
-which is stated in framework vocabulary and belongs to every connector equally.
-Vendor mechanisms, setting keys and tuning numbers live on the connector's own
-page, once. Code and YAML blocks are exempt: a config example has to name a
-real tag. `docs/STYLE.md` § 1 has the full rule and its exemptions.
+The one rule to know before writing a line: **framework pages are vendor-neutral
+prose.** Everything under `docs/user-guide/` outside `04-connectors/` states its
+rules in framework vocabulary. A connector name belongs in a link label, a
+`## Related` entry, or a `:::note Connector specifics` block — never in the
+explanation, which belongs to every connector equally. Fenced code and YAML are
+exempt: a configuration example has to name a real tag. The boundary has
+judgement at its edges, so review enforces it rather than a lint.
 
-The boundary is enforced in review — the rule has judgement at its edges, so
-there is no lint gate for it. Before you push, run
-`cd website && npm run build`: that one *is* gated, and it is what catches a
-link you broke by moving a page.
+## Security and legal
 
-**A performance figure in the docs carries how it was established.** The
-decision log in [`docs/DESIGN.md`](docs/DESIGN.md) is where the load-bearing
-ones live, most carrying a parenthetical for what stands behind them. Match the
-wording already there rather than inventing a stronger-sounding one. A figure
-nobody can place is one nobody can later check. If a change makes something
-faster, say so in the pull request and say what you measured it on, because a
-number from a busy laptop is not comparable to one taken on a quiet machine.
-
-The [benchmark repository](https://github.com/spate-etl/benchmark)
-carries the cross-framework comparison and the methodology it runs under: one
-fixed pipeline, several frameworks. Neither it nor this repository carries a
-rig that sweeps *this* framework's own settings against each other end to end,
-so a claim needing one is a claim to state as unmeasured rather than to dress
-in a figure nothing can reproduce. The bench targets here measure inside a
-single component, which is a different question again.
-
-When you do measure two arms against each other, interleave them — every arm
-once per repetition rather than one arm finished before the next starts — and
-throw the first pass away. Anything that drifts over a run lands entirely on
-whichever arm goes last otherwise, and the first repetition hands one arm the
-cold-start cost, which has been large enough here to decide which arm looked
-faster. Report an interval and the repetition count beside the value, so a
-reader can tell a difference from a spread.
-
-`make bench-ab REF=main` does all of that for a change against a reference —
-worktree, interleave, discard the priming pass, pair by replicate and state the
-rule it decided by. Nothing it produces is stored; [`bench/README.md`](bench/README.md)
-and the harness's own crate docs say what it measures and how to add a case.
-
-## Releases
-
-Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md), which is
-where the version and tag mechanics live. The one part of it that reaches a
-contributor is the changelog fragment described above: releases are assembled
-from `changelog.d/`, so the release note for your change is written with the
-change and not reconstructed from the log months later.
-
-## Reporting a vulnerability
-
-Privately, through
+Vulnerabilities go privately through
 [GitHub's advisory flow](https://github.com/spate-etl/spate/security/advisories/new),
-never as a public issue. [`SECURITY.md`](SECURITY.md) has the scope and the
+never as a public issue; [`SECURITY.md`](SECURITY.md) has the scope and the
 response times.
 
----
+Contributions are accepted under Apache-2.0 §5, inbound under the same terms as
+outbound. There is no CLA and nothing to sign, and the
+[Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
 
-One note on history: this repository was published from a private development
-history. Commits before the first release reference pull requests by number
-(`(#81)`, `closes #76`) that belonged to the pre-publication repository, and
-those numbers do not resolve here.
+AI tools are welcome here, and [`AI_POLICY.md`](AI_POLICY.md) says what a
+contribution has to withstand regardless of how it was produced. The short
+version: be able to answer questions about your own change in your own words, and
+back a delivery-correctness fix with a failing test rather than an explanation.
+
+Maintainers cut releases as described in [`RELEASING.md`](RELEASING.md). The one
+part that reaches a contributor is the changelog fragment above — releases are
+assembled from `changelog.d/`, so the release note is written with the change
+rather than reconstructed from the log months later.

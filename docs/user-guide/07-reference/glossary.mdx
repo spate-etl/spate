@@ -3,11 +3,11 @@
 Precise definitions of the terms used throughout this guide, in
 alphabetical order. Where a term names a public type, the exact contract is
 in the rustdoc ([Reference](README.mdx)); where it names a mechanism, the
-rationale is in [docs/DESIGN.md](../../DESIGN.md).
+rationale is in [docs/adr/](../../adr/README.mdx).
 
 ### Ack / `AckRef`
 
-The acknowledgement handle for one source poll batch: a clone of a
+The acknowledgment handle for one source poll batch: a clone of a
 refcounted `Arc` created **per batch**, not per record. Every record
 derived from the batch clones it — `flat_map` children share the parent's,
 multi-output routing clones per output with worst-status merge. Dropping a
@@ -18,7 +18,7 @@ channel — the ack path can never block behind data.
 
 ### `AckSet`
 
-A collection of acknowledgement handles on the sink path (encoded chunks,
+A collection of acknowledgment handles on the sink path (encoded chunks,
 worker ledgers, batch accumulators) with the **opposite** drop default:
 where a lone record's drop means delivered, an `AckSet` **fails** its
 handles on drop and delivers only explicitly, after a durable write. This
@@ -90,13 +90,13 @@ replay — after restart, data re-batches with new boundaries and new tokens
 
 *Connector mapping:*
 [ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens--and-the-window-warning)
-— honoured, but silently inert without a server-side dedup window ·
+— honored, but silently inert without a server-side dedup window ·
 [Kafka sink](../04-connectors/sinks/kafka/README.mdx#delivery-semantics-honestly)
 — unused; there is no destination-side dedup window to hand it to.
 
 ### Drain
 
-The choreography that quiesces data without losing acknowledgements: stop
+The choreography that quiesces data without losing acknowledgments: stop
 the affected lanes, flush the chains, force-seal and write out in-flight
 sink batches under `checkpoint.drain_timeout`, then commit synchronously.
 Triggered identically by SIGTERM (all lanes) and by a rebalance revocation
@@ -235,7 +235,7 @@ next healthy replica.
 
 ### Sealed batch
 
-The sink's write, retry, and acknowledgement unit (`SealedBatch`):
+The sink's write, retry, and acknowledgment unit (`SealedBatch`):
 concatenated pre-encoded frames plus row/byte counts, the
 [dedup token](#dedup-token), and the covered acks. A shard worker seals
 when `batch.max_rows`, `batch.max_bytes`, or `batch.linger` trips, then

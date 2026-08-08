@@ -1153,7 +1153,7 @@ fn a_revocation_of_the_last_split_is_not_a_departure() {
 }
 
 /// The lane budget is a per-worker materialization limit, and the leader
-/// honours each worker's own. Splits beyond the fleet's summed budget are
+/// honors each worker's own. Splits beyond the fleet's summed budget are
 /// the queue: not assigned, not quarantined, not lost.
 #[test]
 fn splits_beyond_the_fleets_lane_budget_wait_in_the_queue() {

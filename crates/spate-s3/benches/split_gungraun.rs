@@ -1,7 +1,7 @@
 //! Instruction counts for the leader's planning work (gungraun).
 //!
 //! One shape — pack a listing into splits and mint each split's id —
-//! parameterised by the listing profile, because what changes packing's cost
+//! parameterized by the listing profile, because what changes packing's cost
 //! is where the objects sit relative to the split target and the open-cost
 //! floor, not which function is called:
 //!
@@ -30,9 +30,9 @@
 //! Packing, minting and descriptor encoding are one case rather than three on
 //! purpose: the planner does them as a single pass per split, and a change to
 //! any one moves the others — the id digests the member keys and ETags, and
-//! the descriptor serialises those same members immediately afterwards.
+//! the descriptor serializes those same members immediately afterwards.
 //! Measuring them apart would miss the loop that carries all three, and would
-//! omit the serialisation, which is the term most likely to dominate.
+//! omit the serialization, which is the term most likely to dominate.
 //! Attribution between the stages comes from the callgrind profile, which the
 //! run writes either way.
 //!

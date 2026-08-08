@@ -1,9 +1,9 @@
 //! Backpressure: the global in-flight byte budget and the watermark
 //! pause/resume controller with hysteresis.
 //!
-//! Invariant (see `docs/DESIGN.md` § Backpressure): source threads never
-//! block on sends. When a `try_send` is rejected or the in-flight budget
-//! crosses its high watermark, the poll loop pauses its source lanes and
+//! Invariant (INV-2): source threads never block on sends. When a
+//! `try_send` is rejected or the in-flight budget crosses its high
+//! watermark, the poll loop pauses its source lanes and
 //! *keeps polling*; it resumes only under hysteresis — usage back below the
 //! low watermark, downstream queues drained, and a minimum pause elapsed —
 //! so pause/resume cannot flap faster than once per `min_pause`.
@@ -66,7 +66,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// modification order); relaxation only permits *stale reads* in
 /// [`InflightBudget::usage`], which the hysteresis absorbs. Both directions
 /// saturate — `sub` can never underflow past zero even if an
-/// acknowledgement races ahead of the bookkeeping that added its bytes.
+/// acknowledgment races ahead of the bookkeeping that added its bytes.
 #[derive(Debug, Default)]
 pub struct InflightBudget {
     bytes: AtomicUsize,

@@ -246,7 +246,7 @@ fn each_corpus_is_the_length_its_constants_imply() {
 
 /// Neither the tick width nor the driver changes which batches are issued.
 ///
-/// The wall tier reads this as a licence to compare `ack_wide_*` against
+/// The wall tier reads this as a license to compare `ack_wide_*` against
 /// `ack_narrow_*` and against the threaded cases: the corpus digest that
 /// travels in every record is the same for all of them, so what separates
 /// those cases is how the batches are grouped and who issues them, not which

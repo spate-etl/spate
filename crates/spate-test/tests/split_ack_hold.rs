@@ -248,7 +248,7 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
 
     let last = samples.last().expect("at least one sample");
     // Delivery-health precondition: the hot branch flushed throughout, so a
-    // failure below is an acknowledgement hold, not a wedged sink.
+    // failure below is an acknowledgment hold, not a wedged sink.
     assert!(
         last.hot_writes >= 3,
         "hot branch delivered only {} writes; the repro premise (healthy \

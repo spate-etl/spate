@@ -8,8 +8,14 @@
 //! Applications should depend on the [`spate`](https://crates.io/crates/spate)
 //! facade crate rather than on `spate-core` directly.
 //!
-//! The architecture and its invariants are documented in `docs/DESIGN.md`;
-//! the metric taxonomy in `docs/METRICS.md`.
+//! The properties the engine is arranged around are published as
+//! [Invariants], the decisions behind them as [Decisions], and the metric
+//! taxonomy as [Metrics]. Module documentation below cites the first two by
+//! identifier alone — `INV-2`, `ADR-0013`.
+//!
+//! [Invariants]: https://spate.kainth.dev/docs/INVARIANTS
+//! [Decisions]: https://spate.kainth.dev/docs/adr/
+//! [Metrics]: https://spate.kainth.dev/docs/METRICS
 
 // tokio's own sources change shape under `--cfg loom` (net disappears), so
 // anything touching tokio::net is compiled out of loom model builds.

@@ -1,4 +1,4 @@
-//! Instruction counts for the checkpoint tracker and the acknowledgement
+//! Instruction counts for the checkpoint tracker and the acknowledgment
 //! path around it (gungraun).
 //!
 //! One shape — 8,192 source poll batches issued, resolved and committed
@@ -6,7 +6,7 @@
 //! `AckRef`'s drop,
 //! [`Checkpointer::drain`](spate_core::checkpoint::Checkpointer::drain) and
 //! [`take_watermarks`](spate_core::checkpoint::Checkpointer::take_watermarks)
-//! — parameterised by the two things a commit interval varies.
+//! — parameterized by the two things a commit interval varies.
 //!
 //! This is the at-least-once core, and it is the one part of the framework
 //! whose per-call cost has never been counted: it is loom-tested for the
@@ -94,7 +94,7 @@ const NARROW: usize = 16;
 /// both halves of that are load-bearing rather than stylistic. Collection is
 /// bounded by a callgrind toggle on the module the benchmark macro wraps the
 /// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimiser leaves in an unstable shape inside that module can
+/// so work the optimizer leaves in an unstable shape inside that module can
 /// end up outside the collected region entirely, and a bench that measures
 /// nothing still reports a plausible number. Everything this drive calls is
 /// a plain synchronous function in `spate_core`, with no erasure boundary of
@@ -147,7 +147,7 @@ library_benchmark_group!(name = checkpoint; benchmarks = commit_batches);
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
 // callgrind invocation — and so every `Ir` baseline — is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
-// deep enough that heap blocks attribute to the acknowledgement path under
+// deep enough that heap blocks attribute to the acknowledgment path under
 // measurement rather than to whichever frame the default depth of 4 happens
 // to cut at.
 //

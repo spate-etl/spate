@@ -4,8 +4,10 @@
 # so the label follows from the path that changed. Anything finer — which role,
 # which subsystem — is a judgement call a path cannot make, and stays manual.
 #
-# Every label named here must exist in `.github/labels.yml`; check-labels.sh
-# enforces that.
+# Every label named here must exist in `.github/labels.yml`. GitHub creates a
+# missing one on the fly, with a default colour and no description, so a name
+# that does not match the taxonomy shows up as a stray label rather than an
+# error.
 #
 # This runs on pull requests only. Issues are labelled by hand at triage.
 

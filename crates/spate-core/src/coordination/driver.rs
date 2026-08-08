@@ -1342,7 +1342,7 @@ mod tests {
         let mut s = TestSource::default();
         let park = Duration::from_millis(400);
 
-        // Control: nothing pending and nothing signalling, so the full
+        // Control: nothing pending and nothing signaling, so the full
         // timeout elapses. Without this the test would pass even if
         // `poll_events` never parked at all.
         let t0 = Instant::now();

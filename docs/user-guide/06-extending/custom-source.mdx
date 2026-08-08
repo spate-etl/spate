@@ -12,7 +12,7 @@ The API is poll-based rather than a `futures::Stream`, deliberately: real
 source clients typically already own their network I/O on their own
 threads, and a Stream wrapper only adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
-[docs/DESIGN.md](../../DESIGN.md) (§ Source abstraction); trait docs in
+[ADR-0003](../../adr/0003-poll-based-source-api.md); trait docs in
 `crates/spate-core/src/source/mod.rs` and on
 [docs.rs](../07-reference/README.mdx).
 
@@ -226,7 +226,7 @@ Assignment changes are where at-least-once is won or lost:
   for lanes whose input is fully delivered, acknowledged, *and committed*
   (e.g. a coordinated split whose terminal progress reached the store), so
   by contract nothing unflushed or uncommitted can exist behind them. If
-  any in-flight data or uncommitted acknowledgement may remain, use
+  any in-flight data or uncommitted acknowledgment may remain, use
   `LanesRevoked`.
 - **`CommitReady { partitions }` is a latency hint**: the named lanes have
   decided end-of-input, and a commit outside the periodic tick is
@@ -524,7 +524,7 @@ into every lane and call `wake()` on exactly two edges — when the lane
 decides end-of-input, and when it reports poison. Both are per-tenancy
 edges, never the per-record path.
 
-Signalling is non-blocking, a burst collapses into one wakeup, and a
+Signaling is non-blocking, a burst collapses into one wakeup, and a
 signal arriving between the driver's check and its park is buffered
 rather than lost — so the ordering rule is simply *make the state visible
 first, then wake*. Dropping a `wake()` call is silent: the work still
@@ -584,7 +584,7 @@ let store = MemoryStore::new(coordination.lease_duration);
 ```
 
 Building a durable store is the store's business, not the source's:
-requirements, credentials and outage behaviour are on its page. What matters
+requirements, credentials and outage behavior are on its page. What matters
 here is that construction is **synchronous and lazy** — connecting and
 provisioning happen under the coordinator's startup retry budget, so a store
 that is down at boot retries with backoff, while a genuine misconfiguration (a

@@ -96,7 +96,7 @@ fn wide() -> Rig {
 /// stopped splitting, stopped stripping a `\r`, or started counting blank
 /// lines would otherwise report a large improvement rather than a failure —
 /// and the returned pair is also what `black_box` holds, so the loop cannot be
-/// optimised away.
+/// optimized away.
 fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
     suite
         .case(

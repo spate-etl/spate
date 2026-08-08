@@ -155,7 +155,7 @@ pub(crate) fn caps(n: usize) -> BTreeMap<String, u32> {
 /// The digest matters more than the length. Ids are the keys of the map both
 /// functions walk, the sort key the claim scan orders on, and the tie-break
 /// preimage the improving pass hashes — and a sequential `split-0001` scheme
-/// would share a long prefix between neighbours, so every comparison would
+/// would share a long prefix between neighbors, so every comparison would
 /// run to the last byte in one corpus and diverge on the first in production.
 /// These diverge early, as a digest does.
 fn split_id(i: usize) -> String {

@@ -20,7 +20,7 @@ Which kind each shipped source is, and how to wire it:
 
 The rest of this page is about the coordinated case: what a fleet does, what it
 costs, and how it fails. The store itself is a connector with its own page —
-requirements, provisioning, and outage behaviour live there, not here.
+requirements, provisioning, and outage behavior live there, not here.
 
 ## Deploying the fleet
 
@@ -229,7 +229,7 @@ are gone entirely.
 ## Upgrading from the work-stealing balancer
 
 Leader-assigned coordination replaced a peer-to-peer work-stealing
-balancer. The [design log](../../DESIGN.md) records why; this section is
+balancer. [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records why; this section is
 what an upgrade actually requires.
 
 ### The store must be empty (or new)

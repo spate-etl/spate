@@ -74,7 +74,7 @@ pub struct RetryConfig {
     pub multiplier: f64,
     /// Fraction of the delay randomized away (`0.0..=1.0`).
     pub jitter: f64,
-    /// Total write attempts before the batch is abandoned (acknowledgements
+    /// Total write attempts before the batch is abandoned (acknowledgments
     /// failed, watermark stalls). `0` means unbounded — retry until the drain
     /// deadline, at which point the attempt in flight is aborted and the batch
     /// abandoned. The at-least-once default.

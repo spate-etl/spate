@@ -9,7 +9,7 @@ honestly — what at-least-once does *not* give you.
 ## The ack chain: from record to watermark
 
 **One `AckRef` per source poll batch.** When a lane's poll yields a batch,
-the framework creates a single refcounted acknowledgement state for it;
+the framework creates a single refcounted acknowledgment state for it;
 every record deserialized from that batch carries a clone. The refcount
 follows the data wherever it goes:
 
@@ -43,7 +43,7 @@ thing: the `ShardWriter` returned `Ok` for that sealed batch. Everything
 upstream — the watermark, the commit, the at-least-once claim — is anchored on
 that return, so what a sink must prove before returning `Ok` is the sharpest
 contract a sink implementation has. A synchronous end-to-end server
-acknowledgement and a per-message delivery confirmation are both valid answers;
+acknowledgment and a per-message delivery confirmation are both valid answers;
 a fire-and-forget write is not.
 
 :::note Connector specifics
@@ -54,7 +54,7 @@ What each sink proves before it returns `Ok`:
 
 ## Teardown can't lose data
 
-Two structural contracts guard the seams where acknowledgements travel in
+Two structural contracts guard the seams where acknowledgments travel in
 bulk (encoded chunks, worker ledgers, batch accumulators):
 
 - **Collections fail by default.** Every collection of acks on the sink
@@ -79,7 +79,7 @@ discarded rather than advancing a watermark that is no longer its own.
 That fence is the reason revocation is safe rather than merely fast: it does
 not rely on the outgoing owner finishing in time, only on it being unable to
 succeed afterwards. The choreography is in
-[docs/DESIGN.md](../../DESIGN.md) § Source abstraction, and the
+[ADR-0012](../../adr/0012-single-kafka-consumer-with-split-partition-queues.md), and the
 fleet-level view in [Work assignment](08-work-assignment.mdx).
 
 :::note Connector specifics
@@ -111,17 +111,17 @@ sealed batch and reused unchanged across retries of that batch. A sink whose
 destination supports insert deduplication can hand the token over and make
 same-boundary retries idempotent.
 
-The line the token draws is worth internalising, because it is not the line
+The line the token draws is worth internalizing, because it is not the line
 most people assume:
 
 - **Covered — same-batch retries.** A batch that fails and is retried carries
-  the same token, so the destination can recognise and drop the repeat.
+  the same token, so the destination can recognize and drop the repeat.
 - **NOT covered — crash replay.** After a restart, replayed records re-batch
   with different boundaries and therefore different tokens. Those rows land
   twice, and no deduplication window will catch them.
 
 So target tables must be designed for replay regardless of what the token
-covers. Whether a destination honours the token at all — and what it must be
+covers. Whether a destination honors the token at all — and what it must be
 configured to do so — is the sink's business, and at least one shipped sink has
 a silent failure mode here worth reading before going to production.
 
@@ -139,9 +139,13 @@ destination or at the query layer.
 
 ## Further reading
 
-- [docs/DESIGN.md](../../DESIGN.md) § Records and checkpointing, § Delivery
-  semantics — the canonical treatment, including the evaluated alternative
-  ack designs.
+- [Writing a sink](../06-extending/custom-sink.mdx) — the `Drop` obligation on
+  anything holding acknowledgment handles for data not yet written.
+- [ADR-0005](../../adr/0005-refcounted-per-batch-acknowledgements.md) — why
+  acknowledgments are refcounted per poll batch, and why the fail-by-default
+  inversion was adopted for collections but rejected for records.
+- [ADR-0002](../../adr/0002-at-least-once-delivery.md) — why the guarantee is
+  at-least-once, and what exactly-once would have cost.
 - [Error handling](04-error-handling.mdx) — what happens to the watermark
   when records fail.
 - [Testing pipelines](../03-guides/testing-pipelines.mdx) — asserting on

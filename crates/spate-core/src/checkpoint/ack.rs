@@ -1,11 +1,11 @@
-//! Batch acknowledgement handles (Vector-finalizer style).
+//! Batch acknowledgment handles (Vector-finalizer style).
 
 use crate::checkpoint::sync::{Arc, AtomicU8, Ordering};
 use crate::record::PartitionId;
 use std::fmt;
 
 /// Identity of one source poll batch within a partition and assignment
-/// epoch. Epochs are bumped on every rebalance so acknowledgements from
+/// epoch. Epochs are bumped on every rebalance so acknowledgments from
 /// revoked assignments are recognized as stale and discarded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BatchId {
@@ -76,7 +76,7 @@ impl fmt::Debug for AckTx {
     }
 }
 
-/// Shared acknowledgement state of one source poll batch.
+/// Shared acknowledgment state of one source poll batch.
 ///
 /// Dropping the final handle sends an [`AckMsg`] on the checkpointer's
 /// unbounded channel. `Arc`'s release/acquire on the refcount orders all
@@ -105,7 +105,7 @@ impl Drop for AckState {
     }
 }
 
-/// Refcounted handle to a batch's acknowledgement state. Clone = one atomic
+/// Refcounted handle to a batch's acknowledgment state. Clone = one atomic
 /// increment, no allocation; records hold one each.
 #[derive(Clone, Debug)]
 pub struct AckRef(Arc<AckState>);
@@ -208,12 +208,12 @@ mod tests {
     }
 }
 
-/// A fail-safe collection of acknowledgement handles for data that has not
+/// A fail-safe collection of acknowledgment handles for data that has not
 /// been durably written yet (encoded chunks, sink batches).
 ///
 /// A bare [`AckRef`] resolves *Delivered* on drop — the right default for
 /// records, where drop means "consumed" (filtered out, skipped by policy,
-/// or written). Collections travelling the sink path are different: there,
+/// or written). Collections traveling the sink path are different: there,
 /// drop without an explicit outcome means the data was torn down (task
 /// aborted, queue dropped, worker cancelled), and resolving Delivered would
 /// commit offsets for rows that never reached the sink. `AckSet` therefore

@@ -1,7 +1,7 @@
 //! Instruction counts for a worker's claim scan (gungraun).
 //!
 //! One shape — walk an observed store state for the splits this worker may
-//! act on and order them — parameterised by the mix of claim kinds the pool
+//! act on and order them — parameterized by the mix of claim kinds the pool
 //! holds, because what changes the scan's cost is how far down the
 //! eligibility ladder each split falls and how much of the pool survives to
 //! be sorted, not which function is called:

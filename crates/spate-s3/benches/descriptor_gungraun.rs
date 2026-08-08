@@ -6,14 +6,14 @@
 //! descriptor when it opens a split, and again when it validates a resume —
 //! which the driver only does for a split gained with carried progress, so a
 //! resumed split pays it twice and a fresh one once. The parse allocates a
-//! `String` for every key and every ETag where the serialiser only borrowed
+//! `String` for every key and every ETag where the serializer only borrowed
 //! them, and
 //! `decode` runs the parser **twice over the same bytes**, probing the
 //! version before parsing the document, so an incompatible descriptor is
 //! reported as a version mismatch rather than as a parse error.
 //!
 //! One shape — decode a plan's worth of descriptors, the worker-side mirror
-//! of planning a listing's worth of splits — parameterised by how the same
+//! of planning a listing's worth of splits — parameterized by how the same
 //! member count is arranged, because what a change to this path moves is the
 //! split between per-document and per-member work:
 //!
@@ -61,7 +61,7 @@ mod descriptors;
 /// both halves of that are load-bearing rather than stylistic. Collection is
 /// bounded by a callgrind toggle on the module the benchmark macro wraps the
 /// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimiser leaves in an unstable shape inside that module can
+/// so work the optimizer leaves in an unstable shape inside that module can
 /// end up outside the collected region entirely. Two earlier revisions of
 /// this bench proved it: one built the vector with `.iter().map().collect()`
 /// and counted 3,249 Ir, the other used a plain `for` in the benchmark

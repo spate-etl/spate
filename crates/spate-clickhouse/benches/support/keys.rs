@@ -7,7 +7,7 @@
 //!
 //! **Length**, because XXH64 changes shape at 32 bytes: below it the digest
 //! is a single accumulator seeded from a prime, at or above it four lanes are
-//! initialised, striped over, and merged. `SHORT_LEN` sits in the first
+//! initialized, striped over, and merged. `SHORT_LEN` sits in the first
 //! regime and `LONG_LEN` in the second, so a change that helps one and hurts
 //! the other cannot hide in an average.
 //!

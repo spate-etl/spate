@@ -24,7 +24,7 @@ at-least-once contract: the sink always sends — and **reserves** — exactly
 `wait_end_of_query=1`. These three cannot be overridden through the `settings:`
 map; the config rejects them at load. Together they mean a successful insert is
 durably committed and a retried batch is deduplicated rather than doubled (the
-token is honoured even on ClickHouse's async-insert path). Everything else under
+token is honored even on ClickHouse's async-insert path). Everything else under
 `settings:` is yours — **including `wait_for_async_insert`, which is *not*
 reserved**: with `async_insert` on, setting it to `"0"` makes an insert
 acknowledge before the rows are durable, which breaks at-least-once delivery
@@ -144,7 +144,7 @@ Acked-but-not-yet-committed batches are tracked for the at-least-once watermark.
 Under very high insert rates — especially many small parts — this queue can fill
 and pause the source before the sink is saturated. If you see lanes pausing for
 the pending-batch limit while ClickHouse still has headroom, **raise it**; the
-cost is the memory those pending acknowledgements occupy. Prefer fixing it by
+cost is the memory those pending acknowledgments occupy. Prefer fixing it by
 writing **larger** batches first (fewer, bigger inserts drain the queue faster);
 raise the limit when large batches alone are not enough.
 
@@ -200,11 +200,11 @@ it on by default.** If your client already batches into large blocks — as this
 sink does — the setting has little to offer: ClickHouse writes a large enough
 insert directly, so the async buffer is barely exercised, and you gain nothing
 for the extra moving part. For batched bulk ingestion, **set `async_insert:
-"0"`**: it keeps the write path simple and the durable-ack behaviour
+"0"`**: it keeps the write path simple and the durable-ack behavior
 unambiguous. Leave it **on** only when you cannot batch on the client and are
 sending frequent small inserts — the workload it was built for. If you do use it,
 keep `wait_for_async_insert: "1"` so the server confirms the buffer was flushed
-before acknowledging — with `"0"` the acknowledgement returns before the data is
+before acknowledging — with `"0"` the acknowledgment returns before the data is
 durable, which is incompatible with at-least-once delivery.
 
 ## ClickHouse `max_insert_block_size`

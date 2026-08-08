@@ -1369,7 +1369,7 @@ impl<S: CoordinationStore> Task<S> {
     /// Publishing is best-effort per instance. A failed or lost write
     /// leaves that instance on its previous assignment, which is stale but
     /// never unsafe, and the next step retries. There is deliberately no
-    /// barrier and no acknowledgement protocol: the leader learns that a
+    /// barrier and no acknowledgment protocol: the leader learns that a
     /// revocation completed by watching the split's lease disappear, which
     /// is the same fact an ack would have carried and one the store already
     /// tells it.

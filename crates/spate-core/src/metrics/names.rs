@@ -48,11 +48,11 @@ pub const SOURCE_RECORDS_TOTAL: &str = "spate_source_records_total";
 pub const SOURCE_BYTES_TOTAL: &str = "spate_source_bytes_total";
 /// Time spent inside `poll` per call.
 pub const SOURCE_POLL_DURATION_SECONDS: &str = "spate_source_poll_duration_seconds";
-/// Consumer lag, always labelled by [`L_PARTITION`] — there is no aggregate
+/// Consumer lag, always labeled by [`L_PARTITION`] — there is no aggregate
 /// series; aggregate with `sum`/`max` in the query layer. A partition whose
 /// lag has never been measured is absent rather than `0`.
 pub const SOURCE_LAG_RECORDS: &str = "spate_source_lag_records";
-/// Rebalance events observed, labelled by [`L_EVENT`].
+/// Rebalance events observed, labeled by [`L_EVENT`].
 pub const SOURCE_REBALANCES_TOTAL: &str = "spate_source_rebalances_total";
 /// Currently assigned lanes (partitions).
 pub const SOURCE_LANES_ACTIVE: &str = "spate_source_lanes_active";
@@ -131,7 +131,7 @@ pub const SINK_FLUSH_DURATION_SECONDS: &str = "spate_sink_flush_duration_seconds
 /// sink system's round-trip, with the framework's own scheduling around the
 /// call (the permit wait, the retry backoff, the probe wait) left out.
 /// A connector that sleeps *inside* its write puts that sleep in here.
-/// Labelled by outcome because a fast fatal reject and a slow timeout are
+/// Labeled by outcome because a fast fatal reject and a slow timeout are
 /// both attempts; the error *class* stays on [`SINK_ERRORS_TOTAL`].
 pub const SINK_WRITE_DURATION_SECONDS: &str = "spate_sink_write_duration_seconds";
 /// Time a sealed batch waited for one of its shard's `inflight.max_per_shard`
@@ -177,7 +177,7 @@ pub const SINK_DRAIN_OVERRUN_TOTAL: &str = "spate_sink_drain_overrun_total";
 
 // Checkpointing.
 
-/// Unacknowledged batches tracked; unlabelled series is the max across
+/// Unacknowledged batches tracked; unlabeled series is the max across
 /// partitions.
 pub const CHECKPOINT_PENDING_BATCHES: &str = "spate_checkpoint_pending_batches";
 /// Source commit calls, by [`L_OUTCOME`].

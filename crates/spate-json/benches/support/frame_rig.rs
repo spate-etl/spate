@@ -46,9 +46,9 @@ pub(crate) struct Rig {
 /// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
 /// fail anything — it silently empties the measurement. Callgrind toggles
 /// collection on the benchmark function's module, and a toggle flips
-/// collection rather than forcing it on, so a loop the optimiser reshapes
+/// collection rather than forcing it on, so a loop the optimizer reshapes
 /// across that boundary leaves the region holding whatever else was running —
-/// usually the allocator freeing the corpus. A named frame the optimiser may
+/// usually the allocator freeing the corpus. A named frame the optimizer may
 /// not erase is what keeps the loop inside the region.
 ///
 /// The wall tier does not need the attribute and is not harmed by it: it times
@@ -68,7 +68,7 @@ pub(crate) struct Rig {
 /// dropped here too, which is the allocation a source really pays.
 ///
 /// Summing the record lengths is what keeps the loop alive: the framed bytes
-/// are otherwise unobserved and the optimiser is free to delete the calls this
+/// are otherwise unobserved and the optimizer is free to delete the calls this
 /// exists to count. The caller asserts both totals.
 #[inline(never)]
 pub(crate) fn frame_stream(rig: &Rig) -> (usize, usize) {

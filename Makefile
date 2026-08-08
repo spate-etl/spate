@@ -28,9 +28,10 @@
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-compare loom \
         deny attribution \
-        supply-chain zizmor shellcheck self-test check-labels check-perf-report \
-        check-gungraun-benches check-wall-benches check-collected-region \
-        check-invariants \
+        supply-chain zizmor shellcheck self-test check-perf-report \
+        check-gungraun-benches check-collected-region \
+        check-transclusions \
+        check-adr adr-new \
         check-changelog changelog-new \
         ci-lint docs docs-serve gates
 
@@ -191,17 +192,11 @@ shellcheck: ## Lint the shell scripts
 self-test: ## The CI change classifier still matches the crate graph
 	./scripts/ci-changes.sh --self-test
 
-check-labels: ## Every referenced label is a defined label
-	./scripts/check-labels.sh
-
 # The report script and perf-label.yml share a one-file contract that no pull
 # request can execute end to end (`workflow_run` runs the default branch's
 # definition), so the write side runs here instead.
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
-
-check-invariants: ## The invariant lists still agree
-	./scripts/check-invariants.sh
 
 # A `*_gungraun.rs` without a `[[bench]] harness = false` stanza is still
 # auto-discovered by cargo — under the default libtest harness, which rejects
@@ -210,18 +205,29 @@ check-invariants: ## The invariant lists still agree
 check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 	./scripts/gungraun-benches.sh --self-test
 
-# The same trap on the wall tier, where it costs more to find late: the A/B
-# driver builds both legs before it ever starts a target, so a missing stanza
-# surfaces as a runner-protocol error several minutes into a comparison.
-check-wall-benches: ## Every wall-clock bench declares a harness-free target
-	./scripts/wall-benches.sh --self-test
-
 # The guard that rejects a bench measuring the C runtime instead of itself.
 # Its rule is only exercised where valgrind runs, so the fixtures — real
 # profiles, captured under valgrind on Linux — are what holds it to its word
 # everywhere else.
 check-collected-region: ## The degenerate-region guard still recognises both shapes
 	./scripts/gungraun-collected-region.sh --self-test
+
+# The remark plugin resolves every `file=`/`region=` fence when the site builds
+# and throws on a miss. This runs the same resolution straight off disk, which
+# matters twice: the site build carries a persistent bundler cache, and the
+# `site` job is path-filtered, so "the site built" is a weaker statement than it
+# looks. Needs neither cargo nor node.
+check-transclusions: ## Every transcluded region a docs page names exists
+	./scripts/transclude.sh --check
+
+check-adr: ## The decision records stay consistent with their index
+	./scripts/adr.sh --check
+
+# SLUG rather than a positional argument, for the same reason changelog-new
+# takes named variables: a bare `make adr-new leader-assignment` reads the slug
+# as another target to build.
+adr-new: ## Scaffold a decision record: make adr-new SLUG=short-description
+	./scripts/adr.sh --new "$(SLUG)"
 
 check-changelog: ## A user-visible change carries a changelog fragment
 	./scripts/changelog.sh --check
@@ -231,7 +237,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-ci-lint: zizmor shellcheck self-test check-labels check-perf-report check-gungraun-benches check-wall-benches check-collected-region check-invariants check-changelog ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
 
 ##@ Docs
 

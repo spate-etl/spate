@@ -91,6 +91,7 @@ What the pipeline tells you, and what it does when something breaks.
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
 | [`custom_metrics`](custom_metrics.rs) | How to register your own metrics beside the framework's with **the Meter API** | — | nothing |
+| [`instrumented_operator`](instrumented_operator.rs) | How to count what an operator you wrote is doing with **the Meter API** | — | nothing |
 
 ## 5. Extending
 

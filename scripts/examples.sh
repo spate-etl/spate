@@ -66,6 +66,7 @@ example_tier() {
     case "$1" in
         memory_pipeline | custom_operator | custom_source_sink | custom_metrics) echo "free" ;;
         manual_assembly) echo "free" ;;
+        storefront_pipeline) echo "free" ;;
         json_ndjson_memory | s3_backfill) echo "free" ;;
         instrumented_operator) echo "free" ;;
         avro_schema_evolution) echo "free" ;;

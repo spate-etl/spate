@@ -46,8 +46,12 @@ payment_captured { order_id, amount_cents }
 refund_issued    { order_id, amount_cents, reason }
 ```
 
-The nested `lines` array is what `flat_map` fans out; `customer_id` is what
-sharding keys on; the three event kinds are what a split terminal separates.
+The nested `lines` array is what `flat_map` fans out, and the three event kinds
+are what a split terminal separates. Sharding keys on the **order id**, which
+the generator sets as each record's key: a payment and a refund carry only the
+`order_id` of the order they settle, so that is the only field all three share
+and the only one that can colocate them on a shard.
+
 The types are `spate_datagen::storefront`, so an example and your own code can
 share them.
 
@@ -58,6 +62,7 @@ No infrastructure. Read them in this order.
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
 | [`memory_pipeline`](memory_pipeline.rs) | How to build, drive and assert on a whole pipeline with **no infrastructure** | — | nothing |
+| [`storefront_pipeline`](storefront_pipeline.rs) | How to run a realistic order stream to completion or to SIGTERM with **no infrastructure** | — | nothing |
 | [`json_ndjson_memory`](json_ndjson_memory.rs) | How to decode an NDJSON order stream and skip malformed records rather than stop with **JSON** | `json` | nothing |
 
 ## 2. Production pipelines

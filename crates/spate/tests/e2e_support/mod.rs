@@ -37,9 +37,11 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -57,6 +59,10 @@ pub const SCHEMA_ID: u32 = 42;
 pub const SCHEMA_JSON: &str = r#"{"type":"record","name":"Event","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}"#;
 pub const CH_PASSWORD: &str = "e2e";
 
+/// Schemas the stub registry serves, by id. Shared with the server task so a
+/// scenario whose row shape is not [`Event`] can publish its own.
+type Schemas = Arc<Mutex<HashMap<u32, String>>>;
+
 /// Globally-unique record id: partition-millions + sequence. With a fresh
 /// topic and a single ordered producer per partition, `seq` equals the
 /// Kafka offset, which the drain/restart scenario relies on.
@@ -73,6 +79,7 @@ pub struct Harness {
     pub ch_url: String,
     pub registry_url: String,
     schema: Schema,
+    schemas: Schemas,
 }
 
 impl Harness {
@@ -108,7 +115,11 @@ impl Harness {
             std::panic::catch_unwind(|| http_get(ping, "/ping").0 == 200).unwrap_or(false)
         });
 
-        let registry_addr = rt.block_on(serve_stub_registry());
+        let schemas: Schemas = Arc::new(Mutex::new(HashMap::from([(
+            SCHEMA_ID,
+            SCHEMA_JSON.to_string(),
+        )])));
+        let registry_addr = rt.block_on(serve_stub_registry(Arc::clone(&schemas)));
         let registry_url = format!("http://{registry_addr}");
 
         Harness {
@@ -119,7 +130,17 @@ impl Harness {
             ch_url,
             registry_url,
             schema: Schema::parse_str(SCHEMA_JSON).expect("schema"),
+            schemas,
         }
+    }
+
+    /// Publish one more schema in the stub registry, so a scenario whose
+    /// record shape is not [`Event`] can frame payloads against its own id.
+    pub fn register_schema(&self, id: u32, json: &str) {
+        self.schemas
+            .lock()
+            .expect("registry schemas")
+            .insert(id, json.to_string());
     }
 
     // ── ClickHouse ─────────────────────────────────────────────────────
@@ -494,9 +515,11 @@ fn docker(args: &[&str]) {
     );
 }
 
-/// Minimal Confluent-compatible registry: serves `SCHEMA_JSON` for
-/// `/schemas/ids/{SCHEMA_ID}`, 404 elsewhere.
-async fn serve_stub_registry() -> SocketAddr {
+/// Minimal Confluent-compatible registry: serves the registered schemas from
+/// `/schemas/ids/{id}` — `SCHEMA_JSON` under `SCHEMA_ID` out of the box — and
+/// 404s everything else, including the subject lookups a `prewarm_subjects`
+/// list makes (a pre-warm miss is logged, never fatal).
+async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stub registry");
@@ -506,28 +529,40 @@ async fn serve_stub_registry() -> SocketAddr {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let schemas = Arc::clone(&schemas);
             tokio::spawn(async move {
                 let io = hyper_util::rt::TokioIo::new(stream);
-                let service = service_fn(|req: Request<hyper::body::Incoming>| async move {
-                    let known = format!("/schemas/ids/{SCHEMA_ID}");
-                    let (status, body) = if req.uri().path() == known {
-                        (
-                            StatusCode::OK,
-                            serde_json::json!({ "schema": SCHEMA_JSON }).to_string(),
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let schemas = Arc::clone(&schemas);
+                    async move {
+                        let found = req
+                            .uri()
+                            .path()
+                            .strip_prefix("/schemas/ids/")
+                            .and_then(|rest| rest.split('/').next())
+                            .and_then(|id| id.parse::<u32>().ok())
+                            .and_then(|id| {
+                                schemas.lock().expect("registry schemas").get(&id).cloned()
+                            });
+                        let (status, body) = if let Some(schema) = found {
+                            (
+                                StatusCode::OK,
+                                serde_json::json!({ "schema": schema }).to_string(),
+                            )
+                        } else {
+                            (
+                                StatusCode::NOT_FOUND,
+                                r#"{"error_code":40403,"message":"Schema not found"}"#.to_string(),
+                            )
+                        };
+                        Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(status)
+                                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                                .body(Full::new(Bytes::from(body)))
+                                .expect("response"),
                         )
-                    } else {
-                        (
-                            StatusCode::NOT_FOUND,
-                            r#"{"error_code":40403,"message":"Schema not found"}"#.to_string(),
-                        )
-                    };
-                    Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(status)
-                            .header("content-type", "application/vnd.schemaregistry.v1+json")
-                            .body(Full::new(Bytes::from(body)))
-                            .expect("response"),
-                    )
+                    }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, service)

@@ -71,6 +71,14 @@ required-features = ["full"]
 name = "e2e_poison"
 required-features = ["full"]
 
+# The container tier of the example suite: the `infra` examples, driven as the
+# shipped binaries against real servers. Excluded from `[profile.docker]`'s
+# default filter in .config/nextest.toml — it reports nightly, not per pull
+# request. `full` covers every feature the examples it drives ask for.
+[[test]]
+name = "e2e_examples"
+required-features = ["full"]
+
 # `test = true` makes each example a one-test binary: the `#[cfg(test)]` runner
 # at its foot calls `main`, so the assertions an example already carries become
 # a gate instead of decoration. Only the examples that need no infrastructure

@@ -9,17 +9,19 @@
 //! batching, retries, replica rotation, acknowledgments, backpressure.
 //!
 //! Here: a generator source counting to a limit per partition, and a sink
-//! printing JSON lines to stdout.
+//! printing JSON lines to stdout — with a payload-aware [`RecordRouter`]
+//! deciding which shard each order line belongs to.
 //!
 //! ```sh
 //! cargo run -p spate --example custom_source_sink
 //! ```
 //!
 //! [`AckRef`]: spate::checkpoint::AckRef
+//! [`RecordRouter`]: spate::sink::RecordRouter
 
 // The examples index renders these fields; see scripts/examples-index.sh.
 // INDEX-TIER:  extending
-// INDEX-GOAL:  write a source and a sink from scratch
+// INDEX-GOAL:  write a source, a payload-aware router and a sink from scratch
 // INDEX-TECH:  no infrastructure
 // INDEX-NEEDS: nothing
 
@@ -28,14 +30,22 @@
 
 use spate::checkpoint::{AckIssuer, AckRef};
 use spate::deser::Owned;
-use spate::error::{SinkError, SourceError};
+use spate::error::{ErrorPolicy, SinkError, SourceError};
 use spate::prelude::*;
 use spate::record::{RawPayload, Record};
-use spate::sink::{RowEncoder, SealedBatch, ShardWriter};
+use spate::sink::{RecordRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Sink shards, and how many storefront customers the orders belong to.
+const SHARDS: usize = 2;
+const CUSTOMERS: i64 = 4;
+/// Each source record is an upload carrying this many order lines, and
+/// consecutive orders belong to different customers — the fan-out below is
+/// what makes the routing tier matter.
+const LINES_PER_BATCH: i64 = 2;
 
 // ─── The source ─────────────────────────────────────────────────────────
 
@@ -170,6 +180,59 @@ impl Source for CounterSource {
     }
 }
 
+// ─── The router ─────────────────────────────────────────────────────────
+
+/// Routes on a field of the decoded record — the **record-aware** tier.
+///
+/// The chain below fans one upload out into several order lines, and every
+/// child of a `flat_map` carries its parent's `RecordMeta` — the shared
+/// metadata that lets one parent ack resolve across all its children. A
+/// meta-only `ShardRouter` (the tier `KeyHashRouter` sits in) sees that
+/// metadata and nothing else, so it places every child of one upload on one
+/// shard; reading the payload places them independently.
+///
+/// The decision is **deterministic across retries**. Delivery is
+/// at-least-once, so a record can be replayed after a failure, and a router
+/// answering differently the second time writes the same order into two
+/// shards — the dedup token is per shard, so nothing downstream collapses
+/// them. Keep the hash below explicit rather than reaching for
+/// `DefaultHasher`, whose output is seeded and not stable across releases.
+struct ByCustomer;
+
+impl RecordRouter<Owned<Vec<u8>>> for ByCustomer {
+    fn route_record<'buf>(&self, rec: &Record<Vec<u8>>, num_shards: usize) -> usize {
+        shard_of(customer_field(&rec.payload), num_shards)
+    }
+}
+
+/// The routing decision itself, so `main` can assert that what each shard
+/// received is what this function chose, rather than re-deriving it.
+fn shard_of(customer_id: &[u8], num_shards: usize) -> usize {
+    (fnv1a(customer_id) % num_shards as u64) as usize
+}
+
+/// The `cust-N` prefix of an order line. Total by construction: a line
+/// without the separator hashes whole. A router has no per-record error
+/// policy — it must return a shard for every record and never panic, since
+/// a payload-dependent panic replays into a crash loop on restart.
+fn customer_field(line: &[u8]) -> &[u8] {
+    match line.iter().position(|b| *b == b'|') {
+        Some(sep) => &line[..sep],
+        None => line,
+    }
+}
+
+/// FNV-1a: a few instructions, no allocation, and the same answer in every
+/// process and every release — the properties routing needs.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 // ─── The sink ───────────────────────────────────────────────────────────
 
 /// CPU half: encode each record as a JSON line. Runs on pipeline threads;
@@ -187,17 +250,22 @@ impl RowEncoder<Owned<Vec<u8>>> for JsonLinesEncoder {
         use bytes::BufMut;
         buf.put_slice(b"{\"partition\":");
         buf.put_slice(rec.meta.partition.0.to_string().as_bytes());
-        buf.put_slice(b",\"value\":");
+        buf.put_slice(b",\"order_line\":\"");
         buf.put_slice(&rec.payload);
-        buf.put_slice(b"}\n");
+        buf.put_slice(b"\"}\n");
         Ok(())
     }
 }
 
-/// I/O half: "write" a sealed batch by printing it. Returning `Ok` is the
+/// I/O half: "write" a sealed batch by printing it, and record the rows it
+/// carried so `main` can assert on the placement. Returning `Ok` is the
 /// durable-ack point — a real writer returns only after its server
 /// confirmed (e.g. ClickHouse `end()`).
-struct StdoutWriter;
+struct StdoutWriter {
+    /// Endpoint → the encoded rows it received; a real deployment reads
+    /// this back out of the destination instead.
+    written: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
+}
 
 impl ShardWriter for StdoutWriter {
     type Endpoint = String; // a real sink holds a connected client here
@@ -215,11 +283,34 @@ impl ShardWriter for StdoutWriter {
             "── batch {} → {endpoint}: {} rows ──\n",
             batch.dedup_token, batch.rows
         );
+        let endpoint = endpoint.clone();
         async move {
             print!("{header}{out}");
+            // Recorded on the path that returns `Ok`, not when the future
+            // is built: a future the drain deadline aborts before it
+            // resolves wrote nothing.
+            let mut written = self.written.lock().expect("written lock");
+            written
+                .entry(endpoint)
+                .or_default()
+                .extend(out.lines().map(str::to_owned));
             Ok(())
         }
     }
+}
+
+/// Read `(partition, customer, order)` back out of an encoded row — the
+/// assertions' stand-in for querying the destination. The partition
+/// identifies which source record an order line came from: upload ids
+/// repeat across partitions, so an order id alone does not.
+fn parse_order_line(row: &str) -> Option<(u32, i64, i64)> {
+    let (_, rest) = row.split_once("\"partition\":")?;
+    let (partition, rest) = rest.split_once(',')?;
+    let (_, rest) = rest.split_once("\"order_line\":\"")?;
+    let (line, _) = rest.split_once('"')?;
+    let (customer, order) = line.split_once('|')?;
+    let customer = customer.strip_prefix("cust-")?.parse().ok()?;
+    Some((partition.parse().ok()?, customer, order.parse().ok()?))
 }
 
 // ─── Assembly ───────────────────────────────────────────────────────────
@@ -239,27 +330,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
 
     let per_partition = 100;
+    let partitions = 2;
     let commits = Arc::new(Mutex::new(BTreeMap::new()));
     let source = CounterSource {
         per_partition,
-        partitions: 2,
+        partitions,
         issuer: None,
         handed_out: false,
         commits: Arc::clone(&commits),
     };
 
     // A hand-rolled sink needs no SinkBundle impl of its own: SinkParts is
-    // the bundle. Two shards, one "replica" each — keyless records route
-    // by partition. The builder derives labels, per-shard metrics, queues,
-    // and workers from it.
+    // the bundle. `SHARDS` shards, one "replica" each, named for their
+    // index — config order is the shard identity. The builder derives
+    // labels, per-shard metrics, queues, and workers from it.
     let pool_cfg = {
         let mut cfg = SinkPoolConfig::default();
         cfg.batch.linger = Duration::from_millis(50);
         cfg
     };
+    let written = Arc::new(Mutex::new(BTreeMap::new()));
     let sink = SinkParts::new(
-        StdoutWriter,
-        vec![vec!["shard-0".to_string()], vec!["shard-1".to_string()]],
+        StdoutWriter {
+            written: Arc::clone(&written),
+        },
+        (0..SHARDS).map(|s| vec![format!("shard-{s}")]).collect(),
         pool_cfg,
     )
     .with_component_type("stdout");
@@ -270,9 +365,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(spate::deser::BytesPassthrough)
                 .with_metrics(ctx.pipeline, "main")
+                // Each source record is an upload id; parse it, then fan it
+                // out into the order lines it carried. Routing runs once per
+                // *emitted* record, after this fan-out and before encoding,
+                // so the router sees each order line on its own.
+                .try_map(
+                    |upload: Vec<u8>| {
+                        std::str::from_utf8(&upload)
+                            .ok()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .ok_or("upload id is not an integer")
+                    },
+                    ErrorPolicy::Fail,
+                )
+                .flat_map::<Owned<Vec<u8>>, _>(|upload: i64, out| {
+                    for line in 0..LINES_PER_BATCH {
+                        let order_id = upload * LINES_PER_BATCH + line;
+                        let customer_id = order_id % CUSTOMERS;
+                        out.emit(format!("cust-{customer_id}|{order_id}").into_bytes());
+                    }
+                })
                 .sink(
                     JsonLinesEncoder,
-                    KeyHashRouter,
+                    ByCustomer,
                     chunk_cfg,
                     ctx.queues,
                     ctx.budget,
@@ -292,7 +407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         {
             let commits = commits.lock().expect("commits lock");
-            if (0..2).all(|p| commits.get(&p) == Some(&per_partition)) {
+            if (0..partitions).all(|p| commits.get(&p) == Some(&per_partition)) {
                 break;
             }
         }
@@ -301,8 +416,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
+    assert_eq!(report.exit_code(), 0, "the pipeline must drain clean");
+
+    // ─── What the router actually did ───────────────────────────────────
+    //
+    // Commits are gated on durable writes, so every order line is in the
+    // log by now; the writer never fails here, so nothing was retried and
+    // the counts are exact.
+    let written = written.lock().expect("written lock");
+    assert_eq!(written.len(), SHARDS, "every shard must have been written");
+
+    let mut shard_of_customer: BTreeMap<i64, usize> = BTreeMap::new();
+    // Keyed by the source record the lines came from — `(partition,
+    // upload)`, never the upload id alone. Every partition counts from
+    // zero, so an upload id names one record per partition, and a set
+    // merged across partitions is split by any router that separates
+    // partitions at all.
+    let mut shards_of_upload: BTreeMap<(u32, i64), BTreeSet<usize>> = BTreeMap::new();
+    let mut rows = 0;
+    for (endpoint, lines) in written.iter() {
+        let shard: usize = endpoint
+            .strip_prefix("shard-")
+            .and_then(|s| s.parse().ok())
+            .expect("endpoints are named for their shard index");
+        for line in lines {
+            let (partition, customer_id, order_id) =
+                parse_order_line(line).expect("every row is one encoded order line");
+            rows += 1;
+            // Same customer, same shard, always — the determinism
+            // `ByCustomer` states as its contract.
+            let seen = shard_of_customer.insert(customer_id, shard);
+            assert!(
+                seen.is_none() || seen == Some(shard),
+                "cust-{customer_id} landed on two shards"
+            );
+            shards_of_upload
+                .entry((partition, order_id / LINES_PER_BATCH))
+                .or_default()
+                .insert(shard);
+        }
+    }
+    assert_eq!(
+        rows,
+        i64::from(partitions) * per_partition * LINES_PER_BATCH
+    );
+
+    // The placement is the router's, not an accident of the shard count.
+    for (customer_id, shard) in &shard_of_customer {
+        let expected = shard_of(format!("cust-{customer_id}").as_bytes(), SHARDS);
+        assert_eq!(*shard, expected, "cust-{customer_id} routed elsewhere");
+    }
+    // And the payoff: one source record's order lines sit on different
+    // shards, which no meta-only router can produce — every child of a
+    // `flat_map` carries the same `RecordMeta`, so metadata alone cannot
+    // tell them apart.
+    assert!(
+        shards_of_upload.values().any(|shards| shards.len() > 1),
+        "one upload's order lines never split across shards"
+    );
+
     println!("\npipeline exit: {:?}", report.state);
     println!("committed: {:?}", commits.lock().expect("commits lock"));
+    println!("customer → shard: {shard_of_customer:?}");
     Ok(())
 }
 

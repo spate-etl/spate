@@ -79,6 +79,10 @@ name = "memory_pipeline"
 test = true
 
 [[example]]
+name = "manual_assembly"
+test = true
+
+[[example]]
 name = "custom_operator"
 test = true
 

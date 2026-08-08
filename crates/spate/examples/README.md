@@ -99,6 +99,7 @@ Writing your own components against the v1 contracts.
 | [`coordinated_pipeline`](coordinated_pipeline.rs) | How to write a coordination-aware source — planner, splits and driver with **the coordination seam** | `coordination` | nothing |
 | [`custom_operator`](custom_operator.rs) | How to write stateful operators and drive a chain by hand with **no infrastructure** | — | nothing |
 | [`custom_source_sink`](custom_source_sink.rs) | How to write a source and a sink from scratch with **no infrastructure** | — | nothing |
+| [`manual_assembly`](manual_assembly.rs) | How to drop below the builder to the primitives it composes with **no infrastructure** | — | nothing |
 
 ## Containers
 

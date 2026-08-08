@@ -19,33 +19,14 @@ cargo run -p spate --example custom_operator
 ## A stateful operator: deduplication with `flat_map`
 
 `flat_map` is the general form — one record in, zero to N records out — and
-emitting zero is how an operator drops a record. A dedup set is just a
-closure capturing a `HashSet`:
+emitting zero is how an operator drops a record. A dedup set is a closure
+capturing a `HashSet`:
 
-```rust
-let mut seen: HashSet<Vec<u8>> = HashSet::new();
-let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
-    // Stateful deduplication: emitting zero records drops the duplicate.
-    .flat_map::<Owned<Vec<u8>>, _>(move |word, out| {
-        if seen.insert(word.clone()) {
-            out.emit(word);
-        }
-    })
-    // Record-level validation with a per-stage error policy.
-    .try_map(
-        |word: Vec<u8>| {
-            if word.iter().all(u8::is_ascii_alphabetic) {
-                Ok(word)
-            } else {
-                Err("non-alphabetic word")
-            }
-        },
-        ErrorPolicy::Skip,
-    )
-    .map(|word: Vec<u8>| word.to_ascii_uppercase())
-    .sink(TestEncoder, KeyHashRouter, ChunkConfig::default(), queues, budget)
-    .build();
+```rust file=crates/spate/examples/custom_operator.rs region=chain
 ```
+
+`queues` and `budget` are the terminal stage's plumbing, built by
+`shard_queues` and `InflightBudget::new` earlier in the example.
 
 Each chain factory runs once per pipeline thread, so `seen` is per-thread
 state — no locks on the hot path, but also no cross-thread visibility. A
@@ -87,11 +68,22 @@ drop. Every skipped record is visible in metrics
 [Monitoring](../05-deployment/monitoring.mdx)).
 
 :::note
-For chains over **borrowing** record families, bare closures on
-`map`/`try_map` hit a Rust inference limit (E0582); those two combinators
-offer `map_rec`/`try_map_rec` variants taking plain `fn` items instead.
-`filter`, `inspect`, and `flat_map` are unaffected, and owned-record
-chains (like the example above) infer everywhere.
+Over a **borrowing** record family, `map` and `try_map` are not offered at
+all — both are defined only on a builder whose current family is
+`Owned<T>` — so reaching for one gets you `no method named 'map'` rather
+than a bound that fails. What rules them out is rejected at its own
+definition site, not at yours: the family-generic bound they would need,
+`for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>`, desugars to
+`FnMut<(CurF::Rec<'buf>,), Output = NF::Rec<'buf>>`, leaving `'buf`
+mentioned only inside associated types, which is E0582. Reach for
+`map_rec`/`try_map_rec` on a borrowing family; their bound routes through a
+two-parameter trait whose input and output are ordinary type parameters, so
+it can be written. Pass a `fn` item where you can: it satisfies a
+higher-ranked bound by construction, where a closure satisfies it only when
+the compiler infers a higher-ranked signature for it. `filter`, `inspect`
+and `flat_map` bind no output family, so one method serves both kinds, and
+owned-record chains like the one above infer everywhere. The example's
+second chain runs a borrowing family end to end.
 :::
 
 ## When closures aren't enough: `Collector` and `StageLifecycle`

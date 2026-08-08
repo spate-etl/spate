@@ -136,7 +136,7 @@ name = "clickhouse_aggregating_mv"
 required-features = ["clickhouse"]
 
 [[example]]
-name = "json_ndjson_memory"
+name = "json_skip_bad_records"
 required-features = ["json"]
 test = true
 

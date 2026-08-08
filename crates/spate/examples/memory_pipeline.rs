@@ -15,8 +15,9 @@
 //! handle, spawn the run, drive records through the source handle, and
 //! assert on what the sink captured.
 //!
-//! The `ANCHOR` comments below mark the regions the quickstart page renders.
-//! They are stripped from what it shows; see `docs/STYLE.md` § 10.
+//! The `ANCHOR` comments below mark the regions the quickstart and the
+//! how-to guides render, and nest where a page shows part of a step. They
+//! are stripped from what those pages show; see `docs/STYLE.md` § 10.
 
 // The examples index renders these four fields; see scripts/examples-index.sh.
 // INDEX-RANK:  10
@@ -99,13 +100,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .build()
         })
+        // ANCHOR: options
         .runtime_options(RuntimeOptions {
             handle_signals: false, // the demo triggers shutdown itself
             ..RuntimeOptions::default()
         })
+        // ANCHOR_END: options
+        // ANCHOR: handoff
         .into_runtime(source)?;
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
+    // ANCHOR_END: handoff
     // ANCHOR_END: chain
 
     // Feed it: one lane on partition 0, three payloads, nine words total

@@ -17,6 +17,9 @@
 //! commented below is a rule the builder makes structurally impossible to
 //! break, and manual assembly hands all of them back.
 //!
+//! The `ANCHOR` comments below mark the regions the manual-assembly guide
+//! renders. They are stripped from what it shows; see `docs/STYLE.md` § 10.
+//!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 
 // The examples index renders these four fields; see scripts/examples-index.sh.
@@ -52,6 +55,7 @@ sink: { capture: {} }
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ANCHOR: init
     let config = PipelineConfig::from_str(CONFIG)?;
     let pipeline_name = config.pipeline.name.clone();
 
@@ -85,7 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminals charge it on enqueue, sink workers credit it on durable
     // write, and the backpressure controller pauses the source off it.
     let budget = Arc::new(InflightBudget::new());
+    // ANCHOR_END: init
 
+    // ANCHOR: sink
     // ── The layer above ─────────────────────────────────────────────────
     // `SinkOptions` is the builder's home for wiring knobs that are neither
     // connector config nor framework YAML. At that layer the whole of step
@@ -171,7 +177,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Drives the sinks half of `/readyz`; `None` reports connected.
         probe: parts.probe,
     };
+    // ANCHOR_END: sink
 
+    // ANCHOR: runtime
     // ── 4. The runtime — what `.chains` + `.into_runtime` do ────────────
     // The factory takes a bare thread index and threads the queues, budget
     // and pipeline name itself. That is all `ChainCtx` is. The contract it
@@ -213,6 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // builder produce the same runtime, so they drive the same way.
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
+    // ANCHOR_END: runtime
 
     let orders = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), orders)]);

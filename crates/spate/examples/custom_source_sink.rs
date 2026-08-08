@@ -62,6 +62,7 @@ struct CounterLane {
 }
 
 /// One poll's worth of payloads, all borrowing `'a` from the lane.
+// ANCHOR: batch
 struct CounterBatch<'a> {
     payloads: &'a [Vec<u8>],
     partition: PartitionId,
@@ -88,7 +89,9 @@ impl<'a> PayloadBatch<'a> for CounterBatch<'a> {
         &self.ack
     }
 }
+// ANCHOR_END: batch
 
+// ANCHOR: lane
 impl SourceLane for CounterLane {
     type Batch<'a> = CounterBatch<'a>;
 
@@ -131,10 +134,12 @@ impl SourceLane for CounterLane {
         }))
     }
 }
+// ANCHOR_END: lane
 
 /// The control plane: hands out its lanes once, then idles. Commits are
 /// recorded where the demo (and your tests) can observe them — a real
 /// source would store them durably (Kafka: `store_offsets`).
+// ANCHOR: control
 struct CounterSource {
     per_partition: i64,
     partitions: u32,
@@ -179,6 +184,7 @@ impl Source for CounterSource {
         Ok(())
     }
 }
+// ANCHOR_END: control
 
 // ─── The router ─────────────────────────────────────────────────────────
 
@@ -241,6 +247,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// CPU half: encode each record as a JSON line. Runs on pipeline threads;
 /// must not do I/O. Frames are concatenable, so workers merge them into
 /// big batches regardless of how many pipeline threads produced them.
+// ANCHOR: encoder
 #[derive(Clone)]
 struct JsonLinesEncoder;
 
@@ -259,11 +266,13 @@ impl RowEncoder<Owned<Vec<u8>>> for JsonLinesEncoder {
         Ok(())
     }
 }
+// ANCHOR_END: encoder
 
 /// I/O half: "write" a sealed batch by printing it, and record the rows it
 /// carried so `main` can assert on the placement. Returning `Ok` is the
 /// durable-ack point — a real writer returns only after its server
 /// confirmed (e.g. ClickHouse `end()`).
+// ANCHOR: writer
 struct StdoutWriter {
     /// Endpoint → the encoded rows it received; a real deployment reads
     /// this back out of the destination instead.
@@ -299,6 +308,7 @@ impl ShardWriter for StdoutWriter {
         }
     }
 }
+// ANCHOR_END: writer
 
 /// Read `(customer, order)` back out of an encoded row — the assertions'
 /// stand-in for querying the destination.
@@ -340,6 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the bundle. `SHARDS` shards, one "replica" each, named for their
     // index — config order is the shard identity. The builder derives
     // labels, per-shard metrics, queues, and workers from it.
+    // ANCHOR: bundle
     let pool_cfg = {
         let mut cfg = SinkPoolConfig::default();
         cfg.batch.linger = Duration::from_millis(50);
@@ -354,6 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool_cfg,
     )
     .with_component_type("stdout");
+    // ANCHOR_END: bundle
 
     let runtime = pipeline
         .sink(sink)?

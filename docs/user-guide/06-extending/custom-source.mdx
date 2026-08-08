@@ -16,52 +16,22 @@ bounds that break payload borrowing. Rationale in
 `crates/spate-core/src/source/mod.rs` and on
 [docs.rs](../07-reference/README.mdx).
 
-This page mirrors `crates/spate/examples/custom_source_sink.rs` — a generator
-source counting to a limit per partition. Run it:
+The data-plane and control-plane blocks below come from
+`crates/spate/examples/custom_source_sink.rs` — a generator source counting to
+a limit per partition, which needs no infrastructure and no facade feature
+beyond the default:
 
 ```sh
 cargo run -p spate --example custom_source_sink
 ```
 
+The coordination section at the end draws on a second example, named there.
+
 ## The data plane: `SourceLane` and `PayloadBatch`
 
 A lane polls up to `max_records` payloads, waiting at most `timeout`:
 
-```rust
-impl SourceLane for CounterLane {
-    type Batch<'a> = CounterBatch<'a>;
-
-    fn id(&self) -> LaneId { self.id }
-    fn partition(&self) -> PartitionId { self.partition }
-
-    fn poll(
-        &mut self,
-        max_records: usize,
-        timeout: Duration,
-    ) -> Result<Option<Self::Batch<'_>>, SourceError> {
-        if self.next >= self.limit {
-            // Exhausted: block briefly like an idle consumer would — a lane
-            // must never busy-spin the pipeline thread.
-            std::thread::sleep(timeout);
-            return Ok(None);
-        }
-        let base = self.next;
-        let end = (base + max_records as i64).min(self.limit);
-        self.buf.clear();
-        self.buf.extend((base..end).map(|n| n.to_string().into_bytes()));
-        self.next = end;
-
-        // One acknowledgement handle per batch.
-        let ack = self.issuer.issue(self.partition, end - 1);
-        Ok(Some(CounterBatch {
-            payloads: &self.buf,
-            partition: self.partition,
-            base_offset: base,
-            idx: 0,
-            ack,
-        }))
-    }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=lane
 ```
 
 What the framework holds you to:
@@ -82,21 +52,10 @@ What the framework holds you to:
   worst case a sleep). A zero-timeout poll loop busy-spins a pinned
   pipeline thread at 100% for nothing.
 
-The batch type streams payloads out one at a time, all sharing the batch
-lifetime:
+The batch type holds one poll's payloads and streams them out one at a time,
+all sharing the batch lifetime:
 
-```rust
-impl<'a> PayloadBatch<'a> for CounterBatch<'a> {
-    fn next_payload(&mut self) -> Option<RawPayload<'a>> {
-        let bytes = self.payloads.get(self.idx)?;
-        let offset = self.base_offset + self.idx as i64;
-        self.idx += 1;
-        Some(RawPayload { bytes, key: None, partition: self.partition,
-                          offset, timestamp_ms: offset })
-    }
-
-    fn ack(&self) -> &AckRef { &self.ack }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=batch
 ```
 
 `RawPayload.key` feeds the sink's shard routing hash — populate it if your
@@ -104,31 +63,15 @@ source has message keys.
 
 ## The control plane: `Source`
 
-```rust
-impl Source for CounterSource {
-    type Lane = CounterLane;
+The control plane owns whatever the lanes are built from, and the `Source` impl
+is the runtime's entire view of it. This one deals its lanes on the first call
+and idles forever after; a real source services its client here on every call:
 
-    fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        self.issuer = Some(ctx.issuer);   // clone into every lane you build
-        Ok(())
-    }
-
-    fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<CounterLane>, SourceError> {
-        if !self.handed_out {
-            self.handed_out = true;
-            let lanes = /* build one CounterLane per partition */;
-            return Ok(SourceEvent::LanesAssigned(lanes));
-        }
-        std::thread::sleep(timeout);      // nothing else ever happens
-        Ok(SourceEvent::Idle)
-    }
-
-    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        // Store durably per your source's policy (Kafka: store_offsets).
-        Ok(())
-    }
-}
+```rust file=crates/spate/examples/custom_source_sink.rs region=control
 ```
+
+The example records its watermarks in a map its own assertions read back. Store
+them wherever your source resumes from instead.
 
 - **`open`** runs once, before anything else, and hands you the
   `AckIssuer`. Connect here.
@@ -160,7 +103,10 @@ backfill, an HTTP chunked body, a WebSocket stream — one transfer is a large
 byte stream that must be cut into records *before* the deserializer sees them.
 That cutting is **framing**. The *seam* is transport-agnostic and lives in
 `spate_core::framing`, but the concrete framer is a property of the **format**, so
-it is owned by the format crate and handed to a source at assembly time:
+it is owned by the format crate and handed to a source at assembly time. The
+trait is quoted here to be read rather than run — you implement it in a format
+crate, and each method's contract is cut to the one line that matters at this
+distance:
 
 ```rust
 pub trait RecordFramer: Send {
@@ -183,7 +129,8 @@ source reuses every format's framer. Worked reference:
 
 Tell the framework how your payloads are framed with **`framing_contract`**, so
 framing is established once (on the source) instead of coordinating it with the
-deserializer by hand:
+deserializer by hand. The whole override is the signature and one of two
+answers:
 
 ```rust
 fn framing_contract(&self) -> FramingContract {
@@ -260,8 +207,14 @@ plugging into the [coordination seam](../02-concepts/07-source-coordination.mdx)
 You implement two small traits — *what the work is* and *how to read one
 piece of it* — and embed the framework's `CoordinationDriver`, which owns
 all of the assignment choreography, fencing bookkeeping, and completion
-tracking. Everything below is the complete wiring; the runnable version
-is `crates/spate/examples/custom_coordinated_source.rs`.
+tracking. Everything below is the complete wiring, rendered from
+`crates/spate/examples/custom_coordinated_source.rs` — two instances dividing a
+synthetic 1,000-row ledger over a shared in-memory store, in one process and
+with nothing installed:
+
+```sh
+cargo run -p spate --features coordination --example custom_coordinated_source
+```
 
 ### 1. Plan the work: `SplitPlanner`
 
@@ -269,39 +222,28 @@ The planner enumerates the input as **splits** — leasable work units with
 deterministic ids. It runs only on the fleet's elected leader; workers
 receive the descriptors and never re-enumerate.
 
-```rust
-use spate::coordination::{
-    CoordinationError, PlanContext, PlanFinality, PlannedSplit, SplitId,
-    SplitPlan, SplitPlanner, SplitSpec,
-};
-
-struct MyPlanner { /* connection/config it plans from */ }
-
-impl SplitPlanner for MyPlanner {
-    /// Config-derived job identity (NEVER derived from the enumeration).
-    /// Byte-equal across every worker of the job, or the odd one out is
-    /// rejected at startup.
-    fn fingerprint(&self) -> String {
-        "my-source:v1:table=orders".into()
-    }
-
-    /// May do real I/O (a LIST, an index scan) — it runs off the async
-    /// loop. Idempotency contract: unchanged work yields the same ids.
-    fn plan(&mut self, ctx: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
-        let splits = vec![PlannedSplit::new(
-            SplitSpec::new(
-                SplitId::new("rows-000000-000125")?,
-                b"0..125".to_vec(),          // opaque descriptor, keep it small
-            )
-            .with_weight(125),               // cost hint (bytes, rows)
-        )];
-        // Final = bounded job (completion is reachable). Open = the leader
-        // re-runs the planner on the replan interval; persist a cursor via
-        // `.with_planner_state(...)` and read it back from `ctx.planner_state`.
-        Ok(SplitPlan::new(splits, PlanFinality::Final))
-    }
-}
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=planner
 ```
+
+`LedgerPlanner` is two methods, and four contracts behind them:
+
+- **`fingerprint` is the job's identity, and it is derived from config, never
+  from the enumeration.** Every instance of one job must produce byte-equal
+  output; the odd one out is rejected at startup rather than allowed to plan
+  a different job into the same store.
+- **`plan` may do real I/O** — a listing, an index scan — because it runs on
+  the blocking pool rather than the async loop. It must be idempotent in the
+  only sense that matters here: unchanged work yields the same split ids, so
+  a replan or a leader failover re-emits what is already there and the store
+  takes it as a no-op.
+- **A descriptor is opaque bytes and travels to every future owner**, so keep
+  it small and decodable on its own. The weight beside it is a cost hint —
+  bytes, rows, whatever the input measures itself in — used to balance the
+  assignment.
+- **`PlanFinality` decides whether the job can finish.** `Final` means the
+  enumeration is complete and completion is reachable. `Open` means the leader
+  re-runs the planner on the replan interval; carry a cursor between runs with
+  `SplitPlan::with_planner_state` and read it back from `ctx.planner_state`.
 
 Sizing guidance: roughly uniform-cost splits, tens of MB to ~128 MB (or
 the row-count equivalent). Migrating from a pre-coordination checkpoint:
@@ -311,7 +253,7 @@ plans without seeds; an empty `Final` plan completes immediately. (A
 source whose legacy checkpoint cannot be mapped onto splits may prefer a
 clean cutover instead — see *Retrofitting an existing source* below.)
 
-Two practicalities the signatures don't show:
+Two further practicalities:
 
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle — capture both at construction. `plan` runs on the
@@ -329,80 +271,46 @@ Two practicalities the signatures don't show:
 ### 2. Read the work: `SplitSource`
 
 Implement the driver's callbacks on your **lane-assembly context** — the
-sub-struct holding what lane construction needs — not on the source
-itself, so the driver (a sibling field) and the context borrow disjointly:
+sub-struct holding what lane construction needs, `LedgerCtx` here — not on the
+source itself, so the driver (a sibling field) and the context borrow
+disjointly:
 
-```rust
-use spate::coordination::driver::{SplitOpening, SplitSource};
-use spate::coordination::{SplitId, SplitProgress, SplitSpec};
-
-impl SplitSource for MyCtx {
-    type Lane = MyLane;
-
-    /// Materialize the data lane for a gained (or re-assigned) split.
-    /// The descriptor the planner wrote arrives verbatim in
-    /// `opening.split.descriptor` — decode it here; a worker never saw
-    /// the planner run. `opening.resume` is the authoritative committed
-    /// progress (already `validate_resume`-checked); start exactly there.
-    /// Spawn fetchers here; never block on data. Clone `opening.waker`
-    /// into the lane — see the wakeup contract below.
-    fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<MyLane, SourceError> {
-        let work = MyDescriptor::decode(&opening.split.descriptor)?;
-        let resume = opening.resume.map_or(0, |p| p.watermark);
-        Ok(MyLane::new(
-            opening.lane,
-            opening.partition,
-            work,
-            resume,
-            opening.waker.clone(),
-        ))
-    }
-
-    /// Drift-check carried progress (etag pins, schema versions) against
-    /// this instance's view before trusting it. Default accepts.
-    /// Rejecting stops the pipeline.
-    fn validate_resume(&self, split: &SplitSpec, p: &SplitProgress) -> Result<(), SourceError> {
-        let pin = MyResumeState::decode(&p.state)?;      // same payload encode_commit writes
-        pin.check_against(&MyDescriptor::decode(&split.descriptor)?)
-    }
-
-    /// Snapshot committable progress at an acked watermark. The `state`
-    /// payload is yours: version it, round-trip everything the NEXT owner
-    /// needs (etag pins, schema versions) — it comes back in
-    /// `opening.resume` and `validate_resume`. Mint
-    /// `SplitProgress::completed` when this watermark COMPLETES the split
-    /// (fully delivered and fully acknowledged — you own that accounting;
-    /// the usual shape is "the lane recorded its terminal watermark T at
-    /// end-of-input, and this acked watermark equals it").
-    fn encode_commit(&mut self, split: &SplitId, watermark: i64) -> Result<SplitProgress, SourceError> {
-        let state = self.resume_state_at(split, watermark).encode();
-        Ok(if self.terminal_watermark(split) == Some(watermark) {
-            SplitProgress::completed(watermark, state)
-        } else {
-            SplitProgress::new(watermark, state)
-        })
-    }
-
-    /// Completion sweep for splits that will never produce another
-    /// watermark: a split whose members yield ZERO records (empty
-    /// objects, an empty id range), or whose final ack landed exactly at
-    /// the previous commit. Return `Some(SplitProgress::completed(...))`
-    /// when done, `None` while data is in flight — without this, a
-    /// recordless split never finishes and the job never completes.
-    fn sweep(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError> {
-        let Some(t) = self.terminal_watermark(split) else { return Ok(None) };
-        Ok(self.fully_acked_at(split, t)
-            .then(|| SplitProgress::completed(t, self.resume_state_at(split, t).encode())))
-    }
-
-    /// The split's lane is being retired (lost, fenced, completed, or
-    /// shutdown): DETACH its fetcher — never abort it, the pipeline
-    /// thread may still be draining the lane. Must not block. This is the
-    /// END OF THE TENANCY: the driver never calls `encode_commit` or
-    /// `sweep` for the split afterwards, so drop its state here.
-    fn close_split(&mut self, split: &SplitId) {}
-}
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=split_source
 ```
+
+Five callbacks, and what each owes the driver:
+
+- **`open_split`** materializes the data lane for a gained or re-assigned
+  split. The descriptor the planner wrote arrives verbatim in
+  `opening.split.descriptor` — decode it here, because a worker never saw the
+  planner run. `opening.resume` is the authoritative committed progress and has
+  already been through `validate_resume`, so start exactly there. Spawn your
+  fetchers here; never block on data. Clone `opening.waker` into the lane — see
+  the wakeup contract below.
+- **`validate_resume`** drift-checks carried progress against this instance's
+  view of the split before the driver trusts a byte of it. It defaults to
+  accepting; [the drift check](#the-drift-check-validate_resume) below is a
+  worked one, and says what rejecting actually does.
+- **`encode_commit`** snapshots committable progress at an acked watermark. The
+  `state` payload is yours: version it, and round-trip everything the *next*
+  owner needs, because it comes back as `opening.resume` and as
+  `validate_resume`'s second argument. Mint `SplitProgress::completed` when
+  this watermark completes the split — fully delivered *and* fully
+  acknowledged, which is accounting you own. The usual shape is a terminal
+  watermark the lane recorded at end-of-input and an acked watermark equal to
+  it; a split with a known record count, like the ledger's ranges, can compare
+  against the count instead.
+- **`sweep`** finishes splits that will never produce another watermark: one
+  whose members yield zero records, or whose final ack landed exactly at the
+  previous commit. Return `Some(SplitProgress::completed(…))` when done and
+  `None` while data is in flight. Without it a recordless split never finishes
+  and the job never completes — the ledger's ranges are never empty, which is
+  why its implementation is a comment and a `None`.
+- **`close_split`** ends the tenancy. The split's lane is being retired — lost,
+  fenced, completed, or shut down — so *detach* its fetcher rather than abort
+  it, since the pipeline thread may still be draining the lane, and do not
+  block. The driver calls neither `encode_commit` nor `sweep` for that split
+  afterwards, so drop its state here.
 
 Progress must be **split-relative**: a watermark encodes a position
 *within the split's own descriptor* (a member ordinal plus a record
@@ -423,68 +331,52 @@ milliseconds of its last record becoming sink-durable. Completion is
 correct without it; the terminal commit lands on the next tick either
 way.
 
+#### The drift check: `validate_resume`
+
+Carried progress describes the split as it stood when the progress was written.
+The two come apart whenever a replan moves an id's bounds under progress
+already committed against them — a job restarted against a different input
+size, a planner whose ranges shift — and the resume point then counts records
+the split no longer covers. A watermark alone cannot reveal that: a number in
+range looks the same either way. So a commit pins the descriptor it was
+produced against, and the check re-reads that pin as well as the watermark's
+place in the range:
+
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=validate_resume
+```
+
+**Rejecting stops the pipeline only when the error is classed `Fatal`, so class
+it `Fatal`.** The driver raises the rejection before it records the tenancy or
+stages the opening, so the split is never opened — no lane, no partition id,
+and the rest of that batch of coordination events goes unapplied. The error
+then leaves the driver through your own `poll_events`, where the controller
+reads its class. A `Fatal` one becomes the pipeline's fatal error and the run
+ends `ExitState::Failed`, which is the only honest outcome for progress nothing
+can reconcile. Any other class is logged as a retryable control-plane error and
+the gain is dropped, which leaves a split this instance neither reads nor hands
+back.
+
 ### 3. Delegate the choreography: `CoordinationDriver`
 
-```rust
-use spate::coordination::driver::CoordinationDriver;
-use spate::coordination::SplitCoordinator;
+`LedgerSource` is the driver, the context, and thin forwards into both:
 
-struct MySource {
-    driver: CoordinationDriver,
-    ctx: MyCtx,
-    started: bool,
-}
-
-impl MySource {
-    /// The coordinator is injected, fully built, at assembly time (§4) —
-    /// expose this as a `with_coordinator(...)` builder on a config-driven
-    /// source. The driver is just a wrapper: `CoordinationDriver::new`
-    /// takes the boxed coordinator and nothing else.
-    fn new(coordinator: Box<dyn SplitCoordinator>) -> MySource {
-        MySource {
-            driver: CoordinationDriver::new(coordinator),
-            ctx: MyCtx::default(),
-            started: false,
-        }
-    }
-}
-
-impl Source for MySource {
-    type Lane = MyLane;
-
-    fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        self.ctx.issuer = Some(ctx.issuer);
-        Ok(())
-    }
-
-    fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<MyLane>, SourceError> {
-        if !self.started {
-            self.started = true;
-            // Joins the job and returns SourceEvent::LanesAssigned(vec![]) —
-            // the EMPTY ready signal. It bumps the controller's assignment
-            // epoch and marks the pipeline running while claims race;
-            // splits then arrive additively (SourceEvent::LanesAdded).
-            return self.driver.start(Box::new(MyPlanner { /* … */ }));
-        }
-        self.driver.poll_events(&mut self.ctx, timeout)
-    }
-
-    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        self.driver.commit(&mut self.ctx, watermarks)
-    }
-    // flush_commits: keep the default no-op. A commit that returns Ok is
-    // either durable in the store or (after a transient store failure)
-    // cached by the driver and recommitted on the next tick — the
-    // previous durable state stays authoritative meanwhile, so a crash
-    // before the recommit only widens replay, never loses data.
-}
-
-impl Drop for MySource {
-    fn drop(&mut self) {
-        self.driver.release(); // graceful release: peers claim instantly
-    }
-}
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=driver
 ```
+
+- **The coordinator arrives fully built**, from assembly (step 4 below); expose
+  that as a `with_coordinator(...)` builder on a config-driven source.
+  `CoordinationDriver::new` takes the boxed coordinator and nothing else.
+- **`driver.start` returns the empty ready signal** —
+  `SourceEvent::LanesAssigned(vec![])`. It bumps the controller's assignment
+  epoch and marks the pipeline running while the claims race, and the splits
+  then arrive additively as `SourceEvent::LanesAdded`.
+- **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
+  either durable in the store or, after a transient store failure, cached by
+  the driver and recommitted on the next tick; the previous durable state stays
+  authoritative meanwhile, so a crash before the recommit widens replay rather
+  than losing data.
+- **`Drop` releases the assignment**, so peers claim the splits immediately
+  instead of waiting out the lease.
 
 What the driver owns so you don't: additive gains (each gain mints a
 fresh, never-reused lane id and joins the running assignment via
@@ -555,33 +447,34 @@ seam. Whatever the backend, the shape is the same — build a
 [coordination store](../04-connectors/coordination/README.mdx), wrap it in a
 `StoreCoordinator`, hand that to your source:
 
-```rust
-use spate::coordination::{CoordinationConfig, StoreCoordinator};
-
-// One value drives the store's TTL and the coordinator's lease_duration.
-// They must match — StoreCoordinator::new fails fast on a divergence
-// (heartbeats pace from the config, expiry runs on the store's clock).
-let coordination = CoordinationConfig {
-    instance_id: std::env::var("POD_NAME").ok(), // unique per replica
-    ..CoordinationConfig::default()
-};
-let store = /* a CoordinationStore — see the store's own page */;
-let coordinator = StoreCoordinator::new(
-    store,
-    coordination,
-    pipeline.io_handle(),
-    None, // or Some(CoordinationMetrics::new(&labels)) — see below
-)?;
-let source = MySource::new(Box::new(coordinator));
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=coordinator
 ```
+
+Three of those arguments carry more than their names suggest:
+
+- **`instance_id` must be unique across live workers**, and it defaults to a
+  fresh random id per run. Set it to something stable per replica — the pod
+  name, the ordinal, whatever your scheduler guarantees — and a restart
+  reclaims its own splits without waiting a lease out. Two live processes
+  sharing one id is detected and fatal, so a value stable across *replicas*
+  is worse than no value at all.
+- **`lease_duration` and the store's TTL must agree**, which is why the example
+  builds both from one constant. `StoreCoordinator::new` fails fast on a
+  divergence: heartbeats pace from the config while expiry runs on the store's
+  clock, so a mismatch is two components disagreeing about when a worker is
+  dead. The timings shown are demo-fast; production floors are far higher.
+- **The trailing `None` is the metrics slot**, filled in under
+  [Metrics](#metrics) below.
 
 Tests and single-process runs swap the store — nothing else changes, and
 the `coordination` feature alone suffices, with no backend dependency tree:
 
-```rust
-use spate::coordination::store::memory::MemoryStore;
-let store = MemoryStore::new(coordination.lease_duration);
+```rust file=crates/spate/examples/custom_coordinated_source.rs region=store
 ```
+
+`LEASE` there is the single constant the coordinator's `lease_duration` also
+comes from; a durable store takes the same value from wherever its own
+configuration lives.
 
 Building a durable store is the store's business, not the source's:
 requirements, credentials and outage behavior are on its page. What matters

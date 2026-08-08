@@ -417,6 +417,7 @@ impl ClickHouseSink {
     }
 }
 
+// ANCHOR: bundle
 impl SinkBundle for ClickHouseSink {
     type Writer = ClickHouseWriter;
 
@@ -433,6 +434,7 @@ impl SinkBundle for ClickHouseSink {
             .with_probe(probe)
     }
 }
+// ANCHOR_END: bundle
 
 /// Build a [`ClickHouseSink`] from the opaque `sink: { clickhouse: ... }`
 /// component section.

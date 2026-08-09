@@ -34,7 +34,8 @@ Each destination is declared with `add`, which returns a `Copy`, typed handle;
 mirrors [`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter — one
 `match`, doing classification and row extraction in the same arm.
 
-The chain below is the one in `crates/spate/examples/multi_table_split.rs`,
+The chain below is the one in
+[`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs),
 which splits a stream of typed metric readings across two destinations:
 
 ```rust file=crates/spate/examples/multi_table_split.rs region=split

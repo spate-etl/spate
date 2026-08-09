@@ -104,7 +104,8 @@ impl std::fmt::Display for SplitFailure {
 }
 
 /// Collect and sort the full listing under `prefix`. Memory is
-/// O(number of keys) — transient, at startup only.
+/// O(number of keys), held for the duration of one plan run — which for an
+/// open plan is every replan tick, not startup alone.
 pub(crate) async fn list_all(
     store: &Arc<dyn ObjectStore>,
     prefix: Option<&Path>,

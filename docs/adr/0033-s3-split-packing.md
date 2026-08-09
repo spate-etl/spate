@@ -28,9 +28,8 @@ share physical locality, get scattered across splits.
 ## Decision outcome
 
 Chosen option: "Listing-order first-fit with a bounded lookback", because it is a
-pure, streamable function of the listing: the planner packs as it lists, so
-memory is bounded by the lookback rather than by object count, and objects that
-listed together stay together.
+pure function of the listing order: packing holds only a bounded window of open
+bins, and objects that listed together stay together.
 
 Three parameters carry the design. A lookback of ten bins is enough to place a
 small object well without unbounded search. Each object is charged
@@ -50,10 +49,12 @@ count, and every split carries coordination overhead.
 
 ### Consequences
 
-- Good, because planner memory is bounded by the lookback, so a bucket with
-  millions of objects plans in constant space.
 - Good, because prefix locality survives, so a split's reads are usually
   physically close.
+- Neutral, because the lookback bounds only the open-bin window. The planner
+  collects and sorts the full listing by key before packing sees it, so planner
+  memory is a function of object count either way — the same cost the sorted
+  pack was charged with above. Packing adds a bounded window on top of it.
 - Bad, because bin evenness is worse than a sorted pack would achieve, so some
   splits are meaningfully larger than others.
 - Bad, because the target size and the divisor in the open cost are tuned

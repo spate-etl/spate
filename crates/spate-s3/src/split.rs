@@ -28,13 +28,13 @@
 //! # Packing
 //!
 //! [`pack`] walks the sorted listing in order and first-fits each object
-//! into one of a bounded window of open bins (no sorting by size: packing
-//! stays a pure, streamable function of the listing and preserves prefix
-//! locality). Each object costs at least `target / 16` — the open-cost
-//! floor that stops thousands of tiny objects coalescing into one split —
-//! so a split holds at most ~16 members and its descriptor stays far below
-//! backend value-size caps. An object at or above the target lands alone in
-//! its own split.
+//! into one of a bounded window of open bins. It never reorders by size, so
+//! the output is a pure function of the listing order and objects sharing a
+//! key prefix stay in the same split. Each object costs at least
+//! `target / 16` — the open-cost floor that stops thousands of tiny objects
+//! coalescing into one split — so a split holds at most ~16 members and its
+//! descriptor stays far below backend value-size caps. An object at or above
+//! the target lands alone in its own split.
 
 use crate::fetch::ObjectEntry;
 use base64::Engine as _;
@@ -54,8 +54,10 @@ pub const DESCRIPTOR_VERSION: u32 = 1;
 /// explicit epoch (see the module docs).
 pub(crate) const PACKING_VERSION: u32 = 1;
 
-/// Maximum number of bins held open during packing. Bounds planner memory
-/// and how far out of listing order a member can land.
+/// Maximum number of bins held open during packing. Bounds the open-bin
+/// window and how far out of listing order a member can land. The listing
+/// itself is resident for the whole plan, so it — not this — is what
+/// planner memory scales with.
 pub(crate) const PACKING_LOOKBACK: usize = 10;
 
 /// Denominator of the per-object open-cost floor: each member costs at

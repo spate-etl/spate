@@ -123,8 +123,8 @@ Of the rule's two terms, pending writes —
 `shards × inflight.max_per_shard × batch.max_bytes` — dominate. Worked
 example from the flagship YAML
 ([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
-one shard, 2 in-flight, 128 MiB batches gives
-`2 × (1 × 2 × 128MiB) = 512MiB`, so the
+one shard, 2 in-flight, 128 MiB batches gives `1 × 2 × 128MiB = 256MiB` of
+pending writes, doubled for the rule's headroom to 512 MiB, so the
 example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). Note
 the framework **defaults are intentionally not self-consistent** under
 saturation: 2 shards at the default batch settings exceed the default

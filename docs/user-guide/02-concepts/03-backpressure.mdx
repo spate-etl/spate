@@ -48,10 +48,13 @@ a completion signal (see
 ## Acting on it: the pause controller
 
 Pausing a lane is not free for every source, which is what the hysteresis
-is for. The pause controller releases a lane only once the budget has
-fallen back below the **low watermark** *and* a minimum pause has elapsed;
-without both, a budget resting at the boundary would pause and resume every
-cycle. Observe it via `spate_backpressure_paused`,
+is for. The pause controller releases a lane only once both pressure
+signals have cleared — the budget back below its **low watermark**, the
+queues back below their fill threshold — and a minimum pause has elapsed on
+top of that. A rejection arriving while paused restarts that timer, since
+it is proof the downstream is still congested. Without the delay, a budget
+resting at the boundary would pause and resume every cycle. Observe it via
+`spate_backpressure_paused`,
 `spate_backpressure_pause_events_total` (a flapping indicator when high),
 and `spate_backpressure_inflight_bytes` (see
 [Metrics](../../METRICS.md)).
@@ -85,10 +88,10 @@ max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
   + shards × SinkOptions::queue_capacity × chunk.target_bytes ) // queued chunks
 ```
 
-Every term but one is a configuration key. `queue_capacity` is a builder
-knob set through `SinkOptions`, and configuration rejects unknown fields
-with the offending key, so a pipeline that names it in YAML fails at
-startup.
+`SinkOptions::queue_capacity` is the one factor that is not a configuration
+key — it is set on the builder. Configuration rejects unknown fields naming
+the offending one, so a pipeline that reads `queue_capacity` off this rule
+and puts it in YAML fails at startup.
 
 In words: the budget's low watermark must comfortably hold everything the
 sink *legitimately* keeps in flight during steady-state operation. If it

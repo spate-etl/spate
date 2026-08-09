@@ -114,11 +114,13 @@
 //! - [`checkpoint`] / [`backpressure`] — acknowledgments and flow control.
 //! - [`config`] — YAML with `${VAR:-default}` interpolation and opaque
 //!   per-connector sections.
-//! - [`metrics`] / [`admin`] / [`telemetry`] — observability (the
+//! - [`metrics`] / [`admin`] / [`telemetry`] — observability. The
 //!   [`metrics`](https://crates.io/crates/metrics) facade is the
-//!   instrumentation API; see `docs/METRICS.md` for the taxonomy).
+//!   instrumentation API, and [the metrics reference] carries the taxonomy.
 //! - Testing your pipelines: the `spate-test` crate (in-memory sources and
 //!   sinks with scripting handles).
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 pub use spate_core::*;
 

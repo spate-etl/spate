@@ -45,8 +45,10 @@ pub(crate) fn kind(event: &StorefrontEvent) -> usize {
 
 impl LaneCounters {
     /// Add one batch's tally, indexed by [`kind`]. Called once per batch, not
-    /// once per record: `docs/METRICS.md` puts counter increments on batch
-    /// boundaries.
+    /// once per record — [the metrics reference] puts counter increments on
+    /// batch boundaries.
+    ///
+    /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     pub(crate) fn add_generated(&self, tally: [u64; 3]) {
         let handles = [
             &self.order_placed,

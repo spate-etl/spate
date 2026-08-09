@@ -3,8 +3,8 @@
 //! [`KafkaStatsMetrics`] translates the periodic [`Statistics`] snapshot
 //! (captured by the `ClientContext::stats` callback, drained by
 //! `KafkaSource::publish_stats` on the controller thread) into the
-//! connector-owned families documented in `docs/METRICS.md` § Kafka source.
-//! All fixed handles are resolved from the runtime-minted
+//! connector-owned families [the metrics reference] documents under Kafka
+//! source. All fixed handles are resolved from the runtime-minted
 //! [`Meter`](spate_core::metrics::Meter) once at `open`; per-broker and
 //! per-partition handles are registered lazily on first sighting — a
 //! control-plane path, never per record.
@@ -30,6 +30,8 @@
 //! (`max()` is the only defensible cross-series operator). librdkafka
 //! reports `rtt` in microseconds but `throttle` in milliseconds; both are
 //! converted to seconds here.
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use rdkafka::statistics::Statistics;
 use spate_core::metrics::{Counter, Gauge, Meter};

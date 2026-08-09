@@ -17,10 +17,10 @@
 //! commented below is a rule the builder makes structurally impossible to
 //! break, and manual assembly hands all of them back.
 //!
-//! The `ANCHOR` comments below mark the regions the manual-assembly guide
-//! renders. They are stripped from what it shows; see `docs/STYLE.md` § 10.
-//!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
+
+// The `ANCHOR` comments below mark the regions the manual-assembly guide
+// renders. They are stripped from what it shows; see docs/STYLE.md § 10.
 
 // The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending

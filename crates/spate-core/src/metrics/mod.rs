@@ -4,8 +4,8 @@
 //! Spate instruments through the [`metrics`] facade — pipeline authors
 //! register custom metrics with the same macros and they are exported
 //! alongside the framework's. [`install`] wires the exporter selected by
-//! configuration; the taxonomy contract lives in `docs/METRICS.md` and its
-//! names in [`names`].
+//! configuration; the taxonomy contract lives in [the metrics reference]
+//! and its names in [`names`].
 //!
 //! # Connector- and user-owned families
 //!
@@ -31,8 +31,9 @@
 //! struct resolving the same series becomes a **shadow**: it still counts, but
 //! it publishes no gauge, leaving the owner's readings truthful. The pipeline
 //! builder and runtime take the fallible constructors (`try_new`) and refuse
-//! to start on a collision; direct construction (`new`) logs and shadows. The
-//! contract is written up under "Series ownership" in `docs/METRICS.md`.
+//! to start on a collision; direct construction (`new`) logs and shadows.
+//! [The metrics reference] carries the same contract under Series ownership,
+//! alongside which series each stage publishes.
 //!
 //! # Hot-path discipline
 //!
@@ -40,6 +41,8 @@
 //! this module ([`SourceMetrics`], [`SinkShardMetrics`], ...). The record
 //! loop only ever touches resolved `Counter`/`Gauge`/`Histogram` handles,
 //! and methods take per-batch aggregates.
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 mod backpressure;
 mod checkpoint;
@@ -174,8 +177,7 @@ pub enum MetricsError {
     #[error("failed to build the metrics exporter: {0}")]
     Build(String),
     /// Another live handle set already owns this gauge series — two
-    /// pipelines, or two components sharing a name, in one process (see the
-    /// "Series ownership" section of `docs/METRICS.md`).
+    /// pipelines, or two components sharing a name, in one process.
     #[error(
         "metric series {0} already has a live owner in this process; \
          gauge series cannot be shared (rename the component or the pipeline)"
@@ -247,7 +249,9 @@ impl MetricsHandle {
 }
 
 /// A Prometheus builder pre-configured with the bucket layout from
-/// `docs/METRICS.md`.
+/// [the metrics reference].
+///
+/// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
     PrometheusBuilder::new()
         .set_buckets_for_metric(

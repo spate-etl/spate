@@ -14,10 +14,10 @@
 //! [`Pipeline::into_runtime`] (instead of `run`) to get the shutdown
 //! handle, spawn the run, drive records through the source handle, and
 //! assert on what the sink captured.
-//!
-//! The `ANCHOR` comments below mark the regions the quickstart and the
-//! how-to guides render, and nest where a page shows part of a step. They
-//! are stripped from what those pages show; see `docs/STYLE.md` § 10.
+
+// The `ANCHOR` comments below mark the regions the quickstart and the how-to
+// guides render, and nest where a page shows part of a step. They are stripped
+// from what those pages show; see docs/STYLE.md § 10.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-RANK:  10

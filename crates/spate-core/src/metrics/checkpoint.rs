@@ -27,7 +27,7 @@ impl CheckpointMetrics {
     ///
     /// Claims the `spate_checkpoint_*` series for these labels; a second live
     /// handle set logs and becomes a shadow, counting commits but publishing
-    /// no gauge (see "Series ownership" in `docs/METRICS.md`).
+    /// no gauge.
     pub fn new(labels: &ComponentLabels, per_partition_detail: bool) -> Self {
         let claim = SeriesClaim::claim_or_shadow(Self::key(labels));
         Self::build(labels, per_partition_detail, claim)

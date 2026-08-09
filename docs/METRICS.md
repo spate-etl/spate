@@ -12,9 +12,9 @@ local name (`schema_fetches_total`); the `Meter` adds the prefix. The namespace
 is `custom` for pipeline-author metrics (`spate_custom_*`) or a segment a
 connector claims (`spate_kafka_*`), and it can never be one of the framework's
 reserved stage roots (`source`, `deser`, `operator`, `queue`, `backpressure`,
-`sink`, `checkpoint`, `e2e`, `pipeline`), so custom families cannot collide with
-a framework metric. A built-in source or sink receives its `Meter` from the
-runtime, scoped by its declared `component_type` and its role
+`sink`, `checkpoint`, `coordination`, `e2e`, `pipeline`), so custom families
+cannot collide with a framework metric. A built-in source or sink receives its
+`Meter` from the runtime, scoped by its declared `component_type` and its role
 (`spate_<component_type>_source_*` / `_sink_*`), so a connector that is both a
 source and a sink keeps its families apart. Dropping to the raw `metrics` macros is the escape hatch for
 a metric you deliberately want *outside* the `spate_` namespace. See

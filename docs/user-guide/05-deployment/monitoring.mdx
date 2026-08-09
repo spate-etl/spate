@@ -9,7 +9,7 @@ framework's own series — there is no extra registry to learn.
 :::note
 This page explains the model. The **canonical metric taxonomy** — every
 metric name, type, label, and histogram bucket — lives in
-[docs/METRICS.md](../../METRICS.md). Link targets there don't move; this
+[Metrics](../../METRICS.md). Link targets there don't move; this
 page intentionally does not duplicate the list.
 :::
 
@@ -74,7 +74,8 @@ custom metrics as much as the framework's:
    the batch's totals; per-record durations are observed as batch means
    (duration divided by n), never per record.
 
-Both rules in one place: `crates/spate/examples/custom_metrics.rs` puts custom
+Both rules in one place:
+[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) puts custom
 handles side by side with a framework stage handle, prints the exposition it
 produced, and runs as-is with `cargo run -p spate --example custom_metrics`.
 Its raw-facade handles are the smallest form of the pattern:
@@ -86,7 +87,7 @@ Its raw-facade handles are the smallest form of the pattern:
 
 These four catch the failure modes that matter most; verify thresholds
 against your latency budget. The full list of starting points is at the end
-of [docs/METRICS.md](../../METRICS.md).
+of [Metrics](../../METRICS.md).
 
 - **Stuck pipeline (watermark stall)** —
   `spate_checkpoint_watermark_age_seconds > 300` while
@@ -146,7 +147,7 @@ shard health, and queue saturation, use the `*_dropped_total`,
 replica left in the shard — the whole-shard outage escalation, with
 `spate_sink_replica_errors_total` attributing the failures per endpoint), and
 `spate_queue_full_events_total` series described in
-[docs/METRICS.md](../../METRICS.md).
+[Metrics](../../METRICS.md).
 
 ## Related
 

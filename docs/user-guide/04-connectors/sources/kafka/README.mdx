@@ -16,14 +16,15 @@ Construct it from the pipeline's opaque section:
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=source
 ```
 
-That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, a complete
-program that builds under the `full` facade feature.
+That is from
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
+a complete program that builds under the `full` facade feature.
 
 ## Configuration
 
-The `source: { kafka: ... }` section deserializes into
-`KafkaSourceConfig` (`crates/spate-kafka/src/config.rs`); unknown fields are
-rejected with the offending key.
+The `source: { kafka: ... }` section deserializes into `KafkaSourceConfig`
+([`spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs));
+unknown fields are rejected with the offending key.
 
 ```yaml
 source:

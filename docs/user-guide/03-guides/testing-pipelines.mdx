@@ -6,7 +6,8 @@ infrastructure. Every mock pairs with a scripting/observation handle (the
 `tower-test` philosophy) — you drive the source side, script the sink side,
 and assert on what actually got written and committed.
 
-Everything below comes from `crates/spate/examples/memory_pipeline.rs` —
+Everything below comes from
+[`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs) —
 the same pattern as a runnable demo, which runs as-is with
 `cargo run -p spate --example memory_pipeline`. In your own project you
 need `spate` and `spate-test`, the latter as a dev-dependency.

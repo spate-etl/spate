@@ -32,18 +32,19 @@ runtime handle and a framer (the framer is **required** — see
 
 Two runnable examples carry the Rust on this page, and neither needs
 infrastructure — both stage a `file://` bucket in a temporary directory.
-`crates/spate/examples/s3_backfill.rs` runs the solo backfill
-(`cargo run -p spate --features s3,json --example s3_backfill`), and
-`crates/spate/examples/s3_coordinated_backfill.rs` runs two instances over one
-shared store
+[`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) runs the solo
+backfill (`cargo run -p spate --features s3,json --example s3_backfill`), and
+[`s3_coordinated_backfill.rs`](repo:crates/spate/examples/s3_coordinated_backfill.rs)
+runs two instances over one shared store
 (`cargo run -p spate --features s3,json,coordination --example s3_coordinated_backfill`).
 
 ## Configuration
 
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
-(`crates/spate-s3/src/config.rs`); unknown fields are rejected with the
-offending key. Coordination is deliberately **not** here — it is assembly
-wiring ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
+([`spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs)); unknown
+fields are rejected with the offending key. Coordination is deliberately
+**not** here — it is assembly wiring
+([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
 covered under [Scaling out](#scaling-out--and-the-solo-default).
 
 ```yaml

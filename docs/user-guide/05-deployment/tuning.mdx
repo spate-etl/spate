@@ -3,8 +3,9 @@
 Every knob below has a safe default; most pipelines change two or three of
 them. This page covers what each one moves and how to size them together —
 the defaults quoted are the exact values from
-`crates/spate-core/src/config/mod.rs` and the sink config structs (also
-tabulated in the [configuration reference](../07-reference/configuration.mdx)).
+[`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) and
+the sink config structs (also tabulated in the
+[configuration reference](../07-reference/configuration.mdx)).
 
 ## Where to start
 
@@ -124,8 +125,9 @@ max_inflight_bytes × low_ratio  ≥  2 × ( shards × inflight.max_per_shard ×
 ```
 
 The pending-writes term dominates. Worked example from the flagship YAML
-(`crates/spate/examples/kafka_avro_to_clickhouse.yaml`): one shard, 2
-in-flight, 128 MiB batches gives `2 × (1 × 2 × 128MiB) = 512MiB`, so the
+([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
+one shard, 2 in-flight, 128 MiB batches gives
+`2 × (1 × 2 × 128MiB) = 512MiB`, so the
 example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). Note
 the framework **defaults are intentionally not self-consistent** under
 saturation: 2 shards at the default batch settings exceed the default

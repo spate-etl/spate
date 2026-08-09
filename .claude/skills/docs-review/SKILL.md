@@ -154,6 +154,7 @@ the reader came for?**
 
 ```sh
 make docs; echo "EXIT=$?"
+make check-transclusions; echo "EXIT=$?"
 make check-adr; echo "EXIT=$?"   # whenever docs/adr/ was touched
 ```
 
@@ -171,6 +172,10 @@ the page by hand; do not report a gate you did not run.
 - `onBrokenLinks`, `onBrokenAnchors` and `onBrokenMarkdownLinks` are all
   `'throw'`. A stale link *or* a stale `#anchor` fails the build outright;
   there is no warning tier to scan the log for.
+- `make check-transclusions` covers `file=` fences and `repo:` links, and needs
+  neither node nor a Rust toolchain. It is the half that holds when the site
+  build's persistent cache would serve a page whose source has since moved, so
+  run it even when `make docs` was the gate you reached for.
 - **Every moved page needs a `{ from, to }` entry** in the `clientRedirects`
   plugin in `website/docusaurus.config.ts`. That plugin registers only under
   `CI=true`. `make docs` sets it; a bare `npm run build` does not, so a

@@ -33,7 +33,8 @@ carries only decode knobs — no `framing:`:
 ```rust file=crates/spate/examples/s3_backfill.rs region=framer
 ```
 
-That wiring comes from `crates/spate/examples/s3_backfill.rs`, which runs
+That wiring comes from
+[`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs), which runs
 against a staged local directory with
 `cargo run -p spate --features s3,json --example s3_backfill`. The matching
 configuration names the format and nothing about framing:

@@ -47,7 +47,7 @@ pause must elapse — so the controller doesn't flap at the boundary. Observe
 it via `spate_backpressure_paused`,
 `spate_backpressure_pause_events_total` (a flapping indicator when high),
 and `spate_backpressure_inflight_bytes` (see
-[docs/METRICS.md](../../METRICS.md)).
+[Metrics](../../METRICS.md)).
 
 Backpressure is resumable mid-batch: if `try_send` fails partway through a
 batch, the chain records the exact resume point — already-processed records
@@ -95,9 +95,9 @@ wrong for saturated ones. For a saturated pipeline, either:
   max_inflight)` — about 16 MiB with the defaults.
 
 The flagship example's YAML
-(`crates/spate/examples/kafka_avro_to_clickhouse.yaml`) carries this rule as
-a comment next to the knobs — a convention worth copying. See
-[Tuning](../05-deployment/tuning.mdx) for the wider performance picture and
+([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml))
+carries this rule as a comment next to the knobs — a convention worth copying.
+See [Tuning](../05-deployment/tuning.mdx) for the wider performance picture and
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the
 config section itself.
 

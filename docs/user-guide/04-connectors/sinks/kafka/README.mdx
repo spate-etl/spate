@@ -27,15 +27,17 @@ reach for `encoder_with` rather than `encoder_bytes` in order to attach a
 produce key: `KafkaBytesEncoder` is the shipped passthrough encoder, and
 `customer_key` a plain `fn` pulling the key out of the payload.
 
-That code is `crates/spate/examples/kafka_to_kafka_split.rs`, which needs a
-broker on `KAFKA_BROKERS`:
+That code is
+[`kafka_to_kafka_split.rs`](repo:crates/spate/examples/kafka_to_kafka_split.rs),
+which needs a broker on `KAFKA_BROKERS`:
 `cargo run --release -p spate --features kafka --example kafka_to_kafka_split`.
 
 ## Configuration
 
 The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
-(`crates/spate-kafka/src/sink/config.rs`); unknown fields are rejected with
-the offending key, and the retry/breaker values are validated at load
+([`spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs));
+unknown fields are rejected with the offending key, and the retry/breaker
+values are validated at load
 against the framework's [sink-pool rules](../../../07-reference/configuration.mdx#sink-pool)
 (a bad multiplier or zero threshold fails startup, naming the key).
 

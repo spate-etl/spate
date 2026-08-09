@@ -3,8 +3,10 @@
 This tutorial builds the flagship shape: consume Confluent-framed Avro from
 Kafka, validate and transform records in an operator chain, and write them
 to ClickHouse in large batches — at-least-once, drained gracefully on
-SIGTERM. It is `crates/spate/examples/kafka_avro_to_clickhouse.rs` and the
-YAML beside it (`crates/spate/examples/kafka_avro_to_clickhouse.yaml`):
+SIGTERM. It is
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs)
+and the YAML beside it
+([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
 every Rust block below is rendered from that source, so what you read is
 what compiles.
 

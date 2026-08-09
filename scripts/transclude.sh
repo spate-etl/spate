@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# The transclusion gate: every `file=`/`region=` fence on a documentation page
-# names a source and a region that exist, and every anchor marker under
-# `crates/` is well formed.
+# The repository-pointer gate: every `file=`/`region=` fence on a documentation
+# page names a source and a region that exist, every `repo:` link names a path
+# that exists, and every anchor marker under `crates/` is well formed.
 #
-# Why this exists alongside the remark plugin, which already throws on all of
-# the above. The plugin runs during the site build, and the site build has a
+# Why this exists alongside the remark plugins, which already throw on all of
+# the above. They run during the site build, and the site build has a
 # persistent Rspack cache (`future.faster` in website/docusaurus.config.ts,
 # restored in the `site` job of ci.yml) — a cached MDX module can be served
 # against a source that has since moved. The pass-through loader in
@@ -13,7 +13,12 @@
 # it by leaning on the bundler's dependency tracking. This script leans on
 # nothing: it reads both sides off disk on every run and needs neither a Rust
 # toolchain nor node, which is why it can run in the job that has neither. The
-# plugin gives the fast feedback; this gives the promise.
+# plugins give the fast feedback; this gives the promise.
+#
+# The `repo:` scan reads text, not a syntax tree, so it cannot tell a link from
+# inline code quoting one. Documentation *of* the form therefore belongs in a
+# fence, which this skips — the same constraint `file=` carries, and the reason
+# docs/STYLE.md states both inside one.
 #
 # What --check holds is the mechanical half only: that a page's pointer
 # resolves. Whether the region it points at is the *right* code for the
@@ -83,6 +88,45 @@ fence_marker() { # line
     '~~~'*) printf '~~~' ;;
     *) return 1 ;;
     esac
+}
+
+# Every `repo:` link target on one line of prose, checked against the tree.
+#
+# A Markdown link destination cannot contain unescaped whitespace, so `](repo:`
+# and its closing parenthesis are always on the same line however the paragraph
+# wraps — which is what makes a line-at-a-time scan sound here. Mirrors
+# resolveTarget() in website/src/remark/repoLinks.ts.
+check_repo_links() { # page, lineno, line
+    local page=$1 lineno=$2 rest=$3 target
+    while :; do
+        case "$rest" in
+        *'](repo:'*) ;;
+        *) return 0 ;;
+        esac
+        rest=${rest#*'](repo:'}
+        target=${rest%%')'*}
+        case "$target" in
+        '' | *[[:space:]]*)
+            fail_at "$page" "$lineno" "\`repo:\` link has no closing parenthesis"
+            return 0
+            ;;
+        /*)
+            fail_at "$page" "$lineno" \
+                "repo:$target must be a path relative to the repository root"
+            ;;
+        *..*)
+            fail_at "$page" "$lineno" "repo:$target must not contain a \`..\` segment"
+            ;;
+        *'#'*)
+            fail_at "$page" "$lineno" \
+                "repo:$target carries a fragment; a link addresses a file, not lines within it"
+            ;;
+        *)
+            # -e, not -f: a link may name a crate directory rather than a file.
+            [ -e "$target" ] || fail_at "$page" "$lineno" "repo:$target does not exist"
+            ;;
+        esac
+    done
 }
 
 # Every region name defined in a file, one per line, or a diagnostic on stderr
@@ -253,7 +297,11 @@ check_page() { # file
                 continue
             fi
         fi
-        [ -n "$open" ] && body=1
+        if [ -n "$open" ]; then
+            body=1
+        else
+            check_repo_links "$page" "$lineno" "$line"
+        fi
     done <"$read_from"
     if [ -n "$open" ]; then
         fail_at "$page" "$openline" "fence opened here is never closed"
@@ -267,8 +315,16 @@ check_page() { # file
 # pipeline whose exit status would be the reader's. AGENTS.md is explicit about
 # this: a piped `grep`/`tail` reports the last command's status and has masked
 # real failures in this repository more than once.
+#
+# Scaffolds are excluded by name. A `_template` file is placeholders by
+# construction — `crates/spate-NAME/src/config.rs` is the shape a new page
+# fills in, not a path that resolves — so holding one to a real tree would
+# force the scaffold to teach a form no page copied from it can use. Other
+# `_`-prefixed files are not excluded: an MDX partial renders into the pages
+# that import it, and its pointers are as load-bearing as theirs.
 pages_into() { # destination
-    if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) -print0 >"$1"; then
+    if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) \
+        ! -name '_template.*' -print0 >"$1"; then
         echo "transclude.sh: could not enumerate $docs" >&2
         return 1
     fi
@@ -425,6 +481,35 @@ self_test() {
     check_page "$tmp/outside.md" >/dev/null 2>&1
     [ "$failures" -gt 0 ] && rc=1 || rc=0
     st "source outside crates/ rejected" "1" "$rc"
+
+    # check_repo_links: a link is checked against the tree, not against the
+    # `crates/` prefix — a page may point at any file in the repository.
+    failures=0
+    check_repo_links "$tmp/x.md" 1 'see [STYLE](repo:docs/STYLE.md) and [c](repo:crates).'
+    st "existing file and directory targets accepted" "0" "$failures"
+
+    failures=0
+    check_repo_links "$tmp/x.md" 1 'see [gone](repo:crates/no_such_file.rs).' 2>/dev/null
+    st "missing target rejected" "1" "$failures"
+
+    failures=0
+    check_repo_links "$tmp/x.md" 1 '[a](repo:../etc/passwd) [b](repo:/etc/passwd)' 2>/dev/null
+    st "escapes rejected, both forms" "2" "$failures"
+
+    failures=0
+    check_repo_links "$tmp/x.md" 1 '[l](repo:docs/STYLE.md#L10)' 2>/dev/null
+    st "line fragment rejected" "1" "$failures"
+
+    failures=0
+    check_repo_links "$tmp/x.md" 1 'no links here, and a bare repo: word'
+    st "prose without a link is not a target" "0" "$failures"
+
+    # A `repo:` link inside a fence is literal text — the fence skip in
+    # check_page is what documentation of the form relies on.
+    printf '# T\n\n```markdown\n[x](repo:crates/no_such_file.rs)\n```\n' >"$tmp/fenced.md"
+    failures=0
+    check_page "$tmp/fenced.md" >/dev/null 2>&1
+    st "repo: link inside a fence is ignored" "0" "$failures"
 
     failures=$saved_failures
     if [ "$st_fail" -ne 0 ]; then

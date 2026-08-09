@@ -12,17 +12,18 @@ I/O runtime handle (the registry fetcher lives there):
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=deserializer
 ```
 
-That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, a complete
-program that builds under the `full` facade feature. The `deserializer:`
-section is optional in the framework's config, so the factory takes the
-unwrapped section: a pipeline whose source emits ready-made records
+That is from
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
+a complete program that builds under the `full` facade feature. The
+`deserializer:` section is optional in the framework's config, so the factory
+takes the unwrapped section: a pipeline whose source emits ready-made records
 configures none.
 
 ## Configuration
 
 The `deserializer: { avro: ... }` section deserializes into `AvroSettings`
-(`crates/spate-avro/src/config.rs`); unknown fields are rejected with the
-offending key.
+([`spate-avro/src/config.rs`](repo:crates/spate-avro/src/config.rs)); unknown
+fields are rejected with the offending key.
 
 ```yaml
 deserializer:
@@ -84,7 +85,8 @@ The builder hands out three deserializer flavors:
   writer schema, never materializing an intermediate value tree. This is the
   throughput path. With a borrowed record family, string and bytes fields
   point straight into the payload buffer (zero-copy;
-  `crates/spate-avro/tests/zero_copy_flat_map.rs` is the worked example).
+  [`spate-avro/tests/zero_copy_flat_map.rs`](repo:crates/spate-avro/tests/zero_copy_flat_map.rs)
+  is the worked example).
   Two constraints: no `reader_schema` (rejected at build time — records
   decode in the writer schema's shape; additive evolution works through
   `#[serde(default)]`/`#[serde(alias)]`, and unknown fields are skipped),

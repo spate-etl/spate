@@ -45,8 +45,8 @@ let x = NameThing::from_component_config(&pipeline.config().SECTION)?;
 ## Configuration
 
 The `SECTION: { NAME: ... }` section deserializes into `NameConfig`
-(`crates/spate-NAME/src/config.rs`); unknown fields are rejected with the
-offending key.
+([`spate-NAME/src/config.rs`](repo:crates/spate-NAME/src/config.rs));
+unknown fields are rejected with the offending key.
 
 ```yaml
 SECTION:

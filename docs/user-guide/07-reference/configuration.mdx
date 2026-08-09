@@ -30,9 +30,10 @@ cell is one of exactly three forms (`docs/STYLE.md` § 3): `required`, a
 backticked literal, or `none` for optional-and-unset. Durations use humantime syntax
 (`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`, `1GiB`) or a
 plain integer for bytes. Framework-section defaults are the exact values from
-`crates/spate-core/src/config/mod.rs`; the sink-pool and code-level defaults come
-from `crates/spate-core/src/sink/config.rs` and
-`crates/spate-core/src/pipeline/builder.rs`.
+[`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs); the
+sink-pool and code-level defaults come from
+[`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs) and
+[`spate-core/src/pipeline/builder.rs`](repo:crates/spate-core/src/pipeline/builder.rs).
 
 :::note
 This appendix is **non-exhaustive**: each connector owns the keys inside its
@@ -103,7 +104,8 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 ## Sink pool (`batch` / `inflight` / `retry`) {#sink-pool}
 
 Every sink connector maps its `batch`, `inflight`, `retry`, and `breaker`
-sub-sections onto the framework's `SinkPoolConfig` (`crates/spate-core/src/sink/config.rs`).
+sub-sections onto the framework's `SinkPoolConfig`
+([`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs)).
 The keys and defaults are **framework-owned and identical across sinks** — this
 table is their single source of truth; each connector page shows only the keys
 it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.

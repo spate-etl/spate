@@ -49,9 +49,10 @@ ClickHouse type to lay bytes out columnar, so selecting it always fetches
 `system.columns` (it upgrades `validate_schema: off` to `names`).
 
 The row is an ordinary `serde::Serialize` struct — the same one RowBinary
-takes. `crates/spate/examples/kafka_avro_flatmap_clickhouse.rs` decodes a
-nested batch and fans it out into one such row per reading; it needs a Kafka
-topic of Avro batches and the target table, and runs with
+takes.
+[`kafka_avro_flatmap_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_flatmap_clickhouse.rs)
+decodes a nested batch and fans it out into one such row per reading; it needs
+a Kafka topic of Avro batches and the target table, and runs with
 `cargo run --release -p spate --features full --example kafka_avro_flatmap_clickhouse`:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=record

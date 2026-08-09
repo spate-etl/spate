@@ -30,7 +30,8 @@ rather than stopping:
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=validate
 ```
 
-The stage comes from `crates/spate/examples/kafka_avro_to_clickhouse.rs`,
+The stage comes from
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
 which builds under the `full` facade feature;
 [Your first pipeline](../01-getting-started/03-first-pipeline.mdx) runs that
 example end to end.
@@ -67,7 +68,7 @@ This is distinct from the sink being full, which *does* pause the source. Both
 report the push as blocked; only the reason differs. See
 [Backpressure](03-backpressure.mdx).
 
-A useful alert from [docs/METRICS.md](../../METRICS.md): a non-zero
+A useful alert from [Metrics](../../METRICS.md): a non-zero
 `rate(spate_deser_records_dropped_total[5m])` means schema drift or poison
 messages are being skipped — Skip keeps you up, not uninformed. See
 [Monitoring](../05-deployment/monitoring.mdx) for the full alerting story.
@@ -107,6 +108,6 @@ messages are being skipped — Skip keeps you up, not uninformed. See
 
 - [ADR-0010](../../adr/0010-skip-or-fail-record-error-policies.md) —
   the canonical policy statement.
-- [docs/METRICS.md](../../METRICS.md) — the full metric taxonomy.
+- [Metrics](../../METRICS.md) — the full metric taxonomy.
 - [Graceful shutdown](../03-guides/graceful-shutdown.mdx) — what a
   Fail-triggered stop does to in-flight data.

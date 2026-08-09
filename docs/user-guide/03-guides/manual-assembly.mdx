@@ -9,7 +9,8 @@ for exotic wiring, for embedding, or just to understand what you are
 running. The rationale is in
 [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md).
 
-Every snippet below comes from `crates/spate/examples/manual_assembly.rs`,
+Every snippet below comes from
+[`manual_assembly.rs`](repo:crates/spate/examples/manual_assembly.rs),
 which assembles and drives a whole pipeline this way and runs as-is with
 `cargo run -p spate --example manual_assembly`.
 
@@ -51,7 +52,7 @@ scopes an assembly below it does not get for free.
   a name that drifts from the connector's own docs takes its families with
   it.
 
-Everything else in [docs/METRICS.md](../../METRICS.md) is identical: the
+Everything else in [Metrics](../../METRICS.md) is identical: the
 stage metrics, the per-shard sink metrics, the process metrics, and
 whatever your own components register through a `Meter` of their own.
 

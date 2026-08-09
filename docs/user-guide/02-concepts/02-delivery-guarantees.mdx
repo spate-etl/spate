@@ -36,7 +36,7 @@ source on an interval (`checkpoint.interval`, default 5s). The invariant:
 partition's watermark rather than being skipped — watch
 `spate_checkpoint_watermark_age_seconds`, the primary "stuck pipeline" alert
 (see [Monitoring](../05-deployment/monitoring.mdx) and
-[docs/METRICS.md](../../METRICS.md)).
+[Metrics](../../METRICS.md)).
 
 **Durability is the sink's ack.** The framework's definition is exactly one
 thing: the `ShardWriter` returned `Ok` for that sealed batch. Everything

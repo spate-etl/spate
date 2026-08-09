@@ -52,8 +52,8 @@ In framework **prose**, a connector or vendor name may appear only:
 - as a link label,
 - as an entry in a `## Related` list,
 - inside a pointer block (below),
-- inside a literal repository path (`crates/spate-kafka/src/metrics.rs`) — a
-  path is a pointer to code, like a link, not prose about a vendor.
+- inside a link to a file in this repository (§ 7) — a pointer to code, not
+  prose about a vendor.
 
 Never in framework prose: vendor setting keys (`max.poll.interval.ms`), vendor
 tuning numbers, vendor troubleshooting, or vendor client-library behavior.
@@ -111,7 +111,7 @@ Each is a decision, not drift. Nothing else is exempt.
 | Area | Why | Bound |
 |---|---|---|
 | `01-getting-started/**` | A tutorial must be concrete — a reader cannot follow an abstract pipeline. | Declares its stack in the first paragraph. |
-| `06-extending/**` | Teaching someone to write a connector needs a real one to point at. | Shipped connectors appear as marked worked references (`worked reference: crates/spate-kafka/src/metrics.rs`), never as the normative prose. |
+| `06-extending/**` | Teaching someone to write a connector needs a real one to point at. | Shipped connectors appear as marked worked references (`worked reference: [spate-kafka/src/metrics.rs](repo:crates/spate-kafka/src/metrics.rs)`), never as the normative prose. |
 | Index pages — `04-connectors/README.mdx`, the role card indexes, `user-guide/README.mdx`, `07-reference/README.mdx`, the appendix's component mapping table | Indexing connectors and crates by name is their entire job. | Name and one-line summary; no behavior. |
 | `03-guides/securing-connections.mdx` | It is the security hub, and a hub's content *is* the per-connector matrix. | Matrix rows and the framework-wide model; no mechanism — that lives on each connector page. |
 | `07-reference/glossary.mdx` | Definitions need anchors. | The mapping line above, nothing looser. |
@@ -297,7 +297,24 @@ Everywhere:
   who acts on the first half of that sentence has already acted wrongly.
 - **Link text names its destination.** Never "here", "this page", "see this".
   The words under the link say what is on the other side, so it still works
-  read out of context — which is how a skimming reader meets it.
+  read out of context — which is how a skimming reader meets it. A path is not
+  a name: `[docs/METRICS.md](…)` labels a link with a file location where
+  "Metrics" would say what the reader gets.
+- **A repository path is a link, not prose.** A reader on the site has no
+  checkout, so a bare `crates/spate/examples/memory_pipeline.rs` in a sentence
+  describes a layout they cannot act on. Write the `repo:` form (§ 8) and let
+  the build produce the URL:
+
+  ```markdown
+  [`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs)
+  ```
+
+  Name an example by its file name — the same sentence carries
+  `cargo run -p spate --example memory_pipeline`, and the two echo each other.
+  Name anything else by its path below `crates/` (`spate-kafka/src/metrics.rs`),
+  since `config.rs` alone names eleven files, and by its repository path
+  outside `crates/` (`examples/docker/Dockerfile`). Paths inside fenced code
+  are exempt, as everywhere else.
 - **Open with the subject, not with the page.** "This page explains how
   sharding works" spends the most valuable line in the document on nothing.
   Start with sharding.
@@ -341,6 +358,16 @@ Everywhere:
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
   `onBrokenLinks: 'throw'` fails the build on a stale link, so `make docs` is
   the correctness gate for any move or rename.
+- **A link to a file in this repository uses the `repo:` scheme** — a
+  repository-relative path, which the build resolves against the checkout and
+  turns into a URL on the hosting service. A path that does not exist fails the
+  build, the same tier as a stale internal link; a directory resolves to the
+  tree view rather than the file view. `make check-transclusions` holds the same
+  rule without a site build. Two constraints follow from how it is resolved: the
+  scheme addresses a file, never lines within one — render the lines as a fence
+  (§ 10) — and because the offline check reads text rather than a syntax tree,
+  documentation *of* the form belongs inside a fence, where both it and § 10's
+  `file=` are skipped.
 - **Moving or renaming a page changes its URL** (URLs are path-derived). Add a
   `{ from, to }` entry to the `clientRedirects` plugin in
   `website/docusaurus.config.ts` for every moved page to keep old links alive.
@@ -457,8 +484,12 @@ between them.
 A fence renders with no header. Say where the code comes from once, in prose,
 where the sentence can also say how to run it — a reader holding the published
 crate has no `crates/` directory to look in, so a path on every fence is
-repetition they cannot act on. Add `title="…"` to a single fence when *which*
-source it is matters to the reader, which is usually a page drawing on two.
+repetition they cannot act on. That sentence carries a `repo:` link (§ 7) and
+not a bare path, for the same reason: the reader who wants the whole program
+can then open it. Add `title="…"` to a single fence when *which* source it is
+matters to the reader, which is usually a page drawing on two. Its value is the
+source's file name — `memory_pipeline.rs` — never a path, which is the header
+the fence deliberately does not render.
 
 Exempt, because transcluding them costs more than it protects:
 

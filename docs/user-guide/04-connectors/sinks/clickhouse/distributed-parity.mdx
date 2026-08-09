@@ -131,9 +131,10 @@ the sink account needs `SELECT` on both — see
 The key extractor returns a `ShardKey` and is passed as a fn pointer — a named
 `fn` item, or a closure that captures nothing. The router owns the
 `xxHash64(seed 0)` and the weight-interval selection. Both blocks below come
-from `crates/spate/examples/kafka_avro_flatmap_clickhouse.rs`, a sharded
-Native pipeline that needs a Kafka topic of Avro batches and the target table,
-and runs with
+from
+[`kafka_avro_flatmap_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_flatmap_clickhouse.rs),
+a sharded Native pipeline that needs a Kafka topic of Avro batches and the
+target table, and runs with
 `cargo run --release -p spate --features full --example kafka_avro_flatmap_clickhouse`:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=shard_key

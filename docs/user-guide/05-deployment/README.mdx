@@ -8,7 +8,8 @@ it, and sizing it.
 ## [Docker](docker.mdx)
 
 Packaging a pipeline binary into a minimal, non-root image, using the
-flagship image (`examples/docker/Dockerfile`) as the template: the
+flagship image ([`examples/docker/Dockerfile`](repo:examples/docker/Dockerfile))
+as the template: the
 `SPATE_CONFIG` mount pattern, the `/readyz`, `/healthz`, and `/metrics`
 endpoints on the admin server, and aligning the SIGTERM grace period with
 the drain timeout.
@@ -18,7 +19,7 @@ the drain timeout.
 The metrics model: the `metrics` facade as the one instrumentation API, the
 Prometheus exporter on the admin server, label conventions, the hot-path
 counting discipline, and a small set of starting alerts. The full metric
-taxonomy lives in [docs/METRICS.md](../../METRICS.md).
+taxonomy lives in [Metrics](../../METRICS.md).
 
 ## [Tuning](tuning.mdx)
 
@@ -42,5 +43,5 @@ and the failure-mode table.
   behind the budget knobs in [Tuning](tuning.mdx).
 - [Configuration reference](../07-reference/configuration.mdx) — every YAML
   key, type, and default in one place.
-- [docs/adr/](../../adr/README.mdx) — the rationale behind the operational
+- [Decision records](../../adr/README.mdx) — the rationale behind the operational
   model (one process, one pipeline; scrape-based metrics; drain-on-SIGTERM).

@@ -12,9 +12,10 @@ Construct it from the pipeline's opaque section with
 ```rust file=crates/spate/examples/json_skip_bad_records.rs region=deserializer
 ```
 
-That example is `crates/spate/examples/json_skip_bad_records.rs` — one payload
-of four lines, one of them malformed, over the in-memory connectors, so it
-needs nothing running:
+That example is
+[`json_skip_bad_records.rs`](repo:crates/spate/examples/json_skip_bad_records.rs)
+— one payload of four lines, one of them malformed, over the in-memory
+connectors, so it needs nothing running:
 `cargo run -p spate --features json --example json_skip_bad_records`.
 `from_component` yields that same builder behind a `Result`, and `with_metrics`
 scopes the families under [Metrics](#metrics).
@@ -22,8 +23,8 @@ scopes the families under [Metrics](#metrics).
 ## Configuration
 
 The `deserializer: { json: ... }` section deserializes into `JsonSettings`
-(`crates/spate-json/src/config.rs`); unknown fields are rejected with the
-offending key.
+([`spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs)); unknown
+fields are rejected with the offending key.
 
 ```yaml
 deserializer:

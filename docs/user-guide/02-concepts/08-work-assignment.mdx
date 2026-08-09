@@ -100,8 +100,9 @@ correctness.
 ## Invariants
 
 Each is enforced by a property test in
-`crates/spate-coordination/src/protocol.rs`, named here so a deleted or
-weakened test is visible as a divergence from this page.
+[`spate-coordination/src/protocol.rs`](repo:crates/spate-coordination/src/protocol.rs),
+named here so a deleted or weakened test is visible as a divergence from this
+page.
 
 1. **Deterministic.** The same `(members, splits, ownership, reserved,
    lane budgets, seed)` always yields the same assignment. The seed keys
@@ -284,10 +285,10 @@ which supersedes [ADR-0023](../../adr/0023-dynamic-work-stealing-coordination.md
 
 | Concern | Location |
 |---|---|
-| The assignment function and its property tests | `crates/spate-coordination/src/protocol.rs` (`desired_assignment`) |
-| Publishing, and the delay window | `crates/spate-coordination/src/task.rs` (`publish_assignments`, `reserved_splits`) |
-| Worker reconciliation and revocation | `crates/spate-coordination/src/task.rs` (`reconcile_assignment`, `service_revocations`) |
-| The record on the store | `crates/spate-coordination/src/records.rs` (`AssignmentVal`) |
-| Tuning knobs | `crates/spate-coordination/src/config.rs` |
+| The assignment function and its property tests | [`spate-coordination/src/protocol.rs`](repo:crates/spate-coordination/src/protocol.rs) (`desired_assignment`) |
+| Publishing, and the delay window | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`publish_assignments`, `reserved_splits`) |
+| Worker reconciliation and revocation | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`reconcile_assignment`, `service_revocations`) |
+| The record on the store | [`spate-coordination/src/records.rs`](repo:crates/spate-coordination/src/records.rs) (`AssignmentVal`) |
+| Tuning knobs | [`spate-coordination/src/config.rs`](repo:crates/spate-coordination/src/config.rs) |
 
 See [Scaling out](../05-deployment/scaling-out.mdx) for operational tuning.

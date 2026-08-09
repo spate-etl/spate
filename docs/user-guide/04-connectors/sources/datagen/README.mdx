@@ -136,7 +136,7 @@ so every family is prefixed `spate_datagen_source_`. Standard labels
 (`pipeline`, `component`, `component_type`) are on all of them; extras are
 noted per family.
 
-| Metric | Type | Labels | Description |
+| Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_datagen_source_events_generated_total` | counter | `event` | Events emitted, by kind: `order_placed`, `payment_captured`, `refund_issued`. |
 | `spate_datagen_source_ticks_total` | counter | — | Release cadences that fired, summed across lanes — `partitions` per cadence. Stays at zero when unthrottled. |

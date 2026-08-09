@@ -25,8 +25,8 @@ Prometheus metrics, `/healthz` and `/readyz` probes, and drain-on-SIGTERM.
 
 Not in scope for v1: exactly-once sinks, general DAG topologies, windowing,
 dead-letter queues, and config hot-reload. The rationale lives in
-[docs/adr/](../adr/README.mdx) — the source of truth when code and intuition
-disagree.
+the [decision records](../adr/README.mdx) — the source of truth when code and
+intuition disagree.
 
 ## Where to start
 
@@ -97,11 +97,12 @@ disagree.
 
 ## Related documentation
 
-- [docs/adr/](../adr/README.mdx) — one record per architectural decision: what
-  was chosen, what else was considered, and what the choice cost.
-- [docs/INVARIANTS.md](../INVARIANTS.md) — the properties the engine is
+- [Decision records](../adr/README.mdx) — one record per architectural
+  decision: what was chosen, what else was considered, and what the choice
+  cost.
+- [Spate invariants](../INVARIANTS.md) — the properties the engine is
   arranged around, numbered so a pull request can cite one.
-- [docs/METRICS.md](../METRICS.md) — the full metric taxonomy and alerting
+- [Metrics](../METRICS.md) — the full metric taxonomy and alerting
   starting points.
 - API reference on docs.rs — this guide teaches concepts and contracts;
   signatures and per-item docs live in the rustdoc for the `spate` crate.

@@ -159,6 +159,11 @@ individual bad record is dropped while the good records around it are emitted,
 so the `deserialize` call returns `Ok` and no
 `spate_deser_records_total{outcome="error"}` is counted.
 
+The family carries the standard labels (`pipeline`, `component`,
+`component_type="deserializer"`) — the first two from that call, the third
+fixed by the crate — which is what makes it join against the generic
+families. Extras are noted per family.
+
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_json_deser_records_dropped_total` | counter | `reason` (`malformed`\|`duplicate_key`) | Records dropped by `on_error: skip` because they did not parse / match the target type (`malformed`) or contained a duplicate object key under `reject_duplicate_keys` (`duplicate_key`). |

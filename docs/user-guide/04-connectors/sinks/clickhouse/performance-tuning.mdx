@@ -116,15 +116,12 @@ backpressure:
 ```
 
 This is the global ceiling on bytes admitted into the sink but not yet durably
-written. Size it with the established sizing rule in
-[Deployment tuning](../../../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes),
-which sizes the budget's **low watermark** (default `low_ratio` 0.5) against
-everything the sink legitimately keeps in flight:
-
-```text
-max_inflight_bytes × low_ratio  ≥  2 × ( shards × inflight.max_per_shard × batch.max_bytes
-                                       + shards × queue_capacity × chunk.target_bytes )
-```
+written. Size it with the established sizing rule, stated in
+[Backpressure](../../../02-concepts/03-backpressure.mdx#sizing-the-budget) and
+worked through in
+[Deployment tuning](../../../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes):
+the budget's **low watermark** (default `low_ratio` 0.5) has to hold
+everything the sink legitimately keeps in flight.
 
 The pending-writes term (`shards × max_per_shard × batch.max_bytes`) dominates.
 If the budget is smaller, the source is paused for backpressure **before** the

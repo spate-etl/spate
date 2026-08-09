@@ -335,7 +335,9 @@ every family is prefixed `spate_s3_source_`. All handles are resolved once at
 `open`, and counters are incremented at object/chunk/batch boundaries — never
 per record. The framework's `spate_source_records_total` /
 `spate_source_bytes_total` count framed records as for any source; these
-families add the object-level view of a bounded backfill.
+families add the object-level view of a bounded backfill. Standard labels
+(`pipeline`, `component`, `component_type`) are on all of them; extras are
+noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|

@@ -110,24 +110,21 @@ A global cap on bytes admitted into the pipeline but not yet durably
 written (default **256MiB**), with pause/resume hysteresis: sources pause
 above `high_ratio` (default **0.8**) and may resume below `low_ratio`
 (default **0.5**) after at least `min_pause` (default **500ms**; pausing a
-lane is not free for every source, which is what the hysteresis is for). See
-[Backpressure](../02-concepts/03-backpressure.mdx) for the model.
+lane is not free for every source, which is what the hysteresis is for).
 
-**The sizing rule** (see [Backpressure](../02-concepts/03-backpressure.mdx),
-motivated by a measured 24x throughput collapse): the budget's low
-watermark must comfortably hold everything the sink legitimately keeps in
-flight, or a saturated pipeline lives above the high watermark and
-duty-cycles against `min_pause`:
+**Size it against the sizing rule**, which
+[Backpressure](../02-concepts/03-backpressure.mdx#sizing-the-budget) states
+in full along with the measurement behind it: the budget's low watermark
+must comfortably hold everything the sink legitimately keeps in flight, or a
+saturated pipeline lives above the high watermark and duty-cycles against
+`min_pause`.
 
-```text
-max_inflight_bytes × low_ratio  ≥  2 × ( shards × inflight.max_per_shard × batch.max_bytes
-                                       + shards × queue_capacity × chunk.target_bytes )
-```
-
-The pending-writes term dominates. Worked example from the flagship YAML
+Of the rule's two terms, pending writes —
+`shards × inflight.max_per_shard × batch.max_bytes` — dominate. Worked
+example from the flagship YAML
 ([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
-one shard, 2 in-flight, 128 MiB batches gives
-`2 × (1 × 2 × 128MiB) = 512MiB`, so the
+one shard, 2 in-flight, 128 MiB batches gives `1 × 2 × 128MiB = 256MiB` of
+pending writes, doubled for the rule's headroom to 512 MiB, so the
 example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). Note
 the framework **defaults are intentionally not self-consistent** under
 saturation: 2 shards at the default batch settings exceed the default

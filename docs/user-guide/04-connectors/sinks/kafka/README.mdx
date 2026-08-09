@@ -197,6 +197,9 @@ the producer's internal view. Per-partition transmit-queue detail is
 deferred (see the decision log) — the aggregate queue gauges below cover
 saturation.
 
+Standard labels (`pipeline`, `component`, `component_type`) are on all of
+them; extras — `broker` among them — are noted per family.
+
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_kafka_sink_tx_requests_total` | counter | | Requests sent to brokers. |

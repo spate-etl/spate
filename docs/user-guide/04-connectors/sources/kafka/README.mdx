@@ -153,6 +153,9 @@ aggregated** across brokers or processes (`max()` is the only defensible
 cross-series operator). Series backed by data librdkafka has not produced yet
 (an empty latency window, an unknown lag) are absent rather than `0`.
 
+Standard labels (`pipeline`, `component`, `component_type`) are on all of
+them; extras — `broker` among them — are noted per family.
+
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_kafka_source_tx_requests_total` | counter | | Requests sent to brokers. |

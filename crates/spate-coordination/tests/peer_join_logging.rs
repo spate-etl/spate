@@ -54,28 +54,46 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
     }
 }
 
-/// How many rebalances the leader has announced so far.
-fn announcements(capture: &Capture) -> usize {
+/// The `moved` count of every rebalance the leader has announced so far, in
+/// order. Reading the field rather than testing for the absence of
+/// `moved=0`: a formatter that stopped rendering fields this way produces
+/// that absence too, and such an assertion would pass having checked
+/// nothing.
+fn announced_moves(capture: &Capture) -> Vec<u64> {
     capture
         .lines()
         .iter()
         .filter(|l| l.contains("assignment published"))
-        .count()
+        .map(|l| {
+            l.split_whitespace()
+                .find_map(|f| f.strip_prefix("moved="))
+                .unwrap_or_else(|| panic!("no `moved` field to read on: {l}"))
+                .parse()
+                .expect("moved is a count")
+        })
+        .collect()
 }
 
-/// Wait for `what` to appear in the capture, so the assertions below run
-/// against a fleet that has finished reacting to the join rather than one
-/// still mid-flight.
+/// Wait for a line containing `needle`.
 fn wait_for_line(capture: &Capture, needle: &str) {
+    wait_until(&format!("a line containing {needle:?}"), capture, |c| {
+        c.lines().iter().any(|l| l.contains(needle))
+    });
+}
+
+/// Wait for `what` to become true of the capture, so the assertions below
+/// run against a fleet that has finished reacting to the join rather than
+/// one still mid-flight.
+fn wait_until(what: &str, capture: &Capture, mut check: impl FnMut(&Capture) -> bool) {
     let deadline = Instant::now() + support::DEADLINE;
     while Instant::now() < deadline {
-        if capture.lines().iter().any(|l| l.contains(needle)) {
+        if check(capture) {
             return;
         }
         std::thread::sleep(support::POLL_INTERVAL);
     }
     panic!(
-        "no line containing {needle:?} was logged\n--- captured ---\n{}",
+        "timed out waiting for {what}\n--- captured ---\n{}",
         capture.lines().join("\n")
     );
 }
@@ -112,7 +130,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // shape where a completion demonstrably *cannot* move anything: with
     // two members a shrinking pool rebalances for real, and the silence
     // would prove nothing.
-    let announced_alone = announcements(&capture);
+    let announced_alone = announced_moves(&capture).len();
     for id in ["s0", "s1"] {
         let done = SplitProgress::completed(support::DRAINED_WATERMARK, vec![]);
         a.commit(&support::split_id(id), &done).expect("commit");
@@ -130,7 +148,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     }
     assert_eq!(held_a.splits.len(), 2, "two splits are left to hold");
     assert_eq!(
-        announcements(&capture),
+        announced_moves(&capture).len(),
         announced_alone,
         "a completion was announced as a rebalance\n--- captured ---\n{}",
         capture.lines().join("\n")
@@ -155,43 +173,41 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
         std::thread::sleep(support::POLL_INTERVAL);
     }
 
-    // The incumbent says the fleet grew, and says once that it moved work.
+    // The incumbent says the fleet grew, and announces the rebalance that
+    // followed. Waiting on the *count* rather than on the phrase: the solo
+    // handout above already emitted one `assignment published`, so waiting
+    // for the phrase would be satisfied before the join happened.
     wait_for_line(&capture, "peer joined");
-    wait_for_line(&capture, "assignment published");
+    wait_until(
+        "the join is announced as a rebalance of its own",
+        &capture,
+        |c| announced_moves(c).len() > announced_alone,
+    );
     // The newcomer says what it found, rather than announcing every member
     // of it as an arrival.
     wait_for_line(&capture, "joined a fleet already running");
 
     let lines = capture.lines();
-    // Deliberately not an exact count. This runs on the real clock, so a
-    // scheduler stall long enough to lapse worker-b's presence key is a
-    // second `peer joined` — a flake, not a defect. Every join naming the
-    // instance that joined is the property.
+    // Deliberately neither an exact count nor a claim about every line.
+    // This runs on the real clock, so a scheduler stall long enough to
+    // lapse a presence key produces an extra leave/join pair — for either
+    // worker, since each renews its own. That is a flake, not a defect, and
+    // an assertion over all the lines would fail on it while reporting
+    // something untrue. That worker-b's arrival is announced is the
+    // property.
     let joins: Vec<&String> = lines.iter().filter(|l| l.contains("peer joined")).collect();
     assert!(
-        joins.iter().all(|l| l.contains("worker-b")),
-        "a join named an instance that never joined\n--- captured ---\n{}",
+        joins.iter().any(|l| l.contains("worker-b")),
+        "no join named worker-b\n--- captured ---\n{}",
         lines.join("\n")
     );
 
-    // The join moved work, and the line that announced it says so. Read the
-    // field rather than testing for the absence of `moved=0`: a formatter
-    // that stopped rendering fields this way produces that absence too, and
-    // the assertion would pass having checked nothing.
-    let moves: Vec<u64> = lines
-        .iter()
-        .filter(|l| l.contains("assignment published"))
-        .map(|l| {
-            l.split_whitespace()
-                .find_map(|f| f.strip_prefix("moved="))
-                .unwrap_or_else(|| panic!("no `moved` field to read on: {l}"))
-                .parse()
-                .expect("moved is a count")
-        })
-        .collect();
+    // The join moved work, and the line that announced it says so.
+    let moves = announced_moves(&capture);
     assert!(
-        moves.iter().any(|m| *m > 0),
-        "worker-b took splits off worker-a, so some publish moved them\n--- captured ---\n{}",
+        moves[announced_alone..].iter().any(|m| *m > 0),
+        "worker-b took a split off worker-a, so the publish that followed \
+         the join moved it\n--- captured ---\n{}",
         lines.join("\n")
     );
 
@@ -211,5 +227,35 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
             .map(|l| l.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    );
+
+    // The other half of a fleet changing size, and the harder one to count.
+    // A graceful departure clears the owner of every split it held before
+    // dropping its presence key, so nothing is reserved and the survivor is
+    // handed the whole share at once — the largest rebalance there is. The
+    // departing instance is no longer a member, so its assignment record is
+    // the only remaining evidence that the splits were ever held; a count
+    // that reads live members only reports the biggest move in the fleet's
+    // life as work handed out for the first time.
+    let before_departure = announced_moves(&capture).len();
+    let leaving: Vec<_> = held_b
+        .splits
+        .keys()
+        .map(|id| support::split_id(id))
+        .collect();
+    b.release(&leaving).expect("worker-b departs");
+    drive(
+        &mut a,
+        &mut held_a,
+        "worker-a inherits the departed share",
+        |h| h.splits.len() == 2,
+    );
+    wait_for_line(&capture, "peer left");
+    let moves = announced_moves(&capture);
+    assert!(
+        moves[before_departure..].iter().any(|m| *m > 0),
+        "worker-a inherited worker-b's split, so the publish that followed \
+         the departure moved it\n--- captured ---\n{}",
+        capture.lines().join("\n")
     );
 }

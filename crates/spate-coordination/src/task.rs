@@ -248,14 +248,14 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// elapses, so a pod bounce reclaims its own work instead of the fleet
     /// churning around it. Cleared the moment the instance reappears.
     departed: BTreeMap<String, Instant>,
-    /// The membership last reported by `observe_membership`, and whether it
-    /// has reported at all. Logging membership from a diff of this rather
-    /// than from the presence-key events themselves is what keeps a watch
-    /// reconnect quiet: `try_rewatch` rebuilds `presence` from a snapshot,
-    /// so the events say the whole fleet arrived while the set says nothing
-    /// moved.
-    reported_members: BTreeSet<String>,
-    membership_reported: bool,
+    /// The peers last reported by `observe_membership`; `None` until it has
+    /// run at all, which is a state a set of its own cannot express — an
+    /// empty one is a worker that has looked and is alone. Logging
+    /// membership from a diff of this rather than from the presence-key
+    /// events themselves is what keeps a watch reconnect quiet:
+    /// `try_rewatch` rebuilds `presence` from a snapshot, so the events say
+    /// the whole fleet arrived while the set says nothing moved.
+    reported_members: Option<BTreeSet<String>>,
     /// Leader side only: the membership the last announced assignment was
     /// computed over. A publish whose member set matches it did not follow
     /// a fleet change, so whatever it rewrote came from splits completing.
@@ -319,8 +319,7 @@ impl<S: CoordinationStore> Task<S> {
             awaiting: BTreeMap::new(),
             assign_dirty: true,
             departed: BTreeMap::new(),
-            reported_members: BTreeSet::new(),
-            membership_reported: false,
+            reported_members: None,
             announced_members: BTreeSet::new(),
         }
     }
@@ -1255,24 +1254,36 @@ impl<S: CoordinationStore> Task<S> {
         // common case — nothing moved — without building a set. This runs
         // on every step, which is every watch event.
         let peers = || self.presence.keys().filter(|i| **i != self.instance);
-        let first = !std::mem::replace(&mut self.membership_reported, true);
-        if peers().eq(self.reported_members.iter()) {
+        if let Some(reported) = &self.reported_members
+            && peers().eq(reported.iter())
+        {
             return;
         }
         let members: BTreeSet<String> = peers().cloned().collect();
         let live = protocol::live_workers(&self.presence, &self.instance);
-        if first {
-            let found = members.iter().cloned().collect::<Vec<_>>().join(", ");
-            tracing::info!(live, peers = %found, "joined a fleet already running");
-        } else {
-            for instance in members.difference(&self.reported_members) {
-                tracing::info!(instance = %instance, live, "peer joined");
+        match &self.reported_members {
+            // First look. A worker that finds peers says so once; one that
+            // finds none is alone, and has nothing to describe.
+            None => {
+                if !members.is_empty() {
+                    let found = members
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tracing::info!(live, peers = %found, "joined a fleet already running");
+                }
             }
-            for instance in self.reported_members.difference(&members) {
-                tracing::info!(instance = %instance, live, "peer left");
+            Some(previous) => {
+                for instance in members.difference(previous) {
+                    tracing::info!(instance = %instance, live, "peer joined");
+                }
+                for instance in previous.difference(&members) {
+                    tracing::info!(instance = %instance, live, "peer left");
+                }
             }
         }
-        self.reported_members = members;
+        self.reported_members = Some(members);
     }
 
     fn update_gauges(&self) {
@@ -1456,29 +1467,45 @@ impl<S: CoordinationStore> Task<S> {
         // Each split's previous desired owner, from the assignments already
         // published, counted before the writes consume `desired`.
         //
-        // Two constraints this shape satisfies and the obvious alternatives
-        // do not. It is restricted to **live** members because a record
-        // outlives the instance it names for the whole grace window, and a
-        // departed peer's copy would otherwise shadow the live owner's and
-        // report a move on every publish until the window closed; the
-        // membership arm below announces that departure instead, so nothing
-        // is lost. And it reads the *published assignment* rather than the
-        // split's current owner, because a split mid-drain is still owned by
-        // the instance giving it up — counting from ownership re-reports one
-        // move on every publish until the drain lands.
-        let previous: BTreeMap<&str, &str> = self
-            .assignments
-            .iter()
-            .filter(|(instance, _)| members.contains(instance.as_str()))
-            .flat_map(|(instance, (val, _))| {
-                val.splits
-                    .iter()
-                    .map(move |id| (id.as_str(), instance.as_str()))
-            })
-            .collect();
+        // Read the *published assignment* rather than the split's current
+        // owner: a split mid-drain is still owned by the instance giving it
+        // up, so counting from ownership re-reports one move on every
+        // publish until the drain lands.
+        //
+        // Two passes, and the order is the point. A departed instance's
+        // record outlives it — the sweep below spares it for the whole
+        // grace window — and it is the only remaining evidence of who held
+        // its splits, which is the largest rebalance there is: a graceful
+        // release clears every `owner` before dropping the presence key, so
+        // nothing is reserved and the whole share is re-homed at once.
+        // Dropping those records would count that as work handed out for
+        // the first time. Letting them win would be worse: once a survivor
+        // has been given the split, both records name it, and a stale copy
+        // whose instance sorts later would re-report the move on every
+        // publish until the sweep. So all records seed the map and live
+        // members overwrite — the live record is the one that was published
+        // most recently for any split two of them claim.
+        let mut previous: BTreeMap<&str, &str> = BTreeMap::new();
+        for pass in [false, true] {
+            for (instance, (val, _)) in &self.assignments {
+                if pass != members.contains(instance.as_str()) {
+                    continue;
+                }
+                for id in &val.splits {
+                    previous.insert(id.as_str(), instance.as_str());
+                }
+            }
+        }
         // A split named for the first time is not a move: it is work being
         // handed out, and only a split leaving one instance for another
         // costs a drain.
+        //
+        // This is what was *published*, not what landed. A write that fails
+        // below leaves its instance's record naming splits another instance
+        // has already been given, and the same move is counted again on
+        // each publish until the retry rewrites it. It corrects itself on
+        // the next reconcile, and the alternative is a count that cannot be
+        // taken before the writes it describes.
         let moved = desired
             .iter()
             .flat_map(|(instance, splits)| {
@@ -1580,6 +1607,10 @@ impl<S: CoordinationStore> Task<S> {
     /// Force the next leader step to recompute and republish.
     pub(crate) fn mark_assignment_dirty(&mut self) {
         self.assign_dirty = true;
+        // `announced_members` is bookkeeping about assignments this process
+        // published, and a fresh leader has published none — clearing it
+        // with the flag keeps the two from disagreeing about that.
+        self.announced_members.clear();
     }
 
     /// Expire the grace windows of departed instances.
@@ -1688,6 +1719,11 @@ impl<S: CoordinationStore> Task<S> {
                         cancelled: false,
                     },
                 );
+                // Only a drain that is starting says so. The arm above is a
+                // revocation restarting over a drain that never stopped,
+                // and announcing it would put two starts against one
+                // finish.
+                tracing::debug!(split = %id, "drain started");
             }
         }
         // The denominator of the revocation lifecycle, counted exactly once
@@ -1698,7 +1734,6 @@ impl<S: CoordinationStore> Task<S> {
         // still in flight. That is *not* `splits_draining`, which counts
         // the drains — a cancelled revocation leaves one behind.
         self.metrics(|m| m.revocation(RevocationOutcome::Requested));
-        tracing::debug!(split = %id, "drain started");
         self.emit(CoordinationEvent::RevokeRequested { split });
     }
 

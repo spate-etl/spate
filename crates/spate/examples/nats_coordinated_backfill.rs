@@ -41,6 +41,12 @@
 //! replays nothing — and the second claims them. Each instance prints the
 //! objects it covered.
 //!
+//! The first terminal narrates that: `peer joined` as the new member's
+//! presence key lands, then `assignment published` naming how many splits
+//! changed hands. The second reports the fleet it walked into. Per-split
+//! detail — each claim, each drain — is a level down, at
+//! `RUST_LOG=info,spate_coordination=debug`.
+//!
 //! Draining a paced chain takes time, which is why `drain_deadline` below
 //! sits far above its default: a drain that outruns the deadline is
 //! revoked outright and its uncommitted tail replays under the new owner

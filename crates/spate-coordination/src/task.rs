@@ -248,6 +248,14 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// elapses, so a pod bounce reclaims its own work instead of the fleet
     /// churning around it. Cleared the moment the instance reappears.
     departed: BTreeMap<String, Instant>,
+    /// The membership last reported by `observe_membership`, and whether it
+    /// has reported at all. Logging membership from a diff of this rather
+    /// than from the presence-key events themselves is what keeps a watch
+    /// reconnect quiet: `try_rewatch` rebuilds `presence` from a snapshot,
+    /// so the events say the whole fleet arrived while the set says nothing
+    /// moved.
+    reported_members: BTreeSet<String>,
+    membership_reported: bool,
 }
 
 impl<S: CoordinationStore> Task<S> {
@@ -307,6 +315,8 @@ impl<S: CoordinationStore> Task<S> {
             awaiting: BTreeMap::new(),
             assign_dirty: true,
             departed: BTreeMap::new(),
+            reported_members: BTreeSet::new(),
+            membership_reported: false,
         }
     }
 
@@ -474,7 +484,7 @@ impl<S: CoordinationStore> Task<S> {
     /// guarded delete works — in both keyspaces.
     async fn probe(&mut self) -> Result<(), CoordinationError> {
         for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
-            let key = format!("_probe.{}", self.instance);
+            let key = records::probe_key(&self.instance);
             let ctx = "store probe";
             let rev = match self
                 .store
@@ -902,11 +912,11 @@ impl<S: CoordinationStore> Task<S> {
         match event {
             WatchEvent::Put(entry) => self.apply_state_put(&entry),
             WatchEvent::Delete { key, .. } => {
-                // Assignment records are the one durable key this protocol
-                // deletes: the leader drops them for instances that have
-                // left. Everything else being deleted is external
-                // interference, and the reconcile pass treats missing
-                // records the same way.
+                // The protocol deletes exactly two durable keys: the leader
+                // drops assignment records for instances that have left,
+                // and an instance clears the startup probe key it wrote.
+                // Anything else vanishing is external interference, and the
+                // reconcile pass treats missing records the same way.
                 if let Some(instance) = records::parse_assign_key(&key) {
                     self.assignments.remove(instance);
                     if instance == self.instance {
@@ -918,8 +928,13 @@ impl<S: CoordinationStore> Task<S> {
                         self.assigned.clear();
                         self.awaiting.clear();
                     }
+                } else if let Some(instance) = records::parse_probe_key(&key) {
+                    tracing::debug!(instance = %instance, "startup probe key cleared");
                 } else {
-                    tracing::warn!(key = %key, "durable record deleted externally");
+                    tracing::warn!(
+                        key = %key,
+                        "durable record deleted externally; reconcile treats it as absent"
+                    );
                 }
                 Ok(())
             }
@@ -1194,6 +1209,7 @@ impl<S: CoordinationStore> Task<S> {
         // bookkeeping too — pruning only on the leader path leaked one
         // entry per historical peer on any worker never elected.
         self.prune_departed();
+        self.observe_membership();
         if self.terminal_reported {
             self.update_gauges();
             return Ok(());
@@ -1219,6 +1235,40 @@ impl<S: CoordinationStore> Task<S> {
         self.check_terminal().await?;
         self.update_gauges();
         Ok(())
+    }
+
+    /// Report membership transitions observed since the last step.
+    ///
+    /// The lines come from a diff of the presence set, not from the
+    /// presence-key events: `try_rewatch` rebuilds `presence` from a
+    /// snapshot, so the events say the whole fleet arrived at every watch
+    /// reconnect while the set says nothing moved. A worker running alone
+    /// says nothing — there is no membership to describe — and one that
+    /// starts into a running fleet says so once rather than once per peer.
+    fn observe_membership(&mut self) {
+        let members: BTreeSet<String> = self
+            .presence
+            .keys()
+            .filter(|i| **i != self.instance)
+            .cloned()
+            .collect();
+        let first = !std::mem::replace(&mut self.membership_reported, true);
+        if members == self.reported_members {
+            return;
+        }
+        let live = protocol::live_workers(&self.presence, &self.instance);
+        if first {
+            let peers = members.iter().cloned().collect::<Vec<_>>().join(", ");
+            tracing::info!(live, %peers, "joined a fleet already running");
+        } else {
+            for instance in members.difference(&self.reported_members) {
+                tracing::info!(instance = %instance, live, "peer joined");
+            }
+            for instance in self.reported_members.difference(&members) {
+                tracing::info!(instance = %instance, live, "peer left");
+            }
+        }
+        self.reported_members = members;
     }
 
     fn update_gauges(&self) {
@@ -1399,6 +1449,32 @@ impl<S: CoordinationStore> Task<S> {
             self.config.max_in_flight,
             self.fp,
         );
+        // How many splits change hands, counted before the writes consume
+        // `desired`. A split named for the first time is not a move: it is
+        // work being handed out, and only a split leaving one instance for
+        // another costs a drain. One pass over the published assignments
+        // builds the lookup — the balance pass above is already
+        // O(members x splits), so this is noise beside it.
+        let previous: BTreeMap<&str, &str> = self
+            .assignments
+            .iter()
+            .flat_map(|(instance, (val, _))| {
+                val.splits
+                    .iter()
+                    .map(move |id| (id.as_str(), instance.as_str()))
+            })
+            .collect();
+        let moved = desired
+            .iter()
+            .flat_map(|(instance, splits)| splits.iter().map(move |id| (id, instance)))
+            .filter(|(id, instance)| {
+                previous
+                    .get(id.as_str())
+                    .is_some_and(|prev| prev != instance)
+            })
+            .count();
+        drop(previous);
+        let mut published = 0usize;
         for (instance, splits) in desired {
             let current = self.assignments.get(&instance);
             if current.is_some_and(|(val, _)| val.splits == splits && val.generation == generation)
@@ -1427,7 +1503,10 @@ impl<S: CoordinationStore> Task<S> {
                 // correctly drops — so waiting for the echo would leave the
                 // leader the one instance that never learns its own
                 // assignment.
-                Ok(CasOutcome::Won(rev)) => self.apply_assignment(&instance, val, rev),
+                Ok(CasOutcome::Won(rev)) => {
+                    published += 1;
+                    self.apply_assignment(&instance, val, rev);
+                }
                 // Someone else wrote it — or the key is gone and our
                 // cached revision is a ghost, which a CAS-update can never
                 // recover from on its own. Drop the entry: the next attempt
@@ -1441,6 +1520,20 @@ impl<S: CoordinationStore> Task<S> {
                     tracing::debug!(%instance, error = %e, "assignment publish failed; retrying");
                 }
             }
+        }
+        if moved > 0 && published > 0 {
+            // One line per rebalance, on the instance that decided it, and
+            // only where splits actually change hands. A publish that
+            // merely drops a completed split from its owner's assignment
+            // moves nothing, and counting those here would put a line on
+            // every completion in the job. Per-instance and per-split
+            // detail is at DEBUG.
+            tracing::info!(
+                members = members.len(),
+                moved,
+                generation,
+                "assignment published"
+            );
         }
         // Assignments for instances that are gone are dead weight; drop
         // them once their grace window has passed, so the keyspace tracks

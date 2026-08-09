@@ -1,6 +1,25 @@
 //! Structured logging: `tracing` initialization (JSON for Kubernetes) and
 //! rate-limited hot-path logging helpers.
 //!
+//! # Levels
+//!
+//! The framework and its connectors emit at three levels, and a reader may
+//! rely on the split:
+//!
+//! - **`WARN`** — the pipeline is degraded, or has lost work it expected to
+//!   keep, and somebody may need to act. A routine event the framework
+//!   itself causes is never a `WARN`, however unusual it looks from inside
+//!   one component.
+//! - **`INFO`** — a lifecycle milestone worth a place in a post-mortem
+//!   timeline: startup and shutdown, leadership, fleet membership, a plan
+//!   becoming final.
+//! - **`DEBUG`** — the bookkeeping underneath those: per-split, per-retry,
+//!   per-record.
+//!
+//! A deployment runs at `INFO`, so that is the level the split is drawn
+//! for: everything at it should be something an operator would want to
+//! read, and a healthy pipeline at it should be quiet.
+//!
 //! # Rate limiting on the hot path
 //!
 //! A poison-message storm that logs per record will destroy the pinned

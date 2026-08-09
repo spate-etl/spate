@@ -25,6 +25,7 @@
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
+//! | Both      | `_probe.{instance}` | opaque                  — the startup store probe, deleted by the instance that wrote it |
 
 use crate::error::fatal;
 use base64::Engine as _;
@@ -68,6 +69,11 @@ pub(crate) const SPLIT_PREFIX: &str = "split.";
 pub(crate) const SPEC_PREFIX: &str = "spec.";
 /// Prefix of worker presence keys in the ephemeral keyspace.
 pub(crate) const WORKER_PREFIX: &str = "worker.";
+/// Prefix of the startup store probe, written and deleted in **both**
+/// keyspaces by an instance as it starts. Peers see both events on their
+/// unfiltered watches; the delete is one the protocol makes, not one made
+/// under it.
+pub(crate) const PROBE_PREFIX: &str = "_probe.";
 /// Prefix of the leader's assignment records in the **durable** keyspace.
 /// Durable and not ephemeral on purpose: an assignment must outlive the
 /// leadership that wrote it, or every leader gap would blank the fleet's
@@ -107,6 +113,16 @@ pub(crate) fn parse_spec_key(key: &str) -> Option<&str> {
 /// The instance encoded in a `worker.{instance}` key, if it is one.
 pub(crate) fn parse_worker_key(key: &str) -> Option<&str> {
     key.strip_prefix(WORKER_PREFIX)
+}
+
+/// `_probe.{instance}` startup probe key.
+pub(crate) fn probe_key(instance: &str) -> String {
+    format!("{PROBE_PREFIX}{instance}")
+}
+
+/// The instance encoded in a `_probe.{instance}` key, if it is one.
+pub(crate) fn parse_probe_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PROBE_PREFIX)
 }
 
 /// `assign.{instance}` assignment key.
@@ -669,6 +685,17 @@ mod tests {
         // watch: `assign.` and `split.`/`spec.` share no prefix.
         assert_eq!(parse_assign_key("split.abc"), None);
         assert_eq!(parse_split_key("assign.worker-a"), None);
+
+        // The probe key shares a keyspace with all of them, and a watcher
+        // classifies a delete by prefix alone.
+        assert_eq!(probe_key("worker-a"), "_probe.worker-a");
+        assert_eq!(parse_probe_key("_probe.worker-a"), Some("worker-a"));
+        for key in ["assign.worker-a", "worker.worker-a", "split.abc", "plan"] {
+            assert_eq!(parse_probe_key(key), None, "{key}");
+        }
+        assert_eq!(parse_assign_key("_probe.worker-a"), None);
+        assert_eq!(parse_split_key("_probe.worker-a"), None);
+        assert_eq!(parse_worker_key("_probe.worker-a"), None);
     }
 
     #[test]

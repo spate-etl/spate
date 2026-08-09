@@ -1464,27 +1464,32 @@ impl<S: CoordinationStore> Task<S> {
             self.config.max_in_flight,
             self.fp,
         );
-        // Each split's previous desired owner, from the assignments already
-        // published, counted before the writes consume `desired`.
+        // Where the last published assignment put each split, read before
+        // the writes consume `desired`.
         //
-        // Read the *published assignment* rather than the split's current
-        // owner: a split mid-drain is still owned by the instance giving it
-        // up, so counting from ownership re-reports one move on every
-        // publish until the drain lands.
+        // This is the leader's own record of what it decided, not a reading
+        // of who holds what, and `moved` below means exactly that: splits
+        // being assigned somewhere other than where this map puts them.
+        // Ownership cannot answer the question — a graceful release clears
+        // every `owner` before dropping the presence key, so the largest
+        // rebalance there is (a departing worker's whole share re-homed at
+        // once) is invisible to it, while a split mid-drain still reads as
+        // owned by the instance giving it up long after the decision to
+        // move it. Its cost is that a record for an instance that never
+        // took the split, or that belongs to an earlier run of the job,
+        // still counts as somewhere the split was assigned. It was.
         //
         // Two passes, and the order is the point. A departed instance's
         // record outlives it — the sweep below spares it for the whole
-        // grace window — and it is the only remaining evidence of who held
-        // its splits, which is the largest rebalance there is: a graceful
-        // release clears every `owner` before dropping the presence key, so
-        // nothing is reserved and the whole share is re-homed at once.
-        // Dropping those records would count that as work handed out for
-        // the first time. Letting them win would be worse: once a survivor
-        // has been given the split, both records name it, and a stale copy
-        // whose instance sorts later would re-report the move on every
-        // publish until the sweep. So all records seed the map and live
-        // members overwrite — the live record is the one that was published
-        // most recently for any split two of them claim.
+        // grace window — and it is the only remaining evidence of where its
+        // splits were assigned. Dropping those records would read a
+        // departure as work handed out for the first time. Letting them win
+        // would be worse: once a survivor has been given the split, both
+        // records name it, and a stale copy whose instance sorts later
+        // would re-report the move on every publish until the sweep. So all
+        // records seed the map and live members overwrite — the live record
+        // is the one that was published most recently for any split two of
+        // them claim.
         let mut previous: BTreeMap<&str, &str> = BTreeMap::new();
         for pass in [false, true] {
             for (instance, (val, _)) in &self.assignments {
@@ -1497,15 +1502,15 @@ impl<S: CoordinationStore> Task<S> {
             }
         }
         // A split named for the first time is not a move: it is work being
-        // handed out, and only a split leaving one instance for another
-        // costs a drain.
+        // handed out.
         //
-        // This is what was *published*, not what landed. A write that fails
-        // below leaves its instance's record naming splits another instance
-        // has already been given, and the same move is counted again on
-        // each publish until the retry rewrites it. It corrects itself on
-        // the next reconcile, and the alternative is a count that cannot be
-        // taken before the writes it describes.
+        // What was *published*, not what landed. A write that fails below
+        // leaves its instance's record naming splits another instance has
+        // already been given, and the same move is counted again on each
+        // publish until a later one rewrites it — the reconcile tick, which
+        // marks the assignment dirty unconditionally, not the failed write
+        // itself. The alternative is a count that cannot be taken before
+        // the writes it describes.
         let moved = desired
             .iter()
             .flat_map(|(instance, splits)| {
@@ -1607,10 +1612,6 @@ impl<S: CoordinationStore> Task<S> {
     /// Force the next leader step to recompute and republish.
     pub(crate) fn mark_assignment_dirty(&mut self) {
         self.assign_dirty = true;
-        // `announced_members` is bookkeeping about assignments this process
-        // published, and a fresh leader has published none — clearing it
-        // with the flag keeps the two from disagreeing about that.
-        self.announced_members.clear();
     }
 
     /// Expire the grace windows of departed instances.

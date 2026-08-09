@@ -226,23 +226,36 @@ The logs carry the same story at `INFO`, which is the level a deployment
 runs at. A worker that starts into a running fleet logs the peers it found;
 after that each worker logs `peer joined` and `peer left` with the resulting
 live count, and the worker holding leadership logs `assignment published`
-once per rebalance, carrying the member count and how many splits changed
-hands. A restart fast enough to reclaim its own presence key changes neither
-the membership nor the count, so it passes without a line — the same reason
-`live_workers` does not dip for it. The detail underneath —
-`split claimed`, `drain started`, `drain finished` — sits at `DEBUG`, so a
-rebalance is one line however much it moves, and
+once per rebalance, carrying the member count and how many splits it
+assigned somewhere other than where its last assignment put them. That is a
+count of decisions rather than of drains: a split re-homed from a worker
+that had already released it changed hands without one. The detail
+underneath — `split claimed`, `drain started`, `drain finished` — sits at
+`DEBUG`, so a rebalance is one line however much it moves, and
 `RUST_LOG=info,spate_coordination=debug` turns the rest on.
+
+One restart passes the membership log in silence: a worker killed outright
+and back inside the presence TTL reclaims its own key with a write its peers
+read as an update, so no member arrived or left and `live_workers` never
+dips. The worker itself still reports the fleet it found. A graceful
+shutdown is not this case — it deletes the presence key, so the departure
+and the return are both announced.
 
 Some of what a fleet change warns about is not a fault. A worker whose
 predecessor died between writing its startup probe key and clearing it finds
 the key on the next start, reports it, clears it and carries on; replicas
 racing to create the plan record warn once each for the losers, back off and
-re-read. Both resolve inside the startup retry budget, and both are fatal if
-they never do. A leader being deposed warns too, and resolves by demoting
-rather than by retrying — the successor is already elected. The ones to read
-are those naming work: a forced release, a self-fence, a lease taken from
-under a live owner.
+re-read; a restart can find its own presence key expiring underneath it and
+retry that. All three resolve inside the startup retry budget, and all three
+are fatal if they never do. A leader losing leadership to a successor warns
+and demotes, with nothing to retry.
+
+The ones to read name work or the loss of it: a forced release, a self-fence,
+a lease taken from under a live owner — and `leadership lease expired`, which
+is neither of the above. It means no successor was elected because the
+leadership key simply aged out, which takes a full lease without a successful
+store write; the fleet re-elects, but the write stall that caused it is the
+thing worth chasing.
 
 Two families were renamed when coordination moved to leader-assigned
 balancing: `handoffs_total` → `revocations_total` (new label set), and the

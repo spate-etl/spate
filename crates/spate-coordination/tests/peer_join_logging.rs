@@ -54,6 +54,18 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
     }
 }
 
+/// How many rebalances the leader has announced. Separate from
+/// [`announced_moves`] so a wait can poll it without parsing: a line read
+/// mid-write would panic there, and inside a poll loop that reads as a
+/// timeout in the wrong place.
+fn announcements(capture: &Capture) -> usize {
+    capture
+        .lines()
+        .iter()
+        .filter(|l| l.contains("assignment published"))
+        .count()
+}
+
 /// The `moved` count of every rebalance the leader has announced so far, in
 /// order. Reading the field rather than testing for the absence of
 /// `moved=0`: a formatter that stopped rendering fields this way produces
@@ -130,7 +142,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // shape where a completion demonstrably *cannot* move anything: with
     // two members a shrinking pool rebalances for real, and the silence
     // would prove nothing.
-    let announced_alone = announced_moves(&capture).len();
+    let announced_alone = announcements(&capture);
     for id in ["s0", "s1"] {
         let done = SplitProgress::completed(support::DRAINED_WATERMARK, vec![]);
         a.commit(&support::split_id(id), &done).expect("commit");
@@ -148,7 +160,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     }
     assert_eq!(held_a.splits.len(), 2, "two splits are left to hold");
     assert_eq!(
-        announced_moves(&capture).len(),
+        announcements(&capture),
         announced_alone,
         "a completion was announced as a rebalance\n--- captured ---\n{}",
         capture.lines().join("\n")
@@ -181,7 +193,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     wait_until(
         "the join is announced as a rebalance of its own",
         &capture,
-        |c| announced_moves(c).len() > announced_alone,
+        |c| announcements(c) > announced_alone,
     );
     // The newcomer says what it found, rather than announcing every member
     // of it as an arrival.
@@ -234,16 +246,23 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // dropping its presence key, so nothing is reserved and the survivor is
     // handed the whole share at once — the largest rebalance there is. The
     // departing instance is no longer a member, so its assignment record is
-    // the only remaining evidence that the splits were ever held; a count
-    // that reads live members only reports the biggest move in the fleet's
-    // life as work handed out for the first time.
-    let before_departure = announced_moves(&capture).len();
+    // the only remaining evidence of where those splits were assigned; a
+    // count that reads live members only reports the biggest move in the
+    // fleet's life as work handed out for the first time.
+    //
+    // Drop the coordinator, as the other suites do. `parting` is read by
+    // the control step and not by the heartbeat, so a departed worker still
+    // in scope re-creates its own presence key at its next beat, rejoins
+    // the fleet it just left, and is assigned work its step will never
+    // claim.
+    let before_departure = announcements(&capture);
     let leaving: Vec<_> = held_b
         .splits
         .keys()
         .map(|id| support::split_id(id))
         .collect();
     b.release(&leaving).expect("worker-b departs");
+    drop(b);
     drive(
         &mut a,
         &mut held_a,

@@ -51,6 +51,9 @@ proptest = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The peer-join suite asserts on what the log says, so it needs a subscriber
+# to capture: `fmt` is the formatter, installed globally for that one binary.
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 # gungraun's `main!` is the harness; without these the default libtest one
 # wraps them and rejects the harness's own arguments at run time.

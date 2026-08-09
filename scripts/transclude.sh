@@ -315,8 +315,16 @@ check_page() { # file
 # pipeline whose exit status would be the reader's. AGENTS.md is explicit about
 # this: a piped `grep`/`tail` reports the last command's status and has masked
 # real failures in this repository more than once.
+#
+# Scaffolds are excluded by name. A `_template` file is placeholders by
+# construction — `crates/spate-NAME/src/config.rs` is the shape a new page
+# fills in, not a path that resolves — so holding one to a real tree would
+# force the scaffold to teach a form no page copied from it can use. Other
+# `_`-prefixed files are not excluded: an MDX partial renders into the pages
+# that import it, and its pointers are as load-bearing as theirs.
 pages_into() { # destination
-    if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) -print0 >"$1"; then
+    if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) \
+        ! -name '_template.*' -print0 >"$1"; then
         echo "transclude.sh: could not enumerate $docs" >&2
         return 1
     fi

@@ -18,15 +18,16 @@ let source = DatagenSource::from_component_config(&pipeline.config().source)?;
 ```
 
 One runnable example drives this source end to end and needs nothing installed:
-`crates/spate/examples/storefront_pipeline.rs` runs a bounded stream through a
-whole pipeline — deserializer, filter, split terminal, admin server — and exits
-`Completed` on its own (`cargo run -p spate --example storefront_pipeline`).
+[`storefront_pipeline.rs`](repo:crates/spate/examples/storefront_pipeline.rs)
+runs a bounded stream through a whole pipeline — deserializer, filter, split
+terminal, admin server — and exits `Completed` on its own
+(`cargo run -p spate --example storefront_pipeline`).
 
 ## Configuration
 
 The `source: { datagen: ... }` section deserializes into `DatagenSourceConfig`
-(`crates/spate-datagen/src/config.rs`); unknown fields are rejected with the
-offending key.
+([`spate-datagen/src/config.rs`](repo:crates/spate-datagen/src/config.rs));
+unknown fields are rejected with the offending key.
 
 ```yaml
 source:

@@ -53,8 +53,9 @@ Each table is an ordinary `ClickHouseSink`, built from its named config section,
 minting its own Native encoder (from *its* `system.columns`) and its own shard
 router before `add_sink(name, ...)` moves it into its worker pool. That is the
 single-sink wiring, N times. The whole program is
-`crates/spate/examples/multi_table_split.rs`; it needs a Kafka topic of Avro
-`MetricBatch` messages and both target tables, and runs with
+[`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs); it
+needs a Kafka topic of Avro `MetricBatch` messages and both target tables, and
+runs with
 `cargo run --release -p spate --features full --example multi_table_split`:
 
 ```rust file=crates/spate/examples/multi_table_split.rs region=assembly

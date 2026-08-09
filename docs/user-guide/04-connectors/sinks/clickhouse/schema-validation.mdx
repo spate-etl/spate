@@ -15,8 +15,8 @@ row serialized field by field, in declaration order. The server maps bytes to
 columns purely by position, so the row struct's field order is the wire
 contract. The struct below matches `columns: [id, customer, amount_cents,
 ts_ms]`, and comes — like the wiring further down — from
-`crates/spate/examples/kafka_avro_to_clickhouse.rs`, a complete program that
-builds under the `full` facade feature:
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
+a complete program that builds under the `full` facade feature:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```

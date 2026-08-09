@@ -18,9 +18,10 @@ assembly wiring — there is no `coordination:` section in the pipeline YAML
 `servers` is the URL list and `JOB` the job name, the two required fields of
 `NatsConfig`; `tuning` is the `CoordinationConfig` the coordinator runs on,
 whose `lease_duration` is the TTL the store is handed. That code comes from
-`crates/spate/examples/nats_coordinated_backfill.rs`, one instance per process
-against a JetStream server on `nats://127.0.0.1:4222` (override with `NATS_URL`)
-meeting the [Requirements](#requirements) below. Two terminals, each with a
+[`nats_coordinated_backfill.rs`](repo:crates/spate/examples/nats_coordinated_backfill.rs),
+one instance per process against a JetStream server on `nats://127.0.0.1:4222`
+(override with `NATS_URL`) meeting the [Requirements](#requirements) below.
+Two terminals, each with a
 distinct `POD_NAME` — the example's `instance_id` — divide one backfill between
 them, and two live workers claiming one identity is detected and fatal:
 

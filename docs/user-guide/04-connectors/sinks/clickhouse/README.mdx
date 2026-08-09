@@ -12,10 +12,11 @@ Construct it from the pipeline's opaque section; the result is a
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```
 
-That is from `crates/spate/examples/kafka_avro_to_clickhouse.rs`, a complete
-program that builds under the `full` facade feature. The single `sink:`
-section is addressed as `"default"`; a named sink resolves under its own
-name. Between this line and `pipeline.sink(sink)?` sits the optional
+That is from
+[`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
+a complete program that builds under the `full` facade feature. The single
+`sink:` section is addressed as `"default"`; a named sink resolves under its
+own name. Between this line and `pipeline.sink(sink)?` sits the optional
 pre-flight check — see [Schema validation](./schema-validation.mdx).
 
 To write to **several tables** from one pipeline (one per record kind), see
@@ -24,9 +25,10 @@ To write to **several tables** from one pipeline (one per record kind), see
 ## Configuration
 
 The `sink: { clickhouse: ... }` section deserializes into
-`ClickHouseSinkConfig` (`crates/spate-clickhouse/src/config.rs`); unknown
-fields are rejected with the offending key, and the retry/breaker values
-are validated at load (a bad multiplier or zero threshold fails startup
+`ClickHouseSinkConfig`
+([`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs));
+unknown fields are rejected with the offending key, and the retry/breaker
+values are validated at load (a bad multiplier or zero threshold fails startup
 instead of the write loop).
 
 ```yaml
@@ -203,7 +205,7 @@ restart instead — the watermark stalls either way. Recovery is automatic
 once any probe succeeds. This whole-shard condition is surfaced distinctly
 as `spate_sink_shard_healthy == 0` (with per-replica
 `spate_sink_replica_errors_total` to attribute the failures); see
-[docs/METRICS.md](../../../../METRICS.md).
+[Metrics](../../../../METRICS.md).
 
 ## Why direct-to-shard, not a Distributed table
 

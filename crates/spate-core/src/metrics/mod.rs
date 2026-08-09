@@ -88,7 +88,6 @@ pub use source::SourceMetrics;
 pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
-use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -142,27 +141,14 @@ pub enum E2eBasis {
 /// Exporter settings, mapped from the `metrics` config section by the
 /// pipeline runtime. Defined here (not in `config`) so this module has no
 /// config dependency.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MetricsSettings {
     /// Which exporter to install.
     pub exporter: Exporter,
-    /// Admin-server listen address (`/metrics`, `/healthz`, `/readyz`).
-    pub listen: SocketAddr,
     /// Enable cardinality-sensitive per-partition series.
     pub per_partition_detail: bool,
     /// Time basis for end-to-end latency.
     pub e2e_basis: E2eBasis,
-}
-
-impl Default for MetricsSettings {
-    fn default() -> Self {
-        MetricsSettings {
-            exporter: Exporter::Prometheus,
-            listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 9090)),
-            per_partition_detail: false,
-            e2e_basis: E2eBasis::Ingest,
-        }
-    }
 }
 
 /// Exporter installation failed.
@@ -220,6 +206,16 @@ impl MetricsHandle {
     pub fn render_fn(&self) -> Arc<dyn Fn() -> String + Send + Sync> {
         let this = self.clone();
         Arc::new(move || this.render())
+    }
+
+    /// Whether this handle renders an exposition — false for the no-op
+    /// exporter and for the detached handle a foreign recorder leaves behind.
+    ///
+    /// The admin server serves `/metrics` only when it does, so a scrape of a
+    /// pipeline exporting nothing is a 404 rather than an empty success.
+    #[must_use]
+    pub fn exports(&self) -> bool {
+        matches!(self.inner, Inner::Prometheus(_))
     }
 
     /// One maintenance tick: drains histogram state and refreshes process
@@ -959,6 +955,11 @@ mod tests {
         })
         .expect("noop install");
         assert_eq!(handle.render(), "");
+        assert!(
+            !handle.exports(),
+            "the admin server keys /metrics off this: a no-op exporter has \
+             no exposition to serve"
+        );
         handle.upkeep_tick(); // must not panic
     }
 
@@ -969,6 +970,10 @@ mod tests {
     #[test]
     fn install_prometheus_end_to_end() {
         let handle = install(&MetricsSettings::default()).expect("first install succeeds");
+        assert!(
+            handle.exports(),
+            "a Prometheus handle renders an exposition"
+        );
 
         let pl = PipelineMetrics::new(&labels("install_e2e"), "0.1.0");
         pl.set_threads(4);

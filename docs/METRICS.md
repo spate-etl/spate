@@ -2,8 +2,9 @@
 
 Spate instruments every pipeline stage through the [`metrics`](https://crates.io/crates/metrics)
 facade. The framework installs an exporter selected by the `metrics` config
-section (`prometheus` exposes a scrape endpoint on the admin server; `none`
-disables export). Pipeline authors and connectors register their own metrics through the same
+section: `prometheus` exposes a scrape endpoint on the admin server, which the
+`admin` section binds; `none` disables export, and that endpoint answers 404.
+Pipeline authors and connectors register their own metrics through the same
 facade — anything recorded is exported alongside the framework's. The
 recommended path is a `Meter`: it attaches the three standard labels below and
 **auto-prefixes the name `spate_<namespace>_`**, so custom series live under the

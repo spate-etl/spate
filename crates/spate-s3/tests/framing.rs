@@ -82,8 +82,9 @@ fn a_source_without_a_framer_fails_to_start() {
     let yaml = format!(
         r#"
 pipeline: {{ name: s3-no-framer-test, threads: 1 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"
@@ -120,8 +121,9 @@ fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
     let yaml = format!(
         r#"
 pipeline: {{ name: s3-framing-test, threads: 1 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"

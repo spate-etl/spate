@@ -192,9 +192,10 @@ component_type)` there (it uses the `custom` namespace):
 ```rust file=crates/spate/examples/instrumented_operator.rs region=chain title="instrumented_operator.rs"
 ```
 
-The example carries on past this region to scrape its own exposition and assert
+The example carries on past this region to render its own exposition and assert
 each series by name, label set and value — the assertion worth copying, and the
-one [Testing](#testing) below is about.
+one [Testing](#testing) below is about. It renders through the handle rather
+than scraping an endpoint, which is why it needs no admin server.
 
 ## Dropping to the raw facade
 

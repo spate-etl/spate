@@ -34,7 +34,7 @@ but the drain does its job when given the time.
 
 ## Probes
 
-The admin server (`metrics.listen`, default `:9090`) serves:
+The admin server (`admin.listen`, default `:9090`) serves:
 
 - `GET /readyz` — 200 once the source has an assignment **and** the sink's
   replicas answer probes. Wire this to `readinessProbe`.

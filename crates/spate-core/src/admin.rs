@@ -11,7 +11,9 @@
 //!   kubelet restarts the pod.
 //!
 //! The server takes the metrics renderer as a plain closure
-//! ([`RenderFn`]) so it has no dependency on exporter internals.
+//! ([`RenderFn`]) so it has no dependency on exporter internals. The probes
+//! are served regardless of the exporter; `/metrics` exists only when a
+//! renderer is supplied, and is a 404 otherwise.
 
 use std::io;
 use std::net::SocketAddr;
@@ -149,7 +151,7 @@ impl HealthState {
 pub struct AdminServer {
     listener: TcpListener,
     local_addr: SocketAddr,
-    render: RenderFn,
+    render: Option<RenderFn>,
     health: Arc<HealthState>,
 }
 
@@ -164,9 +166,11 @@ impl std::fmt::Debug for AdminServer {
 
 impl AdminServer {
     /// Bind the admin socket. Use port 0 to let the OS choose (tests).
+    ///
+    /// `render` of `None` serves the probes without `/metrics`.
     pub async fn bind(
         addr: SocketAddr,
-        render: RenderFn,
+        render: Option<RenderFn>,
         health: Arc<HealthState>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
@@ -193,14 +197,14 @@ impl AdminServer {
             tokio::select! {
                 accepted = self.listener.accept() => {
                     let (stream, _peer) = accepted?;
-                    let render = Arc::clone(&self.render);
+                    let render = self.render.clone();
                     let health = Arc::clone(&self.health);
                     tokio::spawn(async move {
                         let io = hyper_util::rt::TokioIo::new(stream);
                         let service = service_fn(move |req| {
-                            let render = Arc::clone(&render);
+                            let render = render.clone();
                             let health = Arc::clone(&health);
-                            async move { respond(&req, &render, &health) }
+                            async move { respond(&req, render.as_ref(), &health) }
                         });
                         if let Err(err) = hyper::server::conn::http1::Builder::new()
                             .serve_connection(io, service)
@@ -222,14 +226,14 @@ impl AdminServer {
 
 fn respond(
     req: &Request<hyper::body::Incoming>,
-    render: &RenderFn,
+    render: Option<&RenderFn>,
     health: &HealthState,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     if req.method() != Method::GET {
         return Ok(plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
     }
-    Ok(match req.uri().path() {
-        "/metrics" => {
+    Ok(match (req.uri().path(), render) {
+        ("/metrics", Some(render)) => {
             let body = render();
             Response::builder()
                 .status(StatusCode::OK)
@@ -240,8 +244,8 @@ fn respond(
                 .body(Full::new(Bytes::from(body)))
                 .expect("static response parts are valid")
         }
-        "/healthz" => probe(health.healthy()),
-        "/readyz" => probe(health.ready()),
+        ("/healthz", _) => probe(health.healthy()),
+        ("/readyz", _) => probe(health.ready()),
         _ => plain(StatusCode::NOT_FOUND, "not found"),
     })
 }
@@ -358,7 +362,7 @@ mod tests {
         let render: RenderFn = Arc::new(|| "spate_pipeline_info 1\n".to_owned());
         let server = AdminServer::bind(
             "127.0.0.1:0".parse().expect("addr"),
-            render,
+            Some(render),
             Arc::clone(&health),
         )
         .await
@@ -384,6 +388,34 @@ mod tests {
 
         let (status, _) = get(addr, "/nope").await;
         assert_eq!(status, 404);
+
+        shutdown_tx.send(true).expect("signal shutdown");
+        running
+            .await
+            .expect("server task joins")
+            .expect("clean shutdown");
+    }
+
+    /// With no exporter there is no exposition, and `/metrics` says so. A 200
+    /// carrying an empty body would read to a scraper as a healthy target
+    /// delivering no series, which is the one answer nothing can act on.
+    #[tokio::test]
+    async fn probes_serve_without_an_exporter_and_metrics_does_not() {
+        let health = HealthState::new(0, HealthThresholds::default());
+        let server = AdminServer::bind("127.0.0.1:0".parse().expect("addr"), None, health)
+            .await
+            .expect("bind");
+        let addr = server.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = tokio::spawn(server.run(shutdown_rx));
+
+        let (status, _) = get(addr, "/metrics").await;
+        assert_eq!(status, 404, "no exporter, no exposition");
+
+        let (status, _) = get(addr, "/healthz").await;
+        assert_eq!(status, 200, "liveness does not depend on the exporter");
+        let (status, _) = get(addr, "/readyz").await;
+        assert_eq!(status, 503, "readiness does not depend on the exporter");
 
         shutdown_tx.send(true).expect("signal shutdown");
         running

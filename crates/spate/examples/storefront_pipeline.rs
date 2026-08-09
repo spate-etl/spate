@@ -70,14 +70,17 @@ const SHARDS: usize = 2;
 /// reverses a mistake rather than returning goods.
 const UNBOOKED_REASON: &str = "duplicate_order";
 
-/// `metrics.listen` is port 0 so several examples can run concurrently under
-/// `cargo test` without fighting over 9090, and `pipeline.name` is unique to
+/// This is the one example that serves the admin endpoints — `main` prints
+/// their URLs to curl — so it names an address where the others ask for
+/// `none`. Port 0 rather than the `0.0.0.0:9090` default, because several
+/// examples run concurrently under `cargo test`. `pipeline.name` is unique to
 /// this file because a gauge series has exactly one live owner per process
 /// (INV-10). Everything else is ordinary framework tuning.
 const CONFIG: &str = r#"
 pipeline: { name: storefront-demo, threads: 2 }
+admin: { listen: "127.0.0.1:0" }
 checkpoint: { interval: 200ms }
-metrics: { exporter: prometheus, listen: "127.0.0.1:0" }
+metrics: { exporter: prometheus }
 
 # 4 lanes x 5 events every 20ms = 1000 events/s, for two seconds. Drop the
 # `count` line and the stream runs until SIGTERM.
@@ -124,8 +127,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The runtime binds the admin server inside `run`, which is past the last
     // chance to print where it landed. Resolve port 0 to a concrete port here
     // instead, so the URLs below are ones a reader can paste.
-    config.metrics.listen = resolve_port(config.metrics.listen)?;
-    let admin = config.metrics.listen;
+    let admin = resolve_port(
+        config
+            .admin
+            .listen
+            .expect("this example serves the admin endpoints"),
+    )?;
+    config.admin.listen = Some(admin);
 
     let pipeline = Pipeline::from_config(config)?;
 

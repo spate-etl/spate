@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 // ANCHOR: config
 const CONFIG: &str = r#"
 pipeline: { name: memory-demo, threads: 1 }
+admin: { listen: none }
 checkpoint: { interval: 200ms }
+metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }
 "#;

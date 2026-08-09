@@ -76,8 +76,7 @@ config edits trigger a rollout.
 
 ## Probes and the admin server
 
-The admin server binds `metrics.listen` (default `0.0.0.0:9090`) and serves
-three endpoints:
+The admin server binds `admin.listen` (default `0.0.0.0:9090`) and serves:
 
 - `GET /readyz` — 200 once the source has received an assignment (lanes are
   live) **and** the sink's replicas answer connectivity probes. Wire this to
@@ -87,8 +86,12 @@ three endpoints:
   fresh and the checkpoint watermark is not stuck while data flows. Wire
   this to `livenessProbe`: a wedged pipeline gets restarted instead of
   idling forever.
-- `GET /metrics` — Prometheus exposition. See [Monitoring](monitoring.mdx)
-  and the canonical taxonomy in [Metrics](../../METRICS.md).
+- `GET /metrics` — Prometheus exposition, when an exporter is installed; 404
+  otherwise. See [Monitoring](monitoring.mdx) and the canonical taxonomy in
+  [Metrics](../../METRICS.md).
+
+Both probes answer regardless of `metrics.exporter`. Setting `admin.listen` to
+`none` is what removes them, along with the port.
 
 ```yaml
 readinessProbe: { httpGet: { path: /readyz, port: 9090 } }

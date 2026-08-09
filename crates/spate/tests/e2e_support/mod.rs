@@ -310,7 +310,10 @@ impl Harness {
 
     pub fn spawn_pipeline(&self, params: &PipelineParams) -> RunningPipeline {
         let config = PipelineConfig::from_str(&params.yaml(self)).expect("pipeline config parses");
-        let admin: SocketAddr = config.metrics.listen;
+        let admin: SocketAddr = config
+            .admin
+            .listen
+            .expect("the scenario names an admin address");
 
         // The builder owns init: exporter before any handle (idempotent
         // across scenarios), the shared I/O runtime, queues, pool, probe.
@@ -429,6 +432,8 @@ pipeline:
   name: {name}
   threads: {threads}
   io_threads: 2
+admin:
+  listen: 127.0.0.1:{port}
 checkpoint:
   interval: {commit}
   max_pending_batches: 1024
@@ -437,7 +442,6 @@ backpressure:
   max_inflight_bytes: 64MiB
 metrics:
   exporter: prometheus
-  listen: 127.0.0.1:{port}
 source:
   kafka:
     brokers: {brokers}

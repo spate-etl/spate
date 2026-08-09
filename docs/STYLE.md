@@ -218,7 +218,7 @@ walkthroughs (those go in `03-guides/configuring-pipelines.mdx`).
 - **Grouped by config section** (`pipeline:`, `checkpoint:`, sink-pool, …), a
   flat table within each group, each group under an `## anchor`.
 - **Single source of truth for framework-owned keys.** The `pipeline`,
-  `checkpoint`, `backpressure`, `metrics`, and `SinkPoolConfig`
+  `admin`, `checkpoint`, `backpressure`, `metrics`, and `SinkPoolConfig`
   (`batch`/`inflight`/`retry`/`breaker`) tables live here and nowhere else.
   Connector pages link to `#sink-pool` instead of restating those defaults.
 - **Connector-owned keys stay on the connector page** and are indexed from the

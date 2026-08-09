@@ -126,13 +126,15 @@ const NARROW_READER: &str =
 /// a gauge series has exactly one live owner per process (INV-10), so a run
 /// builds one pipeline under one name.
 ///
-/// The metrics address is port 0 rather than the default: the runtime binds
-/// `metrics.listen` whatever the exporter is set to, and a fixed port is what
-/// forces the examples to run one at a time (see `.config/nextest.toml`).
+/// This example asserts on decoded records rather than on the exposition, so
+/// it asks for neither an exporter nor an admin server. A pipeline that names
+/// no address takes `0.0.0.0:9090`, which examples running concurrently would
+/// contend for.
 const CONFIG: &str = r#"
 pipeline: { name: avro-evolution-demo, threads: 1 }
+admin: { listen: none }
 checkpoint: { interval: 200ms }
-metrics: { listen: "127.0.0.1:0" }
+metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }
 "#;

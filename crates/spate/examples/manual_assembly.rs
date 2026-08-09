@@ -43,14 +43,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The same YAML a builder assembly loads — nothing about manual assembly
-/// changes the configuration layer. `metrics.listen` takes port 0 rather
-/// than the `0.0.0.0:9090` default: the runtime binds the admin server
-/// wherever the config points it, and two pipelines in flight at once on one
-/// port is `EADDRINUSE` (see `.config/nextest.toml`).
+/// changes the configuration layer. The exporter stays on, since step 3
+/// renders through it, while `admin.listen: none` asks for no HTTP server:
+/// nothing here scrapes one, and a pipeline naming no address takes
+/// `0.0.0.0:9090`. Starting an exporter that no server publishes draws a
+/// warning at startup naming this exact pattern.
 const CONFIG: &str = r#"
 pipeline: { name: manual-assembly-demo, threads: 1, io_threads: 1 }
+admin: { listen: none }
 checkpoint: { interval: 200ms }
-metrics: { listen: "127.0.0.1:0" }
 source: { memory: {} }
 sink: { capture: {} }
 "#;

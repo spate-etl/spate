@@ -33,13 +33,14 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 /// Fixed admin port for the sustained-load test. Only this test binds an
-/// admin listener — the control test runs with `exporter: none` — so even
-/// `cargo test`'s in-process test concurrency cannot collide on it.
+/// admin listener — the control test asks for none — so even `cargo test`'s
+/// in-process test concurrency cannot collide on it.
 const ADMIN: &str = "127.0.0.1:39184";
 
 const SUSTAINED_CONFIG: &str = r#"
 pipeline: { name: age-seal-repro, threads: 1, io_threads: 1 }
-metrics: { exporter: prometheus, listen: "127.0.0.1:39184" }
+admin: { listen: "127.0.0.1:39184" }
+metrics: { exporter: prometheus }
 checkpoint: { interval: 200ms, max_pending_batches: 1000000, drain_timeout: 10s }
 source: { memory: {} }
 sinks:
@@ -49,7 +50,8 @@ sinks:
 
 const CONTROL_CONFIG: &str = r#"
 pipeline: { name: age-seal-control, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 checkpoint: { interval: 200ms, max_pending_batches: 1000000, drain_timeout: 10s }
 source: { memory: {} }
 sinks:

@@ -113,8 +113,9 @@ fn config_yaml(data: &std::path::Path, name: &str) -> String {
     format!(
         r#"
 pipeline: {{ name: {name}, threads: 2 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"

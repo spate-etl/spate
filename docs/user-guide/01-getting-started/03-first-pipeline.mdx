@@ -64,7 +64,7 @@ the live table at startup instead of at 3 a.m.
 
 Tuning lives in YAML next to the binary; the operator graph never does.
 Every `${VAR:-default}` interpolates from the environment (in Kubernetes:
-ConfigMap/Secret env). Framework sections (`pipeline`, `checkpoint`,
+ConfigMap/Secret env). Framework sections (`pipeline`, `admin`, `checkpoint`,
 `backpressure`, `metrics`) are typed and validated; the `source`,
 `deserializer`, and `sink` bodies belong to their connectors:
 
@@ -84,9 +84,11 @@ backpressure:
   # must hold ~2x (shards x inflight x batch.max_bytes + queued chunks).
   max_inflight_bytes: 1GiB
 
+admin:
+  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
+
 metrics:
   exporter: prometheus
-  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
 
 source:
   kafka:

@@ -2,8 +2,8 @@
 //! per-component passthrough, loaded from YAML with `${VAR:-default}`
 //! environment interpolation.
 //!
-//! The framework owns the typed sections (`pipeline`, `checkpoint`,
-//! `backpressure`, `metrics`) and validates them strictly
+//! The framework owns the typed sections (`admin`, `backpressure`,
+//! `checkpoint`, `metrics`, `pipeline`) and validates them strictly
 //! (`deny_unknown_fields` at every level). The `source`, `deserializer`,
 //! and `sink` sections are single-key mappings selecting a component type;
 //! their bodies are opaque [`ComponentConfig`]s handed to the component's
@@ -29,7 +29,8 @@
 //!     columns: [id, amount, ts]              # required; order is the wire contract
 //!     shards:
 //!       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
-//! metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
+//! admin: { listen: 0.0.0.0:9090 }           # /metrics, /healthz, /readyz
+//! metrics: { exporter: prometheus }
 //! ```
 //!
 //! Environment interpolation runs on the raw text before parsing — see
@@ -87,12 +88,15 @@ use std::time::Duration;
 pub struct PipelineConfig {
     /// Identity and thread budget.
     pub pipeline: PipelineSection,
-    /// Watermark commit policy.
+    /// The admin server carrying `/metrics`, `/healthz` and `/readyz`.
     #[serde(default)]
-    pub checkpoint: CheckpointSection,
+    pub admin: AdminSection,
     /// In-flight budget and pause/resume hysteresis.
     #[serde(default)]
     pub backpressure: BackpressureSection,
+    /// Watermark commit policy.
+    #[serde(default)]
+    pub checkpoint: CheckpointSection,
     /// Exporter selection and observability knobs.
     #[serde(default)]
     pub metrics: MetricsSection,
@@ -210,14 +214,74 @@ impl Default for BackpressureSection {
     }
 }
 
+/// `admin:` — the HTTP server carrying `/metrics`, `/healthz` and `/readyz`.
+///
+/// One server serves all three. The probes answer regardless of
+/// [`MetricsSection::exporter`]. `/metrics` is served only where this
+/// pipeline's own handle renders an exposition — `exporter: none` leaves it a
+/// 404, and so does a recorder another library installed first, which this
+/// pipeline records into but cannot render.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AdminSection {
+    /// Bind address, or `none` for no server at all.
+    ///
+    /// With no server the probes and the exposition are unreachable over
+    /// HTTP. The exposition is still readable in-process through
+    /// [`Pipeline::metrics`](crate::pipeline::Pipeline::metrics), which is
+    /// what an embedding program mounting it on its own server uses.
+    #[serde(deserialize_with = "listen_or_none")]
+    pub listen: Option<SocketAddr>,
+}
+
+impl Default for AdminSection {
+    fn default() -> Self {
+        AdminSection {
+            listen: Some(SocketAddr::from(([0, 0, 0, 0], 9090))),
+        }
+    }
+}
+
+/// Deserialize a bind address or the literal `none`.
+///
+/// Takes the value through a visitor rather than through `String` so that a
+/// YAML null — `~`, `null`, or a bare `listen:` — reports the two accepted
+/// spellings instead of a type mismatch against an intermediate this key does
+/// not otherwise have.
+fn listen_or_none<'de, D>(de: D) -> Result<Option<SocketAddr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    const EXPECTING: &str = r#"a socket address or "none""#;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = Option<SocketAddr>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(EXPECTING)
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            if text == "none" {
+                return Ok(None);
+            }
+            text.parse()
+                .map(Some)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Str(text), &EXPECTING))
+        }
+    }
+
+    de.deserialize_any(Visitor)
+}
+
 /// `metrics:` — exporter selection and observability knobs.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MetricsSection {
     /// Which exporter to install.
     pub exporter: MetricsExporter,
-    /// Admin server bind address (`/metrics`, `/healthz`, `/readyz`).
-    pub listen: SocketAddr,
     /// Emit per-partition gauge series (`partition` label). Off by default:
     /// cardinality grows with the assignment.
     pub per_partition_detail: bool,
@@ -229,7 +293,6 @@ impl Default for MetricsSection {
     fn default() -> Self {
         MetricsSection {
             exporter: MetricsExporter::Prometheus,
-            listen: SocketAddr::from(([0, 0, 0, 0], 9090)),
             per_partition_detail: false,
             e2e_basis: E2eBasis::Ingest,
         }
@@ -509,10 +572,70 @@ sink: { memory: {} }
         assert_eq!(cfg.backpressure.low_ratio, 0.5);
         assert_eq!(cfg.backpressure.min_pause, Duration::from_millis(500));
         assert_eq!(cfg.metrics.exporter, MetricsExporter::Prometheus);
-        assert_eq!(cfg.metrics.listen, SocketAddr::from(([0, 0, 0, 0], 9090)));
         assert!(!cfg.metrics.per_partition_detail);
         assert_eq!(cfg.metrics.e2e_basis, E2eBasis::Ingest);
+        assert_eq!(
+            cfg.admin.listen,
+            Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
+        );
         assert!(cfg.deserializer.is_none());
+    }
+
+    #[test]
+    fn admin_listen_takes_an_address_or_none() {
+        let with = |admin: &str| {
+            PipelineConfig::from_str(&format!(
+                "pipeline: {{ name: demo }}\n{admin}\nsource: {{ memory: {{}} }}\n\
+                 sink: {{ memory: {{}} }}\n"
+            ))
+        };
+
+        let bound = with("admin: { listen: 127.0.0.1:7777 }").expect("an address parses");
+        assert_eq!(
+            bound.admin.listen,
+            Some(SocketAddr::from(([127, 0, 0, 1], 7777)))
+        );
+
+        let off = with("admin: { listen: none }").expect("`none` parses");
+        assert_eq!(off.admin.listen, None, "`none` asks for no server");
+
+        // The error names the key and both accepted forms; without the path
+        // a reader cannot tell which of several addresses in a file is wrong.
+        let err = with("admin: { listen: 9090 }").expect_err("a bare port is not an address");
+        let msg = err.to_string();
+        assert!(msg.contains("admin.listen"), "{msg}");
+        assert!(msg.contains(r#"a socket address or "none""#), "{msg}");
+
+        // A YAML null is not a spelling of `none`. It has to say so in the
+        // same terms as every other rejected value, or the one reader who
+        // reaches for `~` gets a type error naming a type they never wrote.
+        for null in [
+            "admin: { listen: ~ }",
+            "admin: { listen: null }",
+            "admin:\n  listen:",
+        ] {
+            let msg = with(null)
+                .expect_err("a null is not an address")
+                .to_string();
+            assert!(
+                msg.contains(r#"a socket address or "none""#),
+                "{null}: {msg}"
+            );
+        }
+    }
+
+    /// The bind address is `admin.listen`, and `metrics` carries no address
+    /// of its own: a file placing one there fails to load rather than parsing
+    /// into a pipeline whose server is somewhere else.
+    #[test]
+    fn the_metrics_section_takes_no_bind_address() {
+        let err = PipelineConfig::from_str(
+            "pipeline: { name: demo }\nmetrics: { listen: 0.0.0.0:9090 }\n\
+             source: { memory: {} }\nsink: { memory: {} }\n",
+        )
+        .expect_err("metrics carries no bind address");
+        let msg = err.to_string();
+        assert!(msg.contains("listen"), "{msg}");
     }
 
     #[test]
@@ -628,7 +751,8 @@ sink:
     batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
     inflight: { max_per_shard: 2 }
     retry: { initial: 100ms, max: 10s, multiplier: 2.0 }
-metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
+admin: { listen: 0.0.0.0:9090 }
+metrics: { exporter: prometheus }
 "#;
         let cfg = PipelineConfig::from_str(yaml).unwrap();
         assert_eq!(cfg.pipeline.threads, Some(4));

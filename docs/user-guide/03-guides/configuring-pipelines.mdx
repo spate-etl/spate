@@ -28,9 +28,11 @@ checkpoint:
 backpressure:
   max_inflight_bytes: 1GiB
 
+admin:
+  listen: 0.0.0.0:9090    # /metrics, /healthz, /readyz
+
 metrics:
   exporter: prometheus
-  listen: 0.0.0.0:9090    # /metrics, /healthz, /readyz
 
 source:
   kafka:
@@ -57,23 +59,25 @@ Load it with `Pipeline::from_path`, or parse a string with
 
 ## The typed framework sections
 
-Four top-level sections belong to the framework — `pipeline`, `checkpoint`,
-`backpressure`, and `metrics`:
+These top-level sections belong to the framework — `pipeline`, `admin`,
+`checkpoint`, `backpressure`, and `metrics`:
 
 - **`pipeline`** — identity and thread budget: `name` (required; the
   `pipeline` label on every metric), `threads`, `io_threads`, `pinning`.
+- **`admin`** — the HTTP server carrying `/metrics`, `/healthz` and
+  `/readyz`: `listen`, which takes an address or `none` for no server.
 - **`checkpoint`** — watermark commit policy: `interval`,
   `max_pending_batches`, `drain_timeout`, `stalled_fail_after`.
 - **`backpressure`** — the in-flight byte budget and pause/resume
   hysteresis: `max_inflight_bytes`, `high_ratio`, `low_ratio`, `min_pause`.
 - **`metrics`** — exporter selection and observability knobs: `exporter`,
-  `listen`, `per_partition_detail`, `e2e_basis`.
+  `per_partition_detail`, `e2e_basis`.
 
 Only `pipeline`, `source`, and `sink` are required; every other section and
 field has a documented default (`deserializer` is optional entirely —
 sources that emit ready-made records need none).
 
-Three conventions apply throughout:
+These conventions apply throughout:
 
 - **`deny_unknown_fields` at every level.** A misspelled key (`intervall`,
   `sinks`) is a load-time error naming the offending field, never a silently
@@ -90,7 +94,7 @@ satisfy `0 < low_ratio < high_ratio <= 1`.
 
 `${VAR}` forms interpolate from the process environment **on the raw text
 before YAML parsing** (Vector-compatible semantics) — the standard way to
-feed Kubernetes ConfigMap/Secret values in. The four forms (`${VAR}`,
+feed Kubernetes ConfigMap/Secret values in. The forms (`${VAR}`,
 `${VAR:-default}`, `${VAR:?message}`, `$$`) and their exact unset-vs-empty
 semantics are tabulated in the
 [configuration reference](../07-reference/configuration.mdx#environment-interpolation).

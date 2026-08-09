@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 const CONFIG: &str = r#"
 pipeline: { name: drain-wedge, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 checkpoint: { interval: 200ms, drain_timeout: 2s, stalled_fail_after: 60s }
 source: { memory: {} }
 sinks:

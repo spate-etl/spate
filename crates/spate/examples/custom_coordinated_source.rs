@@ -387,8 +387,9 @@ fn config_yaml(instance: &str) -> String {
     format!(
         r#"
 pipeline: {{ name: ledger-demo-{instance}, threads: 2 }}
+admin: {{ listen: none }}
+metrics: {{ exporter: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ listen: 127.0.0.1:0 }}
 source: {{ ledger: {{}} }}
 sink: {{ capture: {{}} }}
 "#

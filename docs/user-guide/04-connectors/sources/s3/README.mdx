@@ -1,22 +1,23 @@
 # S3 (object storage) source
 
 The S3 source (`spate-s3`, feature `s3` on the `spate` facade) runs a
-**coordinated, bounded backfill**: point it at a bucket prefix and it
-streams every object's records through the pipeline and terminates the
-pipeline itself — `run()` returns `ExitState::Completed` — once every
-split of the prefix is committed complete. `Completed` is a strong claim
-here: every record was durably written by the sink(s) *and* committed; an
-unacknowledged tail converts the exit into a failure so an incomplete
+**coordinated, bounded backfill** over a bucket prefix. It streams every
+object's records through the pipeline, and it terminates the pipeline
+itself: `run()` returns `ExitState::Completed` once every split of the
+prefix is committed complete. `Completed` is a strong claim here — every
+record was durably written by the sink(s) *and* committed; an
+unacknowledged tail converts the exit into a failure, so an incomplete
 backfill is never reported as done.
 
-Work is planned as **splits**. The fleet's elected leader lists the
-prefix once and packs the sorted listing into splits — batches of whole
-objects, ~`split_target_bytes` each — with deterministic ids and
-self-contained descriptors (member keys, sizes, ETags). Workers lease
-splits through the coordination store and read them straight from the
-descriptors: **workers never list**. Solo and multi-instance are the same
-code path; the only difference is which coordination store the
-coordinator points at.
+Work is planned as
+[**splits**](../../../07-reference/glossary.mdx#split). The fleet's
+elected leader lists the prefix once and packs the sorted listing into
+splits — batches of whole objects, ~`split_target_bytes` each — with
+deterministic ids and self-contained descriptors (member keys, sizes,
+ETags). Workers lease splits through the coordination store and read them
+straight from the descriptors: **workers never list**. Solo and
+multi-worker are the same code path; the only difference is which
+coordination store the coordinator points at.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only — no `object_store` types in the public API), so
@@ -59,21 +60,21 @@ source:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs. Part of the job fingerprint — byte-identical across every instance of a coordinated job. |
-| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams poison the split. Part of the job fingerprint. |
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#errors-poison-splits-not-skipped-objects). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
-| `prefetch_bytes` | bytes | `8MiB` | Per-lane read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. Must be at least `chunk_bytes`; a smaller value fails at load. |
+| `prefetch_bytes` | bytes | `8MiB` | Per-[lane](../../../07-reference/glossary.mdx#lane) read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment — see [below](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
 `split_target_bytes` enters the job fingerprint as its **decoded byte
-count** — so a replica spelling it `64MB` is refused at startup against a
+count** — so a worker spelling it `64MB` is refused at startup against a
 fleet on the `64MiB` default. Spellings that decode to the same number of
 bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
-match across replicas, not the text.
+match across workers, not the text.
 
 The record **format is not a config key** — the S3 source is a transport and
 owns no framing. The format's framer is wired into the source in code (see
@@ -110,8 +111,26 @@ field — `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
 
-Bucket keys are rejected in any case spelling: the bucket comes from `url`, and
-two sources of truth for it would be a silent misroute.
+Bucket keys are **rejected at load time with an explanation**. The client is
+built from `url`, so a passthrough bucket could never take effect; rejecting it
+keeps the configuration honest instead of leaving two sources of truth to
+disagree silently. `object_store` accepts several spellings of the same option —
+with and without the `aws_` prefix, plus historic aliases — and lowercases keys
+before parsing, so every spelling is denied and the match is case-insensitive:
+
+| Denied property | Why |
+|---|---|
+| `bucket` | Owned by the typed `url` field. |
+| `bucket_name` | Owned by the typed `url` field. |
+| `aws_bucket` | Owned by the typed `url` field. |
+| `aws_bucket_name` | Owned by the typed `url` field. |
+
+The error names the key as written, so the spelling in the message matches the
+spelling in the file:
+
+```
+invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field
+```
 
 ## Security (credentials and region)
 
@@ -163,9 +182,10 @@ generic model.
 
 The coordinator is **assembly wiring**: build one over a durable
 [coordination store](../../coordination/README.mdx) and inject it, and every
-replica of the same pipeline shares the backfill — splits are leased, moved
-between live instances by the elected leader, and taken over from dead ones,
-with per-split fenced commits making revocations replay-safe.
+worker running the same pipeline shares the backfill — splits are leased, moved
+between live workers by the elected leader, and taken over from dead ones, with
+per-split [fenced](../../../07-reference/glossary.mdx#fencing-token) commits
+making revocations replay-safe.
 
 ```rust file=crates/spate/examples/s3_coordinated_backfill.rs region=coordinator title="s3_coordinated_backfill.rs"
 ```
@@ -184,7 +204,7 @@ path over an internal in-process store. That is correct and
 self-terminating — but the store dies with the process, so **a restart
 replays the whole prefix** (at-least-once: wasteful, never lossy). A
 startup WARN says exactly this. Durable resume requires a durable
-coordination store; there is no manifest checkpoint anymore.
+coordination store, which is the only place split progress lives.
 
 :::
 
@@ -205,7 +225,7 @@ descriptor's ETag. What that buys:
 
 An **append-only prefix** is the right shape for the lifetime of a backfill.
 By default the listing is taken once (`refresh_listing: false`), so keys
-that arrive later are simply not part of the job; with
+that arrive later are not part of the job; with
 `refresh_listing: true` the leader re-lists on the coordinator's replan
 interval and plans new objects as additional splits (an **open** job that
 never self-terminates — stop it with a signal drain).
@@ -233,7 +253,8 @@ possible, loss is not.
 Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
 overflows it **poisons its split** before any offset can be corrupted —
 handed back, retried, and quarantined at the attempt cap like any other
-object-terminal failure (see below). Split member counts are structurally
+[object-terminal failure](#errors-poison-splits-not-skipped-objects). Split
+member counts are structurally
 capped by the packing floor, far below the ordinal limit. The leader holds the listing in
 memory once per plan; budget roughly 100 bytes per key.
 
@@ -278,12 +299,18 @@ object-terminal — a key deleted after planning, an overwrite tripping the
 `If-Match` pin, corrupt or truncated content, an exhausted retry budget —
 **poisons the split**: the split is handed back to the coordinator (counted in
 `spate_s3_source_objects_failed_total{reason}`), retried on another
-delivery attempt, and **quarantined** at the attempt cap. A bounded job
-with quarantined splits ends **failed** (`Stalled`), never as a silently
-partial `Completed` — alert on `spate_coordination_splits_quarantined > 0`.
-There is no skip-an-object mode: losing a whole object silently is not a
-policy, it's an incident — quarantine keeps it loud *and* lets the rest of the
-backfill finish first.
+delivery attempt, and
+[**quarantined**](../../../07-reference/glossary.mdx#quarantine) at the attempt
+cap. A bounded job with quarantined splits ends **stalled** — fatal by default,
+so `run()` returns `ExitState::Failed` rather than a silently partial
+`Completed`. `CoordinationDriver::stall_drains(true)` trades that for a drain
+with a WARN. Either way, alert on
+`spate_coordination_splits_quarantined > 0`.
+
+There is no skip-an-object mode; the reasoning is in
+[ADR-0035](../../../../adr/0035-s3-poison-policy.md), which also covers why
+credential and configuration failures fail the pipeline instead. Quarantine
+lets the rest of the backfill finish first.
 
 ## Testing
 
@@ -306,9 +333,9 @@ families add the object-level view of a bounded backfill.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the instance that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
-| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this instance. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this instance's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
+| `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the worker that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
+| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. |
+| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
 | `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
 | `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |

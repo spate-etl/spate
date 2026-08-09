@@ -9,15 +9,16 @@ right labels so your series line up with everyone else's, and — when you need
 something the taxonomy doesn't cover — registering your own metric on the same
 facade the framework uses.
 
-The taxonomy every framework series belongs to is [docs/METRICS.md](../../METRICS.md);
+The taxonomy every framework series belongs to is [Metrics](../../METRICS.md);
 the operator's-eye view of the model is
 [Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
 second for the hot-path rules.
 
 Two runnable examples carry most of the Rust on this page —
-`crates/spate/examples/custom_metrics.rs` for the registration patterns and
-`crates/spate/examples/instrumented_operator.rs` for the operator one. Either
-runs as-is:
+[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) for the
+registration patterns and
+[`instrumented_operator.rs`](repo:crates/spate/examples/instrumented_operator.rs)
+for the operator one. Either runs as-is:
 
 ```sh
 cargo run -p spate --example custom_metrics
@@ -44,9 +45,10 @@ defines the handle
 drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
 through a builder of your own — and what follows is a translation from what the
 client reports into what the series means. A shipped source's translation, as a
-worked reference (`crates/spate-kafka/src/source.rs`):
+worked reference
+([`spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs)):
 
-```rust file=crates/spate-kafka/src/source.rs region=lag title="spate-kafka/src/source.rs"
+```rust file=crates/spate-kafka/src/source.rs region=lag title="source.rs"
 ```
 
 `publish_lag` takes the handle as an argument rather than reaching for one, and
@@ -90,8 +92,9 @@ not prune on revocation: a source whose protocol revokes everything before
 handing most of it back would blank partitions you still own and are still
 draining.
 
-Worked reference for all three: `crates/spate-kafka/src/source.rs` and
-`crates/spate-kafka/src/metrics.rs`.
+Worked reference for all three:
+[`spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs) and
+[`spate-kafka/src/metrics.rs`](repo:crates/spate-kafka/src/metrics.rs).
 
 Test the wiring, not the registration: assert a **value** arrives end to end.
 A test that only asserts the family appears in the exposition passes happily
@@ -263,8 +266,9 @@ Assert your instrumentation the way the framework tests its own: build a
 rendered exposition — no global install, so tests stay isolated and parallel.
 `metrics::with_local_recorder(&recorder, || { /* drive the connector */ })` then
 `handle.render()` gives you the scrape text to `assert!(...contains(...))`
-against, exactly as `crates/spate/examples/custom_metrics.rs` and the `metrics`
-module's own tests do.
+against, exactly as
+[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) and the
+`metrics` module's own tests do.
 
 **Give each test its own `pipeline` and `component` labels.** A local recorder
 isolates the *exposition*, but it does not isolate the gauge-ownership claim
@@ -326,7 +330,9 @@ distinct, well-formed `component_type`.
 
 Worked reference for the full production shape, including lazily-registered
 per-endpoint series and detail-gated per-partition series:
-`crates/spate-kafka/src/metrics.rs`, whose families are documented on the
+[`spate-kafka/src/metrics.rs`](repo:crates/spate-kafka/src/metrics.rs), whose
+families are documented on the
 [Kafka source](../04-connectors/sources/kafka/README.mdx#metrics) page. For a
-minimal template see `crates/spate-test`'s `MemorySource` / `CaptureWriter`,
-exercised end-to-end in `crates/spate-test/tests/component_metrics.rs`.
+minimal template see [`spate-test`](repo:crates/spate-test)'s `MemorySource` /
+`CaptureWriter`, exercised end-to-end in
+[`spate-test/tests/component_metrics.rs`](repo:crates/spate-test/tests/component_metrics.rs).

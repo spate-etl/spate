@@ -9,8 +9,9 @@ whole chain monomorphizes into one loop, with a single virtual call per
 an inlined function call, not a dispatch. Rationale in
 [ADR-0004](../../adr/0004-static-operator-chain.md).
 
-This page mirrors `crates/spate/examples/custom_operator.rs`, which drives a
-chain by hand exactly the way a pipeline thread does. Run it:
+This page mirrors
+[`custom_operator.rs`](repo:crates/spate/examples/custom_operator.rs), which
+drives a chain by hand exactly the way a pipeline thread does. Run it:
 
 ```sh
 cargo run -p spate --example custom_operator
@@ -102,7 +103,7 @@ cannot express the behavior: the closures *are* the intended API, and the
 terminal stage's lifecycle contracts (fail-on-teardown for parked data) are
 easy to get wrong. Read the trait docs on
 [docs.rs](../07-reference/README.mdx) and the framework's own stages in
-`crates/spate-core/src/ops/` before going there.
+[`spate-core/src/ops`](repo:crates/spate-core/src/ops) before going there.
 
 ## Wiring it in
 

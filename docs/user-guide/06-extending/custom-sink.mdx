@@ -13,9 +13,9 @@ Everything between is the framework's: chunking, per-shard batching to
 retries, acknowledgments, backpressure. You write the two edges.
 
 Every Rust block below but the last comes from the sink half of
-`crates/spate/examples/custom_source_sink.rs` — a JSON-lines-to-stdout sink fed
-by a generator source, which needs no infrastructure and no facade feature
-beyond the default:
+[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs) —
+a JSON-lines-to-stdout sink fed by a generator source, which needs no
+infrastructure and no facade feature beyond the default:
 
 ```sh
 cargo run -p spate --example custom_source_sink
@@ -155,13 +155,14 @@ pipeline threads and shard workers is the builder's knob, not the bundle's:
 
 A reusable connector exposes a config-built sink type and implements
 `SinkBundle` on it, so applications write one line. A shipped sink does exactly
-that (worked reference: `crates/spate-clickhouse/src/config.rs`, rendered
-below): `into_parts` moves the writer and the topology its config produced into
-`SinkParts::new`, then chains the three refinements — the metric
+that (worked reference:
+[`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs),
+rendered below): `into_parts` moves the writer and the topology its config
+produced into `SinkParts::new`, then chains the three refinements — the metric
 `component_type`, per-replica labels derived from the endpoints themselves, and
 the connectivity probe a hand-rolled sink most often leaves unset:
 
-```rust title="crates/spate-clickhouse/src/config.rs" file=crates/spate-clickhouse/src/config.rs region=bundle
+```rust file=crates/spate-clickhouse/src/config.rs region=bundle title="config.rs"
 ```
 
 `Pipeline::sink` accepts anything implementing `SinkBundle` — `SinkParts`

@@ -13,13 +13,13 @@ source clients typically already own their network I/O on their own
 threads, and a Stream wrapper only adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
 [ADR-0003](../../adr/0003-poll-based-source-api.md); trait docs in
-`crates/spate-core/src/source/mod.rs` and on
-[docs.rs](../07-reference/README.mdx).
+[`spate-core/src/source/mod.rs`](repo:crates/spate-core/src/source/mod.rs)
+and on [docs.rs](../07-reference/README.mdx).
 
 The data-plane and control-plane blocks below come from
-`crates/spate/examples/custom_source_sink.rs` — a generator source counting to
-a limit per partition, which needs no infrastructure and no facade feature
-beyond the default:
+[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs) —
+a generator source counting to a limit per partition, which needs no
+infrastructure and no facade feature beyond the default:
 
 ```sh
 cargo run -p spate --example custom_source_sink
@@ -125,7 +125,7 @@ container format ships a block framer. `FramerWriter` bridges a `Write`-based
 decompressor to a framer so compression stays orthogonal. A streaming source
 takes its framer at construction and stays format-agnostic, so every streaming
 source reuses every format's framer. Worked reference:
-`crates/spate-s3` and its `with_framer`.
+[`spate-s3`](repo:crates/spate-s3) and its `with_framer`.
 
 Tell the framework how your payloads are framed with **`framing_contract`**, so
 framing is established once (on the source) instead of coordinating it with the
@@ -142,7 +142,7 @@ fn framing_contract(&self) -> FramingContract {
 The contract reaches the chain as `ctx.source_framing`, and a format crate's
 deserializer builder reads it there to derive its own granularity and to
 reject a double-framing configuration — source frames *and* deserializer
-frames (worked reference: `crates/spate-json`'s
+frames (worked reference: [`spate-json`](repo:crates/spate-json)'s
 `JsonDeserializerBuilder::for_source_framing`). Not every layout fits this
 model — columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
 per-record byte boundary and belong to a future record-batch reader source,
@@ -195,9 +195,10 @@ toward it.
 Drive your source without a full pipeline: construct a `Checkpointer`, call
 `open` with `SourceCtx::new(cp.handle())`, poll events, poll lanes, and
 assert on committed watermarks — the bottom half of
-`crates/spate/examples/custom_operator.rs` does exactly this with the memory
-source, and [Testing pipelines](../03-guides/testing-pipelines.mdx) covers
-the `spate-test` harness. To run it for real, hand it to the builder:
+[`custom_operator.rs`](repo:crates/spate/examples/custom_operator.rs) does
+exactly this with the memory source, and
+[Testing pipelines](../03-guides/testing-pipelines.mdx) covers the
+`spate-test` harness. To run it for real, hand it to the builder:
 `pipeline.sink(...)?.chains(...).run(source)` — the source stays a terminal
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
@@ -210,9 +211,9 @@ You implement two small traits — *what the work is* and *how to read one
 piece of it* — and embed the framework's `CoordinationDriver`, which owns
 all of the assignment choreography, fencing bookkeeping, and completion
 tracking. Everything below is the complete wiring, rendered from
-`crates/spate/examples/custom_coordinated_source.rs` — two instances dividing a
-synthetic 1,000-row ledger over a shared in-memory store, in one process and
-with nothing installed:
+[`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs)
+— two instances dividing a synthetic 1,000-row ledger over a shared in-memory
+store, in one process and with nothing installed:
 
 ```sh
 cargo run -p spate --features coordination --example custom_coordinated_source
@@ -263,12 +264,13 @@ Two further practicalities:
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle — capture both at construction. `plan` runs on the
   blocking pool, so `Handle::block_on(async_listing())` inside it is the
-  intended shape (worked reference: `crates/spate-s3`'s planner).
+  intended shape (worked reference: [`spate-s3`](repo:crates/spate-s3)'s
+  planner).
 - **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
   names (object keys, table names) rarely qualify — never embed them. Digest
-  them instead. The worked reference (`crates/spate-s3`) hashes the sorted
-  member keys *and their content versions*
-  plus a packing-version constant (truncated SHA-256, base64url), so
+  them instead. The worked reference ([`spate-s3`](repo:crates/spate-s3))
+  hashes the sorted member keys *and their content versions* plus a
+  packing-version constant (truncated SHA-256, base64url), so
   replans are id-stable, an overwritten object becomes *new* work rather
   than silently matching stale progress, and a packing change retires old
   ids as an explicit epoch.
@@ -435,7 +437,7 @@ a poll error: the lane sends a report over a channel (`std::sync::mpsc`
 works; the lane goes quiescent, returning empty polls), and the source
 drains that channel at the top of `poll_events`, calling `driver.fail`
 for each report before delegating to `driver.poll_events`. Worked reference:
-`crates/spate-s3`'s lane/context pair.
+[`spate-s3`](repo:crates/spate-s3)'s lane/context pair.
 
 **Signal the waker on the edges the control plane cannot see.** The
 driver — not the backend — owns the control-plane wait, because the two
@@ -524,7 +526,8 @@ Shipped stores: [NATS JetStream](../04-connectors/coordination/nats/README.mdx)
 
 A source that already implements `Source` with its own lane dealing and a
 whole-source checkpoint retrofits in three moves (worked reference:
-`crates/spate-s3`, which carries the shape these three moves produce):
+[`spate-s3`](repo:crates/spate-s3), which carries the shape these three moves
+produce):
 
 1. **Extract the lane assembly** out of the source into the sibling
    context struct: everything `open_split` needs to spawn a fetcher and
@@ -565,4 +568,4 @@ failure reports, and releases; `take_planner()` hands back the planner
 your source registered so a test can run it directly and feed its plan
 back through `gain(...)`. For the real protocol end to end, run two
 sources over one shared `MemoryStore` in a test — the pattern of
-`crates/spate/examples/custom_coordinated_source.rs`.
+[`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs).

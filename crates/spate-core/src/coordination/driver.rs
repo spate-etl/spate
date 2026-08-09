@@ -98,9 +98,16 @@ pub trait SplitSource {
     fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<Self::Lane, SourceError>;
 
     /// Drift-check carried progress against this instance's view of the
-    /// split (etag pins, schema versions) before it is trusted. Rejecting
-    /// stops the pipeline — carried progress that no longer matches the
-    /// input is unrecoverable divergence.
+    /// split (etag pins, schema versions) before it is trusted; the default
+    /// accepts everything.
+    ///
+    /// A rejection is raised before the tenancy is recorded, so the split is
+    /// never opened, and the driver reports it as poison: one delivery
+    /// attempt is consumed, the split is handed back for another instance,
+    /// and at the attempt cap it is quarantined. The error's class then
+    /// decides this run — [`ErrorClass::Fatal`] stops the pipeline, which is
+    /// the honest end for progress nothing can reconcile; any other class is
+    /// logged and the run continues with the split left to the coordinator.
     fn validate_resume(
         &self,
         split: &SplitSpec,
@@ -267,6 +274,11 @@ pub struct CoordinationDriver {
     /// Tenancies gained but not yet materialized: their lanes go out in
     /// the next [`SourceEvent::LanesAdded`].
     pending_open: Vec<PartitionId>,
+    /// Poison reports the backend refused, with the reason to re-offer.
+    /// A gain refused on resume has no tenancy, so until its report lands
+    /// nothing else here hands the split back and the backend keeps
+    /// renewing its lease.
+    pending_poison: Vec<(SplitId, String)>,
     all_complete: bool,
     stalled: Option<(u64, u64)>,
     stall_drains: bool,
@@ -306,6 +318,7 @@ impl CoordinationDriver {
             pending_lost: Vec::new(),
             pending_retired: Vec::new(),
             pending_open: Vec::new(),
+            pending_poison: Vec::new(),
             all_complete: false,
             stalled: None,
             stall_drains: false,
@@ -413,11 +426,39 @@ impl CoordinationDriver {
                 return Ok(SourceEvent::Drained);
             }
 
+            // 3b. Re-offer poison reports the backend refused. A refused
+            // report leaves a split held here with no tenancy behind it, so
+            // this is the only thing that can hand it back.
+            for (split, reason) in std::mem::take(&mut self.pending_poison) {
+                if !self.report_poison(&split, &reason) {
+                    self.pending_poison.push((split, reason));
+                }
+            }
+
             // 4. Drain the coordinator (never blocks — the wait is ours, at
             // the end of this function).
             let events = self.coordinator.poll().map_err(as_source_error)?;
+            // Apply every event even after one fails, and surface one
+            // failure afterwards. `poll` drained the batch, so an event
+            // skipped here is never re-offered: a skipped gain leaves a split
+            // this instance holds but never reads, and a skipped loss leaves
+            // a lane reading a split it no longer owns.
+            let mut surfaced: Option<SourceError> = None;
             for event in events {
-                self.apply(source, event)?;
+                if let Err(e) = self.apply(source, event) {
+                    // First failure, except that a fatal one anywhere in the
+                    // batch takes its place: the controller reads only the
+                    // class of the error it is handed, so a fatal error
+                    // behind an earlier retryable one would let the run
+                    // continue past a stop the source asked for.
+                    match &surfaced {
+                        Some(kept) if is_fatal(kept) || !is_fatal(&e) => {}
+                        _ => surfaced = Some(e),
+                    }
+                }
+            }
+            if let Some(e) = surfaced {
+                return Err(e);
             }
 
             // 5. Completion sweep over live, uncommitted-terminal tenancies.
@@ -541,6 +582,35 @@ impl CoordinationDriver {
             .collect()
     }
 
+    /// Report a gain the source refused as poison, for a split with no
+    /// tenancy to retire. The rejection is what the caller returns, so a
+    /// report the backend refuses is queued for retry rather than put in
+    /// its place.
+    fn report_rejected_gain(&mut self, split: &SplitId, rejection: &SourceError) {
+        let reason = format!("carried progress rejected on resume: {rejection}");
+        if !self.report_poison(split, &reason) {
+            self.pending_poison.push((split.clone(), reason));
+        }
+    }
+
+    /// Offer one poison report to the backend. `false` means the backend
+    /// refused it and this instance is still holding the split.
+    fn report_poison(&mut self, split: &SplitId, reason: &str) -> bool {
+        match self.coordinator.fail(split, reason) {
+            Ok(()) => true,
+            // Fenced: someone already took it, so it is already back.
+            Err(e) if e.kind == CoordinationErrorKind::Fenced => true,
+            Err(e) => {
+                tracing::warn!(
+                    split = %split,
+                    error = %e,
+                    "poison report refused; retrying while this instance holds the split"
+                );
+                false
+            }
+        }
+    }
+
     fn apply<S: SplitSource>(
         &mut self,
         source: &mut S,
@@ -558,8 +628,16 @@ impl CoordinationDriver {
                     tracing::warn!(split = %split.id, "gained a split already held; retiring stale tenancy");
                     self.retire(source, stale, false);
                 }
-                if let Some(progress) = progress.as_ref() {
-                    source.validate_resume(&split, progress)?;
+                if let Some(progress) = progress.as_ref()
+                    && let Err(e) = source.validate_resume(&split, progress)
+                {
+                    // Report before the rejection leaves. No tenancy was
+                    // recorded, so nothing else here releases the split and
+                    // the backend keeps renewing its lease — dropping the
+                    // rejection on the floor holds a split this instance
+                    // never reads and never hands back.
+                    self.report_rejected_gain(&split.id, &e);
+                    return Err(e);
                 }
                 let partition = PartitionId(self.next_partition);
                 self.next_partition += 1;
@@ -980,6 +1058,11 @@ enum CommitDisposition {
     Deferred,
 }
 
+fn is_fatal(e: &SourceError) -> bool {
+    let SourceError::Client { class, .. } = e;
+    *class == ErrorClass::Fatal
+}
+
 fn as_source_error(e: CoordinationError) -> SourceError {
     SourceError::Client {
         class: e.class(),
@@ -1008,6 +1091,9 @@ mod tests {
         batches: VecDeque<Vec<CoordinationEvent>>,
         commit_outcomes: HashMap<String, VecDeque<CoordinationErrorKind>>,
         commits: Vec<(SplitId, SplitProgress)>,
+        fail_outcomes: HashMap<String, VecDeque<CoordinationErrorKind>>,
+        /// Every `fail` call, including the ones `fail_outcomes` refuses —
+        /// the attempt is what a test asserts the driver made.
         fails: Vec<(SplitId, String)>,
         released: Vec<SplitId>,
         /// Captured separately from `released` so a test can prove the
@@ -1037,6 +1123,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .commit_outcomes
+                .entry(split.to_string())
+                .or_default()
+                .push_back(kind);
+        }
+
+        fn fail_next_report(&self, split: &str, kind: CoordinationErrorKind) {
+            self.0
+                .lock()
+                .unwrap()
+                .fail_outcomes
                 .entry(split.to_string())
                 .or_default()
                 .push_back(kind);
@@ -1102,12 +1198,13 @@ mod tests {
         }
 
         fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
-            self.0
-                .0
-                .lock()
-                .unwrap()
-                .fails
-                .push((split.clone(), reason.to_string()));
+            let mut s = self.0.0.lock().unwrap();
+            s.fails.push((split.clone(), reason.to_string()));
+            if let Some(kinds) = s.fail_outcomes.get_mut(split.as_str())
+                && let Some(kind) = kinds.pop_front()
+            {
+                return Err(CoordinationError::new(kind, "scripted"));
+            }
             Ok(())
         }
 
@@ -1199,7 +1296,10 @@ mod tests {
         encoded: Vec<(String, i64)>,
         sweeps: Rc<RefCell<HashMap<String, SplitProgress>>>,
         complete_at: HashMap<String, i64>,
-        reject_resume: bool,
+        /// Split ids whose carried progress `validate_resume` refuses, and
+        /// the class each refusal carries — so a batch can mix a drifted
+        /// split with a sound one, and one class with another.
+        reject_resume: HashMap<String, ErrorClass>,
         finishing: Vec<String>,
         /// Split ids whose `open_split` fails. Consumed per attempt, so a
         /// retry of the same split succeeds.
@@ -1248,9 +1348,9 @@ mod tests {
             split: &SplitSpec,
             _progress: &SplitProgress,
         ) -> Result<(), SourceError> {
-            if self.reject_resume {
+            if let Some(&class) = self.reject_resume.get(split.id.as_str()) {
                 return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
+                    class,
                     reason: format!("resume drift on {}", split.id),
                 });
             }
@@ -1324,6 +1424,18 @@ mod tests {
 
     fn poll(d: &mut CoordinationDriver, s: &mut TestSource) -> SourceEvent<StubLane> {
         d.poll_events(s, Duration::ZERO).unwrap()
+    }
+
+    /// A source whose `validate_resume` refuses exactly these splits, the
+    /// way a connector is told to: classed `Fatal`.
+    fn rejecting(splits: &[&str]) -> TestSource {
+        TestSource {
+            reject_resume: splits
+                .iter()
+                .map(|s| ((*s).to_string(), ErrorClass::Fatal))
+                .collect(),
+            ..TestSource::default()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1734,13 +1846,97 @@ mod tests {
     fn resume_validation_rejects_drifted_progress() {
         let script = Script::default();
         let mut d = driver(&script);
-        let mut s = TestSource {
-            reject_resume: true,
-            ..TestSource::default()
-        };
+        let mut s = rejecting(&["a"]);
         script.push(vec![gained("a", 1, Some(7))]);
         let err = d.poll_events(&mut s, Duration::ZERO).unwrap_err();
         assert!(err.to_string().contains("resume drift"), "{err}");
+
+        // The split is never opened, so nothing else would hand it back:
+        // the driver reports it as poison, carrying the source's reason.
+        assert!(s.opened.is_empty());
+        let fails = script.fails();
+        assert_eq!(fails.len(), 1);
+        assert_eq!(fails[0].0.as_str(), "a");
+        assert!(fails[0].1.contains("resume drift on a"), "{}", fails[0].1);
+    }
+
+    #[test]
+    fn a_refused_resume_leaves_the_rest_of_the_batch_applied() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        // One batch, one drifted split: `poll` already drained the batch, so
+        // a sound split behind the rejection is never re-offered.
+        script.push(vec![gained("a", 1, Some(7)), gained("b", 1, Some(3))]);
+        let err = d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("resume drift on a"), "{err}");
+        assert_eq!(script.fails().len(), 1);
+
+        // `b` was staged by the same batch and opens on the next poll.
+        let event = poll(&mut d, &mut s);
+        let SourceEvent::LanesAdded(lanes) = event else {
+            panic!("expected the sound split to open");
+        };
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(s.opened.len(), 1);
+        assert_eq!(s.opened[0].0, "b");
+        assert_eq!(s.opened[0].1, Some(3));
+    }
+
+    #[test]
+    fn a_failed_poison_report_does_not_replace_the_rejection() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        script.push(vec![gained("a", 1, Some(7))]);
+
+        // The source's rejection is the error the pipeline classes; a
+        // backend that would not take the report cannot downgrade it.
+        let err = d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("resume drift on a"), "{err}");
+        assert_eq!(script.fails().len(), 1);
+    }
+
+    #[test]
+    fn a_refused_poison_report_is_retried_until_it_lands() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        script.push(vec![gained("a", 1, Some(7))]);
+        d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        assert_eq!(script.fails().len(), 1);
+
+        // A refused report leaves the split held here with no tenancy
+        // behind it, which is the state this whole path exists to avoid —
+        // so it is re-offered until the backend takes it, and then stops.
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2);
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2);
+    }
+
+    #[test]
+    fn a_fatal_rejection_survives_an_earlier_retryable_one() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource {
+            reject_resume: HashMap::from([
+                ("a".to_string(), ErrorClass::Retryable),
+                ("b".to_string(), ErrorClass::Fatal),
+            ]),
+            ..TestSource::default()
+        };
+        script.push(vec![gained("a", 1, Some(7)), gained("b", 1, Some(3))]);
+
+        // The controller reads the class of the one error it is handed, so
+        // surfacing the retryable rejection would run past a stop `b`'s
+        // source asked for. Both splits are still handed back.
+        let err = d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        assert!(is_fatal(&err), "{err}");
+        assert!(err.to_string().contains("resume drift on b"), "{err}");
+        assert_eq!(script.fails().len(), 2);
     }
 
     // ------------------------------------------------------------------

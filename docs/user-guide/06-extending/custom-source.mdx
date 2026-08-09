@@ -372,16 +372,18 @@ in the range:
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=validate_resume
 ```
 
-**Rejecting stops the pipeline only when the error is classed `Fatal`, so class
-it `Fatal`.** The driver raises the rejection before it records the tenancy or
-stages the opening, so the split is never opened — no lane, no partition id,
-and the rest of that batch of coordination events goes unapplied. The error
-then leaves the driver through your own `poll_events`, where the controller
-reads its class. A `Fatal` one becomes the pipeline's fatal error and the run
-ends `ExitState::Failed`, which is the only honest outcome for progress nothing
-can reconcile. Any other class is logged as a retryable control-plane error and
-the gain is dropped, which leaves a split this instance neither reads nor hands
-back.
+**A rejection hands the split back, and the error's class decides the run.**
+The driver raises the rejection before it records the tenancy or stages the
+opening — so the split is never opened, with no lane and no partition id —
+and reports it to the coordinator as poison: one delivery attempt is consumed,
+the lease is dropped so a peer can pick the split up, and at the attempt cap
+the split is quarantined. The error then leaves the driver through your own
+`poll_events`, where the controller reads its class. **Class it `Fatal`** and
+the run ends `ExitState::Failed` with the drift named in its reason — the
+honest outcome for progress nothing can reconcile. Any other class is logged
+as a retryable control-plane error and the run continues on its remaining
+splits; a rejection every owner repeats then ends the job stalled at the
+attempt cap instead.
 
 ### 3. Delegate the choreography: `CoordinationDriver`
 

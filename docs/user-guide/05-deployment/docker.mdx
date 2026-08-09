@@ -1,10 +1,11 @@
 # Docker
 
 A pipeline is one static-ish binary plus one YAML file. The repository ships
-a flagship image at `examples/docker/Dockerfile` that packages the
-[first-pipeline tutorial's](../01-getting-started/03-first-pipeline.mdx)
-binary from `crates/spate/examples/` — treat it as the template for any
-pipeline you build on the framework.
+a flagship image at
+[`examples/docker/Dockerfile`](repo:examples/docker/Dockerfile) that packages
+the [first-pipeline tutorial's](../01-getting-started/03-first-pipeline.mdx)
+binary from [the example crate](repo:crates/spate/examples) — treat it as the
+template for any pipeline you build on the framework.
 
 ## The flagship image
 
@@ -16,7 +17,8 @@ docker run -e KAFKA_BROKERS=broker:9092 -e CLICKHOUSE_URL=http://ch:8123 \
            -p 9090:9090 spate-pipeline
 ```
 
-The Dockerfile is two stages (lifted from `examples/docker/Dockerfile`):
+The Dockerfile is two stages (lifted from
+[`examples/docker/Dockerfile`](repo:examples/docker/Dockerfile)):
 
 ```dockerfile
 FROM rust:1.96-bookworm AS builder
@@ -86,7 +88,7 @@ three endpoints:
   this to `livenessProbe`: a wedged pipeline gets restarted instead of
   idling forever.
 - `GET /metrics` — Prometheus exposition. See [Monitoring](monitoring.mdx)
-  and the canonical taxonomy in [docs/METRICS.md](../../METRICS.md).
+  and the canonical taxonomy in [Metrics](../../METRICS.md).
 
 ```yaml
 readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
@@ -129,4 +131,5 @@ replay after restart — delivery stays at-least-once either way.
   sum with headroom. The sizing rule is in [Tuning](tuning.mdx).
 
 The full Kubernetes walkthrough (including the scaling and rebalance notes)
-lives next to the Dockerfile in `examples/docker/README.md`.
+lives next to the Dockerfile, in
+[`examples/docker/README.md`](repo:examples/docker/README.md).

@@ -60,7 +60,8 @@ than it needed to.
 ## Exit codes via `ExitReport`
 
 `run` returns an `ExitReport` describing how the pipeline stopped. This
-terminal call is from `crates/spate/examples/storefront_pipeline.rs`
+terminal call is from
+[`storefront_pipeline.rs`](repo:crates/spate/examples/storefront_pipeline.rs)
 (`cargo run -p spate --example storefront_pipeline`), which keeps the
 signal handling a deployed process wants: as shipped its source exhausts a
 fixed budget and drains on its own, and SIGTERM runs that same drain at
@@ -139,7 +140,7 @@ because every shutdown until then replays data unnecessarily.
 Disable signal handling with `handle_signals: false` in `runtime_options`
 and drive the drain yourself — the `into_runtime` + `shutdown_handle`
 pattern in [Testing pipelines](testing-pipelines.mdx). From
-`crates/spate/examples/memory_pipeline.rs`
+[`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs)
 (`cargo run -p spate --example memory_pipeline`):
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=handoff title="memory_pipeline.rs"

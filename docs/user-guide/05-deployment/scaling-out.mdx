@@ -227,11 +227,16 @@ runs at. A worker that starts into a running fleet logs the peers it found;
 after that each worker logs `peer joined` and `peer left` with the resulting
 live count, and the worker holding leadership logs `assignment published`
 once per rebalance, carrying the member count and how many splits changed
-hands. The detail underneath — each claim, each drain — sits at `DEBUG`, so
-a rebalance is one line however much it moves, and
-`RUST_LOG=info,spate_coordination=debug` turns the rest on. A `WARN` from
-the coordination layer means work was lost or a record went missing under
-the coordinator; a fleet changing size never produces one.
+hands. The detail underneath — `split claimed`, `drain started`,
+`drain finished` — sits at `DEBUG`, so a rebalance is one line however much
+it moves, and `RUST_LOG=info,spate_coordination=debug` turns the rest on.
+
+A fleet changing size produces `WARN`s of its own, and they are not all
+faults. Replicas racing to create the plan record, a restart contending for
+its own presence key, and a leader being deposed all warn while resolving
+themselves on the next tick — the message says what is being retried. The
+ones to read are those naming work: a forced release, a self-fence, a lease
+taken from under a live owner.
 
 Two families were renamed when coordination moved to leader-assigned
 balancing: `handoffs_total` → `revocations_total` (new label set), and the

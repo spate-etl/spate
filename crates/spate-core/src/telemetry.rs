@@ -3,22 +3,23 @@
 //!
 //! # Levels
 //!
-//! The framework and its connectors emit at three levels, and a reader may
-//! rely on the split:
+//! The convention new code is written to. It is not a guarantee about what
+//! is already in the tree, and it says nothing about what a dependency
+//! logs through its own bridge:
 //!
 //! - **`WARN`** — the pipeline is degraded, or has lost work it expected to
-//!   keep, and somebody may need to act. A routine event the framework
-//!   itself causes is never a `WARN`, however unusual it looks from inside
-//!   one component.
+//!   keep, and somebody may need to act. Reach for `INFO` or `DEBUG` for a
+//!   routine event the framework itself causes, however unusual that event
+//!   looks from inside the one component that observes it.
 //! - **`INFO`** — a lifecycle milestone worth a place in a post-mortem
 //!   timeline: startup and shutdown, leadership, fleet membership, a plan
-//!   becoming final.
+//!   becoming final. Bounded by such events, never by the workload.
 //! - **`DEBUG`** — the bookkeeping underneath those: per-split, per-retry,
-//!   per-record.
+//!   per-connection.
 //!
-//! A deployment runs at `INFO`, so that is the level the split is drawn
-//! for: everything at it should be something an operator would want to
-//! read, and a healthy pipeline at it should be quiet.
+//! A deployment runs at `INFO`, which is what the split is drawn for.
+//! Per-record events are the exception the next section covers: a level
+//! alone cannot bound them, so they carry a rate limit instead.
 //!
 //! # Rate limiting on the hot path
 //!

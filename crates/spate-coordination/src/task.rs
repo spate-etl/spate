@@ -256,6 +256,10 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// moved.
     reported_members: BTreeSet<String>,
     membership_reported: bool,
+    /// Leader side only: the membership the last announced assignment was
+    /// computed over. A publish whose member set matches it did not follow
+    /// a fleet change, so whatever it rewrote came from splits completing.
+    announced_members: BTreeSet<String>,
 }
 
 impl<S: CoordinationStore> Task<S> {
@@ -317,6 +321,7 @@ impl<S: CoordinationStore> Task<S> {
             departed: BTreeMap::new(),
             reported_members: BTreeSet::new(),
             membership_reported: false,
+            announced_members: BTreeSet::new(),
         }
     }
 
@@ -1246,20 +1251,19 @@ impl<S: CoordinationStore> Task<S> {
     /// says nothing — there is no membership to describe — and one that
     /// starts into a running fleet says so once rather than once per peer.
     fn observe_membership(&mut self) {
-        let members: BTreeSet<String> = self
-            .presence
-            .keys()
-            .filter(|i| **i != self.instance)
-            .cloned()
-            .collect();
+        // Both sides are sorted, so comparing the iterators decides the
+        // common case — nothing moved — without building a set. This runs
+        // on every step, which is every watch event.
+        let peers = || self.presence.keys().filter(|i| **i != self.instance);
         let first = !std::mem::replace(&mut self.membership_reported, true);
-        if members == self.reported_members {
+        if peers().eq(self.reported_members.iter()) {
             return;
         }
+        let members: BTreeSet<String> = peers().cloned().collect();
         let live = protocol::live_workers(&self.presence, &self.instance);
         if first {
-            let peers = members.iter().cloned().collect::<Vec<_>>().join(", ");
-            tracing::info!(live, %peers, "joined a fleet already running");
+            let found = members.iter().cloned().collect::<Vec<_>>().join(", ");
+            tracing::info!(live, peers = %found, "joined a fleet already running");
         } else {
             for instance in members.difference(&self.reported_members) {
                 tracing::info!(instance = %instance, live, "peer joined");
@@ -1449,31 +1453,41 @@ impl<S: CoordinationStore> Task<S> {
             self.config.max_in_flight,
             self.fp,
         );
-        // How many splits change hands, counted before the writes consume
-        // `desired`. A split named for the first time is not a move: it is
-        // work being handed out, and only a split leaving one instance for
-        // another costs a drain. One pass over the published assignments
-        // builds the lookup — the balance pass above is already
-        // O(members x splits), so this is noise beside it.
+        // Each split's previous desired owner, from the assignments already
+        // published, counted before the writes consume `desired`.
+        //
+        // Two constraints this shape satisfies and the obvious alternatives
+        // do not. It is restricted to **live** members because a record
+        // outlives the instance it names for the whole grace window, and a
+        // departed peer's copy would otherwise shadow the live owner's and
+        // report a move on every publish until the window closed; the
+        // membership arm below announces that departure instead, so nothing
+        // is lost. And it reads the *published assignment* rather than the
+        // split's current owner, because a split mid-drain is still owned by
+        // the instance giving it up — counting from ownership re-reports one
+        // move on every publish until the drain lands.
         let previous: BTreeMap<&str, &str> = self
             .assignments
             .iter()
+            .filter(|(instance, _)| members.contains(instance.as_str()))
             .flat_map(|(instance, (val, _))| {
                 val.splits
                     .iter()
                     .map(move |id| (id.as_str(), instance.as_str()))
             })
             .collect();
+        // A split named for the first time is not a move: it is work being
+        // handed out, and only a split leaving one instance for another
+        // costs a drain.
         let moved = desired
             .iter()
-            .flat_map(|(instance, splits)| splits.iter().map(move |id| (id, instance)))
-            .filter(|(id, instance)| {
-                previous
-                    .get(id.as_str())
-                    .is_some_and(|prev| prev != instance)
+            .flat_map(|(instance, splits)| {
+                splits
+                    .iter()
+                    .map(move |id| (id.as_str(), instance.as_str()))
             })
+            .filter(|(id, instance)| previous.get(id).is_some_and(|prev| prev != instance))
             .count();
-        drop(previous);
         let mut published = 0usize;
         for (instance, splits) in desired {
             let current = self.assignments.get(&instance);
@@ -1521,19 +1535,24 @@ impl<S: CoordinationStore> Task<S> {
                 }
             }
         }
-        if moved > 0 && published > 0 {
-            // One line per rebalance, on the instance that decided it, and
-            // only where splits actually change hands. A publish that
-            // merely drops a completed split from its owner's assignment
-            // moves nothing, and counting those here would put a line on
-            // every completion in the job. Per-instance and per-split
-            // detail is at DEBUG.
-            tracing::info!(
-                members = members.len(),
-                moved,
-                generation,
-                "assignment published"
-            );
+        if published > 0 {
+            // One line per rebalance, on the instance that decided it: the
+            // fleet changed, or splits changed hands. Both arms are needed.
+            // A member joining a fleet whose lanes are full receives only
+            // splits nobody held, so it moves nothing while being exactly
+            // the rebalance an operator is watching for; a grace window
+            // expiring moves splits with the fleet the same size. What
+            // neither arm admits is a split completing, which rewrites its
+            // owner's assignment on every completion in the job.
+            if members != self.announced_members || moved > 0 {
+                tracing::info!(
+                    members = members.len(),
+                    moved,
+                    generation,
+                    "assignment published"
+                );
+            }
+            self.announced_members = members;
         }
         // Assignments for instances that are gone are dead weight; drop
         // them once their grace window has passed, so the keyspace tracks
@@ -1679,6 +1698,7 @@ impl<S: CoordinationStore> Task<S> {
         // still in flight. That is *not* `splits_draining`, which counts
         // the drains — a cancelled revocation leaves one behind.
         self.metrics(|m| m.revocation(RevocationOutcome::Requested));
+        tracing::debug!(split = %id, "drain started");
         self.emit(CoordinationEvent::RevokeRequested { split });
     }
 
@@ -1793,6 +1813,12 @@ impl<S: CoordinationStore> Task<S> {
                 m.drain_duration(drained_for);
             }
         });
+        tracing::debug!(
+            split = %id,
+            ?outcome,
+            drained_for_ms = drained_for.as_millis(),
+            "drain finished"
+        );
     }
 
     /// End a revocation the expensive way: give the split back without
@@ -1963,6 +1989,7 @@ impl<S: CoordinationStore> Task<S> {
                         m.write(WriteOutcome::Ok, started.elapsed());
                         m.acquired(reason);
                     });
+                    tracing::debug!(split = %id, ?reason, epoch = next_epoch, "split claimed");
                     let progress = record.progress()?;
                     self.record_own_write(id, record, rev, lease_rev)?;
                     self.emit(CoordinationEvent::Gained {

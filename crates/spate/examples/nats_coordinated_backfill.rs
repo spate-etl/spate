@@ -44,8 +44,9 @@
 //! The first terminal narrates that: `peer joined` as the new member's
 //! presence key lands, then `assignment published` naming how many splits
 //! changed hands. The second reports the fleet it walked into. Per-split
-//! detail — each claim, each drain — is a level down, at
-//! `RUST_LOG=info,spate_coordination=debug`.
+//! detail — `split claimed`, `drain started`, `drain finished` — is a level
+//! down, at `RUST_LOG=info,spate_coordination=debug`, which is the run to
+//! make if you want to watch one object's worth of handover.
 //!
 //! Draining a paced chain takes time, which is why `drain_deadline` below
 //! sits far above its default: a drain that outruns the deadline is

@@ -25,7 +25,7 @@
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
-//! | Both      | `_probe.{instance}` | opaque                  — the startup store probe, deleted by the instance that wrote it |
+//! | Either    | `_probe.{instance}` | opaque                  — the startup store probe, written to both keyspaces and deleted by the instance that wrote it |
 
 use crate::error::fatal;
 use base64::Engine as _;

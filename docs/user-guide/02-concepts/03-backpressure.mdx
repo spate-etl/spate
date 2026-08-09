@@ -1,34 +1,38 @@
 # Backpressure
 
-When the sink slows down, something upstream has to give. Spate's answer
-is built around one invariant, with two cooperating layers on top of it.
+When the sink slows down, something upstream has to give. Spate's answer is one
+invariant and the two mechanisms that hold it: one detects the pressure, the
+other acts on it.
 
 ## The invariant: a source thread never blocks on a channel send
 
-The chain's terminal stage hands encoded chunks to the per-shard queues
-with `try_send` — never a blocking `send`. When a queue rejects (or the
-byte budget crosses its high watermark), the source loop **pauses the
-offending lanes and keeps polling**.
+The [chain](../07-reference/glossary.mdx#chain)'s terminal stage hands
+encoded [chunks](../07-reference/glossary.mdx#chunk) to the per-shard
+queues with `try_send` — never a blocking `send`. When a queue rejects (or
+the byte budget crosses its high watermark), the source loop **pauses the
+offending [lanes](../07-reference/glossary.mdx#lane) and keeps polling**.
 
 The reason this is non-negotiable rather than a tuning choice: the source
-loop is what services the assignment protocol, and a loop parked inside
-`send()` stops servicing it. For a source whose liveness proof rides the
-read loop itself, the proof lapses and the assignment is withdrawn. For a
-source whose liveness runs in the background, the leases stay healthy but
-the parked loop cannot answer a reassignment request, so the handoff
-stalls to its deadline and the work is revoked forcibly — and replayed by
-the next owner. Either way the damage is fleet-wide, not local: peers
-absorb the moved work, they pause in turn, and "the sink is slow" has been
-converted into a churning fleet. Pausing lanes while keeping the loop
-running keeps the protocol serviced and confines the slowdown to exactly
-where it belongs.
+loop is what services the [assignment protocol](08-work-assignment.mdx),
+and a loop parked inside `send()` stops servicing it. For a source whose
+liveness proof rides the read loop itself, the proof lapses and the
+assignment is withdrawn. For a source whose liveness runs in the
+background, the [leases](../07-reference/glossary.mdx#lease) stay healthy
+but the parked loop cannot answer a reassignment request, so the handoff
+stalls to its deadline and the work is
+[revoked forcibly](../07-reference/glossary.mdx#cooperative-revocation) —
+and replayed by the next owner. Either way the damage is fleet-wide, not
+local: peers absorb the moved work, they pause in turn, and "the sink is
+slow" has been converted into a churning fleet. Pausing lanes while keeping
+the loop running keeps the protocol serviced and confines the slowdown to
+exactly where it belongs.
 
 The same reasoning protects the ack path: acknowledgments travel over an
 unbounded channel and atomic counters, so a full data path can never block
 a completion signal (see
 [Delivery guarantees](02-delivery-guarantees.mdx)).
 
-## Layer 1 — passive: bounded queues and the byte budget
+## Detecting the pressure: bounded queues and the byte budget
 
 - **Per-shard bounded queues** between pipeline threads and sink workers.
   Their depth and rejections are visible as `spate_queue_depth` and
@@ -36,15 +40,18 @@ a completion signal (see
   never a block).
 - **A global in-flight byte budget** (`backpressure.max_inflight_bytes`)
   counts every byte that has left the source but has not yet been durably
-  written — queued chunks plus batches in flight at the sink.
+  written — queued chunks plus
+  [sealed batches](../07-reference/glossary.mdx#sealed-batch) in flight at the
+  sink. The two are separate units: a worker merges chunks into the batch it
+  writes, so chunk size does not bound insert size.
 
-## Layer 2 — active: pause with hysteresis
+## Acting on it: the pause controller
 
-When a queue rejects or the budget crosses its **high watermark**, the
-source pauses the offending lanes and keeps polling. It resumes under
-hysteresis — the budget must fall below the **low watermark** and a minimum
-pause must elapse — so the controller doesn't flap at the boundary. Observe
-it via `spate_backpressure_paused`,
+Pausing a lane is not free for every source, which is what the hysteresis
+is for. The pause controller releases a lane only once the budget has
+fallen back below the **low watermark** *and* a minimum pause has elapsed;
+without both, a budget resting at the boundary would pause and resume every
+cycle. Observe it via `spate_backpressure_paused`,
 `spate_backpressure_pause_events_total` (a flapping indicator when high),
 and `spate_backpressure_inflight_bytes` (see
 [Metrics](../../METRICS.md)).
@@ -53,19 +60,18 @@ Backpressure is resumable mid-batch: if `try_send` fails partway through a
 batch, the chain records the exact resume point — already-processed records
 are never re-run through the operators.
 
-:::note Connector specifics
-What "pause a lane" costs, and whether a source holds prefetched data
-outside the budget, is the connector's business:
-[Kafka source](../04-connectors/sources/kafka/README.mdx#backpressure-pause-and-resume)
-· [S3 source](../04-connectors/sources/s3/README.mdx)
-· [Datagen source](../04-connectors/sources/datagen/README.mdx#metrics).
-:::
-
 The budget bounds what the *framework* holds. A source client with its own
 read-ahead buffer holds that data before the framework ever sees it, so it
 sits outside the budget entirely — which is a connector-sizing question,
-not a framework one, and can dominate a process's memory footprint. The
-source's own page is the reference when sizing a container.
+not a framework one, and can dominate a process's memory footprint.
+
+:::note Connector specifics
+What "pause a lane" costs, and whether a source holds prefetched data
+outside the budget:
+[Kafka source](../04-connectors/sources/kafka/README.mdx#backpressure-pause-and-resume)
+· [S3 source](../04-connectors/sources/s3/README.mdx#configuration)
+· [Datagen source](../04-connectors/sources/datagen/README.mdx#metrics).
+:::
 
 ## Sizing the budget
 
@@ -120,8 +126,10 @@ waits at the source, not in process memory.
 
 ## Further reading
 
-- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — the sink worker model the sizing
-  rule and what motivated it.
+- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — why one shard dispatches
+  several sealed batches at once, which is the term that dominates the sizing
+  rule, and why a shard whose writes are parked back-pressures the source
+  instead of shedding load.
 - [Architecture](01-architecture.mdx) — where the queues and budget sit in
   the process.
 - [Monitoring](../05-deployment/monitoring.mdx) — alerting on pressure

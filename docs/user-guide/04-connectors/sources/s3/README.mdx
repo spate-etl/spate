@@ -254,9 +254,15 @@ Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
 overflows it **poisons its split** before any offset can be corrupted —
 handed back, retried, and quarantined at the attempt cap like any other
 [object-terminal failure](#errors-poison-splits-not-skipped-objects). Split
-member counts are structurally
-capped by the packing floor, far below the ordinal limit. The leader holds the listing in
-memory once per plan; budget roughly 100 bytes per key.
+member counts are structurally capped by the packing floor, far below the
+ordinal limit.
+
+The leader holds the **whole listing** in memory for the duration of a plan —
+one entry per object, carrying that object's key and ETag. Packing moves those
+entries into splits rather than copying them, so the keys are held once. Peak
+scales with object count *and* key length: a prefix of long keys costs
+materially more than the same number of short ones. Only the leader pays it, and
+only while planning — which for an open plan is every replan tick.
 
 ## Decoding records
 

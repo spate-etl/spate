@@ -47,9 +47,11 @@
 //!
 //! Resolve every handle **once, at build time**, and touch only the resolved
 //! `Counter`/`Gauge`/`Histogram` on the per-record path — exactly the rule
-//! the framework's own handles follow (see `docs/METRICS.md`). The
-//! `Meter::counter` / `gauge` / `histogram` calls belong in construction, not
-//! the record loop.
+//! the framework's own handles follow, and the one [the metrics reference]
+//! states for the taxonomy as a whole. The `Meter::counter` / `gauge` /
+//! `histogram` calls belong in construction, not the record loop.
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use super::labels::{ComponentLabels, NamespaceRejection, classify_namespace, validate_namespace};
 use metrics::{Counter, Gauge, Histogram, SharedString};

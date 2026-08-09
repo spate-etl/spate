@@ -1,10 +1,12 @@
 //! Source-stage handles (`spate_source_*`).
 //!
 //! Every handle the record loop touches is resolved once at build time, and
-//! its methods take per-batch aggregates (see `docs/METRICS.md`). The
-//! per-partition lag series is the exception: it is resolved lazily, on the
-//! control plane, so that a partition whose lag has never been measured is
-//! absent rather than a `0` that reads as "caught up".
+//! its methods take per-batch aggregates, as [the metrics reference]
+//! specifies. The per-partition lag series is the exception: it is resolved
+//! lazily, on the control plane, so that a partition whose lag has never been
+//! measured is absent rather than a `0` that reads as "caught up".
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use super::MetricsError;
 use super::labels::{ComponentLabels, OwnedGauge, PartitionGauges};
@@ -40,7 +42,7 @@ impl SourceMetrics {
     /// clone to the source, which is the only thing that can measure lag. The
     /// per-thread instances are therefore built with [`shadow`](Self::shadow),
     /// not this constructor. A collision here logs and shadows rather than
-    /// panicking (see "Series ownership" in `docs/METRICS.md`).
+    /// panicking.
     ///
     /// Consumer lag is deliberately not gated by `per_partition_detail`: the
     /// per-partition series is the *only* representation of a golden signal,

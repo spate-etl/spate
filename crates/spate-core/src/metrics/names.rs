@@ -1,10 +1,12 @@
 //! Metric and label name constants — the single source of truth for the
-//! taxonomy documented in `docs/METRICS.md`.
+//! taxonomy documented in [the metrics reference].
 //!
 //! Every framework metric is registered through these constants; nothing
 //! else may hard-code a metric name. Names follow Prometheus conventions:
 //! `_total` suffix on counters, unit suffixes (`_seconds`, `_bytes`,
 //! `_rows`) on everything measured in a unit, `spate_` prefix throughout.
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 // Standard labels attached to every framework metric.
 

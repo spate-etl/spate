@@ -49,9 +49,9 @@
 //! SIGTERM drains gracefully: lanes stop, chains flush, sink batches
 //! complete (bounded by `checkpoint.drain_timeout`), offsets commit —
 //! at-least-once end to end. Probes: `curl localhost:9090/readyz`.
-//!
-//! The `ANCHOR` comments below mark the regions the site renders. They are
-//! stripped from what it shows, and they nest; see `docs/STYLE.md` § 10.
+
+// The `ANCHOR` comments below mark the regions the site renders. They are
+// stripped from what it shows, and they nest; see docs/STYLE.md § 10.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production

@@ -96,10 +96,10 @@ pub enum BuildError {
     DuplicateSinkName(String),
     /// Another live handle set in this process already owns a metric series
     /// this sink would publish — a second pipeline with the same pipeline and
-    /// sink name, usually. Gauge series cannot be shared (see "Series
-    /// ownership" in `docs/METRICS.md`), so assembly stops here rather than
-    /// letting one of the two publish readings the other overwrites. A
-    /// pipeline rebuilt *sequentially* is fine: drop the old one first.
+    /// sink name, usually. Gauge series cannot be shared, so assembly stops
+    /// here rather than letting one of the two publish readings the other
+    /// overwrites. A pipeline rebuilt *sequentially* is fine: drop the old one
+    /// first.
     #[error("{0}")]
     DuplicateSeries(String),
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a sink.
@@ -235,7 +235,10 @@ impl ChainCtx {
     /// The resulting series carry `pipeline`/`component`/`component_type` like
     /// every framework series and live under the `spate_` umbrella, so they join
     /// cleanly in a query. You pass local names; the `Meter` adds the
-    /// `spate_custom_` prefix. See `docs/METRICS.md`.
+    /// `spate_custom_` prefix. [The metrics reference] carries the umbrella and
+    /// the label set in full.
+    ///
+    /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     #[must_use]
     pub fn meter(
         &self,

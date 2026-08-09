@@ -36,8 +36,8 @@
 //! `statistics_interval`, default 5s) into connector-owned
 //! `spate_kafka_source_*` families — transport totals, per-broker health and
 //! round-trip time, client-side queue saturation, and consumer-group
-//! stability. See `docs/METRICS.md` § Kafka source for the full table;
-//! setting `statistics_interval: 0s` disables the families.
+//! stability. [The metrics reference] carries the full table under Kafka
+//! source; setting `statistics_interval: 0s` disables the families.
 //!
 //! # Sink
 //!
@@ -50,6 +50,8 @@
 //! This crate deliberately re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
 //! changes here (INV-6; ADR-0011).
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 mod config;
 mod context;

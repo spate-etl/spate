@@ -34,7 +34,7 @@ impl PipelineMetrics {
     ///
     /// Claims the `spate_pipeline_*` series for these labels; a second live
     /// handle set logs and becomes a shadow, publishing neither state nor
-    /// thread count (see "Series ownership" in `docs/METRICS.md`).
+    /// thread count.
     pub fn new(labels: &ComponentLabels, version: &str) -> Self {
         let claim = SeriesClaim::claim_or_shadow(Self::key(labels));
         Self::build(labels, version, claim)

@@ -20,8 +20,7 @@ impl QueueMetrics {
     ///
     /// Claims this edge's series (the labels plus the queue name); a second
     /// live handle set for the same edge logs and becomes a shadow, counting
-    /// but publishing neither depth nor capacity (see "Series ownership" in
-    /// `docs/METRICS.md`).
+    /// but publishing neither depth nor capacity.
     pub fn new(labels: &ComponentLabels, queue: &str, capacity: usize) -> Self {
         let claim = SeriesClaim::claim_or_shadow(Self::key(labels, queue));
         Self::build(labels, queue, capacity, claim)

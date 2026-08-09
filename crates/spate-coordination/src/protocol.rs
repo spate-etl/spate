@@ -10,15 +10,18 @@
 //! [`desired_assignment`] is the balance decision in full, and lives here
 //! rather than in the task deliberately: it is the part most likely to
 //! change, and this is the half of the crate where a change is cheap to
-//! verify. Its contract is specified normatively in
-//! `docs/user-guide/02-concepts/08-work-assignment.mdx` — the numbered
-//! invariants there name the property tests at the bottom of this file.
+//! verify. Its contract is specified normatively by [the work-assignment
+//! page] — the numbered invariants there name the property tests at the
+//! bottom of this file, and they are that page's own scheme, separate from
+//! the framework's `INV-N`.
 //!
 //! Liveness discipline: a split is claimable exactly when its durable
 //! progress record says `runnable` and no live lease key exists for it.
 //! Lease keys expire server-side (single clock — the store's), so there
 //! are no cross-machine clock comparisons anywhere; fencing (the progress
 //! record CAS) remains the only *correctness* mechanism regardless.
+//!
+//! [the work-assignment page]: https://spate.kainth.dev/docs/user-guide/concepts/work-assignment
 
 use crate::records::{LeaseVal, SplitProgressRecord, SplitSpecRecord, SplitStatus};
 use crate::store::Revision;

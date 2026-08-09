@@ -1,9 +1,9 @@
 //! librdkafka producer statistics → `spate_kafka_sink_*` metric families.
 //!
 //! [`KafkaSinkStatsMetrics`] translates the periodic
-//! [`Statistics`] snapshot into the connector-owned families documented in
-//! `docs/METRICS.md` § Kafka sink. Unlike the source (whose snapshots are
-//! drained on the controller thread), the sink has no control-plane tick:
+//! [`Statistics`] snapshot into the connector-owned families [the metrics
+//! reference] documents under Kafka sink. Unlike the source (whose snapshots
+//! are drained on the controller thread), the sink has no control-plane tick:
 //! the producer's `ClientContext::stats` callback publishes directly from
 //! the producer's poll thread — once per statistics interval, never on the
 //! record path — through the shared slot the writer's `attach_metrics`
@@ -30,6 +30,8 @@
 //! across brokers or processes (`max()` is the only defensible
 //! cross-series operator). Windows that sampled nothing publish no series
 //! (a `0` would read as "no latency" rather than "no data").
+//!
+//! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use rdkafka::statistics::Statistics;
 use spate_core::metrics::{Counter, Gauge, Meter};

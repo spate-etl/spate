@@ -1810,33 +1810,30 @@ fn quarantine_contention() -> SinkPoolConfig {
     cfg
 }
 
-/// A batch parked because a shard's only half-open probe is already taken has
-/// made no attempt, so it must not have moved along its retry ladder either.
-///
-/// `docs/METRICS.md` presents the counter and the gauge as complementary
-/// readings of the same retry loop. It states no arithmetic identity between
-/// them, so this pins the stronger one the loop actually maintains and the
-/// docs lean on: with `jitter` at zero — required, since jitter shortens a
-/// delay — a batch that has retried `n` times serves
-/// `initial * multiplier^(n-1)`. That is exactly what the quarantine wait
-/// broke — it advanced the ladder without touching the counter, so the two
-/// drifted apart by however many probe windows the batch lost. Also the only
-/// assertion in the tree on `spate_sink_retries_total`.
-///
-/// Timeline on the paused clock. B is dispatched *after* A already holds the
-/// probe, so there is no race to resolve and no reliance on timer ordering:
-///
-/// * `t0` — A picks the closed replica and fails, opening it until `t0+5s`.
-///   A sleeps its first real step, 1s, then waits out the open deadline.
-/// * `t0+5s` — A is promoted and takes the single probe; its attempt runs 30s.
-/// * `t0+6s` — B is sealed and finds the replica half-open with its budget
-///   spent and no open breaker to wait on: nothing pickable, and no deadline
-///   to sleep until. **The bug's state.**
-/// * `t0+35s` — A's probe fails *fatally*, so A abandons without a backoff
-///   sleep and stops contributing to a gauge that reads the max across a
-///   shard's sleeping batches. The replica re-opens until `t0+40s`.
-/// * `t0+40s` — B takes its **first** attempt, fails, and publishes its first
-///   ladder step. Nothing else is sleeping, so the gauge is B's alone.
+// A batch parked because a shard's only half-open probe is already taken has
+// made no attempt, so it must not have moved along its retry ladder either.
+//
+// docs/METRICS.md presents the counter and the gauge as complementary readings
+// of the same retry loop. It states no arithmetic identity between them, so
+// this pins the stronger one the loop maintains and the docs lean on: with
+// `jitter` at zero — required, since jitter shortens a delay — a batch that has
+// retried `n` times serves `initial * multiplier^(n-1)`. Also the only
+// assertion in the tree on `spate_sink_retries_total`.
+//
+// Timeline on the paused clock. B is dispatched *after* A already holds the
+// probe, so there is no race to resolve and no reliance on timer ordering:
+//
+// * `t0` — A picks the closed replica and fails, opening it until `t0+5s`.
+//   A sleeps its first real step, 1s, then waits out the open deadline.
+// * `t0+5s` — A is promoted and takes the single probe; its attempt runs 30s.
+// * `t0+6s` — B is sealed and finds the replica half-open with its budget
+//   spent and no open breaker to wait on: nothing pickable, and no deadline
+//   to sleep until. This is the state under test.
+// * `t0+35s` — A's probe fails *fatally*, so A abandons without a backoff
+//   sleep and stops contributing to a gauge that reads the max across a
+//   shard's sleeping batches. The replica re-opens until `t0+40s`.
+// * `t0+40s` — B takes its **first** attempt, fails, and publishes its first
+//   ladder step. Nothing else is sleeping, so the gauge is B's alone.
 #[test]
 fn a_quarantine_wait_neither_retries_nor_advances_the_ladder() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

@@ -103,8 +103,8 @@ pub struct SinkShardMetrics {
 impl SinkShardMetrics {
     /// Resolve all handles for one shard. `replicas` are display names used
     /// as the `replica` label (bounded by cluster topology). `e2e_basis`
-    /// selects the time base for `spate_e2e_latency_seconds` (see
-    /// `docs/METRICS.md`).
+    /// selects the time base for `spate_e2e_latency_seconds`; [the metrics
+    /// reference] carries what each basis measures.
     ///
     /// Call **after** [`install`](crate::metrics::install): handles bind to
     /// the recorder present at construction, and a handle built before the
@@ -116,8 +116,10 @@ impl SinkShardMetrics {
     /// writer's reading would stand until the owner's next transition, which
     /// for a quarantined shard may be never. A collision therefore logs and
     /// leaves this instance a shadow: its counters still record, its gauges do
-    /// not (see "Series ownership" in `docs/METRICS.md`). Assembly through
-    /// [`Pipeline`](crate::pipeline::Pipeline) refuses to build instead.
+    /// not. Assembly through [`Pipeline`](crate::pipeline::Pipeline) refuses
+    /// to build instead.
+    ///
+    /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     pub fn new(
         labels: &ComponentLabels,
         shard: u32,

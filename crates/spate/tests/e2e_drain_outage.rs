@@ -2,17 +2,19 @@
 //!
 //! [`e2e_sink_outage`](e2e_sink_outage.rs) recovers the sink before stopping,
 //! so it never exercises the drain against a sink that is still down — the
-//! case `docs/user-guide/03-guides/graceful-shutdown.mdx` names explicitly
-//! ("a ClickHouse outage mid-shutdown, say").
+//! case the graceful-shutdown guide names explicitly ("a ClickHouse outage
+//! mid-shutdown, say").
 //!
 //! With ClickHouse paused, `write_batch` does not return: the container holds
 //! the connection open and answers nothing, and the client's default `end`
 //! timeout is 180s — longer than any sane `drain_timeout`. Every in-flight
-//! permit is therefore held by a write that will not finish, which is exactly
-//! the state in which the sink worker used to park in `dispatch` on
-//! `acquire_owned().await`, outside the `select!` that polls the drain
-//! deadline. Nothing then woke it, no permit was ever released, and the
-//! process ran past `terminationGracePeriodSeconds` to SIGKILL.
+//! permit is therefore held by a write that will not finish, so the sink
+//! worker reaches `dispatch` with no permit available and nothing to release
+//! one. The drain deadline is the only thing that can free it, which is why
+//! `acquire_owned()` has to be polled inside the `select!` that watches that
+//! deadline rather than awaited outside it — a worker parked outside it never
+//! wakes, and the process runs past `terminationGracePeriodSeconds` to
+//! SIGKILL.
 //!
 //! The assertion is the one an operator cares about: SIGTERM with the sink
 //! down still exits, under its own deadline, having abandoned loudly.

@@ -238,9 +238,9 @@ impl CoordinationMetrics {
     /// Resolve all coordination handles.
     ///
     /// Claims the `spate_coordination_*` series for these labels; a second live
-    /// handle set logs and becomes a shadow, counting but publishing no gauge
-    /// (see "Series ownership" in `docs/METRICS.md`). Cloning this struct
-    /// shares the claim — clones are co-owners, not competitors.
+    /// handle set logs and becomes a shadow, counting but publishing no gauge.
+    /// Cloning this struct shares the claim — clones are co-owners, not
+    /// competitors.
     pub fn new(labels: &ComponentLabels) -> Self {
         let claim = SeriesClaim::claim_or_shadow(Self::key(labels));
         Self::build(labels, claim.map(Arc::new))

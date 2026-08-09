@@ -68,9 +68,9 @@ pub trait RecordRouter<F: RecFamily>: Send + Sync {
 ```
 
 An implementation over the owned family `Owned<Vec<u8>>` comes from the router
-half of `crates/spate/examples/custom_source_sink.rs`, a generator source
-feeding a stdout sink that needs no infrastructure and runs with
-`cargo run -p spate --example custom_source_sink`. The chain there explodes
+half of [`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs),
+a generator source feeding a stdout sink that needs no infrastructure and runs
+with `cargo run -p spate --example custom_source_sink`. The chain there explodes
 each upload into its order lines, so the placement of one upload's children is
 exactly the case the record-aware tier exists for:
 
@@ -146,7 +146,7 @@ Three responses remain:
 - **Watching the skew.** It is already observable per shard via
   `spate_sink_records_total{shard}` and `spate_sink_bytes_total{shard}` — a
   persistent imbalance across shard labels is a hot shard (see
-  [docs/METRICS.md](../../METRICS.md)).
+  [Metrics](../../METRICS.md)).
 - **Resharding deliberately.** Adding or removing shards changes `num_shards`
   and therefore reshuffles which shard each key maps to. It rebalances, but
   it is a topology change, not a live knob — it re-homes keys, with the
@@ -202,7 +202,7 @@ absorbs them.
   cluster's own sharding expression, so cluster reads can prune shards.
 - [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — the reasoning behind the
   routing seam, the two tiers, and the shard-worker model.
-- [docs/METRICS.md](../../METRICS.md) — the shard-labeled sink metrics that
+- [Metrics](../../METRICS.md) — the shard-labeled sink metrics that
   make skew and per-shard throughput visible.
 - [Backpressure](03-backpressure.mdx) — how one saturated shard pauses the
   source, and the budget that keeps it bounded.

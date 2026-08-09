@@ -5,16 +5,19 @@ import { themes as prismThemes } from 'prism-react-renderer';
 // `.ts`, and Docusaurus loads this config through jiti, which transpiles
 // nested TypeScript imports and resolves `.ts` itself.
 import transclude from './src/remark/transclude';
+import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
-
 // The site is deployed to Cloudflare Pages on a dedicated subdomain:
 // https://spate.kainth.dev/ (Direct Upload from CI — see the nightly
 // tier of scheduled.yml; pull requests build the site but never publish it).
-// organizationName/projectName below still drive the GitHub source links
-// (githubUrl, editUrl, footer), not the deployed URL.
-const organizationName = 'spate-etl';
-const projectName = 'spate';
-const githubUrl = `https://github.com/${organizationName}/${projectName}`;
+// organizationName/projectName drive the GitHub source links (githubUrl,
+// editUrl, footer, and every `repo:` link on a page), not the deployed URL.
+import {
+  organizationName,
+  projectName,
+  githubUrl,
+  SOURCE_REF,
+} from './src/repoUrl';
 
 // Client-side redirects that keep old published URLs alive. Registered only in
 // CI (see the plugins array): plugin-client-redirects writes `<from>/index.html`
@@ -159,7 +162,7 @@ const config: Config = {
           path: '../docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',
-          editUrl: `${githubUrl}/edit/main/docs/`,
+          editUrl: `${githubUrl}/edit/${SOURCE_REF}/docs/`,
           showLastUpdateTime: true,
           // Keep the Docusaurus defaults (they exclude `_*` MDX partials such as
           // 04-connectors/_securing-kafka.mdx from becoming pages) and add the
@@ -179,7 +182,15 @@ const config: Config = {
           // stale region should report as a stale region; and the mermaid
           // plugin *replaces* a fenced node, so a ```mermaid fence carrying
           // `file=` would never reach a plugin registered after it.
-          beforeDefaultRemarkPlugins: [transclude],
+          //
+          // `repoLinks` is here for the second reason as well: the default list
+          // includes the plugin that resolves Markdown links, and `repo:` is a
+          // scheme it does not know. Resolving first means it only ever sees a
+          // finished URL.
+          beforeDefaultRemarkPlugins: [
+            transclude,
+            [repoLinks, {githubUrl, sourceRef: SOURCE_REF}],
+          ],
         },
         blog: false,
         theme: {

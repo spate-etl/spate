@@ -113,7 +113,18 @@ will…". The most valuable line in the document, spent on nothing.
 
 **Link text that names nothing** (§ 7). "here", "this page", "see this". Also
 the near-miss: link text that names a *different* thing from what is on the
-other side.
+other side, and the path standing in for a name — `[docs/METRICS.md](…)` where
+"Metrics" is what the reader is looking for.
+
+**A repository path the reader cannot act on** (§ 7). A bare
+`crates/spate/examples/memory_pipeline.rs` in a sentence. The site reader has no
+checkout, so it names a layout only a contributor holds; § 7 gives the `repo:`
+form. The build catches a path that does not resolve — what it cannot catch is a
+path that resolves and was never made a link, which is why this is here.
+
+*Not this:* a path in a fenced block, or in `CONTRIBUTING.md`, `DEVELOPING.md`,
+`AGENTS.md` and `docs/STYLE.md` itself — contributor files, none of them
+published, all read from a checkout.
 
 **First-person plural** (§ 7). "we recommend", "our design".
 

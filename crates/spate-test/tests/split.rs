@@ -18,7 +18,8 @@ use std::time::Duration;
 
 const CONFIG: &str = r#"
 pipeline: { name: split-test, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 source: { memory: {} }
 sinks:
   a: { capture: {} }
@@ -111,7 +112,8 @@ fn split_unmatched_fail_stops_the_pipeline() {
 
     const ONE_SINK: &str = r#"
 pipeline: { name: split-fail, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 checkpoint: { interval: 200ms, drain_timeout: 2s, stalled_fail_after: 3s }
 source: { memory: {} }
 sinks:

@@ -14,14 +14,14 @@ use spate_core::record::PartitionId;
 use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
 use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
-use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 // Prometheus exporter so the mocks' families are recorded; port 0 lets the OS
 // pick a free admin port (no collision with a real deployment).
 const CONFIG: &str = r#"
 pipeline: { name: seam-test, threads: 1, io_threads: 1 }
-metrics: { exporter: prometheus, listen: "127.0.0.1:0" }
+admin: { listen: "127.0.0.1:0" }
+metrics: { exporter: prometheus }
 source: { memory: {} }
 sink: { capture: {} }
 "#;
@@ -84,7 +84,6 @@ fn source_and_sink_receive_role_scoped_meters() {
     // `install` is idempotent — reuse the pipeline's global handle to render.
     let rendered = install(&MetricsSettings {
         exporter: Exporter::Prometheus,
-        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         ..MetricsSettings::default()
     })
     .expect("reuse installed exporter")

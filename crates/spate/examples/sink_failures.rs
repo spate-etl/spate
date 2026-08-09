@@ -103,8 +103,9 @@ fn assemble(
 fn retryable_write() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
 pipeline: { name: sink-failures-retryable, threads: 1, io_threads: 2 }
+admin: { listen: none }
+metrics: { exporter: none }
 checkpoint: { interval: 100ms, drain_timeout: 5s }
-metrics: { listen: "127.0.0.1:0" }
 source: { memory: {} }
 sink: { capture: {} }
 "#;
@@ -183,7 +184,8 @@ fn failed_probe() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
 pipeline: { name: sink-failures-probe, threads: 1, io_threads: 2 }
 checkpoint: { interval: 100ms, drain_timeout: 5s }
-metrics: { listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }
 "#;
@@ -264,7 +266,8 @@ fn fatal_write() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
 pipeline: { name: sink-failures-fatal, threads: 1, io_threads: 2 }
 checkpoint: { interval: 100ms, drain_timeout: 5s, stalled_fail_after: 1s }
-metrics: { listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }
 "#;
@@ -347,7 +350,8 @@ fn slow_sink() -> Result<(), Box<dyn std::error::Error>> {
 pipeline: { name: sink-failures-slow, threads: 1, io_threads: 2 }
 checkpoint: { interval: 100ms, drain_timeout: 10s }
 backpressure: { max_inflight_bytes: 1KiB, high_ratio: 0.5, low_ratio: 0.25, min_pause: 50ms }
-metrics: { listen: "127.0.0.1:0" }
+admin: { listen: none }
+metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: { chunk: { target_bytes: 256B } } }
 "#;

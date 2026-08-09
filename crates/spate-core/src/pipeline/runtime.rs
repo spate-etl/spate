@@ -13,6 +13,7 @@ use crate::metrics::{
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -73,7 +74,16 @@ pub enum StartError {
     /// The metrics exporter could not be installed.
     #[error("metrics: {0}")]
     Metrics(String),
-    /// The I/O runtime or the admin server could not start.
+    /// The admin server could not take its address. Set `admin.listen` to a
+    /// free address, or to `none` for a pipeline that needs no server.
+    #[error("admin.listen: cannot bind {addr}: {source}")]
+    AdminBind {
+        /// The address `admin.listen` asked for.
+        addr: SocketAddr,
+        /// Why the kernel refused it.
+        source: std::io::Error,
+    },
+    /// The I/O runtime or a pipeline thread could not start.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -389,25 +399,38 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let control_txs_for_stop = control_txs.clone();
 
         // Admin bind now that the drivers are live: a bind failure (e.g. the
-        // metrics port is taken) stops them instead of leaking them.
-        let admin = match io.block_on(AdminServer::bind(
-            self.config.metrics.listen,
-            handle.render_fn(),
-            Arc::clone(&health),
-        )) {
-            Ok(admin) => admin,
-            Err(e) => {
-                stop_drivers(
-                    &self.shutdown,
-                    &control_txs_for_stop,
-                    driver_handles,
-                    drain_timeout,
-                );
-                return Err(StartError::Io(e));
+        // address is taken) stops them instead of leaking them.
+        let admin_stop_tx = match self.config.admin.listen {
+            Some(addr) => {
+                let render = handle.exports().then(|| handle.render_fn());
+                let admin = match io.block_on(AdminServer::bind(addr, render, Arc::clone(&health)))
+                {
+                    Ok(admin) => admin,
+                    Err(source) => {
+                        stop_drivers(
+                            &self.shutdown,
+                            &control_txs_for_stop,
+                            driver_handles,
+                            drain_timeout,
+                        );
+                        return Err(StartError::AdminBind { addr, source });
+                    }
+                };
+                let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
+                io.spawn(admin.run(admin_stop_rx));
+                Some(admin_stop_tx)
+            }
+            None => {
+                if handle.exports() {
+                    tracing::warn!(
+                        "an exporter is installed but `admin.listen` is `none`, so \
+                         nothing serves /metrics; render the exposition through \
+                         Pipeline::metrics(), or set `metrics.exporter: none`"
+                    );
+                }
+                None
             }
         };
-        let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
-        io.spawn(admin.run(admin_stop_rx));
         {
             // spawn_upkeep uses tokio::spawn internally; enter the runtime.
             let _guard = io.enter();
@@ -519,7 +542,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             state = ExitState::Failed(report);
         }
 
-        let _ = admin_stop_tx.send(true);
+        if let Some(tx) = &admin_stop_tx {
+            let _ = tx.send(true);
+        }
         io.shutdown_timeout(Duration::from_secs(2));
         let _ = controller_handle.join();
 
@@ -597,7 +622,6 @@ pub fn metrics_settings(config: &PipelineConfig) -> MetricsSettings {
             MetricsExporter::Prometheus => Exporter::Prometheus,
             MetricsExporter::None => Exporter::None,
         },
-        listen: config.metrics.listen,
         per_partition_detail: config.metrics.per_partition_detail,
         e2e_basis: match config.metrics.e2e_basis {
             crate::config::E2eBasis::Ingest => E2eBasis::Ingest,

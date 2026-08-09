@@ -117,24 +117,27 @@ fn example_bin(name: &str) -> PathBuf {
 /// admin server to an ephemeral loopback port.
 ///
 /// The listen address is the only edit. Endpoints are left alone: they
-/// interpolate from the environment. `metrics.listen` is a literal in every
-/// shipped file, and the runtime binds it whatever the exporter is set to, so
-/// examples sharing the `0.0.0.0:9090` default would contend for one host port.
+/// interpolate from the environment. Every shipped file states `admin.listen`
+/// as a literal, and the ones naming a port all name the same `0.0.0.0:9090`,
+/// so concurrent runs would contend for one host port. A file asking for no
+/// server needs no rebinding and gets none.
 fn render_config(name: &str) -> PathBuf {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join(format!("{name}.yaml"));
     let shipped =
         std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-    let rendered = if shipped.contains("0.0.0.0:9090") {
-        shipped.replace("0.0.0.0:9090", "127.0.0.1:0")
-    } else {
-        // No `0.0.0.0:9090` literal: the file relies on the default listen
-        // address, so give it an explicit one.
-        shipped.replacen("metrics:\n", "metrics:\n  listen: 127.0.0.1:0\n", 1)
-    };
+    let rendered = shipped.replace("0.0.0.0:9090", "127.0.0.1:0");
+    // Assert the section exists before asserting what it says: matching only a
+    // loopback literal would pass a file that declares no `admin:` at all and
+    // then takes the shared default from somewhere else in the document.
     assert!(
-        rendered.contains("127.0.0.1:0") && !rendered.contains("9090"),
+        rendered.contains("admin:"),
+        "{name}.yaml: declares no `admin:` section, so it would take the default port"
+    );
+    assert!(
+        (rendered.contains("127.0.0.1:0") || rendered.contains("listen: none"))
+            && !rendered.contains("9090"),
         "{name}.yaml: could not rebind the admin server off the shared default port"
     );
     let dst = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.yaml"));

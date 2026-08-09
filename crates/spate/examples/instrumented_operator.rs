@@ -42,13 +42,16 @@ use std::time::Duration;
 /// `pipeline.name` is the `pipeline` label on every series the `Meter` mints,
 /// which is what the exposition assertions at the end of `main` match on.
 ///
-/// The metrics address is port 0 rather than the default: the runtime binds
-/// `metrics.listen` whatever the exporter is set to, and a fixed port is what
-/// forces the examples to run one at a time (see `.config/nextest.toml`).
+/// The exporter stays on — the assertions render through it — while
+/// `admin.listen: none` asks for no HTTP server, because nothing here scrapes
+/// one. A deployment names an address instead and Prometheus reads `/metrics`
+/// off it; the exposition is the same either way, which is what makes
+/// asserting on it here worth anything. Starting an exporter that no server
+/// publishes draws a warning at startup naming this exact pattern.
 const CONFIG: &str = r#"
 pipeline: { name: storefront-orders, threads: 1 }
+admin: { listen: none }
 checkpoint: { interval: 200ms }
-metrics: { listen: "127.0.0.1:0" }
 source: { memory: {} }
 sink: { capture: {} }
 "#;

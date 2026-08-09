@@ -13,6 +13,7 @@ use std::time::Duration;
 
 const CONFIG: &str = r#"
 pipeline: { name: bundle-test, threads: 1, io_threads: 1 }
+admin: { listen: none }
 metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }

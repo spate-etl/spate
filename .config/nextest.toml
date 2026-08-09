@@ -18,25 +18,6 @@
 required = "0.9.89"
 recommended = "0.9.140"
 
-# The examples run as tests (`[[example]] test = true`), and four of them build
-# a `PipelineRuntime`. The runtime binds `metrics.listen` whatever the exporter
-# is set to, and a bind failure is fatal — while `MetricsSettings::default()` is
-# `0.0.0.0:9090`. `memory_pipeline`, `custom_source_sink` and
-# `json_skip_bad_records` declare no `metrics:` block at all and `s3_backfill`
-# names an exporter but no address, so all four land on the same port and two in
-# flight at once is `EADDRINUSE` — reported as a failed example rather than as
-# the port clash it is. One at a time; they are seconds each.
-#
-# Pinning the addresses in the examples instead was the alternative, and it is
-# worse: `memory_pipeline`'s config is the region the quickstart page renders,
-# so it would put ephemeral-port noise on the first config a reader ever sees.
-[test-groups]
-examples = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'kind(example)'
-test-group = 'examples'
-
 [profile.default]
 # Surface every failure in one run: chasing them one-per-run is the thing that
 # makes a slow suite feel slower than it is.

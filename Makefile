@@ -74,9 +74,7 @@ doctest: ## Doc tests — nextest does not run these
 # Narrower than `test`, which already collects these: `[[example]] test = true`
 # makes every infrastructure-free example a one-test binary whose `main` the
 # runner calls, so the assertions each example already carried become a gate.
-# The `examples` test group in .config/nextest.toml serialises them, because
-# four bind the metrics admin port and the runtime binds it whatever the
-# exporter says. Useful while iterating on one example; `test` is the gate.
+# Useful while iterating on one example; `test` is the gate.
 test-examples: ## Just the examples, run as tests (subset of test)
 	cargo nextest run -p spate --all-features --locked -E 'kind(example)'
 

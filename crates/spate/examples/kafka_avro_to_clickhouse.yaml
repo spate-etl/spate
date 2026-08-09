@@ -22,9 +22,11 @@ backpressure:
   # Throttled sources that never fill batches are fine with far less.
   max_inflight_bytes: 1GiB
 
+admin:
+  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
+
 metrics:
   exporter: prometheus
-  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
 
 source:
   kafka:

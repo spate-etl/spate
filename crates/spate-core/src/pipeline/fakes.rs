@@ -5,8 +5,8 @@
 
 use crate::checkpoint::AckIssuer;
 use crate::config::{
-    BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter, MetricsSection,
-    PinningMode, PipelineConfig, PipelineSection,
+    AdminSection, BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter,
+    MetricsSection, PinningMode, PipelineConfig, PipelineSection,
 };
 use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
@@ -413,8 +413,10 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         },
         metrics: MetricsSection {
             exporter: MetricsExporter::None,
-            listen: "127.0.0.1:0".parse().expect("addr"),
             ..Default::default()
+        },
+        admin: AdminSection {
+            listen: Some("127.0.0.1:0".parse().expect("addr")),
         },
         source: ComponentConfig::new("fake", serde_yaml::Value::Null),
         deserializer: None,

@@ -32,7 +32,8 @@ const TOTAL: usize = 100;
 
 const PIPELINE_CONFIG: &str = r#"
 pipeline: { name: kafka-to-kafka, threads: 1, io_threads: 1 }
-metrics: { exporter: none, listen: 127.0.0.1:0 }
+admin: { listen: none }
+metrics: { exporter: none }
 source: { kafka: {} }
 sinks:
   a: { kafka: {} }

@@ -204,14 +204,16 @@ fn object_of(line: &str) -> Option<&str> {
 ///
 /// The pipeline name is not instance-scoped: each instance is its own
 /// process, so the metric series a name claims has exactly one live owner
-/// (INV-10) without any help. The admin port is ephemeral only because two
-/// instances share a host here; a real deployment binds a fixed one.
+/// (INV-10) without any help. Neither instance is scraped, so neither asks
+/// for an admin server; a real deployment names an address and gets
+/// `/metrics`, `/healthz` and `/readyz` on it.
 fn config_yaml(data: &std::path::Path) -> String {
     format!(
         r#"
 pipeline: {{ name: nats-coordinated-backfill, threads: 1 }}
+admin: {{ listen: none }}
+metrics: {{ exporter: none }}
 checkpoint: {{ interval: 500ms }}
-metrics: {{ listen: "127.0.0.1:0" }}
 source:
   s3:
     url: "file://{data}/"

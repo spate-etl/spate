@@ -11,6 +11,9 @@ pipeline:
 checkpoint:
   interval: 500ms
 
+admin:
+  listen: none
+
 metrics:
   exporter: none
 

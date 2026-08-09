@@ -5,8 +5,8 @@ meaning. It is a lookup, not a walkthrough — for how the file is loaded and
 how connector sections reach their factories, see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx).
 
-One YAML file configures one process. The framework owns four typed sections —
-`pipeline`, `checkpoint`, `backpressure`, `metrics` — validated strictly
+One YAML file configures one process. The framework owns the typed sections —
+`pipeline`, `admin`, `checkpoint`, `backpressure`, `metrics` — validated strictly
 (`deny_unknown_fields` at every level, so typos fail at startup with the
 offending YAML path). The `source`, `deserializer`, and `sink` sections are
 single-key mappings selecting a component type; their bodies are opaque to the
@@ -16,7 +16,8 @@ framework and deserialized by the component's own factory.
 pipeline: { name: orders, threads: 4, io_threads: 2 }
 checkpoint: { interval: 5s, max_pending_batches: 1024 }
 backpressure: { max_inflight_bytes: 256MiB }
-metrics: { exporter: prometheus, listen: 0.0.0.0:9090 }
+admin: { listen: 0.0.0.0:9090 }     # /metrics, /healthz, /readyz
+metrics: { exporter: prometheus }
 source:
   kafka: { ... }          # body owned by spate-kafka
 deserializer:
@@ -90,14 +91,24 @@ sink batch settings.
 | `low_ratio` | float | `0.5` | Fraction of the budget below which sources may resume. Ratios must satisfy `0 < low_ratio < high_ratio <= 1`. |
 | `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. |
 
+## `admin:`
+
+The HTTP server carrying `/metrics`, `/healthz` and `/readyz`. See
+[Monitoring](../05-deployment/monitoring.mdx) for how it pairs with
+`metrics.exporter`, and [Docker](../05-deployment/docker.mdx) for the probe
+semantics.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `listen` | socket address \| `none` | `0.0.0.0:9090` | Bind address. `none` runs no server: no probes, no scrape endpoint, and the port stays free. An address the process cannot take fails the start, naming that address. |
+
 ## `metrics:`
 
 See [Monitoring](../05-deployment/monitoring.mdx).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` records to a no-op recorder. |
-| `listen` | socket address | `0.0.0.0:9090` | Admin server bind address (`/metrics`, `/healthz`, `/readyz`). |
+| `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` records to a no-op recorder, and `/metrics` answers 404. |
 | `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `spate_source_lag_records`, which is always per partition. |
 | `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `spate_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
 

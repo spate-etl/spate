@@ -15,17 +15,42 @@ page intentionally does not duplicate the list.
 
 ## The exporter and the admin server
 
-The `metrics` config section selects the exporter:
+These are separate settings in separate sections, because they answer separate
+questions. `metrics.exporter` decides whether series are recorded at all; `admin.listen`
+decides whether an HTTP server publishes them — and that same server carries
+the liveness and readiness probes, which are worth serving whether or not
+anything is exported:
 
 ```yaml
+admin:
+  listen: 0.0.0.0:9090    # /metrics, /healthz, /readyz; `none` runs no server
+
 metrics:
   exporter: prometheus    # default; `none` disables export
-  listen: 0.0.0.0:9090    # admin server: /metrics, /healthz, /readyz
 ```
 
 With `prometheus` (the default), the exposition endpoint mounts at
 `GET /metrics` on the admin server, next to the probes described in
 [Docker](docker.mdx). Scrape it with a PodMonitor or scrape annotations.
+
+The combinations, and what each is for:
+
+| `admin.listen` | `metrics.exporter` | What you get |
+|---|---|---|
+| an address | `prometheus` | Probes and a scrape endpoint. The deployment default. |
+| an address | `none` | Probes only. `/metrics` answers 404: there is no exposition to serve, and an empty 200 would read to a scraper as a healthy target delivering nothing. |
+| `none` | `prometheus` | Series recorded, nothing serving them. For a host process that renders the exposition itself, through `Pipeline::metrics`, and mounts it on a server it already runs. The start logs a warning, because this is equally what disabling the server and forgetting the exporter produces. |
+| `none` | `none` | No port and no recorder. What a test or a local demo wants ([Testing pipelines](../03-guides/testing-pipelines.mdx)). |
+
+`/metrics` follows the exposition rather than the setting. Where another
+library installed a recorder before the pipeline did, the pipeline records
+into that recorder and has none of its own to render, so the endpoint answers
+404 and the warning stays silent even though `exporter` says `prometheus`. The
+exposition is that other library's to publish.
+
+Two pipelines on one host collide unless they name different addresses, or one
+of them names `none` — left alone, both take the same default. Failing to take
+an address stops the start and names the address it wanted.
 
 Ordering is handled for you: `Pipeline::from_config` installs the exporter
 before you can construct any metric handle, so a handle recording into the

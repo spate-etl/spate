@@ -25,8 +25,9 @@ fn config_yaml(data: &std::path::Path) -> String {
     format!(
         r#"
 pipeline: {{ name: s3-coordinated-test, threads: 2 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"
@@ -47,7 +48,8 @@ fn throttled_config_yaml(data: &std::path::Path) -> String {
 pipeline: {{ name: s3-coordinated-test, threads: 2 }}
 checkpoint: {{ interval: 100ms }}
 backpressure: {{ max_inflight_bytes: 128KiB }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+admin: {{ listen: none }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "file://{data}/"

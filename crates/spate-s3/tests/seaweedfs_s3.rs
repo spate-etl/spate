@@ -23,8 +23,9 @@ fn config_yaml(gw: &Gateway) -> String {
     format!(
         r#"
 pipeline: {{ name: s3-seaweedfs-test, threads: 2 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none, listen: "127.0.0.1:0" }}
+metrics: {{ exporter: none }}
 source:
   s3:
     url: "s3://{bucket}/data/"

@@ -19,7 +19,6 @@ use spate_core::coordination::{CoordinationEvent, SplitCoordinator, SplitProgres
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,
 };
-use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use support::{Held, LEASE, PhasedPlanner, crash, runtime, split_id, store};
 
@@ -112,7 +111,6 @@ fn counter_sum(text: &str, name: &str, label: &str) -> Option<f64> {
 fn a_real_revocation_moves_every_metric_seam() {
     let handle = install(&MetricsSettings {
         exporter: Exporter::Prometheus,
-        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         ..MetricsSettings::default()
     })
     .expect("install the exporter");
@@ -307,7 +305,6 @@ fn a_real_revocation_moves_every_metric_seam() {
 fn a_cancelled_revocation_moves_its_own_metric_seam() {
     let handle = install(&MetricsSettings {
         exporter: Exporter::Prometheus,
-        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         ..MetricsSettings::default()
     })
     .expect("install the exporter");

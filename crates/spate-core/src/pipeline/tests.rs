@@ -872,7 +872,7 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe port");
     let addr = occupied.local_addr().unwrap();
     let mut cfg = test_config(1);
-    cfg.metrics.listen = addr;
+    cfg.admin.listen = Some(addr);
     let h = start_with_config(cfg, |shared, log| FakeChain {
         shared,
         log,
@@ -889,11 +889,42 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let result = h.join.join().unwrap();
+    let Err(err @ StartError::AdminBind { .. }) = result else {
+        panic!("expected StartError::AdminBind, got {result:?}");
+    };
+    // The address is the whole diagnosis: a bare I/O error leaves the reader
+    // guessing which of a config's addresses the kernel refused.
     assert!(
-        matches!(result, Err(StartError::Io(_))),
-        "expected StartError::Io, got {result:?}"
+        err.to_string().contains(&addr.to_string()),
+        "the error must name the address it could not take: {err}"
     );
     drop(occupied);
+}
+
+/// `admin.listen: none` runs and drains with no admin server. The shutdown
+/// path is what this covers: with no listener there is no stop channel to
+/// signal, and the run has to reach its drain and its controller join anyway.
+///
+/// That no socket is opened is structural — the bind sits inside the `Some`
+/// arm — and proving it from inside the process would take socket enumeration
+/// this suite has no business doing.
+#[test]
+fn no_admin_listener_still_drains_and_completes() {
+    let mut cfg = test_config(1);
+    cfg.admin.listen = None;
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
 }
 
 /// The controller's `SourceMetrics` — not one of the per-thread instances —
@@ -923,7 +954,6 @@ fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
     // reuses this one and renders through this handle.
     let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
         exporter: crate::metrics::Exporter::Prometheus,
-        listen: cfg.metrics.listen,
         per_partition_detail: cfg.metrics.per_partition_detail,
         e2e_basis: crate::metrics::E2eBasis::Ingest,
     })

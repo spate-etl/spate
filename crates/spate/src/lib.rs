@@ -64,6 +64,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = PipelineConfig::from_str(
 //!     "pipeline: { name: demo, threads: 1, io_threads: 1 }\n\
+//!      admin: { listen: none }\n\
 //!      checkpoint: { interval: 100ms }\n\
 //!      metrics: { exporter: none }\n\
 //!      source: { memory: {} }\n\

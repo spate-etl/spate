@@ -205,7 +205,8 @@ fn pipeline_config() -> String {
     format!(
         r#"
 pipeline: {{ name: kafka-sink-test-{n}, threads: 1, io_threads: 1 }}
-metrics: {{ exporter: none, listen: 127.0.0.1:0 }}
+admin: {{ listen: none }}
+metrics: {{ exporter: none }}
 source: {{ memory: {{}} }}
 sink: {{ kafka: {{}} }}
 "#

@@ -11,9 +11,11 @@ checkpoint:
   interval: 5s
   drain_timeout: 25s
 
+admin:
+  listen: 0.0.0.0:9090  # /metrics, /healthz, /readyz
+
 metrics:
   exporter: prometheus
-  listen: 0.0.0.0:9090
 
 source:
   kafka:

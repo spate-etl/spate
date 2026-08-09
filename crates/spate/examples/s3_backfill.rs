@@ -49,6 +49,7 @@ fn config_yaml(root: &std::path::Path) -> String {
     format!(
         r#"
 pipeline: {{ name: s3-backfill-demo, threads: 1 }}
+admin: {{ listen: none }}
 checkpoint: {{ interval: 200ms }}
 metrics: {{ exporter: none }}
 source:

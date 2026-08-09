@@ -329,7 +329,9 @@ fn parse_order_line(row: &str) -> Option<(u32, i64, i64)> {
 
 const CONFIG: &str = r#"
 pipeline: { name: counter-demo, threads: 2 }
+admin: { listen: none }
 checkpoint: { interval: 100ms }
+metrics: { exporter: none }
 source: { counter: {} }
 sink: { stdout: {} }
 "#;

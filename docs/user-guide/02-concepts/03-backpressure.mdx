@@ -73,7 +73,7 @@ outside the budget:
 · [Datagen source](../04-connectors/sources/datagen/README.mdx#metrics).
 :::
 
-## Sizing the budget
+## Sizing the budget {#sizing-the-budget}
 
 This is the one backpressure knob that regularly needs thought. The rule,
 motivated by a **24× throughput collapse** under an unthrottled source with
@@ -81,9 +81,14 @@ default settings, hand-recorded during the tuning investigation:
 
 ```text
 max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
-    shards × inflight.max_per_shard × batch.max_bytes   // pending writes
-  + shards × queue_capacity × chunk.target_bytes )      // queued chunks
+    shards × inflight.max_per_shard × batch.max_bytes           // pending writes
+  + shards × SinkOptions::queue_capacity × chunk.target_bytes ) // queued chunks
 ```
+
+Every term but one is a configuration key. `queue_capacity` is a builder
+knob set through `SinkOptions`, and configuration rejects unknown fields
+with the offending key, so a pipeline that names it in YAML fails at
+startup.
 
 In words: the budget's low watermark must comfortably hold everything the
 sink *legitimately* keeps in flight during steady-state operation. If it
@@ -91,20 +96,18 @@ can't, a saturated pipeline lives permanently above the high watermark and
 the pause controller duty-cycles at its minimum pause — throughput collapses
 even though nothing is wrong.
 
-Worked example (the defaults): 2 shards × 2 in-flight × 128 MiB batches is
-about 512 MiB of pending writes alone — already exceeding the default
-256 MiB budget. That's fine for throttled sources that never fill batches;
-wrong for saturated ones. For a saturated pipeline, either:
-
-- raise `backpressure.max_inflight_bytes` to 2 GiB or more, or
-- cap `batch.max_bytes` near `budget × low_ratio / (2 × shards ×
-  max_inflight)` — about 16 MiB with the defaults.
+The framework defaults are deliberately not self-consistent under
+saturation: 2 shards at the default batch settings hold about 512 MiB of
+pending writes alone, already past the default 256 MiB budget. That is fine
+for throttled sources that never fill batches and wrong for saturated ones,
+where the budget has to be raised or the batches capped —
+[Tuning](../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes)
+carries both, worked through.
 
 The flagship example's YAML
 ([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml))
 carries this rule as a comment next to the knobs — a convention worth copying.
-See [Tuning](../05-deployment/tuning.mdx) for the wider performance picture and
-[Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the
+See [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the
 config section itself.
 
 :::note

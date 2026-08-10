@@ -34,7 +34,7 @@ A `!` needs one whatever the scope and type say. It is you declaring a breaking
 change, and that is the one thing a release note cannot omit.
 
 Note which way round that is. **Naming no scope is not an exemption**, and
-neither is a scope this repository does not recognise. An exemption is earned by
+neither is a scope this repository does not recognize. An exemption is earned by
 saying which non-crate area the change belongs to, not by leaving the scope off
 — `feat: …` requires a fragment, because some of the largest changes this
 project has ever shipped were written exactly that way.
@@ -79,7 +79,7 @@ Changelog](https://keepachangelog.com/en/2.0.0/) sections, lowercased:
 | Type | For |
 | --- | --- |
 | `added` | New capability |
-| `changed` | Existing behaviour that is now different |
+| `changed` | Existing behavior that is now different |
 | `deprecated` | Still works, will not for long |
 | `removed` | Gone |
 | `fixed` | It was wrong and now is not |

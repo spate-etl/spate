@@ -1,11 +1,11 @@
-# Zero-copy pipeline: Kafka → Avro (borrowed) → flat_map → ClickHouse Native.
+# Fan-out pipeline: Kafka → Avro → flat_map → ClickHouse Native.
 # The high-performance sibling of kafka_avro_to_clickhouse.yaml. Every
 # ${VAR:-default} interpolates from the environment (Kubernetes:
 # ConfigMap/Secret env). Framework sections are typed and validated;
 # `source`/`deserializer`/`sink` bodies belong to their connectors.
 
 pipeline:
-  name: sensor-events
+  name: order-lines
   # threads: 4          # default: available cores minus the I/O reserve
   io_threads: 2
 
@@ -28,39 +28,46 @@ metrics:
 source:
   kafka:
     brokers: ${KAFKA_BROKERS:-localhost:9092}
-    topic: ${KAFKA_TOPIC:-sensor-batches}
-    group_id: ${KAFKA_GROUP:-sensor-events-etl}
+    topic: ${KAFKA_TOPIC:-order-placed}
+    group_id: ${KAFKA_GROUP:-order-lines-etl}
     commit_interval: 5s
     rdkafka:
       auto.offset.reset: earliest
 
 deserializer:
   avro:
-    # Bare datums with a fixed writer schema — no registry. The fast backend
-    # (`build_fast`) has no reader-schema resolution, so evolution is
-    # expressed with serde attributes on the row structs, not `reader_schema`.
+    # Bare datums with a fixed writer schema — no registry, so the schema
+    # below is the one every producer to this topic must write against.
+    #
+    # It is the storefront's `order_placed` record, but NOT the framing
+    # `spate-datagen` emits: that crate writes each event as a branch of a
+    # top-level union, so its datums lead with a branch index this schema
+    # would read as `order_id`. Relaying them here needs the union schema,
+    # not this one.
     mode: raw
     schema:
       inline: |
-        {"type":"record","name":"SensorBatch","fields":[
-          {"name":"sensor","type":"string"},
-          {"name":"batch_ts_ms","type":"long"},
-          {"name":"events","type":{"type":"array","items":
-            {"type":"record","name":"Event","fields":[
-              {"name":"name","type":"string"},
-              {"name":"value","type":"long"},
-              {"name":"unit","type":"string"}]}}}]}
+        {"type":"record","name":"OrderPlaced","namespace":"spate.datagen","fields":[
+          {"name":"order_id","type":"long"},
+          {"name":"customer_id","type":"int"},
+          {"name":"region","type":"string"},
+          {"name":"placed_at","type":{"type":"long","logicalType":"timestamp-millis"}},
+          {"name":"lines","type":{"type":"array","items":
+            {"type":"record","name":"OrderLine","fields":[
+              {"name":"sku","type":"string"},
+              {"name":"qty","type":"int"},
+              {"name":"unit_cents","type":"int"}]}}}]}
 
 sink:
   clickhouse:
-    table: ${CLICKHOUSE_TABLE:-sensor_events}
+    table: ${CLICKHOUSE_TABLE:-order_lines}
     # Columnar Native blocks: offloads parse CPU to the client and shrinks the
     # wire on LowCardinality columns. Column order is the positional contract —
-    # it must match the SensorEvent struct's field order in the example.
-    columns: [sensor, batch_ts_ms, name, value, unit]
+    # it must match the OrderLineRow struct's field order in the example.
+    columns: [order_id, placed_at, sku, qty, unit_cents]
     format: native
     # `full` checks type classes on the first record against the live table —
-    # including the SensorEvent struct's DateTime64Millis wrapper against the
+    # including the OrderLineRow struct's DateTime64Millis wrapper against the
     # column's declared DateTime64(3) precision, so a milli/micro scale
     # mismatch fails fatally instead of landing 1970-era timestamps.
     # (`format: native` would upgrade `off` to `names` anyway: the encoder is
@@ -71,16 +78,16 @@ sink:
     # Scale-out: list shards in the cluster's remote_servers order (shard i
     # here = shard_num i+1 there), weights matching the cluster config, and
     # let startup verify parity against the Distributed table's DDL — the
-    # example's router already shards by xxHash64(sensor):
+    # example's router already shards by xxHash64(order_id):
     # shards:
     #   - replicas: ["http://ch-0:8123"]
     #     weight: 1
     #   - replicas: ["http://ch-1:8123"]
     #     weight: 1
     # distributed_check:
-    #   cluster: sensors
-    #   table: sensor_events_dist
-    #   sharding_key: sensor
+    #   cluster: storefront
+    #   table: order_lines_dist
+    #   sharding_key: order_id
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
     batch:

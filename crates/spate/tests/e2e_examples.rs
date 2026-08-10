@@ -702,7 +702,8 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
 // ── Kafka only ─────────────────────────────────────────────────────────────
 
 /// `kafka_to_kafka_split`: one region-prefixed stream fanned out to a topic
-/// per region, with an unroutable prefix exercising the `unmatched` policy.
+/// per region group, with an unroutable region exercising the `unmatched`
+/// policy.
 #[test]
 #[ignore = "requires Docker"]
 fn kafka_to_kafka_split_example_fans_out_and_drains() {
@@ -711,13 +712,24 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     for topic in ["orders", "orders-eu", "orders-us"] {
         h.create_topic(topic, 2);
     }
-    let per_region: usize = 200;
+    let per_region: usize = 100;
     let mut payloads = Vec::new();
+    // Two sub-regions per destination, so the example's prefix match is what
+    // routes them rather than an exact region compare. `apac` belongs to
+    // neither and must follow the `unmatched` policy.
+    //
+    // Order ids are disjoint across regions, as the domain has them: an order
+    // is placed from one region, so reusing an id across five would be a
+    // stream no generator produces. The key is the id, so this is also what
+    // makes the produce key mean something — records sharing a key share a
+    // partition, and here nothing shares one by accident.
+    let regions = ["eu-west", "eu-north", "us-east", "us-west", "apac"];
     for i in 0..per_region {
-        for region in ["eu", "us", "apac"] {
+        for (r, region) in regions.iter().enumerate() {
+            let order_id = 1000 + i * regions.len() + r;
             payloads.push((
-                format!("k{i}").into_bytes(),
-                format!("{region}:cust-{}:order-{i}", i % 5).into_bytes(),
+                format!("k{order_id}").into_bytes(),
+                format!("{region}:{order_id}:order_placed").into_bytes(),
             ));
         }
     }
@@ -726,23 +738,28 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     let config = render_config("kafka_to_kafka_split");
     let env = vec![("KAFKA_BROKERS", h.brokers.clone())];
     let mut example = spawn("kafka_to_kafka_split", Some(&config), &env);
+    // Two sub-regions land on each destination topic.
+    let per_topic = per_region * 2;
     example.wait_for("both region topics", || {
-        topic_count(&h.brokers, "orders-eu") >= per_region
-            && topic_count(&h.brokers, "orders-us") >= per_region
+        topic_count(&h.brokers, "orders-eu") >= per_topic
+            && topic_count(&h.brokers, "orders-us") >= per_topic
     });
     example.terminate();
-    // Equal thirds were produced, one third of them unroutable. Both
+    // Equal fifths were produced, one fifth of them unroutable. Both
     // equalities fail if the `apac` records — which match no branch and follow
-    // the `unmatched` policy — had reached either destination topic.
+    // the `unmatched` policy — had reached either destination topic. An
+    // under-count is caught earlier: the wait above never reaches `per_topic`
+    // and times out, so a prefix match that took only one sub-region per side
+    // fails there rather than here.
     assert_eq!(
         topic_count(&h.brokers, "orders-eu"),
-        per_region,
-        "the eu topic holds the eu records and nothing else"
+        per_topic,
+        "the eu topic holds both eu sub-regions and nothing else"
     );
     assert_eq!(
         topic_count(&h.brokers, "orders-us"),
-        per_region,
-        "the us topic holds the us records and nothing else"
+        per_topic,
+        "the us topic holds both us sub-regions and nothing else"
     );
     // Delivery reports for every derived record are what let the watermark
     // advance, so a committed offset per source record is the drain's receipt.

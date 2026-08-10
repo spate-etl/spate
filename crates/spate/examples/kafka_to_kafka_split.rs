@@ -1,13 +1,16 @@
 //! Kafka → chain → **Kafka**: filter/reshape a stream and fan it out to
 //! two topics with the producer sink.
 //!
-//! One `orders` stream carries region-prefixed records (`eu:cust-7:...`,
-//! `us:cust-9:...`); the chain routes each to its region's topic through a
-//! [`split`](spate::ops::ChainBuilder) terminal — one Kafka sink per
-//! destination topic, each a full sink with its own producer, batching,
-//! and `spate_sink_*` series. Records with an unknown prefix follow the
+//! One `orders` stream carries region-prefixed records
+//! (`eu-west:1042:...`, `us-east:1043:...`); the chain routes each to its
+//! region's topic through a [`split`](spate::ops::ChainBuilder) terminal — one
+//! Kafka sink per destination topic, each a full sink with its own producer,
+//! batching, and `spate_sink_*` series. A region matching no branch follows the
 //! `unmatched` policy (`Skip`: dropped and counted on
 //! `spate_operator_records_dropped_total{reason="unrouted"}`).
+//!
+//! Routing matches a region *prefix*, so every sub-region of a region shares
+//! that region's destination.
 //!
 //! # Delivery semantics
 //!
@@ -22,8 +25,8 @@
 //!
 //! Source message keys do not survive deserialization (records carry only
 //! the key hash), so this example re-derives the produce key from the
-//! payload — [`KafkaBytesEncoder::with_key_fn`] extracts the customer
-//! segment, keeping per-customer ordering within each output topic.
+//! payload — [`KafkaBytesEncoder::with_key_fn`] extracts the order segment,
+//! keeping an order's events in order within each output topic.
 //!
 //! # Run it
 //!
@@ -50,10 +53,12 @@ use spate::kafka::{KafkaSource, KafkaSourceConfig};
 use spate::prelude::*;
 use std::path::Path;
 
-/// Produce key: the customer segment of `region:customer:rest` payloads
-/// (a plain `fn` item — the encoder seam takes these so borrowed families
-/// work too).
-fn customer_key(payload: &[u8]) -> Option<&[u8]> {
+/// Produce key: the order segment of `region:order_id:rest` payloads (a plain
+/// `fn` item — the encoder seam takes these so borrowed families work too).
+///
+/// The order id is what every storefront event shares, so keying on it is what
+/// keeps one order's events on one partition of the destination topic.
+fn order_key(payload: &[u8]) -> Option<&[u8]> {
     let mut parts = payload.splitn(3, |b| *b == b':');
     let _region = parts.next()?;
     parts.next()
@@ -75,8 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: encoder
     let eu_sink = spate::kafka::sink::from_component_config(pipeline.config().sink_config("eu")?)?;
     let us_sink = spate::kafka::sink::from_component_config(pipeline.config().sink_config("us")?)?;
-    let eu_enc = eu_sink.encoder_with(KafkaBytesEncoder::with_key_fn(customer_key));
-    let us_enc = us_sink.encoder_with(KafkaBytesEncoder::with_key_fn(customer_key));
+    let eu_enc = eu_sink.encoder_with(KafkaBytesEncoder::with_key_fn(order_key));
+    let us_enc = us_sink.encoder_with(KafkaBytesEncoder::with_key_fn(order_key));
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
@@ -93,11 +98,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 split.add::<Owned<Vec<u8>>, _, _>(us_enc.clone(), KeyHashRouter, ctx.sink("us"));
             split
                 .route(move |payload: Vec<u8>, out| {
-                    match payload.split(|b| *b == b':').next() {
-                        Some(b"eu") => out.emit(eu, payload),
-                        Some(b"us") => out.emit(us, payload),
-                        // Unknown region → `unmatched` (Skip: counted, dropped).
-                        _ => {}
+                    // The region is the payload's first field, matched by
+                    // prefix: every sub-region of a region shares its
+                    // destination.
+                    let region: &[u8] = payload.split(|b| *b == b':').next().unwrap_or_default();
+                    let branch = if region.starts_with(b"eu-") {
+                        Some(eu)
+                    } else if region.starts_with(b"us-") {
+                        Some(us)
+                    } else {
+                        // Any other region → `unmatched` (Skip: counted, dropped).
+                        None
+                    };
+                    if let Some(branch) = branch {
+                        out.emit(branch, payload);
                     }
                 })
                 .build()

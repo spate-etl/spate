@@ -25,13 +25,21 @@ window setting:
 
 ```sql
 CREATE TABLE orders (
-    id           UInt64,
-    customer     String,
-    amount_cents Int64,
-    ts_ms        Int64
-) ENGINE = MergeTree ORDER BY id
+    order_id    UInt64,
+    customer_id UInt32,
+    region      LowCardinality(String),
+    placed_at   DateTime64(3),
+    total_cents UInt64
+) ENGINE = MergeTree ORDER BY order_id
   SETTINGS non_replicated_deduplication_window = 100;
 ```
+
+Three of those column types do not spell their Rust field the same way, and
+each is deliberate. `LowCardinality(String)` takes a plain `String` — the
+encoding is the server's business, not the row's. `UInt32` takes a `u32`, so
+the width has to match rather than merely be large enough. And `DateTime64(3)`
+takes the `DateTime64Millis` wrapper in step 2, which is what declares the
+scale; a bare `i64` would encode identically and validate against nothing.
 
 :::warning
 On plain `MergeTree`, insert deduplication **silently no-ops** unless the
@@ -44,17 +52,45 @@ tokens only cover same-batch retries — not crash replay. Read
 choosing a table engine for production.
 :::
 
-## 2. The record type
+## 2. The record types
 
-One struct travels end to end, carrying both serde derives: `Deserialize`
-reads it from Avro (field names match the writer schema), `Serialize`
-writes it as RowBinary:
+The writer schema is what your producer registers and what the records on the
+topic are framed against — the pipeline fetches it by id and never declares it:
+
+```json
+{
+  "type": "record", "name": "OrderPlaced", "namespace": "spate.datagen",
+  "fields": [
+    {"name": "order_id", "type": "long"},
+    {"name": "customer_id", "type": "int"},
+    {"name": "region", "type": "string"},
+    {"name": "placed_at",
+     "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "lines", "type": {"type": "array", "items": {
+      "type": "record", "name": "OrderLine", "fields": [
+        {"name": "sku", "type": "string"},
+        {"name": "qty", "type": "int"},
+        {"name": "unit_cents", "type": "int"}
+      ]}}}
+  ]
+}
+```
+
+It is the `order_placed` event of the storefront stream every example in the
+catalogue decodes, so [`spate-datagen`](https://docs.rs/spate-datagen)
+generates records this pipeline reads.
+
+Three structs, two of which are the pipeline's ends. `Deserialize` reads
+`OrderPlaced` from the writer schema above, and `OrderLine` is the nested
+element its `lines` array holds. `Serialize` writes `OrderRow` as RowBinary.
+The chain's `try_map` in step 4 is what turns the first into the last,
+totalling the lines on the way:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
 
 :::info
-RowBinary carries no column names — **the struct's field declaration
+RowBinary carries no column names — **`OrderRow`'s field declaration
 order must match the `columns` list in the YAML**. Order is the wire
 contract. The `validate_schema` option below catches mismatches against
 the live table at startup instead of at 3 a.m.
@@ -113,7 +149,7 @@ sink:
     table: ${CLICKHOUSE_TABLE:-orders}
     # Column order is the RowBinary wire contract: it must match the row
     # struct's field declaration order.
-    columns: [id, customer, amount_cents, ts_ms]
+    columns: [order_id, customer_id, region, placed_at, total_cents]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
@@ -141,7 +177,7 @@ is only what is genuinely *this* pipeline's: connector construction, schema
 validation, and the chain.
 
 The imports — the framework prelude, one line per connector, and the serde
-derives the record type in step 2 needs:
+derives the record types in step 2 need:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=imports
 ```
@@ -165,8 +201,9 @@ Walking the assembly:
   the `/readyz` probe. The single `sink:` section above is addressed as
   `"default"`; a pipeline with several named sinks resolves each by name.
 - **`.chains(..)`** installs the per-thread chain factory. The `try_map`
-  with `ErrorPolicy::Skip` drops bad records, counts them on
-  `spate_operator_records_dropped_total`, and keeps going — see
+  totals an order's lines into its row; an order carrying none cannot be
+  totalled, so `ErrorPolicy::Skip` drops it, counts it on
+  `spate_operator_records_dropped_total`, and the chain keeps going — see
   [Error handling](../02-concepts/04-error-handling.mdx).
 - **`.run(source)`** blocks until SIGTERM/SIGINT (drain) or a fatal error,
   then returns an exit report.

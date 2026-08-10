@@ -15,11 +15,15 @@ zero-infrastructure variant is
 
 ## The shape of an assembly
 
-The block below is the exception: it is a shape, not a program. `Order`,
-`deserializer` and `encoder` are used without ever being bound, and the
-connector imports are elided along with them, so it does not compile. The
+The block below is the exception: it is a shape, not a program. `OrderPlaced`,
+`to_row`, `deserializer` and `encoder` are used without ever being bound, and
+the connector imports are elided along with them, so it does not compile. The
 assembly with nothing left out is the example; the steps that follow fill each
 elision in with code that does compile.
+
+`to_row` stands for the stage that turns the decoded record into the row the
+sink encodes — every chain has one, whether it is a `map`, a `try_map` or a
+`flat_map`, and it is what makes the two type parameters line up.
 
 ```rust
 use spate::prelude::*;
@@ -38,8 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sink(sink)?
         .chains(move |ctx| {
             let chunk_cfg = ctx.chunk(); // per-sink `chunk:` YAML, or the default
-            chain_owned::<Order, _>(deserializer.clone())
+            chain_owned::<OrderPlaced, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
+                .try_map(to_row, ErrorPolicy::Skip)
                 .sink(encoder.clone(), KeyHashRouter, chunk_cfg,
                       ctx.queues, ctx.budget)
                 .build()

@@ -56,14 +56,20 @@ const OUTPUT_DEADLINE: Duration = Duration::from_secs(180);
 const DRAIN_DEADLINE: Duration = Duration::from_secs(90);
 
 /// Registry id the flagship example's payloads are framed under. The harness
-/// stub already serves its own `Event` schema; `Order` gets one of its own.
+/// stub already serves its own `Event` schema; `OrderPlaced` gets one of its
+/// own.
 const ORDER_SCHEMA_ID: u32 = 77;
 
-const ORDER_SCHEMA: &str = r#"{"type":"record","name":"Order","fields":[
-    {"name":"id","type":"long"},
-    {"name":"customer","type":"string"},
-    {"name":"amount_cents","type":"long"},
-    {"name":"ts_ms","type":"long"}]}"#;
+const ORDER_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace":"spate.datagen","fields":[
+    {"name":"order_id","type":"long"},
+    {"name":"customer_id","type":"int"},
+    {"name":"region","type":"string"},
+    {"name":"placed_at","type":{"type":"long","logicalType":"timestamp-millis"}},
+    {"name":"lines","type":{"type":"array","items":
+      {"type":"record","name":"OrderLine","fields":[
+        {"name":"sku","type":"string"},
+        {"name":"qty","type":"int"},
+        {"name":"unit_cents","type":"int"}]}}}]}"#;
 
 /// Writer schema of `kafka_avro_flatmap_clickhouse.yaml`, restated here. It
 /// must stay identical to that file's `inline:` schema, or the example's
@@ -387,25 +393,59 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     let order_schema = Schema::parse_str(ORDER_SCHEMA).expect("order schema");
     ddl(
         &h,
-        "CREATE TABLE orders (id UInt64, customer String, amount_cents Int64, ts_ms Int64) \
-         ENGINE = MergeTree ORDER BY id \
+        "CREATE TABLE orders (\
+             order_id UInt64, customer_id UInt32, region LowCardinality(String), \
+             placed_at DateTime64(3), total_cents UInt64) \
+         ENGINE = MergeTree ORDER BY order_id \
          SETTINGS non_replicated_deduplication_window = 100",
     );
     h.create_topic("orders", 2);
     let orders: i64 = 500;
-    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..orders)
+    // Ten orders carrying no lines. There is nothing for the example's
+    // `try_map` to total, so `ErrorPolicy::Skip` drops each one — they are
+    // produced, and the row count below is what says they never landed.
+    //
+    // They are produced **first**, and that ordering is load-bearing: a
+    // skipped record puts no row in the table, so nothing observable would
+    // prove the tail had been consumed before the drain. Sitting at the head
+    // of each partition, they are covered by construction once every lined
+    // order behind them has landed.
+    let unlined: i64 = 10;
+    let order_line = |sku: &str, qty: i32, unit_cents: i32| {
+        Value::Record(vec![
+            ("sku".into(), Value::String(sku.to_string())),
+            ("qty".into(), Value::Int(qty)),
+            ("unit_cents".into(), Value::Int(unit_cents)),
+        ])
+    };
+    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..orders + unlined)
         .map(|i| {
+            let lines = if i < unlined {
+                vec![]
+            } else {
+                vec![
+                    order_line("KBD-01", 2, 7_900),
+                    order_line("MSE-01", 1, 3_500),
+                ]
+            };
             let datum = encode(
                 &order_schema,
                 vec![
-                    ("id", Value::Long(i)),
-                    ("customer", Value::String(format!("cust-{}", i % 7))),
-                    ("amount_cents", Value::Long(i * 10)),
-                    ("ts_ms", Value::Long(1_700_000_000_000 + i)),
+                    ("order_id", Value::Long(i)),
+                    (
+                        "customer_id",
+                        Value::Int(i32::try_from(i % 1024).expect("customer")),
+                    ),
+                    ("region", Value::String("eu-west".into())),
+                    ("placed_at", Value::Long(1_700_000_000_000 + i)),
+                    ("lines", Value::Array(lines)),
                 ],
             );
+            // The order id is the key, as the generator sets it: a payment and
+            // a refund carry only that, so it is what colocates an order's
+            // events on a shard.
             (
-                format!("cust-{}", i % 7).into_bytes(),
+                i.to_string().into_bytes(),
                 confluent(ORDER_SCHEMA_ID, &datum),
             )
         })
@@ -418,20 +458,36 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         h.count("orders") >= u64::try_from(orders).expect("orders")
     });
     example.terminate();
-    // `uniq` is `uniqExact(id)`: it holds the at-least-once claim (INV-1) —
-    // every produced order landed, and nothing was invented — and is by
-    // construction blind to a replayed duplicate, which inflates `count`.
+    // `uniqExact` holds the at-least-once claim (INV-1) — every lined order
+    // landed, and nothing was invented — and is by construction blind to a
+    // replayed duplicate, which inflates `count`. It is also what says the ten
+    // line-less orders were skipped rather than landed with a zero total.
     assert_eq!(
-        h.uniq("orders"),
+        h.scalar("SELECT uniqExact(order_id) FROM orders"),
         u64::try_from(orders).expect("orders"),
-        "every produced order landed"
+        "every lined order landed, and no line-less one did"
+    );
+    // The `try_map` really totalled the lines: 2 x 7900 + 1 x 3500.
+    assert_eq!(
+        h.scalar("SELECT uniqExact(total_cents) FROM orders"),
+        1,
+        "every row carries the same total, summed from its lines"
+    );
+    assert_eq!(
+        h.scalar("SELECT any(total_cents) FROM orders"),
+        19_300,
+        "the total is the sum of qty x unit_cents over the order's lines"
     );
     // What the drain committed, which exit status 0 does not imply on a
     // signal-initiated shutdown: the group's watermark covers every record
-    // produced, so nothing was left for a restart to replay.
+    // produced — the skipped ones included — so nothing was left for a restart
+    // to replay. The wait above is what makes this reachable: every lined
+    // order landing means every partition was consumed past the line-less
+    // ones ahead of them.
     let committed: i64 = h.committed("orders", "orders-etl", 2).into_iter().sum();
     assert_eq!(
-        committed, orders,
+        committed,
+        orders + unlined,
         "the drain committed a watermark covering every order"
     );
 

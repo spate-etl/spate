@@ -49,7 +49,7 @@ deserializer:
 sink:
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-orders}
-    columns: [id, customer, amount_cents, ts_ms]
+    columns: [order_id, customer_id, region, placed_at, total_cents]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
 ```

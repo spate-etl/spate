@@ -39,10 +39,12 @@ use spate_test::{TestEncoder, capture_sink};
 use std::io::Write as _;
 use std::time::Duration;
 
+/// One NDJSON line in the staged objects: a captured payment, the storefront
+/// event a backfill of settled money reads.
 #[derive(Debug, Deserialize)]
-struct Reading {
-    sensor: String,
-    value: f64,
+struct PaymentCaptured {
+    order_id: u64,
+    amount_cents: u64,
 }
 
 fn config_yaml(root: &std::path::Path) -> String {
@@ -102,12 +104,12 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .with_metrics(ctx.pipeline.clone(), "main")
-                .build_serde::<Reading>();
+                .build_serde::<PaymentCaptured>();
             // ANCHOR_END: deserializer
-            chain_owned::<Reading, _>(deser)
+            chain_owned::<PaymentCaptured, _>(deser)
                 .with_metrics(ctx.pipeline, "main")
-                .filter(|r: &Reading| r.value.is_finite())
-                .map(|r: Reading| format!("{}={}", r.sensor, r.value).into_bytes())
+                .filter(|p: &PaymentCaptured| p.amount_cents > 0)
+                .map(|p: PaymentCaptured| format!("{}={}", p.order_id, p.amount_cents).into_bytes())
                 .sink(
                     TestEncoder,
                     KeyHashRouter,
@@ -145,15 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(
         root.path().join("data/2026-07-13.ndjson"),
         concat!(
-            "{\"sensor\":\"kitchen\",\"value\":21.5}\n",
-            "{\"sensor\":\"attic\",\"value\":31.0}\n",
+            "{\"order_id\":1001,\"amount_cents\":19300}\n",
+            "{\"order_id\":1002,\"amount_cents\":4825}\n",
         ),
     )?;
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     gz.write_all(
         concat!(
-            "{\"sensor\":\"cellar\",\"value\":12.25}\n",
-            "{\"sensor\":\"hall\",\"value\":19.75}\n",
+            "{\"order_id\":1003,\"amount_cents\":129000}\n",
+            "{\"order_id\":1004,\"amount_cents\":7900}\n",
         )
         .as_bytes(),
     )?;

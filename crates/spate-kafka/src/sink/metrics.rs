@@ -157,10 +157,21 @@ impl KafkaSinkStatsMetrics {
         let mut timeouts: u64 = 0;
         let mut seen: HashSet<&str> = HashSet::new();
         let meter = &self.meter;
+        // Same contract as the source: `logical` entries (coordinators) are
+        // excluded from every sum and per-broker series, but a broker is up
+        // if any connection to it — regular or logical — is up. The join
+        // key is the resolved `nodename` (a logical entry's `nodeid` reads
+        // -1 even once bound).
+        let logical_up: HashSet<&str> = stats
+            .brokers
+            .values()
+            .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
+            .map(|b| b.nodename.as_str())
+            .collect();
         for broker in stats.brokers.values() {
             // Same filters as the source: `internal` is the `:0/internal`
-            // pseudo-broker; `logical` entries mirror an underlying broker
-            // and would double-count.
+            // pseudo-broker; `logical` entries fold into `broker_up` above
+            // and count nowhere else.
             if broker.source == "internal" || broker.source == "logical" {
                 continue;
             }
@@ -177,7 +188,8 @@ impl KafkaSinkStatsMetrics {
                 .brokers
                 .entry(broker.name.clone())
                 .or_insert_with(|| BrokerHandles::new(meter, &broker.name));
-            handles.up.set(if broker.state == "UP" { 1.0 } else { 0.0 });
+            let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
+            handles.up.set(if up { 1.0 } else { 0.0 });
             handles.tx_errors.absolute(broker.txerrs);
             for (window, slot, avg_name, p99_name) in [
                 (
@@ -362,6 +374,63 @@ mod tests {
         );
         assert!(!rendered.contains("internal"));
         assert!(!rendered.contains("GroupCoordinator"));
+    }
+
+    /// Mirror of the source-side regression for #195: a broker whose only
+    /// live connection is a logical (coordinator) link reads as up, one with
+    /// every link down stays down, and logical entries mint no series and
+    /// join no sums.
+    #[test]
+    fn a_coordinator_only_broker_counts_as_up() {
+        let rendered = render(|| {
+            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut coordinator_only = broker("k1:9092/1", "learned", 1);
+            coordinator_only.nodename = "k1:9092".to_owned();
+            coordinator_only.state = "DOWN".to_owned();
+            coordinator_only.txretries = 5;
+            let mut coord_link = broker("TxnCoordinator", "logical", -1);
+            coord_link.nodename = "k1:9092".to_owned();
+            coord_link.txretries = 50;
+            let mut dark = broker("k2:9092/2", "learned", 2);
+            dark.nodename = "k2:9092".to_owned();
+            dark.state = "DOWN".to_owned();
+            let mut dark_link = broker("GroupCoordinator", "logical", -1);
+            dark_link.nodename = "k2:9092".to_owned();
+            dark_link.state = "DOWN".to_owned();
+            let mut orphan_link = broker("OrphanCoordinator", "logical", -1);
+            orphan_link.nodename = "k9:9092".to_owned();
+            let stats = Statistics {
+                brokers: HashMap::from([
+                    (coordinator_only.name.clone(), coordinator_only),
+                    (coord_link.name.clone(), coord_link),
+                    (dark.name.clone(), dark),
+                    (dark_link.name.clone(), dark_link),
+                    (orphan_link.name.clone(), orphan_link),
+                ]),
+                ..Default::default()
+            };
+            m.update(&stats);
+        });
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_broker_up{{{STD},broker="k1:9092/1"}} 1"#
+            )),
+            "coordinator-only broker must read as up:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_broker_up{{{STD},broker="k2:9092/2"}} 0"#
+            )),
+            "a broker with every link down stays down:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Coordinator"),
+            "logical entries must mint no series of their own:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("spate_kafka_broker_tx_retries_total{{{STD}}} 5")),
+            "logical entries stay out of the transport sums:\n{rendered}"
+        );
     }
 
     #[test]

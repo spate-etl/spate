@@ -84,6 +84,11 @@ pub struct KafkaSource {
     /// A revocation was surfaced; `unassign` completes it on the next
     /// `poll_events` call (after the runtime finished drain + commit).
     pending_unassign: bool,
+    /// A rebalance error whose lane revocation was surfaced; the classified
+    /// error is reported on the next `poll_events` call, after the runtime
+    /// finished draining the revoked lanes. The callback already released
+    /// ownership with `unassign`, so no completion step remains.
+    pending_error: Option<rdkafka::error::RDKafkaErrorCode>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
 }
@@ -114,6 +119,7 @@ impl KafkaSource {
             opened_at: None,
             saw_first_assignment: false,
             pending_unassign: false,
+            pending_error: None,
             main_queue_rewinds: 0,
         }
     }
@@ -398,6 +404,17 @@ impl Source for KafkaSource {
             self.revoking.clear();
         }
 
+        // A rebalance error whose lanes were surfaced as revoked on the
+        // previous call: the runtime has drained them, and ownership was
+        // already released in the callback. Report the classified error;
+        // librdkafka rejoins on its own and a fresh assignment follows.
+        if let Some(code) = self.pending_error.take() {
+            return Err(SourceError::Client {
+                class: crate::error::classify_consumer_error(code, self.saw_first_assignment),
+                reason: format!("rebalance error: {code}"),
+            });
+        }
+
         let consumer = Arc::clone(self.consumer()?);
 
         // Serve callbacks; with all partitions split and choreographed
@@ -441,12 +458,25 @@ impl Source for KafkaSource {
         self.publish_stats();
 
         // Rebalance intents recorded by the callback during the poll above
-        // (or a previous one).
-        let intent = {
+        // (or a previous one). One intent per call: each needs its runtime
+        // choreography to complete before the next may be acted on. A
+        // pileup here means rebalances are arriving faster than they are
+        // being completed — the precondition for acting on an intent the
+        // group has already moved past — so it is surfaced loudly.
+        let (intent, queued) = {
             let ctx = self.consumer()?.context().clone();
             let mut intents = ctx.intents.lock().expect("intent lock");
-            intents.pop_front()
+            let intent = intents.pop_front();
+            let queued: Vec<&'static str> = intents.iter().map(Intent::kind).collect();
+            (intent, queued)
         };
+        if let (Some(intent), false) = (&intent, queued.is_empty()) {
+            tracing::warn!(
+                processing = intent.kind(),
+                queued = ?queued,
+                "rebalance intents piled up; completing one per poll"
+            );
+        }
         if let Some(intent) = intent {
             match intent {
                 Intent::Assign(tpl) => {
@@ -504,11 +534,31 @@ impl Source for KafkaSource {
                     let barrier = DrainBarrier::new(lanes.len());
                     return Ok(SourceEvent::LanesRevoked { lanes, barrier });
                 }
-                Intent::Error(reason) => {
-                    return Err(SourceError::Client {
-                        class: ErrorClass::Retryable,
-                        reason: format!("rebalance error: {reason}"),
-                    });
+                Intent::Error(code) => {
+                    // The callback already released ownership with
+                    // `unassign` (the contract for the arbitrary-error
+                    // event), so this member holds nothing: every live lane
+                    // is dead and must be drained by the runtime before the
+                    // error is reported. Unlike an ordinary revocation,
+                    // ownership is already gone, so `commit` refuses the
+                    // drained watermarks and that work replays — delivery
+                    // stays at-least-once.
+                    let lanes: Vec<LaneId> = self.assignment.keys().copied().collect();
+                    self.assignment.clear();
+                    self.revoking.clear();
+                    self.prune_lag_series();
+                    if lanes.is_empty() {
+                        return Err(SourceError::Client {
+                            class: crate::error::classify_consumer_error(
+                                code,
+                                self.saw_first_assignment,
+                            ),
+                            reason: format!("rebalance error: {code}"),
+                        });
+                    }
+                    self.pending_error = Some(code);
+                    let barrier = DrainBarrier::new(lanes.len());
+                    return Ok(SourceEvent::LanesRevoked { lanes, barrier });
                 }
             }
         }
@@ -703,6 +753,104 @@ mod tests {
         let mut owned = source.committable_partitions();
         owned.sort_unstable();
         assert_eq!(owned, vec![0, 1]);
+    }
+
+    mod rebalance_error {
+        use super::*;
+        use crate::context::Intent;
+        use rdkafka::error::RDKafkaErrorCode;
+        use spate_core::checkpoint::Checkpointer;
+
+        /// An opened source against an unreachable broker (open never
+        /// contacts one), with `lanes` pre-seeded into the assignment map.
+        fn opened_source(lanes: &[(u32, i32)]) -> KafkaSource {
+            let mut cfg = test_config();
+            cfg.brokers = "127.0.0.1:1".into();
+            let mut source = KafkaSource::new(cfg);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            source.saw_first_assignment = true;
+            for &(lane, part) in lanes {
+                source.assignment.insert(LaneId(lane), part);
+            }
+            source
+        }
+
+        fn push_error(source: &KafkaSource, code: RDKafkaErrorCode) {
+            source
+                .consumer
+                .as_ref()
+                .expect("opened")
+                .context()
+                .intents
+                .lock()
+                .expect("intent lock")
+                .push_back(Intent::Error(code));
+        }
+
+        /// Drive `poll_events` past transient transport noise (the broker is
+        /// unreachable) until it yields something other than `Idle` or a
+        /// `consumer poll` error.
+        fn next_outcome(source: &mut KafkaSource) -> Result<SourceEvent<KafkaLane>, SourceError> {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                assert!(Instant::now() < deadline, "no outcome within deadline");
+                match source.poll_events(Duration::from_millis(50)) {
+                    Ok(SourceEvent::Idle) => continue,
+                    Err(e) if e.to_string().contains("consumer poll") => continue,
+                    other => return other,
+                }
+            }
+        }
+
+        /// A rebalance error with live lanes surfaces their revocation
+        /// first — the runtime must drain them — and reports the classified
+        /// error on the next call. Ownership bookkeeping is cleared: the
+        /// callback already released the partitions, so nothing may remain
+        /// committable.
+        #[test]
+        fn live_lanes_are_revoked_then_the_error_reports() {
+            let mut source = opened_source(&[(0, 0), (1, 1)]);
+            push_error(&source, RDKafkaErrorCode::RebalanceInProgress);
+
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { mut lanes, barrier }) => {
+                    lanes.sort();
+                    assert_eq!(lanes, vec![LaneId(0), LaneId(1)]);
+                    assert_eq!(barrier.remaining(), 2);
+                    barrier.arrive();
+                    barrier.arrive();
+                }
+                other => panic!("expected LanesRevoked, got {other:?}"),
+            }
+            assert!(source.assignment.is_empty(), "ownership cleared");
+            assert!(source.committable_partitions().is_empty());
+
+            match next_outcome(&mut source) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Retryable, "transient code: {reason}");
+                    assert!(reason.contains("rebalance error"), "{reason}");
+                }
+                other => panic!("expected the classified error, got {other:?}"),
+            }
+        }
+
+        /// With nothing assigned the classified error reports immediately,
+        /// and a permanent code (an authorization failure) is fatal rather
+        /// than retried forever behind a green probe.
+        #[test]
+        fn an_authorization_error_is_fatal() {
+            let mut source = opened_source(&[]);
+            push_error(&source, RDKafkaErrorCode::GroupAuthorizationFailed);
+
+            match next_outcome(&mut source) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("rebalance error"), "{reason}");
+                }
+                other => panic!("expected a fatal error, got {other:?}"),
+            }
+        }
     }
 
     /// The retained set that prunes per-partition metric series must exclude

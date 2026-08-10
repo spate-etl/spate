@@ -43,8 +43,14 @@ use std::time::Instant;
 
 /// Control messages the controller sends to a driver thread.
 pub(crate) enum ThreadControl<L> {
-    /// Take ownership of a newly assigned lane.
-    AddLane(L),
+    /// Take ownership of a newly assigned lane, with the pending-ceiling
+    /// gate for its partition (`None` only if the partition is unknown to
+    /// the checkpointer, which is a controller bug — the lane then runs
+    /// ungated rather than not at all).
+    AddLane {
+        lane: L,
+        gate: Option<crate::checkpoint::PendingGate>,
+    },
     /// Stop and drop the listed lanes (revocation): flush the chain, then
     /// arrive at `barrier` once per stopped lane before `deadline`.
     StopLanes {

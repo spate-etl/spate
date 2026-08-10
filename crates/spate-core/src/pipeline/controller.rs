@@ -57,9 +57,6 @@ pub(crate) struct ControllerContext<S: Source> {
     pub commit_interval: Duration,
     pub drain_timeout: Duration,
     pub event_poll_timeout: Duration,
-    /// Pending-batch ceiling per partition: once exceeded, the controller
-    /// pauses assigned lanes until pending drains below half of it.
-    pub max_pending_batches: usize,
     /// A partition watermark stalled behind a failed batch for longer than
     /// this fails the pipeline (permanent sink failures otherwise leave it
     /// running forever, committing nothing for that partition).
@@ -91,7 +88,6 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         commit_interval,
         drain_timeout,
         event_poll_timeout,
-        max_pending_batches,
         stalled_fail_after,
         checkpoint_metrics,
         source_metrics,
@@ -104,7 +100,6 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         assignment: HashMap::new(),
         thread_load: vec![0usize; control_txs.len()],
         paused: HashSet::new(),
-        pending_paused: HashSet::new(),
         epoch: 0,
         pending_commit: BTreeMap::new(),
         committed: BTreeMap::new(),
@@ -149,7 +144,14 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             break;
         }
 
-        // 2. Commit tick.
+        // 2. Harvest acknowledgments every pass, not only on the commit
+        // tick: watermark advances retire batches from the drivers'
+        // pending-ceiling gates, so harvesting at control cadence is what
+        // reopens a gated lane in ~one `event_poll_timeout` instead of a
+        // full commit interval. The commit itself stays on the tick.
+        harvest(&mut checkpointer, &mut state);
+
+        // 3. Commit tick.
         if last_commit.elapsed() >= commit_interval {
             last_commit = Instant::now();
             // Seal partial chain buffers before harvesting acknowledgments.
@@ -192,16 +194,12 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     break;
                 }
             }
-
-            // Pause lanes when per-partition pending batches exceed the
-            // ceiling; resume once they drain below half of it.
-            apply_pending_pressure(&mut source, &checkpointer, &mut state, max_pending_batches);
         }
         if state.failure.is_some() {
             break;
         }
 
-        // 3. Source control-plane events. Fast-commit mode tightens the
+        // 4. Source control-plane events. Fast-commit mode tightens the
         // wait so chased acks are committed within ~a millisecond of
         // resolving instead of on the next periodic tick.
         let poll_timeout = if fast_commit.is_empty() {
@@ -250,7 +248,6 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             Ok(SourceEvent::LanesAdded(lanes)) => {
                 handle_added::<S>(
                     lanes,
-                    &mut source,
                     &mut checkpointer,
                     &mut state,
                     &control_txs,
@@ -300,7 +297,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             }
         }
 
-        // 3b. Chase fast-commit partitions: commit just them, standing down
+        // 4b. Chase fast-commit partitions: commit just them, standing down
         // once each is fully resolved and flushed — or at the deadline, so
         // a stalled batch falls back to the periodic tick instead of
         // spinning here.
@@ -447,11 +444,6 @@ struct State {
     thread_load: Vec<usize>,
     /// Lanes paused at the source by a driver's backpressure request.
     paused: HashSet<LaneId>,
-    /// Lanes the controller itself paused because per-partition pending
-    /// batches exceeded `max_pending_batches`. Kept separate from `paused`
-    /// so a driver resume never lifts a checkpoint-pressure pause and vice
-    /// versa; released as a set once pending drains.
-    pending_paused: HashSet<LaneId>,
     /// Assignment epoch counter (strictly increasing).
     epoch: u32,
     /// Watermarks taken from the checkpointer but not yet successfully
@@ -467,72 +459,24 @@ fn is_fatal(e: &SourceError) -> bool {
     *class == ErrorClass::Fatal
 }
 
-/// Checkpoint-pressure backpressure at the controller: pause every assigned
-/// lane once per-partition pending batches exceed `max_pending_batches`, and
-/// resume them once pending drains below half that (hysteresis). Tracked in
-/// `state.pending_paused`, disjoint from driver backpressure pauses
-/// (`state.paused`) so the two never lift one another. The existing sink
-/// backpressure counters are per-driver and not reachable here, so engage
-/// and release are surfaced via `tracing` rather than a new metric.
-fn apply_pending_pressure<S: Source>(
-    source: &mut S,
+/// The pending-ceiling gate for one partition's lanes. `None` (with a
+/// warning) if the checkpointer does not track the partition — a controller
+/// bug; the lane then runs ungated rather than not at all.
+fn pending_gate(
     checkpointer: &Checkpointer,
-    state: &mut State,
-    max_pending_batches: usize,
-) {
-    let pending = checkpointer.max_pending();
-    if pending > max_pending_batches {
-        // Engage: pause assigned lanes not already paused (by a driver or by
-        // a previous engage). Driver-paused lanes stay the driver's concern.
-        let to_pause: Vec<LaneId> = state
-            .assignment
-            .keys()
-            .filter(|l| !state.paused.contains(l) && !state.pending_paused.contains(l))
-            .copied()
-            .collect();
-        if to_pause.is_empty() {
-            return;
-        }
-        match source.pause(&to_pause) {
-            Ok(()) => {
-                state.pending_paused.extend(to_pause.iter().copied());
-                tracing::warn!(
-                    pending,
-                    limit = max_pending_batches,
-                    lanes = to_pause.len(),
-                    "checkpoint pending-batch limit exceeded; pausing lanes until it drains"
-                );
-            }
-            Err(e) => tracing::warn!(error = %e, "pending-pressure pause failed"),
-        }
-    } else if pending < max_pending_batches / 2 && !state.pending_paused.is_empty() {
-        // Release: resume the lanes we paused that a driver does not also
-        // want paused. Driver-requested pauses persist.
-        let to_resume: Vec<LaneId> = state
-            .pending_paused
-            .iter()
-            .filter(|l| !state.paused.contains(l))
-            .copied()
-            .collect();
-        if to_resume.is_empty() {
-            // Every lane we paused is now also driver-paused; drop our claim.
-            state.pending_paused.clear();
-            return;
-        }
-        match source.resume(&to_resume) {
-            Ok(()) => {
-                tracing::warn!(
-                    pending,
-                    lanes = to_resume.len(),
-                    "checkpoint pending pressure cleared; resuming lanes"
-                );
-                state.pending_paused.clear();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "pending-pressure resume failed; retrying next tick")
-            }
-        }
+    partition: PartitionId,
+    epoch: u32,
+) -> Option<crate::checkpoint::PendingGate> {
+    let gate = checkpointer
+        .advance_handle(partition)
+        .map(|advanced| crate::checkpoint::PendingGate { epoch, advanced });
+    if gate.is_none() {
+        tracing::warn!(
+            partition = partition.0,
+            "no advance counter for an assigned partition; its lanes run ungated"
+        );
     }
+    gate
 }
 
 fn handle_driver_event<S: Source>(event: DriverEvent, source: &mut S, state: &mut State) {
@@ -574,17 +518,12 @@ fn handle_driver_event<S: Source>(event: DriverEvent, source: &mut S, state: &mu
     }
 }
 
-/// Drain acknowledgments, publish checkpoint health, and commit what
-/// advanced. Failed commits are retried next tick (positions merge by
-/// max, so nothing regresses).
-fn commit_cycle<S: Source>(
-    source: &mut S,
-    checkpointer: &mut Checkpointer,
-    state: &mut State,
-    metrics: &CheckpointMetrics,
-    health: &HealthState,
-    only: Option<&BTreeSet<PartitionId>>,
-) {
+/// Drain registrations and acknowledgments into the trackers and fold the
+/// watermarks that advanced into `state.pending_commit` (merged by max, so
+/// a retried commit never regresses). Advancing also retires batches from
+/// the drivers' pending-ceiling gates, which is why the controller calls
+/// this every loop pass rather than only on the commit tick.
+fn harvest(checkpointer: &mut Checkpointer, state: &mut State) {
     let stats = checkpointer.drain();
     if stats.stale_epoch > 0 || stats.unknown > 0 {
         tracing::debug!(
@@ -597,6 +536,20 @@ fn commit_cycle<S: Source>(
         let slot = state.pending_commit.entry(p).or_insert(offset);
         *slot = (*slot).max(offset);
     }
+}
+
+/// Harvest, publish checkpoint health, and commit what advanced. Failed
+/// commits are retried next tick (positions merge by max, so nothing
+/// regresses).
+fn commit_cycle<S: Source>(
+    source: &mut S,
+    checkpointer: &mut Checkpointer,
+    state: &mut State,
+    metrics: &CheckpointMetrics,
+    health: &HealthState,
+    only: Option<&BTreeSet<PartitionId>>,
+) {
+    harvest(checkpointer, state);
 
     metrics.set_pending_max(checkpointer.max_pending());
     let stalled = checkpointer.stalled_partitions();
@@ -708,11 +661,15 @@ fn handle_assign<S: Source>(
             .min_by_key(|(_, load)| **load)
             .map(|(i, _)| i)
             .unwrap_or(0);
+        let gate = pending_gate(checkpointer, partition, state.epoch);
         for lane in group {
             let id = lane.id();
             state.assignment.insert(id, (partition, thread));
             state.thread_load[thread] += 1;
-            let _ = control_txs[thread].send(ThreadControl::AddLane(lane));
+            let _ = control_txs[thread].send(ThreadControl::AddLane {
+                lane,
+                gate: gate.clone(),
+            });
         }
     }
 
@@ -729,7 +686,6 @@ fn handle_assign<S: Source>(
 /// ordering contract as a full assignment.
 fn handle_added<S: Source>(
     lanes: Vec<S::Lane>,
-    source: &mut S,
     checkpointer: &mut Checkpointer,
     state: &mut State,
     control_txs: &[crossbeam_channel::Sender<ThreadControl<S::Lane>>],
@@ -748,7 +704,6 @@ fn handle_added<S: Source>(
         return;
     }
 
-    let mut added: Vec<LaneId> = Vec::new();
     for (partition, group) in groups {
         let thread = state
             .thread_load
@@ -757,28 +712,18 @@ fn handle_added<S: Source>(
             .min_by_key(|(_, load)| **load)
             .map(|(i, _)| i)
             .unwrap_or(0);
+        // Added lanes join the current epoch, so their gates carry it; the
+        // per-partition ceiling makes a newcomer's pressure independent of
+        // its siblings' — no controller-side re-pause is needed.
+        let gate = pending_gate(checkpointer, partition, state.epoch);
         for lane in group {
             let id = lane.id();
             state.assignment.insert(id, (partition, thread));
             state.thread_load[thread] += 1;
-            added.push(id);
-            let _ = control_txs[thread].send(ThreadControl::AddLane(lane));
-        }
-    }
-
-    // Checkpoint pending-pressure is engaged for *every* assigned lane
-    // (see `apply_pending_pressure`), so a lane arriving mid-pressure must
-    // join it rather than run free beside paused siblings. Waiting for the
-    // next tick is not enough: inside the hysteresis band neither the
-    // engage nor the release branch fires, so an unpaused newcomer can keep
-    // reading indefinitely. Driver backpressure needs no equivalent — it
-    // stops the owning thread's polling wholesale.
-    if !state.pending_paused.is_empty() {
-        match source.pause(&added) {
-            Ok(()) => state.pending_paused.extend(added.iter().copied()),
-            Err(e) => {
-                tracing::warn!(error = %e, "pausing an added lane under pending pressure failed")
-            }
+            let _ = control_txs[thread].send(ThreadControl::AddLane {
+                lane,
+                gate: gate.clone(),
+            });
         }
     }
     source_metrics.set_lanes_active(state.assignment.len());
@@ -855,7 +800,6 @@ fn handle_retired<S: Source>(
             state.thread_load[thread] = state.thread_load[thread].saturating_sub(1);
         }
         state.paused.remove(lane);
-        state.pending_paused.remove(lane);
     }
     // Drop tracking only for partitions with no remaining lanes; their
     // late acknowledgments (none exist by contract) would be stale.
@@ -938,7 +882,6 @@ fn revoke_lanes<S: Source>(
             state.thread_load[thread] = state.thread_load[thread].saturating_sub(1);
         }
         state.paused.remove(lane);
-        state.pending_paused.remove(lane);
     }
     // Drop tracking only for partitions with no remaining lanes; their
     // late acknowledgments are then discarded as stale.

@@ -168,7 +168,7 @@ them; extras — `broker` among them — are noted per family.
 | `spate_kafka_source_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
 | `spate_kafka_source_broker_connects_total` | counter | | Connection attempts (including failed), summed across brokers. |
 | `spate_kafka_source_broker_disconnects_total` | counter | | Disconnections (broker, network, or otherwise), summed across brokers. |
-| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while any connection to the broker — regular or a logical coordinator link — is up; `sum()` gives the brokers-up count. |
 | `spate_kafka_source_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
 | `spate_kafka_source_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
 | `spate_kafka_source_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
@@ -194,7 +194,9 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
   wedged join.
 - `rate(spate_kafka_source_broker_tx_errors_total[5m]) > 0` or
   `spate_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
-  by the `broker` label.
+  by the `broker` label. On large clusters a broker the member currently needs
+  no connection to also reads 0 (sparse connections), so alert on brokers the
+  assignment depends on rather than on the cluster-wide sum.
 
 Consumer lag is a framework family (`spate_source_lag_records`) and is alerted
 on separately; see [Metrics](../../../../METRICS.md) for the taxonomy, the

@@ -94,3 +94,29 @@ fn clone_drop_races_resolve_once() {
         assert_eq!(msgs[0].status, AckStatus::Delivered);
     });
 }
+
+/// The pending-ceiling gate's read is safe under any interleaving with the
+/// controller's retirement adds: a driver computing `issued - advanced`
+/// can only over-estimate pending (a stale `advanced` read), never
+/// under-estimate it — the gate closes a round longer, never opens early.
+#[test]
+fn gate_reads_only_over_estimate_pending() {
+    use super::gate::AdvanceCounter;
+    loom::model(|| {
+        const RETIRED: u64 = 2;
+        const ISSUED: u64 = 3;
+        let counter = AdvanceCounter::new();
+        let controller = counter.clone();
+        let t = loom::thread::spawn(move || {
+            for _ in 0..RETIRED {
+                controller.add(1);
+            }
+        });
+        let observed_pending = ISSUED.saturating_sub(counter.get());
+        assert!(
+            (ISSUED - RETIRED..=ISSUED).contains(&observed_pending),
+            "a gate read may lag retirement but never run ahead of it: {observed_pending}"
+        );
+        t.join().unwrap();
+    });
+}

@@ -259,9 +259,11 @@ not `chunk.target_bytes`.
   worst-case commit lag (≈ two intervals + the sink `linger`), at the cost
   of more commit traffic and slightly smaller chunks. Validation floors it
   at 100ms.
-- `max_pending_batches` (default **1024**): unacknowledged batches per
-  partition before that partition pauses — a per-partition backpressure
-  backstop alongside the byte budget.
+- `max_pending_batches` (default **1024**): hard ceiling on unacknowledged
+  batches per partition — at the limit the partition's lanes are skipped at
+  the poll boundary until acknowledgments retire batches. Bounds the replay
+  a stalled partition can accumulate, alongside (and independent of) the
+  byte budget.
 - `drain_timeout` (default **25s**): the shutdown/rebalance drain budget.
   Keep it below `terminationGracePeriodSeconds` — see [Docker](docker.mdx)
   and [Graceful shutdown](../03-guides/graceful-shutdown.mdx).

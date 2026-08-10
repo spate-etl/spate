@@ -2,7 +2,8 @@
 
 When the sink slows down, something upstream has to give. Spate's answer is one
 invariant and the two mechanisms that hold it: one detects the pressure, the
-other acts on it.
+other acts on it. A separate, per-partition ceiling bounds acknowledgment debt
+— [the checkpoint ceiling](#the-checkpoint-ceiling) below.
 
 ## The invariant: a source thread never blocks on a channel send
 
@@ -75,6 +76,38 @@ outside the budget:
 · [S3 source](../04-connectors/sources/s3/README.mdx#configuration)
 · [Datagen source](../04-connectors/sources/datagen/README.mdx#metrics).
 :::
+
+## The checkpoint ceiling: `max_pending_batches` {#the-checkpoint-ceiling}
+
+The byte budget bounds *data* in flight; `checkpoint.max_pending_batches`
+bounds *acknowledgment debt* — batches a partition has registered with the
+checkpointer that no watermark advance has retired. The two move
+independently: a slow acknowledging leg (a low-volume `split` branch, a
+stalled write) can hold a partition's watermark still while its data has
+long since left the queues.
+
+The ceiling is enforced where batches are created. Each partition's owning
+pipeline thread compares the batches it has issued against the batches the
+controller has retired, and skips the partition's lanes at the poll
+boundary while the difference sits at the limit. It is a hard per-partition
+bound, not a request: pending never exceeds the configured value. A gated
+thread keeps servicing its control traffic (the invariant above holds), a
+gated partition costs its siblings nothing, and the gate reopens as soon as
+the controller's next acknowledgment harvest retires batches — within one
+control cycle, well inside a commit interval.
+
+Two consequences worth designing around:
+
+- A partition stalled behind a permanently failed batch accumulates at most
+  `max_pending_batches` of replay before `checkpoint.stalled_fail_after`
+  fails the pipeline: the restart replays a bounded tail rather than
+  everything fetched during the stall.
+- `spate_checkpoint_pending_batches` reads at or below the configured
+  limit; a value above it is a defect, not a tuning signal.
+
+As with the pause controller, the gate stops the framework *taking* data;
+what a source client buffers ahead of the framework is bounded by the
+client's own settings, outside this ceiling.
 
 ## Sizing the budget {#sizing-the-budget}
 

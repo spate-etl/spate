@@ -26,6 +26,7 @@
 mod ack;
 #[cfg(not(loom))]
 mod checkpointer;
+mod gate;
 #[cfg(all(test, loom))]
 mod loom_tests;
 mod sync;
@@ -34,4 +35,5 @@ mod tracker;
 pub use ack::{AckMsg, AckRef, AckSet, AckStatus, BatchId};
 #[cfg(not(loom))]
 pub use checkpointer::{AckIssuer, Checkpointer, DrainStats};
+pub(crate) use gate::{AdvanceCounter, PendingGate};
 pub use tracker::{PartitionTracker, ResolveOutcome};

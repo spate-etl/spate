@@ -44,10 +44,11 @@ use std::time::Duration;
 
 // ─── A borrowing record family ──────────────────────────────────────────
 
-/// One order line, still pointing into the payload buffer the source lane
-/// handed the chain — decoding copies nothing out of it.
+/// One order header — the order's id and the customer who placed it — still
+/// pointing into the payload buffer the source lane handed the chain, so
+/// decoding copies nothing out of it.
 #[derive(Debug)]
-struct OrderLine<'buf> {
+struct OrderHeader<'buf> {
     order_id: &'buf str,
     customer_id: &'buf str,
 }
@@ -55,30 +56,30 @@ struct OrderLine<'buf> {
 /// The family tag: a type-level function from a buffer lifetime to the
 /// record type. It is what lets a lifetime-parameterized record cross the
 /// chain's generic boundaries.
-struct OrderLineF;
+struct OrderHeaderF;
 
-impl RecFamily for OrderLineF {
-    type Rec<'buf> = OrderLine<'buf>;
+impl RecFamily for OrderHeaderF {
+    type Rec<'buf> = OrderHeader<'buf>;
 }
 
-/// Splits `<order_id>|<customer_id>` payloads into borrowed order lines.
-struct OrderLineDeser;
+/// Splits `<order_id>|<customer_id>` payloads into borrowed order headers.
+struct OrderHeaderDeser;
 
-impl Deserializer<OrderLineF> for OrderLineDeser {
+impl Deserializer<OrderHeaderF> for OrderHeaderDeser {
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
         ack: &AckRef,
-        out: &mut dyn EmitRecord<'buf, OrderLine<'buf>>,
+        out: &mut dyn EmitRecord<'buf, OrderHeader<'buf>>,
     ) -> Result<(), DeserError> {
         let text = std::str::from_utf8(raw.bytes).map_err(|e| DeserError::Malformed {
             reason: e.to_string(),
         })?;
         let (order_id, customer_id) = text.split_once('|').ok_or(DeserError::Malformed {
-            reason: "order line has no customer field".to_string(),
+            reason: "order header has no customer field".to_string(),
         })?;
         let _ = out.emit(Record {
-            payload: OrderLine {
+            payload: OrderHeader {
                 order_id,
                 customer_id,
             },
@@ -89,11 +90,11 @@ impl Deserializer<OrderLineF> for OrderLineDeser {
     }
 }
 
-/// The `map_rec` stage: a borrowed order line in, the owned billing key the
+/// The `map_rec` stage: a borrowed order header in, the owned billing key the
 /// sink stores out. A `fn` item, which satisfies the stage's higher-ranked
 /// bound at every buffer lifetime — the call site explains the bound.
-fn billing_key(line: OrderLine<'_>) -> Vec<u8> {
-    format!("{}/{}", line.customer_id, line.order_id).into_bytes()
+fn billing_key(order: OrderHeader<'_>) -> Vec<u8> {
+    format!("{}/{}", order.customer_id, order.order_id).into_bytes()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -210,8 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let order_budget = Arc::new(InflightBudget::new());
     // (`chain` by its full path: the owned chain above already took the
     // name.)
-    let mut orders = spate::ops::chain::<OrderLineF, _>(OrderLineDeser)
-        .filter(|line: &OrderLine<'_>| !line.order_id.is_empty())
+    let mut orders = spate::ops::chain::<OrderHeaderF, _>(OrderHeaderDeser)
+        .filter(|order: &OrderHeader<'_>| !order.order_id.is_empty())
         .map_rec::<Owned<Vec<u8>>, _>(billing_key)
         .sink(
             TestEncoder,
@@ -222,14 +223,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .build();
 
-    // Same drive loop, same lane: three order lines, the middle one with no
+    // Same drive loop, same lane: three order headers, the middle one with no
     // order id for the `filter` to drop.
-    for line in ["o-17|cust-2", "|cust-2", "o-18|cust-3"] {
-        handle.push(p0, None, line.as_bytes());
+    for payload in ["o-17|cust-2", "|cust-2", "o-18|cust-3"] {
+        handle.push(p0, None, payload.as_bytes());
     }
     let mut batch = lanes[0]
         .poll(64, Duration::from_millis(200))?
-        .expect("order lines queued");
+        .expect("order headers queued");
     assert!(matches!(
         orders.push_batch(&mut batch, 0),
         PushOutcome::Done

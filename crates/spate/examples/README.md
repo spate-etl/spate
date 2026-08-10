@@ -78,7 +78,7 @@ The shapes a real deployment takes.
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
 | [`avro_schema_evolution`](avro_schema_evolution.rs) | How to add a field to a producer's schema without breaking a running pipeline with **Avro** | `avro` | nothing |
-| [`clickhouse_aggregating_mv`](clickhouse_aggregating_mv.rs) | How to feed an AggregatingMergeTree rollup through a Null landing table with **ClickHouse** | `clickhouse` | ClickHouse |
+| [`clickhouse_aggregating_mv`](clickhouse_aggregating_mv.rs) | How to roll orders up per region through a Null landing table into an AggregatingMergeTree with **ClickHouse** | `clickhouse` | ClickHouse |
 | [`kafka_avro_flatmap_clickhouse`](kafka_avro_flatmap_clickhouse.rs) | How to fan an order's lines into a row each and shard them by order with **Kafka, Avro and ClickHouse Native** | `full` | Kafka and ClickHouse |
 | [`kafka_avro_to_clickhouse`](kafka_avro_to_clickhouse.rs) | How to load an Avro order stream from Kafka into ClickHouse with **Kafka, Avro and ClickHouse** | `full` | Kafka, a schema registry and ClickHouse |
 | [`kafka_to_kafka_split`](kafka_to_kafka_split.rs) | How to fan an order stream out to per-region topics with **Kafka** | `kafka` | Kafka |

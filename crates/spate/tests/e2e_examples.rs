@@ -778,7 +778,7 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
 
 /// `clickhouse_aggregating_mv`: rows into a `Null` landing table, aggregate
 /// states built by the materialized view. This example feeds a fixed set of
-/// events and stops itself, so there is no SIGTERM to send — only a clean exit
+/// orders and stops itself, so there is no SIGTERM to send — only a clean exit
 /// and the states to read back.
 #[test]
 #[ignore = "requires Docker"]
@@ -786,25 +786,27 @@ fn clickhouse_aggregating_mv_example_builds_states() {
     let h = Harness::up();
     ddl(
         &h,
-        "CREATE TABLE events_agg (\
-             bucket String, \
-             dt_min AggregateFunction(min, DateTime), \
-             dt_max AggregateFunction(max, DateTime), \
-             counts AggregateFunction(sumMap, Map(String, UInt64))) \
-         ENGINE = AggregatingMergeTree ORDER BY bucket \
+        "CREATE TABLE orders_agg (\
+             region String, \
+             first_placed_at AggregateFunction(min, DateTime), \
+             last_placed_at AggregateFunction(max, DateTime), \
+             qty_by_sku AggregateFunction(sumMap, Map(String, UInt64))) \
+         ENGINE = AggregatingMergeTree ORDER BY region \
          SETTINGS non_replicated_deduplication_window = 100",
     );
     ddl(
         &h,
-        "CREATE TABLE events_null (bucket String, dt DateTime, counts Map(String, UInt64)) \
+        "CREATE TABLE orders_null (\
+             region String, placed_at DateTime, qty_by_sku Map(String, UInt64)) \
          ENGINE = Null",
     );
     ddl(
         &h,
-        "CREATE MATERIALIZED VIEW events_mv TO events_agg AS \
-         SELECT bucket, minState(dt) AS dt_min, maxState(dt) AS dt_max, \
-                sumMapState(counts) AS counts \
-         FROM events_null GROUP BY bucket",
+        "CREATE MATERIALIZED VIEW orders_mv TO orders_agg AS \
+         SELECT region, minState(placed_at) AS first_placed_at, \
+                maxState(placed_at) AS last_placed_at, \
+                sumMapState(qty_by_sku) AS qty_by_sku \
+         FROM orders_null GROUP BY region",
     );
 
     let config = render_config("clickhouse_aggregating_mv");
@@ -814,38 +816,59 @@ fn clickhouse_aggregating_mv_example_builds_states() {
     ];
     spawn("clickhouse_aggregating_mv", Some(&config), &env).wait_exit(OUTPUT_DEADLINE);
 
-    // The view aggregated the five demo events into their two buckets, and
-    // the states finalize to the values those events carry.
+    // The view aggregated the five demo orders into their two regions, and
+    // the states finalize to the values those orders carry.
     assert_eq!(
-        h.scalar("SELECT uniqExact(bucket) FROM events_agg"),
+        h.scalar("SELECT uniqExact(region) FROM orders_agg"),
         2,
-        "one aggregate row per bucket"
+        "the view grouped the five orders into their two regions"
+    );
+    // eu-west's orders arrive out of order (1767225600, 1767229200,
+    // 1767227400), so the min and max states are what put them back in it.
+    assert_eq!(
+        h.scalar(
+            "SELECT toUInt64(maxMerge(last_placed_at)) FROM orders_agg \
+             WHERE region = 'eu-west' GROUP BY region"
+        ),
+        1_767_229_200,
+        "the max state over eu-west's three orders"
     );
     assert_eq!(
         h.scalar(
-            "SELECT toUInt64(maxMerge(dt_max)) FROM events_agg WHERE bucket = 'a' GROUP BY bucket"
+            "SELECT toUInt64(minMerge(first_placed_at)) FROM orders_agg \
+             WHERE region = 'eu-west' GROUP BY region"
         ),
-        2000,
-        "the max state over bucket a's three events"
+        1_767_225_600,
+        "the min state over eu-west's three orders"
     );
+    // eu-west's quantities are KBD-01=1,MSE-01=2 then KBD-01=2,MON-01=3 then
+    // MSE-01=1, so the summed map is KBD-01=3,MSE-01=3,MON-01=3. Assert the
+    // whole map rather than a sum over its values: `mapValues` discards the
+    // keys, and every eu-west total is 3, so a key-side regression that
+    // collapsed all three into one would still add to 9. Reading the map back
+    // through the state is what holds the sink's `Map(String, UInt64)`
+    // encoding end to end — `validate_schema: names` rejects an
+    // `AggregateFunction` column but does not check a field's shape against
+    // its column type; only `full` does that.
     assert_eq!(
         h.scalar(
-            "SELECT toUInt64(minMerge(dt_min)) FROM events_agg WHERE bucket = 'a' GROUP BY bucket"
+            "SELECT toUInt64(length(m) = 3 AND m['KBD-01'] = 3 \
+                 AND m['MSE-01'] = 3 AND m['MON-01'] = 3) \
+             FROM (SELECT sumMapMerge(qty_by_sku) AS m FROM orders_agg \
+                   WHERE region = 'eu-west' GROUP BY region)"
         ),
-        1000,
-        "the min state over bucket a's three events"
+        1,
+        "the summed map over eu-west's three orders, keys included"
     );
-    // Bucket a's counts are x=1,y=2 then x=2,z=3 then y=1, so the summed map
-    // is x=3,y=3,z=3. Reading the values back through the state is what holds
-    // the sink's `Map(String, UInt64)` encoding: `validate_schema: names`
-    // checks column names, never the column's type.
+    // The larger multi-SKU region, otherwise only counted.
     assert_eq!(
         h.scalar(
-            "SELECT toUInt64(arraySum(mapValues(sumMapMerge(counts)))) FROM events_agg \
-             WHERE bucket = 'a' GROUP BY bucket"
+            "SELECT toUInt64(length(m) = 2 AND m['CBL-01'] = 15 AND m['DCK-01'] = 7) \
+             FROM (SELECT sumMapMerge(qty_by_sku) AS m FROM orders_agg \
+                   WHERE region = 'us-east' GROUP BY region)"
         ),
-        9,
-        "the summed map over bucket a's three events"
+        1,
+        "the summed map over us-east's two orders"
     );
 }
 

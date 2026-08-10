@@ -1,8 +1,8 @@
 //! Fan-out pipeline: Kafka → Avro → flat_map → ClickHouse **Native** (sharded).
 //!
 //! The columnar twin of `kafka_avro_to_clickhouse.rs`. Where that example
-//! writes one row per message through RowBinary, this one decodes a nested
-//! `SensorBatch`, explodes its event array into one row per event with
+//! totals a placed order into one row through RowBinary, this one keeps the
+//! lines: it explodes the order's line array into one row per line with
 //! `flat_map`, encodes the rows **columnar** with the ClickHouse Native
 //! encoder, and routes each row to the shard a `Distributed` table would pick.
 //!
@@ -13,9 +13,10 @@
 //! - **Native columnar encoding** — fields are written into per-column buffers
 //!   rather than row-at-a-time, which is what ClickHouse ingests most cheaply.
 //! - **Record-aware shard routing** — flat_map children share their parent's
-//!   metadata, so the default meta-only router would colocate every event of a
-//!   batch; a [`DistributedRouter`](spate::clickhouse::DistributedRouter) keyed
-//!   on each row's own `sensor` places them the way `xxHash64(sensor)` would.
+//!   metadata, so the default meta-only router would colocate every line of an
+//!   order anyway; a [`DistributedRouter`](spate::clickhouse::DistributedRouter)
+//!   keyed on each row's own `order_id` places them the way
+//!   `xxHash64(order_id)` would, which is what a `Distributed` read needs.
 //!
 //! # What the builder desugars to
 //!
@@ -26,30 +27,29 @@
 //! 1. `Pipeline::from_path` — telemetry, metrics exporter (before any handle),
 //!    the shared I/O runtime, and the inflight budget.
 //! 2. `KafkaSource::from_component_config` — the `source: { kafka: ... }` section.
-//! 3. `AvroDeserializerBuilder::build_serde::<SensorBatch>()` — the typed
+//! 3. `AvroDeserializerBuilder::build_serde::<OrderPlaced>()` — the typed
 //!    decoder. The YAML uses `mode: raw` with an inline writer schema, so no
 //!    registry is needed.
 //! 4. `sink.native_schema()` — fetches `system.columns` and builds the columnar
 //!    template; `NativeEncoder::new` mints one encoder per shard on `.clone()`.
-//! 5. `.flat_map` fans out the event array; `.filter` drops negatives. Native
-//!    column mapping is **positional** — the `SensorEvent` field order must
-//!    equal the YAML `columns` order — with a first-record field-name check
-//!    off the hot path.
-//! 6. `sink.router::<Owned<SensorEvent>>(sensor_key)` — a record-aware
+//! 5. `.flat_map` fans out the line array; `.filter` drops a line ordering no
+//!    units. Native column mapping is **positional** — the `OrderLineRow`
+//!    field order must equal the YAML `columns` order — with a first-record
+//!    field-name check off the hot path.
+//! 6. `sink.router::<Owned<OrderLineRow>>(order_key)` — a record-aware
 //!    [`DistributedRouter`](spate::clickhouse::DistributedRouter): each exploded
-//!    event routes by **its own** `sensor` field (flat_map children share
-//!    their parent's metadata, so the default meta-only `KeyHashRouter`
-//!    would colocate them), placing every sensor on the shard a ClickHouse
-//!    `Distributed` table with sharding key `xxHash64(sensor)` would pick.
-//!    With the YAML's single shard it routes identically to the default —
-//!    scaling out is a YAML change (see the `shards:` comment there).
+//!    line routes by **its own** `order_id` field, placing every order's lines
+//!    on the shard a ClickHouse `Distributed` table with sharding key
+//!    `xxHash64(order_id)` would pick. With the YAML's single shard it routes
+//!    identically to the default — scaling out is a YAML change (see the
+//!    `shards:` comment there).
 //! 7. `.run(source)` — the runtime, reusing the builder's I/O runtime.
 //!
 //! # Run it
 //!
 //! Needs Kafka and ClickHouse (`KAFKA_BROKERS`, `CLICKHOUSE_URL`), a topic of
-//! bare-datum Avro `SensorBatch` messages (`mode: raw`, no registry), and the
-//! target table. `batch_ts_ms` is epoch milliseconds and lands in a real
+//! bare-datum Avro `OrderPlaced` messages (`mode: raw`, no registry), and the
+//! target table. `placed_at` is epoch milliseconds and lands in a real
 //! `DateTime64(3)` column: the row declares that scale with the
 //! [`DateTime64Millis`] wrapper, which encodes as the raw little-endian
 //! `Int64` (exactly the epoch-millis wire value, zero cost), and the column
@@ -63,19 +63,19 @@
 //! (a plain `i64` field declares no scale, so nothing could validate it).
 //!
 //! ```sql
-//! CREATE TABLE sensor_events (
-//!     sensor       LowCardinality(String),
-//!     batch_ts_ms  DateTime64(3),
-//!     name         LowCardinality(String),
-//!     value        Int64,
-//!     unit         LowCardinality(String)
-//! ) ENGINE = MergeTree ORDER BY (sensor, batch_ts_ms);
+//! CREATE TABLE order_lines (
+//!     order_id    UInt64,
+//!     placed_at   DateTime64(3),
+//!     sku         LowCardinality(String),
+//!     qty         UInt32,
+//!     unit_cents  UInt32
+//! ) ENGINE = MergeTree ORDER BY (order_id, sku);
 //!
 //! -- Sharded deployments add a Distributed table for SELECTs whose sharding
 //! -- key matches the router (inserts stay direct-to-local); with
-//! -- optimize_skip_unused_shards=1, sensor-filtered queries touch one shard:
-//! -- CREATE TABLE sensor_events_dist AS sensor_events
-//! --     ENGINE = Distributed(<cluster>, <db>, sensor_events, xxHash64(sensor));
+//! -- optimize_skip_unused_shards=1, order-filtered queries touch one shard:
+//! -- CREATE TABLE order_lines_dist AS order_lines
+//! --     ENGINE = Distributed(<cluster>, <db>, order_lines, xxHash64(order_id));
 //! ```
 //!
 //! ```sh
@@ -87,7 +87,7 @@
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
-// INDEX-GOAL:  fan a nested batch into one row per event and shard them by sensor
+// INDEX-GOAL:  fan an order's lines into a row each and shard them by order
 // INDEX-TECH:  Kafka, Avro and ClickHouse Native
 // INDEX-NEEDS: Kafka and ClickHouse
 
@@ -102,21 +102,29 @@ use spate::prelude::*;
 use std::path::Path;
 
 // ANCHOR: record
-/// One Kafka datum: a sensor's batch of readings. The nested event array is
-/// exploded downstream by `flat_map`.
+/// One Kafka datum: a placed order, whose nested line array is exploded
+/// downstream by `flat_map`. The writer schema carries the order's customer
+/// and region too; a target type declares the fields it reads and the rest are
+/// discarded.
+///
+/// Discarded, not skipped: `build_serde` decodes the datum into an
+/// intermediate value and then reads the target out of it by name, so an
+/// undeclared field still costs what decoding it costs.
+/// [`build_serde_datum`](spate::avro::AvroDeserializerBuilder::build_serde_datum)
+/// is the path that steps over it without materializing it.
 #[derive(Debug, Deserialize)]
-struct SensorBatch {
-    sensor: String,
-    batch_ts_ms: i64,
-    events: Vec<Event>,
+struct OrderPlaced {
+    order_id: u64,
+    placed_at: i64,
+    lines: Vec<OrderLine>,
 }
 
-/// One inner reading.
+/// One line of an order.
 #[derive(Debug, Deserialize)]
-struct Event {
-    name: String,
-    value: i64,
-    unit: String,
+struct OrderLine {
+    sku: String,
+    qty: u32,
+    unit_cents: u32,
 }
 
 /// The `flat_map` output = one ClickHouse row. **Field order must match the
@@ -125,21 +133,25 @@ struct Event {
 /// full` can check it against the column's declared precision (it still
 /// encodes as the raw `Int64`).
 #[derive(Debug, Serialize)]
-struct SensorEvent {
-    sensor: String,
-    batch_ts_ms: DateTime64Millis,
-    name: String,
-    value: i64,
-    unit: String,
+struct OrderLineRow {
+    order_id: u64,
+    placed_at: DateTime64Millis,
+    sku: String,
+    qty: u32,
+    unit_cents: u32,
 }
 // ANCHOR_END: record
 
 // ANCHOR: shard_key
-/// Sharding key: the `sensor` column — one sensor always lands on one shard,
-/// matching a `Distributed` DDL of `xxHash64(sensor)`. A named fn item: the
-/// extractor is a fn pointer, so it cannot capture.
-fn sensor_key(row: &SensorEvent) -> ShardKey<'_> {
-    ShardKey::Str(&row.sensor)
+/// Sharding key: the `order_id` column — an order's lines always land
+/// together, matching a `Distributed` DDL of `xxHash64(order_id)`. A named fn
+/// item: the extractor is a fn pointer, so it cannot capture.
+///
+/// `ShardKey::U64` hashes eight little-endian bytes, which is what ClickHouse
+/// hashes for a `UInt64` column. The variant has to match the column's
+/// declared width — `U32` over the same value hashes differently.
+fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
+    ShardKey::U64(row.order_id)
 }
 // ANCHOR_END: shard_key
 
@@ -162,11 +174,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<SensorBatch>()?;
+            .build_serde::<OrderPlaced>()?;
 
-    // ── Sink: ClickHouse Native, sharded by sensor ──────────────────────
+    // ── Sink: ClickHouse Native, sharded by order ───────────────────────
     // `format: native` fetches `system.columns` and hands the encoder the
-    // real column types (so `batch_ts_ms`'s `DateTime64(3)` is laid out as an
+    // real column types (so `placed_at`'s `DateTime64(3)` is laid out as an
     // Int64). The encoder is `Clone`: the terminal stage mints one per shard.
     // ANCHOR: router
     let sink = spate::clickhouse::config::from_component_config(
@@ -177,38 +189,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pipeline.block_on(sink.validate_distributed())?;
     // Weights come from the validated YAML — router and endpoints can't
     // drift. With a single shard this routes identically to the default
-    // (everything to shard 0); with N it matches `xxHash64(sensor)`.
-    let router = sink.router::<Owned<SensorEvent>>(sensor_key);
+    // (everything to shard 0); with N it matches `xxHash64(order_id)`.
+    let router = sink.router::<Owned<OrderLineRow>>(order_key);
     // ANCHOR_END: router
     // ANCHOR: encoder
     let native = pipeline.block_on(sink.native_schema())?;
-    let encoder = NativeEncoder::<Owned<SensorEvent>>::new(native);
+    let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(native);
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
-    // `flat_map` explodes each batch's event array into one row per event;
-    // `filter` drops negative readings. `NativeEncoder::encode` then writes
-    // each field into its per-column buffer on the pipeline thread, inside
-    // the terminal sink-handoff stage.
+    // `flat_map` explodes each order's line array into one row per line;
+    // `filter` drops a line that orders nothing. It is the only bad quantity
+    // the filter can see: `qty` is unsigned, so a negative one fails to decode
+    // and takes the whole order with it, one stage earlier. `NativeEncoder::
+    // encode` then writes each field into its per-column buffer on the
+    // pipeline thread, inside the terminal sink-handoff stage.
     let report = pipeline
         .sink(sink)?
         .chains(move |ctx| {
             let chunk_cfg = ctx.chunk();
-            chain::<Owned<SensorBatch>, _>(deserializer.clone())
+            chain::<Owned<OrderPlaced>, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
-                .flat_map::<Owned<SensorEvent>, _>(|batch, out| {
-                    let (sensor, batch_ts_ms) = (batch.sensor, batch.batch_ts_ms);
-                    for event in batch.events {
-                        out.emit(SensorEvent {
-                            sensor: sensor.clone(),
-                            batch_ts_ms: DateTime64Millis(batch_ts_ms),
-                            name: event.name,
-                            value: event.value,
-                            unit: event.unit,
+                .flat_map::<Owned<OrderLineRow>, _>(|order, out| {
+                    let (order_id, placed_at) = (order.order_id, order.placed_at);
+                    for line in order.lines {
+                        out.emit(OrderLineRow {
+                            order_id,
+                            placed_at: DateTime64Millis(placed_at),
+                            sku: line.sku,
+                            qty: line.qty,
+                            unit_cents: line.unit_cents,
                         });
                     }
                 })
-                .filter(|event: &SensorEvent| event.value >= 0)
+                .filter(|line: &OrderLineRow| line.qty > 0)
                 .sink(
                     encoder.clone(),
                     router.clone(), // Clone, not Copy: one router per chain lane

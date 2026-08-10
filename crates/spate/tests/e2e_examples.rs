@@ -73,17 +73,20 @@ const ORDER_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace":
 
 /// Writer schema of `kafka_avro_flatmap_clickhouse.yaml`, restated here. It
 /// must stay identical to that file's `inline:` schema, or the example's
-/// decoder cannot read what this test produces.
-const SENSOR_SCHEMA: &str = r#"{"type":"record","name":"SensorBatch","fields":[
-    {"name":"sensor","type":"string"},
-    {"name":"batch_ts_ms","type":"long"},
-    {"name":"events","type":{"type":"array","items":
-      {"type":"record","name":"Event","fields":[
-        {"name":"name","type":"string"},
-        {"name":"value","type":"long"},
-        {"name":"unit","type":"string"}]}}}]}"#;
+/// decoder cannot read what this test produces. It is the same `order_placed`
+/// record [`ORDER_SCHEMA`] carries — one domain, two framings.
+const PLACED_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace":"spate.datagen","fields":[
+    {"name":"order_id","type":"long"},
+    {"name":"customer_id","type":"int"},
+    {"name":"region","type":"string"},
+    {"name":"placed_at","type":{"type":"long","logicalType":"timestamp-millis"}},
+    {"name":"lines","type":{"type":"array","items":
+      {"type":"record","name":"OrderLine","fields":[
+        {"name":"sku","type":"string"},
+        {"name":"qty","type":"int"},
+        {"name":"unit_cents","type":"int"}]}}}]}"#;
 
-/// Writer schema of `multi_table_split.yaml`; see [`SENSOR_SCHEMA`].
+/// Writer schema of `multi_table_split.yaml`; see [`PLACED_SCHEMA`].
 const METRIC_SCHEMA: &str = r#"{"type":"record","name":"MetricBatch","fields":[
     {"name":"host","type":"string"},
     {"name":"ts_ms","type":"long"},
@@ -492,66 +495,92 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     );
 
     // ── kafka_avro_flatmap_clickhouse: raw Avro → flat_map → Native ────────
-    let sensor_schema = Schema::parse_str(SENSOR_SCHEMA).expect("sensor schema");
+    let placed_schema = Schema::parse_str(PLACED_SCHEMA).expect("placed schema");
     ddl(
         &h,
         // The deduplication window is what makes an exact row count assertable
         // under at-least-once (INV-1): the sink stamps a token per batch, so a
         // replayed batch is dropped by the server instead of doubling the table.
-        "CREATE TABLE sensor_events (\
-             sensor LowCardinality(String), batch_ts_ms DateTime64(3), \
-             name LowCardinality(String), value Int64, unit LowCardinality(String)) \
-         ENGINE = MergeTree ORDER BY (sensor, batch_ts_ms) \
+        "CREATE TABLE order_lines (\
+             order_id UInt64, placed_at DateTime64(3), \
+             sku LowCardinality(String), qty UInt32, unit_cents UInt32) \
+         ENGINE = MergeTree ORDER BY (order_id, sku) \
          SETTINGS non_replicated_deduplication_window = 100",
     );
-    h.create_topic("sensor-batches", 2);
-    let batches: i64 = 100;
-    let per_batch: i64 = 5;
-    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..batches)
+    h.create_topic("order-placed", 2);
+    let placed: i64 = 100;
+    let per_order: i64 = 5;
+    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..placed)
         .map(|i| {
-            let events: Vec<Value> = (0..per_batch)
-                .map(|e| {
+            let lines: Vec<Value> = (0..per_order)
+                .map(|l| {
                     Value::Record(vec![
-                        ("name".into(), Value::String(format!("m{e}"))),
-                        ("value".into(), Value::Long(i * 10 + e)),
-                        ("unit".into(), Value::String("c".into())),
+                        ("sku".into(), Value::String(format!("KBD-{l:02}"))),
+                        // Every line orders at least one unit, so the
+                        // example's `qty > 0` filter drops none of them and
+                        // the row count below is exact.
+                        ("qty".into(), Value::Int(i32::try_from(l).expect("qty") + 1)),
+                        ("unit_cents".into(), Value::Int(7_900)),
                     ])
                 })
                 .collect();
             let datum = encode(
-                &sensor_schema,
+                &placed_schema,
                 vec![
-                    ("sensor", Value::String(format!("sensor-{}", i % 4))),
-                    ("batch_ts_ms", Value::Long(1_700_000_000_000 + i)),
-                    ("events", Value::Array(events)),
+                    ("order_id", Value::Long(i)),
+                    (
+                        "customer_id",
+                        Value::Int(i32::try_from(i % 1024).expect("customer")),
+                    ),
+                    ("region", Value::String("eu-west".into())),
+                    ("placed_at", Value::Long(1_700_000_000_000 + i)),
+                    ("lines", Value::Array(lines)),
                 ],
             );
-            (format!("sensor-{}", i % 4).into_bytes(), datum)
+            (i.to_string().into_bytes(), datum)
         })
         .collect();
-    produce_raw(&h.brokers, "sensor-batches", &payloads);
+    produce_raw(&h.brokers, "order-placed", &payloads);
 
-    let rows = u64::try_from(batches * per_batch).expect("sensor rows");
+    let rows = u64::try_from(placed * per_order).expect("line rows");
     let config = render_config("kafka_avro_flatmap_clickhouse");
     let mut example = spawn("kafka_avro_flatmap_clickhouse", Some(&config), &env);
-    example.wait_for("every exploded sensor row", || {
-        h.count("sensor_events") >= rows
+    example.wait_for("every exploded order line", || {
+        h.count("order_lines") >= rows
     });
     example.terminate();
-    // `flat_map` exploded each batch into exactly its `per_batch` readings —
-    // an under-count would have hung the wait above, an over-count lands here.
+    // `flat_map` exploded each order into exactly its `per_order` lines — an
+    // under-count would have hung the wait above, an over-count lands here.
     assert_eq!(
-        h.count("sensor_events"),
+        h.count("order_lines"),
         rows,
-        "each batch exploded into its readings and no more"
+        "each order exploded into its lines and no more"
+    );
+    // Every line kept its parent's order id, which is what the router shards
+    // on. A distinct-id count alone would not say that — 500 rows over 100
+    // ids holds however the ids were assigned. The producer sets
+    // `placed_at = 1_700_000_000_000 + order_id`, so the pairing is checkable:
+    // a line carrying another order's id breaks the identity.
+    assert_eq!(
+        h.scalar(
+            "SELECT count() FROM order_lines \
+             WHERE toUnixTimestamp64Milli(placed_at) - 1700000000000 != order_id"
+        ),
+        0,
+        "every line carries the order id of the order it was exploded from"
+    );
+    assert_eq!(
+        h.scalar("SELECT uniqExact(order_id) FROM order_lines"),
+        u64::try_from(placed).expect("placed"),
+        "the lines cover every order, one group each"
     );
     let committed: i64 = h
-        .committed("sensor-batches", "sensor-events-etl", 2)
+        .committed("order-placed", "order-lines-etl", 2)
         .into_iter()
         .sum();
     assert_eq!(
-        committed, batches,
-        "the drain committed a watermark covering every batch"
+        committed, placed,
+        "the drain committed a watermark covering every order"
     );
 
     // ── multi_table_split: one stream, two tables ──────────────────────────
@@ -563,7 +592,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         ddl(
             &h,
             &format!(
-                // Deduplication window: see the `sensor_events` DDL above.
+                // Deduplication window: see the `order_lines` DDL above.
                 "CREATE TABLE {table} (\
                      host LowCardinality(String), ts_ms DateTime64(3), \
                      name LowCardinality(String), {last}) \
@@ -573,6 +602,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         );
     }
     h.create_topic("metric-batches", 2);
+    let batches: i64 = 100;
     let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..batches)
         .map(|i| {
             // One gauge and one text reading per batch, plus one kind that

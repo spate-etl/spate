@@ -41,7 +41,7 @@ entries), it never fails startup, and its silence proves nothing. Own the
 ordering operationally: list the shards in cluster order and keep the two
 configs under one review.
 
-## A worked example: shard by `sensor`
+## A worked example: shard by `order_id`
 
 ### 1. The cluster (`remote_servers`)
 
@@ -51,7 +51,7 @@ topology this sink assumes — see the README):
 ```xml
 <clickhouse>
     <remote_servers>
-        <sensors>
+        <storefront>
             <shard>
                 <internal_replication>true</internal_replication>
                 <weight>1</weight>
@@ -62,7 +62,7 @@ topology this sink assumes — see the README):
                 <weight>1</weight>
                 <replica><host>ch-1</host><port>9000</port></replica>
             </shard>
-        </sensors>
+        </storefront>
     </remote_servers>
 </clickhouse>
 ```
@@ -74,22 +74,24 @@ A local table on **every** shard node (what the sink writes to), and a
 
 ```sql
 -- On each shard node: the local table the sink inserts into.
-CREATE TABLE analytics.sensor_events
+CREATE TABLE analytics.order_lines
 (
-    sensor  String,
-    ts_ms   Int64,
-    value   Float64
+    order_id    UInt64,
+    placed_at   DateTime64(3),
+    sku         LowCardinality(String),
+    qty         UInt32,
+    unit_cents  UInt32
 )
 ENGINE = MergeTree
-ORDER BY (sensor, ts_ms)
+ORDER BY (order_id, sku)
 SETTINGS non_replicated_deduplication_window = 100;
 
 -- On a query node: reads fan out (and prune) across the cluster.
-CREATE TABLE analytics.sensor_events_dist AS analytics.sensor_events
-ENGINE = Distributed(sensors, analytics, sensor_events, xxHash64(sensor));
+CREATE TABLE analytics.order_lines_dist AS analytics.order_lines
+ENGINE = Distributed(storefront, analytics, order_lines, xxHash64(order_id));
 ```
 
-The `Distributed` engine's fourth argument, `xxHash64(sensor)`, is the
+The `Distributed` engine's fourth argument, `xxHash64(order_id)`, is the
 sharding expression the sink must reproduce exactly.
 
 ### 3. The sink
@@ -101,19 +103,19 @@ sharding expression the sink must reproduce exactly.
 ```yaml
 sink:
   clickhouse:
-    table: analytics.sensor_events      # the LOCAL table, never the Distributed one
-    columns: [sensor, ts_ms, value]
+    table: analytics.order_lines        # the LOCAL table, never the Distributed one
+    columns: [order_id, placed_at, sku, qty, unit_cents]
     shards:
       - replicas: ["http://ch-0:8123"]
         weight: 1
       - replicas: ["http://ch-1:8123"]
         weight: 1
     distributed_check:
-      cluster: sensors
-      table: analytics.sensor_events_dist
-      sharding_key: sensor
+      cluster: storefront
+      table: analytics.order_lines_dist
+      sharding_key: order_id
       # endpoint: "http://query-node:8123"  # if the Distributed table lives off-shard
-      # sharding_expr: "xxHash64(sensor)"    # escape hatch for non-identifier keys
+      # sharding_expr: "xxHash64(order_id)"  # escape hatch for non-identifier keys
 ```
 
 `distributed_check` takes **exactly one** of `sharding_key` (the shipped,
@@ -133,15 +135,17 @@ The key extractor returns a `ShardKey` and is passed as a fn pointer — a named
 `xxHash64(seed 0)` and the weight-interval selection. Both blocks below come
 from
 [`kafka_avro_flatmap_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_flatmap_clickhouse.rs),
-a sharded Native pipeline that needs a Kafka topic of Avro batches and the
+a sharded Native pipeline that needs a Kafka topic of Avro orders and the
 target table, and runs with
 `cargo run --release -p spate --features full --example kafka_avro_flatmap_clickhouse`:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=shard_key
 ```
 
-`SensorEvent` is the row the chain emits, and `ShardKey::Str` borrows its
-`sensor` field, so extraction allocates nothing on the per-record path.
+`OrderLineRow` is the row the chain emits, and `ShardKey::U64` carries its
+`order_id` by value, so extraction allocates nothing on the per-record path.
+The variant is the column's declared width, not a free choice — the parity
+rules below say what goes wrong when it is not.
 
 The router is minted from the sink itself, which is where the validated
 weights live. The single `sink:` section above resolves under the name
@@ -151,7 +155,7 @@ weights live. The single `sink:` section above resolves under the name
 ```
 
 `sink.router::<F>` is parameterized by the record family the terminal stage
-carries — `Owned<SensorEvent>` for an owned row struct, matching the family the
+carries — `Owned<OrderLineRow>` for an owned row struct, matching the family the
 encoder is built over.
 
 `router` then drops into the chain's terminal stage in place of
@@ -183,8 +187,8 @@ Once placement matches, prune reads by enabling the setting per query:
 
 ```sql
 SELECT count()
-FROM analytics.sensor_events_dist
-WHERE sensor = 'sensor-42'
+FROM analytics.order_lines_dist
+WHERE order_id = 42
 SETTINGS optimize_skip_unused_shards = 1;
 ```
 

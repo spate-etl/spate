@@ -262,11 +262,11 @@ fn default_weight() -> u32 {
 /// sink:
 ///   clickhouse:
 ///     distributed_check:
-///       cluster: prod
-///       table: analytics.events_dist   # db-qualified, or bare like `table`
-///       sharding_key: sensor           # expected DDL expr = xxHash64(sensor)
-///       # sharding_expr: "xxHash64(sensor)"  # escape hatch — exactly one
-///       # endpoint: "http://ch-front:8123"   # default: shard 0, replica 0
+///       cluster: storefront
+///       table: analytics.order_lines_dist  # db-qualified, or bare like `table`
+///       sharding_key: order_id             # expected DDL = xxHash64(order_id)
+///       # sharding_expr: "xxHash64(order_id)"  # escape hatch — exactly one
+///       # endpoint: "http://ch-front:8123"     # default: shard 0, replica 0
 /// ```
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -392,7 +392,7 @@ impl ClickHouseSink {
     ///
     /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
     /// projections are not injective) — name it:
-    /// `sink.router::<EventFam>(sensor_key)`.
+    /// `sink.router::<Owned<OrderLineRow>>(order_key)`.
     #[must_use]
     pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
         DistributedRouter::new(extract, &self.shard_weights)

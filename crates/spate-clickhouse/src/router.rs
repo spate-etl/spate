@@ -54,8 +54,8 @@ pub enum ShardKey<'a> {
 /// coerce to this type:
 ///
 /// ```ignore
-/// fn sensor_key<'a>(row: &'a SensorEvent<'_>) -> ShardKey<'a> {
-///     ShardKey::Str(row.sensor)
+/// fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
+///     ShardKey::U64(row.order_id)
 /// }
 /// ```
 ///
@@ -65,8 +65,10 @@ pub enum ShardKey<'a> {
 /// in-flight batch and stops the pipeline, and because restart replays
 /// the same record, a payload-dependent panic (say, slicing an empty
 /// field) is a deterministic crash loop until a code fix ships. For a
-/// malformed or absent key, return a deterministic fallback such as
-/// `ShardKey::Str("")` instead.
+/// malformed or absent key, return a deterministic fallback **in the same
+/// variant as the key** — `ShardKey::U64(0)` for the extractor above. A
+/// fallback of another variant hashes a different domain, so those records
+/// land where the server would not put them.
 pub type KeyExtractor<F> = for<'a, 'buf> fn(&'a <F as RecFamily>::Rec<'buf>) -> ShardKey<'a>;
 
 /// Routes records to shards exactly as a ClickHouse `Distributed` table

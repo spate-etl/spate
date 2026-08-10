@@ -24,8 +24,10 @@ Defaults follow the likely blast radius: **deserializers default to Skip**
 (one poison message on a topic shouldn't take the pipeline down),
 **operators default to Fail** (an error in your own transform is a bug you
 want to see immediately). Both are overridable per stage — the policy is the
-second argument, and this validation stage counts and drops what it rejects
-rather than stopping:
+second argument. The stage below is an ordinary transform that happens to be
+able to reject its input, which is the common shape: it builds a row from a
+decoded record, and the two inputs it cannot build one from take the policy
+rather than stopping the pipeline.
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=validate
 ```

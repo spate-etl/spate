@@ -34,11 +34,12 @@
 //!
 //! ```sql
 //! CREATE TABLE orders (
-//!     id           UInt64,
-//!     customer     String,
-//!     amount_cents Int64,
-//!     ts_ms        Int64
-//! ) ENGINE = MergeTree ORDER BY id
+//!     order_id    UInt64,
+//!     customer_id UInt32,
+//!     region      LowCardinality(String),
+//!     placed_at   DateTime64(3),
+//!     total_cents UInt64
+//! ) ENGINE = MergeTree ORDER BY order_id
 //!   SETTINGS non_replicated_deduplication_window = 100;
 //! ```
 //!
@@ -65,23 +66,51 @@
 // ANCHOR: imports
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::ClickHouseEncoder;
+use spate::clickhouse::{ClickHouseEncoder, DateTime64Millis};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
 // ANCHOR_END: imports
 
-/// One record, end to end: `Deserialize` reads it from Avro (field names
-/// match the writer schema), `Serialize` writes it as RowBinary — where
-/// **field order must match the `columns` list in the YAML** (RowBinary
-/// carries no names; order is the wire contract).
+/// The two ends of the pipeline, and why they are two types. `Deserialize`
+/// reads [`OrderPlaced`] from Avro, so its fields match the writer schema —
+/// including the nested `lines` array. `Serialize` writes [`OrderRow`] as
+/// RowBinary, where **field order must match the `columns` list in the YAML**
+/// (RowBinary carries no names; order is the wire contract). The chain's
+/// `try_map` is what turns one into the other.
 // ANCHOR: record
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Order {
-    id: u64,
-    customer: String,
-    amount_cents: i64,
-    ts_ms: i64,
+#[derive(Debug, Deserialize)]
+struct OrderPlaced {
+    order_id: u64,
+    customer_id: u32,
+    region: String,
+    placed_at: i64,
+    lines: Vec<OrderLine>,
+}
+
+/// Only what the total needs: a target type declares the fields it reads, not
+/// the whole record, so the writer schema's `sku` needs no field here.
+///
+/// That is a convenience, not a saving. `build_serde` decodes the datum into
+/// an intermediate value and then reads the target out of it by name, so an
+/// undeclared field is still decoded before it is discarded.
+/// `build_serde_datum` is the path that skips it without materializing it.
+#[derive(Debug, Deserialize)]
+struct OrderLine {
+    qty: u32,
+    unit_cents: u32,
+}
+
+/// One ClickHouse row. [`DateTime64Millis`] declares the timestamp's scale so
+/// `validate_schema: full` can check it against the column's declared
+/// precision (it still encodes as the raw `Int64`).
+#[derive(Debug, Serialize)]
+struct OrderRow {
+    order_id: u64,
+    customer_id: u32,
+    region: String,
+    placed_at: DateTime64Millis,
+    total_cents: u64,
 }
 // ANCHOR_END: record
 
@@ -114,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<Order>()?;
+            .build_serde::<OrderPlaced>()?;
     // ANCHOR_END: deserializer
 
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
@@ -133,8 +162,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // first record. `off` (the default) returns None and issues no queries.
     // ANCHOR: encoder
     let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Owned<Order>>::with_schema(schema),
-        None => ClickHouseEncoder::<Owned<Order>>::new(),
+        Some(schema) => ClickHouseEncoder::<Owned<OrderRow>>::with_schema(schema),
+        None => ClickHouseEncoder::<Owned<OrderRow>>::new(),
     };
     // ANCHOR_END: encoder
 
@@ -151,16 +180,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The sink's chunking — per-sink `chunk:` in the YAML, or the
             // default — bound before `with_metrics` moves `ctx.pipeline`.
             let chunk_cfg = ctx.chunk();
-            chain_owned::<Order, _>(deserializer.clone())
+            chain_owned::<OrderPlaced, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
                 // ANCHOR: validate
+                // Total an order's lines into its row, and reject one whose
+                // total cannot be stated: an order with no lines to total,
+                // and one whose total does not fit the column, are both
+                // malformed rather than zero.
                 .try_map(
-                    |order: Order| {
-                        if order.amount_cents >= 0 {
-                            Ok(order)
-                        } else {
-                            Err("negative amount")
+                    |order: OrderPlaced| {
+                        if order.lines.is_empty() {
+                            return Err("order has no lines");
                         }
+                        let total_cents = order
+                            .lines
+                            .iter()
+                            .try_fold(0u64, |total, line| {
+                                u64::from(line.qty)
+                                    .checked_mul(u64::from(line.unit_cents))
+                                    .and_then(|amount| total.checked_add(amount))
+                            })
+                            .ok_or("order total overflows the column")?;
+                        Ok(OrderRow {
+                            order_id: order.order_id,
+                            customer_id: order.customer_id,
+                            region: order.region,
+                            placed_at: DateTime64Millis(order.placed_at),
+                            total_cents,
+                        })
                     },
                     ErrorPolicy::Skip,
                 )

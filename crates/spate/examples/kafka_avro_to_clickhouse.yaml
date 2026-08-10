@@ -51,7 +51,7 @@ sink:
     table: ${CLICKHOUSE_TABLE:-orders}
     # Column order is the RowBinary wire contract: it must match the row
     # struct's field declaration order in the example.
-    columns: [id, customer, amount_cents, ts_ms]
+    columns: [order_id, customer_id, region, placed_at, total_cents]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}

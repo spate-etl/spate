@@ -105,7 +105,7 @@ Encoding is CPU work, so it happens on the pinned pipeline threads —
 `ClickHouseEncoder` (the sink's `RowEncoder`) serializes each row to RowBinary
 using the crate's own serializer. Its type parameter is the record *family*,
 not the row type: owned rows are wrapped as `Owned<Row>` (e.g.
-`ClickHouseEncoder::<Owned<Order>>::new()`), while the encode path itself needs
+`ClickHouseEncoder::<Owned<OrderRow>>::new()`), while the encode path itself needs
 only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
 frames, seal batches, and drive inserts; they never touch a record.
 
@@ -133,7 +133,7 @@ deduplication only works if the server keeps a deduplication window.
 error, no warning, duplicates on every retry. Set it explicitly:
 
 ```sql
-CREATE TABLE orders (...) ENGINE = MergeTree ORDER BY id
+CREATE TABLE orders (...) ENGINE = MergeTree ORDER BY order_id
 SETTINGS non_replicated_deduplication_window = 100;
 ```
 :::

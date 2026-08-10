@@ -226,10 +226,24 @@ impl KafkaStatsMetrics {
         let mut disconnects: u64 = 0;
         let mut seen: HashSet<&str> = HashSet::new();
         let meter = &self.meter;
+        // `logical` entries (the group coordinator) are separate librdkafka
+        // connections that mirror an underlying broker. The join key is the
+        // resolved `nodename` (host:port) — a logical entry reports
+        // `nodeid: -1` even once bound. Logical entries are excluded from
+        // every sum and from per-broker series (they would double-count),
+        // but they are real connections to that broker: `broker_up` reports
+        // a broker as up if any connection to it — regular or logical — is
+        // up. A broker whose only live link is the coordinator connection
+        // is connected, not down.
+        let logical_up: HashSet<&str> = stats
+            .brokers
+            .values()
+            .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
+            .map(|b| b.nodename.as_str())
+            .collect();
         for broker in stats.brokers.values() {
             // `internal` is the `:0/internal` pseudo-broker; `logical`
-            // entries (group coordinator) mirror an underlying broker and
-            // would double-count.
+            // entries fold into `broker_up` above and count nowhere else.
             if broker.source == "internal" || broker.source == "logical" {
                 continue;
             }
@@ -249,7 +263,8 @@ impl KafkaStatsMetrics {
                 .brokers
                 .entry(broker.name.clone())
                 .or_insert_with(|| BrokerHandles::new(meter, &broker.name));
-            handles.up.set(if broker.state == "UP" { 1.0 } else { 0.0 });
+            let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
+            handles.up.set(if up { 1.0 } else { 0.0 });
             handles.tx_errors.absolute(broker.txerrs);
             // Publish window estimates only when the window sampled
             // anything (see `BrokerHandles`).
@@ -508,6 +523,69 @@ mod tests {
         );
         assert!(!rendered.contains("internal"));
         assert!(!rendered.contains("GroupCoordinator"));
+    }
+
+    /// The regression #195 pins: a broker whose only live connection is the
+    /// group-coordinator logical link reads as up. Sparse connections mean
+    /// librdkafka never reopens a regular link it has no fetch-reason for,
+    /// so after a coordinator-only outage the real entry sits DOWN (or
+    /// INIT) for the process lifetime while the coordinator link it mirrors
+    /// is healthy. The mirror joins by resolved `nodename`; its `nodeid`
+    /// reads -1 even once bound (observed against a live client).
+    #[test]
+    fn a_coordinator_only_broker_counts_as_up() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            // Real link down, coordinator link up: up.
+            let mut coordinator_only = broker("k1:9092/1", "learned", 1);
+            coordinator_only.nodename = "k1:9092".to_owned();
+            coordinator_only.state = "DOWN".to_owned();
+            coordinator_only.txretries = 5;
+            let mut coord_link = broker("GroupCoordinator", "logical", -1);
+            coord_link.nodename = "k1:9092".to_owned();
+            coord_link.txretries = 50; // logical entries still count in no sum
+            // Both links down: down.
+            let mut dark = broker("k2:9092/2", "learned", 2);
+            dark.nodename = "k2:9092".to_owned();
+            dark.state = "DOWN".to_owned();
+            let mut dark_link = broker("TxnCoordinator", "logical", -1);
+            dark_link.nodename = "k2:9092".to_owned();
+            dark_link.state = "DOWN".to_owned();
+            // A logical entry mirroring no real entry mints no series.
+            let mut orphan_link = broker("OrphanCoordinator", "logical", -1);
+            orphan_link.nodename = "k9:9092".to_owned();
+            let stats = Statistics {
+                brokers: HashMap::from([
+                    (coordinator_only.name.clone(), coordinator_only),
+                    (coord_link.name.clone(), coord_link),
+                    (dark.name.clone(), dark),
+                    (dark_link.name.clone(), dark_link),
+                    (orphan_link.name.clone(), orphan_link),
+                ]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders");
+        });
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_broker_up{{{STD},broker="k1:9092/1"}} 1"#
+            )),
+            "coordinator-only broker must read as up:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_broker_up{{{STD},broker="k2:9092/2"}} 0"#
+            )),
+            "a broker with every link down stays down:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Coordinator"),
+            "logical entries must mint no series of their own:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("spate_kafka_broker_tx_retries_total{{{STD}}} 5")),
+            "logical entries stay out of the transport sums:\n{rendered}"
+        );
     }
 
     #[test]

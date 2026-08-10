@@ -212,7 +212,7 @@ them; extras — `broker` among them — are noted per family.
 | `spate_kafka_sink_produce_queue_bytes` | gauge | | Bytes waiting in the producer's client-side queue. |
 | `spate_kafka_sink_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
 | `spate_kafka_sink_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
-| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while the broker connection state is `UP`; `sum()` gives the brokers-up count. |
+| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while any connection to the broker — regular or a logical coordinator link — is up; `sum()` gives the brokers-up count. |
 | `spate_kafka_sink_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
 | `spate_kafka_sink_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
 | `spate_kafka_sink_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |

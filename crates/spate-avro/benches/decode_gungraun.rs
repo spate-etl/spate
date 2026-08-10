@@ -326,9 +326,9 @@ fn batch_value_rig() -> Rig<AvroValueDeserializer> {
     })
 }
 
-fn batch_datum_rig() -> Rig<AvroDatumDeserializer<Owned<orders::SensorBatch>>> {
+fn batch_datum_rig() -> Rig<AvroDatumDeserializer<Owned<orders::PlacedOrder>>> {
     rig(orders::BATCH_SCHEMA, orders::batch_datum(), |b| {
-        b.build_serde_datum::<orders::SensorBatch>()
+        b.build_serde_datum::<orders::PlacedOrder>()
             .expect("datum builder")
     })
 }
@@ -504,8 +504,8 @@ fn decode_value_malformed(mut rig: Rig<AvroValueDeserializer>) -> Rig<AvroValueD
 #[library_benchmark]
 #[bench::batch50(batch_datum_rig())]
 fn decode_batch_datum_typed(
-    mut rig: Rig<AvroDatumDeserializer<Owned<orders::SensorBatch>>>,
-) -> Rig<AvroDatumDeserializer<Owned<orders::SensorBatch>>> {
+    mut rig: Rig<AvroDatumDeserializer<Owned<orders::PlacedOrder>>>,
+) -> Rig<AvroDatumDeserializer<Owned<orders::PlacedOrder>>> {
     decode_once(&mut rig);
     rig
 }

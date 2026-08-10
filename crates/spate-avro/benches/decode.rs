@@ -1,7 +1,7 @@
 //! Datum-decoding throughput across the three decode paths — the
 //! dynamically-typed Value path, the two-pass serde-typed path, and the
 //! single-pass datum path (owned and borrowed) — on a realistic 15-field
-//! record, a batch shape (one datum = an array of 50 events, per-event
+//! record, a batch shape (one datum = an array of 50 lines, per-line
 //! throughput) tracking the flagship `flat_map` use case, the
 //! sensor-batch attribution corpus with its decode-plus-flatten arms, and
 //! the malformed-datum error path.
@@ -91,11 +91,11 @@ fn bench(c: &mut Criterion) {
     bench_sensor_batch(c);
 }
 
-/// The flagship batch shape: one datum = one sensor batch holding an array
-/// of 50 events, throughput measured **per event** — the `flat_map` use
+/// The flagship batch shape: one datum = one placed order holding an array
+/// of 50 lines, throughput measured **per line** — the `flat_map` use
 /// case, regression-tracked inside the workspace.
 fn bench_batch(c: &mut Criterion) {
-    use orders::{BATCH_EVENTS as EVENTS, BATCH_SCHEMA, SensorBatch};
+    use orders::{BATCH_LINES as LINES, BATCH_SCHEMA, PlacedOrder};
 
     let payload = orders::batch_datum();
 
@@ -118,7 +118,7 @@ fn bench_batch(c: &mut Criterion) {
     let (ack, _rx) = AckRef::test_pair();
 
     let mut group = c.benchmark_group("avro_decode_batch50");
-    group.throughput(Throughput::Elements(EVENTS));
+    group.throughput(Throughput::Elements(LINES));
     group.bench_function("value", |b| {
         let mut deser = builder.build_value().expect("value builder");
         let mut sink = Sink(0);
@@ -127,7 +127,7 @@ fn bench_batch(c: &mut Criterion) {
         });
     });
     group.bench_function("serde_typed", |b| {
-        let mut deser = builder.build_serde::<SensorBatch>().expect("serde builder");
+        let mut deser = builder.build_serde::<PlacedOrder>().expect("serde builder");
         let mut sink = Sink(0);
         b.iter(|| {
             deser.deserialize(black_box(&raw), &ack, &mut sink).unwrap();
@@ -135,7 +135,7 @@ fn bench_batch(c: &mut Criterion) {
     });
     group.bench_function("datum_typed", |b| {
         let mut deser = builder
-            .build_serde_datum::<SensorBatch>()
+            .build_serde_datum::<PlacedOrder>()
             .expect("datum builder");
         let mut sink = Sink(0);
         b.iter(|| {

@@ -1,11 +1,13 @@
-//! Raw events → Null landing table → Materialized View → AggregatingMergeTree.
+//! Raw orders → Null landing table → Materialized View → AggregatingMergeTree.
 //!
 //! ClickHouse `AggregateFunction` columns store opaque, version-dependent
 //! aggregate *states*, so the sink never writes them directly. Instead it
-//! INSERTs plain event rows into an `ENGINE = Null` table, and a
+//! INSERTs plain order rows into an `ENGINE = Null` table, and a
 //! `MATERIALIZED VIEW` computes the states (`minState`/`maxState`/
-//! `sumMapState`) into the target `AggregatingMergeTree`. ClickHouse owns the
-//! state construction and its versioning; the framework just ships rows.
+//! `sumMapState`) into the target `AggregatingMergeTree` — a per-region
+//! rollup of when orders were placed and how many units of each SKU they
+//! carried. ClickHouse owns the state construction and its versioning; the
+//! framework just ships rows.
 //!
 //! This example uses `spate-test`'s in-memory source, so it runs against
 //! nothing but ClickHouse.
@@ -18,26 +20,27 @@
 //!
 //! ```sql
 //! -- 1. Target: the fixed-schema AggregatingMergeTree (already exists in prod).
-//! CREATE TABLE events_agg (
-//!     bucket String,
-//!     dt_min AggregateFunction(min, DateTime),
-//!     dt_max AggregateFunction(max, DateTime),
-//!     counts AggregateFunction(sumMap, Map(String, UInt64))
-//! ) ENGINE = AggregatingMergeTree ORDER BY bucket
+//! CREATE TABLE orders_agg (
+//!     region            String,
+//!     first_placed_at   AggregateFunction(min, DateTime),
+//!     last_placed_at    AggregateFunction(max, DateTime),
+//!     qty_by_sku        AggregateFunction(sumMap, Map(String, UInt64))
+//! ) ENGINE = AggregatingMergeTree ORDER BY region
 //!   SETTINGS non_replicated_deduplication_window = 100;  -- dedup window
 //!
 //! -- 2. Landing table: plain columns, stores nothing (the sink writes here).
-//! CREATE TABLE events_null (
-//!     bucket String,
-//!     dt     DateTime,
-//!     counts Map(String, UInt64)
+//! CREATE TABLE orders_null (
+//!     region     String,
+//!     placed_at  DateTime,
+//!     qty_by_sku Map(String, UInt64)
 //! ) ENGINE = Null;
 //!
-//! -- 3. MV: raw events -> aggregate states -> target.
-//! CREATE MATERIALIZED VIEW events_mv TO events_agg AS
-//! SELECT bucket, minState(dt) AS dt_min, maxState(dt) AS dt_max,
-//!        sumMapState(counts) AS counts
-//! FROM events_null GROUP BY bucket;
+//! -- 3. MV: raw orders -> aggregate states -> target.
+//! CREATE MATERIALIZED VIEW orders_mv TO orders_agg AS
+//! SELECT region, minState(placed_at) AS first_placed_at,
+//!        maxState(placed_at) AS last_placed_at,
+//!        sumMapState(qty_by_sku) AS qty_by_sku
+//! FROM orders_null GROUP BY region;
 //! ```
 //!
 //! ```sh
@@ -48,17 +51,19 @@
 //! columns stay `AggregateFunction`, and `FINAL` alone does not finalize them:
 //!
 //! ```sql
-//! SELECT bucket, minMerge(dt_min), maxMerge(dt_max), sumMapMerge(counts)
-//! FROM events_agg GROUP BY bucket;
+//! SELECT region, minMerge(first_placed_at), maxMerge(last_placed_at),
+//!        sumMapMerge(qty_by_sku)
+//! FROM orders_agg GROUP BY region;
 //! ```
 //!
-//! An alternative event shape carries one `(metric, value)` pair per row; the
-//! view would then use `sumMapState(map(metric, value))`. The whole-`Map`
-//! shape used here exercises the sink's `Map(String, UInt64)` encoding.
+//! An alternative row shape carries one `(sku, qty)` pair per row; the view
+//! would then use `sumMapState(map(sku, qty))`. The whole-`Map` shape used
+//! here — an order's lines already collapsed to a per-SKU total — exercises
+//! the sink's `Map(String, UInt64)` encoding.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
-// INDEX-GOAL:  feed an AggregatingMergeTree rollup through a Null landing table
+// INDEX-GOAL:  roll orders up per region through a Null landing table into an AggregatingMergeTree
 // INDEX-TECH:  ClickHouse
 // INDEX-NEEDS: ClickHouse
 
@@ -74,30 +79,35 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// One raw event. `Serialize` writes it as RowBinary into the Null landing
-/// table, where **field order must match the `columns` list in the YAML**
-/// (RowBinary carries no names; order is the wire contract).
+/// One placed order, already collapsed to a per-SKU quantity. `Serialize`
+/// writes it as RowBinary into the Null landing table, where **field order
+/// must match the `columns` list in the YAML** (RowBinary carries no names;
+/// order is the wire contract).
 #[derive(Clone, Debug, Serialize)]
-struct Event {
-    bucket: String,
-    dt: u32,                       // epoch seconds -> DateTime
-    counts: BTreeMap<String, u64>, // -> Map(String, UInt64)
+struct OrderRollup {
+    region: String,
+    placed_at: u32,                    // epoch seconds -> DateTime
+    qty_by_sku: BTreeMap<String, u64>, // -> Map(String, UInt64)
 }
 
-/// Parse a demo payload `bucket|dt|k1=v1,k2=v2` into an [`Event`]. In a real
-/// pipeline this is the deserializer's job (Avro, JSON, ...); here a tiny
-/// hand-parser keeps the example self-contained.
-fn parse_event(line: &[u8]) -> Option<Event> {
+/// Parse a demo payload `region|placed_at|SKU=qty,SKU=qty` into an
+/// [`OrderRollup`]. In a real pipeline this is the deserializer's job (Avro,
+/// JSON, ...); here a tiny hand-parser keeps the example self-contained.
+fn parse_order(line: &[u8]) -> Option<OrderRollup> {
     let line = std::str::from_utf8(line).ok()?;
     let mut parts = line.split('|');
-    let bucket = parts.next()?.to_string();
-    let dt: u32 = parts.next()?.parse().ok()?;
-    let mut counts = BTreeMap::new();
+    let region = parts.next()?.to_string();
+    let placed_at: u32 = parts.next()?.parse().ok()?;
+    let mut qty_by_sku = BTreeMap::new();
     for kv in parts.next()?.split(',').filter(|s| !s.is_empty()) {
-        let (k, v) = kv.split_once('=')?;
-        counts.insert(k.to_string(), v.parse().ok()?);
+        let (sku, qty) = kv.split_once('=')?;
+        qty_by_sku.insert(sku.to_string(), qty.parse().ok()?);
     }
-    Some(Event { bucket, dt, counts })
+    Some(OrderRollup {
+        region,
+        placed_at,
+        qty_by_sku,
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -122,11 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // here with an actionable "insert into a Null table + MV" error — the
     // sink cannot write aggregate states directly.
     let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Owned<Event>>::with_schema(schema),
-        None => ClickHouseEncoder::<Owned<Event>>::new(),
+        Some(schema) => ClickHouseEncoder::<Owned<OrderRollup>>::with_schema(schema),
+        None => ClickHouseEncoder::<Owned<OrderRollup>>::new(),
     };
 
-    // ── Chain: bytes -> Event -> RowBinary -> Null table ───────────────────
+    // ── Chain: bytes -> OrderRollup -> RowBinary -> Null table ─────────────
     let runtime = pipeline
         .sink(sink)?
         .chains(move |ctx| {
@@ -134,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b'\n'))
                 .with_metrics(ctx.pipeline, "main")
                 .try_map(
-                    |line: Vec<u8>| parse_event(&line).ok_or("malformed event line"),
+                    |line: Vec<u8>| parse_order(&line).ok_or("malformed order line"),
                     ErrorPolicy::Skip,
                 )
                 .sink(
@@ -154,16 +164,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
 
-    // Feed a handful of raw events across two buckets (newline-framed).
+    // Feed a handful of raw orders across two regions (newline-framed).
+    // Timestamps are epoch seconds on 2026-01-01, deliberately out of order:
+    // the view's min/max states are what put them back in it.
     let p0 = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), p0)]);
     let mut last = 0;
     for payload in [
-        &b"a|1000|x=1,y=2"[..],
-        b"a|2000|x=2,z=3",
-        b"a|1500|y=1",
-        b"b|5000|p=10",
-        b"b|4000|p=5,q=7",
+        &b"eu-west|1767225600|KBD-01=1,MSE-01=2"[..],
+        b"eu-west|1767229200|KBD-01=2,MON-01=3",
+        b"eu-west|1767227400|MSE-01=1",
+        b"us-east|1767238800|CBL-01=10",
+        b"us-east|1767235200|CBL-01=5,DCK-01=7",
     ] {
         last = handle.push(p0, Some(b"demo"), payload);
     }
@@ -180,10 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     report.log();
     println!(
-        "\nRaw events landed in events_null; the MV built min/max/sumMap states \
-         into events_agg. Read back the aggregates with:\n  \
-         SELECT bucket, minMerge(dt_min), maxMerge(dt_max), sumMapMerge(counts) \
-         FROM events_agg GROUP BY bucket;"
+        "\nRaw orders landed in orders_null; the MV built min/max/sumMap states \
+         into orders_agg. Read back the aggregates with:\n  \
+         SELECT region, minMerge(first_placed_at), maxMerge(last_placed_at), \
+         sumMapMerge(qty_by_sku) FROM orders_agg GROUP BY region;"
     );
     std::process::exit(report.exit_code());
 }

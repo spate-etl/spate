@@ -1,11 +1,12 @@
-# Ingesting raw events into an AggregatingMergeTree via a Null landing table
-# + Materialized View. The sink writes PLAIN event rows (bucket/dt/counts);
-# ClickHouse builds the min/max/sumMap aggregate states. See the example's
-# module docs for the three CREATE statements.
+# Ingesting raw orders into an AggregatingMergeTree via a Null landing table
+# + Materialized View. The sink writes PLAIN order rows
+# (region/placed_at/qty_by_sku); ClickHouse builds the min/max/sumMap
+# aggregate states. See the example's module docs for the three CREATE
+# statements.
 # ${VAR:-default} interpolates from the environment.
 
 pipeline:
-  name: aggregating-mv
+  name: order-rollup
   threads: 1
 
 checkpoint:
@@ -24,10 +25,10 @@ source:
 
 sink:
   clickhouse:
-    table: ${CLICKHOUSE_TABLE:-events_null}
-    # Column order is the RowBinary wire contract: it must match the Event
-    # struct's field declaration order in the example.
-    columns: [bucket, dt, counts]
+    table: ${CLICKHOUSE_TABLE:-orders_null}
+    # Column order is the RowBinary wire contract: it must match the
+    # OrderRollup struct's field declaration order in the example.
+    columns: [region, placed_at, qty_by_sku]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}

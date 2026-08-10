@@ -30,29 +30,29 @@ example below covers `min`/`max` over `DateTime` and `sumMap` over
 
 ```sql
 -- 1. Target: the AggregatingMergeTree you already have.
-CREATE TABLE events_agg (
-    bucket String,
-    dt_min AggregateFunction(min, DateTime),
-    dt_max AggregateFunction(max, DateTime),
-    counts AggregateFunction(sumMap, Map(String, UInt64))
-) ENGINE = AggregatingMergeTree ORDER BY bucket
+CREATE TABLE orders_agg (
+    region          String,
+    first_placed_at AggregateFunction(min, DateTime),
+    last_placed_at  AggregateFunction(max, DateTime),
+    qty_by_sku      AggregateFunction(sumMap, Map(String, UInt64))
+) ENGINE = AggregatingMergeTree ORDER BY region
   SETTINGS non_replicated_deduplication_window = 100;   -- dedup window (see below)
 
 -- 2. Landing table: plain columns, stores nothing. The sink writes HERE.
-CREATE TABLE events_null (
-    bucket String,
-    dt     DateTime,
-    counts Map(String, UInt64)
+CREATE TABLE orders_null (
+    region     String,
+    placed_at  DateTime,
+    qty_by_sku Map(String, UInt64)
 ) ENGINE = Null;
 
 -- 3. Materialized View: raw rows -> aggregate states -> target.
-CREATE MATERIALIZED VIEW events_mv TO events_agg AS
-SELECT bucket,
-       minState(dt)        AS dt_min,
-       maxState(dt)        AS dt_max,
-       sumMapState(counts) AS counts
-FROM events_null
-GROUP BY bucket;
+CREATE MATERIALIZED VIEW orders_mv TO orders_agg AS
+SELECT region,
+       minState(placed_at)     AS first_placed_at,
+       maxState(placed_at)     AS last_placed_at,
+       sumMapState(qty_by_sku) AS qty_by_sku
+FROM orders_null
+GROUP BY region;
 ```
 
 The sink points at the **Null** table; its columns are all types RowBinary and
@@ -61,8 +61,8 @@ Native already encode:
 ```yaml
 sink:
   clickhouse:
-    table: events_null
-    columns: [bucket, dt, counts]      # order = the RowBinary wire contract
+    table: orders_null
+    columns: [region, placed_at, qty_by_sku]   # order = the RowBinary wire contract
     validate_schema: names
 ```
 
@@ -70,8 +70,9 @@ Read the finalized values back with the `-Merge` combinators — the stored
 columns stay `AggregateFunction`, and `FINAL` alone does **not** finalize them:
 
 ```sql
-SELECT bucket, minMerge(dt_min), maxMerge(dt_max), sumMapMerge(counts)
-FROM events_agg GROUP BY bucket;
+SELECT region, minMerge(first_placed_at), maxMerge(last_placed_at),
+       sumMapMerge(qty_by_sku)
+FROM orders_agg GROUP BY region;
 ```
 
 A full runnable version is the `clickhouse_aggregating_mv` example

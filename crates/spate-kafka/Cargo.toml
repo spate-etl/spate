@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 gungraun = { workspace = true }
 spate-test = { workspace = true }
 metrics = { workspace = true }

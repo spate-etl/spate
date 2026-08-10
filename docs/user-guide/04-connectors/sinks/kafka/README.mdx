@@ -25,7 +25,7 @@ fan-out to multiple topics is the chain's
 per topic. `"eu"` and `"us"` name entries in the pipeline's `sinks:` map. Both
 reach for `encoder_with` rather than `encoder_bytes` in order to attach a
 produce key: `KafkaBytesEncoder` is the shipped passthrough encoder, and
-`customer_key` a plain `fn` pulling the key out of the payload.
+`order_key` a plain `fn` pulling the key out of the payload.
 
 That code is
 [`kafka_to_kafka_split.rs`](repo:crates/spate/examples/kafka_to_kafka_split.rs),

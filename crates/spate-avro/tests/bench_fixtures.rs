@@ -317,10 +317,32 @@ fn the_single_payload_fixtures_still_decode_and_fail_as_documented() {
     );
 
     let batch = decode_one_value(orders::BATCH_SCHEMA, None, &orders::batch_datum());
-    let AvroValue::Array(events) = field(&batch, "events") else {
-        panic!("events is not an array");
+    let AvroValue::Array(lines) = field(&batch, "lines") else {
+        panic!("lines is not an array");
     };
-    assert_eq!(events.len() as u64, orders::BATCH_EVENTS);
+    assert_eq!(lines.len() as u64, orders::BATCH_LINES);
+
+    // The array's element *types* are the workload the counted tier compares
+    // against, so pin them rather than only their count. A rename may move the
+    // field names freely; changing a `long` to an `int` here would move the
+    // instruction baseline with nothing else to say it had.
+    let AvroValue::Record(fields) = &lines[0] else {
+        panic!("a line is not a record");
+    };
+    let shape: Vec<&str> = fields
+        .iter()
+        .map(|(_, v)| match v {
+            AvroValue::String(_) => "string",
+            AvroValue::Long(_) => "long",
+            AvroValue::Int(_) => "int",
+            other => panic!("unexpected line field {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        ["string", "long", "string"],
+        "the batch fixture's element types are the measured workload"
+    );
 }
 
 // ---------------------------------------------------------------------------

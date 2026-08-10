@@ -104,50 +104,54 @@ pub(crate) fn malformed_datum() -> Vec<u8> {
     datum
 }
 
-/// The batch shape: one datum is an array of events, so throughput is
-/// measured per event. Tracks the `flat_map` use case.
-pub(crate) const BATCH_SCHEMA: &str = r#"{"type":"record","name":"SensorBatch","fields":[
-  {"name":"sensor","type":"string"},
-  {"name":"events","type":{"type":"array","items":
-    {"type":"record","name":"Event","fields":[
-      {"name":"name","type":"string"},
-      {"name":"value","type":"long"},
+/// The batch shape: one datum is an array of lines, so throughput is
+/// measured per line. Tracks the `flat_map` use case.
+///
+/// Do not change the field *types* — one string, then an array of (string,
+/// long, string). They are the workload the counted tier compares against, and
+/// `tests/bench_fixtures.rs` pins them. The names are free.
+pub(crate) const BATCH_SCHEMA: &str = r#"{"type":"record","name":"PlacedOrder","fields":[
+  {"name":"region","type":"string"},
+  {"name":"lines","type":{"type":"array","items":
+    {"type":"record","name":"OrderLine","fields":[
+      {"name":"sku","type":"string"},
+      {"name":"qty","type":"long"},
       {"name":"unit","type":"string"}]}}}]}"#;
 
-/// Events in one [`BATCH_SCHEMA`] datum.
-pub(crate) const BATCH_EVENTS: u64 = 50;
+/// Lines in one [`BATCH_SCHEMA`] datum.
+pub(crate) const BATCH_LINES: u64 = 50;
 
 #[derive(Debug, serde::Deserialize)]
 #[expect(dead_code, reason = "deserialization target only")]
-pub(crate) struct SensorBatch {
-    sensor: String,
-    events: Vec<Event>,
+pub(crate) struct PlacedOrder {
+    region: String,
+    lines: Vec<OrderLine>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[expect(dead_code, reason = "deserialization target only")]
-pub(crate) struct Event {
-    name: String,
-    value: i64,
+pub(crate) struct OrderLine {
+    sku: String,
+    qty: i64,
     unit: String,
 }
 
-/// One [`BATCH_SCHEMA`] datum holding [`BATCH_EVENTS`] events.
+/// One [`BATCH_SCHEMA`] datum holding [`BATCH_LINES`] lines.
 pub(crate) fn batch_datum() -> Vec<u8> {
     use apache_avro::types::Value;
 
     let schema = Schema::parse_str(BATCH_SCHEMA).unwrap();
     let mut rec = apache_avro::types::Record::new(&schema).unwrap();
-    rec.put("sensor", "sensor-7");
+    rec.put("region", "eu-west");
     rec.put(
-        "events",
+        "lines",
         Value::Array(
-            (0..BATCH_EVENTS)
+            (0..BATCH_LINES)
                 .map(|i| {
                     Value::Record(vec![
-                        ("name".into(), Value::String(format!("metric_{i}"))),
-                        ("value".into(), Value::Long(i as i64 * 37)),
-                        ("unit".into(), Value::String("count".into())),
+                        ("sku".into(), Value::String(format!("SKU-{i:04}"))),
+                        ("qty".into(), Value::Long(i as i64 * 37)),
+                        ("unit".into(), Value::String("each".into())),
                     ])
                 })
                 .collect(),

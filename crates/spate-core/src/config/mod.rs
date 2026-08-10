@@ -157,8 +157,11 @@ pub struct CheckpointSection {
     /// How often committable watermarks are flushed to the source.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
-    /// Maximum unacknowledged batches per partition before that partition
-    /// is paused (doubles as a backpressure trigger).
+    /// Hard per-partition ceiling on unacknowledged batches. A partition at
+    /// the ceiling has its lanes skipped at the poll boundary — no pause is
+    /// involved, and other partitions are unaffected — until acknowledgments
+    /// retire batches. Bounds tracker memory and the replay a stalled
+    /// partition can accumulate.
     pub max_pending_batches: usize,
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
     /// `terminationGracePeriodSeconds`.

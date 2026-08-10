@@ -322,7 +322,7 @@ way to reason about where a flush went, not an identity to compute.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabeled series is the max across partitions. |
+| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabeled series is the max across partitions. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
 | `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |

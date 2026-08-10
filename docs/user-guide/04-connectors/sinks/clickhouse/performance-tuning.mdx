@@ -137,13 +137,18 @@ checkpoint:
   max_pending_batches: 1024
 ```
 
-Acked-but-not-yet-committed batches are tracked for the at-least-once watermark.
-Under very high insert rates — especially many small parts — this queue can fill
-and pause the source before the sink is saturated. If you see lanes pausing for
-the pending-batch limit while ClickHouse still has headroom, **raise it**; the
-cost is the memory those pending acknowledgments occupy. Prefer fixing it by
-writing **larger** batches first (fewer, bigger inserts drain the queue faster);
-raise the limit when large batches alone are not enough.
+Batches not yet acknowledged by every sink leg are tracked for the
+at-least-once watermark, and `max_pending_batches` is a hard per-partition
+ceiling on that tracking: a partition at the ceiling stops being polled until
+acknowledgments retire batches. Under very high insert rates — especially many
+small parts — a partition can sit at the ceiling before ClickHouse is
+saturated. The signals are a `partition at the pending-batch ceiling` warning
+in the logs and `spate_checkpoint_pending_batches` plateauing at the configured
+value while `spate_sink_errors_total` stays quiet. When that is the shape,
+prefer fixing it by writing **larger** batches first (fewer, bigger inserts
+retire acknowledgments faster); **raise the limit** when large batches alone
+are not enough — the cost is the memory the pending acknowledgments occupy and
+a larger replay after a crash.
 
 ## Wire format
 

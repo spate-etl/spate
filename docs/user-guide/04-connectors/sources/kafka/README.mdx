@@ -94,6 +94,12 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
 - Rebalance revocations and shutdown drain first, then store and commit
   **synchronously** while the member still owns the partitions — so another
   member never starts from an offset covering unwritten data.
+- A rebalance *error* (an event that is neither an assignment nor a
+  revocation) releases ownership immediately, as the client library's
+  contract requires. The lanes still drain, but their offsets can no longer
+  be stored — that work is redelivered after the member rejoins, and the
+  refusal is logged. At-least-once holds either way; the difference is
+  replay instead of a clean handoff.
 
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).

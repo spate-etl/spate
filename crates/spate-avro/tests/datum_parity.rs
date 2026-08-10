@@ -752,3 +752,61 @@ fn garbage_errors_on_both_paths() {
         .unwrap_err();
     assert!(out.0.is_empty());
 }
+
+#[test]
+fn a_top_level_union_of_records_maps_to_a_positional_rust_enum() {
+    // The idiomatic Avro spelling of a sum type: the whole datum is the
+    // union, not a field inside a record. `multi_branch_union_maps_to_a_
+    // positional_rust_enum` covers the field position; this covers the root,
+    // which is what a stream of mixed event kinds decodes through.
+    const SCH: &str = r#"[
+        {"type":"record","name":"A","fields":[{"name":"id","type":"long"}]},
+        {"type":"record","name":"B","fields":[
+            {"name":"id","type":"long"},{"name":"why","type":"string"}]}
+    ]"#;
+    // The variant names deliberately do NOT match the record names: with
+    // `A(A)`/`B(B)` a name-keyed implementation would produce the same answer
+    // as a positional one, and the test could not tell them apart. Crossed
+    // this way, only branch-index selection decodes.
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    enum Event {
+        Second(A),
+        First(B),
+    }
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct A {
+        id: i64,
+    }
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct B {
+        id: i64,
+        why: String,
+    }
+    let schema = Schema::parse_str(SCH).unwrap();
+    for (value, expected) in [
+        (
+            Value::Union(
+                0,
+                Box::new(Value::Record(vec![("id".into(), Value::Long(1))])),
+            ),
+            Event::Second(A { id: 1 }),
+        ),
+        (
+            Value::Union(
+                1,
+                Box::new(Value::Record(vec![
+                    ("id".into(), Value::Long(2)),
+                    ("why".into(), Value::String("damaged".into())),
+                ])),
+            ),
+            Event::First(B {
+                id: 2,
+                why: "damaged".into(),
+            }),
+        ),
+    ] {
+        let datum = to_avro_datum(&schema, value).unwrap();
+        let got: Event = assert_parity(SCH, &datum);
+        assert_eq!(got, expected);
+    }
+}

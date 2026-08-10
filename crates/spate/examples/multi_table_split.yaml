@@ -1,10 +1,10 @@
-# Multi-sink split: Kafka → Avro (borrowed) → flat_map → split into one
-# ClickHouse table per record kind. The `sinks:` map replaces `sink:` — each
-# entry is an ordinary single-key connector section, keyed by the name the
-# chain resolves via `ctx.sink("<name>")`.
+# Multi-sink split: Kafka → Avro → split into one ClickHouse table per event
+# kind. The `sinks:` map replaces `sink:` — each entry is an ordinary
+# single-key connector section, keyed by the name the chain resolves via
+# `ctx.sink("<name>")`.
 
 pipeline:
-  name: metric-split
+  name: storefront-split
   io_threads: 2
 
 checkpoint:
@@ -24,35 +24,48 @@ metrics:
 source:
   kafka:
     brokers: ${KAFKA_BROKERS:-localhost:9092}
-    topic: ${KAFKA_TOPIC:-metric-batches}
-    group_id: ${KAFKA_GROUP:-metric-split-etl}
+    topic: ${KAFKA_TOPIC:-storefront-events}
+    group_id: ${KAFKA_GROUP:-storefront-split-etl}
     commit_interval: 5s
     rdkafka:
       auto.offset.reset: earliest
 
 deserializer:
   avro:
+    # A top-level union of the three event records: the branch index on the
+    # wire selects the Rust enum's variant positionally, so the variant order
+    # in the example must match the order below.
     mode: raw
     schema:
       inline: |
-        {"type":"record","name":"MetricBatch","fields":[
-          {"name":"host","type":"string"},
-          {"name":"ts_ms","type":"long"},
-          {"name":"readings","type":{"type":"array","items":
-            {"type":"record","name":"Reading","fields":[
-              {"name":"kind","type":"string"},
-              {"name":"name","type":"string"},
-              {"name":"value","type":"long"},
-              {"name":"text","type":"string"}]}}}]}
+        [
+          {"type":"record","name":"OrderPlaced","namespace":"spate.datagen","fields":[
+            {"name":"order_id","type":"long"},
+            {"name":"customer_id","type":"int"},
+            {"name":"region","type":"string"},
+            {"name":"placed_at","type":{"type":"long","logicalType":"timestamp-millis"}},
+            {"name":"lines","type":{"type":"array","items":
+              {"type":"record","name":"OrderLine","fields":[
+                {"name":"sku","type":"string"},
+                {"name":"qty","type":"int"},
+                {"name":"unit_cents","type":"int"}]}}}]},
+          {"type":"record","name":"PaymentCaptured","namespace":"spate.datagen","fields":[
+            {"name":"order_id","type":"long"},
+            {"name":"amount_cents","type":"long"}]},
+          {"type":"record","name":"RefundIssued","namespace":"spate.datagen","fields":[
+            {"name":"order_id","type":"long"},
+            {"name":"amount_cents","type":"long"},
+            {"name":"reason","type":"string"}]}
+        ]
 
 # One sink per destination table. Each is a full ClickHouse sink section — its
 # own columns, format, shards, and batch/linger — so per-table part sizing is
 # tuned independently.
 sinks:
-  gauge:
+  payments:
     clickhouse:
-      table: ${CLICKHOUSE_GAUGE_TABLE:-metrics_gauge}
-      columns: [host, ts_ms, name, value]
+      table: ${CLICKHOUSE_PAYMENTS_TABLE:-payments}
+      columns: [order_id, amount_cents]
       format: native
       validate_schema: full
       shards:
@@ -66,10 +79,10 @@ sinks:
       inflight:
         max_per_shard: 2
 
-  text:
+  refunds:
     clickhouse:
-      table: ${CLICKHOUSE_TEXT_TABLE:-metrics_text}
-      columns: [host, ts_ms, name, text]
+      table: ${CLICKHOUSE_REFUNDS_TABLE:-refunds}
+      columns: [order_id, amount_cents, reason]
       format: native
       validate_schema: full
       shards:
@@ -77,7 +90,7 @@ sinks:
       user: ${CLICKHOUSE_USER:-default}
       password: ${CLICKHOUSE_PASSWORD:-}
       # A low-volume table: linger longer to build bigger parts. The cost is
-      # checkpoint lag — a Kafka batch with even one text reading holds its
+      # checkpoint lag — a Kafka batch with even one refund in it holds its
       # offsets until this fires (docs/user-guide/02-concepts/06-multi-sink.md).
       batch:
         max_rows: 500000

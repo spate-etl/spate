@@ -1,44 +1,47 @@
-//! Multi-sink split: Kafka → Avro → `flat_map` → **split** into one ClickHouse
-//! table per record kind.
+//! Multi-sink split: Kafka → Avro → **split** into one ClickHouse table per
+//! event kind.
 //!
-//! The chain of `kafka_avro_flatmap_clickhouse.rs`, extended with a
-//! [`split`](spate::ops::ChainBuilder) terminal: one interleaved stream of typed
-//! metric readings fans out to **N tables, each with its own schema, encoder,
-//! and batch/linger tuning**, instead of one wide table. A `gauge` reading
-//! carries a number, a `text` reading a string — genuinely different columns —
-//! so each lands in a table indexed for its own shape.
+//! One interleaved stream of storefront events fans out to **N tables, each
+//! with its own schema, encoder, and batch/linger tuning**, instead of one
+//! wide table, through a [`split`](spate::ops::ChainBuilder) terminal. A
+//! captured payment carries an amount; a refund carries an amount and a
+//! reason — genuinely different columns — so each lands in a table shaped for
+//! it.
+//!
+//! The stream arrives as a **top-level Avro union**, the idiomatic spelling of
+//! a sum type, which decodes straight into a Rust enum: the wire branch index
+//! selects the variant positionally. Classification is therefore a `match` on
+//! a decoded variant rather than a string compare on a discriminator field.
 //!
 //! # The routing the user writes
 //!
 //! Each destination is declared once with [`SplitBuilder::add`](spate::ops::SplitBuilder),
 //! which returns a `Copy` typed handle. The `route` closure then does one
 //! `match` — classify **and** extract in the same arm — and dispatches with
-//! `out.emit(handle, row)`; a reading whose `kind` matches no branch follows
-//! the `unmatched` policy (`Skip` here: dropped and counted on
-//! `spate_operator_records_dropped_total{reason="unrouted"}`).
+//! `out.emit(handle, row)`; an event kind with no branch follows the
+//! `unmatched` policy (`Skip` here: dropped and counted on
+//! `spate_operator_records_dropped_total{reason="unrouted"}`). A placed order
+//! is that kind: this pipeline settles money and has no table for it.
 //!
 //! # At-least-once across tables
 //!
 //! Each branch clones the source batch's ack, so a Kafka batch's offsets commit
-//! only after **every** table its readings landed in has durably written; a
+//! only after **every** table its events landed in has durably written; a
 //! failed write to any one table stalls the batch and replays it. This falls
 //! straight out of the shared ack handle — the split terminal adds no new
 //! delivery machinery.
 //!
 //! ```sql
-//! CREATE TABLE metrics_gauge (
-//!     host   LowCardinality(String),
-//!     ts_ms  DateTime64(3),
-//!     name   LowCardinality(String),
-//!     value  Int64
-//! ) ENGINE = MergeTree ORDER BY (host, name, ts_ms);
+//! CREATE TABLE payments (
+//!     order_id     UInt64,
+//!     amount_cents UInt64
+//! ) ENGINE = MergeTree ORDER BY order_id;
 //!
-//! CREATE TABLE metrics_text (
-//!     host   LowCardinality(String),
-//!     ts_ms  DateTime64(3),
-//!     name   LowCardinality(String),
-//!     text   String
-//! ) ENGINE = MergeTree ORDER BY (host, name, ts_ms);
+//! CREATE TABLE refunds (
+//!     order_id     UInt64,
+//!     amount_cents UInt64,
+//!     reason       LowCardinality(String)
+//! ) ENGINE = MergeTree ORDER BY order_id;
 //! ```
 //!
 //! ```sh
@@ -47,12 +50,12 @@
 //! ```
 //!
 //! Needs Kafka and ClickHouse (`KAFKA_BROKERS`, `CLICKHOUSE_URL`), a topic of
-//! bare-datum Avro `MetricBatch` messages, and both target tables. SIGTERM
+//! bare-datum Avro storefront-event messages, and both target tables. SIGTERM
 //! drains gracefully; probes: `curl localhost:9090/readyz`.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production
-// INDEX-GOAL:  route gauge and text readings to a table each from one stream
+// INDEX-GOAL:  route payments and refunds to a table each from one event stream
 // INDEX-TECH:  Kafka and ClickHouse
 // INDEX-NEEDS: Kafka and ClickHouse
 
@@ -61,68 +64,61 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{DateTime64Millis, NativeEncoder, ShardKey};
+use spate::clickhouse::{NativeEncoder, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
 
-/// One Kafka datum: a host's batch of typed readings.
+/// One Kafka datum: whichever of the three storefront events it happens to
+/// be. The writer schema is a top-level Avro union — the idiomatic spelling
+/// of a sum type — and the branch is selected **positionally**, so these
+/// variants must stay in the union's declaration order.
 #[derive(Debug, Deserialize)]
-struct MetricBatch {
-    host: String,
-    ts_ms: i64,
-    readings: Vec<Reading>,
+enum StorefrontEvent {
+    /// Routed nowhere by this pipeline, and decoded as
+    /// [`IgnoredAny`](serde::de::IgnoredAny) to say so at the type level:
+    /// no arm reads a placed order, so no field is declared for one. It is
+    /// what exercises the `unmatched` policy below.
+    ///
+    /// The branch is still decoded. `build_serde` materializes the datum and
+    /// then reads the target out of it, so `IgnoredAny` discards a value that
+    /// already exists rather than stepping over the bytes.
+    /// [`build_serde_datum`](spate::avro::AvroDeserializerBuilder::build_serde_datum)
+    /// is the path that skips it without materializing it, and this pipeline
+    /// declares no `reader_schema`, so it could take it.
+    OrderPlaced(serde::de::IgnoredAny),
+    PaymentCaptured(PaymentRow),
+    RefundIssued(RefundRow),
 }
 
-/// One reading. `kind` selects the destination table; a gauge uses `value`, a
-/// text metric uses `text` — the fields the two tables do not share.
-#[derive(Debug, Deserialize)]
-struct Reading {
-    kind: String,
-    name: String,
-    value: i64,
-    text: String,
+/// The payments table's row, and the decoded shape of the event that fills
+/// it — one type, because the event *is* the row here. Field order matches
+/// the YAML `columns`; Native maps positionally.
+#[derive(Debug, Deserialize, Serialize)]
+struct PaymentRow {
+    order_id: u64,
+    amount_cents: u64,
 }
 
-/// The `flat_map` output: a reading enriched with its batch's host and time.
-/// This is the record the split classifies.
-#[derive(Debug)]
-struct Sample {
-    host: String,
-    ts_ms: i64,
-    kind: String,
-    name: String,
-    value: i64,
-    text: String,
+/// The refunds table's row, which carries a `reason` a payment has no column
+/// for — the reason there are two tables rather than one wide one.
+#[derive(Debug, Deserialize, Serialize)]
+struct RefundRow {
+    order_id: u64,
+    amount_cents: u64,
+    reason: String,
 }
 
-/// The gauge table's row (numeric `value`, no `text` column). Field order
-/// matches the YAML `columns` — Native maps positionally.
-#[derive(Debug, Serialize)]
-struct GaugeRow {
-    host: String,
-    ts_ms: DateTime64Millis,
-    name: String,
-    value: i64,
+/// Shard both tables by `order_id`, matching a `Distributed` DDL of
+/// `xxHash64(order_id)`. It is the only field the three events share, so it
+/// is the only key that can colocate an order's payment and its refund on one
+/// shard. Named fn items: the extractor is a fn pointer, so it cannot
+/// capture.
+fn payment_key(row: &PaymentRow) -> ShardKey<'_> {
+    ShardKey::U64(row.order_id)
 }
-
-/// The text table's row (string `text`, no `value` column).
-#[derive(Debug, Serialize)]
-struct TextRow {
-    host: String,
-    ts_ms: DateTime64Millis,
-    name: String,
-    text: String,
-}
-
-/// Shard each table by `host`, matching a `Distributed` DDL of
-/// `xxHash64(host)`. Named fn items: the extractor is a fn pointer, so it
-/// cannot capture.
-fn gauge_key(row: &GaugeRow) -> ShardKey<'_> {
-    ShardKey::Str(&row.host)
-}
-fn text_key(row: &TextRow) -> ShardKey<'_> {
-    ShardKey::Str(&row.host)
+fn refund_key(row: &RefundRow) -> ShardKey<'_> {
+    ShardKey::U64(row.order_id)
 }
 
 // ANCHOR: assembly
@@ -142,88 +138,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
         AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<MetricBatch>()?;
+            .build_serde::<StorefrontEvent>()?;
 
-    // ── Sinks: one ClickHouse table per kind, from the `sinks:` map ──────
-    // Each sink mints its own Native encoder (its table's column types) and a
-    // host-sharded router, exactly as a single-sink pipeline would — just N of
-    // them. Built before `add_sink` moves each sink into its worker pool.
-    let gauge_sink =
-        spate::clickhouse::config::from_component_config(pipeline.config().sink_config("gauge")?)?;
-    let text_sink =
-        spate::clickhouse::config::from_component_config(pipeline.config().sink_config("text")?)?;
-    let gauge_router = gauge_sink.router::<Owned<GaugeRow>>(gauge_key);
-    let text_router = text_sink.router::<Owned<TextRow>>(text_key);
-    let gauge_enc =
-        NativeEncoder::<Owned<GaugeRow>>::new(pipeline.block_on(gauge_sink.native_schema())?);
-    let text_enc =
-        NativeEncoder::<Owned<TextRow>>::new(pipeline.block_on(text_sink.native_schema())?);
+    // ── Sinks: one ClickHouse table per event kind, from the `sinks:` map ─
+    // Each sink mints its own Native encoder (its table's column types) and an
+    // order-sharded router, exactly as a single-sink pipeline would — just N
+    // of them. Built before `add_sink` moves each sink into its worker pool.
+    let payments_sink = spate::clickhouse::config::from_component_config(
+        pipeline.config().sink_config("payments")?,
+    )?;
+    let refunds_sink = spate::clickhouse::config::from_component_config(
+        pipeline.config().sink_config("refunds")?,
+    )?;
+    let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
+    let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);
+    let payments_enc =
+        NativeEncoder::<Owned<PaymentRow>>::new(pipeline.block_on(payments_sink.native_schema())?);
+    let refunds_enc =
+        NativeEncoder::<Owned<RefundRow>>::new(pipeline.block_on(refunds_sink.native_schema())?);
 
     // ── The chain, and run ──────────────────────────────────────────────
     // ANCHOR: install_sinks
     let report = pipeline
-        .add_sink("gauge", gauge_sink)?
-        .add_sink("text", text_sink)?
+        .add_sink("payments", payments_sink)?
+        .add_sink("refunds", refunds_sink)?
         // ANCHOR_END: install_sinks
         .chains(move |ctx| {
-            // deserialize → explode readings (enriched with host/time) → split
-            // by `kind` into the two tables. `ErrorPolicy::Skip`: an unknown
-            // kind is dropped and counted, not fatal.
+            // deserialize → split by event kind into the two tables.
+            // `ErrorPolicy::Skip`: a kind with no branch is dropped and
+            // counted, not fatal.
             // ANCHOR: split
-            let mut split = chain::<Owned<MetricBatch>, _>(deserializer.clone())
+            let mut split = chain::<Owned<StorefrontEvent>, _>(deserializer.clone())
                 // Clone: `ctx.sink(...)` below borrows `ctx`, so `ctx.pipeline`
                 // must not be moved out of it.
                 .with_metrics(ctx.pipeline.clone(), "main")
-                .flat_map::<Owned<Sample>, _>(|batch, out| {
-                    let (host, ts_ms) = (batch.host, batch.ts_ms);
-                    for r in batch.readings {
-                        out.emit(Sample {
-                            host: host.clone(),
-                            ts_ms,
-                            kind: r.kind,
-                            name: r.name,
-                            value: r.value,
-                            text: r.text,
-                        });
-                    }
-                })
                 .split(ErrorPolicy::Skip);
 
             // Declare the branches; each `add` returns a Copy, typed handle.
-            let gauge = split.add::<Owned<GaugeRow>, _, _>(
-                gauge_enc.clone(),
-                gauge_router.clone(),
-                ctx.sink("gauge"),
+            let payments = split.add::<Owned<PaymentRow>, _, _>(
+                payments_enc.clone(),
+                payments_router.clone(),
+                ctx.sink("payments"),
             );
-            let text = split.add::<Owned<TextRow>, _, _>(
-                text_enc.clone(),
-                text_router.clone(),
-                ctx.sink("text"),
+            let refunds = split.add::<Owned<RefundRow>, _, _>(
+                refunds_enc.clone(),
+                refunds_router.clone(),
+                ctx.sink("refunds"),
             );
 
-            // The routing logic: one match, O(1) dispatch, type-checked per arm.
+            // The routing logic: one match, O(1) dispatch, type-checked per
+            // arm. Classify and extract in the same arm — the variant's
+            // payload is already the row its table takes.
             split
-                .route(move |s: Sample, out| match s.kind.as_str() {
-                    "gauge" => out.emit(
-                        gauge,
-                        GaugeRow {
-                            host: s.host,
-                            ts_ms: DateTime64Millis(s.ts_ms),
-                            name: s.name,
-                            value: s.value,
-                        },
-                    ),
-                    "text" => out.emit(
-                        text,
-                        TextRow {
-                            host: s.host,
-                            ts_ms: DateTime64Millis(s.ts_ms),
-                            name: s.name,
-                            text: s.text,
-                        },
-                    ),
-                    // Any other kind matches no branch → `unmatched` (Skip).
-                    _ => {}
+                .route(move |event: StorefrontEvent, out| match event {
+                    StorefrontEvent::PaymentCaptured(row) => out.emit(payments, row),
+                    StorefrontEvent::RefundIssued(row) => out.emit(refunds, row),
+                    // A placed order matches no branch → `unmatched` (Skip).
+                    StorefrontEvent::OrderPlaced(_) => {}
                 })
                 .build()
             // ANCHOR_END: split

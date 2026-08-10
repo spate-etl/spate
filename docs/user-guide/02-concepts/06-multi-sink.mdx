@@ -16,9 +16,9 @@ write sizing under its own configuration.
 ## The shape
 
 ```text
-                         ┌─ branch "gauge"  → encoder → router → table_gauge
-source → deserialize →   ├─ branch "text"   → encoder → router → table_text
-        (one stream)     └─ unmatched → ErrorPolicy (Fail | Skip)
+                        ┌─ branch "payments" → encoder → router → destination
+source → deserialize →  ├─ branch "refunds"  → encoder → router → destination
+        (one stream)    └─ unmatched → ErrorPolicy (Fail | Skip)
 ```
 
 Each branch is an ordinary sink — the same route → encode → per-shard queue →
@@ -36,19 +36,25 @@ mirrors [`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter — one
 
 The chain below is the one in
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs),
-which splits a stream of typed metric readings across two destinations:
+which splits one stream of mixed event kinds across two destinations:
 
 ```rust file=crates/spate/examples/multi_table_split.rs region=split
 ```
 
 The record family is explicit at every seam. The chain deserializes into
-`Owned<MetricBatch>`; `flat_map` fans each batch out into `Owned<Sample>`
-readings, which is what the classifier sees; and each `add` fixes its own
-branch's row family — `Owned<GaugeRow>` and `Owned<TextRow>` here, two rows
-with genuinely different columns. `ctx.sink("<name>")` resolves the sink
-installed under that name, handing the branch that sink's queues **and** its
-own resolved chunking (from that sink's `chunk:` block, so each branch tunes
-independently). Declaration order fixes the handle indices.
+`Owned<StorefrontEvent>`, a sum type over the kinds on the stream, which is
+what the classifier sees; and each `add` fixes its own branch's row family —
+`Owned<PaymentRow>` and `Owned<RefundRow>` here, two rows with genuinely
+different columns. `ctx.sink("<name>")` resolves the sink installed under that
+name, handing the branch that sink's queues **and** its own resolved chunking
+(from that sink's `chunk:` block, so each branch tunes independently).
+Declaration order fixes the handle indices.
+
+Classification against a decoded sum type is the shortest shape this takes:
+the arm that matches a variant already owns the row, so it emits what it
+matched. Where the kinds arrive as one record with a discriminator field
+instead, the arm reads that field and builds the row from the record's parts —
+the same `match`, one step longer.
 
 `out.emit(handle, row)` type-checks per arm (the handle fixes the row's family)
 and dispatches in O(1) — a branch index and one downcast, no per-record name

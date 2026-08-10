@@ -20,19 +20,19 @@ independently. The map key is the name the chain resolves with `ctx.sink(...)`.
 
 ```yaml
 sinks:
-  gauge:
+  payments:
     clickhouse:
-      table: metrics_gauge
-      columns: [host, ts_ms, name, value]   # this table's own columns/order
+      table: payments
+      columns: [order_id, amount_cents]           # this table's own columns/order
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
       batch: { max_rows: 500000, linger: 1s }
 
-  text:
+  refunds:
     clickhouse:
-      table: metrics_text
-      columns: [host, ts_ms, name, text]    # a different schema
+      table: refunds
+      columns: [order_id, amount_cents, reason]   # a different schema
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
@@ -54,21 +54,26 @@ minting its own Native encoder (from *its* `system.columns`) and its own shard
 router before `add_sink(name, ...)` moves it into its worker pool. That is the
 single-sink wiring, N times. The whole program is
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs); it
-needs a Kafka topic of Avro `MetricBatch` messages and both target tables, and
-runs with
+needs a Kafka topic of Avro storefront-event messages and both target tables,
+and runs with
 `cargo run --release -p spate --features full --example multi_table_split`:
 
 ```rust file=crates/spate/examples/multi_table_split.rs region=assembly
 ```
 
-`gauge_sink` and `text_sink` come from the `sinks:` map's `gauge` and `text`
-entries, resolved by `sink_config(name)`. Each mints a `NativeEncoder` over the
-row family that table receives — `Owned<GaugeRow>` and `Owned<TextRow>`, two
-structs with different columns — from its own fetched schema, and a
-`DistributedRouter` over the same family from the `ShardKey` extractors
-`gauge_key` and `text_key`, which shard both tables on `host`. The split's
-input family is `Owned<Sample>`, the enriched reading `flat_map` produces from
-each decoded `Owned<MetricBatch>`. See the concept page for the
+`payments_sink` and `refunds_sink` come from the `sinks:` map's `payments` and
+`refunds` entries, resolved by `sink_config(name)`. Each mints a
+`NativeEncoder` over the row family that table receives —
+`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different columns
+— from its own fetched schema, and a `DistributedRouter` over the same family
+from the `ShardKey` extractors `payment_key` and `refund_key`, which shard both
+tables on `order_id`. Sharding both on the same key is what keeps an order's
+payment and its refund on one shard, so a join across the two tables stays
+local — but only while the two sinks also carry the same `shards` topology.
+Placement is the key's hash over the shard weights, so scaling one table's
+shard list without the other separates the rows the shared key was chosen to
+keep together. The split's input family is `Owned<StorefrontEvent>`, the sum type the
+chain decodes the union into. See the concept page for the
 [routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
 ## What carries over per table, unchanged
@@ -89,8 +94,8 @@ Each branch is a full ClickHouse sink, so everything on the
 - **Replica rotation, circuit breaker, readiness probe** per table. `/readyz`
   reports connected only when every table's replicas probe healthy.
 - **Metrics per table**: each sink's `spate_sink_*` series carry the sink name as
-  their `component` label, so `spate_sink_records_total{component="gauge"}` and
-  `{component="text"}` are distinct.
+  their `component` label, so `spate_sink_records_total{component="payments"}`
+  and `{component="refunds"}` are distinct.
 
 ## Per-table part tuning — and the checkpoint-lag cost
 

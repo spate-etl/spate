@@ -466,8 +466,8 @@ fn run_instance(
 /// checkpoint interval, so its only commit is the terminal one and a takeover
 /// almost always arrives carrying nothing. The plan is `Final` and its split
 /// ids are deterministic, so no descriptor moves under progress committed
-/// against it — the rejecting answer, which stops a pipeline, is unreachable
-/// from the live run.
+/// against it — the rejecting answer, which hands the split back and (classed
+/// `Fatal` here) ends the run, is unreachable from the live run.
 fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = LedgerCtx {
         issuer: None,

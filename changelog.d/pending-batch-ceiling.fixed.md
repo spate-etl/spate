@@ -8,4 +8,4 @@ orders of magnitude under a post-rebalance replay. The ceiling is now
 per-partition in effect as well as in name: one partition at its limit no
 longer pauses its siblings, and a partition stalled behind a failed batch
 accumulates at most the configured replay before `stalled_fail_after` fails
-the pipeline.
+the pipeline. ([#200])

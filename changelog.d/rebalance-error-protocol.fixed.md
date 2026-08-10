@@ -7,4 +7,4 @@ until a restart. The error is now classified like every other consumer error,
 so an authorization failure fails the pipeline fast while transient rebalance
 codes retry, and the affected lanes are drained through the ordinary
 revocation choreography first; their uncommitted work replays. A warning is
-also logged when rebalance events queue faster than they complete.
+also logged when rebalance events queue faster than they complete. ([#198])

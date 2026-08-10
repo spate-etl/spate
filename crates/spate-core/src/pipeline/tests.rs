@@ -407,11 +407,14 @@ fn permanent_watermark_stall_fails_pipeline_as_checkpoint() {
     assert!(failure.reason.contains("stalled"), "{}", failure.reason);
 }
 
-/// When per-partition pending batches exceed `max_pending_batches`, the
-/// controller pauses the assigned lanes; once acknowledgments drain the
-/// pending count below half the limit, it resumes them.
+/// The regression #196 pins: `max_pending_batches` is a hard per-partition
+/// bound, enforced at the driver's poll boundary — not a request the
+/// commit tick eventually notices. With every ack withheld, exactly
+/// `limit` batches enter the chain and no more, however long the pipeline
+/// runs; the old tick-gated pause let issuance overshoot by fetch-rate x
+/// commit-interval (421-1721 observed against a limit of 256).
 #[test]
-fn pending_batch_limit_pauses_then_resumes_lanes() {
+fn pending_batch_ceiling_is_a_hard_bound() {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
@@ -427,51 +430,80 @@ fn pending_batch_limit_pauses_then_resumes_lanes() {
         },
         batches_seen: 0,
     });
-    // Six batches whose acks are all withheld: pending climbs past the
-    // limit of 3 and the controller pauses the lane.
+    // Six batches whose acks are all withheld: the gate closes after the
+    // third and the remaining three never leave the lane.
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
-    wait_for(
-        "controller pauses under pending pressure",
-        Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .pauses
-                .iter()
-                .any(|p| p.contains(&LaneId(0)))
-        },
+    wait_for("the ceiling fills", Duration::from_secs(5), || {
+        held.lock().unwrap().len() == 3
+    });
+    // Many commit ticks later (20ms interval), the count has not moved:
+    // the bound holds instead of overshooting on the next tick's slack.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        held.lock().unwrap().len(),
+        3,
+        "pending exceeded max_pending_batches"
     );
-    // Stop withholding and resolve everything held: pending drains to zero
-    // and the controller resumes the lane.
+    // The bound is the driver's, not a controller pause: the source was
+    // never asked to pause for checkpoint pressure.
+    assert!(
+        h.shared.lock().unwrap().pauses.is_empty(),
+        "the ceiling must not be enforced via source pauses"
+    );
+    // Releasing the acks retires the held batches; the gate reopens and
+    // the remainder flows to completion.
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for(
-        "controller resumes after pending clears",
-        Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .resumes
-                .iter()
-                .any(|r| r.contains(&LaneId(0)))
-        },
-    );
+    wait_for("everything commits", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .committed
+            .get(&PartitionId(0))
+            .is_some_and(|&w| w >= 60)
+    });
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// A permanently failed batch stalls its partition's watermark, so the
+/// gate pins that partition at the ceiling: the replay a restart faces is
+/// bounded by `max_pending_batches`, not by fetch rate x
+/// `stalled_fail_after`.
 #[test]
-fn a_lane_added_under_pending_pressure_starts_paused() {
-    // Pending-pressure pauses *every* assigned lane, so a lane arriving
-    // mid-pressure must join the pause rather than read on beside its
-    // paused siblings. Waiting for the next commit tick is not enough:
-    // inside the hysteresis band (pending between half the limit and the
-    // limit) neither the engage nor the release branch fires, so an
-    // unpaused newcomer can keep pulling indefinitely. This is also the
-    // only lane-placement path a coordinated source ever uses.
+fn a_stalled_partition_plateaus_at_the_ceiling() {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 3;
+    let h = start_with_config(cfg, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::FailAckAtBatch(1),
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
+    // The failed head blocks advancement forever; the gate lets exactly
+    // the ceiling through and the other three batches stay in the lane.
+    wait_for("the ceiling fills", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 30
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        h.chain.consumed.load(Ordering::Relaxed),
+        30,
+        "a stalled partition must plateau at the ceiling"
+    );
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// The ceiling is per partition: a lane added while a sibling partition
+/// sits at its ceiling runs immediately — gated only by its own count —
+/// which is what `checkpoint.max_pending_batches` documents. (The old
+/// pause-everything enforcement needed the newcomer paused too; the
+/// per-partition gate makes that machinery unnecessary.)
+#[test]
+fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
@@ -489,43 +521,14 @@ fn a_lane_added_under_pending_pressure_starts_paused() {
     });
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
     wait_for(
-        "pending pressure engages on the original lane",
+        "partition 0 reaches its ceiling",
         Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .pauses
-                .iter()
-                .any(|p| p.contains(&LaneId(0)))
-        },
-    );
-    wait_for(
-        "all six batches are in flight",
-        Duration::from_secs(5),
-        || held.lock().unwrap().len() == 6,
+        || held.lock().unwrap().len() == 3,
     );
 
-    // Settle into the hysteresis band, where the periodic tick cannot
-    // rescue a mis-started lane: resolving four batches leaves pending at
-    // 2, which is neither above the limit (engage) nor below half of it
-    // (release), so `apply_pending_pressure` does nothing from here on.
-    // The advancing watermark is the signal that the tick has folded them.
-    held.lock().unwrap().drain(..4);
-    wait_for(
-        "the resolved batches are committed, leaving pending in the band",
-        Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .committed
-                .get(&PartitionId(0))
-                .is_some_and(|&w| w >= 40)
-        },
-    );
-
-    // A fresh lane on a fresh partition joins while pressure is engaged.
+    // A fresh lane on a fresh partition joins while partition 0 is gated.
+    // Its batch flows immediately: the newcomer's gate counts only its own
+    // partition's pending.
     h.script
         .lock()
         .unwrap()
@@ -535,33 +538,29 @@ fn a_lane_added_under_pending_pressure_starts_paused() {
             batches: batches(std::slice::from_ref(&(100..110))),
         }]));
     wait_for(
-        "the added lane is paused too",
+        "the added partition's batch is delivered beside the gated sibling",
         Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .pauses
-                .iter()
-                .any(|p| p.contains(&LaneId(1)))
-        },
+        || held.lock().unwrap().len() == 4,
+    );
+    assert!(
+        h.shared.lock().unwrap().pauses.is_empty(),
+        "no source pause is involved in gating"
     );
 
-    // Clearing the pressure releases both lanes together.
+    // Releasing drains both partitions to completion.
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for(
-        "both lanes resume once pending drains",
-        Duration::from_secs(5),
-        || {
-            h.shared
-                .lock()
-                .unwrap()
-                .resumes
-                .iter()
-                .any(|r| r.contains(&LaneId(1)))
-        },
-    );
+    wait_for("both partitions commit", Duration::from_secs(5), || {
+        let shared = h.shared.lock().unwrap();
+        shared
+            .committed
+            .get(&PartitionId(0))
+            .is_some_and(|&w| w >= 60)
+            && shared
+                .committed
+                .get(&PartitionId(1))
+                .is_some_and(|&w| w >= 110)
+    });
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);

@@ -9,14 +9,15 @@
 use super::{DriverEvent, ThreadControl};
 use crate::admin::HealthState;
 use crate::backpressure::{InflightBudget, Transition, WatermarkController};
-use crate::checkpoint::AckRef;
+use crate::checkpoint::{AckRef, AdvanceCounter};
 use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
-use crate::record::RawPayload;
+use crate::record::{PartitionId, RawPayload};
 use crate::sink::ShardQueues;
 use crate::source::{LaneId, PayloadBatch, SourceLane};
 use crate::telemetry::RateLimit;
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +43,10 @@ pub(crate) struct DriverParams {
     /// Queue fill ratio below which resume is allowed (mirrors the
     /// backpressure low watermark).
     pub queue_low_ratio: f64,
+    /// Hard per-partition ceiling on registered-but-unadvanced batches
+    /// (`checkpoint.max_pending_batches`): a lane whose partition is at the
+    /// ceiling is skipped, not polled, so pending can never exceed it.
+    pub max_pending_batches: usize,
 }
 
 /// How the driver loop ended.
@@ -100,6 +105,15 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     // A control message received while parked with no lanes (see the
     // lane-less wait below); handled by the drain at the top of the loop.
     let mut parked: Option<ThreadControl<L>> = None;
+    // The pending-ceiling gate per owned partition: `issued` is exact (the
+    // ack sequence is contiguous per partition and this thread is the only
+    // issuer), `advanced` is the controller's retirement counter. A lane is
+    // skipped while `issued - advanced` is at the ceiling, which is what
+    // makes `checkpoint.max_pending_batches` a bound instead of a request.
+    let mut gates: HashMap<PartitionId, GateState> = HashMap::new();
+    // Consecutive gated lanes; a full pass of gated lanes parks on the
+    // control channel instead of spinning.
+    let mut gated_streak = 0usize;
 
     loop {
         health.heartbeat(params.thread);
@@ -107,7 +121,26 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // 1. Control messages (never block).
         while let Some(msg) = parked.take().or_else(|| control.try_recv().ok()) {
             match msg {
-                ThreadControl::AddLane(lane) => lanes.push(lane),
+                ThreadControl::AddLane { lane, gate } => {
+                    if let Some(gate) = gate {
+                        match gates.get(&lane.partition()) {
+                            // A later epoch replaces the gate wholesale;
+                            // the issued count restarts with the sequence.
+                            Some(g) if g.epoch >= gate.epoch => {}
+                            _ => {
+                                gates.insert(
+                                    lane.partition(),
+                                    GateState {
+                                        epoch: gate.epoch,
+                                        advanced: gate.advanced,
+                                        issued: 0,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    lanes.push(lane);
+                }
                 ThreadControl::StopLanes {
                     lanes: stop,
                     barrier,
@@ -119,6 +152,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         stopped += usize::from(goes);
                         !goes
                     });
+                    prune_gates(&mut gates, &lanes);
                     if stopped > 0 {
                         flush_until(
                             chain.as_mut(),
@@ -161,6 +195,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     // sink-durable, and flushing here would emit a partial
                     // chunk and stall this thread once per completed unit.
                     lanes.retain(|l| !drop.contains(&l.id()));
+                    prune_gates(&mut gates, &lanes);
                 }
                 ThreadControl::Shutdown { barrier, deadline } => {
                     flush_until(
@@ -239,6 +274,42 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             Duration::ZERO
         };
 
+        // Pending-ceiling gate: skip a lane whose partition has the full
+        // ceiling of batches registered and not yet advanced past. The
+        // check happens before the poll and a poll issues one batch, so
+        // pending never exceeds the ceiling. When every lane is gated,
+        // park on the control channel — the controller's next harvest
+        // retires batches and reopens the gates; meanwhile control
+        // messages (FlushNow above all) keep being serviced.
+        let partition = lanes[lane_idx].partition();
+        let at_ceiling = gates.get(&partition).is_some_and(|g| {
+            g.issued.saturating_sub(g.advanced.get()) >= params.max_pending_batches as u64
+        });
+        if at_ceiling {
+            gated_streak += 1;
+            if gated_streak >= lanes.len() {
+                gated_streak = 0;
+                match control.recv_timeout(params.poll_timeout) {
+                    Ok(msg) => parked = Some(msg),
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        std::thread::sleep(params.poll_timeout);
+                    }
+                }
+                idle_flush(
+                    chain.as_mut(),
+                    &mut last_data,
+                    &mut flushed_since_data,
+                    params.idle_flush,
+                    &mut bp,
+                    &events,
+                    params.thread,
+                );
+            }
+            continue;
+        }
+        gated_streak = 0;
+
         let owned_ids: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
         // The poll result borrows the lane's buffers, so the lanes cannot
         // move into the parking loop until this block ends; the fatal is
@@ -254,6 +325,15 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     empty_polls = 0;
                     last_data = Instant::now();
                     flushed_since_data = false;
+                    if let Some(g) = gates.get_mut(&partition) {
+                        let id = batch.ack().batch_id();
+                        // A batch stamped with another epoch is stale by
+                        // construction — its registration is discarded, so
+                        // nothing would ever retire it from the gate.
+                        if id.epoch == g.epoch {
+                            g.issued = g.issued.max(id.seq + 1);
+                        }
+                    }
                     let mut counting = CountingBatch::new(&mut batch);
                     let outcome = drive_batch(
                         chain.as_mut(),
@@ -326,6 +406,24 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     }
 }
 
+/// Driver-side half of one partition's pending-ceiling gate.
+struct GateState {
+    /// Assignment epoch the gate belongs to; batches from other epochs are
+    /// stale and uncounted.
+    epoch: u32,
+    /// Batches the controller has advanced past (shared counter).
+    advanced: AdvanceCounter,
+    /// Batches this thread has issued for the partition, derived from the
+    /// contiguous ack sequence — exact, since a partition has one issuing
+    /// thread.
+    issued: u64,
+}
+
+/// Drop gates for partitions that no longer have a lane on this thread.
+fn prune_gates<L: SourceLane>(gates: &mut HashMap<PartitionId, GateState>, lanes: &[L]) {
+    gates.retain(|p, _| lanes.iter().any(|l| l.partition() == *p));
+}
+
 fn is_fatal(e: &SourceError) -> bool {
     let SourceError::Client { class, .. } = e;
     *class == ErrorClass::Fatal
@@ -348,7 +446,7 @@ fn park_until_shutdown<L: SourceLane>(
         match control.recv_timeout(Duration::from_millis(50)) {
             // A lane assigned in the fatal→shutdown race: accept and drop
             // it; the failure is already latched, nothing polls it again.
-            Ok(ThreadControl::AddLane(lane)) => drop(lane),
+            Ok(ThreadControl::AddLane { lane, .. }) => drop(lane),
             Ok(ThreadControl::StopLanes {
                 lanes: stop,
                 barrier,

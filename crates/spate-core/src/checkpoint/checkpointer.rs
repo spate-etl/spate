@@ -10,6 +10,7 @@
 //! makes the backpressure design deadlock-free.
 
 use super::ack::AckTx;
+use super::gate::AdvanceCounter;
 use super::tracker::{PartitionTracker, ResolveOutcome};
 use super::{AckMsg, AckRef, BatchId};
 use crate::error::FatalError;
@@ -125,6 +126,10 @@ pub struct Checkpointer {
     shared_epoch: Arc<AtomicU32>,
     epoch: u32,
     trackers: HashMap<PartitionId, PartitionTracker>,
+    /// One advance counter per tracked partition: the controller-side half
+    /// of the pending-ceiling gate the owning driver reads at the poll
+    /// boundary. Created and dropped in lockstep with `trackers`.
+    gates: HashMap<PartitionId, AdvanceCounter>,
     /// Every partition admitted to the current epoch, including ones since
     /// revoked. `trackers` alone cannot enforce the additive contract: a
     /// revocation removes the tracker, so a re-add would look fresh.
@@ -154,6 +159,7 @@ impl Checkpointer {
             shared_epoch: Arc::new(AtomicU32::new(0)),
             epoch: 0,
             trackers: HashMap::new(),
+            gates: HashMap::new(),
             admitted: HashSet::new(),
         }
     }
@@ -188,6 +194,10 @@ impl Checkpointer {
         self.trackers = partitions
             .iter()
             .map(|&p| (p, PartitionTracker::new()))
+            .collect();
+        self.gates = partitions
+            .iter()
+            .map(|&p| (p, AdvanceCounter::new()))
             .collect();
         // A new epoch clears the admission ledger: every issuer restarts its
         // sequences on the epoch change, so a partition may legitimately
@@ -245,6 +255,7 @@ impl Checkpointer {
         }
         for &p in partitions {
             self.trackers.insert(p, PartitionTracker::new());
+            self.gates.insert(p, AdvanceCounter::new());
             self.admitted.insert(p);
         }
         Ok(())
@@ -256,7 +267,16 @@ impl Checkpointer {
     pub fn revoke(&mut self, partitions: &[PartitionId]) {
         for p in partitions {
             self.trackers.remove(p);
+            self.gates.remove(p);
         }
+    }
+
+    /// The advance counter for a tracked partition, cloned for the gate
+    /// handed to the partition's owning driver. `None` for a partition not
+    /// in the current epoch.
+    #[must_use]
+    pub(crate) fn advance_handle(&self, partition: PartitionId) -> Option<AdvanceCounter> {
+        self.gates.get(&partition).cloned()
     }
 
     /// Apply all pending registrations and resolutions.
@@ -325,11 +345,22 @@ impl Checkpointer {
     /// nothing moved — callers skip the commit entirely.
     #[must_use]
     pub fn take_watermarks(&mut self) -> Vec<(PartitionId, i64)> {
-        let mut out: Vec<_> = self
-            .trackers
-            .iter_mut()
-            .filter_map(|(&p, t)| t.advance().map(|w| (p, w)))
-            .collect();
+        let mut out = Vec::new();
+        for (&p, t) in &mut self.trackers {
+            let before = t.pending();
+            let watermark = t.advance();
+            // Retired batches reopen the partition's pending gate; the
+            // owning driver reads the counter at its poll boundary.
+            let retired = before - t.pending();
+            if retired > 0
+                && let Some(gate) = self.gates.get(&p)
+            {
+                gate.add(retired as u64);
+            }
+            if let Some(w) = watermark {
+                out.push((p, w));
+            }
+        }
         out.sort_unstable_by_key(|&(p, _)| p);
         out
     }
@@ -378,6 +409,34 @@ mod tests {
         cp.begin_epoch(partitions, 1);
         let issuer = cp.handle();
         (cp, issuer)
+    }
+
+    /// The advance counters behind the drivers' pending gates: bumped by
+    /// exactly the batches an advance retires, frozen by a stalled head,
+    /// dropped on revoke, fresh per epoch.
+    #[test]
+    fn advance_counters_track_retired_batches() {
+        let (mut cp, mut issuer) = checkpointer(&[P0]);
+        let gate = cp.advance_handle(P0).expect("gate for a tracked partition");
+        drop(issuer.issue(P0, 9));
+        drop(issuer.issue(P0, 19));
+        cp.drain();
+        assert_eq!(cp.take_watermarks(), vec![(P0, 20)]);
+        assert_eq!(gate.get(), 2, "both retired batches counted");
+
+        // A failed batch stalls advancement: nothing further retires.
+        issuer.issue(P0, 29).fail();
+        drop(issuer.issue(P0, 39));
+        cp.drain();
+        assert!(cp.take_watermarks().is_empty());
+        assert_eq!(gate.get(), 2, "a stalled head retires nothing");
+
+        // Revocation drops the gate; a new epoch starts a fresh counter.
+        cp.revoke(&[P0]);
+        assert!(cp.advance_handle(P0).is_none());
+        cp.begin_epoch(&[P0], 2);
+        let fresh = cp.advance_handle(P0).expect("fresh gate");
+        assert_eq!(fresh.get(), 0);
     }
 
     #[test]

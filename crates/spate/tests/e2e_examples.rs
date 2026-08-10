@@ -86,16 +86,12 @@ const PLACED_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace"
         {"name":"qty","type":"int"},
         {"name":"unit_cents","type":"int"}]}}}]}"#;
 
-/// Writer schema of `multi_table_split.yaml`; see [`PLACED_SCHEMA`].
-const METRIC_SCHEMA: &str = r#"{"type":"record","name":"MetricBatch","fields":[
-    {"name":"host","type":"string"},
-    {"name":"ts_ms","type":"long"},
-    {"name":"readings","type":{"type":"array","items":
-      {"type":"record","name":"Reading","fields":[
-        {"name":"kind","type":"string"},
-        {"name":"name","type":"string"},
-        {"name":"value","type":"long"},
-        {"name":"text","type":"string"}]}}}]}"#;
+/// Writer schema of `multi_table_split.yaml`: the storefront event union,
+/// taken from the crate that defines it rather than restated. The example
+/// selects its enum variant by the union's **branch index**, so the branch
+/// order is a contract — borrowing the constant is what keeps this test from
+/// silently disagreeing with it.
+const EVENT_UNION_SCHEMA: &str = spate_datagen::EVENT_SCHEMA_JSON;
 
 // ── Locating and running an example ────────────────────────────────────────
 
@@ -584,82 +580,122 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     );
 
     // ── multi_table_split: one stream, two tables ──────────────────────────
-    let metric_schema = Schema::parse_str(METRIC_SCHEMA).expect("metric schema");
+    let event_schema = Schema::parse_str(EVENT_UNION_SCHEMA).expect("event schema");
     for (table, last) in [
-        ("metrics_gauge", "value Int64"),
-        ("metrics_text", "text String"),
+        ("payments", ""),
+        ("refunds", ", reason LowCardinality(String)"),
     ] {
         ddl(
             &h,
             &format!(
                 // Deduplication window: see the `order_lines` DDL above.
                 "CREATE TABLE {table} (\
-                     host LowCardinality(String), ts_ms DateTime64(3), \
-                     name LowCardinality(String), {last}) \
-                 ENGINE = MergeTree ORDER BY (host, name, ts_ms) \
+                     order_id UInt64, amount_cents UInt64{last}) \
+                 ENGINE = MergeTree ORDER BY order_id \
                  SETTINGS non_replicated_deduplication_window = 100"
             ),
         );
     }
-    h.create_topic("metric-batches", 2);
-    let batches: i64 = 100;
-    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..batches)
-        .map(|i| {
-            // One gauge and one text reading per batch, plus one kind that
-            // matches no branch and must follow the `unmatched` policy.
-            let readings: Vec<Value> = ["gauge", "text", "histogram"]
-                .iter()
-                .map(|kind| {
-                    Value::Record(vec![
-                        ("kind".into(), Value::String((*kind).to_string())),
-                        ("name".into(), Value::String(format!("m{i}"))),
-                        ("value".into(), Value::Long(i)),
-                        ("text".into(), Value::String(format!("t{i}"))),
-                    ])
-                })
-                .collect();
-            let datum = encode(
-                &metric_schema,
-                vec![
-                    ("host", Value::String(format!("host-{}", i % 3))),
-                    ("ts_ms", Value::Long(1_700_000_000_000 + i)),
-                    ("readings", Value::Array(readings)),
-                ],
+    h.create_topic("storefront-events", 2);
+    let settled: i64 = 100;
+    // One event of each kind per order. The placed order matches no branch and
+    // must follow the `unmatched` policy; the branch index is positional, so
+    // these must be encoded against the union in its declared order.
+    let payloads: Vec<(Vec<u8>, Vec<u8>)> = (0..settled)
+        .flat_map(|i| {
+            let placed = Value::Union(
+                0,
+                Box::new(Value::Record(vec![
+                    ("order_id".into(), Value::Long(i)),
+                    (
+                        "customer_id".into(),
+                        Value::Int(i32::try_from(i % 1024).expect("customer")),
+                    ),
+                    ("region".into(), Value::String("eu-west".into())),
+                    ("placed_at".into(), Value::Long(1_700_000_000_000 + i)),
+                    ("lines".into(), Value::Array(vec![])),
+                ])),
             );
-            (format!("host-{}", i % 3).into_bytes(), datum)
+            let payment = Value::Union(
+                1,
+                Box::new(Value::Record(vec![
+                    ("order_id".into(), Value::Long(i)),
+                    ("amount_cents".into(), Value::Long(19_300)),
+                ])),
+            );
+            let refund = Value::Union(
+                2,
+                Box::new(Value::Record(vec![
+                    ("order_id".into(), Value::Long(i)),
+                    ("amount_cents".into(), Value::Long(4_825)),
+                    ("reason".into(), Value::String("damaged".into())),
+                ])),
+            );
+            [placed, payment, refund].map(|value| {
+                let datum = to_avro_datum(&event_schema, value).expect("avro datum");
+                (i.to_string().into_bytes(), datum)
+            })
         })
         .collect();
-    produce_raw(&h.brokers, "metric-batches", &payloads);
+    produce_raw(&h.brokers, "storefront-events", &payloads);
 
-    let per_table = u64::try_from(batches).expect("metric rows");
+    let per_table = u64::try_from(settled).expect("settled rows");
     let config = render_config("multi_table_split");
     let mut example = spawn("multi_table_split", Some(&config), &env);
     example.wait_for("both split branches", || {
-        h.count("metrics_gauge") >= per_table && h.count("metrics_text") >= per_table
+        h.count("payments") >= per_table && h.count("refunds") >= per_table
     });
-    example.terminate();
-    // One reading of each kind per batch, so an equality here fails if the
-    // `histogram` readings — which match no branch and follow the `unmatched`
-    // policy — had reached either table.
+    let log = example.terminate();
+    // The placed orders must reach the split and be dropped there as
+    // `unrouted` — not fail to decode and be dropped a stage earlier. Both
+    // leave the tables identical and both commit their offsets, so the tables
+    // cannot tell them apart and the log is what does.
+    assert!(
+        !log.contains("payload skipped by deserializer error policy"),
+        "a record was dropped by the deserializer, so the unmatched policy is \
+         not what this test exercised\n--- log ---\n{log}"
+    );
+    // One event of each kind per order, so an equality here fails if the
+    // placed orders — which match no branch and follow the `unmatched` policy
+    // — had reached either table.
     assert_eq!(
-        h.count("metrics_gauge"),
+        h.count("payments"),
         per_table,
-        "the gauge branch took the gauge readings and nothing else"
+        "the payments branch took the captured payments and nothing else"
     );
     assert_eq!(
-        h.count("metrics_text"),
+        h.count("refunds"),
         per_table,
-        "the text branch took the text readings and nothing else"
+        "the refunds branch took the issued refunds and nothing else"
+    );
+    // The variant's payload is the row, and Native maps it positionally — so
+    // check the values, not just the counts. A column swap or a mis-selected
+    // branch keeps both counts at 100 and fails here.
+    assert_eq!(
+        h.scalar("SELECT count() FROM payments WHERE amount_cents = 19300"),
+        per_table,
+        "every payment landed with the amount it captured"
+    );
+    assert_eq!(
+        h.scalar("SELECT uniqExact(order_id) FROM payments"),
+        per_table,
+        "each payment kept its own order id rather than a constant"
+    );
+    assert_eq!(
+        h.scalar("SELECT count() FROM refunds WHERE reason = 'damaged' AND amount_cents = 4825"),
+        per_table,
+        "every refund landed with the reason and amount it was issued for"
     );
     // Both branches clone the source batch's ack, so the watermark advances
-    // only once every table a batch's readings landed in has written.
+    // only once every table a batch's events landed in has written.
     let committed: i64 = h
-        .committed("metric-batches", "metric-split-etl", 2)
+        .committed("storefront-events", "storefront-split-etl", 2)
         .into_iter()
         .sum();
     assert_eq!(
-        committed, batches,
-        "the drain committed a watermark covering every batch"
+        committed,
+        settled * 3,
+        "the drain committed a watermark covering every event"
     );
 }
 

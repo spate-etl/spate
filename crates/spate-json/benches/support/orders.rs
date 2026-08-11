@@ -1,6 +1,6 @@
 //! Decode fixtures shared by `benches/decode_wall.rs` (wall time) and
 //! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record,
-//! a seven-field reading, and the three payload framings the deserializer
+//! a seven-field order line, and the three payload framings the deserializer
 //! supports, clean and corrupted.
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
@@ -38,10 +38,15 @@ pub(crate) struct Order {
     pub(crate) coupon: Option<String>,
 }
 
+/// One line of an order — the many-small-records workload the framing cases
+/// batch. Do not change the field *types* (string, int, string, int, bool,
+/// float, string array) or the record's encoded size: both are what the
+/// counted tier compares against, and `tests/bench_fixtures.rs` pins the
+/// corpus byte-for-byte.
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Reading {
-    pub(crate) name: String,
-    pub(crate) value: i64,
+pub(crate) struct LineItem {
+    pub(crate) sku: String,
+    pub(crate) qty: i64,
     pub(crate) unit: String,
     pub(crate) ts_ms: i64,
     pub(crate) ok: bool,
@@ -69,29 +74,25 @@ pub(crate) fn sample_order() -> Order {
     }
 }
 
-pub(crate) fn sample_reading(i: u64) -> Reading {
-    Reading {
-        name: format!("metric_{i}"),
-        value: (i as i64) * 37,
-        unit: "count".to_owned(),
+pub(crate) fn sample_line(i: u64) -> LineItem {
+    LineItem {
+        sku: format!("SKU-{i:06}"),
+        qty: (i as i64) * 37,
+        unit: "each".to_owned(),
         ts_ms: 1_772_000_000_000 + i as i64,
         ok: !i.is_multiple_of(5),
         ratio: (i as f64) / 100.0,
-        tags: vec![
-            "prod".to_owned(),
-            "eu".to_owned(),
-            format!("rack-{}", i % 8),
-        ],
+        tags: vec!["gift".to_owned(), "eu".to_owned(), format!("bin-{}", i % 8)],
     }
 }
 
-pub(crate) fn sample_readings(n: u64) -> Vec<Reading> {
-    (0..n).map(sample_reading).collect()
+pub(crate) fn sample_lines(n: u64) -> Vec<LineItem> {
+    (0..n).map(sample_line).collect()
 }
 
-pub(crate) fn ndjson(readings: &[Reading]) -> Vec<u8> {
+pub(crate) fn ndjson(lines: &[LineItem]) -> Vec<u8> {
     let mut out = Vec::new();
-    for r in readings {
+    for r in lines {
         out.extend_from_slice(&serde_json::to_vec(r).unwrap());
         out.push(b'\n');
     }
@@ -103,14 +104,14 @@ pub(crate) fn order_document() -> Vec<u8> {
     serde_json::to_vec(&sample_order()).expect("encode an order")
 }
 
-/// `n` readings as a top-level JSON array — the `array` framing's payload.
-pub(crate) fn readings_array(n: u64) -> Vec<u8> {
-    serde_json::to_vec(&sample_readings(n)).expect("encode an array")
+/// `n` lines as a top-level JSON array — the `array` framing's payload.
+pub(crate) fn lines_array(n: u64) -> Vec<u8> {
+    serde_json::to_vec(&sample_lines(n)).expect("encode an array")
 }
 
-/// `n` readings newline-delimited — the `ndjson` framing's payload.
-pub(crate) fn readings_ndjson(n: u64) -> Vec<u8> {
-    ndjson(&sample_readings(n))
+/// `n` lines newline-delimited — the `ndjson` framing's payload.
+pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
+    ndjson(&sample_lines(n))
 }
 
 // ---------------------------------------------------------------------------
@@ -154,51 +155,58 @@ pub(crate) enum Corruption {
     /// then the input ends — a *syntax* error (`is_data` false), reached after
     /// the parser has done the whole document's work.
     Syntax,
-    /// A well-formed document whose `name` is a number where [`Reading`] wants
+    /// A well-formed document whose `sku` is a number where [`LineItem`] wants
     /// a string. The parse succeeds and the *mapping* fails — a data error,
     /// and the one a schema drift produces rather than a truncated write.
+    ///
+    /// Where in the record it fails is part of the workload, and it is not the
+    /// declaration order: this document is built with `json!`, whose map is a
+    /// `BTreeMap`, so its keys are emitted **alphabetically**. `sku` sits
+    /// fourth, and `ok`, `qty` and `ratio` decode successfully before the
+    /// rejection. Renaming a field can therefore move the failure position
+    /// without touching this code.
     TypeMismatch,
 }
 
 /// One record, encoded and then broken.
-pub(crate) fn bad_reading(i: u64, how: Corruption) -> Vec<u8> {
-    let r = sample_reading(i);
+pub(crate) fn bad_line(i: u64, how: Corruption) -> Vec<u8> {
+    let r = sample_line(i);
     match how {
         Corruption::Syntax => {
-            let mut line = serde_json::to_vec(&r).expect("encode a reading");
+            let mut line = serde_json::to_vec(&r).expect("encode an order line");
             let brace = line.pop();
             assert_eq!(brace, Some(b'}'), "a record does not end in a brace");
             line
         }
         Corruption::TypeMismatch => serde_json::to_vec(&serde_json::json!({
-            "name": i,
-            "value": r.value,
+            "sku": i,
+            "qty": r.qty,
             "unit": r.unit,
             "ts_ms": r.ts_ms,
             "ok": r.ok,
             "ratio": r.ratio,
             "tags": r.tags,
         }))
-        .expect("encode a mismatched reading"),
+        .expect("encode a mismatched order line"),
     }
 }
 
-/// `records` readings newline-delimited, with every `bad_every`-th record
+/// `records` lines newline-delimited, with every `bad_every`-th record
 /// broken (`bad_every` of 0 breaks none, 1 breaks all).
-pub(crate) fn readings_ndjson_bad_every(records: u64, bad_every: u64, how: Corruption) -> Vec<u8> {
+pub(crate) fn lines_ndjson_bad_every(records: u64, bad_every: u64, how: Corruption) -> Vec<u8> {
     let mut out = Vec::new();
     for i in 0..records {
         if bad_every != 0 && (i + 1).is_multiple_of(bad_every) {
-            out.extend_from_slice(&bad_reading(i, how));
+            out.extend_from_slice(&bad_line(i, how));
         } else {
-            out.extend_from_slice(&serde_json::to_vec(&sample_reading(i)).unwrap());
+            out.extend_from_slice(&serde_json::to_vec(&sample_line(i)).unwrap());
         }
         out.push(b'\n');
     }
     out
 }
 
-/// How many records a corpus built by [`readings_ndjson_bad_every`] must
+/// How many records a corpus built by [`lines_ndjson_bad_every`] must
 /// yield. Derived from the same arithmetic the builder uses, so the two cannot
 /// disagree about which lines are broken.
 pub(crate) fn good_lines(records: u64, bad_every: u64) -> u64 {
@@ -211,43 +219,43 @@ pub(crate) fn good_lines(records: u64, bad_every: u64) -> u64 {
             .count() as u64
 }
 
-/// `records` readings newline-delimited with only the **last** one broken.
+/// `records` lines newline-delimited with only the **last** one broken.
 ///
 /// Late on purpose. Under `on_error: fail` the ndjson path decodes every line
 /// into a holding buffer before emitting any of them, so a payload that fails
 /// on its last line is the one that pays for the whole decode and then throws
 /// all of it away — the atomic path's worst case, and the one that says what
 /// atomicity costs.
-pub(crate) fn readings_ndjson_bad_last(records: u64, how: Corruption) -> Vec<u8> {
+pub(crate) fn lines_ndjson_bad_last(records: u64, how: Corruption) -> Vec<u8> {
     let mut out = Vec::new();
     for i in 0..records - 1 {
-        out.extend_from_slice(&serde_json::to_vec(&sample_reading(i)).unwrap());
+        out.extend_from_slice(&serde_json::to_vec(&sample_line(i)).unwrap());
         out.push(b'\n');
     }
-    out.extend_from_slice(&bad_reading(records - 1, how));
+    out.extend_from_slice(&bad_line(records - 1, how));
     out.push(b'\n');
     out
 }
 
-/// `records` readings as a top-level array with only the **last** element
+/// `records` lines as a top-level array with only the **last** element
 /// broken — the array framing's counterpart to
-/// [`readings_ndjson_bad_last`], and broken the same way at the same position
+/// [`lines_ndjson_bad_last`], and broken the same way at the same position
 /// so the pair differs in framing and nothing else.
 ///
 /// A syntax error here would end the array parse early rather than late, so
 /// this takes the [`TypeMismatch`](Corruption::TypeMismatch) kind: the parser
 /// builds every element before `serde` rejects the last, and the whole vector
 /// is discarded.
-pub(crate) fn readings_array_bad_last(records: u64) -> Vec<u8> {
+pub(crate) fn lines_array_bad_last(records: u64) -> Vec<u8> {
     let mut out = Vec::from(b"[");
     for i in 0..records - 1 {
         if i > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(&serde_json::to_vec(&sample_reading(i)).unwrap());
+        out.extend_from_slice(&serde_json::to_vec(&sample_line(i)).unwrap());
     }
     out.push(b',');
-    out.extend_from_slice(&bad_reading(records - 1, Corruption::TypeMismatch));
+    out.extend_from_slice(&bad_line(records - 1, Corruption::TypeMismatch));
     out.push(b']');
     out
 }

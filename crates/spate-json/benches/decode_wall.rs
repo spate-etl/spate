@@ -102,7 +102,7 @@ mod orders;
 mod shapes;
 
 use decode_rig::{Rig, batch_rig, decode_run, decode_run_err, shape_rig};
-use orders::{BAD_EVERY, Corruption, RECORDS, Reading};
+use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 
 /// The component label a case's drop counters carry; the pipeline label is the
 /// case id.
@@ -151,14 +151,14 @@ fn batch_case(
             id,
             move |corpus, _seed| {
                 let rig =
-                    batch_rig::<Reading>(framing, on_error, payload(), expect, (id, COMPONENT));
+                    batch_rig::<LineItem>(framing, on_error, payload(), expect, (id, COMPONENT));
                 absorb(corpus, &rig);
                 RefCell::new(rig)
             },
-            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<Reading>>>| {
+            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<LineItem>>>| {
                 b.iter(|| {
                     let mut rig = rig.borrow_mut();
-                    let got = decode_run::<Owned<Reading>, _>(&mut rig);
+                    let got = decode_run::<Owned<LineItem>, _>(&mut rig);
                     assert_eq!(got, rig.expect, "the framing emitted a different count");
                     got
                 });
@@ -190,14 +190,14 @@ fn batch_fail_case(
             id,
             move |corpus, _seed| {
                 let rig =
-                    batch_rig::<Reading>(framing, OnError::Fail, payload(), 0, (id, COMPONENT));
+                    batch_rig::<LineItem>(framing, OnError::Fail, payload(), 0, (id, COMPONENT));
                 absorb(corpus, &rig);
                 RefCell::new(rig)
             },
-            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<Reading>>>| {
+            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<LineItem>>>| {
                 b.iter(|| {
                     let mut rig = rig.borrow_mut();
-                    let got = decode_run_err::<Owned<Reading>, _>(&mut rig);
+                    let got = decode_run_err::<Owned<LineItem>, _>(&mut rig);
                     assert_eq!(got, 0, "an atomic framing emitted a record before failing");
                     got
                 });
@@ -255,7 +255,7 @@ fn suite() -> Suite {
         JsonFraming::Ndjson,
         OnError::Skip,
         RECORDS,
-        || orders::readings_ndjson(RECORDS),
+        || orders::lines_ndjson(RECORDS),
     );
     let suite = batch_case(
         suite,
@@ -263,7 +263,7 @@ fn suite() -> Suite {
         JsonFraming::Array,
         OnError::Skip,
         RECORDS,
-        || orders::readings_array(RECORDS),
+        || orders::lines_array(RECORDS),
     );
 
     // The `Fail` policy on input that never needed it. This framing decodes
@@ -276,7 +276,7 @@ fn suite() -> Suite {
         JsonFraming::Ndjson,
         OnError::Fail,
         RECORDS,
-        || orders::readings_ndjson(RECORDS),
+        || orders::lines_ndjson(RECORDS),
     );
 
     // The error axis under `Skip`: one record in `BAD_EVERY` broken from
@@ -287,7 +287,7 @@ fn suite() -> Suite {
         JsonFraming::Ndjson,
         OnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
-        || orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
+        || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
     );
     let suite = batch_case(
         suite,
@@ -295,7 +295,7 @@ fn suite() -> Suite {
         JsonFraming::Ndjson,
         OnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
-        || orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
+        || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
     );
     let suite = batch_case(
         suite,
@@ -303,7 +303,7 @@ fn suite() -> Suite {
         JsonFraming::Ndjson,
         OnError::Skip,
         0,
-        || orders::readings_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
+        || orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
     );
 
     // Everything decoded, nothing emitted, the holding buffer discarded.
@@ -311,7 +311,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_fail_bad_last",
         JsonFraming::Ndjson,
-        || orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
+        || orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
     );
 
     // The shape axis, all under the dynamically-typed target so that shape is
@@ -396,7 +396,7 @@ fn serde_floor<T: 'static>(
         .done()
 }
 
-fn serde_array(bytes: &[u8]) -> Vec<Reading> {
+fn serde_array(bytes: &[u8]) -> Vec<LineItem> {
     serde_json::from_slice(bytes).expect("the fixture is a valid array")
 }
 
@@ -416,7 +416,7 @@ fn serde_ndjson(bytes: &[u8]) -> u64 {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let _: Reading = serde_json::from_slice(line).expect("the fixture is a valid reading");
+        let _: LineItem = serde_json::from_slice(line).expect("the fixture is a valid order line");
         decoded += 1;
     }
     decoded
@@ -442,14 +442,14 @@ fn serde_floors(suite: Suite) -> Suite {
         suite,
         "decode_floor_serde_ndjson",
         RECORDS,
-        || orders::readings_ndjson(RECORDS),
+        || orders::lines_ndjson(RECORDS),
         serde_ndjson,
     );
     let suite = serde_floor(
         suite,
         "decode_floor_serde_array",
         RECORDS,
-        || orders::readings_array(RECORDS),
+        || orders::lines_array(RECORDS),
         serde_array,
     );
     serde_floor(
@@ -529,7 +529,7 @@ fn simd_decode<T: serde::de::DeserializeOwned>(state: &SimdFloor, bytes: &[u8]) 
 }
 
 #[cfg(feature = "simd")]
-fn simd_array(state: &SimdFloor) -> Vec<Reading> {
+fn simd_array(state: &SimdFloor) -> Vec<LineItem> {
     simd_decode(state, &state.payload)
 }
 
@@ -545,7 +545,7 @@ fn simd_ndjson(state: &SimdFloor) -> u64 {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let _: Reading = simd_decode(state, line);
+        let _: LineItem = simd_decode(state, line);
         decoded += 1;
     }
     decoded
@@ -557,14 +557,14 @@ fn simd_floors(suite: Suite) -> Suite {
         suite,
         "decode_floor_simd_ndjson",
         RECORDS,
-        || orders::readings_ndjson(RECORDS),
+        || orders::lines_ndjson(RECORDS),
         simd_ndjson,
     );
     let suite = simd_floor(
         suite,
         "decode_floor_simd_array",
         RECORDS,
-        || orders::readings_array(RECORDS),
+        || orders::lines_array(RECORDS),
         simd_array,
     );
     simd_floor(

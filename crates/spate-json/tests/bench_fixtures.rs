@@ -35,7 +35,7 @@ mod shapes;
 
 use decode_rig::Sink;
 use lines::Eol;
-use orders::{BAD_EVERY, Corruption, RECORDS, Reading};
+use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 
 /// FNV-1a over a corpus.
 ///
@@ -76,7 +76,7 @@ fn raw(bytes: &[u8]) -> RawPayload<'_> {
 /// failed, and how many records reached the sink. The same two quantities
 /// every bench case asserts.
 fn drive(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
-    let mut deser = JsonDeserializerBuilder::from_settings(settings).build_serde::<Reading>();
+    let mut deser = JsonDeserializerBuilder::from_settings(settings).build_serde::<LineItem>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink(0);
     let failed = deser.deserialize(&raw(payload), &ack, &mut sink).is_err();
@@ -126,13 +126,10 @@ fn frame(stream: &[u8], chunk: usize) -> (usize, usize) {
 
 #[test]
 fn the_corpora_are_reproducible() {
+    assert_eq!(orders::lines_ndjson(RECORDS), orders::lines_ndjson(RECORDS));
     assert_eq!(
-        orders::readings_ndjson(RECORDS),
-        orders::readings_ndjson(RECORDS)
-    );
-    assert_eq!(
-        orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
-        orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch)
+        orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
+        orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch)
     );
     assert_eq!(shapes::wide_flat(), shapes::wide_flat());
     assert_eq!(shapes::deep_nested(), shapes::deep_nested());
@@ -141,6 +138,56 @@ fn the_corpora_are_reproducible() {
     assert_eq!(
         lines::stream(lines::RECORDS, lines::LINE_BYTES, Eol::Lf, 0),
         lines::stream(lines::RECORDS, lines::LINE_BYTES, Eol::Lf, 0)
+    );
+}
+
+/// The record's field names and JSON kinds, pinned separately from the bytes.
+///
+/// A length-and-digest pin moves whenever any byte moves and cannot say what
+/// moved; this names the part of the shape that did, and fails on a `qty` that
+/// quietly became a float while the corpus happened to keep its size. It also
+/// catches an added, removed or renamed field, and a `#[serde(rename)]`.
+///
+/// What it does **not** catch: `i64` becoming `u64`, or `String` becoming
+/// `Box<str>`. Those keep both the JSON kind and the encoded bytes, so neither
+/// this nor the digests below would notice — the guard there is the
+/// do-not-change contract on the fixture itself.
+///
+/// Keys come back sorted, because `serde_json::Value` is a map, so this pins
+/// name/kind pairs and not their declaration order. Order is pinned by the
+/// clean corpora's digests: it is what the encoder writes.
+#[test]
+fn the_line_item_shape_is_the_measured_workload() {
+    let doc = serde_json::to_value(orders::sample_line(7)).expect("encode an order line");
+    let obj = doc.as_object().expect("an order line is a JSON object");
+    let shape: Vec<(&str, &str)> = obj
+        .iter()
+        .map(|(k, v)| {
+            let kind = match v {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Number(n) if n.is_f64() => "float",
+                serde_json::Value::Number(_) => "int",
+                // Reported rather than panicked, so an accidental `Option`
+                // field arrives as a readable shape diff.
+                serde_json::Value::Null => "null",
+                serde_json::Value::Object(_) => "object",
+            };
+            (k.as_str(), kind)
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("ok", "bool"),
+            ("qty", "int"),
+            ("ratio", "float"),
+            ("sku", "string"),
+            ("tags", "array"),
+            ("ts_ms", "int"),
+            ("unit", "string"),
+        ]
     );
 }
 
@@ -162,53 +209,53 @@ fn the_corpora_are_pinned_across_revisions() {
         "single_typed / single_value"
     );
     assert_eq!(
-        pin(&orders::readings_ndjson(RECORDS)),
-        (253_787, 0xf116_9d1d_5776_def2),
+        pin(&orders::lines_ndjson(RECORDS)),
+        (242_897, 0xa3d6_4abc_50c3_2286),
         "ndjson_clean / ndjson_fail_clean"
     );
     assert_eq!(
-        pin(&orders::readings_array(RECORDS)),
-        (253_788, 0x2578_a27f_d419_bbb8),
+        pin(&orders::lines_array(RECORDS)),
+        (242_898, 0x0c28_c24d_f9f9_05a4),
         "array_clean"
     );
     assert_eq!(
-        pin(&orders::readings_ndjson_bad_every(
+        pin(&orders::lines_ndjson_bad_every(
             RECORDS,
             BAD_EVERY,
             Corruption::Syntax
         )),
-        (253_587, 0xcf8c_5a93_348a_cd40),
+        (242_697, 0x2c32_faca_f2c0_1388),
         "ndjson_syntax_10pct"
     );
     assert_eq!(
-        pin(&orders::readings_ndjson_bad_every(
+        pin(&orders::lines_ndjson_bad_every(
             RECORDS,
             BAD_EVERY,
             Corruption::TypeMismatch
         )),
-        (251_987, 0xcf6e_ffba_62f0_b2de),
+        (241_186, 0x699a_8e82_2d17_1b30),
         "ndjson_type_10pct"
     );
     assert_eq!(
-        pin(&orders::readings_ndjson_bad_every(
+        pin(&orders::lines_ndjson_bad_every(
             RECORDS,
             1,
             Corruption::Syntax
         )),
-        (251_787, 0x6998_e4c3_ee66_86d8),
+        (240_897, 0x4be5_a663_e642_cb62),
         "ndjson_syntax_all"
     );
     assert_eq!(
-        pin(&orders::readings_ndjson_bad_last(
+        pin(&orders::lines_ndjson_bad_last(
             RECORDS,
             Corruption::TypeMismatch
         )),
-        (253_778, 0x0e21_e9e6_7740_6b11),
+        (242_889, 0x8576_1234_48d1_cc3c),
         "ndjson_fail_bad_last"
     );
     assert_eq!(
-        pin(&orders::readings_array_bad_last(RECORDS)),
-        (253_779, 0x58cc_d66e_21f6_1b85),
+        pin(&orders::lines_array_bad_last(RECORDS)),
+        (242_890, 0xe02a_92e8_bb84_e836),
         "array_bad_last"
     );
     assert_eq!(
@@ -293,7 +340,7 @@ fn the_corpora_are_pinned_across_revisions() {
 fn the_error_cases_emit_what_they_claim() {
     let skip_ndjson = settings(JsonFraming::Ndjson, OnError::Skip, false);
     assert_eq!(
-        drive(skip_ndjson.clone(), &orders::readings_ndjson(RECORDS)),
+        drive(skip_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
         "ndjson_clean"
     );
@@ -301,7 +348,7 @@ fn the_error_cases_emit_what_they_claim() {
         assert_eq!(
             drive(
                 skip_ndjson.clone(),
-                &orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, how)
+                &orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, how)
             ),
             (false, orders::good_lines(RECORDS, BAD_EVERY)),
             "ndjson_*_10pct with {how:?}"
@@ -310,7 +357,7 @@ fn the_error_cases_emit_what_they_claim() {
     assert_eq!(
         drive(
             skip_ndjson,
-            &orders::readings_ndjson_bad_every(RECORDS, 1, Corruption::Syntax)
+            &orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax)
         ),
         (false, 0),
         "ndjson_syntax_all"
@@ -318,14 +365,14 @@ fn the_error_cases_emit_what_they_claim() {
 
     let fail_ndjson = settings(JsonFraming::Ndjson, OnError::Fail, false);
     assert_eq!(
-        drive(fail_ndjson.clone(), &orders::readings_ndjson(RECORDS)),
+        drive(fail_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
         "ndjson_fail_clean"
     );
     assert_eq!(
         drive(
             fail_ndjson,
-            &orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch)
+            &orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch)
         ),
         (true, 0),
         "ndjson_fail_bad_last: the payload fails and emits no prefix"
@@ -333,12 +380,12 @@ fn the_error_cases_emit_what_they_claim() {
 
     let skip_array = settings(JsonFraming::Array, OnError::Skip, false);
     assert_eq!(
-        drive(skip_array.clone(), &orders::readings_array(RECORDS)),
+        drive(skip_array.clone(), &orders::lines_array(RECORDS)),
         (false, RECORDS),
         "array_clean"
     );
     assert_eq!(
-        drive(skip_array, &orders::readings_array_bad_last(RECORDS)),
+        drive(skip_array, &orders::lines_array_bad_last(RECORDS)),
         (false, 0),
         "array_bad_last: one bad element drops the whole payload"
     );
@@ -351,14 +398,14 @@ fn the_error_cases_emit_what_they_claim() {
 /// distinction is structural rather than textual: the truncated record is not
 /// JSON at all, so the parser stops without ever producing a value, while the
 /// mismatched one is perfectly good JSON that simply cannot become a
-/// [`Reading`] — the parser does all of its work and `serde` rejects the
+/// [`LineItem`] — the parser does all of its work and `serde` rejects the
 /// result. Asserted that way rather than on the message, which the two decode
 /// backends word differently and which the `simd` arm reaches from a different
 /// position in the input.
 #[test]
 fn the_two_corruptions_fail_for_different_reasons() {
-    let syntax = orders::bad_reading(0, Corruption::Syntax);
-    let mismatch = orders::bad_reading(0, Corruption::TypeMismatch);
+    let syntax = orders::bad_line(0, Corruption::Syntax);
+    let mismatch = orders::bad_line(0, Corruption::TypeMismatch);
 
     assert!(
         serde_json::from_slice::<serde_json::Value>(&syntax).is_err(),
@@ -378,7 +425,7 @@ fn the_two_corruptions_fail_for_different_reasons() {
             OnError::Fail,
             false,
         ))
-        .build_serde::<Reading>();
+        .build_serde::<LineItem>();
         let (ack, _rx) = AckRef::test_pair();
         let mut sink = Sink(0);
         deser
@@ -638,55 +685,55 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 #[test]
 fn a_second_drive_emits_what_the_first_did() {
     // Both framings, since only ndjson decodes line by line.
-    let mut ndjson = decode_rig::batch_rig::<Reading>(
+    let mut ndjson = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson(RECORDS),
+        orders::lines_ndjson(RECORDS),
         RECORDS,
         ("fixtures-ndjson", "json"),
     );
-    let mut array = decode_rig::batch_rig::<Reading>(
+    let mut array = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Array,
         OnError::Skip,
-        orders::readings_array(RECORDS),
+        orders::lines_array(RECORDS),
         RECORDS,
         ("fixtures-array", "json"),
     );
     // Both poison rates: one record in ten, and every record. The second is
     // the case that drops two thousand times per drive, which is where a
     // limiter or a counter that accumulated would show first.
-    let mut poisoned = decode_rig::batch_rig::<Reading>(
+    let mut poisoned = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
+        orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
         orders::good_lines(RECORDS, BAD_EVERY),
         ("fixtures-poisoned", "json"),
     );
-    let mut storm = decode_rig::batch_rig::<Reading>(
+    let mut storm = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
+        orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
         0,
         ("fixtures-storm", "json"),
     );
     for drive in 1..=3 {
         assert_eq!(
-            decode_rig::decode_run::<Owned<Reading>, _>(&mut ndjson),
+            decode_rig::decode_run::<Owned<LineItem>, _>(&mut ndjson),
             RECORDS,
             "ndjson drive {drive}"
         );
         assert_eq!(
-            decode_rig::decode_run::<Owned<Reading>, _>(&mut array),
+            decode_rig::decode_run::<Owned<LineItem>, _>(&mut array),
             RECORDS,
             "array drive {drive}"
         );
         assert_eq!(
-            decode_rig::decode_run::<Owned<Reading>, _>(&mut poisoned),
+            decode_rig::decode_run::<Owned<LineItem>, _>(&mut poisoned),
             orders::good_lines(RECORDS, BAD_EVERY),
             "poisoned drive {drive}"
         );
         assert_eq!(
-            decode_rig::decode_run::<Owned<Reading>, _>(&mut storm),
+            decode_rig::decode_run::<Owned<LineItem>, _>(&mut storm),
             0,
             "storm drive {drive}"
         );
@@ -694,16 +741,16 @@ fn a_second_drive_emits_what_the_first_did() {
 
     // The failing arm too: a rig whose call must return `Err` has to keep
     // returning it, or the case quietly starts measuring the happy path.
-    let mut failing = decode_rig::batch_rig::<Reading>(
+    let mut failing = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Fail,
-        orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
+        orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
         ("fixtures-failing", "json"),
     );
     for drive in 1..=3 {
         assert_eq!(
-            decode_rig::decode_run_err::<Owned<Reading>, _>(&mut failing),
+            decode_rig::decode_run_err::<Owned<LineItem>, _>(&mut failing),
             0,
             "failing drive {drive}"
         );
@@ -781,10 +828,10 @@ fn a_second_drive_emits_what_the_first_did() {
 /// wall tier's thousandth iteration the same as its first.
 #[test]
 fn the_decode_rig_would_accumulate_without_its_reset() {
-    let mut rig = decode_rig::batch_rig::<Reading>(
+    let mut rig = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson(RECORDS),
+        orders::lines_ndjson(RECORDS),
         RECORDS,
         ("fixtures-noreset", "json"),
     );

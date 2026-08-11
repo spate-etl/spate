@@ -73,7 +73,7 @@ carries that thread's plumbing (queues, byte budget, pipeline name):
 ```rust file=crates/spate/examples/memory_pipeline.rs region=chain
 ```
 
-Two things to notice:
+Things to notice:
 
 - Everything inside the closure is statically composed — `filter` and `map`
   monomorphize into one loop, with a single virtual call per *batch* at the

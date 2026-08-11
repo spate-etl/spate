@@ -18,7 +18,7 @@ concrete mechanism.
 | Avro format | Registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-registry-credentials) |
 | NATS JetStream store | TLS, mTLS, token, creds file | opt-in `coordination-nats` feature | [NATS → Security](../04-connectors/coordination/nats/README.mdx#security-authentication-and-tls) |
 
-Two connectors that share a client share a matrix — the Kafka source and sink
+Connectors that share a client share a matrix — the Kafka source and sink
 render the same one, from the same partial.
 
 ## Secrets stay out of the file

@@ -407,9 +407,9 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     //
     // They are produced **first**, and that ordering is load-bearing: a
     // skipped record puts no row in the table, so nothing observable would
-    // prove the tail had been consumed before the drain. Sitting at the head
-    // of each partition, they are covered by construction once every lined
-    // order behind them has landed.
+    // prove the tail had been consumed before the drain. Producing them first
+    // puts each one at a lower offset than every lined order on whichever
+    // partition it lands, so the wait below covers them by construction.
     let unlined: i64 = 10;
     let order_line = |sku: &str, qty: i32, unit_cents: i32| {
         Value::Record(vec![
@@ -467,7 +467,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         u64::try_from(orders).expect("orders"),
         "every lined order landed, and no line-less one did"
     );
-    // The `try_map` really totalled the lines: 2 x 7900 + 1 x 3500.
+    // The `try_map` really totaled the lines: 2 x 7900 + 1 x 3500.
     assert_eq!(
         h.scalar("SELECT uniqExact(total_cents) FROM orders"),
         1,

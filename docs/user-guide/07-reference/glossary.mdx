@@ -106,7 +106,7 @@ replay after restart.
 
 ### Epoch
 
-Three generations share the name, all monotonic, all fencing something:
+Several generations share the name, all monotonic, all fencing something:
 the **assignment epoch** in the checkpointer, bumped on every rebalance
 (`Checkpointer::begin_epoch`) so acks issued under a previous assignment
 are discarded; the **lease epoch** (`LeaseEpoch`) on a coordinated

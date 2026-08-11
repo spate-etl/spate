@@ -157,7 +157,7 @@ directly (a hand-built harness, a test fixture) logs an error and shadows
 instead, because a metrics label collision must never take down a healthy data
 path.
 
-Two consequences worth stating outright:
+Consequences worth stating outright:
 
 - **A shadow is never promoted.** The claim frees when the owner is dropped, so
   a pipeline rebuilt *sequentially* — drop the old one, then build — re-owns its
@@ -264,7 +264,7 @@ So a rising flush p99 is not evidence about the sink. It is equally consistent
 with a sink that has not slowed down at all while the shard queues behind its
 `inflight.max_per_shard` cap — which is how a healthy ClickHouse cluster
 (40% CPU, merges keeping up) came to be investigated as a slow one. Ask the
-three questions separately:
+questions separately:
 
 ```promql
 # Is the sink slow? Successful attempts only, so a fast fatal reject cannot
@@ -308,14 +308,14 @@ a shard writing — but check `spate_sink_shard_healthy` before you check the
 backoff gauge. A quarantined shard can hold a flush open for a whole `open_for`
 window with the backoff gauge flat at zero throughout.
 
-Three asymmetries worth knowing before you subtract one family from another.
+Asymmetries worth knowing before you subtract one family from another.
 Flush is observed once per **batch** and only for batches that settled. Write
 is observed once per **attempt**, so a batch that retried contributes several
 observations — including a batch that is later abandoned, whose completed
 attempts stay in `{outcome="error"}` with no matching flush. And "abandoned" is
 not only a drain-deadline event: a fatal class, exhausted `retry.max_attempts`,
 or a panicking write task all abandon in steady state with no drain in sight
-(`spate_sink_abandoned_batches_total` counts all four). The decomposition is a
+(`spate_sink_abandoned_batches_total` counts them all). The decomposition is a
 way to reason about where a flush went, not an identity to compute.
 
 ## Checkpointing (`spate_checkpoint_*`)
@@ -359,7 +359,7 @@ handed a `CoordinationMetrics`). They fire alongside the source's own
 | `spate_coordination_drain_duration_seconds` | histogram | | One cooperative drain, on the **releasing** worker: revocation requested to the release landing — stopping intake at a safe boundary, committing the drained tail, giving the split up. Only drains that end a revocation cooperatively are observed; a forced release is a *failed* drain and is counted as `revocations_total{outcome="forced"}` instead, so `drain_deadline` never shows up as a spike in this distribution. A drain whose revocation was `cancelled` is not observed either — when it lands it is no longer ending a revocation, so timing it would mix "how long a handoff takes" with "how long a withdrawn one took to unwind". Read it against `drain_deadline`: a p99 creeping toward it means forced revocations are imminent. |
 | `spate_coordination_assignment_latency_seconds` | histogram | | One assignment wait, on the **gaining** worker: a split appearing in this worker's assignment to this worker holding its lease. This is time-to-balance as an operator experiences it — how long work the leader had already decided this worker should be doing sat undone. It spans whatever stood in the way, including the previous owner's drain, rather than flattering itself by timing only the final claim. |
 
-### The two coordination latencies do not compose
+### The coordination latencies do not compose
 
 `drain_duration_seconds` and `assignment_latency_seconds` were a single
 family split by a `phase` label until the balancer became leader-assigned,

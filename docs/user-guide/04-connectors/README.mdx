@@ -32,7 +32,7 @@ Connectors are grouped by role:
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 `features = ["full"]` on the `spate` facade enables all production
-connectors. The two connectors outside it are the ones no deployment should
+connectors. The connectors outside it are the ones no deployment should
 reach for: Datagen, which keeps no durable progress and needs its own
 `datagen` feature, and Memory / Capture, which ships as a separate
 dev-dependency. Memory / Capture is dual-role — neither a production source

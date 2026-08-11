@@ -14,7 +14,7 @@ Construct it from the pipeline's opaque section, and terminate the chain
 with one of the sink's encoder helpers — `encoder_bytes` for payload
 passthrough, `encoder_json::<Owned<MyRow>>` for `serde_json`, and
 `encoder_with` for any `MessageEncoder` carrying keys, headers or tombstones.
-All three bake the configured `max_message_bytes` guard into the encoder:
+All of them bake the configured `max_message_bytes` guard into the encoder:
 
 ```rust file=crates/spate/examples/kafka_to_kafka_split.rs region=encoder
 ```
@@ -120,7 +120,7 @@ Skip/Fail policy applies (default Skip: dropped and counted).
 
 ## Delivery semantics, honestly
 
-At-least-once with three distinct duplicate windows — none of them loss:
+At-least-once, with distinct duplicate windows — none of them loss:
 
 - **In-session producer retries** — covered by the forced
   `enable.idempotence` (per-partition sequence numbers). No duplicates.

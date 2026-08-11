@@ -238,7 +238,7 @@ the framework's `spate_sink_*` stage families, labeled `component_type="clickhou
 and carrying `shard` and `replica` (both bounded by the configured topology, so
 both are always on).
 
-The three worth watching here are `spate_sink_shard_healthy`, which reads `0`
+The ones worth watching here are `spate_sink_shard_healthy`, which reads `0`
 when no replica of a shard is circuit-closed;
 `spate_sink_replica_errors_total`, which attributes failures to a replica URL;
 and `spate_sink_write_duration_seconds{outcome}` for insert latency. See

@@ -78,7 +78,7 @@ generic model.
 
 ## Typed or dynamic records
 
-The builder hands out three deserializer flavors:
+The builder hands out these deserializer flavors:
 
 - `build_serde_datum::<T>()` (and the record-family form `build_datum::<F>()`)
   — decodes each datum **directly** into `T` in a single pass, driven by the
@@ -87,7 +87,7 @@ The builder hands out three deserializer flavors:
   point straight into the payload buffer (zero-copy;
   [`spate-avro/tests/zero_copy_flat_map.rs`](repo:crates/spate-avro/tests/zero_copy_flat_map.rs)
   is the worked example).
-  Two constraints: no `reader_schema` (rejected at build time — records
+  The constraints: no `reader_schema` (rejected at build time — records
   decode in the writer schema's shape; additive evolution works through
   `#[serde(default)]`/`#[serde(alias)]`, and unknown fields are skipped),
   and no `duration`/`big-decimal` logical types. A fixed schema breaks the
@@ -112,7 +112,7 @@ schema that is not cached yet, the deserializer does not wait: it reports
 "not ready", the operator chain holds the batch (backpressure pauses the
 source if needed), and **the batch retries once the fetch lands**. Records
 are never dropped or duplicated by this mechanism, and the CPU-pinned
-pipeline threads never perform I/O. Two knobs shape the edge cases:
+pipeline threads never perform I/O. These knobs shape the edge cases:
 
 - `prewarm_subjects` fetches the configured subjects' latest schemas at
   startup, so the first batch does not pay the miss.

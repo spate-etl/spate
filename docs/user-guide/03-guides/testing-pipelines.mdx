@@ -65,8 +65,8 @@ test finish in milliseconds.
 
 Assemble with the ordinary `Pipeline` builder — the sink, the chain factory
 and the chunking are the production steps unchanged, and
-[Assembling a pipeline](assembling-a-pipeline.mdx) walks them. Two things
-differ. Turn signal handling off with `handle_signals: false` in
+[Assembling a pipeline](assembling-a-pipeline.mdx) walks them. The
+differences are in the runtime setup. Turn signal handling off with `handle_signals: false` in
 `runtime_options`, because the test triggers shutdown itself rather than
 raising SIGTERM at its own process. Then finish with `into_runtime` instead
 of `run`, so you hold the shutdown handle before anything starts, and spawn

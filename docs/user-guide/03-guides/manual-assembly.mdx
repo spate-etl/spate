@@ -35,10 +35,10 @@ the root): `spate::telemetry`, `spate::metrics`, `spate::pipeline`
 `SinkOptions`), `spate::sink` (`shard_queues`, `SinkPool`, `SinkBundle`,
 `SinkParts`), and `spate::backpressure` (`InflightBudget`).
 
-## The two metric scopes the builder wires
+## The metric scopes the builder wires
 
-The mapping above is exact but for its metrics: the builder attaches two
-scopes an assembly below it does not get for free.
+The mapping above is exact but for its metrics: the builder attaches scopes
+an assembly below it does not get for free.
 
 - **The queue-depth series** (`spate_queue_*`), attached to the shard
   queues before any chain terminal clones them. The seam that attaches it
@@ -127,7 +127,7 @@ impossibility; manually, they are yours again:
   clone is gone; audit every clone you make (see
   [Graceful shutdown](graceful-shutdown.mdx)).
 - **Topology validation** — shard, label and receiver counts must agree.
-  The builder checks all three and returns `BuildError::Sink`. By hand an
+  The builder checks them all and returns `BuildError::Sink`. By hand an
   empty topology panics out of `shard_queues` and a shard with no replicas
   out of `SinkPool::spawn`, but replica labels that do not match their
   shard's endpoints are caught nowhere: a surplus label publishes health
@@ -138,7 +138,7 @@ impossibility; manually, they are yours again:
 
 Both layers are public and semver-committed. The builder is a composition
 rather than a gatekeeper: it grows no capability the primitives cannot
-express, bar the two standing exceptions above — the queue-depth series,
+express, bar the standing exceptions above — the queue-depth series,
 which has no public seam, and resolving a per-sink `chunk:` block, which is
 the config layer's job — and the primitives will not break under you to
 make the builder prettier. If you

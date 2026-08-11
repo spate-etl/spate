@@ -22,8 +22,10 @@ assembly with nothing left out is the example; the steps that follow fill each
 elision in with code that does compile.
 
 `to_row` stands for the stage that turns the decoded record into the row the
-sink encodes — every chain has one, whether it is a `map`, a `try_map` or a
-`flat_map`, and it is what makes the two type parameters line up.
+sink encodes — a `map`, a `try_map` or a `flat_map`, whichever the conversion
+needs — and it is what makes the two type parameters line up. A chain whose
+decoded record is already the row it writes has no such stage and goes straight
+from the deserializer to the terminal.
 
 ```rust
 use spate::prelude::*;

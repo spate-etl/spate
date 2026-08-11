@@ -34,12 +34,13 @@ CREATE TABLE orders (
   SETTINGS non_replicated_deduplication_window = 100;
 ```
 
-Three of those column types do not spell their Rust field the same way, and
-each is deliberate. `LowCardinality(String)` takes a plain `String` — the
-encoding is the server's business, not the row's. `UInt32` takes a `u32`, so
-the width has to match rather than merely be large enough. And `DateTime64(3)`
-takes the `DateTime64Millis` wrapper in step 2, which is what declares the
-scale; a bare `i64` would encode identically and validate against nothing.
+Two of those column types do not spell their Rust field the same way, and both
+are deliberate. `LowCardinality(String)` takes a plain `String` — the encoding
+is the server's business, not the row's. `DateTime64(3)` takes the
+`DateTime64Millis` wrapper in step 2, which is what declares the scale; a bare
+`i64` would encode identically and validate against nothing. `UInt32` does
+spell its field, and that is its own constraint: the width has to match rather
+than merely be large enough.
 
 :::warning
 On plain `MergeTree`, insert deduplication **silently no-ops** unless the
@@ -76,15 +77,19 @@ topic are framed against — the pipeline fetches it by id and never declares it
 }
 ```
 
-It is the `order_placed` event of the storefront stream every example in the
-catalogue decodes, so [`spate-datagen`](https://docs.rs/spate-datagen)
-generates records this pipeline reads.
+The record is the `order_placed` event of the storefront stream the examples
+share, field for field with the one
+[`spate-datagen`](https://docs.rs/spate-datagen) mints. It is not a source you
+can point at this topic: that crate is a library with no producer of its own,
+and it writes bare datums against a top-level union of the three event kinds
+rather than the Confluent frames this pipeline reads. What carries over between
+them is the shape, not the bytes.
 
 Three structs, two of which are the pipeline's ends. `Deserialize` reads
 `OrderPlaced` from the writer schema above, and `OrderLine` is the nested
 element its `lines` array holds. `Serialize` writes `OrderRow` as RowBinary.
 The chain's `try_map` in step 4 is what turns the first into the last,
-totalling the lines on the way:
+totaling the lines on the way:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
@@ -202,7 +207,7 @@ Walking the assembly:
   `"default"`; a pipeline with several named sinks resolves each by name.
 - **`.chains(..)`** installs the per-thread chain factory. The `try_map`
   totals an order's lines into its row; an order carrying none cannot be
-  totalled, so `ErrorPolicy::Skip` drops it, counts it on
+  totaled, so `ErrorPolicy::Skip` drops it, counts it on
   `spate_operator_records_dropped_total`, and the chain keeps going — see
   [Error handling](../02-concepts/04-error-handling.mdx).
 - **`.run(source)`** blocks until SIGTERM/SIGINT (drain) or a fatal error,

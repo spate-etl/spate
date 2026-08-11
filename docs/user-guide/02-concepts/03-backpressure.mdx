@@ -96,7 +96,7 @@ gated partition costs its siblings nothing, and the gate reopens as soon as
 the controller's next acknowledgment harvest retires batches — within one
 control cycle, well inside a commit interval.
 
-Two consequences worth designing around:
+Consequences worth designing around:
 
 - A partition stalled behind a permanently failed batch accumulates at most
   `max_pending_batches` of replay before `checkpoint.stalled_fail_after`

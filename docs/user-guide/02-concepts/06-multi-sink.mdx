@@ -103,7 +103,7 @@ the one place routing can legitimately produce "no destination".
 The split adds **no new delivery machinery**. Each branch clones the source poll
 batch's ack handle, so — exactly as with [`flat_map` fan-out](02-delivery-guarantees.mdx)
 — a source batch's offsets commit only once **every** destination its records
-landed in has durably written. Two properties fall straight out of the shared
+landed in has durably written. Properties fall straight out of the shared
 ack:
 
 - **Worst-status merge.** If the write to any one destination fails, that batch
@@ -134,7 +134,7 @@ restart-replay volume. **Huge rare-kind writes and low checkpoint lag cannot
 coexist while rare and hot records occur in the same source batches.**
 :::
 
-Two levers soften it:
+These levers soften it:
 
 - **Seal on `max_rows` too, not just `linger`.** With `max_rows` sized to the
   target write, `linger` only bites in genuine lulls, and steady-state a rare

@@ -219,7 +219,7 @@ than the deadline. Enforced by
 `a_reassigned_split_cancels_its_own_revocation`.
 
 **What cancelling removes is the replay, not the lane teardown** — and
-only if the source had accepted. Two shapes:
+only if the source had accepted. It takes these shapes:
 
 - **The source had already stopped intake.** It keeps draining, so the
   split is still released and then re-claimed by the same worker on the

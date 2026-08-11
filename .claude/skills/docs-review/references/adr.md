@@ -52,6 +52,8 @@ Both directions, always (`_template.md`). Check all five:
   client-library behavior — none is a defect in a record.
 - **§ 7 present tense and "never a changelog" is suspended.** Past tense, a
   date, "this replaced X", "at the time this was believed" — all correct here.
+- **§ 7 insertion-safe prose is suspended.** "Four options were considered"
+  stays: nothing is added to a record later, so the count cannot go stale.
 - **§ 8 no-YAML-frontmatter still applies.** Records are rendered pages; status
   is a body line.
 

@@ -11,19 +11,20 @@ once and removed; do not reintroduce one.
 
 ## Fan out by directory
 
-The tree is ~56 rendered pages under `docs/user-guide/` plus 41 records under
-`docs/adr/`. One reviewer reading all of it will be a worse reviewer by page 30,
-so split it. Each unit below is independent — no shared state, no ordering:
+The rendered tree under `docs/user-guide/`, plus the records under `docs/adr/`,
+is more than one reviewer should take at a sitting — they will be a worse
+reviewer by page 30, so split it. Each unit below is independent — no shared
+state, no ordering:
 
-| Unit | Pages | Carries |
-|---|---|---|
-| `01-getting-started/` | 4 | Tutorial discipline; § 1's concrete-stack exemption |
-| `02-concepts/` | 9 | Explanation discipline; the heaviest prose in the tree |
-| `03-guides/` | 7 | How-to titles as goals; the security hub |
-| `04-connectors/sources/`, `sinks/`, `formats/`, `coordination/` | 23 | One unit per role; template conformance |
-| `05-deployment/`, `06-extending/` | 11 | § 1's worked-reference exemption in `06-` |
-| `07-reference/` + `METRICS.md` + `INVARIANTS.md` | 5 | The appendix as single source of truth |
-| `docs/adr/` | 43 | [adr.md](adr.md) — different rules entirely |
+| Unit | Carries |
+|---|---|
+| `01-getting-started/` | Tutorial discipline; § 1's concrete-stack exemption |
+| `02-concepts/` | Explanation discipline; the heaviest prose in the tree |
+| `03-guides/` | How-to titles as goals; the security hub |
+| `04-connectors/sources/`, `sinks/`, `formats/`, `coordination/` | One unit per role; template conformance |
+| `05-deployment/`, `06-extending/` | § 1's worked-reference exemption in `06-` |
+| `07-reference/` + `METRICS.md` + `INVARIANTS.md` | The appendix as single source of truth |
+| `docs/adr/` | [adr.md](adr.md) — different rules entirely |
 
 Give each unit the same brief: [SKILL.md](../SKILL.md) steps 1–3 over every page
 in it, reporting findings rather than applying fixes. Ask for the quadrant and

@@ -107,7 +107,7 @@ which is why the sweep is flat from 300000 to 3000000.
 That also makes it the cap that bounds memory, because it bounds bytes
 directly:
 
-```
+```text
 worst-case prefetch = partitions x min(queued.min.messages x avg_message_bytes,
                                        queued.max.messages.kbytes x 1000)
 ```

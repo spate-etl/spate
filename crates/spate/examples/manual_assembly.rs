@@ -22,7 +22,7 @@
 // The `ANCHOR` comments below mark the regions the manual-assembly guide
 // renders. They are stripped from what it shows; see docs/STYLE.md § 10.
 
-// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
 // INDEX-GOAL:  drop below the builder to the primitives it composes
 // INDEX-TECH:  no infrastructure

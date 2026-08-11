@@ -110,7 +110,7 @@ for the pause/resume machinery and the sizing rule.
 ### When every replica of a shard is unhealthy
 
 If no replica has a closed circuit breaker, there is nowhere to write. New
-attempts **park** until the earliest of three things:
+attempts **park** until the earliest of these:
 
 1. the next half-open probe window,
 2. an in-flight probe reporting its result,
@@ -138,7 +138,7 @@ one key (or a handful) dominates the volume, that shard runs hot, and no
 router setting fixes it: affinity makes the skew *irreducible* by design.
 :::
 
-Three responses remain:
+The responses that remain:
 
 - **Choosing a high-cardinality routing key.** Skew comes from few, heavy key
   values. A key with many roughly-even values spreads naturally; a low-
@@ -160,7 +160,7 @@ one shard's write throughput, and the pipeline-wide backpressure it induces.
 
 The router must be a pure function of the record: the same record routes to
 the same shard on every *processing* — across restarts, rebalances, and
-replays. Two guarantees depend on it:
+replays. These guarantees depend on it:
 
 - **Duplicates must colocate to be collapsible.** At-least-once delivery
   means a reprocessed record lands again, and it lands with new batch

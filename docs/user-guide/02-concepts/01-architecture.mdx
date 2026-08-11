@@ -30,7 +30,7 @@ runs the whole hot path single-threaded:
 poll → deserialize → operator chain → route to shard queues
 ```
 
-Two decisions define this stage:
+These decisions define this stage:
 
 - **Deserialization happens here, not on an I/O task.** Payloads borrow
   from the source's buffers, and those borrows cannot cross threads.

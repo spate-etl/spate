@@ -54,7 +54,7 @@ What each sink proves before it returns `Ok`:
 
 ## Teardown can't lose data
 
-Two structural contracts guard the seams where acknowledgments travel in
+Structural contracts guard the seams where acknowledgments travel in
 bulk (encoded chunks, worker ledgers, batch accumulators):
 
 - **Collections fail by default.** Every collection of acks on the sink

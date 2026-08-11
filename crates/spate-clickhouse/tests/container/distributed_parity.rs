@@ -13,15 +13,15 @@
 // proof.
 //
 //   A. Placement parity — a REAL pipeline (memory source -> flat_map explode
-//      -> ClickHouse sink with `sink.router::<_>(sensor_key)`) writes rows
-//      DIRECTLY into each node's shard-local `events_local`. The SAME logical
-//      rows are then inserted through a `Distributed` table (`events_twin_dist`,
+//      -> ClickHouse sink with `sink.router::<_>(sku_key)`) writes rows
+//      DIRECTLY into each node's shard-local `lines_local`. The SAME logical
+//      rows are then inserted through a `Distributed` table (`lines_twin_dist`,
 //      `insert_distributed_sync = 1`), letting ClickHouse place them into
-//      `events_twin`. Per node, `events_local` must equal `events_twin`
+//      `lines_twin`. Per node, `lines_local` must equal `lines_twin`
 //      bit-for-bit — proof our router reproduces the engine's placement, and
-//      that every sensor lives on exactly one shard.
+//      that every sku lives on exactly one shard.
 //
-//   B. Shard pruning — a `SELECT ... WHERE sensor = <literal owned by shard 0>`
+//   B. Shard pruning — a `SELECT ... WHERE sku = <literal owned by shard 0>`
 //      through the `Distributed` table with `optimize_skip_unused_shards = 1`
 //      (+ `force_optimize_skip_unused_shards = 2` as a guardrail) must query
 //      only the owning shard. Proven via the REMOTE node's `system.query_log`
@@ -66,17 +66,17 @@ use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
 // ---- the user-side record types + their owned families ----------------------
 
-/// One decoded sensor batch: a sensor and its events. Owned (the memory
+/// One decoded sku batch: a sku and its lines. Owned (the memory
 /// source hands us bytes we parse into `String`s), so the family is the
 /// stock [`Owned`].
 #[derive(Debug)]
-struct SensorBatch {
-    sensor: String,
-    events: Vec<(String, i64)>,
+struct SkuBatch {
+    sku: String,
+    lines: Vec<(String, i64)>,
 }
 
-/// One exploded event row — the sink's RowBinary shape and the read-back
-/// shape, in the `columns: [sensor, name, value]` order. `Serialize` drives
+/// One exploded order line — the sink's RowBinary shape and the read-back
+/// shape, in the `columns: [sku, unit, qty]` order. `Serialize` drives
 /// the sink encoder; `Row + Deserialize` drives the comparison read-back;
 /// `Ord` sorts the ground-truth for equality.
 #[derive(
@@ -90,58 +90,58 @@ struct SensorBatch {
     serde::Deserialize,
     clickhouse::Row,
 )]
-struct EventRow {
-    sensor: String,
-    name: String,
-    value: i64,
+struct LineRow {
+    sku: String,
+    unit: String,
+    qty: i64,
 }
 
-/// Sharding key: the `sensor` column — one sensor always lands on one shard,
-/// matching a `Distributed` DDL of `xxHash64(sensor)`. A fn item, not a
+/// Sharding key: the `sku` column — one sku always lands on one shard,
+/// matching a `Distributed` DDL of `xxHash64(sku)`. A fn item, not a
 /// closure (the extractor is higher-ranked over the payload lifetime).
-fn sensor_key(row: &EventRow) -> ShardKey<'_> {
-    ShardKey::Str(&row.sensor)
+fn sku_key(row: &LineRow) -> ShardKey<'_> {
+    ShardKey::Str(&row.sku)
 }
 
-/// The `flat_map` explode: one sensor batch fans out into one row per event,
-/// each re-keyed by its own `sensor` — the record-aware routing that
+/// The `flat_map` explode: one SKU's batch fans out into one row per line,
+/// each re-keyed by its own `sku` — the record-aware routing that
 /// meta-only routing cannot express.
-fn explode(batch: SensorBatch, em: &mut Emitter<'_, Owned<EventRow>>) {
-    for (name, value) in batch.events {
+fn explode(batch: SkuBatch, em: &mut Emitter<'_, Owned<LineRow>>) {
+    for (unit, qty) in batch.lines {
         // Small data + a generously-sized queue: never actually blocks, so
         // (mirroring the spate-avro flat_map template) the Flow is ignored.
-        let _ = em.emit(EventRow {
-            sensor: batch.sensor.clone(),
-            name,
-            value,
+        let _ = em.emit(LineRow {
+            sku: batch.sku.clone(),
+            unit,
+            qty,
         });
     }
 }
 
-/// Parse one memory-source payload: first line is the sensor, each further
-/// `name=value` line is an event.
-fn parse_batch(text: &str) -> SensorBatch {
-    let mut lines = text.split('\n');
-    let sensor = lines.next().unwrap_or_default().to_string();
-    let events = lines
+/// Parse one memory-source payload: first line is the sku, each further
+/// `unit=qty` line is one of its lines.
+fn parse_batch(text: &str) -> SkuBatch {
+    let mut text_lines = text.split('\n');
+    let sku = text_lines.next().unwrap_or_default().to_string();
+    let lines = text_lines
         .filter(|l| !l.is_empty())
         .map(|l| {
-            let (name, value) = l.split_once('=').expect("event line is `name=value`");
-            (name.to_string(), value.parse::<i64>().expect("i64 value"))
+            let (unit, qty) = l.split_once('=').expect("a line reads `unit=qty`");
+            (unit.to_string(), qty.parse::<i64>().expect("i64 qty"))
         })
         .collect();
-    SensorBatch { sensor, events }
+    SkuBatch { sku, lines }
 }
 
 /// A trivial line-format deserializer for the memory source's byte payloads.
 struct BatchDeser;
 
-impl Deserializer<Owned<SensorBatch>> for BatchDeser {
+impl Deserializer<Owned<SkuBatch>> for BatchDeser {
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
         ack: &AckRef,
-        out: &mut dyn EmitRecord<'buf, SensorBatch>,
+        out: &mut dyn EmitRecord<'buf, SkuBatch>,
     ) -> Result<(), DeserError> {
         let text = std::str::from_utf8(raw.bytes).map_err(|e| DeserError::Malformed {
             reason: e.to_string(),
@@ -155,33 +155,35 @@ impl Deserializer<Owned<SensorBatch>> for BatchDeser {
     }
 }
 
-/// `num_sensors` sensor batches of `events_per` events each. Returns the
+/// `num_skus` sku batches of `lines_per` lines each. Returns the
 /// memory-source payloads and the flat ground-truth rows they encode to.
-fn make_data(num_sensors: usize, events_per: usize) -> (Vec<String>, Vec<EventRow>) {
-    let mut payloads = Vec::with_capacity(num_sensors);
-    let mut rows = Vec::with_capacity(num_sensors * events_per);
-    for s in 0..num_sensors {
-        let sensor = format!("sensor-{s:02}");
-        let mut lines = vec![sensor.clone()];
-        for e in 0..events_per {
-            let name = format!("metric-{e}");
-            let value = (s * 100 + e) as i64;
-            lines.push(format!("{name}={value}"));
-            rows.push(EventRow {
-                sensor: sensor.clone(),
-                name,
-                value,
+fn make_data(num_skus: usize, lines_per: usize) -> (Vec<String>, Vec<LineRow>) {
+    let mut payloads = Vec::with_capacity(num_skus);
+    let mut rows = Vec::with_capacity(num_skus * lines_per);
+    for s in 0..num_skus {
+        let sku = format!("SKU-{s:02}");
+        // The payload's text lines: the SKU header, then one `unit=qty` per
+        // row — so this is `lines_per + 1` long, not `lines_per`.
+        let mut payload_lines = vec![sku.clone()];
+        for e in 0..lines_per {
+            let unit = format!("pack-{e}");
+            let qty = (s * 100 + e) as i64;
+            payload_lines.push(format!("{unit}={qty}"));
+            rows.push(LineRow {
+                sku: sku.clone(),
+                unit,
+                qty,
             });
         }
-        payloads.push(lines.join("\n"));
+        payloads.push(payload_lines.join("\n"));
     }
     (payloads, rows)
 }
 
-/// The shard our router (and, by parity, ClickHouse) assigns `sensor` to,
+/// The shard our router (and, by parity, ClickHouse) assigns `sku` to,
 /// for a 2-shard equal-weight cluster.
-fn shard_of(sensor: &str) -> usize {
-    (DistributedRouter::<Owned<EventRow>>::hash_key(ShardKey::Str(sensor)) % 2) as usize
+fn shard_of(sku: &str) -> usize {
+    (DistributedRouter::<Owned<LineRow>>::hash_key(ShardKey::Str(sku)) % 2) as usize
 }
 
 // ---- the two-node cluster fixture (net-new: nothing else networks two --------
@@ -342,17 +344,17 @@ async fn two_node_cluster(pw: &str) -> Cluster {
     cluster
 }
 
-/// Create `events_local`/`events_twin` on both nodes, and the two
+/// Create `lines_local`/`lines_twin` on both nodes, and the two
 /// `Distributed` tables on node 0 (the initiator).
 async fn create_tables(c: &Cluster) {
     let local = |t: &str| {
         format!(
-            "CREATE TABLE {t} (sensor String, name String, value Int64) \
-             ENGINE = MergeTree ORDER BY (sensor, name, value)"
+            "CREATE TABLE {t} (sku String, unit String, qty Int64) \
+             ENGINE = MergeTree ORDER BY (sku, unit, qty)"
         )
     };
     for n in [&c.node0, &c.node1] {
-        for t in ["events_local", "events_twin"] {
+        for t in ["lines_local", "lines_twin"] {
             n.admin
                 .query(&local(t))
                 .execute()
@@ -361,14 +363,14 @@ async fn create_tables(c: &Cluster) {
         }
     }
     for (dist, local_name) in [
-        ("events_dist", "events_local"),
-        ("events_twin_dist", "events_twin"),
+        ("lines_dist", "lines_local"),
+        ("lines_twin_dist", "lines_twin"),
     ] {
         c.node0
             .admin
             .query(&format!(
                 "CREATE TABLE {dist} AS {local_name} \
-                 ENGINE = Distributed('parity', currentDatabase(), '{local_name}', xxHash64(sensor))"
+                 ENGINE = Distributed('parity', currentDatabase(), '{local_name}', xxHash64(sku))"
             ))
             .execute()
             .await
@@ -377,18 +379,18 @@ async fn create_tables(c: &Cluster) {
 }
 
 /// The weighted twin of [`create_tables`], over cluster `parity_weighted`:
-/// `events_w_local`/`events_w_twin` on both nodes, `events_w_dist` (the
-/// sink's check target) and `events_w_twin_dist` (the engine-placement twin)
+/// `lines_w_local`/`lines_w_twin` on both nodes, `lines_w_dist` (the
+/// sink's check target) and `lines_w_twin_dist` (the engine-placement twin)
 /// on node 0.
 async fn create_weighted_tables(c: &Cluster) {
     let local = |t: &str| {
         format!(
-            "CREATE TABLE {t} (sensor String, name String, value Int64) \
-             ENGINE = MergeTree ORDER BY (sensor, name, value)"
+            "CREATE TABLE {t} (sku String, unit String, qty Int64) \
+             ENGINE = MergeTree ORDER BY (sku, unit, qty)"
         )
     };
     for n in [&c.node0, &c.node1] {
-        for t in ["events_w_local", "events_w_twin"] {
+        for t in ["lines_w_local", "lines_w_twin"] {
             n.admin
                 .query(&local(t))
                 .execute()
@@ -397,15 +399,15 @@ async fn create_weighted_tables(c: &Cluster) {
         }
     }
     for (dist, local_name) in [
-        ("events_w_dist", "events_w_local"),
-        ("events_w_twin_dist", "events_w_twin"),
+        ("lines_w_dist", "lines_w_local"),
+        ("lines_w_twin_dist", "lines_w_twin"),
     ] {
         c.node0
             .admin
             .query(&format!(
                 "CREATE TABLE {dist} AS {local_name} \
                  ENGINE = Distributed('parity_weighted', currentDatabase(), '{local_name}', \
-                 xxHash64(sensor))"
+                 xxHash64(sku))"
             ))
             .execute()
             .await
@@ -428,7 +430,7 @@ fn parity_sink(
         .collect();
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         "table: {table}\n\
-         columns: [sensor, name, value]\n\
+         columns: [sku, unit, qty]\n\
          shards:\n{shard_lines}\
          user: default\n\
          password: {pw}\n\
@@ -441,7 +443,7 @@ fn parity_sink(
 }
 
 /// Drive one full pipeline: memory source -> `BatchDeser` -> `flat_map`
-/// explode -> ClickHouse sink (record-routed by `sensor`), wired to a real
+/// explode -> ClickHouse sink (record-routed by `sku`), wired to a real
 /// [`SinkPool`] so chunks flow chain -> per-shard queues -> workers ->
 /// `ClickHouseWriter` -> the servers. Returns the pool's drain report.
 async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> DrainReport {
@@ -450,7 +452,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
 
     let num_shards = sink.endpoints.len();
     // Read everything that borrows `sink` before the endpoints move out.
-    let router = sink.router::<Owned<EventRow>>(sensor_key);
+    let router = sink.router::<Owned<LineRow>>(sku_key);
     let pool_cfg = sink.pool;
     let writer = Arc::new(sink.writer.clone());
     let endpoints = sink.endpoints; // partial move; the rest of `sink` drops at scope end
@@ -459,9 +461,9 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let budget = Arc::new(InflightBudget::new());
 
     let mut driver = chain(BatchDeser)
-        .flat_map::<Owned<EventRow>, _>(explode)
+        .flat_map::<Owned<LineRow>, _>(explode)
         .sink(
-            ClickHouseEncoder::<Owned<EventRow>>::new(),
+            ClickHouseEncoder::<Owned<LineRow>>::new(),
             router,
             ChunkConfig::default(),
             queues,
@@ -488,7 +490,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     );
 
     // Drive the source exactly as the runtime does: one lane, push every
-    // sensor-batch payload, poll one batch, run it through the chain.
+    // sku-batch payload, poll one batch, run it through the chain.
     let mut cp = Checkpointer::new();
     let (mut source, handle) = memory_source();
     source
@@ -498,7 +500,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     handle.assign_lanes(&[(L0, P0)]);
     let mut lanes = match source
         .poll_events(Duration::from_millis(200))
-        .expect("poll events")
+        .expect("poll source events")
     {
         SourceEvent::LanesAssigned(lanes) => lanes,
         other => panic!("expected lane assignment, got {other:?}"),
@@ -526,23 +528,23 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
 }
 
 /// All rows of a table in a stable order, for bit-for-bit comparison.
-async fn dump(admin: &clickhouse::Client, table: &str) -> Vec<EventRow> {
+async fn dump(admin: &clickhouse::Client, table: &str) -> Vec<LineRow> {
     admin
         .query(&format!(
-            "SELECT ?fields FROM {table} ORDER BY sensor, name, value"
+            "SELECT ?fields FROM {table} ORDER BY sku, unit, qty"
         ))
-        .fetch_all::<EventRow>()
+        .fetch_all::<LineRow>()
         .await
         .unwrap_or_else(|e| panic!("dump {table}: {e}"))
 }
 
-async fn count_where_sensor(admin: &clickhouse::Client, table: &str, sensor: &str) -> u64 {
+async fn count_where_sku(admin: &clickhouse::Client, table: &str, sku: &str) -> u64 {
     admin
-        .query(&format!("SELECT count() FROM {table} WHERE sensor = ?"))
-        .bind(sensor)
+        .query(&format!("SELECT count() FROM {table} WHERE sku = ?"))
+        .bind(sku)
         .fetch_one::<u64>()
         .await
-        .expect("sensor count")
+        .expect("sku count")
 }
 
 async fn flush_logs(c: &Cluster) {
@@ -585,16 +587,16 @@ async fn distributed_insert_and_sink_place_rows_identically() {
     let (payloads, rows) = make_data(12, 3);
 
     // The data must actually exercise both shards, or parity proves nothing.
-    let on_shard0 = rows.iter().filter(|r| shard_of(&r.sensor) == 0).count();
+    let on_shard0 = rows.iter().filter(|r| shard_of(&r.sku) == 0).count();
     let on_shard1 = rows.len() - on_shard0;
     assert!(
         on_shard0 > 0 && on_shard1 > 0,
         "the fixture data must reach both shards (shard0={on_shard0}, shard1={on_shard1})"
     );
 
-    // Run the real pipeline: rows land directly in each node's events_local.
+    // Run the real pipeline: rows land directly in each node's lines_local.
     let sink = parity_sink(
-        "events_local",
+        "lines_local",
         &[(&c.node0.url, 1), (&c.node1.url, 1)],
         pw,
         None,
@@ -610,12 +612,12 @@ async fn distributed_insert_and_sink_place_rows_identically() {
     );
 
     // Insert the SAME logical rows through the Distributed table; ClickHouse
-    // itself places them into events_twin. Synchronous so placement is
+    // itself places them into lines_twin. Synchronous so placement is
     // complete when the insert returns.
     let mut insert = c
         .node0
         .admin
-        .insert::<EventRow>("events_twin_dist")
+        .insert::<LineRow>("lines_twin_dist")
         .await
         .expect("open twin insert")
         .with_setting("insert_distributed_sync", "1");
@@ -626,8 +628,8 @@ async fn distributed_insert_and_sink_place_rows_identically() {
 
     // Per node: what the sink placed == what ClickHouse placed, exactly.
     for n in [&c.node0, &c.node1] {
-        let sink_placed = dump(&n.admin, "events_local").await;
-        let ch_placed = dump(&n.admin, "events_twin").await;
+        let sink_placed = dump(&n.admin, "lines_local").await;
+        let ch_placed = dump(&n.admin, "lines_twin").await;
         assert!(
             !sink_placed.is_empty(),
             "both shards must receive rows; {} got none",
@@ -640,21 +642,21 @@ async fn distributed_insert_and_sink_place_rows_identically() {
         );
     }
 
-    // And every sensor lives on exactly one shard — the one our router chose.
+    // And every sku lives on exactly one shard — the one our router chose.
     for s in 0..12 {
-        let sensor = format!("sensor-{s:02}");
-        let c0 = count_where_sensor(&c.node0.admin, "events_local", &sensor).await;
-        let c1 = count_where_sensor(&c.node1.admin, "events_local", &sensor).await;
+        let sku = format!("SKU-{s:02}");
+        let c0 = count_where_sku(&c.node0.admin, "lines_local", &sku).await;
+        let c1 = count_where_sku(&c.node1.admin, "lines_local", &sku).await;
         assert!(
             (c0 == 0) ^ (c1 == 0),
-            "sensor {sensor} must live on exactly one shard (node0={c0}, node1={c1})"
+            "sku {sku} must live on exactly one shard (node0={c0}, node1={c1})"
         );
         let owning = if c0 > 0 { 0 } else { 1 };
         assert_eq!(
             owning,
-            shard_of(&sensor),
-            "sensor {sensor} landed on shard {owning} but the router chose shard {}",
-            shard_of(&sensor)
+            shard_of(&sku),
+            "sku {sku} landed on shard {owning} but the router chose shard {}",
+            shard_of(&sku)
         );
     }
 }
@@ -676,7 +678,7 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     let mut insert = c
         .node0
         .admin
-        .insert::<EventRow>("events_dist")
+        .insert::<LineRow>("lines_dist")
         .await
         .expect("open insert")
         .with_setting("insert_distributed_sync", "1");
@@ -685,18 +687,18 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     }
     insert.end().await.expect("finish insert");
 
-    // A sensor OWNED BY SHARD 0 — local to the initiator (node 0), so a
+    // A sku OWNED BY SHARD 0 — local to the initiator (node 0), so a
     // pruned query must never touch node 1.
     let owned_by_shard0 = (0..12)
-        .map(|s| format!("sensor-{s:02}"))
+        .map(|s| format!("SKU-{s:02}"))
         .find(|s| shard_of(s) == 0)
-        .expect("some sensor must hash to shard 0");
+        .expect("some sku must hash to shard 0");
     assert_eq!(
         shard_of(&owned_by_shard0),
         0,
-        "the chosen sensor must be owned by shard 0"
+        "the chosen sku must be owned by shard 0"
     );
-    let expected = rows.iter().filter(|r| r.sensor == owned_by_shard0).count() as u64;
+    let expected = rows.iter().filter(|r| r.sku == owned_by_shard0).count() as u64;
 
     // Pruned query: literal `=` on the sharding key; force=2 makes ClickHouse
     // throw if it could NOT prune (a guardrail that the optimizer engaged).
@@ -704,7 +706,7 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     let count = c
         .node0
         .admin
-        .query("SELECT count() FROM events_dist WHERE sensor = ?")
+        .query("SELECT count() FROM lines_dist WHERE sku = ?")
         .bind(&owned_by_shard0)
         .with_setting("optimize_skip_unused_shards", "1")
         .with_setting("force_optimize_skip_unused_shards", "2")
@@ -714,7 +716,7 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
         .expect("pruned count");
     assert_eq!(
         count, expected,
-        "the pruned query must still return the right count for the sensor"
+        "the pruned query must still return the right count for the sku"
     );
 
     flush_logs(&c).await;
@@ -731,7 +733,7 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     let _ = c
         .node0
         .admin
-        .query("SELECT count() FROM events_dist WHERE sensor = ?")
+        .query("SELECT count() FROM lines_dist WHERE sku = ?")
         .bind(&owned_by_shard0)
         .with_setting("optimize_skip_unused_shards", "0")
         .with_setting("query_id", full_id.as_str())
@@ -752,8 +754,8 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
 /// weighted sink configs below.
 const WEIGHTED_CHECK: &str = "distributed_check:\n\
                               \x20 cluster: parity_weighted\n\
-                              \x20 table: events_w_dist\n\
-                              \x20 sharding_key: sensor\n";
+                              \x20 table: lines_w_dist\n\
+                              \x20 sharding_key: sku\n";
 
 /// Proof A's engine-as-oracle comparison under a NON-UNIFORM weight split
 /// (9/10): the unit tests pin the interval mapping against ClickHouse's
@@ -786,27 +788,27 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
 
     // Weighted placement oracle: the router's own public API over [9, 10].
     let oracle =
-        DistributedRouter::<Owned<EventRow>>::new(sensor_key, &[9, 10]).expect("oracle router");
-    let shard_w = |sensor: &str| {
-        oracle.shard_for_hash(DistributedRouter::<Owned<EventRow>>::hash_key(
-            ShardKey::Str(sensor),
+        DistributedRouter::<Owned<LineRow>>::new(sku_key, &[9, 10]).expect("oracle router");
+    let shard_w = |sku: &str| {
+        oracle.shard_for_hash(DistributedRouter::<Owned<LineRow>>::hash_key(
+            ShardKey::Str(sku),
         ))
     };
 
     let (payloads, rows) = make_data(16, 2);
-    let sensors: Vec<String> = (0..16).map(|s| format!("sensor-{s:02}")).collect();
+    let skus: Vec<String> = (0..16).map(|s| format!("SKU-{s:02}")).collect();
 
     // The fixture must exercise both shards AND differ from the equal-weight
-    // split for at least one sensor — otherwise this proof adds nothing over
+    // split for at least one sku — otherwise this proof adds nothing over
     // proof A and a wrong interval model could pass vacuously.
-    let on_shard0 = sensors.iter().filter(|s| shard_w(s) == 0).count();
+    let on_shard0 = skus.iter().filter(|s| shard_w(s) == 0).count();
     assert!(
-        on_shard0 > 0 && on_shard0 < sensors.len(),
+        on_shard0 > 0 && on_shard0 < skus.len(),
         "weighted fixture data must reach both shards (shard0={on_shard0}/16)"
     );
     assert!(
-        sensors.iter().any(|s| shard_w(s) != shard_of(s)),
-        "at least one sensor must place differently under weights 9/10 than \
+        skus.iter().any(|s| shard_w(s) != shard_of(s)),
+        "at least one sku must place differently under weights 9/10 than \
          under the equal-weight split"
     );
 
@@ -814,7 +816,7 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
     // config passes; a weight-drifted config (1/1) fails before writing —
     // system.clusters really carries shard_weight 9/10 and the check reads it.
     let sink = parity_sink(
-        "events_w_local",
+        "lines_w_local",
         &[(&c.node0.url, 9), (&c.node1.url, 10)],
         pw,
         Some(WEIGHTED_CHECK),
@@ -823,7 +825,7 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
         .await
         .expect("the matching weighted config must pass the startup check");
     let drifted = parity_sink(
-        "events_w_local",
+        "lines_w_local",
         &[(&c.node0.url, 1), (&c.node1.url, 1)],
         pw,
         Some(WEIGHTED_CHECK),
@@ -838,17 +840,17 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
     );
 
     // Run the real pipeline with the weighted router: rows land directly in
-    // each node's events_w_local.
+    // each node's lines_w_local.
     let report = run_pipeline(sink, &payloads).await;
     assert_eq!(report.abandoned, 0, "no batch may be abandoned");
     assert!(report.flushed >= 1, "the pool must have flushed");
 
     // The SAME logical rows through the weighted Distributed table: the
-    // engine itself places them into events_w_twin.
+    // engine itself places them into lines_w_twin.
     let mut insert = c
         .node0
         .admin
-        .insert::<EventRow>("events_w_twin_dist")
+        .insert::<LineRow>("lines_w_twin_dist")
         .await
         .expect("open weighted twin insert")
         .with_setting("insert_distributed_sync", "1");
@@ -859,8 +861,8 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
 
     // Per node: the sink's weighted placement == ClickHouse's, bit-for-bit.
     for n in [&c.node0, &c.node1] {
-        let sink_placed = dump(&n.admin, "events_w_local").await;
-        let ch_placed = dump(&n.admin, "events_w_twin").await;
+        let sink_placed = dump(&n.admin, "lines_w_local").await;
+        let ch_placed = dump(&n.admin, "lines_w_twin").await;
         assert!(
             !sink_placed.is_empty(),
             "both shards must receive rows under weights 9/10; {} got none",
@@ -873,19 +875,19 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
         );
     }
 
-    // And each sensor lives on exactly the shard the weighted intervals name.
-    for sensor in &sensors {
-        let c0 = count_where_sensor(&c.node0.admin, "events_w_local", sensor).await;
-        let c1 = count_where_sensor(&c.node1.admin, "events_w_local", sensor).await;
+    // And each sku lives on exactly the shard the weighted intervals name.
+    for sku in &skus {
+        let c0 = count_where_sku(&c.node0.admin, "lines_w_local", sku).await;
+        let c1 = count_where_sku(&c.node1.admin, "lines_w_local", sku).await;
         assert!(
             (c0 == 0) ^ (c1 == 0),
-            "sensor {sensor} must live on exactly one shard (node0={c0}, node1={c1})"
+            "sku {sku} must live on exactly one shard (node0={c0}, node1={c1})"
         );
         let owning = if c0 > 0 { 0 } else { 1 };
         assert_eq!(
             owning,
-            shard_w(sensor),
-            "sensor {sensor} landed on shard {owning}, not its weighted-interval shard"
+            shard_w(sku),
+            "sku {sku} landed on shard {owning}, not its weighted-interval shard"
         );
     }
 }

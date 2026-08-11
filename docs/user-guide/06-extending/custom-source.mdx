@@ -231,7 +231,7 @@ receive the descriptors and never re-enumerate.
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=planner
 ```
 
-`LedgerPlanner` is two methods, and four contracts behind them:
+`LedgerPlanner` is two methods, with these contracts behind them:
 
 - **`fingerprint` is the job's identity, and it is derived from config, never
   from the enumeration.** Every instance of one job must produce byte-equal
@@ -259,7 +259,7 @@ plans without seeds; an empty `Final` plan completes immediately. (A
 source whose legacy checkpoint cannot be mapped onto splits may prefer a
 clean cutover instead — see *Retrofitting an existing source* below.)
 
-Two further practicalities:
+Further practicalities:
 
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle — capture both at construction. `plan` runs on the
@@ -484,7 +484,7 @@ seam. Whatever the backend, the shape is the same — build a
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=coordinator
 ```
 
-Three of those arguments carry more than their names suggest:
+Some of those arguments carry more than their names suggest:
 
 - **`instance_id` must be unique across live workers**, and it defaults to a
   fresh random id per run. Set it to something stable per replica — the pod
@@ -527,9 +527,8 @@ Shipped stores: [NATS JetStream](../04-connectors/coordination/nats/README.mdx)
 ### Retrofitting an existing source
 
 A source that already implements `Source` with its own lane dealing and a
-whole-source checkpoint retrofits in three moves (worked reference:
-[`spate-s3`](repo:crates/spate-s3), which carries the shape these three moves
-produce):
+whole-source checkpoint retrofits in the moves below (worked reference:
+[`spate-s3`](repo:crates/spate-s3), which carries the shape they produce):
 
 1. **Extract the lane assembly** out of the source into the sibling
    context struct: everything `open_split` needs to spawn a fetcher and

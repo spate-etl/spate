@@ -14,7 +14,7 @@ the operator's-eye view of the model is
 [Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
 second for the hot-path rules.
 
-Two runnable examples carry most of the Rust on this page —
+Runnable examples carry most of the Rust on this page —
 [`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) for the
 registration patterns and
 [`instrumented_operator.rs`](repo:crates/spate/examples/instrumented_operator.rs)
@@ -52,7 +52,7 @@ worked reference
 ```
 
 `publish_lag` takes the handle as an argument rather than reaching for one, and
-two of the rules stated below are already visible in it: a partition whose lag
+some of the rules stated below are already visible in it: a partition whose lag
 the client has not measured is skipped rather than published as `0`, and
 publication is restricted to the partitions this member still owns.
 
@@ -65,7 +65,7 @@ all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
 
 :::danger[Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose]
-All three of these are scar tissue.
+Every one of these is scar tissue.
 
 **Take the handle from `SourceCtx`.** A builder the runtime cannot reach is
 dead code, not an option: the runtime registers the series either way, so a
@@ -84,21 +84,21 @@ be passed through as silence, never flattened to zero.
 away when you lose the partition: the exporter has no deletion and no idle
 timeout is configured, so dropping your handle is invisible — the series
 renders its last value for the life of the process, and a reader summing across
-members counts that partition twice. Two things are needed. Filter publication
-to the live assignment, since a stale client snapshot still lists partitions
-you have lost; and call `SourceMetrics::retain_partitions` with the **new**
-assignment once the assignment change settles, which zeroes what you lost. Do
+members counts that partition twice. The fix: filter publication to the live
+assignment, since a stale client snapshot still lists partitions you have lost;
+and call `SourceMetrics::retain_partitions` with the **new** assignment once the
+assignment change settles, which zeroes what you lost. Do
 not prune on revocation: a source whose protocol revokes everything before
 handing most of it back would blank partitions you still own and are still
 draining.
 
-Worked reference for all three:
+Worked reference for all of them:
 [`spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs) and
 [`spate-kafka/src/metrics.rs`](repo:crates/spate-kafka/src/metrics.rs).
 
 Test the wiring, not the registration: assert a **value** arrives end to end.
 A test that only asserts the family appears in the exposition passes happily
-against all three of these bugs.
+against every one of these bugs.
 :::
 
 :::note
@@ -114,7 +114,7 @@ metrics handle. See [Custom sinks](custom-sink.mdx).
 Every framework series carries three standard labels — `pipeline`, `component`,
 `component_type` — plus stage-specific ones (`shard`, `replica`, `partition`).
 `component` and `pipeline` come from `with_metrics(pipeline, component)` at
-assembly. The two you set as a connector author are on the sink builder:
+assembly. The ones you set as a connector author are on the sink builder:
 
 - `SinkParts::with_component_type("...")` sets `component_type`
   (default `"custom"`) on every sink series. Every shipped sink sets it to the
@@ -212,7 +212,7 @@ Pre-registration and batch-boundary counting bind here exactly as they do
 through a `Meter`; what changes is that these series carry only the labels
 typed into the macro.
 [Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx#the-hot-path-discipline)
-states those two rules in full. Prefer the `Meter` above unless you
+states those rules in full. Prefer the `Meter` above unless you
 specifically want to live outside the `spate_` taxonomy.
 
 ## Contracts

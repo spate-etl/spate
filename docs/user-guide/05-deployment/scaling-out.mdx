@@ -246,8 +246,8 @@ predecessor died between writing its startup probe key and clearing it finds
 the key on the next start, reports it, clears it and carries on; replicas
 racing to create the plan record warn once each for the losers, back off and
 re-read; a restart can find its own presence key expiring underneath it and
-retry that. All three resolve inside the startup retry budget, and all three
-are fatal if they never do. A leader losing leadership to a successor warns
+retry that. Each resolves inside the startup retry budget, and each is fatal
+if it never does. A leader losing leadership to a successor warns
 and demotes, with nothing to retry.
 
 The ones to read name work or the loss of it: a forced release, a self-fence,

@@ -36,7 +36,7 @@ call.** Records are deserialized, transformed and serialized into shard frames
 entirely inside one `push_batch` — born and dead within it — so by the time it
 returns there is nothing borrowed left to name.
 
-Two things follow that are worth knowing before you design around them:
+Consequences worth knowing before you design around them:
 
 - Dispatch costs one virtual call **per batch**, amortized over every record in
   it. Everything inside the chain is monomorphized and inlines freely.
@@ -94,7 +94,7 @@ clone of the batch's acknowledgment handle — see
 happens when it drops.
 
 `push_batch` returns a `PushOutcome`. When it reports that it is blocked, the
-reason matters, and the two are handled very differently:
+reason matters, and they are handled very differently:
 
 | Reason | Means | What the framework does |
 | --- | --- | --- |

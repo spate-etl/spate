@@ -88,7 +88,7 @@ in the process wants it.
 
 ## The hot-path discipline
 
-Two rules keep instrumentation off the per-record path, and they bind your
+These rules keep instrumentation off the per-record path, and they bind your
 custom metrics as much as the framework's:
 
 1. **Pre-register handles at build time.** Resolve metric names and labels
@@ -99,7 +99,7 @@ custom metrics as much as the framework's:
    the batch's totals; per-record durations are observed as batch means
    (duration divided by n), never per record.
 
-Both rules in one place:
+The rules in one place:
 [`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) puts custom
 handles side by side with a framework stage handle, prints the exposition it
 produced, and runs as-is with `cargo run -p spate --example custom_metrics`.
@@ -110,7 +110,7 @@ Its raw-facade handles are the smallest form of the pattern:
 
 ## Starting alerts
 
-These four catch the failure modes that matter most; verify thresholds
+These catch the failure modes that matter most; verify thresholds
 against your latency budget. The full list of starting points is at the end
 of [Metrics](../../METRICS.md).
 

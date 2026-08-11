@@ -87,7 +87,7 @@
 //! `--rm` throws it away — so stopping that container and starting a fresh
 //! one is the reset.
 
-// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  bounded-jobs
 // INDEX-GOAL:  coordinate a fleet over the durable store
 // INDEX-TECH:  NATS JetStream

@@ -30,7 +30,7 @@
 //! has exactly one live owner per process (INV-10), so they cannot share a
 //! name either.
 
-// The examples index renders these four fields; see crates/spate/tests/examples_index.rs.
+// The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  operating
 // INDEX-GOAL:  see what a failing sink does to the watermark
 // INDEX-TECH:  no infrastructure

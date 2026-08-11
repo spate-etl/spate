@@ -154,7 +154,7 @@ mod orders;
 mod shapes;
 
 use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, rig, shape_rig};
-use orders::{BAD_EVERY, Corruption, Order, RECORDS, Reading};
+use orders::{BAD_EVERY, Corruption, LineItem, Order, RECORDS};
 
 /// The number of records the batch framings carry. Fifty is the same batch
 /// size the Avro decode bench uses, so the two are comparable per element.
@@ -172,7 +172,7 @@ fn batch(
     on_error: OnError,
     payload: Vec<u8>,
     expect: u64,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch_rig(framing, on_error, payload, expect, LABELS)
 }
 
@@ -192,29 +192,26 @@ fn single_value_rig() -> Rig<spate_json::JsonValueDeserializer> {
     })
 }
 
-fn ndjson_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn ndjson_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     rig(
         JsonFraming::Ndjson,
-        orders::readings_ndjson(BATCH),
+        orders::lines_ndjson(BATCH),
         BATCH,
-        |b| b.build_serde::<Reading>(),
+        |b| b.build_serde::<LineItem>(),
     )
 }
 
-fn array_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    rig(
-        JsonFraming::Array,
-        orders::readings_array(BATCH),
-        BATCH,
-        |b| b.build_serde::<Reading>(),
-    )
+fn array_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
+    rig(JsonFraming::Array, orders::lines_array(BATCH), BATCH, |b| {
+        b.build_serde::<LineItem>()
+    })
 }
 
-fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson(RECORDS),
+        orders::lines_ndjson(RECORDS),
         RECORDS,
     )
 }
@@ -222,47 +219,47 @@ fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
 fn ndjson_bad_rig(
     bad_every: u64,
     how: Corruption,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Ndjson,
         OnError::Skip,
-        orders::readings_ndjson_bad_every(RECORDS, bad_every, how),
+        orders::lines_ndjson_bad_every(RECORDS, bad_every, how),
         orders::good_lines(RECORDS, bad_every),
     )
 }
 
-fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Ndjson,
         OnError::Fail,
-        orders::readings_ndjson(RECORDS),
+        orders::lines_ndjson(RECORDS),
         RECORDS,
     )
 }
 
-fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Ndjson,
         OnError::Fail,
-        orders::readings_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
+        orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
     )
 }
 
-fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Array,
         OnError::Skip,
-        orders::readings_array(RECORDS),
+        orders::lines_array(RECORDS),
         RECORDS,
     )
 }
 
-fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Array,
         OnError::Skip,
-        orders::readings_array_bad_last(RECORDS),
+        orders::lines_array_bad_last(RECORDS),
         0,
     )
 }
@@ -293,9 +290,9 @@ fn decode_value(
 #[bench::ndjson_batch50(ndjson_batch_rig())]
 #[bench::array_batch50(array_batch_rig())]
 fn decode_framed(
-    mut rig: Rig<spate_json::JsonSerdeDeserializer<Reading>>,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
-    decode_once::<Owned<Reading>, _>(&mut rig);
+    mut rig: Rig<spate_json::JsonSerdeDeserializer<LineItem>>,
+) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
+    decode_once::<Owned<LineItem>, _>(&mut rig);
     rig
 }
 
@@ -310,10 +307,10 @@ fn decode_framed(
 #[bench::array_clean(array_clean_rig())]
 #[bench::array_bad_last(array_bad_last_rig())]
 fn decode_batch(
-    mut rig: Rig<spate_json::JsonSerdeDeserializer<Reading>>,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+    mut rig: Rig<spate_json::JsonSerdeDeserializer<LineItem>>,
+) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     assert_eq!(
-        decode_run::<Owned<Reading>, _>(&mut rig),
+        decode_run::<Owned<LineItem>, _>(&mut rig),
         rig.expect,
         "the framing emitted a different count"
     );
@@ -326,10 +323,10 @@ fn decode_batch(
 #[library_benchmark]
 #[bench::ndjson_fail_bad_last(ndjson_fail_bad_last_rig())]
 fn decode_batch_failing(
-    mut rig: Rig<spate_json::JsonSerdeDeserializer<Reading>>,
-) -> Rig<spate_json::JsonSerdeDeserializer<Reading>> {
+    mut rig: Rig<spate_json::JsonSerdeDeserializer<LineItem>>,
+) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     assert_eq!(
-        decode_run_err::<Owned<Reading>, _>(&mut rig),
+        decode_run_err::<Owned<LineItem>, _>(&mut rig),
         rig.expect,
         "an atomic framing emitted a record before failing"
     );

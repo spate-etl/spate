@@ -116,8 +116,8 @@ responses remain:", "## The two coordination latencies". The list counts itself,
 and the next contributor adds a bullet without reading upward. Delete the
 numeral; the sentence rarely loses anything else.
 
-*Not this:* a number the source closes — an enum's variants, a `const` array —
-which step 1 verifies instead. Nor a number that *constrains* the set: § 3's
+*Not this:* a number the source closes — an enum's variants, a `const`
+array — which step 1 verifies instead. Nor a number that *constrains* the set: § 3's
 "exactly three forms, no others" is the rule, and deleting the number deletes
 it.
 

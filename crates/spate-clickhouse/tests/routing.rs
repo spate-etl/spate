@@ -20,36 +20,36 @@ use spate_core::sink::{EncodedChunk, RowEncoder, shard_queues};
 use spate_core::source::PayloadBatch;
 use std::sync::Arc;
 
-/// The terminal record type: one sensor name per row.
+/// The terminal record type: one SKU per row.
 #[derive(Debug, serde::Serialize)]
-struct SensorRow {
-    sensor: String,
+struct SkuRow {
+    sku: String,
 }
 
-/// Sharding key: the row's own `sensor` field (a fn item — the extractor is
+/// Sharding key: the row's own `sku` field (a fn item — the extractor is
 /// higher-ranked over the payload lifetime).
-fn sensor_key(row: &SensorRow) -> ShardKey<'_> {
-    ShardKey::Str(&row.sensor)
+fn sku_key(row: &SkuRow) -> ShardKey<'_> {
+    ShardKey::Str(&row.sku)
 }
 
-/// One record per payload; the payload bytes are the sensor name.
+/// One record per payload; the payload bytes are the SKU.
 #[derive(Clone)]
 struct LineDeser;
 
-impl Deserializer<Owned<SensorRow>> for LineDeser {
+impl Deserializer<Owned<SkuRow>> for LineDeser {
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
         ack: &AckRef,
-        out: &mut dyn EmitRecord<'buf, SensorRow>,
+        out: &mut dyn EmitRecord<'buf, SkuRow>,
     ) -> Result<(), DeserError> {
-        let sensor = std::str::from_utf8(raw.bytes)
+        let sku = std::str::from_utf8(raw.bytes)
             .map_err(|e| DeserError::Malformed {
                 reason: e.to_string(),
             })?
             .to_string();
         let _ = out.emit(Record {
-            payload: SensorRow { sensor },
+            payload: SkuRow { sku },
             meta: raw.meta(),
             ack: ack.clone(),
         });
@@ -62,12 +62,8 @@ impl Deserializer<Owned<SensorRow>> for LineDeser {
 #[derive(Clone)]
 struct RowBinaryEncoder;
 
-impl RowEncoder<Owned<SensorRow>> for RowBinaryEncoder {
-    fn encode<'buf>(
-        &mut self,
-        rec: &Record<SensorRow>,
-        buf: &mut BytesMut,
-    ) -> Result<(), SinkError> {
+impl RowEncoder<Owned<SkuRow>> for RowBinaryEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<SkuRow>, buf: &mut BytesMut) -> Result<(), SinkError> {
         spate_clickhouse::serialize_row(&rec.payload, buf).map_err(|e| SinkError::Client {
             class: ErrorClass::RecordLevel,
             reason: e.to_string(),
@@ -103,14 +99,14 @@ impl<'buf> PayloadBatch<'buf> for VecBatch<'buf> {
 }
 
 /// Decode the single-`String`-column RowBinary rows in one queue: each row
-/// is a one-byte length prefix (all test sensors are short) plus UTF-8.
-fn drain_sensors(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<String> {
+/// is a one-byte length prefix (all test SKUs are short) plus UTF-8.
+fn drain_skus(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
         let mut rest = &chunk.frame[..];
         while !rest.is_empty() {
             let len = rest[0] as usize;
-            out.push(String::from_utf8(rest[1..1 + len].to_vec()).expect("utf8 sensor"));
+            out.push(String::from_utf8(rest[1..1 + len].to_vec()).expect("utf8 sku"));
             rest = &rest[1 + len..];
         }
         // These tests play the sink: consuming a chunk stands in for a
@@ -127,7 +123,7 @@ fn sink_minted_router_places_rows_by_payload_key_through_the_terminal_stage() {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(
         r#"
 table: t
-columns: [sensor]
+columns: [sku]
 shards:
   - replicas: ["http://ch-0:8123"]
     weight: 9
@@ -137,7 +133,7 @@ shards:
     )
     .expect("config yaml");
     let sink = config::build(cfg).expect("valid sink config");
-    let router = sink.router::<Owned<SensorRow>>(sensor_key);
+    let router = sink.router::<Owned<SkuRow>>(sku_key);
 
     let (queues, mut rxs) = shard_queues(2, 64);
     let mut c = chain(LineDeser)
@@ -150,8 +146,8 @@ shards:
         )
         .build();
 
-    let sensors: Vec<String> = (0..32).map(|i| format!("sensor-{i:02}")).collect();
-    let payloads: Vec<Vec<u8>> = sensors.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let skus: Vec<String> = (0..32).map(|i| format!("SKU-{i:02}")).collect();
+    let payloads: Vec<Vec<u8>> = skus.iter().map(|s| s.as_bytes().to_vec()).collect();
     let (ack, _rx) = AckRef::test_pair();
     let mut batch = VecBatch {
         payloads: &payloads,
@@ -163,28 +159,28 @@ shards:
 
     // Placement oracle: the same hash + weight-interval selection the unit
     // vectors pin (and the container suite proves against a live server).
-    let expect_shard = |sensor: &str| {
-        router.shard_for_hash(DistributedRouter::<Owned<SensorRow>>::hash_key(
-            ShardKey::Str(sensor),
-        ))
+    let expect_shard = |sku: &str| {
+        router.shard_for_hash(DistributedRouter::<Owned<SkuRow>>::hash_key(ShardKey::Str(
+            sku,
+        )))
     };
 
     let mut seen = Vec::new();
     for (shard, rx) in rxs.iter_mut().enumerate() {
-        let landed = drain_sensors(rx);
+        let landed = drain_skus(rx);
         assert!(
             !landed.is_empty(),
             "deterministic fixture fans out to both shards; shard {shard} is empty"
         );
-        for sensor in landed {
+        for sku in landed {
             assert_eq!(
-                expect_shard(&sensor),
+                expect_shard(&sku),
                 shard,
-                "{sensor} landed on shard {shard}, not its parity shard"
+                "{sku} landed on shard {shard}, not its parity shard"
             );
-            seen.push(sensor);
+            seen.push(sku);
         }
     }
     seen.sort();
-    assert_eq!(seen, sensors, "every record reaches exactly one shard");
+    assert_eq!(seen, skus, "every record reaches exactly one shard");
 }

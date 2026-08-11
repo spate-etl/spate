@@ -301,7 +301,7 @@ be at least `op_timeout`, and both default to 10s. If you raised
 |---|---|
 | `spate_coordination_handoffs_total{outcome}` | `spate_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`/`cancelled`) |
 | `spate_coordination_revocations_total{reason}` | `spate_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
-| `spate_coordination_handoff_duration_seconds{phase}` | `spate_coordination_drain_duration_seconds` and `spate_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-two-coordination-latencies-do-not-compose) |
+| `spate_coordination_handoff_duration_seconds{phase}` | `spate_coordination_drain_duration_seconds` and `spate_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-coordination-latencies-do-not-compose) |
 | `spate_coordination_handoffs_in_flight` | `spate_coordination_splits_draining` |
 | `acquisitions_total{reason="stolen"}` | gone — there is no steal path |
 | `acquisitions_total{reason="handoff"}` | `acquisitions_total{reason="reassigned"}` |

@@ -15,7 +15,7 @@ to streaming**. Assume they are comfortable with async Rust, and that they
 already hold the concepts the field shares — at-least-once delivery, consumer
 groups, backpressure, partitioning. Assume they know nothing Spate-specific.
 
-Two consequences, because both get broken by well-meaning edits:
+The consequences, because well-meaning edits break them:
 
 - **Re-explaining a concept the reader already has buries the thing they came
   for**, which is how *this* system expresses it. A paragraph defining
@@ -278,6 +278,15 @@ Everywhere:
 - **The page reads as the present, never as a changelog.** No "now", "recently",
   "as of", "has been changed to". If something moved, the page describes what
   is and the commit message says what moved. (§ 9 suspends this for `docs/adr/`.)
+- **Adding an item to a list is an insertion, never an edit to the sentence
+  above it.** Prose must not restate what the structure beside it already
+  carries. The count is the usual breach: "the framework owns four typed
+  sections — `a`, `b`, `c`, `d`" makes the same assertion twice, and the next
+  contributor updates only the list. Write "the framework owns the typed
+  sections". A number that *constrains* the set stays — § 3's "exactly three
+  forms, no others" is the rule, and deleting the number deletes it. A number
+  the source closes stays too, and is a claim to check against that source, not
+  a turn of phrase. (§ 9 suspends this for `docs/adr/`.)
 - **American English** — `serialize`, `behavior`, `normalize`. The API surface
   is permanently American, because serde owns `Serializer` and `serialize`, so
   British prose mismatches the identifier in the code block beside it. The
@@ -392,13 +401,14 @@ and what else was considered. A reader who needs the first should be sent to the
 guide, and a record that starts explaining how to configure something has become
 the wrong kind of document.
 
-Three of the rules above are deliberately suspended here, and each is a decision
-rather than an oversight:
+The rules above do not all hold here, and each departure is a decision rather
+than an oversight:
 
 | Rule | Status in `docs/adr/` | Why |
 |---|---|---|
 | § 1 vendor neutrality | Suspended | A decision about a connector cannot be restated in neutral vocabulary without becoming a different decision. |
 | § 7 present-tense, "never a changelog" | Suspended | A record is a point-in-time artifact by construction. It describes the decision as it stood, and dates it. |
+| § 7 insertion-safe prose | Suspended | Same reason. A count that was right when the decision was made stays right, because nothing is added to a record later. |
 | § 8 no YAML frontmatter | **Applies** | Records are published pages, so a frontmatter `title:` would render twice. Status is a body line instead. |
 
 **Accepted records are immutable.** Never rewrite one to say something

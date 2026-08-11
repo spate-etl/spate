@@ -70,13 +70,20 @@ Open the source. For each of these, if the page asserts it:
   reader to enable.
 - **Performance figures.** § 7 requires provenance. A figure carrying none is a
   defect even when it happens to be true.
+- **A count of a list** (§ 7), against whatever closes the set — an enum's
+  variants, a `const` array, a trait's required methods. The count is a second
+  assertion about the list beside it, so verify it as you would a `Default`
+  cell, by opening the source rather than counting the bullets on the page.
+  `#[non_exhaustive]` does not close a set: `ErrorClass` has three variants and
+  reserves a fourth (`crates/spate-core/src/error.rs`). Where nothing closes
+  the set, the count is the § 7 defect and belongs in step 3.
 - **Link glosses**, against the page each one points at. `make docs` proves a
   link *resolves*; nothing proves the sentence describing it is *true*. § 7 puts
   a gloss on every cross-link in the tree, so these rot exactly like a `Default`
   cell and are just as unguarded.
 
-A `Default` column and a YAML example are the two things in this tree that rot
-fastest, and no gate covers either.
+A `Default` column, a YAML example and a count rot fastest in this tree, and no
+gate covers any of them.
 
 **Check the page against its siblings, not only against the code.** A formula, a
 shared default or a figure that appears on three pages has three chances to be

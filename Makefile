@@ -248,7 +248,7 @@ changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-
 # The examples answer to `crates/spate/tests/examples_{manifest,index}.rs`,
 # which the `test` target already runs. Accept an index change with:
 #
-#     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index
+#     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
 ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
 

@@ -31,8 +31,8 @@ runtime handle and a framer (the framer is **required** — see
 ```rust file=crates/spate/examples/s3_backfill.rs region=source
 ```
 
-Two runnable examples carry the Rust on this page, and neither needs
-infrastructure — both stage a `file://` bucket in a temporary directory.
+Runnable examples carry the Rust on this page, and none needs
+infrastructure — each stages a `file://` bucket in a temporary directory.
 [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) runs the solo
 backfill (`cargo run -p spate --features s3,json --example s3_backfill`), and
 [`s3_coordinated_backfill.rs`](repo:crates/spate/examples/s3_coordinated_backfill.rs)

@@ -16,7 +16,7 @@ For bulk ingestion the destination is usually the bottleneck, not the framework.
 So the goal of tuning is: **give ClickHouse large, infrequent inserts** (large
 parts, little merge pressure), **overlap enough of them** to keep the server
 busy, and **spend client CPU and network only where they are actually scarce**.
-Almost every setting below is a lever on one of those three.
+Almost every setting below is a lever on one of those goals.
 
 Three insert settings are fixed no matter how you tune, because they are the
 at-least-once contract: the sink always sends — and **reserves** — exactly

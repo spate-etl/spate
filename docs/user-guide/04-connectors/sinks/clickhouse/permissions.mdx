@@ -48,8 +48,8 @@ additional privilege.
 
 ## Grants by feature
 
-Two features each add read access to a system table. The sink only ever
-**reads** these — it issues no DDL against them.
+These features add read access to system tables. The sink only ever
+**reads** them — it issues no DDL against them.
 
 | Feature (config) | Extra grant | What the sink reads it for |
 |---|---|---|
@@ -75,7 +75,7 @@ introspection to succeed.
 
 The `distributed_check` guard reads from its `endpoint` (defaults to the first
 replica of shard 0; override it when the Distributed table lives on a front
-node). Grant the two system-table `SELECT`s on whichever node serves that
+node). Grant its system-table `SELECT`s on whichever node serves that
 endpoint.
 
 ## A complete role-based grant
@@ -104,7 +104,7 @@ To scope the account for a security review: the framework issues **no** DDL or
 maintenance statements at all — no `CREATE`, `ALTER`, `OPTIMIZE`, `TRUNCATE`,
 `DROP`, `RENAME`, `KILL`, `ON CLUSTER`, `SYSTEM …`, or temporary tables.
 Partitioning, the deduplication window, and table engines are properties of
-tables **you** create; the sink only inserts into them and reads the two system
+tables **you** create; the sink only inserts into them and reads the system
 tables above. An account with just the grants on this page — and no
 `CREATE`/`DROP`/`ALTER` — is sufficient.
 

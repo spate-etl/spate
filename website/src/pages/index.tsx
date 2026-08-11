@@ -59,7 +59,7 @@ const FEATURES: Feature[] = [
 ];
 
 const TASTE = `let chains = move |_thread| {
-    chain_owned::<Order, _>(avro.clone())
+    chain_owned::<OrderPlaced, _>(avro.clone())
         .with_metrics("orders", "main")
         .try_map(validate, ErrorPolicy::Skip)
         .map(enrich)

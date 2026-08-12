@@ -33,7 +33,7 @@ You raise it by making each fetch **bigger** (prefetch and fetch sizing) or by
 having **more of them in flight** (more brokers, then more instances). Adding
 pipeline threads raises neither.
 
-:::tip[The byte cap is per-partition here, by design]
+:::note The byte cap is per-partition here, by design
 `queued.min.messages` is documented as "per topic+partition" on any consumer,
 so it is not what splitting changes. `queued.max.messages.kbytes` is:
 librdkafka applies it to the *single* consumer queue on a stock high-level
@@ -283,7 +283,7 @@ In roughly this order:
    connection per broker, so this multiplies fetch concurrency. The ceiling is
    one consuming member per partition — beyond that, members sit idle.
 
-:::caution[Scaling events are stop-the-world here]
+:::warning Scaling events are stop-the-world here
 This connector uses eager assignment; cooperative-sticky is rejected at load
 time. Every replica added or removed triggers a full group rebalance during
 which no member consumes. Scaling out is not free, which is the practical

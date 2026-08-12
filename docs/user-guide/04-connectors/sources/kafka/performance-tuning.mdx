@@ -118,7 +118,7 @@ entirely — the budget governs what the pipeline holds, not what the client
 prefetches — so if your pod has a memory limit, set
 `queued.max.messages.kbytes` explicitly.
 
-:::warning[Capping the queue also shrinks the fetch]
+:::warning Capping the queue also shrinks the fetch
 Unless you set `fetch.max.bytes` yourself, librdkafka clamps it to
 `queued.max.messages.kbytes x 1024` at client construction
 ([`rdkafka_conf.c`](https://github.com/confluentinc/librdkafka/blob/master/src/rdkafka_conf.c)).
@@ -158,7 +158,7 @@ query. A lag that is large and not shrinking is the signal that catching up
 matters at all: prefetch depth is only worth tuning when there is a backlog to
 prefetch.
 
-:::note[Prefetch only matters when there is a backlog]
+:::note Prefetch only matters when there is a backlog
 A consumer caught up with its producers is tail-following: nothing is buffered
 to prefetch, so the caps are inert. Prefetch depth matters when you are
 *catching up* — after a deployment, a rebalance, an outage, or a backfill —
@@ -182,7 +182,7 @@ Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
 documented way to break fetches after raising `fetch.max.bytes`
 ([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)).
 
-:::warning[Property-name trap]
+:::warning Property-name trap
 librdkafka spells it **`fetch.wait.max.ms`**. Apache/Java spells it
 `fetch.max.wait.ms` — the words are transposed. The `rdkafka` map takes
 librdkafka names, and an unrecognized property is not silently ignored, so copy
@@ -260,7 +260,7 @@ So size `pipeline.threads` for what your **chain and sink** need —
 deserialization, transforms and encoding are what genuinely parallelize — and
 expect diminishing returns from the fetch path, not a cliff.
 
-:::note[More clients in one process is not the answer]
+:::note More clients in one process is not the answer
 `MODE=perthread` — several `BaseConsumer`s in one process instead of one client
 with several drain threads — wins only while fetch-bound (+108% at four threads
 with no work) and loses heavily once work is present (−56% at 5 µs). This says

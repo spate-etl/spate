@@ -82,11 +82,8 @@ record is one predictable branch — nothing on the per-record hot path.
 
 Together the two halves pin all three descriptions to each other:
 `columns` ↔ live table at startup, struct ↔ `columns` at the first record.
-
-:::note
-Validation checks every replica independently, so it also catches replica
-drift — a replica whose table was altered out of step with the others.
-:::
+Because the startup half queries every replica independently, it also catches
+replica drift — a replica whose table was altered out of step with the others.
 
 :::warning
 `validate_schema: off` preserves the historical behavior: nothing is

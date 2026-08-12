@@ -45,6 +45,7 @@ sink:
     password: ${CLICKHOUSE_PASSWORD}
     batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
     inflight: { max_per_shard: 2 }
+    timeouts: { send: 30s, end: 180s }
     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
     validate_schema: full          # off | names | full
 ```
@@ -53,7 +54,8 @@ sink:
 |---|---|---|---|
 | `table` | string | `required` | Target table, optionally `database.table`-qualified. |
 | `columns` | string list | `required` | Insert column list. **Order is the wire contract** — must match the row struct's field declaration order. Duplicates rejected at load. |
-| `shards` | list of `{ replicas: [url] }` | `required` | One entry per shard, each with its replica HTTP(S) URLs. |
+| `shards` | list of `{ replicas: [url], weight }` | `required` | One entry per shard, each with its replica HTTP(S) URLs. |
+| `shards[].weight` | integer | `1` | Distributed-parity weight: must equal this shard's `<weight>` in the cluster's `remote_servers` entry. Rejected at load if zero. Consumed by the router — see [Distributed parity](./distributed-parity.mdx). |
 | `database` | string | `none` | Default database for unqualified tables. |
 | `user` | string | `none` | Username (interpolate secrets via `${VAR}`). |
 | `password` | string | `none` | Password (interpolate secrets via `${VAR}`). |
@@ -61,9 +63,10 @@ sink:
 | `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply; keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
 | `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
-| `compression` | string | `lz4` | Transport (HTTP-body) compression: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in 1..22. Unrelated to on-disk column codecs. |
+| `compression` | string | `lz4` | Transport (HTTP-body) compression: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in `1..=22`. Unrelated to on-disk column codecs. |
 | `validate_schema` | string | `off` | Startup + first-record schema validation: `off`, `names`, `full`. See [Schema validation](./schema-validation.mdx). |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
+| `distributed_check` | section | `none` | Opt-in startup parity check against the cluster topology and a `Distributed` table's DDL. Absent means no queries are issued. Its keys are on [Distributed parity](./distributed-parity.mdx). |
 
 ## The `settings` passthrough and the denylist
 

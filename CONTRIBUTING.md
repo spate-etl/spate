@@ -14,8 +14,8 @@ whether the change will be accepted before you write it. A maintainer should
 comment on or review a pull request within a few days, though depending on
 circumstances it can take longer.
 
-There are four issue forms: a delivery guarantee that did not hold, an ordinary
-bug, a performance problem, and a proposal. Blank issues are off deliberately,
+The issue forms cover a delivery guarantee that did not hold, an ordinary bug, a
+performance problem, and a proposal. Blank issues are off deliberately,
 because each form asks the question somebody would have to ask you anyway. A
 vulnerability is the exception and never goes in an issue — see
 [Security and legal](#security-and-legal).

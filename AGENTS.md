@@ -141,8 +141,8 @@ those by exit code, not by memory.
 
 ## Filing an issue
 
-`gh` **cannot read our issue forms** — it only sees markdown templates, and all
-four of ours are `.yml` forms, so `--template` fails regardless of flags
+`gh` **cannot read our issue forms** — it only sees markdown templates, and ours
+are all `.yml` forms, so `--template` fails regardless of flags
 ([cli/cli#5865](https://github.com/cli/cli/issues/5865)). Read the relevant
 `.github/ISSUE_TEMPLATE/*.yml`, render its fields to markdown yourself (each
 field's `label` as a `###` heading, `render:` fields in a fenced block), and post

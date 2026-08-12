@@ -37,9 +37,8 @@ cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 
 `make help` lists every target; `make gates` is what a pull request must pass.
 CI calls the same targets for lint, type check, doctests, the feature matrix,
-licences and every `ci-lint` member — but the test, container, site and MSRV jobs
-spell out invocations of their own, so green gates locally is necessary and not
-sufficient.
+licences and every `ci-lint` member — but other jobs spell out invocations of
+their own, so green gates locally is necessary and not sufficient.
 
 Three traps that have cost real time here:
 

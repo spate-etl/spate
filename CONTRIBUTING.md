@@ -33,8 +33,8 @@ make help    # every target, grouped
 `make gates` covers formatting, clippy, the type check, the test suite, doctests,
 the feature matrix, licences and advisories, and the repository's own consistency
 checks. CI calls those same targets, so a target that passes here is what runs
-there. It is necessary rather than sufficient: the test, container, site and MSRV
-jobs spell out invocations of their own.
+there. It is necessary rather than sufficient: other jobs spell out invocations
+of their own.
 
 Containers, benchmarks, nextest profiles and the opt-in suites are in
 [`DEVELOPING.md`](DEVELOPING.md).

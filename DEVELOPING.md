@@ -15,10 +15,10 @@ status of the last command in the pipeline and have masked real failures here
 more than once, which is why no target contains a pipe.
 
 CI calls the same targets for lint, type check, doctests, the feature matrix,
-licences and every `ci-lint` member. Four jobs spell out invocations of their own
-instead — test and coverage, containers, the site, and the allocation
-assertions — so a green `make gates` locally does not mean CI has nothing left
-to say.
+licences and every `ci-lint` member. Other jobs spell out invocations of their
+own instead — a coverage run, a container image, Node or a pinned tool is
+something a target cannot assume — so a green `make gates` locally does not mean
+CI has nothing left to say.
 
 These sit outside `gates`, by cost or by dependency:
 

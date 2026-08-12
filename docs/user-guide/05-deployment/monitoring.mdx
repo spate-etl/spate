@@ -133,7 +133,7 @@ of [Metrics](../../METRICS.md).
 - **A shard asleep between retries** — `spate_sink_retry_backoff_seconds`
   sustained above `(1 - retry.jitter) * retry.max`. The shard is not idle, it
   is parked between write attempts; with an unbounded `retry.max_attempts` it
-  will stay there. The retry *counter* goes flat while this happens (it only
+  stays there. The retry *counter* goes flat while this happens (it only
   moves on an attempt), which is exactly why the gauge exists. Threshold below
   the ceiling rather than at it: jitter only shortens a delay, so the published
   step never sits exactly on `retry.max`. This covers backoff against a replica
@@ -160,7 +160,7 @@ of [Metrics](../../METRICS.md).
   sink's own I/O runtime: the measurement is wall-clock across the write call,
   so it charges time the runtime spent elsewhere. Where a sink does its own
   request compression on that runtime, high byte rates can make the runtime the
-  limit rather than the server — `io_threads` is the lever there.
+  limit rather than the server — `pipeline.io_threads` is the lever there.
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,

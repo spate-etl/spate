@@ -9,6 +9,12 @@
 //! Stdout is captured and parsed; stderr is inherited, so a panic inside a case
 //! reaches the terminal as it happens rather than being reassembled afterwards.
 //!
+//! A call that has not returned after [`slow_period`] is reported on stderr, and
+//! reported again at every period after that. Nothing is killed: the driver names
+//! the child so an operator — or the log of a run bounded from outside — says
+//! which leg and which case is still running, and stopping it stays the
+//! operator's decision.
+//!
 //! The build fingerprint travels *down* to the child through the environment so
 //! a record is self-describing wherever it is written, and is stamped back onto
 //! every record the driver collects — see [`Runner::measure`] for why the round
@@ -16,12 +22,41 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
 use crate::fingerprint::{BuildFingerprint, FINGERPRINT_ENV};
+use crate::note;
 use crate::protocol::{Calibration, Listing, PROTOCOL_VERSION, ProtocolVersion};
 use crate::record::Record;
+
+/// The shortest interval between reports of an outstanding call, and the floor
+/// [`slow_period`] derives against.
+const SLOW_PERIOD: Duration = Duration::from_secs(30);
+
+/// How much of a case's own budget a child may spend before it is reported.
+const PERIOD_MULTIPLE: u64 = 20;
+
+/// How long a protocol call runs before the driver reports it, and the interval
+/// between reports after that.
+///
+/// Twenty times what one measured region was asked to cost, and never less than
+/// thirty seconds. A case measures for `target_ms` after warming for
+/// `warmup_ms`, so the multiple is what a child may spend on everything else —
+/// process start, corpus construction, the calibrated iterations — before the
+/// run says so.
+#[must_use]
+pub fn slow_period(target_ms: u64, warmup_ms: u64) -> Duration {
+    Duration::from_millis(
+        target_ms
+            .saturating_add(warmup_ms)
+            .saturating_mul(PERIOD_MULTIPLE),
+    )
+    .max(SLOW_PERIOD)
+}
 
 /// A compiled bench binary, checked to speak this protocol.
 #[derive(Debug, Clone)]
@@ -30,12 +65,15 @@ pub struct Runner {
     dir: PathBuf,
     fingerprint: BuildFingerprint,
     fingerprint_json: String,
+    period: Duration,
 }
 
 impl Runner {
     /// Wraps a binary and checks its protocol version.
     ///
-    /// `dir` is the leg's own tree, which every child runs in.
+    /// `dir` is the leg's own tree, which every child runs in. `period` is how
+    /// long one of this binary's calls runs before the driver reports it, from
+    /// [`slow_period`].
     ///
     /// The version check happens once, before anything is measured, because the
     /// two legs of an A/B run are compiled from different checkouts and a
@@ -46,7 +84,12 @@ impl Runner {
     ///
     /// When the binary cannot be run, does not answer with JSON, or answers
     /// with a protocol this driver does not speak.
-    pub fn open(binary: &Path, dir: &Path, fingerprint: &BuildFingerprint) -> Result<Self, String> {
+    pub fn open(
+        binary: &Path,
+        dir: &Path,
+        fingerprint: &BuildFingerprint,
+        period: Duration,
+    ) -> Result<Self, String> {
         let fingerprint_json = serde_json::to_string(fingerprint)
             .map_err(|e| format!("the build fingerprint does not serialise: {e}"))?;
         let runner = Self {
@@ -54,6 +97,7 @@ impl Runner {
             dir: dir.to_owned(),
             fingerprint: fingerprint.clone(),
             fingerprint_json,
+            period,
         };
         let version: ProtocolVersion = runner.ask(&["--protocol-version".to_owned()])?;
         if version.protocol != PROTOCOL_VERSION {
@@ -126,8 +170,27 @@ impl Runner {
         Ok(record)
     }
 
+    /// How a child is named while it is still running: its leg, its target, and
+    /// the call in full.
+    fn label(&self, args: &[String]) -> String {
+        format!(
+            "{} {} {}",
+            self.fingerprint.leg,
+            target_name(&self.binary),
+            args.join(" ")
+        )
+    }
+
     /// Runs the binary and parses its single line of stdout.
+    ///
+    /// A call outstanding longer than this runner's period is reported on
+    /// stderr, once per period, until it returns.
     fn ask<T: DeserializeOwned>(&self, args: &[String]) -> Result<T, String> {
+        // Bound to a name, not to `_`. A `let _ =` drops the guard here rather
+        // than at the end of the call, which stops the thread before it can
+        // report anything and leaves no trace that it did.
+        let _watchdog = Watchdog::start(self.period, self.label(args), note);
+
         let output = Command::new(&self.binary)
             .args(args)
             // In its own leg's tree. No case reads a file today, but the day
@@ -192,6 +255,76 @@ pub struct Measurement<'a> {
     pub warmup_ms: u64,
 }
 
+/// Reports a call that is still running, once per period, until it is dropped.
+///
+/// The reporting thread stops when the guard drops, which is what makes the
+/// guard's scope the call's lifetime.
+struct Watchdog {
+    // Both fields are `Option` so `Drop` can drop the sender before joining the
+    // thread. Joining first waits for a thread whose exit condition is that
+    // drop, which never comes.
+    done: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    /// Starts reporting `label` every `period` until the guard is dropped.
+    ///
+    /// Nothing is ever sent on the channel. The sender's lifetime is the
+    /// signal: dropping it disconnects the receiver, which ends the loop at
+    /// once rather than at the end of the period it is sitting in.
+    fn start<R>(period: Duration, label: String, report: R) -> Self
+    where
+        R: Fn(&str) + Send + 'static,
+    {
+        let (done, idle) = mpsc::channel::<()>();
+        let thread = thread::spawn(move || {
+            let mut periods: u32 = 0;
+            while let Err(mpsc::RecvTimeoutError::Timeout) = idle.recv_timeout(period) {
+                periods = periods.saturating_add(1);
+                report(&slow_line(&label, period.saturating_mul(periods)));
+            }
+        });
+        Self {
+            done: Some(done),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        if let Some(thread) = self.thread.take() {
+            // A watchdog that panicked has already lost its thread; taking its
+            // payload here would panic a second time, and during an unwind that
+            // aborts.
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The line an outstanding call earns.
+///
+/// `elapsed` is the period times the number of them that have passed, so the
+/// figure is always a threshold the call has crossed rather than a measurement
+/// of it — a reader can tell the reporting interval from any single line.
+fn slow_line(label: &str, elapsed: Duration) -> String {
+    format!("SLOW [> {:.3}s] {label}", elapsed.as_secs_f64())
+}
+
+/// The bench target's name, from the binary cargo built for it.
+///
+/// Cargo appends a hash to the file name, which is noise in a message about the
+/// target.
+fn target_name(binary: &Path) -> &str {
+    binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.rsplit_once('-').map(|(stem, _)| stem))
+        .unwrap_or("<target>")
+}
+
 /// The error any binary that did not answer the protocol earns, naming the
 /// likeliest cause.
 ///
@@ -210,19 +343,36 @@ fn hint(binary: &Path, args: &[String], why: &str) -> String {
          Without it cargo runs the target under libtest, which rejects these arguments.",
         binary.display(),
         args.join(" "),
-        binary
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.rsplit_once('-').map(|(stem, _)| stem))
-            .unwrap_or("<target>")
+        target_name(binary)
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
 
-    use super::hint;
+    use super::{PERIOD_MULTIPLE, Runner, SLOW_PERIOD, Watchdog, hint, slow_line, slow_period};
+    use crate::fingerprint::BuildFingerprint;
+    use crate::protocol::{PROTOCOL_VERSION, ProtocolVersion};
+
+    /// A runner over a stand-in binary, built by struct literal.
+    ///
+    /// [`Runner::open`] asks the binary for its protocol version, which nothing
+    /// a test can point at answers, so a test that needs a runner rather than a
+    /// protocol builds one directly.
+    fn stub(period: Duration) -> Runner {
+        let mut fingerprint = BuildFingerprint::local();
+        fingerprint.leg = "base".to_owned();
+        Runner {
+            binary: PathBuf::from("/bin/sh"),
+            dir: std::env::temp_dir(),
+            fingerprint,
+            fingerprint_json: "{}".to_owned(),
+            period,
+        }
+    }
 
     #[test]
     fn the_hint_names_the_manifest_stanza_and_strips_the_hash_suffix() {
@@ -234,5 +384,116 @@ mod tests {
         assert!(message.contains("harness = false"), "{message}");
         assert!(message.contains("name = \"decode_wall\""), "{message}");
         assert!(message.contains("--list-cases"), "{message}");
+    }
+
+    /// The reported figure is the threshold crossed, so the count is one-sided:
+    /// a loaded machine may deliver fewer reports than the elapsed time allows,
+    /// and asserting an exact number would make this a test of the scheduler.
+    #[test]
+    fn a_call_that_outlives_a_period_is_reported_once_per_period() {
+        let (tx, rx) = mpsc::channel();
+        let watchdog = Watchdog::start(
+            Duration::from_millis(20),
+            "base decode_wall --run decode/small".to_owned(),
+            move |line: &str| {
+                let _ = tx.send(line.to_owned());
+            },
+        );
+        std::thread::sleep(Duration::from_millis(110));
+        drop(watchdog);
+
+        let lines: Vec<String> = rx.iter().collect();
+        assert!(!lines.is_empty(), "no report after five periods");
+        assert_eq!(
+            lines[0],
+            "SLOW [> 0.020s] base decode_wall --run decode/small"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            let elapsed = 0.020 * (index + 1) as f64;
+            assert!(
+                line.starts_with(&format!("SLOW [> {elapsed:.3}s] ")),
+                "report {index} is {line}"
+            );
+        }
+    }
+
+    /// What makes the watchdog safe to arm on every call: a child that answers
+    /// promptly is never mentioned.
+    #[test]
+    fn a_call_that_returns_before_the_first_period_is_never_reported() {
+        let (tx, rx) = mpsc::channel();
+        let watchdog = Watchdog::start(
+            Duration::from_secs(5),
+            "base decode_wall --list-cases".to_owned(),
+            move |line: &str| {
+                let _ = tx.send(line.to_owned());
+            },
+        );
+        drop(watchdog);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A `Drop` that joined before dropping the sender would wait for a thread
+    /// whose exit condition is that drop, so this hangs rather than fails if the
+    /// order is ever reversed.
+    #[test]
+    fn dropping_the_watchdog_stops_and_joins_its_thread() {
+        let marker = Arc::new(());
+        let held = Arc::clone(&marker);
+        let watchdog = Watchdog::start(Duration::from_millis(5), "base t --run c".to_owned(), {
+            move |_: &str| {
+                let _ = &held;
+            }
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        drop(watchdog);
+
+        assert_eq!(Arc::strong_count(&marker), 1);
+    }
+
+    /// The watchdog wraps the call rather than changing it: an answer parses as
+    /// it did before, and a period nothing reaches costs nothing.
+    #[test]
+    fn a_prompt_answer_parses_exactly_as_it_did_unwatched() {
+        let runner = stub(Duration::from_secs(5));
+        let started = Instant::now();
+        let answer: ProtocolVersion = runner
+            .ask(&[
+                "-c".to_owned(),
+                format!("echo '{{\"protocol\":{PROTOCOL_VERSION}}}'"),
+            ])
+            .expect("the stub answers the protocol");
+
+        assert_eq!(answer.protocol, PROTOCOL_VERSION);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_slow_line_names_the_leg_the_target_and_the_call() {
+        let mut runner = stub(SLOW_PERIOD);
+        runner.binary = PathBuf::from("/t/bench/decode_wall-9f3c1a");
+        let label = runner.label(&["--run".to_owned(), "decode/small".to_owned()]);
+
+        assert_eq!(label, "base decode_wall --run decode/small");
+        assert_eq!(
+            slow_line(&label, Duration::from_secs(30)),
+            "SLOW [> 30.000s] base decode_wall --run decode/small"
+        );
+    }
+
+    /// The floor, the multiple, and the saturation the multiple could otherwise
+    /// overflow through.
+    #[test]
+    fn the_period_is_the_larger_of_the_floor_and_the_case_budget() {
+        assert_eq!(slow_period(50, 50), SLOW_PERIOD);
+        assert_eq!(slow_period(1, 0), SLOW_PERIOD);
+        assert_eq!(slow_period(5_000, 1_000), Duration::from_secs(120));
+        assert_eq!(
+            slow_period(u64::MAX, u64::MAX),
+            Duration::from_millis(u64::MAX)
+        );
+        assert_eq!(PERIOD_MULTIPLE, 20);
+        assert_eq!(SLOW_PERIOD, Duration::from_secs(30));
     }
 }

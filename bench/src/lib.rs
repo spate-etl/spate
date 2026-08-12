@@ -211,5 +211,24 @@ pub mod worktree;
 #[cfg(feature = "driver")]
 pub mod ab;
 
+/// Writes one progress line to stderr, prefixed with the crate name.
+///
+/// The line is built whole and issued as a single `write_all`: the driver
+/// reports from a background thread while a child writes to the same inherited
+/// stderr, and a formatted write can otherwise reach the descriptor in several
+/// pieces.
+///
+/// Unbuffered, and it must stay that way. A run bounded from outside — a CI job
+/// reaching its own timeout — keeps only what already reached the log, so a
+/// buffered line is a line the operator never sees in the one case it exists
+/// for.
+#[cfg(feature = "driver")]
+pub(crate) fn note(message: &str) {
+    use std::io::Write as _;
+
+    let line = format!("spate-bench: {message}\n");
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
 pub use case::{Bencher, Case, CaseBuilder, Suite, suite};
 pub use corpus::Corpus;

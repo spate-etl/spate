@@ -64,7 +64,7 @@ alone — records, bytes, poll duration, rebalance counts, and active lanes are
 all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
 
-:::danger[Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose]
+:::danger Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose
 Every one of these is scar tissue.
 
 **Take the handle from `SourceCtx`.** A builder the runtime cannot reach is

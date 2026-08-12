@@ -221,7 +221,7 @@ The default stays at 8 because a shallow queue fails in the direction that is
 easier to diagnose — under-using a fast sink, rather than hiding a slow one
 behind a buffer. That is a defensive choice, not a free one.
 
-:::note[Which regime am I in?]
+:::note Which regime am I in?
 Read `spate_backpressure_pause_events_total` **together with**
 `spate_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
 `spate_sink_flush_duration_seconds`. Flush duration spans seal to settle and

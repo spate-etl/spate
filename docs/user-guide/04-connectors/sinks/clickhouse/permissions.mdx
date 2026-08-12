@@ -26,12 +26,11 @@ per-batch `INSERT`. One grant covers it:
 GRANT INSERT ON analytics.orders_local TO spate_writer;
 ```
 
-:::note Grant the local table, on every node
-The sink writes to **shard-local** tables, never a `Distributed` table (see
+**Grant the local table, on every node.** The sink writes to **shard-local**
+tables, never a `Distributed` table (see
 [Why direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table)).
 Grant `INSERT` on the local table on **every replica of every shard** — not on
 a Distributed table, which the sink never inserts through.
-:::
 
 :::warning The writer profile must allow changing settings
 Every insert sets `insert_deduplicate`, `insert_deduplication_token`, and

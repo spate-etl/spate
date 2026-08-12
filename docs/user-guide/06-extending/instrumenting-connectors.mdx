@@ -101,13 +101,11 @@ A test that only asserts the family appears in the exposition passes happily
 against every one of these bugs.
 :::
 
-:::note
 `SourceMetrics` is the one framework handle a connector is expected to drive
 today. Sink-side signals (flush outcomes, retries, replica health) are derived
 by the sink worker and circuit breaker from the results your `ShardWriter`
 returns — you report them by returning the right outcome, not by touching a
 metrics handle. See [Custom sinks](custom-sink.mdx).
-:::
 
 ## Labeling your component
 

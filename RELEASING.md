@@ -59,7 +59,7 @@ right. Steps 1 and 2 are in that order for this reason.
    ruleset requires one and carries no bypass actors, so there is no direct push.
 
 3. **Merge the release pull request.** It rebases onto the `main` you just
-   updated, and the `release` job publishes all ten crates in dependency order,
+   updated, and the `release` job publishes every crate in dependency order,
    tags `vX.Y.Z`, and opens the GitHub release.
 
    Between step 2 landing and this merge, `CHANGELOG.md` on `main` carries a
@@ -86,7 +86,7 @@ as the subject. If you ever need to force it, the workflow takes a
 
 ## Versioning
 
-All ten crates move together, and this needs no configuration: they inherit
+The crates move together, and this needs no configuration: they inherit
 `version` from `[workspace.package]`, release-plz takes the highest next
 version across the workspace and writes that back, and it preserves the `=`
 operator so `[workspace.dependencies]` follows.
@@ -126,9 +126,9 @@ From crates.io's own limiter:
 | Publishing a **version** of an existing crate | 30 | 1 per minute |
 
 Nine new crates therefore cost about 45 minutes of waiting, once. Every release
-after that publishes ten *versions*, which fits inside a burst of 30 with no
-waiting at all. This is not a recurring cost and it is not a reason to merge
-the workspace into one crate.
+after that publishes one *version* per crate, which fits inside a burst of 30
+with no waiting at all. This is not a recurring cost and it is not a reason to
+merge the workspace into one crate.
 
 ## Why the release workflow uses a GitHub App
 
@@ -148,8 +148,8 @@ somebody's account changing.
 
 ## If it breaks mid-release
 
-The failure that matters is a partial publish: three crates on the registry,
-six not. **A published version can never be replaced** — `cargo yank` hides a
+The failure that matters is a partial publish: some crates on the registry, the
+rest not. **A published version can never be replaced** — `cargo yank` hides a
 version from new resolution but does not free the number, and does not let you
 re-upload it.
 
@@ -185,8 +185,8 @@ the real run:
 
 - **A verified email address is required.** An unverified one fails the first
   upload with `400 Bad Request` and publishes nothing.
-- **Rate limits.** See the table above. A dry run of ten crates completes in
-  minutes; the real thing takes about forty-five.
+- **Rate limits.** See the table above. A dry run of the whole workspace
+  completes in minutes; the real thing takes about forty-five.
 
 Neither is a reason to skip the dry run — it catches missing metadata,
 oversized payloads and compilation failures, which are the expensive ones. Just

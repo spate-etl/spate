@@ -291,6 +291,17 @@ impl Comparison {
     pub fn informational(&self) -> impl Iterator<Item = &Row> {
         self.rows.iter().filter(|row| row.erratic)
     }
+
+    /// The rows the rule reached no conclusion about.
+    ///
+    /// Fewer than [`crate::stats::MIN_REPLICATES`] paired replicates, so there
+    /// is a difference to print and nothing concluded from it. Disjoint from
+    /// [`Comparison::significant`].
+    pub fn unjudged(&self) -> impl Iterator<Item = &Row> {
+        self.rows
+            .iter()
+            .filter(|row| !row.analysis.verdict.is_judged())
+    }
 }
 
 /// Compares two legs.
@@ -1208,6 +1219,26 @@ mod tests {
         elsewhere.dir = std::path::PathBuf::from("/legs/other");
         let err = compare(base, elsewhere, &[]).expect_err("two base legs");
         assert!(err.contains("both directories hold"), "{err}");
+    }
+
+    /// Tied to real records rather than a hand-built analysis: the renderer asks
+    /// this, and the replicate floor is applied where the verdict is decided.
+    #[test]
+    fn a_run_below_the_replicate_floor_judges_nothing() {
+        let base = Builder::new("base")
+            .series("a", &[100.0, 101.0, 99.0])
+            .build();
+        let head = Builder::new("head")
+            .series("a", &[130.0, 131.0, 129.0])
+            .build();
+
+        let out = compare(base, head, &[]).expect("compares");
+        assert_eq!(out.unjudged().count(), out.rows.len());
+        assert_eq!(out.significant().count(), 0);
+        assert!(!out.rows.is_empty());
+        for row in &out.rows {
+            assert_eq!(row.analysis.verdict, Verdict::NoVerdict);
+        }
     }
 
     /// A consumer switches on these, so two classes sharing a token would make

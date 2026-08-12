@@ -130,13 +130,11 @@ watermark stalls either way.
 
 ## The honest part: hot shards
 
-:::info
 **A hot shard is the data's shape, not the router's choice.** Any router
 that gives a key stable shard affinity — which is the entire point of
 payload routing — sends every record for a hot key to the same shard. Where
 one key (or a handful) dominates the volume, that shard runs hot, and no
 router setting fixes it: affinity makes the skew *irreducible* by design.
-:::
 
 The responses that remain:
 

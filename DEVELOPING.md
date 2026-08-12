@@ -93,7 +93,7 @@ everything depends on it, and a crate without one selects nothing.
 
 For a change whose reach those paths do not show — a refactor moving code between
 crates, or a dependency swap — a maintainer can label the pull request
-`ci: docker`, `ci: loom` or `ci: bench`. All three only ever add work; none can
+`ci: docker`, `ci: loom` or `ci: bench`. They only ever add work; none can
 switch a suite off. `make self-test` checks the classifier against the crate
 graph.
 
@@ -115,7 +115,7 @@ claim.
 
 ## Benchmarks
 
-Three tiers, answering different questions. Only the counted tier gates a pull
+The tiers below answer different questions. Only the counted one gates a pull
 request.
 
 None of them sweeps this framework's own settings against each other end to end,
@@ -134,8 +134,8 @@ property of the one that produced it. It needs Linux, valgrind, and a
 a hard error. On macOS the most you can check is that the benches build, which is
 `make bench-gungraun-check`.
 
-Adding one is two steps: name the file `benches/<something>_gungraun.rs`, and
-declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
+Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
+it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it — `scripts/gungraun-benches.sh` discovers it by that
 name, and the Makefile target, both CI legs and `scripts/ci-changes.sh` all read
 from that one place, so there is no list to add yourself to. Running that script

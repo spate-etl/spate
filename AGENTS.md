@@ -40,7 +40,7 @@ CI calls the same targets for lint, type check, doctests, the feature matrix,
 licences and every `ci-lint` member — but other jobs spell out invocations of
 their own, so green gates locally is necessary and not sufficient.
 
-Three traps that have cost real time here:
+The traps that have cost real time here:
 
 - **Verify by explicit exit code**, everywhere — gates, checklists, all of it.
   Piped `grep`/`tail` chains report the exit status of the last command in the
@@ -90,7 +90,7 @@ finish before reaching the description.
 (`.claude/skills/docs-review/SKILL.md`) is the procedure for applying it. Read or
 invoke it for any edit under `docs/`.
 
-Two rules break by accident more than the rest:
+The rules that break by accident more than the rest:
 
 - **Framework pages are vendor-neutral prose.** Everything under
   `docs/user-guide/` outside `04-connectors/` states its rules in framework
@@ -107,10 +107,10 @@ Two rules break by accident more than the rest:
 
 Decision records live in `docs/adr/`, one file per decision, and are the only
 place under `docs/` that reads as history. Scaffold one with
-`make adr-new SLUG=…`. Two things about them differ from everything else here:
-an **accepted record is immutable** — a changed decision is a *new* record that
-supersedes the old one, never an edit to it — and a decision only earns a record
-if it affects structure, a key quality attribute, or is hard to reverse.
+`make adr-new SLUG=…`. They differ from everything else here: an **accepted
+record is immutable** — a changed decision is a *new* record that supersedes the
+old one, never an edit to it — and a decision only earns a record if it affects
+structure, a key quality attribute, or is hard to reverse.
 `docs/adr/_template.md` states both rules in full and is normative;
 `make check-adr` holds the mechanical half.
 

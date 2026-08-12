@@ -5,10 +5,10 @@ into [`CHANGELOG.md`](../CHANGELOG.md) at release time. One file per pull
 request; the conventions follow
 [towncrier](https://towncrier.readthedocs.io/en/stable/tutorial.html).
 
-Two reasons the entry lives here rather than in `CHANGELOG.md` directly. A
-fragment is a **separate reviewable diff** — the wording is read on its own, the
-way the user will read it, instead of being skimmed past at the top of a long
-file. And checking that a file was *added* has no fail-open mode, where checking
+The entry lives here rather than in `CHANGELOG.md` directly. A fragment is a
+**separate reviewable diff** — the wording is read on its own, the way the user
+will read it, instead of being skimmed past at the top of a long file. And
+checking that a file was *added* has no fail-open mode, where checking
 that the `## [Unreleased]` section *grew* does: a section extractor that loses
 its end boundary silently starts accepting any edit anywhere in the file.
 

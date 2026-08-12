@@ -121,6 +121,12 @@ most people assume:
   with different boundaries and therefore different tokens. Those rows land
   twice, and no deduplication window will catch them.
 
+:::danger
+Nothing in Spate is exactly-once, and no configuration makes it so.
+If a downstream consumer cannot tolerate duplicates, deduplicate at the
+destination or at the query layer.
+:::
+
 So target tables must be designed for replay regardless of what the token
 covers. Whether a destination honors the token at all — and what it must be
 configured to do so — is the sink's business, and at least one shipped sink has
@@ -130,12 +136,6 @@ a silent failure mode here worth reading before going to production.
 Dedup support, and the configuration it depends on:
 [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens--and-the-window-warning)
 · [Kafka](../04-connectors/sinks/kafka/README.mdx#delivery-semantics-honestly).
-:::
-
-:::info
-Nothing in Spate is exactly-once, and no configuration makes it so.
-If a downstream consumer cannot tolerate duplicates, deduplicate at the
-destination or at the query layer.
 :::
 
 ## Further reading

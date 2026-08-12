@@ -339,8 +339,12 @@ Everywhere:
   `:::note` for the pointer block above and for an aside a reader may skip;
   `:::warning` for a footgun that costs time; `:::danger` only for what costs
   *data* — a delivery caveat, a setting that drops records, an operation with
-  no undo. `:::tip` and `:::caution` are unused: a tip is either worth a
-  sentence of prose or is not worth the reader's eye. Never stack two, and
+  no undo. `:::info`, `:::tip` and `:::caution` are unused: `:::info` is the
+  one reached for by reflex, and it lands a delivery caveat and a skippable
+  aside at the same weight, which leaves nothing louder for the case that
+  costs data; a tip is either worth a sentence of prose or is not worth the
+  reader's eye. A title follows the marker after a space
+  (`:::note Connector specifics`), not in brackets. Never stack two, and
   never open a section with one.
 - **A quantitative claim carries how it was established.** Throughput and
   latency figures, and equally any number a reader sizes infrastructure from —

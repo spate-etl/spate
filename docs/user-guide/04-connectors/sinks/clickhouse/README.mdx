@@ -4,7 +4,9 @@ The ClickHouse sink (`spate-clickhouse`, feature `clickhouse` on the `spate`
 facade) writes **directly to shard-local tables** over HTTP: rows are
 encoded to RowBinary on the pipeline threads, shipped to sink workers as
 pre-formatted frames, and inserted one `INSERT ... FORMAT RowBinary` per
-sealed batch with a deterministic `insert_deduplication_token`.
+sealed batch with a deterministic `insert_deduplication_token`. RowBinary is
+the default; `format: native` encodes columnar blocks and inserts
+`FORMAT Native` instead — see [Native format](./native-format.mdx).
 
 Construct it from the pipeline's opaque section; the result is a
 `SinkBundle` that drops straight into the builder:

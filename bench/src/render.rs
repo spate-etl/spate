@@ -7,6 +7,11 @@
 //! The decision rule is printed verbatim in every format. A report that states
 //! how it decided can be argued with; one that shows a number and a marker
 //! cannot.
+//!
+//! The JSON view is the one a script reads, and it is versioned by
+//! [`REPORT_SCHEMA_VERSION`]. Its `verdict` and `cause` fields carry tokens
+//! rather than the phrases the other two formats print, so a consumer matches on
+//! a string that changes only when the version does.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,7 +20,17 @@ use serde::Serialize;
 
 use crate::clock::{human_bytes, human_ns, human_rate};
 use crate::compare::{Cause, Comparison, Row};
+use crate::record::{ALLOC_BYTES_PER_ITER, ALLOC_COUNT_PER_ITER, PEAK_RSS_BYTES};
 use crate::stats::{ALLOC_FLOOR, CONFIDENCE, DEFAULT_FLOOR, MIN_REPLICATES, RSS_FLOOR, Verdict};
+
+/// Schema version of the `--format json` report, carried as its `schema` field.
+/// Bump on any breaking field change.
+///
+/// One of three independent versions: [`crate::record::SCHEMA_VERSION`] versions
+/// the records a leg is written from, and [`crate::protocol::PROTOCOL_VERSION`]
+/// versions the conversation with a bench binary. A report is rendered from
+/// records rather than being one, so the two move apart.
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// The rule, stated the same way in every rendering.
 ///
@@ -157,6 +172,7 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
         .map(|row| row.analysis.replicates)
         .collect();
     let report = Report {
+        schema: REPORT_SCHEMA_VERSION,
         // Both ends, because a run that paired ten for one case and three for
         // another has not taken ten replicates — and a script reading one
         // number would be told it had.
@@ -164,10 +180,14 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
         replicates_max: counts.iter().copied().max().unwrap_or(0),
         confidence: CONFIDENCE,
         min_replicates: MIN_REPLICATES,
+        // Keyed by the metric names a row carries, so a consumer holding a row
+        // can look its floor up. `default` is the remaining key because
+        // `stats::floor_for` genuinely falls back for every other metric.
         floors: BTreeMap::from([
             ("default", DEFAULT_FLOOR),
-            ("peak_rss_bytes", RSS_FLOOR),
-            ("alloc", ALLOC_FLOOR),
+            (PEAK_RSS_BYTES, RSS_FLOOR),
+            (ALLOC_BYTES_PER_ITER, ALLOC_FLOOR),
+            (ALLOC_COUNT_PER_ITER, ALLOC_FLOOR),
         ]),
         allowed: comparison.allowed.clone(),
         base: LegReport::of(&comparison.base),
@@ -179,6 +199,7 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
             .map(|n| NotComparableReport {
                 what: n.what.clone(),
                 why: n.why.clone(),
+                cause: n.cause.token(),
             })
             .collect(),
         decision_rule: decision_rule(),
@@ -381,6 +402,7 @@ fn percent(fraction: f64) -> String {
 
 #[derive(Debug, Serialize)]
 struct Report {
+    schema: u32,
     replicates_min: usize,
     replicates_max: usize,
     confidence: f64,
@@ -450,7 +472,7 @@ impl RowReport {
             ci_low: row.analysis.ci_low,
             ci_high: row.analysis.ci_high,
             floor: row.analysis.floor,
-            verdict: row.analysis.verdict.label(),
+            verdict: row.analysis.verdict.token(),
             significant: !row.erratic && row.analysis.verdict.is_significant(),
         }
     }
@@ -460,6 +482,7 @@ impl RowReport {
 struct NotComparableReport {
     what: String,
     why: String,
+    cause: &'static str,
 }
 
 #[cfg(test)]
@@ -695,7 +718,73 @@ mod tests {
         assert_eq!(parsed["replicates_min"], 10);
         assert_eq!(parsed["replicates_max"], 10);
         assert_eq!(parsed["decision_rule"], decision_rule());
+        assert_eq!(parsed["schema"], super::REPORT_SCHEMA_VERSION);
         assert!((parsed["floors"]["peak_rss_bytes"].as_f64().expect("f64") - 0.10).abs() < 1e-12);
+    }
+
+    /// Every floor key is a metric a row can carry, apart from the fallback the
+    /// rule genuinely has: a consumer holding a row's metric can resolve it.
+    #[test]
+    fn every_floor_is_keyed_by_a_metric_a_row_carries() {
+        let cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        let floors = parsed["floors"].as_object().expect("floors");
+
+        for metric in [
+            crate::record::PEAK_RSS_BYTES,
+            crate::record::ALLOC_BYTES_PER_ITER,
+            crate::record::ALLOC_COUNT_PER_ITER,
+        ] {
+            let floor = floors[metric].as_f64().expect("f64");
+            assert!(
+                (floor - crate::stats::floor_for(metric)).abs() < 1e-12,
+                "{metric} disagrees with the rule that applies it"
+            );
+        }
+        let default = floors["default"].as_f64().expect("f64");
+        assert!((default - crate::stats::floor_for(crate::record::WALL_NS_PER_ITER)).abs() < 1e-12);
+    }
+
+    /// The JSON verdict is matched on rather than read, so it must not drift
+    /// back to the phrasing the human formats use.
+    #[test]
+    fn the_json_verdict_is_a_token_rather_than_a_phrase() {
+        let cmp = comparison(
+            vec![
+                row("a", Verdict::NoChange, false),
+                row("b", Verdict::NoVerdict, false),
+            ],
+            Vec::new(),
+        );
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+
+        assert_eq!(parsed["rows"][0]["verdict"], "no_change");
+        assert_eq!(parsed["rows"][1]["verdict"], "no_verdict");
+        for row in parsed["rows"].as_array().expect("rows") {
+            let verdict = row["verdict"].as_str().expect("str");
+            assert!(!verdict.contains(' '), "{verdict} reads as a phrase");
+        }
+    }
+
+    #[test]
+    fn every_cause_reaches_the_json_as_a_token() {
+        let not_comparable = [Cause::DigestLeftOut, Cause::DigestCompared, Cause::Other]
+            .into_iter()
+            .map(|cause| NotComparable {
+                what: "spate-bench/selftest_wall/a".to_owned(),
+                why: "because".to_owned(),
+                cause,
+            })
+            .collect();
+        let cmp = comparison(vec![row("a", Verdict::NoChange, false)], not_comparable);
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+
+        assert_eq!(parsed["not_comparable"][0]["cause"], "digest_left_out");
+        assert_eq!(parsed["not_comparable"][1]["cause"], "digest_compared");
+        assert_eq!(parsed["not_comparable"][2]["cause"], "other");
     }
 
     #[test]

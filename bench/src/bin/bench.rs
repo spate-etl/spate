@@ -50,7 +50,10 @@
 //! full table in collapsed sections, then anything that could not be compared,
 //! then the decision rule — also collapsed, because a reader who wants it knows
 //! to look and a reader who does not should see the table first. `--format json`
-//! carries every row with its interval and verdict.
+//! carries every row with its interval and verdict, and everything that could
+//! not be compared with the reason it could not. Its `schema` field is the
+//! report's version; its `verdict` and `cause` fields are tokens a script
+//! matches on rather than the phrases the other two formats print.
 //!
 //! # Exit codes, and two refusals worth knowing in advance
 //!

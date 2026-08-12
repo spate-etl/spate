@@ -140,6 +140,22 @@ impl Verdict {
             Self::NoVerdict => "no verdict",
         }
     }
+
+    /// The machine token, as `--format json` carries it.
+    ///
+    /// Snake case throughout, including where [`Verdict::label`] renders a
+    /// space: a field a script matches on and a phrase a reader reads are two
+    /// strings with different rules. Stable for a report schema version — see
+    /// [`crate::render::REPORT_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Improved => "improved",
+            Self::Regressed => "regressed",
+            Self::NoChange => "no_change",
+            Self::NoVerdict => "no_verdict",
+        }
+    }
 }
 
 /// One metric of one case, decided.
@@ -491,5 +507,26 @@ mod tests {
         assert!(!Verdict::NoChange.is_significant());
         assert!(!Verdict::NoVerdict.is_significant());
         assert_eq!(Verdict::NoVerdict.label(), "no verdict");
+    }
+
+    /// The two renderings are deliberately different strings. A token that
+    /// drifts back to its label would go on parsing until a consumer split it.
+    #[test]
+    fn a_verdict_reads_one_way_for_humans_and_another_for_scripts() {
+        assert_eq!(Verdict::Improved.token(), "improved");
+        assert_eq!(Verdict::Regressed.token(), "regressed");
+        assert_eq!(Verdict::NoChange.token(), "no_change");
+        assert_eq!(Verdict::NoVerdict.token(), "no_verdict");
+
+        for verdict in [
+            Verdict::Improved,
+            Verdict::Regressed,
+            Verdict::NoChange,
+            Verdict::NoVerdict,
+        ] {
+            assert!(!verdict.token().contains(' '), "{}", verdict.token());
+        }
+        assert!(Verdict::NoChange.label().contains(' '));
+        assert!(Verdict::NoVerdict.label().contains(' '));
     }
 }

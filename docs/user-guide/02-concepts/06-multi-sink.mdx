@@ -126,7 +126,7 @@ unblocked this half stays within ~`checkpoint.interval` — even for a branch
 too cold to ever fill a chunk), and
 the sink-side batch `linger`, which is the trade being made here:
 
-:::info
+:::warning
 If a source batch mixes hot and rare records, its offsets are held until the
 **rare** destination's `linger` fires. Rare records are sprinkled across many
 batches, so a long rare-destination `linger` inflates checkpoint lag and

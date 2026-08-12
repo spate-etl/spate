@@ -104,7 +104,7 @@ table's `batch.max_rows`/`max_bytes`/`linger` is sized for *its* volume. A hot
 table seals on rows in milliseconds; a rare table would trickle, so a longer
 `linger` builds bigger parts for it.
 
-:::info
+:::warning
 `linger` on a rare table is **not free**: because the source watermark is
 held until every table a batch touched has flushed, a long rare-table
 `linger` holds the offsets of every source batch that carried even one rare

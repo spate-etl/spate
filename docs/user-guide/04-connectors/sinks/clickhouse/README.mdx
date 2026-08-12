@@ -114,7 +114,7 @@ not the row type: owned rows are wrapped as `Owned<Row>` (e.g.
 only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
 frames, seal batches, and drive inserts; they never touch a record.
 
-:::info
+:::warning
 RowBinary carries no column names — position is everything. The
 configured `columns` list and the row struct's **field declaration
 order** must match; reordering either is a breaking change to the

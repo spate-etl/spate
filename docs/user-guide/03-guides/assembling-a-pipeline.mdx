@@ -165,7 +165,7 @@ payload instead — matching a sink cluster's sharding key, or splitting
 `flat_map` children across shards — pass a record-aware `RecordRouter` here
 instead (see [Sink sharding](../02-concepts/05-sink-sharding.mdx)).
 
-:::info
+:::warning
 **The drain contract: do not stash `ctx.queues` outside the chain.** The
 sink only begins draining once every `ShardQueues` clone is dropped —
 that is how workers know no more data can arrive. The builder discharges

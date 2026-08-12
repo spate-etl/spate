@@ -106,7 +106,7 @@ batches `checkpoint.drain_timeout` (default **25s**) to complete, commit
 offsets synchronously, exit. The details live in
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 
-:::info
+:::warning
 Set `terminationGracePeriodSeconds` comfortably **above**
 `checkpoint.drain_timeout` — e.g. 30s for the default 25s. If Kubernetes
 kills the pod mid-drain nothing is lost (at-least-once: uncommitted

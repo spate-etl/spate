@@ -71,6 +71,14 @@ Do this from a plain thread, usually `main`: a tokio runtime dropped inside
 async context panics. The builder refuses that case up front with
 `BuildError::AsyncContext`; by hand there is nothing to refuse it.
 
+`metrics::install` is **idempotent**, which matters when you are embedding a
+pipeline in a larger program. A second call returns the first exporter rather
+than failing or replacing it, so you can install early — right after loading
+configuration, before anything else runs — and the runtime's own install
+reuses what you created. `exporter: none` never claims the process slot at
+all, so a pipeline with metrics disabled leaves the recorder free for
+whatever else in the process wants it.
+
 ### Connectors
 
 Exactly as under the builder: your factories read the opaque `source:`,

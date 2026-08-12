@@ -32,8 +32,9 @@
 //!
 //! `--allow <field>` waives one by name. An unrecognised name is rejected rather
 //! than accepted as a waiver that does nothing, and the report says in its header
-//! which guards were waived — so comparing two feature arms of one commit is a
-//! deliberate act with a disclosure attached, rather than an accident.
+//! which guards were waived and what the two legs disagreed about — so comparing
+//! two feature arms of one commit is a deliberate act with a disclosure attached,
+//! rather than an accident.
 //!
 //! # Who fills them in
 //!

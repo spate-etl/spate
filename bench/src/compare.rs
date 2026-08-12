@@ -8,8 +8,9 @@
 //! - **The builds must be the same build.** Two legs from different toolchains,
 //!   targets, profiles or resolved feature sets are not a comparison, whatever
 //!   the numbers look like. That is a hard error before any pairing, with an
-//!   `--allow` escape hatch that is printed in the report header so a reader is
-//!   never shown a bypassed guard silently.
+//!   `--allow` escape hatch that is printed in the report header — along with
+//!   what the two legs disagreed about — so a reader is never shown a bypassed
+//!   guard silently.
 //! - **A record with no partner is a finding, never a drop.** A case one leg
 //!   added or removed goes into *Not comparable* and is named. An empty
 //!   significant table has to mean "nothing moved", not "nothing paired".
@@ -249,6 +250,32 @@ impl Cause {
     }
 }
 
+/// A guarded field the two legs disagree about.
+///
+/// Produced once and read twice: the guard refuses over the ones that were not
+/// waived, and the report header names the ones that were. Both render it
+/// through [`Display`](std::fmt::Display), so one difference cannot be described
+/// two ways.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Divergence {
+    /// The field's name, as `--allow` spells it.
+    pub field: &'static str,
+    /// The base leg's value, empty when that leg recorded none.
+    pub base: String,
+    /// The head leg's value, empty when that leg recorded none.
+    pub head: String,
+}
+
+impl std::fmt::Display for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: base '{}' vs head '{}'",
+            self.field, self.base, self.head
+        )
+    }
+}
+
 /// Something that could not be compared, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NotComparable {
@@ -301,6 +328,17 @@ impl Comparison {
         self.rows
             .iter()
             .filter(|row| !row.analysis.verdict.is_judged())
+    }
+
+    /// Every guarded field the two legs disagree about.
+    ///
+    /// Empty for any comparison [`compare`] produced without `--allow`: a
+    /// difference that was not waived is a refusal rather than a report. Not
+    /// filtered by what was waived, because this states what is true of the two
+    /// legs rather than what the run was told to permit.
+    #[must_use]
+    pub fn divergences(&self) -> Vec<Divergence> {
+        divergences(&guarded(&self.base), &guarded(&self.head))
     }
 }
 
@@ -636,13 +674,37 @@ fn guard_legs(base: &Leg, head: &Leg) -> Result<(), String> {
     Ok(())
 }
 
+/// Every guarded field of one leg — build and machine — in one map.
+fn guarded(leg: &Leg) -> BTreeMap<&'static str, String> {
+    let mut fields = leg.build.guarded_fields();
+    fields.extend(leg.host.guarded_fields());
+    fields
+}
+
+/// Every guarded field the two maps disagree about, in field-name order.
+fn divergences(
+    fields: &BTreeMap<&'static str, String>,
+    theirs: &BTreeMap<&'static str, String>,
+) -> Vec<Divergence> {
+    fields
+        .iter()
+        .filter_map(|(field, base)| {
+            // The maps hold the same keys, so the fallback is unreachable
+            // today. It is here so a field one side stops recording reads as a
+            // difference rather than panicking.
+            let head = theirs.get(field).cloned().unwrap_or_default();
+            (*base != head).then(|| Divergence {
+                field,
+                base: base.clone(),
+                head,
+            })
+        })
+        .collect()
+}
+
 /// The build and machine guard, over two legs' records.
 fn guard(base: &Leg, head: &Leg, waived: &BTreeSet<&str>) -> Result<(), String> {
-    let mut fields = base.build.guarded_fields();
-    fields.extend(base.host.guarded_fields());
-    let mut theirs = head.build.guarded_fields();
-    theirs.extend(head.host.guarded_fields());
-    guard_fields(&fields, &theirs, waived)
+    guard_fields(&guarded(base), &guarded(head), waived)
 }
 
 /// The same guard, over two fingerprints alone.
@@ -669,15 +731,11 @@ fn guard_fields(
     theirs: &BTreeMap<&'static str, String>,
     waived: &BTreeSet<&str>,
 ) -> Result<(), String> {
-    let mut differences = Vec::new();
-    for (field, base_value) in fields {
-        let head_value = theirs.get(field).cloned().unwrap_or_default();
-        if *base_value != head_value && !waived.contains(field) {
-            differences.push(format!(
-                "{field}: base '{base_value}' vs head '{head_value}'"
-            ));
-        }
-    }
+    let differences: Vec<String> = divergences(fields, theirs)
+        .iter()
+        .filter(|d| !waived.contains(d.field))
+        .map(ToString::to_string)
+        .collect();
 
     if differences.is_empty() {
         return Ok(());
@@ -798,6 +856,7 @@ mod tests {
         assert_eq!(out.rows[0].analysis.verdict, Verdict::NoChange);
         assert!(out.not_comparable.is_empty(), "{:?}", out.not_comparable);
         assert_eq!(out.rows[0].analysis.replicates, 10);
+        assert!(out.divergences().is_empty(), "{:?}", out.divergences());
     }
 
     #[test]
@@ -938,7 +997,17 @@ mod tests {
 
         let err = compare(base.clone(), head.clone(), &[]).expect_err("refused");
         assert!(err.contains("rustc"), "{err}");
-        assert!(compare(base, head, &["rustc".to_owned()]).is_ok());
+
+        // One literal, both consumers. The refusal and the report header
+        // describe a difference through the same `Display`, so a reader who has
+        // seen one recognises the other.
+        const DIFFERENCE: &str = "rustc: base 'rustc 1.94.0' vs head 'rustc 1.95.0'";
+        assert!(err.contains(DIFFERENCE), "{err}");
+
+        let waived = compare(base, head, &["rustc".to_owned()]).expect("waived");
+        let found = waived.divergences();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_string(), DIFFERENCE);
     }
 
     #[test]

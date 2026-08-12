@@ -279,8 +279,11 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
     let mut lines = vec![
         format!("base {} · {}", describe(base), base.dir.display()),
         format!("head {} · {}", describe(head), head.dir.display()),
+        // Labelled `head` because that is the leg they describe. The guard makes
+        // them true of the base leg too, right up until an `--allow` waives the
+        // field that stopped being true.
         format!(
-            "{} · {} · {} · {} · {}",
+            "head {} · {} · {} · {} · {}",
             replicate_span(comparison),
             head.build.rustc.as_deref().unwrap_or("rustc unknown"),
             head.build
@@ -295,7 +298,7 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
             },
         ),
         format!(
-            "host {} · {} · {} core(s) · label {}",
+            "head host {} · {} · {} core(s) · label {}",
             head.host.os, head.host.cpu, head.host.cores, head.host.label
         ),
     ];
@@ -329,6 +332,15 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
             "GUARDS WAIVED with --allow: {}",
             comparison.allowed.join(", ")
         ));
+    }
+
+    // Taken from the same set the guard refuses over, rather than from the
+    // fields that happen to appear above: a waived `codegen` or `protocol` is
+    // named here and nowhere else in the header.
+    let divergences = comparison.divergences();
+    if !divergences.is_empty() {
+        lines.push("the two legs differ on these guarded fields:".to_owned());
+        lines.extend(divergences.iter().map(ToString::to_string));
     }
     lines
 }
@@ -627,8 +639,8 @@ mod tests {
 
 - base v0.1.0-2-gaaaaaaa · /legs/base
 - head v0.1.0-3-gbbbbbbb (dirty) · /legs/head
-- 10 replicate(s) · rustc 1.94.0 · aarch64-apple-darwin · bench · default features
-- host macos/aarch64 · Apple M5 Max · 16 core(s) · label local
+- head 10 replicate(s) · rustc 1.94.0 · aarch64-apple-darwin · bench · default features
+- head host macos/aarch64 · Apple M5 Max · 16 core(s) · label local
 - corpus digests: every compared case matched
 
 ### Significant changes
@@ -836,6 +848,64 @@ mod tests {
         cmp.allowed = vec!["rustc".to_owned()];
         assert!(markdown(&cmp).contains("GUARDS WAIVED with --allow: rustc"));
         assert!(table(&cmp).contains("GUARDS WAIVED with --allow: rustc"));
+        // A waiver is permission for a difference, not a difference. These legs
+        // agree about `rustc`, so there is nothing to name.
+        assert!(!markdown(&cmp).contains("differ on these guarded fields"));
+    }
+
+    /// `codegen` appears in no other header line, so a header that annotated the
+    /// lines it already prints would not name it.
+    #[test]
+    fn a_waived_build_divergence_is_named_in_the_header() {
+        let mut cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        cmp.head.build.rustc = Some("rustc 1.95.0".to_owned());
+        cmp.head.build.codegen = Some("deadbeefdeadbeef".to_owned());
+        cmp.allowed = vec!["codegen".to_owned(), "rustc".to_owned()];
+
+        for rendered in [markdown(&cmp), table(&cmp)] {
+            assert!(
+                rendered.contains("the two legs differ on these guarded fields:"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("codegen: base 'cafecafecafecafe' vs head 'deadbeefdeadbeef'"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("rustc: base 'rustc 1.94.0' vs head 'rustc 1.95.0'"),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// The host half of the merged map, which nothing else in the header would
+    /// have compared.
+    #[test]
+    fn a_waived_host_divergence_is_named_in_the_header() {
+        let mut cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        cmp.head.host.cpu = "Apple M4".to_owned();
+        cmp.allowed = vec!["host_cpu".to_owned()];
+
+        assert!(
+            markdown(&cmp).contains("host_cpu: base 'Apple M5 Max' vs head 'Apple M4'"),
+            "{}",
+            markdown(&cmp)
+        );
+    }
+
+    /// A leg that recorded nothing for a field reads as empty rather than as
+    /// absent, which is what the guard has always done with it.
+    #[test]
+    fn a_field_absent_from_one_leg_reads_as_empty() {
+        let mut cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        cmp.head.build.rustc = None;
+        cmp.allowed = vec!["rustc".to_owned()];
+
+        assert!(
+            markdown(&cmp).contains("rustc: base 'rustc 1.94.0' vs head ''"),
+            "{}",
+            markdown(&cmp)
+        );
     }
 
     #[test]

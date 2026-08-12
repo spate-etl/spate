@@ -48,9 +48,9 @@ the guide, `crates/spate-json` is the smallest complete crate to read as a shape
 and `crates/spate-test` is how you exercise one without standing up
 infrastructure.
 
-Two things belong in the change rather than in a follow-up: the connector page
-built from the template in [`docs/STYLE.md`](docs/STYLE.md) § 3, and keeping your
-own types out of `spate-core`'s public API (INV-6).
+What belongs in the change rather than in a follow-up: the connector page built
+from the template in [`docs/STYLE.md`](docs/STYLE.md) § 3, and keeping your own
+types out of `spate-core`'s public API (INV-6).
 
 ## Opening a pull request
 

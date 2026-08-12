@@ -126,9 +126,14 @@ of [Metrics](../../METRICS.md).
   clear the cause will loop.
 - **Abandoned sink batches** —
   `increase(spate_sink_abandoned_batches_total[10m]) > 0`. A batch is
-  abandoned when a drain deadline expires with the sink still down; its
-  data replays after restart, so this is a duplicates-incoming and
-  sink-health signal, not data loss.
+  abandoned when a fatal error class or exhausted `retry.max_attempts`
+  ends its write, when a write task panics, or when a drain deadline
+  expires at shutdown with the sink still down. Its data replays after
+  restart, so this is a duplicates-incoming signal, not data loss. Only
+  the last of those three is a shutdown event, so read the class
+  breakdown on `spate_sink_errors_total{error_type}` before reaching for
+  sink liveness: a dropped target table, revoked credentials or a schema
+  mismatch abandons in steady state with no drain in sight.
 - **Sustained backpressure** — `spate_backpressure_paused == 1` sustained
   (e.g. `avg_over_time(spate_backpressure_paused[10m]) > 0.9`). The source is
   paused because the in-flight budget is above its high watermark: the sink

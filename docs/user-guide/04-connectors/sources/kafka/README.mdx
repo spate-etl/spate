@@ -125,7 +125,7 @@ hysteresis (low watermark + `backpressure.min_pause`), because pausing a
 Kafka partition purges its prefetch buffer — resume is not free, and
 flapping would thrash the fetch pipeline.
 
-:::info
+:::note
 A source thread never blocks on a channel send. A poll loop parked in
 `send()` would stop polling, trip `max.poll.interval.ms`, get the member
 evicted, and turn sink slowness into a rebalance storm. This is a

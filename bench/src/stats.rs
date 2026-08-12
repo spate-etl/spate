@@ -130,6 +130,17 @@ impl Verdict {
         matches!(self, Self::Improved | Self::Regressed)
     }
 
+    /// Whether the rule reached a conclusion at all.
+    ///
+    /// False only for [`Verdict::NoVerdict`]: fewer than [`MIN_REPLICATES`]
+    /// paired replicates, so the rule was never applied rather than applied and
+    /// not met. A report that conflates the two claims the opposite of what
+    /// happened.
+    #[must_use]
+    pub const fn is_judged(self) -> bool {
+        !matches!(self, Self::NoVerdict)
+    }
+
     /// A one-word rendering.
     #[must_use]
     pub const fn label(self) -> &'static str {

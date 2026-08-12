@@ -63,13 +63,35 @@ pub fn table(comparison: &Comparison) -> String {
     let _ = writeln!(out, "{}", header_lines(comparison).join("\n"));
 
     let significant: Vec<&Row> = comparison.significant().collect();
+    let unjudged = comparison.unjudged().count();
+    let erratic = comparison.informational().count();
     let _ = writeln!(out, "\nSignificant changes");
     if comparison.rows.is_empty() {
         let _ = writeln!(out, "  none — and nothing was comparable; see below");
+    } else if unjudged == comparison.rows.len() {
+        let _ = writeln!(
+            out,
+            "  none — and nothing was judged: every row has fewer than {MIN_REPLICATES} paired \
+             replicates, so the rule below was never applied"
+        );
+    } else if erratic == comparison.rows.len() {
+        let _ = writeln!(
+            out,
+            "  none — and nothing was judged: every metric comes from a case marked erratic, \
+             which the rule below never flags. See Informational."
+        );
     } else if significant.is_empty() {
         let _ = writeln!(out, "  none");
     } else {
         write_plain_rows(&mut out, &significant);
+    }
+    if unjudged > 0 && unjudged < comparison.rows.len() {
+        let _ = writeln!(
+            out,
+            "  note: {unjudged} of {} rows have fewer than {MIN_REPLICATES} paired replicates and \
+             were not judged",
+            comparison.rows.len()
+        );
     }
 
     let informational: Vec<&Row> = comparison.informational().collect();
@@ -106,6 +128,8 @@ pub fn markdown(comparison: &Comparison) -> String {
     }
 
     let significant: Vec<&Row> = comparison.significant().collect();
+    let unjudged = comparison.unjudged().count();
+    let erratic = comparison.informational().count();
     let _ = writeln!(out, "\n### Significant changes\n");
     if comparison.rows.is_empty() {
         // Not "no metric cleared the rule": no metric was judged by it. The two
@@ -115,6 +139,24 @@ pub fn markdown(comparison: &Comparison) -> String {
             "None — and no metric was comparable at all, so the rule below was never \
              applied. See *Not comparable*."
         );
+    } else if unjudged == comparison.rows.len() {
+        // The replicate floor is checked before the rule, so these rows carry a
+        // difference and no conclusion.
+        let _ = writeln!(
+            out,
+            "None — and no metric was judged at all: all {} have fewer than {MIN_REPLICATES} \
+             paired replicates, so the rule below was never applied. Re-run with \
+             `--replicates {MIN_REPLICATES}` or more.",
+            comparison.rows.len()
+        );
+    } else if erratic == comparison.rows.len() {
+        // Erratic rows are excluded before the rule's outcome is consulted, so
+        // this is the same claim as above with a different cause.
+        let _ = writeln!(
+            out,
+            "None — and no metric was judged at all: every metric comes from a case marked \
+             erratic, which the rule below never flags. See *Informational*."
+        );
     } else if significant.is_empty() {
         let _ = writeln!(
             out,
@@ -122,6 +164,17 @@ pub fn markdown(comparison: &Comparison) -> String {
         );
     } else {
         write_markdown_rows(&mut out, &significant);
+    }
+    // Appended rather than folded into a branch above: a partial shortfall is
+    // true whether or not anything cleared the rule, and it is least likely to
+    // be noticed exactly when the table is not empty.
+    if unjudged > 0 && unjudged < comparison.rows.len() {
+        let _ = writeln!(
+            out,
+            "\n{unjudged} of the {} metric(s) below have fewer than {MIN_REPLICATES} paired \
+             replicates and were not judged; the rule was not applied to them.",
+            comparison.rows.len()
+        );
     }
 
     let informational: Vec<&Row> = comparison.informational().collect();
@@ -619,6 +672,100 @@ mod tests {
 
     /// An erratic case must never appear in the significant table, however
     /// large its difference.
+    /// A row the rule never reached, as a run of fewer than `MIN_REPLICATES`
+    /// produces one.
+    fn unjudged_row(case: &str) -> Row {
+        let mut row = row(case, Verdict::NoVerdict, false);
+        row.analysis.replicates = 3;
+        row
+    }
+
+    /// The claim this branch exists to stop: a run too short to judge said
+    /// nothing cleared the rule, which is the opposite of what happened.
+    #[test]
+    fn a_run_too_short_to_judge_says_the_rule_was_never_applied() {
+        let cmp = comparison(vec![unjudged_row("a"), unjudged_row("b")], Vec::new());
+
+        let rendered = markdown(&cmp);
+        assert!(
+            rendered.contains("no metric was judged at all"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("--replicates 5"), "{rendered}");
+        assert!(
+            !rendered.contains("No metric cleared both halves"),
+            "{rendered}"
+        );
+
+        let plain = table(&cmp);
+        assert!(plain.contains("nothing was judged"), "{plain}");
+        assert!(
+            !plain.contains("note: 2 of 2 rows"),
+            "the whole-run case is stated once, not twice: {plain}"
+        );
+    }
+
+    /// The same false claim with a different cause: an erratic row is excluded
+    /// before the rule's outcome is consulted, so it never failed the rule
+    /// either.
+    #[test]
+    fn an_all_erratic_run_says_the_rule_was_never_applied() {
+        let cmp = comparison(
+            vec![
+                row("a", Verdict::Regressed, true),
+                row("b", Verdict::NoChange, true),
+            ],
+            Vec::new(),
+        );
+
+        let rendered = markdown(&cmp);
+        assert!(rendered.contains("marked erratic"), "{rendered}");
+        assert!(
+            !rendered.contains("No metric cleared both halves"),
+            "{rendered}"
+        );
+        assert!(table(&cmp).contains("marked erratic"));
+    }
+
+    /// A shortfall that covers part of the run is counted beside the table
+    /// rather than replacing it, so it survives a report that also has findings.
+    #[test]
+    fn a_partial_shortfall_is_counted_beside_the_table() {
+        let cmp = comparison(
+            vec![
+                row("a", Verdict::Regressed, false),
+                row("b", Verdict::NoChange, false),
+                unjudged_row("c"),
+            ],
+            Vec::new(),
+        );
+
+        let rendered = markdown(&cmp);
+        assert!(rendered.contains("1 of the 3 metric(s)"), "{rendered}");
+        assert!(
+            rendered.contains("`spate-bench/selftest_wall/a`"),
+            "{rendered}"
+        );
+        assert!(table(&cmp).contains("note: 1 of 3 rows"));
+    }
+
+    /// The shortfall line is independent of the significant table being empty,
+    /// which a fourth branch would have swallowed.
+    #[test]
+    fn a_shortfall_is_counted_even_when_nothing_cleared_the_rule() {
+        let cmp = comparison(
+            vec![row("a", Verdict::NoChange, false), unjudged_row("b")],
+            Vec::new(),
+        );
+
+        let rendered = markdown(&cmp);
+        assert!(
+            rendered.contains("No metric cleared both halves"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("1 of the 2 metric(s)"), "{rendered}");
+    }
+
     #[test]
     fn an_erratic_row_renders_as_informational_only() {
         let rendered = markdown(&comparison(

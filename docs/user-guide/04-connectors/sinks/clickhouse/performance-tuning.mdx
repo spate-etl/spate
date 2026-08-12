@@ -235,7 +235,8 @@ deliberately.
 Deduplication is always on (the at-least-once contract). On a plain (non-
 replicated) `MergeTree` table, ClickHouse's dedup window defaults to **0**, which
 silently disables it — set `non_replicated_deduplication_window` on the table
-(replicated tables default to 10000) so a retried batch is actually deduplicated:
+(replicated tables keep a window by default) so a retried batch is actually
+deduplicated:
 
 ```sql
 CREATE TABLE events (...) ENGINE = MergeTree ORDER BY ...

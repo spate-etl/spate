@@ -128,7 +128,7 @@ idempotent — the server drops the duplicate insert.
 :::warning
 **Deduplication is silently off on plain `MergeTree`.** Token
 deduplication only works if the server keeps a deduplication window.
-`Replicated*MergeTree` defaults to a window of 10000;
+`Replicated*MergeTree` keeps one by default;
 **plain `MergeTree` defaults to `0`, and the token does nothing** — no
 error, no warning, duplicates on every retry. Set it explicitly:
 

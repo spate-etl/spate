@@ -232,6 +232,23 @@ pub enum Cause {
     Other,
 }
 
+impl Cause {
+    /// The machine token, as `--format json` carries it.
+    ///
+    /// Stable for a report schema version — see
+    /// [`crate::render::REPORT_SCHEMA_VERSION`]. Written out rather than
+    /// derived from the variant names, so renaming a variant does not rewrite
+    /// what a consumer matches on.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::DigestLeftOut => "digest_left_out",
+            Self::DigestCompared => "digest_compared",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Something that could not be compared, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NotComparable {
@@ -667,7 +684,7 @@ fn guard_fields(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{ALLOW_DIGEST, Leg, compare, load_leg};
+    use super::{ALLOW_DIGEST, Cause, Leg, compare, load_leg};
     use crate::fingerprint::{BuildFingerprint, Host};
     use crate::record::{CaseId, Metric, Record, SCHEMA_VERSION, WALL_NS_PER_ITER};
     use crate::stats::Verdict;
@@ -1191,5 +1208,27 @@ mod tests {
         elsewhere.dir = std::path::PathBuf::from("/legs/other");
         let err = compare(base, elsewhere, &[]).expect_err("two base legs");
         assert!(err.contains("both directories hold"), "{err}");
+    }
+
+    /// A consumer switches on these, so two classes sharing a token would make
+    /// one of them unreachable.
+    #[test]
+    fn every_cause_has_a_distinct_token() {
+        let tokens: Vec<&str> = [Cause::DigestLeftOut, Cause::DigestCompared, Cause::Other]
+            .into_iter()
+            .map(Cause::token)
+            .collect();
+
+        let mut unique = tokens.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), tokens.len(), "{tokens:?}");
+
+        for token in tokens {
+            assert!(
+                token.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{token}"
+            );
+        }
     }
 }

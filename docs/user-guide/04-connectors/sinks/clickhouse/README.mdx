@@ -151,8 +151,10 @@ Each shard has one worker that seals batches and dispatches up to
 that shard's **healthy** replicas. A failed write retries the *same sealed
 batch* (same token) on the next healthy replica with capped exponential
 backoff. Per-replica circuit breakers quarantine a replica after
-`failure_threshold` consecutive failures for `open_for`, then admit
-`half_open_probes` trial writes before closing again. Per-shard workers
+`failure_threshold` consecutive failures for `open_for`, then admit trial
+writes again: the first probe to succeed closes the breaker, and
+`half_open_probes` caps how many probes run concurrently in one half-open
+episode rather than how many must succeed. Per-shard workers
 (rather than per-replica) keep batches full-sized — ClickHouse wants few
 big inserts — while `max_per_shard` still provides replica parallelism.
 

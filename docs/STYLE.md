@@ -8,6 +8,12 @@ configuration keys.
 
 This file is a contributor reference; it is excluded from the rendered site.
 
+Its rules govern `docs/`. One reaches past that: § 7's insertion rule, in its
+narrow form — prose must not count or enumerate a set that a later change grows
+— which holds for the contributor markdown at the repository root as well. No
+docs review reads those files, so a stale count there is the one that survives
+longest. Nothing else in this file governs them.
+
 ## Who this is for
 
 The reader of `docs/user-guide/` is a **Rust developer new to Spate but not new

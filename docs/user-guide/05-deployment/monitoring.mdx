@@ -45,8 +45,12 @@ The combinations, and what each is for:
 `/metrics` follows the exposition rather than the setting. Where another
 library installed a recorder before the pipeline did, the pipeline records
 into that recorder and has none of its own to render, so the endpoint answers
-404 and the warning stays silent even though `exporter` says `prometheus`. The
-exposition is that other library's to publish.
+404 even though `exporter` says `prometheus`. The start does log this — a
+recorder was already installed, and the pipeline continued against the
+existing one with a detached render handle. What stays silent is the
+`admin.listen: none` warning from the table above, which fires only for a
+handle that exports an exposition of its own. The exposition is that other
+library's to publish.
 
 Two pipelines on one host collide unless they name different addresses, or one
 of them names `none` — left alone, both take the same default. Failing to take

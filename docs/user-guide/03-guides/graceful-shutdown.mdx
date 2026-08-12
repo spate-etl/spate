@@ -39,7 +39,7 @@ Kubernetes, SIGTERM starts both this drain and the pod's
 `terminationGracePeriodSeconds` clock (default 30s) — after which the
 kubelet sends SIGKILL. The rule:
 
-:::info
+:::warning
 Keep `drain_timeout` comfortably **below**
 `terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
 gap has to absorb what follows it — the pool's one-second backstop, the

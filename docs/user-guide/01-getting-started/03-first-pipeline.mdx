@@ -94,7 +94,7 @@ totaling the lines on the way:
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
 
-:::info
+:::warning
 RowBinary carries no column names — **`OrderRow`'s field declaration
 order must match the `columns` list in the YAML**. Order is the wire
 contract. The `validate_schema` option below catches mismatches against

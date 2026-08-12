@@ -37,6 +37,12 @@
 //! filter on case ids, so it needs the case list to filter. `run` takes
 //! `--leg NAME` (default `head`) for the name stamped into every record.
 //!
+//! A child still running thirty seconds in — or twenty times `--target-ms` plus
+//! `--warmup-ms`, whichever is longer — prints a `SLOW` line naming its leg, its
+//! target and the call, and prints it again at every period after that. Nothing
+//! is stopped: the line says which of a run's many children is the slow one, and
+//! Ctrl-C is what ends it.
+//!
 //! `compare` and `ab` take `--format` — `table`, `markdown` or `json` — and
 //! `--allow`, whose values are the guarded field names. `--format markdown`
 //! produces the shape a pull-request comment carries: a header naming both

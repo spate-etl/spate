@@ -51,9 +51,10 @@ use crate::cargo;
 use crate::compare::{Cause, Comparison, Leg, NotComparable, guard_fingerprints, load_leg};
 use crate::fingerprint::BuildFingerprint;
 pub use crate::fingerprint::{BASE_LEG, HEAD_LEG};
+use crate::note;
 use crate::protocol::Listing;
 use crate::record::{CaseId, Record};
-use crate::runner::{Measurement, Runner};
+use crate::runner::{Measurement, Runner, slow_period};
 use crate::worktree::{self, Worktree};
 
 /// What one leg is asked to measure.
@@ -134,11 +135,14 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
     let mut runners = BTreeMap::new();
     let mut cases = BTreeSet::new();
     let mut listings = Vec::new();
+    // One period for every child of this leg: it is derived from the plan, and
+    // the plan does not change while the leg is measured.
+    let period = slow_period(plan.target_ms, plan.warmup_ms);
     for target in &discovery.targets {
         let binary = binaries
             .get(&target.target)
             .ok_or_else(|| format!("no binary for '{}'", target.target))?;
-        let runner = Runner::open(binary, &plan.dir, &fingerprint)?;
+        let runner = Runner::open(binary, &plan.dir, &fingerprint, period)?;
         let mut listing = runner.list()?;
         if let Some(filter) = &plan.filter {
             listing
@@ -479,10 +483,6 @@ fn check_interrupt() -> Result<(), String> {
         return Err("interrupted; the worktree is being removed".to_owned());
     }
     Ok(())
-}
-
-fn note(message: &str) {
-    let _ = writeln!(std::io::stderr(), "spate-bench: {message}");
 }
 
 #[cfg(test)]

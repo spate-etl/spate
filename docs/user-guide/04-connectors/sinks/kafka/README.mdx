@@ -136,7 +136,7 @@ server-side dedup window to hand it to), so it is unused here. Downstream
 consumers must tolerate duplicates — idempotent handling keyed on a payload
 identity, or compacted topics keyed on the message key.
 
-:::info
+:::danger
 Nothing in Spate is exactly-once, and no configuration makes it so. In
 particular, `enable.idempotence` does **not** mean exactly-once delivery
 of the stream — it only dedupes librdkafka's own in-session retries.

@@ -222,7 +222,7 @@ lever: when you add capacity, give the new (or larger) shard a higher
 **equal to** the cluster's `<weight>` values — the parity check enforces this
 on startup, and drift would misplace rows.
 
-:::info
+:::danger
 Changing weights, changing the sharding key, or adding/removing a shard
 **re-homes** keys to different shards — and rows already written do not
 move. Nothing merges across shards: the old shard keeps its copies

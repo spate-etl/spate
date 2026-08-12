@@ -17,7 +17,7 @@
 //! **but only if the server keeps a deduplication window**:
 //!
 //! - `Replicated*MergeTree`: deduplication is on by default
-//!   (`replicated_deduplication_window = 10000`).
+//!   (`replicated_deduplication_window` is non-zero).
 //! - **Plain `MergeTree`: the window defaults to `0` and token
 //!   deduplication silently does nothing.** Set it explicitly:
 //!

@@ -46,8 +46,8 @@ than merely be large enough.
 On plain `MergeTree`, insert deduplication **silently no-ops** unless the
 table sets `non_replicated_deduplication_window` greater than 0 (the
 server default is 0). Without it, the sink's dedup tokens do nothing and
-a retried batch lands twice. `Replicated*MergeTree` tables default to a
-window of 100 and don't need the setting. Even with the window, dedup
+a retried batch lands twice. `Replicated*MergeTree` tables keep a window
+by default and don't need the setting. Even with the window, dedup
 tokens only cover same-batch retries — not crash replay. Read
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) before
 choosing a table engine for production.

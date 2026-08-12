@@ -164,7 +164,10 @@ writes the partial batch under `checkpoint.drain_timeout`; if the broker
 is down at the deadline, remaining batches are abandoned loudly
 (`spate_sink_abandoned_batches_total` + log) and replay after restart.
 Producer teardown is bounded: rdkafka's own drop purges queued and
-in-flight messages and joins its poll thread (≲1s).
+in-flight messages, flushes, and joins its poll thread — a bound that is
+rdkafka's to move rather than ours
+(see [ADR-0022](../../../../adr/0022-kafka-producer-teardown-and-stats.md),
+which records the figure it was measured at).
 
 ## Dependency note
 
@@ -193,9 +196,13 @@ Batch-level write latency is framework-side
 (`spate_sink_write_duration_seconds` — the family comparable with the
 producer's own round-trip; `spate_sink_flush_duration_seconds` spans seal to
 settle and would fold this sink's queueing in on top); these families add
-the producer's internal view. Per-partition transmit-queue detail is
-deferred (see the decision log) — the aggregate queue gauges below cover
-saturation.
+the producer's internal view. Per-partition produce-queue detail is
+deferred — aggregate only, so sink cardinality stays independent of topic
+partition count (see
+[ADR-0022](../../../../adr/0022-kafka-producer-teardown-and-stats.md)). The
+produce-queue gauges below show that the producer is backing up, not which
+partition is backing it up. `metrics.per_partition_detail` has no sink
+counterpart.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
 them; extras — `broker` among them — are noted per family.

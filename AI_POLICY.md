@@ -14,9 +14,10 @@ save you hours.
 It will not give you the intuition, though, and this codebase punishes its
 absence in a specific way. Almost everything load-bearing here is a *negative*
 property — what must never happen, on a path that looks fine when it does.
-`docs/INVARIANTS.md` states ten of them as INV-1 through INV-10. Read those
-yourself, in the source, before changing engine behaviour. A model can tell you
-they exist; only reading tells you why each one is shaped the way it is.
+`docs/INVARIANTS.md` states them, each numbered `INV-N` and cited everywhere else
+by that number. Read them yourself, in the source, before changing engine
+behaviour. A model can tell you they exist; only reading tells you why each one
+is shaped the way it is.
 
 ## You own what you submit
 

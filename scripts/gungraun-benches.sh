@@ -98,11 +98,10 @@ discover() {
 }
 
 # Every `*_gungraun.rs` must carry a `[[bench]]` stanza naming it with
-# `harness = false`. Without the stanza cargo still auto-discovers the file as
-# a bench target — but with the default libtest harness, which rejects
-# gungraun's own arguments. The bench therefore compiles, ships, and dies at
-# run time with an error about arguments rather than about the missing
-# stanza. This check is the reason that mistake cannot reach CI.
+# `harness = false`. Without the stanza cargo still auto-discovers the file, but
+# under the default libtest harness, which finds no `#[bench]` functions and
+# reports `0 measured` with exit 0. The bench is then green while measuring
+# nothing, which is why the manifest is checked here.
 declares_target() {
     local manifest=$1 bench=$2
     # Key ordering inside a block is free, so the verdict can only be reached
@@ -270,7 +269,7 @@ self_test() {
         declares_target "$manifest" "$bench" || fail \
             "crates/$pkg/benches/$bench.rs has no '[[bench]] name = \"$bench\"' with
     harness = false in $manifest. Cargo would auto-discover it under the
-    default libtest harness, which rejects gungraun's arguments at run time."
+    default libtest harness, which reports 0 measured and exits 0."
         checked=$((checked + 1))
     done < <(discover)
 
@@ -327,9 +326,8 @@ check_only() {
 }
 
 # Runs each discovered bench, optionally filtered to the named packages.
-# Named explicitly with `--bench` for the same reason the Makefile does: an
-# unnamed `cargo bench -p X` also drives the lib's default libtest harness,
-# which rejects any argument the real harness forwards.
+# Named explicitly with `--bench`: an unnamed `cargo bench -p X` also builds and
+# runs the lib's own test harness, which is not what is being measured.
 run() {
     local wanted=("$@") pkg bench failed=0 ran=0
     while read -r pkg bench; do

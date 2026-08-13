@@ -37,22 +37,19 @@ Take a general-purpose stream processor and you inherit its delivery
 guarantees and its operational maturity, but your transformations are written
 in whatever language that runtime accepts, and the runtime is not yours to
 profile. Write the consumer loop yourself and you get the opposite trade: your
-language, your allocator, your profile — and every guarantee is now your
+language, your allocator, your profile, and every guarantee is now your
 problem, including the ones you find out about in production.
 
 Spate is the third shape. Transformations are ordinary Rust functions,
 monomorphized into the pipeline rather than interpreted by it. Delivery,
 backpressure, checkpointing, rebalancing and drain-on-shutdown belong to the
 framework, and the properties they hold to are written down, numbered, and
-tested rather than described.
-
-The name is the workload: more water arriving than the channel was built for.
+tested.
 
 ## How it works
 
 One process runs one pipeline, in four stages. The property each stage holds
-to is stated and numbered in [docs/INVARIANTS.md](docs/INVARIANTS.md), so a claim
-below is something you can go and check.
+to is stated and numbered in [docs/INVARIANTS.md](docs/INVARIANTS.md).
 
 **Extract** — one consumer per process. Partitions fan out across CPU-pinned
 threads as zero-copy lanes, so a record is read from the source buffer and
@@ -89,7 +86,7 @@ compiles the Kafka tree and never resolves `rdkafka` into its lockfile.
 ## A taste
 
 Operators are stateful closures composed into one monomorphized loop; YAML
-carries the tuning and connector configuration. This is a whole program —
+carries the tuning and connector configuration. This is a whole program,
 against in-memory mocks, so it needs no infrastructure to build or run:
 
 ```rust,no_run
@@ -143,18 +140,18 @@ order to run. `kafka_avro_to_clickhouse` is the fully-commented production
 assembly, `custom_source_sink` is the connector-author tutorial, and
 `s3_coordinated_backfill` runs two instances sharing one bounded backfill
 without either duplicating it.
-[`examples/docker`](examples/docker) covers containers and Kubernetes —
+[`examples/docker`](examples/docker) covers containers and Kubernetes:
 probes, drain timeouts, sizing.
 
-## Delivery semantics, honestly
+## Delivery semantics
 
 At-least-once. A batch's offsets commit only after every record derived
 from it is durably written (or intentionally dropped by `filter`/`Skip`
-policies) — enforced across rebalances, shutdown, and failure, where the
+policies). That holds across rebalances, shutdown, and failure, where the
 watermark stalls rather than ever committing past unacknowledged data.
 Duplicates remain possible: in-session retries are idempotent where sinks
 support it (ClickHouse deduplication tokens), but **crash replay re-batches
-with new boundaries and will land rows twice** — design target tables to
+with new boundaries and will land rows twice**. Design target tables to
 tolerate that (`ReplacingMergeTree` with a version column is the sanctioned
 ClickHouse pattern).
 
@@ -168,42 +165,40 @@ ClickHouse pattern).
 | [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
 | [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |
 | [`spate-coordination`](https://crates.io/crates/spate-coordination) | `coordination` | Multi-instance work assignment: leader-computed sticky assignment over a pluggable store. |
-| [`spate-datagen`](https://crates.io/crates/spate-datagen) | `datagen` | Synthetic storefront-event source: referentially consistent orders, payments and refunds, with no broker or bucket to stand up first. A demo and test source — it keeps no durable progress. |
+| [`spate-datagen`](https://crates.io/crates/spate-datagen) | `datagen` | Synthetic storefront-event source: referentially consistent orders, payments and refunds, with no broker or bucket to stand up first. A demo and test source; it keeps no durable progress. |
 
 And the framework itself:
 
 | Crate | Role |
 |---|---|
-| [`spate`](https://crates.io/crates/spate) | The facade — the only crate applications depend on. |
+| [`spate`](https://crates.io/crates/spate) | The facade: the only crate applications depend on. |
 | [`spate-core`](https://crates.io/crates/spate-core) | The engine: operator chains, source and sink abstractions, checkpointing, backpressure, config, metrics, the runtime. |
-| [`spate-test`](https://crates.io/crates/spate-test) | In-memory sources and sinks with scripting handles — test your pipelines without infrastructure. |
+| [`spate-test`](https://crates.io/crates/spate-test) | In-memory sources and sinks with scripting handles; test your pipelines without infrastructure. |
 
-Each connector feature turns on one crate. Finer knobs — a SIMD JSON backend,
-TLS and SASL for Kafka, `chrono`/`time`/`uuid`/`rust_decimal` column types for
-ClickHouse, a NATS JetStream store for coordination — are separate features,
-listed with what they pull in on [docs.rs](https://docs.rs/spate). Writing your
+Each connector feature turns on one crate. Finer knobs are separate features,
+listed with what they pull in on [docs.rs](https://docs.rs/spate): a SIMD JSON
+backend, TLS and SASL for Kafka, `chrono`/`time`/`uuid`/`rust_decimal` column
+types for ClickHouse, a NATS JetStream store for coordination. Writing your
 own connector is a supported path, not a fork: see
 [`custom_source_sink`](crates/spate/examples/custom_source_sink.rs).
 
 ## Performance
 
-Single-node throughput is the point of the design, so it is measured rather
-than asserted. A change that reaches Rust runs allocation assertions and
-request-shape assertions, and one whose blast radius reaches a benched crate
-runs instruction-count benches too. What they compare are counts rather than
-elapsed time, so a regression they report is a property of the change and not
-of how busy the runner was.
+Single-node throughput is measured. A change that reaches Rust runs allocation
+assertions and request-shape assertions, and one whose blast radius reaches a
+benched crate runs instruction-count benches too. Those compare counts rather
+than elapsed time, so a regression they report is a property of the change and
+not of how busy the runner was.
 
 Wall-clock benches sit beside them as `cargo bench` targets, and nothing
 gates on one: a wall-clock figure is only worth reading against another taken
-on the same quiet hardware, which a shared CI runner is not.
+on the same quiet hardware, and a shared CI runner is not that.
 
 ## Testing
 
-The guarantees above are claims, so they are tested rather than asserted.
 proptest covers the checkpoint tracker, the codecs and the assignment
 protocol across seven crates. loom models the tracker's concurrency
-directly, which is why that module stays synchronous and free of async
+directly; that module stays synchronous and free of async
 runtime types. Kafka runs against librdkafka's `MockCluster` on every pull
 request; brokers, ClickHouse and object stores run against real containers
 whenever a change reaches them, and on a schedule regardless. The
@@ -214,7 +209,7 @@ The most useful contribution is one that proves a delivery guarantee wrong.
 
 ## Documentation
 
-The full documentation site — the user guide plus the generated API reference —
+The documentation site, the user guide plus the generated API reference,
 is published at **<https://spate.kainth.dev/>** (source in
 [`website/`](website), content in [`docs/`](docs)).
 
@@ -228,7 +223,7 @@ is published at **<https://spate.kainth.dev/>** (source in
 
 ## Status
 
-Under active initial development — APIs are not yet stable (0.x). Breaking
+Under active initial development; APIs are not yet stable (0.x). Breaking
 changes ship in a minor bump and are called out in
 [CHANGELOG.md](CHANGELOG.md). The newest `0.x` minor is the supported one.
 
@@ -241,17 +236,17 @@ to withstand, whatever wrote it.
 
 Vulnerabilities go through
 [GitHub's private advisory flow](https://github.com/spate-etl/spate/security/advisories/new),
-never a public issue — see [SECURITY.md](SECURITY.md).
+never a public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
 Copyright 2026 Marcus Kainth.
 
-Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
+Licensed under the Apache License, Version 2.0; see [LICENSE](LICENSE).
 
 Dependency licenses are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md); the full
 texts are published at
 [spate.kainth.dev/licenses](https://spate.kainth.dev/licenses/).
 
-Contributions are accepted under the same terms, per Apache-2.0 §5 — there is no
+Contributions are accepted under the same terms, per Apache-2.0 §5. There is no
 CLA to sign.

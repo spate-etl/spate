@@ -1,23 +1,23 @@
 # Monitoring
 
-Every stage of a pipeline is instrumented, and the instrumentation API is
-deliberately not framework-specific: it is the
-[`metrics`](https://crates.io/crates/metrics) facade. Anything you record
-with `metrics` macros or handles exports through the same endpoint as the
-framework's own series — there is no extra registry to learn.
+Every stage of a pipeline is instrumented, and the instrumentation API is the
+general-purpose [`metrics`](https://crates.io/crates/metrics) facade.
+Anything you record with `metrics` macros or handles exports
+through the same endpoint as the framework's own series. There is no extra
+registry to learn.
 
 :::note
-The **canonical metric taxonomy** — every metric name, type, label and
-histogram bucket — lives in [Metrics](../../METRICS.md).
+[Metrics](../../METRICS.md) is the **canonical metric taxonomy**, carrying
+every metric name, type, label and histogram bucket.
 :::
 
 ## The exporter and the admin server
 
 These are separate settings in separate sections, because they answer separate
-questions. `metrics.exporter` decides whether series are recorded at all; `admin.listen`
-decides whether an HTTP server publishes them — and that same server carries
-the liveness and readiness probes, which are worth serving whether or not
-anything is exported:
+questions. `metrics.exporter` decides whether series are recorded at all.
+`admin.listen` decides whether an HTTP server publishes them, and that same
+server carries the liveness and readiness probes, which are worth serving
+whether or not anything is exported:
 
 ```yaml
 admin:
@@ -43,19 +43,18 @@ The combinations, and what each is for:
 `/metrics` follows the exposition rather than the setting. Where another
 library installed a recorder before the pipeline did, the pipeline records
 into that recorder and has none of its own to render, so the endpoint answers
-404 even though `exporter` says `prometheus`. The start does log this — a
+404 even though `exporter` says `prometheus`. The start does log it. A
 recorder was already installed, and the pipeline continued against the
-existing one with a detached render handle. What stays silent is the
-`admin.listen: none` warning from the table above, which fires only for a
-handle that exports an exposition of its own. The exposition is that other
-library's to publish.
+existing one with a detached render handle. The `admin.listen: none` warning
+from the table above stays silent; it fires only for a handle that exports an
+exposition of its own. The exposition is that other library's to publish.
 
 Two pipelines on one host collide unless they name different addresses, or one
-of them names `none` — left alone, both take the same default. Failing to take
+of them names `none`. Left alone, both take the same default. Failing to take
 an address stops the start and names the address it wanted.
 
 Ordering is handled for you under the builder. Assembling by hand puts it back
-in your hands — see [Manual assembly](../03-guides/manual-assembly.mdx).
+in your hands. See [Manual assembly](../03-guides/manual-assembly.mdx).
 
 ## Conventions you can rely on
 
@@ -71,9 +70,9 @@ in your hands — see [Manual assembly](../03-guides/manual-assembly.mdx).
 - **Cardinality is mostly opt-in**: `partition`-labeled series appear only
   with `metrics.per_partition_detail: true` (default `false`), because their
   cardinality grows with the assignment. The one exception is
-  `spate_source_lag_records`, which is always per partition — consumer lag has
-  no aggregate series to fall back to, so a cardinality knob is not allowed to
-  delete it. Budget one series per assigned partition per member for that
+  `spate_source_lag_records`, which is always per partition. Consumer lag has
+  no aggregate series to fall back to, so the cardinality knob does not delete
+  it. Budget one series per assigned partition per member for that
   family even on the default config. `shard` and `replica` labels are bounded
   by your cluster topology and always on.
 
@@ -90,10 +89,10 @@ custom metrics as much as the framework's:
    the batch's totals; per-record durations are observed as batch means
    (duration divided by n), never per record.
 
-The rules in one place:
-[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) puts custom
-handles side by side with a framework stage handle, prints the exposition it
-produced, and runs as-is with `cargo run -p spate --example custom_metrics`.
+Both rules appear together in
+[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs), which puts
+custom handles side by side with a framework stage handle, prints the exposition
+it produced, and runs as-is with `cargo run -p spate --example custom_metrics`.
 Its raw-facade handles are the smallest form of the pattern:
 
 ```rust file=crates/spate/examples/custom_metrics.rs region=facade
@@ -113,7 +112,7 @@ of [Metrics](../../METRICS.md).
   so this is the primary "data is flowing but nothing is committing"
   signal. The pipeline self-terminates after
   `checkpoint.stalled_fail_after` (default 120s) behind a permanently
-  failed batch, but you want the alert regardless — restarts that don't
+  failed batch, but you want the alert regardless. Restarts that don't
   clear the cause will loop.
 - **Abandoned sink batches** —
   `increase(spate_sink_abandoned_batches_total[10m]) > 0`. A batch is
@@ -123,49 +122,50 @@ of [Metrics](../../METRICS.md).
   restart, so this is a duplicates-incoming signal, not data loss. Only
   the last of those three is a shutdown event, so read the class
   breakdown on `spate_sink_errors_total{error_type}` before reaching for
-  sink liveness: a dropped target table, revoked credentials or a schema
+  sink liveness. A dropped target table, revoked credentials or a schema
   mismatch abandons in steady state with no drain in sight.
 - **Sustained backpressure** — `spate_backpressure_paused == 1` sustained
   (e.g. `avg_over_time(spate_backpressure_paused[10m]) > 0.9`). The source is
-  paused because the in-flight budget is above its high watermark: the sink
-  cannot keep up, or the budget is undersized for the batch settings — see
+  paused because the in-flight budget is above its high watermark. Either the
+  sink cannot keep up, or the budget is undersized for the batch settings. See
   the sizing rule in [Tuning](tuning.mdx).
 - **A shard asleep between retries** — `spate_sink_retry_backoff_seconds`
   sustained above `(1 - retry.jitter) * retry.max`. The shard is not idle, it
   is parked between write attempts; with an unbounded `retry.max_attempts` it
   stays there. The retry *counter* goes flat while this happens (it only
-  moves on an attempt), which is exactly why the gauge exists. Threshold below
-  the ceiling rather than at it: jitter only shortens a delay, so the published
-  step never sits exactly on `retry.max`. This covers backoff against a replica
-  that is still available — when every replica is quarantined the shard sleeps
-  waiting for a probe instead, and `spate_sink_shard_healthy == 0` is the
-  signal for that.
+  moves on an attempt), so the gauge carries the signal. Threshold
+  below the ceiling rather than at it. Jitter only shortens a delay, so the
+  published step never sits exactly on `retry.max`. This covers backoff against
+  a replica that is still available. When every replica is quarantined the
+  shard sleeps waiting for a probe instead, and `spate_sink_shard_healthy == 0`
+  is the signal for that.
 - **A slow sink** — the p99 of
   `spate_sink_write_duration_seconds{outcome="ok"}` above your write budget.
-  Reach for this one, not `spate_sink_flush_duration_seconds`: flush spans seal
+  Reach for this one, not `spate_sink_flush_duration_seconds`. Flush spans seal
   to settle and carries the wait for an `inflight.max_per_shard` slot and every
   backoff sleep on top of the write, so it fires on a saturated pipeline as
   readily as on a slow server. The sink-latency families each answer a
-  different question — permit wait says *queued*
+  different question. Permit wait says *queued*
   (`spate_sink_permit_wait_duration_seconds`), backoff says *asleep between
   attempts* (`spate_sink_retry_backoff_seconds`), shard health says *no
   replica is usable* (`spate_sink_shard_healthy == 0`, where the backoff gauge
-  reads `0`) — which covers both waiting for a probe and writing one, so it is
-  the wider signal rather than an "asleep" one — write says *slow*, and
+  reads `0`), and write says *slow*. Shard health covers both waiting for a
+  probe and writing one, so it is the wider signal rather than an "asleep" one.
   `spate_sink_flush_duration_seconds` is all of them at once, which makes it a
   commit-lag budget rather than a diagnosis. See [What a flush
   contains](../../METRICS.md#what-a-flush-contains).
 
-  Before escalating a high write p99 to whoever runs the server, rule out the
-  sink's own I/O runtime: the measurement is wall-clock across the write call,
-  so it charges time the runtime spent elsewhere. Where a sink does its own
-  request compression on that runtime, high byte rates can make the runtime the
-  limit rather than the server — `pipeline.io_threads` is the lever there.
+  Before escalating a high write p99 to the team that runs the server, rule out
+  the sink's own I/O runtime. The measurement is wall-clock across the write
+  call, so it charges time the runtime spent elsewhere. Where a sink does its
+  own request compression on that runtime, high byte rates can make the runtime
+  the limit rather than the server, and `pipeline.io_threads` is the lever
+  there.
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,
 `spate_sink_replica_healthy`, `spate_sink_shard_healthy` (0 = no circuit-closed
-replica left in the shard — the whole-shard outage escalation, with
+replica left in the shard; the whole-shard outage escalation, with
 `spate_sink_replica_errors_total` attributing the failures per endpoint), and
 `spate_queue_full_events_total` series described in
 [Metrics](../../METRICS.md).

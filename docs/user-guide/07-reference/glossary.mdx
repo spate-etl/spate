@@ -9,12 +9,12 @@ rationale is in the [decision records](../../adr/README.mdx).
 
 The acknowledgment handle for one source poll batch: a clone of a
 refcounted `Arc` created **per batch**, not per record. Every record
-derived from the batch clones it — `flat_map` children share the parent's,
+derived from the batch clones it. `flat_map` children share the parent's, and
 multi-output routing clones per output with worst-status merge. Dropping a
 record resolves its share, and an intentional drop (a `filter`, a Skip
 policy) counts as **success**. When the last clone drops, the batch's
 `(partition, seq, status)` reaches the checkpointer over an unbounded
-channel — the ack path can never block behind data.
+channel, so the ack path can never block behind data.
 
 ### `AckSet`
 
@@ -22,8 +22,8 @@ A collection of acknowledgment handles on the sink path (encoded chunks,
 worker ledgers, batch accumulators) with the **opposite** drop default:
 where a lone record's drop means delivered, an `AckSet` **fails** its
 handles on drop and delivers only explicitly, after a durable write. This
-is the fail-by-default contract that turns any teardown — a dropped queue,
-an aborted worker — into a watermark stall (replay) instead of a silent
+is the fail-by-default contract that turns any teardown (a dropped queue,
+an aborted worker) into a watermark stall (replay) instead of a silent
 commit of unwritten data.
 
 ### Backpressure watermarks (high / low)
@@ -31,8 +31,8 @@ commit of unwritten data.
 The hysteresis thresholds on the in-flight byte [budget](#budget--in-flight-bytes):
 sources pause when usage crosses `high_ratio` × budget and may resume once
 it falls below `low_ratio` × budget and at least `min_pause` has elapsed.
-Unrelated to the [checkpoint watermark](#watermark) — same word, different
-mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
+Unrelated to the [checkpoint watermark](#watermark), which is the same word
+for a different mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
 
 ### Budget / in-flight bytes
 
@@ -56,7 +56,7 @@ The handoff unit between a pipeline thread and a shard worker: rows encoded
 (by the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes`
 (default 64 KiB), carrying its rows' acks as an [`AckSet`](#ackset).
 A chunk seals when it reaches the target, on every commit tick
-(`checkpoint.interval`), or on an idle lull — so while the pipeline is
+(`checkpoint.interval`), or on an idle lull, so while the pipeline is
 unblocked, a slow-filling buffer holds its acks for at most ~one checkpoint
 period. Workers merge chunks into
 [sealed batches](#sealed-batch), so chunk size does not bound insert size.
@@ -65,8 +65,9 @@ period. Workers merge chunks into
 
 Two of the three standard labels on every framework metric (with
 `pipeline`): `component` identifies the instance (e.g. `orders_source`,
-`main.deserializer`), `component_type` the implementation — for a connector
-the system it talks to, for an operator its kind (`map`, `filter`). See
+`main.deserializer`), `component_type` the implementation, which for a
+connector is the system it talks to and for an operator is its kind
+(`map`, `filter`). See
 [Monitoring](../05-deployment/monitoring.mdx) and
 [Metrics](../../METRICS.md).
 
@@ -76,7 +77,7 @@ The checkpointer's per-partition, per-[epoch](#epoch) bookkeeping: a ring
 of outstanding batch sequence numbers, from which it pops the contiguous
 acknowledged **prefix** and advances the committable
 [watermark](#watermark). Out-of-order acks park until the gap before them
-closes — this is what makes "never commit past unacknowledged data"
+closes, which is what makes "never commit past unacknowledged data"
 structural. A synchronous, tokio-free, loom-tested module.
 
 ### Dedup token
@@ -85,7 +86,7 @@ A deterministic string minted per [sealed batch](#sealed-batch)
 (`SealedBatch::dedup_token`) and reused unchanged across retries of that
 batch. A sink whose destination supports insert deduplication hands the token
 over to make **same-boundary retries** idempotent. It does not cover crash
-replay — after restart, data re-batches with new boundaries and new tokens
+replay, because after restart data re-batches with new boundaries and new tokens
 ([Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)).
 
 *Connector mapping:*
@@ -122,7 +123,7 @@ that a writer whose authority lapsed (an expired lease, a paused process)
 is *rejected by the store* rather than trusted. In coordinated sources
 the token is the split record's revision/epoch, and the fenced write is
 the progress commit itself: a fenced commit writes **nothing**. Leases
-alone cannot provide this — only the store-side check can.
+alone cannot provide this; only the store-side check can.
 
 ### Lane
 
@@ -153,14 +154,14 @@ correctness comes from the [fencing token](#fencing-token).
 
 Where poison [splits](#split) go: a split whose tenancies keep ending in
 failure consumes a delivery attempt per non-graceful end and is parked at
-the cap — visible, never re-offered, and blocking `AllComplete` (a
-bounded job with quarantined work ends stalled, not falsely complete).
+the cap, where it stays visible, is never re-offered, and blocks `AllComplete`
+(a bounded job with quarantined work ends stalled, not falsely complete).
 
 ### Split
 
 The leasable work unit of a coordinated source, enumerated by the
 source's `SplitPlanner`. Deterministic id, opaque descriptor, weight hint;
-progress commits are per-split, fenced, and resumable — a taken-over split
+progress commits are per-split, fenced, and resumable, so a taken-over split
 continues from its last committed watermark. Distinct from a [lane](#lane)
 (local execution) and a [partition](#partition) (checkpoint bookkeeping).
 
@@ -176,7 +177,7 @@ How a coordinated fleet stays balanced: the elected leader computes which
 `assign.{instance}` record per worker; each worker reconciles toward its
 own record, claiming what is named and cooperatively giving up what is
 not. Workers never select work for themselves. Balance is on split
-*weight* (not count), sticky — a split whose owner is alive stays put
+*weight* (not count), and sticky. A split whose owner is alive stays put
 unless moving it strictly reduces imbalance, because every move costs a
 [revocation](#cooperative-revocation).
 
@@ -193,19 +194,19 @@ How a split leaves a live worker: it disappears from that worker's
 safe boundary, lets everything it already emitted reach the sink and
 acknowledge, commits the final watermark, and releases the split. The next
 owner resumes from that commit, covering everything the previous one
-emitted — zero replay.
+emitted, with zero replay.
 
 `drain_deadline` bounds it. A source that declines to stop at a safe
 boundary, or a drain still running at the deadline, has its release
 **forced** instead: the split goes back anyway and its uncommitted tail
-replays under the next owner, bounded by one commit interval. Forcing is
-what keeps one wedged drain from pinning a rebalance open — the leader's
+replays under the next owner, bounded by one commit interval. Forcing
+keeps one wedged drain from pinning a rebalance open; the leader's
 revocation is a decision, not a request.
 
 If the leader takes the revocation back mid-drain, it is **cancelled** and
 the deadline no longer applies: nothing is waiting for the split, so a slow
-drain gets to finish cleanly. The drain is then bounded by silence instead
-— committing nothing for `drain_deadline` releases it anyway, so a wedged
+drain gets to finish cleanly. The drain is then bounded by silence instead:
+committing nothing for `drain_deadline` releases it anyway, so a wedged
 drain cannot leave a split owned with nothing reading it. See
 [Work assignment](../02-concepts/08-work-assignment.mdx#revocation).
 
@@ -243,7 +244,7 @@ The sink's write, retry, and acknowledgment unit (`SealedBatch`):
 concatenated pre-encoded frames plus row/byte counts, the
 [dedup token](#dedup-token), and the covered acks. A shard worker seals
 when `batch.max_rows`, `batch.max_bytes`, or `batch.linger` trips, then
-writes it via the `ShardWriter` — whose `Ok` is the durable-ack point.
+writes it via the `ShardWriter`, whose `Ok` is the durable-ack point.
 
 ### Shard
 

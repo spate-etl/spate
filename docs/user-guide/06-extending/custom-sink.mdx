@@ -13,7 +13,7 @@ Everything between is the framework's: chunking, per-shard batching to
 retries, acknowledgments, backpressure. You write the two edges.
 
 Every Rust block below but the last comes from the sink half of
-[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs) —
+[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs),
 a JSON-lines-to-stdout sink fed by a generator source, which needs no
 infrastructure and no facade feature beyond the default:
 
@@ -42,7 +42,7 @@ Contracts:
   or newline-delimited text is; a format needing a global header belongs in
   the writer).
 - **Errors are record-level by default**, subject to the sink stage's
-  `ErrorPolicy` (`ChunkConfig::encode_policy`, default `Skip` — counted in
+  `ErrorPolicy` (`ChunkConfig::encode_policy`, default `Skip`, counted in
   metrics). Return an error classed **`Fatal`** to stop the pipeline
   regardless of policy: fatal means the *encoder* is broken (e.g. the row
   type can never match the target schema) and every subsequent record would
@@ -54,8 +54,8 @@ Contracts:
 
 ### Buffering: encoders that are not row-at-a-time
 
-A columnar format cannot emit bytes per row — it transposes a block and writes
-it whole. Two defaulted hooks make that fit the same trait:
+A columnar format cannot emit bytes per row; it transposes a block and writes
+it whole. Defaulted hooks make that fit the same trait:
 
 | Hook | What it is for |
 | --- | --- |
@@ -72,18 +72,18 @@ chunk and cannot interleave with another's.
 One sealed batch out to one replica endpoint. The example's endpoint is a shard
 name and its write is a `print!`, so returning `Ok` after it is honest; it also
 keeps the rows it printed, which is how the example asserts on placement without
-a destination to query. Note the shape: `write_batch` returns a future rather
-than being an `async fn`, so whatever runs before that future — here, joining
-the frames — happens when the worker calls it, not when the future is polled:
+a destination to query. `write_batch` returns a future rather
+than being an `async fn`, so whatever runs before that future (here, joining
+the frames) happens when the worker calls it, not when the future is polled:
 
 ```rust file=crates/spate/examples/custom_source_sink.rs region=writer
 ```
 
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
-  system has durably accepted the batch — a synchronous server ack, a
+  system has durably accepted the batch: a synchronous server ack, a
   delivery confirmation, or here, after printing. The framework releases the batch's
-  acknowledgments on `Ok`, which is what lets the source watermark advance
-  past that data — return `Ok` early and a crash loses records, violating
+  acknowledgments on `Ok`, letting the source watermark advance
+  past that data. Return `Ok` early and a crash loses records, violating
   at-least-once.
 - **Retries reuse the sealed batch unchanged**, rotating across healthy
   replicas with capped exponential backoff. `SealedBatch::dedup_token` is
@@ -100,25 +100,26 @@ the frames — happens when the worker calls it, not when the future is polled:
 
 ### If you hold acknowledgment handles, fail them on teardown
 
-Dropping a record's acknowledgment means *delivered* — that default is what
-makes `filter` and `flat_map` correct for free. It also means any component
+Dropping a record's acknowledgment means *delivered*. That default makes
+`filter` and `flat_map` correct at no cost. It also means any component
 holding handles for data it has **not** durably written must explicitly fail
 them in its `Drop`, or teardown silently reports unwritten data as delivered and
 the watermark advances past it.
 
 The framework does this for its own seams: the chain's terminal stage fails
 parked chunks and partial buffers, and sink workers fail abandoned batches. If
-your connector holds handles anywhere the framework cannot see — an internal
-queue, a retry buffer of your own — it owes the same.
+your connector holds handles anywhere the framework cannot see, such as an
+internal queue or a retry buffer of your own, it owes the same.
 
 **Over-failing is always safe.** It costs a replay, never a loss, so when in
 doubt, fail. Collections on the sink path already work this way: an `AckSet`
 fails its handles on drop and delivers only after a durable write, so teardown
-anywhere stalls the watermark rather than committing data nobody wrote.
+anywhere stalls the watermark rather than committing data that was never
+written.
 
 ## Handing it to the builder: `SinkParts`
 
-Hand-rolled sinks need no trait impl — `SinkParts` is the bundle. The example
+Hand-rolled sinks need no trait impl; `SinkParts` is the bundle. The example
 builds one endpoint per shard, each named for its own index, and shortens the
 pool's linger so a demo does not wait a second for its first batch:
 
@@ -141,13 +142,13 @@ workers, their queues and their metric labels from the topology it carries.
   `"{component_type}-{shard}-{replica}"`.
 - `.with_probe(...)` — an optional repeatable connectivity probe. The
   runtime polls it at startup and periodically, driving the
-  sinks-connected half of `/readyz` — without one, readiness can't reflect
-  your sink. Probes should use their **own** client set: sharing the
-  writer's connections would report the insert path healthy simply because
+  sinks-connected half of `/readyz`. Without one, readiness can't reflect
+  your sink. Probes should use their **own** client set. Sharing the
+  writer's connections would report the insert path healthy because
   probing keeps it warm.
 
-The struct is `#[non_exhaustive]` — construct via `new` plus the `with_*`
-methods, so fields can grow without breaking you. Queue depth between
+Construct the struct via `new` plus the `with_*` methods. It is
+`#[non_exhaustive]`, so fields can grow without breaking you. Queue depth between
 pipeline threads and shard workers is the builder's knob, not the bundle's:
 `Pipeline::sink_with(bundle, SinkOptions::default().with_queue_capacity(n))`.
 
@@ -158,31 +159,31 @@ A reusable connector exposes a config-built sink type and implements
 that (worked reference:
 [`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs),
 rendered below): `into_parts` moves the writer and the topology its config
-produced into `SinkParts::new`, then chains the three refinements — the metric
+produced into `SinkParts::new`, then chains its refinements: the metric
 `component_type`, per-replica labels derived from the endpoints themselves, and
 the connectivity probe a hand-rolled sink most often leaves unset:
 
 ```rust file=crates/spate-clickhouse/src/config.rs region=bundle title="config.rs"
 ```
 
-`Pipeline::sink` accepts anything implementing `SinkBundle` — `SinkParts`
+`Pipeline::sink` accepts anything implementing `SinkBundle`, and `SinkParts`
 itself implements it, which is why hand-rolled sinks skip the impl. The
 only bound anywhere is `ShardWriter`, so your connector's client types
 never appear in framework APIs (the dependency policy in
 [ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)). Connector-specific flows the framework
-cannot name — a pre-flight schema check that produces the encoder's row
-schema, say — stay concrete pre-steps in your factory, before `into_parts`.
+cannot name, such as a pre-flight schema check that produces the encoder's row
+schema, stay concrete pre-steps in your factory, before `into_parts`.
 
 If your connector deserializes a YAML body, don't name a field `chunk`: that
 key is **framework-reserved** inside every component body (it carries the
-chain terminal's chunking) and is peeled out before your config ever sees it —
-a `chunk` field of your own would never receive a value. See
+chain terminal's chunking) and is peeled out before your config ever sees it,
+so a `chunk` field of your own would never receive a value. See
 [the configuration reference](../07-reference/configuration.mdx#chunk).
 
 ## Testing
 
 `spate-test` drives chains end to end against capturing sinks, and the
 assertions in `custom_source_sink.rs` (observe commits, then trigger
-shutdown) are the template for verifying your durable-ack point actually
-gates the watermark — see
+shutdown) are the template for verifying your durable-ack point
+gates the watermark. See
 [Testing pipelines](../03-guides/testing-pipelines.mdx).

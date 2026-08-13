@@ -1,9 +1,9 @@
 # Custom operators
 
 There is no `Operator` trait to implement. Operators in Spate are
-**stateful closures** over the chain builder's combinators — `map`,
-`filter`, `try_map`, `flat_map` — and a closure capturing its own state is
-a full-blown custom operator. The combinators compose **statically**: the
+**stateful closures** over the chain builder's combinators (`map`,
+`filter`, `try_map`, `flat_map`), and a closure capturing its own state is
+a custom operator. The combinators compose **statically**: the
 whole chain monomorphizes into one loop, with a single virtual call per
 *batch* at the chain boundary (never per record), so adding a stage costs
 an inlined function call, not a dispatch. Rationale in
@@ -19,8 +19,8 @@ cargo run -p spate --example custom_operator
 
 ## A stateful operator: deduplication with `flat_map`
 
-`flat_map` is the general form — one record in, zero to N records out — and
-emitting zero is how an operator drops a record. A dedup set is a closure
+`flat_map` is the general form: one record in, zero to N records out.
+Emitting zero is how an operator drops a record. A dedup set is a closure
 capturing a `HashSet`:
 
 ```rust file=crates/spate/examples/custom_operator.rs region=chain
@@ -30,15 +30,15 @@ capturing a `HashSet`:
 `shard_queues` and `InflightBudget::new` earlier in the example.
 
 Each chain factory runs once per pipeline thread, so `seen` is per-thread
-state — no locks on the hot path, but also no cross-thread visibility. A
-dedup set like this deduplicates within a thread's lanes only; that's the
-deal you're accepting by keeping the hot path share-nothing.
+state, with no locks on the hot path and no cross-thread visibility. A
+dedup set like this deduplicates within a thread's lanes only; that is the
+trade you accept by keeping the hot path share-nothing.
 
 ## Dropping is not losing
 
 When the dedup closure emits nothing, the duplicate's ack share is released
-as **success**. Intentional drops — `filter` returning false, `flat_map`
-emitting zero, a `Skip` policy — count as delivered, so the source
+as **success**. Intentional drops (`filter` returning false, `flat_map`
+emitting zero, a `Skip` policy) count as delivered, so the source
 watermark still advances past them. The checkpointer only stalls on
 *failures*. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
@@ -47,7 +47,7 @@ watermark still advances past them. The checkpointer only stalls on
 
 `flat_map`'s second argument (`out` above) is a stack-borrowed `Emitter`.
 Each `out.emit(value)` pushes the child record straight into the downstream
-stage, inline — fan-out allocates nothing and buffers nothing. Children
+stage, inline, so fan-out allocates nothing and buffers nothing. Children
 clone the parent's `AckRef`, so a parent record resolves only when all of
 its children do.
 
@@ -60,24 +60,24 @@ stage:
   `spate_operator_records_dropped_total{reason="skip_policy"}`, continue.
 - `ErrorPolicy::Fail` — stop the pipeline. This is the right default for
   bugs: operators default to Fail in the framework's taxonomy (the
-  deserializer stage defaults to Skip — malformed input is the outside
-  world's fault, a failing map is yours).
+  deserializer stage defaults to Skip, since malformed input is the outside
+  world's fault and a failing map is yours).
 
-There is deliberately no third option — no dead-letter queue, no silent
+There is no third option: no dead-letter queue, no silent
 drop. Every skipped record is visible in metrics
 ([Error handling](../02-concepts/04-error-handling.mdx),
 [Monitoring](../05-deployment/monitoring.mdx)).
 
 :::note
 Over a **borrowing** record family, `map` and `try_map` are not offered at
-all — both are defined only on a builder whose current family is
-`Owned<T>` — so reaching for one gets you a missing method rather than a
+all. Both are defined only on a builder whose current family is
+`Owned<T>`, so reaching for one gets you a missing method rather than a
 bound that fails. `try_map` says so plainly: `no method named 'try_map'`,
 with a `try_map_rec` suggestion. `map` is the one that misleads, because
-`Iterator::map` is in the prelude — rustc resolves the name against that
-and reports `ChainBuilder<…> is not an iterator`. What rules them out is
-rejected at its own definition site, not at yours: the family-generic bound
-they would need, `for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>`,
+`Iterator::map` is in the prelude, so rustc resolves the name against that
+and reports `ChainBuilder<…> is not an iterator`. The bound they would need
+is rejected at its own definition site, not at yours:
+`for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>`
 desugars to `FnMut<(CurF::Rec<'buf>,), Output = NF::Rec<'buf>>`, leaving
 `'buf` mentioned only inside associated types, which is E0582. Reach for
 `map_rec`/`try_map_rec` on a borrowing family; their bound routes through a
@@ -86,8 +86,8 @@ than an associated-type binding, so it can be written. Pass a `fn` item
 where you can: it satisfies a higher-ranked bound by construction, where a
 closure satisfies it only when the compiler infers a higher-ranked
 signature for it. `filter`, `inspect` and `flat_map` bind no output type in
-an `Output` position — `flat_map`'s output family sits in an argument type,
-the emitter it writes through — so one method serves both kinds, and
+an `Output` position; `flat_map`'s output family sits in an argument type,
+the emitter it writes through. One method therefore serves both kinds, and
 owned-record chains like the one above infer everywhere. The example's
 second chain runs a borrowing family end to end.
 :::
@@ -95,11 +95,11 @@ second chain runs a borrowing family end to end.
 ## When closures aren't enough: `Collector` and `StageLifecycle`
 
 The traits underneath the combinators are public in `spate::ops` for advanced
-stages — an operator that must observe batch flush/drain boundaries, park
+stages. An operator that must observe batch flush/drain boundaries, park
 state across pushes, or integrate with the chain's lifecycle implements
 `Collector` (the push interface, `push(Record<T>) -> Flow`) and
-`StageLifecycle` directly. Reach for them only when a closure genuinely
-cannot express the behavior: the closures *are* the intended API, and the
+`StageLifecycle` directly. Reach for them only when a closure
+cannot express the behavior. The closures are the intended API, and the
 terminal stage's lifecycle contracts (fail-on-teardown for parked data) are
 easy to get wrong. Read the trait docs on
 [docs.rs](../07-reference/README.mdx) and the framework's own stages in
@@ -109,9 +109,9 @@ easy to get wrong. Read the trait docs on
 
 In a real assembly the chain factory is the closure you hand to
 `Pipeline::chains`, and it gets a `ChainCtx` carrying the queues, budget,
-and pipeline name — see
+and pipeline name. See
 [Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx). The example
 instead builds a `Checkpointer` and memory source by hand and pushes a
-batch through the chain directly — the same moves the runtime makes, and a
-convenient harness for unit-testing an operator in isolation
+batch through the chain directly, the same moves the runtime makes, which
+doubles as a harness for unit-testing an operator in isolation
 ([Testing pipelines](../03-guides/testing-pipelines.mdx)).

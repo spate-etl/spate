@@ -2,8 +2,8 @@
 
 Everything after `cargo build`. Your pipeline compiles to a single binary
 that reads one YAML file, serves its own probes and metrics, and drains
-cleanly on SIGTERM — the deployment story is packaging that binary, watching
-it, and sizing it.
+cleanly on SIGTERM. Deployment is packaging that binary, watching it, and
+sizing it.
 
 ## [Docker](docker.mdx)
 
@@ -25,13 +25,13 @@ taxonomy lives in [Metrics](../../METRICS.md).
 
 Sizing a pipeline: thread counts, batch thresholds, in-flight limits, the
 backpressure budget and its sizing rule, queue capacities, checkpoint
-timing, and core pinning — with the exact defaults and why each knob moves
+timing, and core pinning, with the exact defaults and why each knob moves
 what it moves.
 
 ## [Scaling out](scaling-out.mdx)
 
 Several identical replicas dividing one source's work: brokered sources that
-divide it natively, and the coordination layer for those that cannot —
+divide it natively, and the coordination layer for those that cannot. Covers
 Kubernetes patterns (plain Deployments, pod-name instance ids), lease tuning,
 and the failure-mode table.
 

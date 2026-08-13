@@ -17,24 +17,24 @@ Which kind each shipped source is, and how to wire it:
 [S3 source](../04-connectors/sources/s3/README.mdx#scaling-out--and-the-solo-default)
 (coordinated) ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#delivery-semantics)
-(neither — every replica generates its own stream from offset 0).
+(neither, since every replica generates its own stream from offset 0).
 :::
 
 The rest of this page is about the coordinated case: what a fleet does, what it
-costs, and how it fails. The store itself is a connector with its own page —
-requirements, provisioning, and outage behavior live there, not here.
+costs, and how it fails. The store itself is a connector with its own page,
+where requirements, provisioning, and outage behavior live.
 
 ## Deploying the fleet
 
-The coordinator is assembly wiring — there is no `coordination:` YAML on the
+The coordinator is assembly wiring; there is no `coordination:` YAML on the
 source ([why](../07-reference/configuration.mdx#code-level-knobs-not-yaml)).
-What deployment has to guarantee is narrower than it looks:
+Deployment carries a narrow set of guarantees:
 
 - **Every replica runs the same binary with the same source config.** A
   coordinated source folds its identity-bearing settings into a **job
   fingerprint**, and a worker whose fingerprint differs is rejected at startup
-  with both fingerprints in the message. That is a feature: a half-upgraded
-  fleet cannot quietly plan the job two different ways.
+  with both fingerprints in the message. The rejection stops a half-upgraded
+  fleet from planning the job two different ways.
 - **Every replica points at the same store, under the same job name.** The job
   name is what separates two coordinated jobs sharing one store.
 - **Every live replica has a distinct `instance_id`.** Two live processes
@@ -42,7 +42,7 @@ What deployment has to guarantee is narrower than it looks:
 
 ## Kubernetes
 
-A plain `Deployment` — no StatefulSet, no persistent volumes, no
+A plain `Deployment`, with no StatefulSet, no persistent volumes and no
 per-replica configuration:
 
 - **`instance_id` from the pod name.** It must be unique per live
@@ -50,7 +50,7 @@ per-replica configuration:
   instantly instead of waiting out the lease. Two live processes sharing
   an id is detected and fatal. (A pod name is already unique per live
   replica; the id charset is `[A-Za-z0-9_-]`, 1–128 bytes, so a name
-  containing dots is rejected — substitute them, e.g. with `-`.)
+  containing dots is rejected; substitute them, e.g. with `-`.)
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and releases its splits on the way out, so
   peers pick them up immediately; a SIGKILL'd one is covered by lease
@@ -58,20 +58,19 @@ per-replica configuration:
 - Readiness/liveness probes are unchanged (the admin server's endpoints).
 
 Scaling events are *cooperative* rebalances, but the decision is central
-rather than pairwise. The elected leader computes a
-desired assignment for the whole fleet — balanced on split **weight**, not
-split count, since one large unit of work can outweigh several small ones — and
-publishes it as one `assign.{instance}` record per live worker. Every
+rather than pairwise. The elected leader computes a desired assignment for the
+whole fleet and publishes it as one `assign.{instance}` record per live worker.
+That assignment is balanced on split **weight**, not split count, since one
+large unit of work can outweigh several small ones. Every
 worker then reconciles toward its own record: claim what is named and not
 yet held, revoke what is held and no longer named. Workers never choose
-for themselves, so there is nothing to negotiate and no one to out-race.
+for themselves, so there is nothing to negotiate and no race between peers.
 
-The assignment is deliberately sticky. A move costs a drain, so the leader
+The assignment is sticky. A move costs a drain, so the leader
 keeps every split whose owner is still alive where it is, fills unassigned
 work to the least-loaded worker heaviest-first, and only then moves splits
-that strictly reduce imbalance. Feeding the result back in reproduces it,
-which is why a steady fleet republishes nothing and therefore drains
-nothing.
+that strictly reduce imbalance. Feeding the result back in reproduces it, so a
+steady fleet republishes nothing and drains nothing.
 
 ### What a rebalance costs {#what-a-rebalance-costs}
 
@@ -79,24 +78,24 @@ A rebalance move is a **cooperative revocation**. The split leaves one
 worker's assignment, and that worker stops intake for it at a safe boundary of
 the source's choosing, lets everything it already emitted reach the sink and
 acknowledge, commits the final watermark, and releases the split. The new
-owner resumes from exactly that commit — **a cooperative revocation
-replays nothing**. Its cost is latency, not rows: the drain is bounded by
-the split's in-flight depth — whatever the source had already read past the
-boundary, plus queued-but-unacked records.
+owner resumes from exactly that commit, so **a cooperative revocation
+replays nothing**. Its cost is latency, not rows. The drain is bounded
+by the split's in-flight depth, meaning whatever the source had already read
+past the boundary, plus queued-but-unacked records.
 
-`drain_deadline` (default 10s) is what stops one wedged drain from pinning
+`drain_deadline` (default 10s) stops one wedged drain from pinning
 a rebalance open. A source that declines to stop at a safe boundary, or a
 drain still running when the deadline elapses, has its release **forced**:
 the split goes back the replaying way instead of the clean one. (If the
 leader takes the move back mid-drain the revocation is cancelled and the
-deadline stops applying — nothing is waiting for the split. The drain is
+deadline stops applying, since nothing is waiting for the split. The drain is
 then bounded by silence instead: no commit at all for `drain_deadline` and
 it is released anyway, so a wedged drain cannot leave a split owned with
 nothing reading it.) Its next
 owner resumes from the last *committed* watermark and re-reads what came
 after, so a forced revocation costs up to one commit interval
 (`checkpoint.interval`) of duplicates. A decline is forced immediately
-rather than after the deadline — the source has already said the answer
+rather than after the deadline, because the source has already said the answer
 will not change.
 
 Unlike the peer-to-peer protocol this replaced, a revocation does not
@@ -114,12 +113,12 @@ A departing worker's splits are withheld from reassignment for
 `rebalance_delay` (default 20s) so a pod bounce reclaims its own work
 instead of the fleet churning around it; the window is cancelled the
 moment the instance reappears, so a fast restart costs nothing. Setting it
-to zero reassigns immediately — supported, not a disabled feature.
+to zero reassigns immediately, and is supported.
 
 A bounded job that completes before a transfer lands finishes on the
-instance that claimed it — zero replay, which for a short job is the
-cheapest outcome available, not a scheduling failure. Instances only
-genuinely share a job whose runtime spans several assignment cycles.
+instance that claimed it, with zero replay, which for a short job is the
+cheapest outcome available. Instances share a job only when its runtime
+spans several assignment cycles.
 
 #### Time to balance {#time-to-balance}
 
@@ -134,31 +133,31 @@ Nothing paces the moves against each other: the leader publishes the whole
 assignment at once, and every affected worker starts its drain on the
 observation that carries its own record, so moves that involve different
 workers run concurrently at store latency. `lease_duration` does not gate
-this path at all — it is the failover timer, not the rebalance timer.
+this path at all; it is the failover timer, not the rebalance timer.
 
 The drain is usually the larger term, and it is set by how fast the losing
 worker's sink can absorb what it has already read, not by anything in the
 coordination layer. Measure before reaching for a knob:
 `spate_coordination_drain_duration_seconds` on the losing side and
 `spate_coordination_assignment_latency_seconds` on the gaining side. Those
-are **two families on purpose** — they are recorded in different processes
+are **two separate families**, recorded in different processes
 against separately-observed assignment records, so they neither nest nor
-add; read each on the worker that reports it. A drain p99 approaching
+add. Read each on the worker that reports it. A drain p99 approaching
 `drain_deadline` is the signal that forced (replaying) revocations are
 about to start.
 
 If drains are the constraint, the lever is the sink, not the coordinator:
 give it headroom, or raise `drain_deadline` so slow drains finish cleanly
 instead of being forced. Raising the deadline trades a longer rebalance
-for fewer duplicates. It may exceed `lease_duration` — a draining split is
-still owned and still heartbeated, so a long drain does not race its own
-lease. The one floor startup enforces is `op_timeout`: a deadline shorter
+for fewer duplicates. It may exceed `lease_duration`, because a draining split
+is still owned and still heartbeated, so a long drain does not race its own
+lease. Startup enforces a floor of `op_timeout`, because a deadline shorter
 than a single store round-trip would force every revocation before its
 final commit could land.
 
 Near the end of a bounded job the assignment re-arms as splits complete,
-so a nearly-done split can move more than once before it finishes — but
-each hop drains first, so endgame churn costs latency, never rows.
+so a nearly-done split can move more than once before it finishes. Each hop
+drains first, so endgame churn costs latency, never rows.
 Stickiness keeps this rare. Replayed duplicates among live workers come
 only from forced revocations; crash takeover (lease expiry) remains the
 irreducible at-least-once replay.
@@ -176,8 +175,8 @@ irreducible at-least-once replay.
 | `drain_deadline` | 10s | How long a revoked split may keep draining before the release is forced (and its uncommitted tail replays). Doubles as the no-progress timeout over a drain whose revocation was cancelled: that one is forced only if it commits nothing at all for this long. Larger = more patience with slow-draining sinks, slower rebalances; smaller = faster rebalances, more duplicates. May exceed `lease_duration` — a draining split is still heartbeated, so a long drain does not race its own lease; size it against how long the sink takes to flush a split's tail. See [time to balance](#time-to-balance). |
 
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
-~128 MB range (or the row-count equivalent) — big enough that lease
-traffic is noise, small enough that takeovers and reassignments move
+~128 MB range (or the row-count equivalent), big enough that lease
+traffic is noise and small enough that takeovers and reassignments move
 useful quanta of work. For most sources that is the planner's design rather
 than a knob; a source whose input sizes vary widely may expose a target, in
 which case its own page documents it.
@@ -200,15 +199,15 @@ which case its own page documents it.
 
 The `spate_coordination_*` families (see
 [Metrics](../../METRICS.md))
-carry the whole story: `splits_owned` per worker, `live_workers` for the
+carry the fleet's state: `splits_owned` per worker, `live_workers` for the
 fleet view, `leader` for who plans, `acquisitions_total` by reason
-(`create`/`reclaimed`/`expired`/`reassigned` — `reassigned` is
-the healthy rebalance path, `expired` means a worker died),
+(`create`/`reclaimed`/`expired`/`reassigned`, where `reassigned` is
+the healthy rebalance path and `expired` means a worker died),
 `revocations_total` by outcome (`requested`/`drained`/`forced`/`cancelled`,
-all on the worker giving the split up — `drained` is replay-free, a rising
+all on the worker giving the split up; `drained` is replay-free, a rising
 `forced` means drains are being cut short, so look at that worker's sink
 health and `drain_deadline`, and `cancelled` is the leader taking a move
-back, which is only worth chasing if it is sustained: membership is
+back, worth chasing only if it is sustained, which means membership is
 flapping faster than a drain takes), `split_losses_total`
 (`fenced`/`starved`/`revoked`), `splits_quarantined` for poison, and
 store-op latency histograms for the round-trips to the store.
@@ -216,11 +215,11 @@ store-op latency histograms for the round-trips to the store.
 Time to balance reads from two separate families, one per side:
 `drain_duration_seconds` on the worker losing a split and
 `assignment_latency_seconds` on the worker gaining one. They are recorded
-in different processes and do not compose — do not add or subtract them.
+in different processes and do not compose, so do not add or subtract them.
 `splits_draining` shows whether a worker is stuck mid-drain while the
-fleet is visibly uneven — it counts drains, so a drain left behind by a
+fleet is visibly uneven; it counts drains, so a drain left behind by a
 cancelled revocation keeps showing until it lands. `spate_coordination_writes_total{outcome="conflict"}`
-is fencing working as designed — alarming only in bulk.
+is fencing working as designed, and is alarming only in bulk.
 
 The logs carry the same story at `INFO`, which is the level a deployment
 runs at. A worker that starts into a running fleet logs the peers it found;
@@ -230,7 +229,7 @@ once per rebalance, carrying the member count and how many splits it
 assigned somewhere other than where its last assignment put them. That is a
 count of decisions rather than of drains: a split re-homed from a worker
 that had already released it changed hands without one. The detail
-underneath — `split claimed`, `drain started`, `drain finished` — sits at
+underneath (`split claimed`, `drain started`, `drain finished`) sits at
 `DEBUG`, so a rebalance is one line however much it moves, and
 `RUST_LOG=info,spate_coordination=debug` turns the rest on.
 
@@ -238,7 +237,7 @@ One restart passes the membership log in silence: a worker killed outright
 and back inside the presence TTL reclaims its own key with a write its peers
 read as an update, so no member arrived or left and `live_workers` never
 dips. The worker itself still reports the fleet it found. A graceful
-shutdown is not this case — it deletes the presence key, so the departure
+shutdown behaves differently, deleting the presence key, so the departure
 and the return are both announced.
 
 Some of what a fleet change warns about is not a fault. A worker whose
@@ -251,14 +250,14 @@ if it never does. A leader losing leadership to a successor warns
 and demotes, with nothing to retry.
 
 The ones to read name work or the loss of it: a forced release, a self-fence,
-a lease taken from under a live owner — and `leadership lease expired`, which
-is neither of the above. It means no successor was elected because the
-leadership key simply aged out, which takes a full lease without a successful
+a lease taken from under a live owner. `leadership lease expired` is none of
+those. It means no successor was elected because the
+leadership key aged out, which takes a full lease without a successful
 store write; the fleet re-elects, but the write stall that caused it is the
 thing worth chasing.
 
-Two families were renamed when coordination moved to leader-assigned
-balancing: `handoffs_total` → `revocations_total` (new label set), and the
+Coordination moving to leader-assigned balancing renamed two families:
+`handoffs_total` → `revocations_total` (new label set), and the
 old `revocations_total` → `split_losses_total`. Dashboards carrying the old
 names need updating; `handoff_duration_seconds` and `handoffs_in_flight`
 are gone entirely.
@@ -267,21 +266,21 @@ are gone entirely.
 
 Leader-assigned coordination replaced a peer-to-peer work-stealing
 balancer. [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records why; this section is
-what an upgrade actually requires.
+what an upgrade requires.
 
 ### The store must be empty (or new)
 
 The on-store record schema went from 2 to 3. **The versions do not
 interoperate, and a schema-3 worker will not read a schema-2 store at
-all** — it reads the plan record during startup, finds the wrong schema
+all.** It reads the plan record during startup, finds the wrong schema
 version, and exits fatally with `upgrade or isolate the store prefix`. The
 same pin covers every `spec.` and `split.` record.
 
 So "stop the fleet, restart it on the new build" is *not* sufficient: point
 the new fleet at a fresh job name, or an empty store. That discards
 committed per-split progress, so an in-flight bounded backfill restarts
-from the beginning. Delivery is at-least-once either way — the re-run
-duplicates, it does not lose — but drain a job to completion before
+from the beginning. Delivery is at-least-once either way, because the re-run
+duplicates and does not lose. Drain a job to completion before
 upgrading if you would rather not pay for it.
 
 ### Configuration
@@ -316,9 +315,10 @@ handles directly:
 - `SplitSource::begin_handoff`/`handoff_ready` → `begin_revoke`/`drain_ready`,
   and `SplitCoordinator::release_handoff`/`decline_handoff` →
   `release_drained`/`decline_revoke`. Renamed methods that you *overrode*
-  fail to compile; ones you left defaulted do not — and the default
-  `begin_revoke` declines, which now costs a forced revocation and a
-  replayed tail on every rebalance rather than merely declining an offer.
+  fail to compile; ones you left defaulted do not. The default
+  `begin_revoke` declines, and under this protocol that costs a forced
+  revocation and a replayed tail on every rebalance, where before it only
+  declined an offer.
 - `HandoffOutcome` and `HandoffPhase` are deleted, along with the
   `L_PHASE` label constant and `AcquireReason::{Stolen, Released}`.
   `AcquireReason::Handoff` is now `Reassigned`.
@@ -328,5 +328,5 @@ handles directly:
 - `SplitSpec::weight` kept its name, type and default but changed meaning:
   it was an ordering hint over count-based balancing, and it is now the
   balance objective itself. A planner that populated it as a ranking key
-  rather than a cost will skew the leader's distribution — with no compile
+  rather than a cost will skew the leader's distribution, with no compile
   error to warn you.

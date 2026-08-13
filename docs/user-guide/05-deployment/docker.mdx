@@ -4,7 +4,7 @@ A pipeline is one static-ish binary plus one YAML file. The repository ships
 a flagship image at
 [`examples/docker/Dockerfile`](repo:examples/docker/Dockerfile) that packages
 the [first-pipeline tutorial's](../01-getting-started/03-first-pipeline.mdx)
-binary from [the example crate](repo:crates/spate/examples) — treat it as the
+binary from [the example crate](repo:crates/spate/examples). Treat it as the
 template for any pipeline you build on the framework.
 
 ## The flagship image
@@ -41,7 +41,7 @@ Why this shape:
 
 - **Distroless runtime** (`gcr.io/distroless/cc-debian12:nonroot`): the
   binary needs only glibc and libgcc. No shell, no package manager, runs as
-  UID 65532 — the attack surface is the pipeline itself.
+  UID 65532. The attack surface is the pipeline itself.
 - **Vendored C dependencies build from source** in the builder stage, so
   no system packages are needed beyond the Rust image's toolchain. Some
   connectors pull in a sizeable one, so expect
@@ -57,12 +57,12 @@ Why this shape:
 The binary reads a single YAML file from the path in `SPATE_CONFIG` (the image
 defaults it to `/etc/spate/pipeline.yaml` and bakes in the example config).
 Every `${VAR:-default}` in the file interpolates from the process
-environment at startup — see
+environment at startup. See
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the exact
 interpolation semantics. The Kubernetes pattern:
 
 - **ConfigMap** mounted over `/etc/spate/pipeline.yaml` (or anywhere, with
-  `SPATE_CONFIG` pointing at it) owns the structure — connectors, tuning,
+  `SPATE_CONFIG` pointing at it) owns the structure: connectors, tuning,
   topology.
 - **Environment variables** (plain or Secret-backed) own credentials and
   endpoints: they land in the YAML through interpolation, so secrets never
@@ -81,17 +81,17 @@ The admin server binds `admin.listen` (default `0.0.0.0:9090`) and serves:
 - `GET /readyz` — 200 once the source has received an assignment (lanes are
   live) **and** the sink's replicas answer connectivity probes. Wire this to
   `readinessProbe` so a pod takes traffic-shaped duties (its consumer-group
-  membership) only when it can actually write.
+  membership) only when it can write.
 - `GET /healthz` — 200 while every pipeline thread's poll loop heartbeat is
   fresh and the checkpoint watermark is not stuck while data flows. Wire
-  this to `livenessProbe`: a wedged pipeline gets restarted instead of
+  this to `livenessProbe` so a wedged pipeline gets restarted instead of
   idling forever.
 - `GET /metrics` — Prometheus exposition, when an exporter is installed; 404
   otherwise. See [Monitoring](monitoring.mdx) and the canonical taxonomy in
   [Metrics](../../METRICS.md).
 
 Both probes answer regardless of `metrics.exporter`. Setting `admin.listen` to
-`none` is what removes them, along with the port.
+`none` removes them, along with the port.
 
 ```yaml
 readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
@@ -108,7 +108,7 @@ offsets synchronously, exit. The details live in
 
 :::warning
 Set `terminationGracePeriodSeconds` comfortably **above**
-`checkpoint.drain_timeout` — e.g. 30s for the default 25s. If Kubernetes
+`checkpoint.drain_timeout`, e.g. 30s for the default 25s. If Kubernetes
 kills the pod mid-drain nothing is lost (at-least-once: uncommitted
 offsets replay on the next member), but every SIGKILL turns a clean
 commit into replayed duplicates. Give the drain the time it was
@@ -117,13 +117,13 @@ configured to take.
 
 If a sink is down when the drain deadline hits, unflushed batches are
 abandoned loudly (`spate_sink_abandoned_batches_total` plus a log line) and
-replay after restart — delivery stays at-least-once either way.
+replay after restart. Delivery stays at-least-once either way.
 
 ## Resources and scaling
 
 - `pipeline.threads` defaults to `available_parallelism` minus the I/O
   reserve, and `available_parallelism` honors cgroup CPU limits. **Set a
-  CPU limit or set `pipeline.threads` explicitly** — a pod without limits
+  CPU limit or set `pipeline.threads` explicitly.** A pod without limits
   sees the node's cores and spawns a thread per core. See
   [Tuning](tuning.mdx).
 - One pod is one member of the source's assignment. Scaling the Deployment

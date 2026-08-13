@@ -1,20 +1,20 @@
 # Instrumenting connectors
 
-The engine already measures the pipeline your connector plugs into — records,
-bytes, poll and flush durations, retries, errors, watermark age, end-to-end
-latency — without you writing a line of instrumentation. This page is about the
+The engine already measures the pipeline your connector plugs into, without you
+writing a line of instrumentation: records, bytes, poll and flush durations,
+retries, errors, watermark age, end-to-end latency. This page is about the
 seams where a connector *adds* to that picture: feeding a framework handle with
 signals only the connector can see (consumer lag, a rebalance), carrying the
-right labels so your series line up with everyone else's, and — when you need
-something the taxonomy doesn't cover — registering your own metric on the same
-facade the framework uses.
+right labels so your series line up with everyone else's, and registering your
+own metric on the same facade the framework uses when the taxonomy doesn't
+cover something.
 
 The taxonomy every framework series belongs to is [Metrics](../../METRICS.md);
 the operator's-eye view of the model is
 [Monitoring](../05-deployment/monitoring.mdx). Read the first for names, the
 second for the hot-path rules.
 
-Runnable examples carry most of the Rust on this page —
+Runnable examples carry most of the Rust on this page:
 [`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) for the
 registration patterns and
 [`instrumented_operator.rs`](repo:crates/spate/examples/instrumented_operator.rs)
@@ -32,9 +32,9 @@ records and bytes are counted as the driver polls it; a sink's flushes, batch
 sizes, retries, and errors are counted by the sink worker as it drains and
 writes; the checkpointer owns commit and watermark metrics. A hand-rolled
 `Source`/`RowEncoder`/`ShardWriter` inherits all of it the moment it is wired
-into a pipeline. So the question is never "how do I emit `spate_sink_records_total`" —
-the framework does — but "what does my connector know that the framework can't
-measure from the outside?"
+into a pipeline. So the question is never "how do I emit
+`spate_sink_records_total`", since the framework does, but "what does my
+connector know that the framework can't measure from the outside?"
 
 ## Feeding a framework handle
 
@@ -42,8 +42,8 @@ Some signals live inside the connector and nowhere else: per-partition lag that
 only the client can compute, an assignment callback firing. The framework
 defines the handle
 ([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
-drives it. The handle arrives on `SourceCtx` at `open` — take it there, never
-through a builder of your own — and what follows is a translation from what the
+drives it. The handle arrives on `SourceCtx` at `open`; take it there, never
+through a builder of your own. What follows is a translation from what the
 client reports into what the series means. A shipped source's translation, as a
 worked reference
 ([`spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs)):
@@ -60,7 +60,7 @@ The handle is resolved once at build time and injected; the connector never
 looks up a metric name on the hot path, it only calls methods on a handle it was
 handed. Lag is the *only* part of it a source drives: take `ctx.stage_metrics`
 at `open` and call `set_partition_lag` and `retain_partitions`. Leave the rest
-alone — records, bytes, poll duration, rebalance counts, and active lanes are
+alone. Records, bytes, poll duration, rebalance counts, and active lanes are
 all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
 
@@ -70,10 +70,10 @@ Every one of these is scar tissue.
 **Take the handle from `SourceCtx`.** A builder the runtime cannot reach is
 dead code, not an option: the runtime registers the series either way, so a
 connector that never receives its handle leaves the gauge rendering a permanent
-`0`. For lag that is the worst possible failure — a maximally backlogged source
+`0`. That is worst for lag, where a maximally backlogged source
 reports nothing wrong and every alert keyed on it stays green.
 
-**Publish a value only once you have really measured it.** A
+**Publish a value only once you have measured it.** A
 registered-but-unwritten gauge renders `0`, and for lag a `0` is
 indistinguishable from "caught up". `SourceMetrics::set_partition_lag`
 registers a partition's series on first call, so *not calling it* is how you
@@ -82,7 +82,7 @@ be passed through as silence, never flattened to zero.
 
 **Clean up the series you stop owning.** A per-partition series does not go
 away when you lose the partition: the exporter has no deletion and no idle
-timeout is configured, so dropping your handle is invisible — the series
+timeout is configured, so dropping your handle is invisible. The series
 renders its last value for the life of the process, and a reader summing across
 members counts that partition twice. The fix: filter publication to the live
 assignment, since a stale client snapshot still lists partitions you have lost;
@@ -101,16 +101,16 @@ A test that only asserts the family appears in the exposition passes happily
 against every one of these bugs.
 :::
 
-`SourceMetrics` is the one framework handle a connector is expected to drive
-today. Sink-side signals (flush outcomes, retries, replica health) are derived
+`SourceMetrics` is the one framework handle a connector is expected to drive.
+Sink-side signals (flush outcomes, retries, replica health) are derived
 by the sink worker and circuit breaker from the results your `ShardWriter`
-returns — you report them by returning the right outcome, not by touching a
+returns. You report them by returning the right outcome, not by touching a
 metrics handle. See [Custom sinks](custom-sink.mdx).
 
 ## Labeling your component
 
-Every framework series carries three standard labels — `pipeline`, `component`,
-`component_type` — plus stage-specific ones (`shard`, `replica`, `partition`).
+Every framework series carries three standard labels (`pipeline`, `component`,
+`component_type`), plus stage-specific ones (`shard`, `replica`, `partition`).
 `component` and `pipeline` come from `with_metrics(pipeline, component)` at
 assembly. The ones you set as a connector author are on the sink builder:
 
@@ -122,13 +122,13 @@ assembly. The ones you set as a connector author are on the sink builder:
   `replica` label, so per-replica health and error series identify the right
   endpoint.
 
-[Custom sinks](custom-sink.mdx) is the reference for both — this page doesn't
-repeat the plumbing. The rule to internalize: pick a stable, low-cardinality
+[Custom sinks](custom-sink.mdx) is the reference for both, and this page doesn't
+repeat the plumbing. Pick a stable, low-cardinality
 `component_type` and give replicas human-meaningful names.
 
 ## Owning a metric family
 
-When the taxonomy genuinely lacks something your connector or pipeline needs,
+When the taxonomy lacks something your connector or pipeline needs,
 register it through a [`Meter`](../07-reference/README.mdx). A `Meter` is a
 small, cloneable scope bound to one component's three standard labels: every
 handle it mints inherits them, and its name is **auto-prefixed under the `spate_`
@@ -149,10 +149,10 @@ alongside the extra one it was minted with:
 spate_storefront_orders_fetched_total{pipeline="metrics-demo",component="orders-in",component_type="storefront",shop="eu-west"}
 ```
 
-The rules the `Meter` enforces so you don't have to think about them:
+The rules the `Meter` enforces for you:
 
 - **You never type the prefix.** `Meter::new(...)` uses the `custom` namespace
-  (`spate_custom_*`) — the bucket for pipeline-author metrics;
+  (`spate_custom_*`), the bucket for pipeline-author metrics;
   `Meter::with_namespace(...)` claims a connector segment
   (`spate_<namespace>_*`). The namespace is validated once at construction and **cannot
   be a reserved framework stage root** (`source`, `sink`, `deser`, …), so a
@@ -165,24 +165,25 @@ The rules the `Meter` enforces so you don't have to think about them:
   config both work. Push per-instance identity (a topic, a shard) into `extra`
   labels, not the name, keeping the name low-cardinality.
 - **Store the handles** (`Counter` / `Gauge` / `Histogram`, re-exported from
-  `spate_core::metrics`) in your own struct — no direct `metrics` dependency.
+  `spate_core::metrics`) in your own struct, with no direct `metrics`
+  dependency.
 
 A crate that provides **both a source and a sink**, appearing at both ends of
 one pipeline, is separated by the runtime, not by you: when it injects a
 component's `Meter` it derives the end from the source-vs-sink position and
 scopes the family `spate_<namespace>_source_*` / `spate_<namespace>_sink_*`, so
 its source `bytes_total` and its sink `bytes_total` land under distinct names.
-Your connector code is identical at either end — you never name the role, and a
+Your connector code is identical at either end. You never name the role, and a
 `Meter` local name may not itself begin with a role segment (`source_` /
-`sink_`), which is reserved for exactly this scoping. Instance identity — two
-sinks of the same type — stays in the `component` label, where same-meaning
+`sink_`), which is reserved for this scoping. Instance identity, such as two
+sinks of the same type, stays in the `component` label, where same-meaning
 series belong.
 
 ### From a pipeline author's operators
 
 A `Meter` is also how you instrument an **operator** you write. An operator
-closure is handed a record and nothing else — there is no per-record context,
-by design — so the pattern is *mint at build time, close the handle over the
+closure is handed a record and nothing else, with no per-record context,
+so the pattern is *mint at build time, close the handle over the
 closure*. The chain factory hands you a
 [`ChainCtx`](../07-reference/README.mdx); call `ctx.meter(component,
 component_type)` there (it uses the `custom` namespace):
@@ -191,14 +192,14 @@ component_type)` there (it uses the `custom` namespace):
 ```
 
 The example carries on past this region to render its own exposition and assert
-each series by name, label set and value — the assertion worth copying, and the
-one [Testing](#testing) below is about. It renders through the handle rather
-than scraping an endpoint, which is why it needs no admin server.
+each series by name, label set and value. That is the assertion worth copying,
+and the one [Testing](#testing) below is about. It renders through the handle
+rather than scraping an endpoint, so it needs no admin server.
 
 ## Dropping to the raw facade
 
-If you need a metric **outside** the governed `spate_` namespace — mirroring a
-third-party library's own naming, say — record it straight onto the
+If you need a metric **outside** the governed `spate_` namespace, mirroring a
+third-party library's own naming for instance, record it straight onto the
 [`metrics`](https://crates.io/crates/metrics) facade. You get no standard labels
 and no namespace enforcement, so the collision-avoidance is yours: prefix with
 your own name, **not** `spate_` (that umbrella belongs to the `Meter`).
@@ -207,15 +208,15 @@ your own name, **not** `spate_` (that umbrella belongs to the `Meter`).
 ```
 
 Pre-registration and batch-boundary counting bind here exactly as they do
-through a `Meter`; what changes is that these series carry only the labels
+through a `Meter`, and these series carry only the labels
 typed into the macro.
 [Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx#the-hot-path-discipline)
 states those rules in full. Prefer the `Meter` above unless you
-specifically want to live outside the `spate_` taxonomy.
+want to live outside the `spate_` taxonomy.
 
 ## Contracts
 
-The framework's own stages follow these, and so must anything you add — the
+The framework's own stages follow these, and so must anything you add; the
 handle method shapes exist to make them the path of least resistance:
 
 - **Pre-register at build time.** Resolve every name and label once and keep the
@@ -235,18 +236,18 @@ handle method shapes exist to make them the path of least resistance:
   [Metrics § Histogram buckets](../../METRICS.md)).
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
-  `metrics.per_partition_detail` (default off) precisely because it is unbounded
-  — with the single exception of `spate_source_lag_records`, which is ungated
+  `metrics.per_partition_detail` (default off) because it is unbounded.
+  The one exception is `spate_source_lag_records`, which is ungated
   because it has no aggregate series to fall back to (see the box above).
   Don't attach an unbounded label (a key, an offset) to any series.
 - **One live owner per gauge series.** A handle struct claims its series when it
   is constructed, and a duplicate claim on the same key is refused rather than
-  shared — two live owners would be two writers racing to describe one piece of
+  shared. Two live owners would be two writers racing to describe one piece of
   state, and the exposition cannot show that happened. Through the builder a
   collision is fatal (`BuildError` / `StartError`). Direct construction cannot
   fail a build, so it logs and the loser becomes a **shadow**: it still counts,
   because counters sum, but it publishes no gauge. A shadow is the failure you
-  are most likely to meet in tests — see [Testing](#testing) below for why your
+  are most likely to meet in tests. See [Testing](#testing) below for why your
   fixtures need per-test labels.
 
 :::warning
@@ -262,7 +263,7 @@ first or your handles record into the void. See
 
 Assert your instrumentation the way the framework tests its own: build a
 **local** (non-global) recorder, exercise the code, and match against the
-rendered exposition — no global install, so tests stay isolated and parallel.
+rendered exposition, with no global install, so tests stay isolated and parallel.
 `metrics::with_local_recorder(&recorder, || { /* drive the connector */ })` then
 `handle.render()` gives you the scrape text to `assert!(...contains(...))`
 against, exactly as
@@ -273,13 +274,13 @@ against, exactly as
 isolates the *exposition*, but it does not isolate the gauge-ownership claim
 described above, which is process-wide. `cargo test` runs a binary's tests in
 one process, so two tests building the same handle with the same labels have the
-second one become a shadow — its counters still sum, but its gauges publish
-nothing, and the assertion fails somewhere unrelated to the change that broke
+second one become a shadow, whose counters still sum but whose gauges publish
+nothing, so the assertion fails somewhere unrelated to the change that broke
 it. Distinct labels per test avoid the collision entirely.
 
 ## From a built-in source or sink
 
-A `Meter` you construct with `Meter::new(...)` — or take from `ChainCtx` —
+A `Meter` you construct with `Meter::new(...)`, or take from `ChainCtx`,
 covers pipeline authors. A **built-in `Source` or sink `ShardWriter`** doesn't
 construct one: the runtime hands it a pre-scoped `Meter` at construction, so a
 connector never wires the pipeline name, the labels, or the prefix.
@@ -294,8 +295,8 @@ connector never wires the pipeline name, the labels, or the prefix.
 - **Receive the `Meter`.** A source reads `Option<Meter>` from
   `SourceCtx` in `open`; a sink's writer overrides
   `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before the
-  writer is shared). The runtime scopes it by **role** — `source`/`sink` derived
-  from the wiring position — so one crate's source families land under
+  writer is shared). The runtime scopes it by **role**, `source` or `sink`
+  derived from the wiring position, so one crate's source families land under
   `spate_<namespace>_source_*` and its sink families under
   `spate_<namespace>_sink_*`, under distinct names. The connector's code is
   identical at either end.
@@ -324,7 +325,7 @@ The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
 (a sink's default) opts out silently, and a value that is a legal label but an
 illegal metric-name segment (a hyphen, say) is logged at `warn` and
-also yields `None` — so a component only gets a scope once it declares a
+also yields `None`. A component gets a scope only once it declares a
 distinct, well-formed `component_type`.
 
 Worked reference for the full production shape, including lazily-registered

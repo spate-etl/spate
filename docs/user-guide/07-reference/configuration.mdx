@@ -1,14 +1,14 @@
 # Configuration reference
 
 This is the appendix of every configuration key: its type, default, and
-meaning. It is a lookup, not a walkthrough — for how the file is loaded and
+meaning. It is a lookup, not a walkthrough. For how the file is loaded and
 how connector sections reach their factories, see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx).
 
-One YAML file configures one process. The framework owns the typed sections —
-`pipeline`, `admin`, `checkpoint`, `backpressure`, `metrics` — validated strictly
-(`deny_unknown_fields` at every level, so typos fail at startup with the
-offending YAML path). The `source`, `deserializer`, and `sink` sections are
+One YAML file configures one process. The framework owns the typed sections
+`pipeline`, `admin`, `checkpoint`, `backpressure` and `metrics`, validated
+strictly (`deny_unknown_fields` at every level, so typos fail at startup with
+the offending YAML path). The `source`, `deserializer`, and `sink` sections are
 single-key mappings selecting a component type; their bodies are opaque to the
 framework and deserialized by the component's own factory.
 
@@ -49,7 +49,7 @@ indexed below.
 The raw text interpolates against the process environment **before** YAML
 parsing, anywhere in the file (including connector bodies). Substitution is
 textual and pre-parse, so quote the site (`password: "${PASSWORD}"`) when a
-value may contain YAML-significant characters — see
+value may contain YAML-significant characters. See
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx#environment-interpolation)
 for the parsing caveats.
 
@@ -117,8 +117,8 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 Every sink connector maps its `batch`, `inflight`, `retry`, and `breaker`
 sub-sections onto the framework's `SinkPoolConfig`
 ([`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs)).
-The keys and defaults are **framework-owned and identical across sinks** — this
-table is their single source of truth; each connector page shows only the keys
+The keys and defaults are **framework-owned and identical across sinks**, and
+this table is their single source of truth; each connector page shows only the keys
 it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
 
 | Key | Type | Default | Description |
@@ -140,47 +140,47 @@ The `retry` and `breaker` bounds above are enforced at load by
 `RetryConfig::validate` and `BreakerConfig::validate`, which every sink calls,
 so a bad multiplier, a zero delay or a zero probe budget fails startup with the
 offending key rather than surfacing in the write loop. They rule out the
-nonsensical, not the merely aggressive: `initial: 1ns` passes. Both are
-independently total at the point of use — the backoff saturates at `retry.max`
+nonsensical, not the aggressive; `initial: 1ns` passes. Both are
+independently total at the point of use. The backoff saturates at `retry.max`
 and never yields a zero-delay retry, and the breaker floors `half_open_probes`
-at 1 and caps `open_for` at a year — so a sink assembled in code rather than
-YAML cannot escape those guarantees by skipping validation.
+at 1 and caps `open_for` at a year. A sink assembled in code rather than
+YAML therefore cannot escape those guarantees by skipping validation.
 
-There is deliberately **no upper bound on `retry.max`** — a sink fronting an
-expensive or rate-limited destination may legitimately want a very patient
+There is **no upper bound on `retry.max`**, because a sink fronting an
+expensive or rate-limited destination may want a very patient
 policy. But `max_attempts: 0` (unbounded) together with a `retry.max` over five
 minutes logs a warning at startup: once a shard backs off to that ceiling it
 sleeps that long between attempts and never abandons the batch, so a stalled
 shard is indistinguishable from a healthy idle one. Bound it with
 `retry.max_attempts` or lower `retry.max` if you did not mean it. Delivery is
-unaffected either way — the drain deadline aborts an in-flight write at
-shutdown, and its data replays.
+unaffected either way, since the drain deadline aborts an in-flight write at
+shutdown and its data replays.
 
 If you *did* mean it, `spate_sink_retry_backoff_seconds{shard}` is the live
 counterpart to that startup warning: it reads the backoff a shard is currently
 sleeping between attempts on an available replica (`0` when it is not backing
 off), so a patient policy stays legible on a dashboard instead of looking like
 an idle shard. Alert above `(1 - jitter) × retry.max` rather than at
-`retry.max` — the sleep is jittered downwards, so the gauge never sits exactly
-on the ceiling. When every replica is quarantined the shard sleeps waiting for
+`retry.max`, because the sleep is jittered downwards, so the gauge never sits
+exactly on the ceiling. When every replica is quarantined the shard sleeps waiting for
 the earliest of a probe window and an in-flight probe reporting, and this gauge
 reads `0`; `spate_sink_shard_healthy` covers that state.
 
-Connectors add their own keys on top of these — a client-level timeout, for
-instance, is the connector's own and not the shared pool's. Those live on the
+Connectors add their own keys on top of these; a client-level timeout, for
+instance, is the connector's own, not the shared pool's. Those live on the
 respective connector pages, indexed [below](#source-deserializer-sink).
 
 ## Chunk handoff (`chunk`) {#chunk}
 
-`chunk:` tunes the chain terminal's per-shard chunking — the granularity at
+`chunk:` tunes the chain terminal's per-shard chunking, the granularity at
 which encoded rows are sealed and handed to the shard workers. Like the sink
 pool above it is **framework-owned and identical across sinks**, and it sits
 inside the sink body (`sink.<type>.chunk`, or per branch as
 `sinks.<name>.chunk`), but it configures the *chain terminal*, not the sink
-worker, so the framework reads it directly — connectors neither declare nor see
-it. It is purely performance-shaping and never affects delivery correctness:
+worker, so the framework reads it directly and connectors neither declare nor
+see it. It is purely performance-shaping and never affects delivery correctness:
 a below-target chunk is sealed on every `checkpoint.interval` tick regardless,
-so the most a larger target can do is defer a commit by roughly one tick — it
+so the most a larger target can do is defer a commit by roughly one tick. It
 can never hold offsets back indefinitely. See
 [Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
 
@@ -199,7 +199,7 @@ Each `sinks.<name>.chunk` is independent, so a split tunes every destination
 separately. The knob can instead be set in code via `SinkOptions::with_chunk`
 (the install-time counterpart to the [code-level knobs](#code-level-knobs-not-yaml)
 below); setting **both** the YAML `chunk:` block and `with_chunk` on one sink is
-a load error — it is declared in exactly one place.
+a load error, since it is declared in exactly one place.
 
 :::note
 `chunk` is a **framework-reserved key** inside any sink body: the framework
@@ -210,8 +210,8 @@ key is rejected on a `source`/`deserializer` section).
 
 ## `source:`, `deserializer:`, `sink:`
 
-Each is a single-key mapping — the key selects the component, the body belongs
-to it. The framework requires exactly one `source`, exactly one of `sink` **or**
+Each is a single-key mapping in which the key selects the component and the
+body belongs to it. The framework requires exactly one `source`, exactly one of `sink` **or**
 `sinks`, and treats `deserializer` as optional.
 
 | Section | Required | Body documented in |
@@ -227,8 +227,8 @@ of which is which is in
 
 ### `sinks:` — multiple named sinks {#sinks}
 
-A pipeline that writes to more than one destination declares `sinks:` — a
-`name -> component` map — **instead of** `sink:` (setting both, or neither, is a
+A pipeline that writes to more than one destination declares `sinks:`, a
+`name -> component` map, **instead of** `sink:` (setting both, or neither, is a
 load error). Each entry is an ordinary single-key component with its own full
 configuration.
 
@@ -261,8 +261,8 @@ the YAML block on the same sink).
 
 **Coordination is assembly wiring, not source YAML.** A coordinated
 source takes a fully built coordinator through its `with_coordinator`
-builder — a `StoreCoordinator` over a
-[coordination store](../04-connectors/coordination/README.mdx), with a
+builder, which takes a `StoreCoordinator` over a
+[coordination store](../04-connectors/coordination/README.mdx) with a
 `CoordinationConfig` for `lease_duration`, `instance_id`, `max_in_flight`
 and the rest. No connector grows per-backend config keys or compile-time
 features, and a new store backend needs no connector changes.

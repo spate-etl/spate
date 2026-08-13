@@ -1,9 +1,10 @@
 # Extending
 
-This section is for library users building their own components: connector
-authors and anyone whose pipeline needs more than the shipped connectors.
-The framework's abstractions were sized for exactly
-this — small, stable traits at the edges, with batching, retries,
+This section is for library users building their own components, whether
+connector authors or anyone whose pipeline needs more than the shipped
+connectors.
+The framework's abstractions were sized for that case:
+small, stable traits at the edges, with batching, retries,
 acknowledgments, checkpointing, and backpressure all owned by the engine so
 your component doesn't have to be.
 
@@ -31,12 +32,12 @@ sources live under backpressure and correct across rebalances.
 
 Implement `RowEncoder` (the CPU half: record to wire bytes, on pipeline
 threads) and `ShardWriter` (the I/O half: sealed batch to replica endpoint,
-on sink workers), then hand them to the builder as `SinkParts` — no trait
-impl required for hand-rolled sinks.
+on sink workers), then hand them to the builder as `SinkParts`. No trait
+impl is required for hand-rolled sinks.
 
 ## [Custom operators](custom-operators.mdx)
 
-Operators are stateful closures over `map`/`filter`/`try_map`/`flat_map` —
+Operators are stateful closures over `map`/`filter`/`try_map`/`flat_map`, with
 no trait to implement, and the whole chain still compiles to one
 monomorphized loop. Covers per-stage error policies, zero-allocation
 fan-out, and when to drop down to the `Collector`/`StageLifecycle` traits.
@@ -44,7 +45,7 @@ fan-out, and when to drop down to the `Collector`/`StageLifecycle` traits.
 ## [Instrumenting connectors](instrumenting-connectors.mdx)
 
 Every stage is pre-instrumented by the engine; this page covers where a
-connector *adds* to that — feeding a framework handle with signals only it can
+connector *adds* to that: feeding a framework handle with signals only it can
 see (a source driving `SourceMetrics` for consumer lag), carrying the
 standard labels via `with_component_type` / `with_replica_labels`, and
 registering your own metric on the same `metrics` facade when the taxonomy
@@ -52,7 +53,7 @@ doesn't cover it.
 
 ## Prerequisites
 
-You'll want the [Concepts](../02-concepts/README.mdx) section first —
+You'll want the [Concepts](../02-concepts/README.mdx) section first,
 especially [Architecture](../02-concepts/01-architecture.mdx) (which half of
 the process your code runs on) and
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) (what the

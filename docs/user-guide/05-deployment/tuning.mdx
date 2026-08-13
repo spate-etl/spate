@@ -1,8 +1,8 @@
 # Tuning
 
 Every knob below has a safe default; most pipelines change two or three of
-them. This page covers what each one moves and how to size them together —
-the defaults quoted are the exact values from
+them. This page covers what each one moves and how to size them together.
+The defaults quoted are the exact values from
 [`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) and
 the sink config structs (also tabulated in the
 [configuration reference](../07-reference/configuration.mdx)).
@@ -16,14 +16,14 @@ and scaling out before you reach that limit multiplies the wrong thing.
 The loop is:
 
 1. **Find which side binds.** A pipeline is either source-bound, chain-bound, or
-   sink-bound at any moment, and the metrics say which — see
+   sink-bound at any moment, and the metrics say which. See
    [Monitoring](./monitoring.mdx). Guessing here is the most common way tuning
    time gets wasted.
 2. **Raise the binding side** using that component's knobs.
 3. **Re-measure.** The bottleneck usually moves rather than disappearing: a
    source that was starving the chain will, once fixed, start saturating the
    sink.
-4. **Repeat until a physical resource is saturated** — CPU cores busy, memory
+4. **Repeat until a physical resource is saturated**: CPU cores busy, memory
    at the pod limit, or the NIC/broker link full.
 5. **Only then scale horizontally**, by adding replicas.
 
@@ -31,18 +31,18 @@ The loop is:
 
 Throughput is not the only thing that improves. Sink batches seal on whichever
 of `max_rows`, `max_bytes`, or `linger` trips first. A source that cannot keep
-up leaves batches sealing on **`linger`** — the pipeline emits small writes on a
-timer regardless of how little it has accumulated. Fix the source and the same
-batches seal on **size** instead: fewer, larger writes.
+up leaves batches sealing on **`linger`**, so the pipeline emits small writes on
+a timer regardless of how little it has accumulated. Fix the source and the same
+batches seal on **size** instead, giving fewer, larger writes.
 
-That difference is the whole ballgame for any sink with a per-write cost — a
-columnar store where each write becomes a part to merge, an object store
-billing per PUT, a warehouse with a commit overhead. Two pods each writing
+That difference dominates for any sink with a per-write cost: a columnar store
+where each write becomes a part to merge, an object store billing per PUT, a
+warehouse with a commit overhead. Two pods each writing
 half-size batches are strictly worse for the destination than one pod writing
 full-size ones, even at identical total throughput. How steep that curve is
 depends on the sink, and its page says so.
 
-The corollary: **horizontal scaling has a real cost**, not just a bill. Each
+**Horizontal scaling carries a cost beyond the bill.** Each
 replica is another member of the source's assignment, another set of
 connections, and another participant in every rebalance. Extract the vertical
 throughput first.
@@ -91,7 +91,7 @@ one chunk, since chunks arrive whole):
 
 Watch `spate_sink_batch_rows`/`spate_sink_batch_bytes` and
 `spate_sink_flushes_total{reason=...}`: a sink flushing mostly on `linger`
-never fills its batches — the size thresholds are irrelevant there, and you
+never fills its batches. The size thresholds are irrelevant there, and you
 can safely lower `max_bytes` to relax the backpressure budget (next
 section).
 
@@ -99,8 +99,8 @@ section).
 
 Concurrent sealed batches in flight per shard (default **2**), rotating
 across healthy replicas. While all permits are taken the worker stops
-consuming its queue, which fills and surfaces upstream as backpressure —
-this is the intended signal, not a stall. Raising it buys replica
+consuming its queue, which fills and surfaces upstream as backpressure.
+That is the intended signal, not a stall. Raising it buys replica
 parallelism at the cost of more memory pinned in flight (it multiplies
 directly into the budget rule below).
 
@@ -110,23 +110,23 @@ A global cap on bytes admitted into the pipeline but not yet durably
 written (default **256MiB**), with pause/resume hysteresis: sources pause
 above `high_ratio` (default **0.8**) and may resume below `low_ratio`
 (default **0.5**) after at least `min_pause` (default **500ms**; pausing a
-lane is not free for every source, which is what the hysteresis is for).
+lane is not free for every source, and the hysteresis absorbs that cost).
 
 **Size it against the sizing rule**, which
 [Backpressure](../02-concepts/03-backpressure.mdx#sizing-the-budget) states
-in full along with the measurement behind it: the budget's low watermark
-must comfortably hold everything the sink legitimately keeps in flight, or a
+in full along with the measurement behind it. The budget's low watermark
+must comfortably hold everything the sink keeps in flight, or a
 saturated pipeline lives above the high watermark and duty-cycles against
 `min_pause`.
 
-Of the rule's two terms, pending writes —
-`shards × inflight.max_per_shard × batch.max_bytes` — dominate. Worked
+Of the rule's two terms, the pending-writes term
+`shards × inflight.max_per_shard × batch.max_bytes` dominates. Worked
 example from the flagship YAML
 ([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
 one shard, 2 in-flight, 128 MiB batches gives `1 × 2 × 128MiB = 256MiB` of
 pending writes, doubled for the rule's headroom to 512 MiB, so the
-example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). Note
-the framework **defaults are intentionally not self-consistent** under
+example sets `max_inflight_bytes: 1GiB` (512 MiB at `low_ratio: 0.5`). The
+framework **defaults are intentionally not self-consistent** under
 saturation: 2 shards at the default batch settings exceed the default
 256 MiB budget. That's fine for throttled sources that never fill batches;
 for a saturated source, either raise the budget or cap `batch.max_bytes`
@@ -138,7 +138,7 @@ with headroom for batches held during retries.
 
 That second term is easy to under-count and it is not a framework number. A
 source client with its own read-ahead holds that data before the framework sees
-it, so it sits outside the in-flight budget entirely — and where the buffer is
+it, so it sits outside the in-flight budget entirely. Where the buffer is
 charged per assignment unit rather than per process, it can be an order of
 magnitude larger than the budget. Size it from the source's own page before
 setting a memory limit.
@@ -151,51 +151,51 @@ Read-ahead buffering and how to cap it:
 
 ## Chunk sizing: `chunk.target_bytes` {#chunk-sizing}
 
-Set per sink in YAML — `sink.<type>.chunk.target_bytes`, or per branch as
+Set per sink in YAML as `sink.<type>.chunk.target_bytes`, or per branch as
 `sinks.<name>.chunk.target_bytes` ([configuration reference](../07-reference/configuration.mdx#chunk)).
-Because it never affects delivery correctness — a partial chunk is sealed on
-every commit tick, so at most it defers a commit by ~one interval — it is a
-deploy-time knob you can retune without a rebuild; `SinkOptions::with_chunk` is
+It never affects delivery correctness, because a partial chunk is sealed on
+every commit tick and at most defers a commit by ~one interval, so it is a
+deploy-time knob you can retune without a rebuild. `SinkOptions::with_chunk` is
 the code-level equivalent for pipelines assembled programmatically (one or the
 other, not both).
 
 The chain terminal encodes rows into a per-shard buffer and seals a **chunk**
 once it reaches `target_bytes` (default **64 KiB**), then hands it to that
-shard's queue. Chunks are not insert sizes — shard workers merge them into
-full batches — so this knob does not bound insert size. What it governs is
+shard's queue. Chunks are not insert sizes. Shard workers merge them into
+full batches, so this knob does not bound insert size. It governs
 **handoff rate**: at 64 KiB a 256-byte row yields roughly 250 rows per chunk,
 so a fast chain generates tens of thousands of queue operations per shard per
 second, each one also a seal and an in-flight budget update.
 
-Raise it when the chain outruns the shard workers — the symptom is backpressure
+Raise it when the chain outruns the shard workers. The symptom is backpressure
 pauses while the sink itself is idle (see the note below). Leave it alone for
 latency-sensitive pipelines: throughput and flush latency rise together, with
 **no knee** in the measured range, so there is no setting that dominates. The
-default sits deliberately at the low-latency end of that range.
+default sits at the low-latency end of that range.
 
 Raising it never strands rows or delays commits: a chunk that has not
 reached `target_bytes` is sealed anyway on every commit tick
 (`checkpoint.interval`), and by the driver's idle timer during a lull. This
-matters most for uneven fan-out — a low-volume `split` branch whose buffer
+matters most for uneven fan-out. A low-volume `split` branch whose buffer
 would take minutes to fill holds the acknowledgments (and therefore the
 source watermark) of every batch that contributed a row to it, so the commit
-tick is what bounds that hold to the checkpoint period.
+tick bounds that hold to the checkpoint period.
 
 ## Queues: `SinkOptions::queue_capacity`
 
 The bounded chunk queue between pipeline threads and each shard worker,
-default **8** chunks (chunks target 64 KiB — [`chunk.target_bytes`](#chunk-sizing)).
+default **8** chunks (chunks target 64 KiB, see [`chunk.target_bytes`](#chunk-sizing)).
 This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
-[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)), not YAML —
-unlike `chunk`, it stays in code for now (deploy-time exposure is a possible
-follow-up). It exists to signal, not to buffer: a full queue is the per-shard
+[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)) and not a YAML
+key; unlike `chunk`, it stays in code, with deploy-time exposure a possible
+follow-up. It exists to signal, not to buffer: a full queue is the per-shard
 backpressure trigger (`spate_queue_full_events_total`). Keep it small; the
 global byte budget, not the queue, is the intended smoothing buffer.
 
-That "keep it small" comes from a queue-depth sweep rather than from taste,
-but it is a genuine trade, not a free default, and **its price depends on
-whether your sink is the constraint.** Depth raised throughput in every regime
-measured, by 46% to 92%. What changes is what you pay for it:
+That "keep it small" comes from a queue-depth sweep. It is a trade, not
+a free default, and **its price depends on whether your sink is the
+constraint.** Depth raised throughput in every regime measured, by 46% to 92%;
+what differs is the cost:
 
 | Your sink | Throughput from depth | Flush p99 cost |
 |---|---|---|
@@ -203,30 +203,30 @@ measured, by 46% to 92%. What changes is what you pay for it:
 | **Has headroom** — something upstream limits you | +86% by capacity 64 | none measured |
 
 The flush p99 in that table is `spate_sink_flush_duration_seconds`, seal to
-settle — the right family for this question, because what depth costs you *is*
-the extra time a batch spends waiting before it is durable. It is the wrong
-family for "did my sink get slower": these arms were recorded before the split
-families existed, so the 10× is a seal-to-settle figure and nothing here
+settle. That is the right family for this question, because what depth costs
+you is the extra time a batch spends waiting before it is durable. It is the
+wrong family for "did my sink get slower": these arms were recorded before the
+split families existed, so the 10× is a seal-to-settle figure and nothing here
 decomposes it into queueing versus write time.
 
 Against a saturated sink the curve is **not** smooth, so choose an end of it
 rather than a middle: the first step up costs nearly all of the latency for
 almost none of the throughput, while the deepest settings recover the throughput
 for comparatively little more. Where the sink has headroom there is no such
-trade — flush p99 held flat across the whole 8-to-512 range, because the queue
-never filled deeply enough to add any, and the shallow default was simply
-throttling a server with room to spare.
+trade. Flush p99 held flat across the whole 8-to-512 range, because the queue
+never filled deeply enough to add any, and the shallow default was throttling a
+server with room to spare.
 
 The default stays at 8 because a shallow queue fails in the direction that is
-easier to diagnose — under-using a fast sink, rather than hiding a slow one
-behind a buffer. That is a defensive choice, not a free one.
+easier to diagnose, under-using a fast sink rather than hiding a slow one
+behind a buffer. It is a defensive choice, and it costs throughput.
 
 :::note Which regime am I in?
 Read `spate_backpressure_pause_events_total` **together with**
-`spate_sink_write_duration_seconds{outcome="ok"}` — the per-attempt write, not
+`spate_sink_write_duration_seconds{outcome="ok"}`, the per-attempt write, not
 `spate_sink_flush_duration_seconds`. Flush duration spans seal to settle and
 carries the wait for an `inflight.max_per_shard` slot, so it rises under
-queueing whether or not the sink slowed down; that ambiguity is exactly what
+queueing whether or not the sink slowed down; that ambiguity is what
 sends this diagnosis the wrong way (see [What a flush
 contains](../../METRICS.md#what-a-flush-contains)).
 
@@ -234,7 +234,7 @@ contains](../../METRICS.md#what-a-flush-contains)).
   has headroom. Raise `queue_capacity` and watch the pauses reach zero.
   `spate_sink_permit_wait_duration_seconds` confirms it: if the flush p99 you are
   worried about is mostly permit wait, no amount of server tuning will move it.
-- **Pauses high, write p99 high** → the sink is genuinely behind. Depth will buy
+- **Pauses high, write p99 high** → the sink is behind. Depth will buy
   throughput but cost latency; add shards or `inflight.max_per_shard` instead.
 
 **A high pause count is not by itself a misconfiguration.** Against a saturated
@@ -242,30 +242,30 @@ sink the *best-latency* configuration also had the *most* pauses.
 
 Earlier revisions of this page described the trigger as *rate-driven as well as
 capacity-driven*, and told you to reach for chunk size when pauses were high
-while the sink was idle. Both were wrong. An iso-buffer re-run — same queued
-bytes, different seal size — put the pause count at zero for the small-chunk
-arm, so the trigger tracks **queued bytes**, and `queue_capacity` is the lever,
-not `chunk.target_bytes`.
+while the sink was idle. Both were wrong. An iso-buffer re-run, holding queued
+bytes constant while varying seal size, put the pause count at zero for the
+small-chunk arm, so the trigger tracks **queued bytes**, and `queue_capacity`
+is the lever, not `chunk.target_bytes`.
 :::
 
 ## Checkpointing: `checkpoint.*`
 
 - `interval` (default **5s**): how often committable watermarks flush to
   the source, **and** the cadence at which partial chunk buffers are sealed
-  (every tick broadcasts a chain flush, so a below-target chunk — a
-  low-volume `split` branch, say — can hold acknowledgments for at most
-  one interval). This is *not* a durability boundary — the sink write is —
+  (every tick broadcasts a chain flush, so a below-target chunk, such as one
+  from a low-volume `split` branch, can hold acknowledgments for at most
+  one interval). The durability boundary is the sink write, not this interval,
   so shortening it narrows the replay window after a crash and tightens
   worst-case commit lag (≈ two intervals + the sink `linger`), at the cost
   of more commit traffic and slightly smaller chunks. Validation floors it
   at 100ms.
 - `max_pending_batches` (default **1024**): hard ceiling on unacknowledged
-  batches per partition — at the limit the partition's lanes are skipped at
+  batches per partition. At the limit the partition's lanes are skipped at
   the poll boundary until acknowledgments retire batches. Bounds the replay
   a stalled partition can accumulate, alongside (and independent of) the
   byte budget.
 - `drain_timeout` (default **25s**): the shutdown/rebalance drain budget.
-  Keep it below `terminationGracePeriodSeconds` — see [Docker](docker.mdx)
+  Keep it below `terminationGracePeriodSeconds`. See [Docker](docker.mdx)
   and [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 - `stalled_fail_after` (default **120s**): a partition watermark stalled
   behind a *failed* batch this long fails the pipeline, converting a
@@ -279,12 +279,12 @@ not `chunk.target_bytes`.
 
 `compact` only yields exclusive cores under the kubelet **static CPU
 manager** with Guaranteed QoS and integer CPU requests; anywhere else it
-merely sets affinity inside a shared cpuset and can hurt by fighting the
+sets affinity inside a shared cpuset and can hurt by fighting the
 scheduler. Leave it `off` unless you run that setup.
 
 ## Where parallelism actually comes from
 
-Read parallelism is bounded by **lane count**, not thread count — lanes map
+Read parallelism is bounded by **lane count**, not thread count. Lanes map
 m:n onto pipeline threads, so threads cannot manufacture concurrency a source
 did not hand out. If the pipeline is CPU-saturated, more threads help; if it is
 lane-starved, only more lanes do, and how a source decides its lane count is

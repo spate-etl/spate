@@ -1,6 +1,6 @@
 # Custom sources
 
-A source is two pieces, split on purpose:
+A source is two pieces:
 
 - **`Source`** — the control plane. Lifecycle, lane assignment/revocation
   events, watermark commits, pause/resume. Driven by the runtime's
@@ -8,16 +8,16 @@ A source is two pieces, split on purpose:
 - **`SourceLane`** — the data plane. A pollable unit pinned to one pipeline
   thread, yielding payload batches that **borrow** the lane's buffers.
 
-The API is poll-based rather than a `futures::Stream`, deliberately: real
-source clients typically already own their network I/O on their own
-threads, and a Stream wrapper only adds waker overhead plus `'static`
+The API is poll-based rather than a `futures::Stream`. Source clients
+typically already own their network I/O on their own
+threads, and a Stream wrapper adds waker overhead plus `'static`
 bounds that break payload borrowing. Rationale in
 [ADR-0003](../../adr/0003-poll-based-source-api.md); trait docs in
 [`spate-core/src/source/mod.rs`](repo:crates/spate-core/src/source/mod.rs)
 and on [docs.rs](../07-reference/README.mdx).
 
 The data-plane and control-plane blocks below come from
-[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs) —
+[`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.rs),
 a generator source counting to a limit per partition, which needs no
 infrastructure and no facade feature beyond the default:
 
@@ -37,17 +37,17 @@ A lane polls up to `max_records` payloads, waiting at most `timeout`:
 What the framework holds you to:
 
 - **Payloads borrow the lane.** `Batch` is a GAT borrowing `'_` from the
-  lane, so payloads can point straight into your client's buffers — zero
+  lane, so payloads can point straight into your client's buffers, with zero
   copies out of the source. The batch is dropped before the next `poll` on
   the same lane; records derived from it are consumed or encoded within
   that window (the operator chain guarantees this by construction).
 - **One `AckRef` per batch.** Issue it through the `AckIssuer` you received
-  at `open` (`issuer.issue(partition, last_offset)` — the offset of the
+  at `open` (`issuer.issue(partition, last_offset)`, the offset of the
   **last** record in the batch). Every record deserialized from the batch
   clones this handle; the checkpointer advances the partition's watermark
   past the batch only when every clone resolves as delivered. You never
   track individual records.
-- **Idle lanes block, never spin.** `Ok(None)` means nothing arrived — but
+- **Idle lanes block, never spin.** `Ok(None)` means nothing arrived, but
   reach it by waiting up to `timeout` (a blocking queue read, a condvar,
   worst case a sleep). A zero-timeout poll loop busy-spins a pinned
   pipeline thread at 100% for nothing.
@@ -58,7 +58,7 @@ all sharing the batch lifetime:
 ```rust file=crates/spate/examples/custom_source_sink.rs region=batch
 ```
 
-`RawPayload.key` feeds the sink's shard routing hash — populate it if your
+`RawPayload.key` feeds the sink's shard routing hash. Populate it if your
 source has message keys.
 
 ## The control plane: `Source`
@@ -76,19 +76,19 @@ them wherever your source resumes from instead.
 - **`open`** runs once, before anything else, and hands you the
   `AckIssuer`. Connect here.
 - **`poll_events`** services control-plane work (rebalance callbacks,
-  statistics) and returns the next `SourceEvent` — for a simple source
+  statistics) and returns the next `SourceEvent`: for a simple source
   `LanesAssigned(lanes)`, `LanesRevoked { lanes, barrier }`, or `Idle`
   (the full set, including the additive and completion events, is under
   [Epochs and rebalances](#epochs-and-rebalances)). The runtime calls it
-  regularly **regardless of backpressure state** — pausing data never
+  regularly **regardless of backpressure state**. Pausing data never
   pauses the control plane, which is how group liveness survives a slow
   sink.
 - **`commit`** receives per-partition committable watermarks. Each is
-  **one past the last acknowledged offset** — store it as-is. This is the
+  **one past the last acknowledged offset**; store it as-is. This is the
   framework's convention everywhere, and the industry's. Interval-driven;
   durability is per your source's own policy.
 - **`flush_commits`** (default no-op) must synchronously flush stored
-  positions — the runtime calls it at shutdown and revocation.
+  positions; the runtime calls it at shutdown and revocation.
 - **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
@@ -98,13 +98,13 @@ them wherever your source resumes from instead.
 
 A source emits `RawPayload`s; a deserializer decodes one payload into records.
 For a **message** source the message boundary *is* the record boundary, so
-nothing extra is needed. For a **streaming** source — an object-storage
-backfill, an HTTP chunked body, a WebSocket stream — one transfer is a large
+nothing extra is needed. For a **streaming** source (an object-storage
+backfill, an HTTP chunked body, a WebSocket stream) one transfer is a large
 byte stream that must be cut into records *before* the deserializer sees them.
 That cutting is **framing**. The *seam* is transport-agnostic and lives in
 `spate_core::framing`, but the concrete framer is a property of the **format**, so
 it is owned by the format crate and handed to a source at assembly time. The
-trait is quoted here to be read rather than run — you implement it in a format
+trait is quoted here to be read rather than run. You implement it in a format
 crate, and each method's contract is cut to the one line that matters at this
 distance:
 
@@ -117,11 +117,11 @@ pub trait RecordFramer: Send {
 }
 ```
 
-A framer **must be a pure function of the byte stream** — the record sequence
-must not depend on how bytes arrive in chunks — so a source that resumes by
+A framer **must be a pure function of the byte stream**. The record sequence
+must not depend on how bytes arrive in chunks, so a source that resumes by
 record index replays deterministically. The framer is owned by the **format**
-crate, not the source — a newline-delimited format ships a line framer, a
-container format ships a block framer. `FramerWriter` bridges a `Write`-based
+crate, not the source. A newline-delimited format ships a line framer
+and a container format ships a block framer. `FramerWriter` bridges a `Write`-based
 decompressor to a framer so compression stays orthogonal. A streaming source
 takes its framer at construction and stays format-agnostic, so every streaming
 source reuses every format's framer. Worked reference:
@@ -141,10 +141,10 @@ fn framing_contract(&self) -> FramingContract {
 
 The contract reaches the chain as `ctx.source_framing`, and a format crate's
 deserializer builder reads it there to derive its own granularity and to
-reject a double-framing configuration — source frames *and* deserializer
-frames (worked reference: [`spate-json`](repo:crates/spate-json)'s
+reject a double-framing configuration where the source frames *and* the
+deserializer frames (worked reference: [`spate-json`](repo:crates/spate-json)'s
 `JsonDeserializerBuilder::for_source_framing`). Not every layout fits this
-model — columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
+model. Columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
 per-record byte boundary and belong to a future record-batch reader source,
 not a framer.
 
@@ -153,7 +153,7 @@ not a framer.
 Assignment changes are where at-least-once is won or lost:
 
 - **`LanesAssigned` bumps the assignment epoch** in the checkpointer, and
-  acks issued under a previous epoch are discarded — a stale ack from a
+  acks issued under a previous epoch are discarded, so a stale ack from a
   revoked assignment can never advance a new epoch's watermark.
 - **`LanesAssigned` is eager**: `begin_epoch` replaces all trackers, so a
   `LanesAssigned` event must describe the **full** assignment following a
@@ -161,17 +161,17 @@ Assignment changes are where at-least-once is won or lost:
   commits live lanes if a source violates this.)
 - **`LanesAdded` is the additive alternative**: new lanes join the
   *current* epoch; existing lanes and their in-flight acks are untouched.
-  Lane ids must be new — never reuse an id from the source's lifetime —
-  and each lane's partition must be fresh, not one revoked earlier in the
-  epoch. Coordinated sources emit this for split gains, so a routine gain
+  Lane ids must be new, never reused from the source's lifetime,
+  and each lane's partition must be fresh, not one revoked earlier in
+  the epoch. Coordinated sources emit this for split gains, so a routine gain
   never drains flowing lanes.
 - **`LanesRevoked` carries a `DrainBarrier`.** The runtime trips it for the
   owning pipeline threads, which stop the lanes, flush in-flight records,
-  and arrive at the barrier. Complete the revocation — final synchronous
-  commit included — only after `DrainBarrier::wait` returns. This is the
+  and arrive at the barrier. Complete the revocation, final synchronous
+  commit included, only after `DrainBarrier::wait` returns. This is the
   choreography that lets a scale-down cost only the uncommitted tail; see
   [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
-- **`LanesRetired` removes finished lanes without a barrier** — strictly
+- **`LanesRetired` removes finished lanes without a barrier**, strictly
   for lanes whose input is fully delivered, acknowledged, *and committed*
   (e.g. a coordinated split whose terminal progress reached the store), so
   by contract nothing unflushed or uncommitted can exist behind them. If
@@ -180,13 +180,13 @@ Assignment changes are where at-least-once is won or lost:
 - **`CommitReady { partitions }` is a latency hint**: the named lanes have
   decided end-of-input, and a commit outside the periodic tick is
   worthwhile now. The runtime briefly tightens its commit cadence for
-  those partitions only — bounded by one commit interval — until their
+  those partitions only, bounded by one commit interval, until their
   acks quiesce. Correctness never depends on it.
 
 :::warning
 Never block inside `poll_events` waiting on data-plane progress you
 yourself gate. The one sanctioned wait is `DrainBarrier::wait` during a
-revocation — the runtime guarantees the pipeline threads are draining
+revocation, where the runtime guarantees the pipeline threads are draining
 toward it.
 :::
 
@@ -194,12 +194,12 @@ toward it.
 
 Drive your source without a full pipeline: construct a `Checkpointer`, call
 `open` with `SourceCtx::new(cp.handle())`, poll events, poll lanes, and
-assert on committed watermarks — the bottom half of
+assert on committed watermarks. The bottom half of
 [`custom_operator.rs`](repo:crates/spate/examples/custom_operator.rs) does
 exactly this with the memory source, and
 [Testing pipelines](../03-guides/testing-pipelines.mdx) covers the
 `spate-test` harness. To run it for real, hand it to the builder:
-`pipeline.sink(...)?.chains(...).run(source)` — the source stays a terminal
+`pipeline.sink(...)?.chains(...).run(source)`. The source stays a terminal
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
 
@@ -207,44 +207,45 @@ generic, so no registration is needed
 
 A broker-less source can let several pipeline replicas divide its work by
 plugging into the [coordination seam](../02-concepts/07-source-coordination.mdx).
-You implement two small traits — *what the work is* and *how to read one
-piece of it* — and embed the framework's `CoordinationDriver`, which owns
-all of the assignment choreography, fencing bookkeeping, and completion
+You implement two small traits, *what the work is* and *how to read one
+piece of it*, and embed the framework's `CoordinationDriver`, which owns
+the assignment choreography, fencing bookkeeping, and completion
 tracking. Everything below is the complete wiring, rendered from
-[`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs)
-— two instances dividing a synthetic 1,000-row ledger over a shared in-memory
+[`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs),
+where two instances divide a synthetic 1,000-row ledger over a shared in-memory
 store, in one process and with nothing installed:
 
 ```sh
 cargo run -p spate --features coordination --example custom_coordinated_source
 ```
 
-Every type named from here on lives under `spate::coordination` — the driver
-and its callbacks in the `driver` submodule, the shipped stores under `store`.
+Every type named from here on lives under `spate::coordination`, with the
+driver and its callbacks in the `driver` submodule and the shipped stores
+under `store`.
 
 ### 1. Plan the work: `SplitPlanner`
 
-The planner enumerates the input as **splits** — leasable work units with
+The planner enumerates the input as **splits**: leasable work units with
 deterministic ids. It runs only on the fleet's elected leader; workers
 receive the descriptors and never re-enumerate.
 
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=planner
 ```
 
-`LedgerPlanner` is two methods, with these contracts behind them:
+`LedgerPlanner`'s methods carry these contracts:
 
 - **`fingerprint` is the job's identity, and it is derived from config, never
   from the enumeration.** Every instance of one job must produce byte-equal
   output; the odd one out is rejected at startup rather than allowed to plan
   a different job into the same store.
-- **`plan` may do real I/O** — a listing, an index scan — because it runs on
+- **`plan` may do I/O** (a listing, an index scan) because it runs on
   the blocking pool rather than the async loop. It must be idempotent in the
-  only sense that matters here: unchanged work yields the same split ids, so
+  sense that unchanged work yields the same split ids, so
   a replan or a leader failover re-emits what is already there and the store
   takes it as a no-op.
 - **A descriptor is opaque bytes and travels to every future owner**, so keep
-  it small and decodable on its own. The weight beside it is a cost hint —
-  bytes, rows, whatever the input measures itself in — used to balance the
+  it small and decodable on its own. The weight beside it is a cost hint in
+  bytes, rows, or whatever the input measures itself in, used to balance the
   assignment.
 - **`PlanFinality` decides whether the job can finish.** `Final` means the
   enumeration is complete and completion is reachable. `Open` means the leader
@@ -253,21 +254,21 @@ receive the descriptors and never re-enumerate.
 
 Sizing guidance: roughly uniform-cost splits, tens of MB to ~128 MB (or
 the row-count equivalent). Migrating from a pre-coordination checkpoint:
-attach it with `PlannedSplit::with_seed(progress)` — seeds are
+attach it with `PlannedSplit::with_seed(progress)`; seeds are
 first-writer-wins and never overwrite live progress. A brand-new source
 plans without seeds; an empty `Final` plan completes immediately. (A
 source whose legacy checkpoint cannot be mapped onto splits may prefer a
-clean cutover instead — see *Retrofitting an existing source* below.)
+clean cutover instead; see *Retrofitting an existing source* below.)
 
 Further practicalities:
 
 - **The planner brings its own I/O.** `PlanContext` carries no client and
-  no runtime handle — capture both at construction. `plan` runs on the
+  no runtime handle, so capture both at construction. `plan` runs on the
   blocking pool, so `Handle::block_on(async_listing())` inside it is the
   intended shape (worked reference: [`spate-s3`](repo:crates/spate-s3)'s
   planner).
 - **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
-  names (object keys, table names) rarely qualify — never embed them. Digest
+  names (object keys, table names) rarely qualify, so never embed them. Digest
   them instead. The worked reference ([`spate-s3`](repo:crates/spate-s3))
   hashes the sorted member keys *and their content versions* plus a
   packing-version constant (truncated SHA-256, base64url), so
@@ -277,34 +278,34 @@ Further practicalities:
 
 ### 2. Read the work: `SplitSource`
 
-Implement the driver's callbacks on your **lane-assembly context** — the
-sub-struct holding what lane construction needs, `LedgerCtx` here — not on the
-source itself, so the driver (a sibling field) and the context borrow
-disjointly:
+Implement the driver's callbacks on your **lane-assembly context**, the
+sub-struct holding what lane construction needs (`LedgerCtx` here), rather
+than on the source itself, so the driver (a sibling field) and the context
+borrow disjointly:
 
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=split_source
 ```
 
-Five callbacks, and what each owes the driver:
+What each callback owes the driver:
 
 - **`open_split`** materializes the data lane for a gained or re-assigned
   split. The descriptor the planner wrote arrives verbatim in
-  `opening.split.descriptor` — decode it here, because a worker never saw the
+  `opening.split.descriptor`; decode it here, because a worker never saw the
   planner run. `opening.resume` is the authoritative committed progress and has
   already been through `validate_resume`, so start exactly there. Spawn your
   fetchers here; never block on data, and clone `opening.waker` into any lane
-  with a background edge to signal — see the wakeup contract below. The
+  with a background edge to signal. See the wakeup contract below. The
   ledger's lane generates its rows inside `poll`, so it spawns nothing and
   holds no waker.
 - **`validate_resume`** drift-checks carried progress against this instance's
   view of the split before the driver trusts a byte of it. It defaults to
   accepting; [the drift check](#the-drift-check-validate_resume) below is a
-  worked one, and says what rejecting actually does.
+  worked one, and says what rejecting does.
 - **`encode_commit`** snapshots committable progress at an acked watermark. The
   `state` payload is yours: version it, and round-trip everything the *next*
   owner needs, because it comes back as `opening.resume` and as
   `validate_resume`'s second argument. Mint `SplitProgress::completed` when
-  this watermark completes the split — fully delivered *and* fully
+  this watermark completes the split, meaning fully delivered *and* fully
   acknowledged, which is accounting you own. The usual shape is a terminal
   watermark the lane recorded at end-of-input and an acked watermark equal to
   it; a split with a known record count, like the ledger's ranges, can compare
@@ -313,29 +314,29 @@ Five callbacks, and what each owes the driver:
   whose members yield zero records, or whose final ack landed exactly at the
   previous commit. Return `Some(SplitProgress::completed(…))` when done and
   `None` while data is in flight. Without it a recordless split never finishes
-  and the job never completes — the ledger's ranges are never empty, which is
-  why its implementation is a comment and a `None`.
-- **`close_split`** ends the tenancy. The split's lane is being retired — lost,
-  fenced, completed, handed off, or shut down — so *detach* its fetcher rather
+  and the job never completes. The ledger's ranges are never empty, so its
+  implementation is a comment and a `None`.
+- **`close_split`** ends the tenancy. The split's lane is being retired (lost,
+  fenced, completed, handed off, or shut down), so *detach* its fetcher rather
   than abort it, since the pipeline thread may still be draining the lane, and
   do not block. The driver calls neither `encode_commit` nor `sweep` for that
   split afterwards, so drop its state here.
 
 Progress must be **split-relative**: a watermark encodes a position
 *within the split's own descriptor* (a member ordinal plus a record
-index, say), never a position in some whole-input enumeration — the next owner
-has only the descriptor to interpret it against. State is per-tenancy:
+index, say), never a position in some whole-input enumeration, since the next
+owner has only the descriptor to interpret it against. State is per-tenancy:
 `close_split` ends one (nothing can follow it, so drop the split's state
-there), and a later re-gain is a fresh tenancy — `open_split` rebuilds
+there), and a later re-gain is a fresh tenancy, where `open_split` rebuilds
 from the carried progress.
 
-Three further callbacks carry defaults, and a source that leaves all three
-alone still reads its splits correctly — each of them saves latency, or spares
-a replay, rather than deciding what gets delivered.
+Further callbacks carry defaults, and a source that leaves them
+alone still reads its splits correctly. Each saves latency or spares
+a replay rather than deciding what gets delivered.
 
 **`take_finishing`** (default: reports none) is a pure latency hint: return
 the splits whose lanes decided end-of-input since the last call (the edge, not
-the level), and the driver surfaces them as `SourceEvent::CommitReady` — the
+the level), and the driver surfaces them as `SourceEvent::CommitReady`. The
 runtime then chases their final acks with a temporarily tightened commit
 cadence (bounded by one commit interval) instead of waiting out the periodic
 tick, so a split completes and frees its working-set slot within milliseconds
@@ -346,14 +347,14 @@ the terminal commit lands on the next tick either way.
 are a pair. When the leader moves an owned split to another instance,
 `begin_revoke` asks this one to stop that split's intake at a safe boundary
 while keeping its commit state; return `true` to accept, and the default
-`false` declines. `drain_ready` then reports that split's final progress —
+`false` declines. `drain_ready` then reports that split's final progress:
 `Some(progress)` once everything its lane emitted is acked *and* committed,
 `None` while any of that tail is still in flight. It is level-triggered, so
 keep answering `Some` until the driver retires the split. A source that
-accepted in `begin_revoke` must eventually answer `Some` here, which is what
-makes the two defaults consistent with each other: declining a revocation
+accepted in `begin_revoke` must eventually answer `Some` here, which keeps
+the two defaults consistent, since declining a revocation
 means never owing a drain. Declining is safe but not free, because a
-revocation is the leader's decision rather than a proposal — the split leaves
+revocation is the leader's decision rather than a proposal. The split leaves
 either way, and what would have been a clean transfer becomes a replay of the
 uncommitted tail under the next owner.
 
@@ -361,12 +362,12 @@ uncommitted tail under the next owner.
 
 Carried progress describes the split as it stood when the progress was written.
 The two come apart whenever a replan moves an id's bounds under progress
-already committed against them — a job restarted against a different input
-size, a planner whose ranges shift — and the resume point then counts records
-the split no longer covers. A watermark alone cannot reveal that: a number in
-range looks the same either way. So a commit pins the descriptor it was
-produced against, and `LedgerCtx`'s implementation — one method of the
-`SplitSource` impl above — re-reads that pin as well as the watermark's place
+already committed against them, as when a job is restarted against a different
+input size or a planner's ranges shift, and the resume point then counts
+records the split no longer covers. A watermark alone cannot reveal that,
+because a number in range looks the same either way. So a commit pins the descriptor it
+was produced against, and `LedgerCtx`'s implementation, one method of the
+`SplitSource` impl above, re-reads that pin as well as the watermark's place
 in the range:
 
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=validate_resume
@@ -374,13 +375,14 @@ in the range:
 
 **A rejection hands the split back, and the error's class decides the run.**
 The driver raises the rejection before it records the tenancy or stages the
-opening — so the split is never opened, with no lane and no partition id —
+opening, so the split is never opened, with no lane and no partition id,
 and reports it to the coordinator as poison: one delivery attempt is consumed,
 the lease is dropped so a peer can pick the split up, and at the attempt cap
 the split is quarantined. The error then leaves the driver through your own
 `poll_events`, where the controller reads its class. **Class it `Fatal`** and
-the run ends `ExitState::Failed` with the drift named in its reason — the
-honest outcome for progress nothing can reconcile. Any other class is logged
+the run ends `ExitState::Failed` with the drift named in its reason. That is
+the outcome to choose when nothing can reconcile the carried progress. Any
+other class is logged
 as a retryable control-plane error and the run continues on its remaining
 splits; a rejection every owner repeats then ends the job stalled at the
 attempt cap instead.
@@ -395,15 +397,15 @@ attempt cap instead.
 - **The coordinator arrives fully built**, from assembly (step 4 below); expose
   that as a `with_coordinator(...)` builder on a config-driven source.
   `CoordinationDriver::new` takes the boxed coordinator and nothing else.
-- **`driver.start` returns the empty ready signal** —
+- **`driver.start` returns the empty ready signal**,
   `SourceEvent::LanesAssigned(vec![])`. It bumps the controller's assignment
   epoch and marks the pipeline running while the claims race, and the splits
   then arrive additively as `SourceEvent::LanesAdded`.
 - **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
   either durable in the store or deferred after a transient store failure. A
   deferred one does not go out again on a bare tick: it rides that split's next
-  commit — the next watermark it acks, which merges past the deferred one, or
-  the terminal progress `sweep` returns if no watermark follows. The previous
+  commit, either the next watermark it acks, which merges past the deferred
+  one, or the terminal progress `sweep` returns if no watermark follows. The previous
   durable state stays authoritative meanwhile, so a crash before the recommit
   widens replay rather than losing data.
 - **Your `Drop` calls `driver.release()`.** The driver has no `Drop` of its
@@ -413,10 +415,10 @@ attempt cap instead.
 
 What the driver owns so you don't: additive gains (each gain mints a
 fresh, never-reused lane id and joins the running assignment via
-`LanesAdded` — flowing lanes are never drained because a peer's split
+`LanesAdded`, so flowing lanes are never drained because a peer's split
 arrived); a fresh `PartitionId` per tenancy (so a late drain-commit from
-a lost split resolves to a retired tenancy and is skipped — no zombie
-folds); the exit split — losses and fences leave through `LanesRevoked`
+a lost split resolves to a retired tenancy and is skipped, with no zombie
+folds); the exit split, where losses and fences leave through `LanesRevoked`
 with the drain barrier, while a split that reached its terminal commit and
 one that finished a cooperative handoff both leave barrier-less through
 `LanesRetired` (in either case a landed commit already proved nothing is in
@@ -424,8 +426,8 @@ flight); fenced-commit triage (`Fenced` → quarantine the tenancy, surface
 the loss; `Retryable` → defer to the split's next commit); completion sweeps
 and the `take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
 `Drained`. A **stalled** job
-(quarantined splits blocking completion) is a fatal error by default —
-build the driver with `CoordinationDriver::new(...).stall_drains(true)`
+(quarantined splits blocking completion) is a fatal error by default.
+Build the driver with `CoordinationDriver::new(...).stall_drains(true)`
 (a consuming builder, applied at construction) to turn it into a
 drain-with-warning. Report a poison split you cannot process with
 `driver.fail(&mut ctx, &split, "reason")`: it consumes a delivery attempt
@@ -433,7 +435,7 @@ and hands the split back (quarantine happens at the attempt cap).
 
 **Poison travels a side channel, never a lane error.** A lane `poll`
 error is terminal for the whole pipeline, and `fail` needs `&mut self` on
-the source — which a lane, polled on a pipeline thread, does not have. So
+the source, which a lane, polled on a pipeline thread, does not have. So
 an object-level failure (a deleted or corrupt input) must not surface as
 a poll error: the lane sends a report over a channel (`std::sync::mpsc`
 works; the lane goes quiescent, returning empty polls), and the source
@@ -442,42 +444,42 @@ for each report before delegating to `driver.poll_events`. Worked reference:
 [`spate-s3`](repo:crates/spate-s3)'s lane/context pair.
 
 **Signal the waker on the edges the control plane cannot see.** The
-driver — not the backend — owns the control-plane wait, because the two
+driver owns the control-plane wait rather than the backend, because the two
 things worth waking for arrive from different directions: the backend's
 events, and *your lanes* reaching end-of-input on pipeline threads. Only
 the driver sees both. `SplitOpening::waker` is a `ControlWaker`: clone it
-into every lane and call `wake()` on exactly two edges — when the lane
-decides end-of-input, and when it reports poison. Both are per-tenancy
+into every lane and call `wake()` on exactly two edges, when the lane
+decides end-of-input and when it reports poison. Both are per-tenancy
 edges, never the per-record path.
 
 Signaling is non-blocking, a burst collapses into one wakeup, and a
 signal arriving between the driver's check and its park is buffered
-rather than lost — so the ordering rule is simply *make the state visible
+rather than lost, so the ordering rule is *make the state visible
 first, then wake*. Dropping a `wake()` call is silent: the work still
-completes, it just waits out a full idle timeout first, so a split's
+completes, but waits out a full idle timeout first, so a split's
 completion (and the working-set slot it frees) is delayed by up to
 `event_poll_timeout` instead of surfacing in microseconds.
 
 The same contract binds a coordination **backend**: `SplitCoordinator::poll`
-takes no timeout and must not block — return whatever is pending,
-including nothing — and `set_waker` hands over the handle to signal
-whenever a later `poll` would return something. There is deliberately no
+takes no timeout and must not block, returning whatever is pending,
+including nothing, and `set_waker` hands over the handle to signal
+whenever a later `poll` would return something. There is no
 default `set_waker`: a no-op one would leave the backend parking
 internally *and* the driver parking on top.
 
 **How a coordinated job ends.** On a `Final` plan, once every split is
-committed complete, every instance — including idle standbys — observes
+committed complete, every instance, including idle standbys, observes
 `AllComplete`; the driver returns `SourceEvent::Drained` and a bounded
 runtime exits `ExitState::Completed` with the usual guarantee (every
 acked record durably committed). `Stalled` surfaces as a fatal error →
 `ExitState::Failed` (or a warned drain under `stall_drains(true)`). An
-`Open` plan never reports either — operators stop those jobs with a
+`Open` plan never reports either; operators stop those jobs with a
 signal drain.
 
 ### 4. Construct a backend
 
 The coordinator is injected at assembly time, exactly like the framer
-seam. Whatever the backend, the shape is the same — build a
+seam. Whatever the backend, the shape is the same: build a
 [coordination store](../04-connectors/coordination/README.mdx), wrap it in a
 `StoreCoordinator`, hand that to your source:
 
@@ -487,8 +489,8 @@ seam. Whatever the backend, the shape is the same — build a
 Some of those arguments carry more than their names suggest:
 
 - **`instance_id` must be unique across live workers**, and it defaults to a
-  fresh random id per run. Set it to something stable per replica — the pod
-  name, the ordinal, whatever your scheduler guarantees — and a restart
+  fresh random id per run. Set it to something stable per replica (the pod
+  name, the ordinal, whatever your scheduler guarantees) and a restart
   reclaims its own splits without waiting a lease out. Two live processes
   sharing one id is detected and fatal, so a value stable across *replicas*
   is worse than no value at all.
@@ -500,7 +502,7 @@ Some of those arguments carry more than their names suggest:
 - **The trailing `None` is the metrics slot**, filled in under
   [Metrics](#metrics) below.
 
-Tests and single-process runs swap the store — nothing else changes, and
+Tests and single-process runs swap the store; nothing else changes, and
 the `coordination` feature alone suffices, with no backend dependency tree:
 
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=store
@@ -511,10 +513,10 @@ comes from; a durable store takes the same value from wherever its own
 configuration lives.
 
 Building a durable store is the store's business, not the source's:
-requirements, credentials and outage behavior are on its page. What matters
-here is that construction is **synchronous and lazy** — connecting and
+requirements, credentials and outage behavior are on its page. Construction is
+**synchronous and lazy**: connecting and
 provisioning happen under the coordinator's startup retry budget, so a store
-that is down at boot retries with backoff, while a genuine misconfiguration (a
+that is down at boot retries with backoff, while a misconfiguration (a
 `lease_duration` changed mid-job, a store TTL diverging from the coordination
 config) fails fast with an actionable message.
 
@@ -538,14 +540,14 @@ whole-source checkpoint retrofits in the moves below (worked reference:
    dealt the enumerated work across N lanes becomes the planner (the
    enumeration, leader-only) plus `open_split` (one lane per gained
    split). Static assignment, EOF flags, and "all lanes done" logic all
-   disappear — the driver owns assignment cycles and completion.
+   disappear, since the driver owns assignment cycles and completion.
 3. **Decide the checkpoint story.** Per-split fenced progress in the
    coordination store replaces the whole-source checkpoint; they cannot
    coexist as two sources of truth. If old progress maps cleanly onto
    splits, seed it (`PlannedSplit::with_seed`); if the old layout is
    keyed by something splits don't preserve (a per-lane round-robin manifest,
-   say), make a clean cutover — delete the legacy
-   path, and let the job fingerprint refuse any config that could
+   say), make a clean cutover, deleting the legacy
+   path and letting the job fingerprint refuse any config that could
    misread old state.
 
 ### Metrics
@@ -553,9 +555,9 @@ whole-source checkpoint retrofits in the moves below (worked reference:
 The `spate_coordination_*` families are framework-owned and pre-registered:
 build `CoordinationMetrics::new(&labels)` and pass it to
 `StoreCoordinator::new` (metrics are a constructor parameter; there is no
-later hook). The `labels` are `ComponentLabels` — at assembly time build
-them yourself (after `Pipeline::from_config` has installed the recorder);
-a source constructing its own fallback coordinator inside `open` reuses
+later hook). The `labels` are `ComponentLabels`. At assembly time build
+them yourself (after `Pipeline::from_config` has installed the recorder),
+while a source constructing its own fallback coordinator inside `open` reuses
 its meter's: `ctx.meter.as_ref().map(|m| CoordinationMetrics::new(m.labels()))`.
 Passing `None` runs without coordination metrics; nothing registers
 per-record.
@@ -568,5 +570,5 @@ outcomes (`Fenced`/`Retryable`/`Fatal`), assert on observed commits,
 failure reports, and releases; `take_planner()` hands back the planner
 your source registered so a test can run it directly and feed its plan
 back through `gain(...)`. For the real protocol end to end, run two
-sources over one shared `MemoryStore` in a test — the pattern of
+sources over one shared `MemoryStore` in a test, the pattern of
 [`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs).

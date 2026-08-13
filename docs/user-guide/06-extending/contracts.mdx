@@ -6,7 +6,7 @@ a source, a sink or an operator; this page is the seam they all meet at, and the
 types that only make sense once you have seen it.
 
 Exact signatures live on [docs.rs](../07-reference/README.mdx). What follows is
-the shape and, where it is not obvious, why it is that shape — because several
+the shape and, where it is not obvious, why it is that shape, since several
 of these look stranger than they are until you know what they are working
 around.
 
@@ -33,7 +33,7 @@ lifetime that varies per call, and records here *borrow* from the source's
 buffers, so their type is lifetime-parameterized. `Box<dyn RunnableChain>` is
 only legal because **no lifetime-parameterized type is ever stored across the
 call.** Records are deserialized, transformed and serialized into shard frames
-entirely inside one `push_batch` — born and dead within it — so by the time it
+entirely inside one `push_batch`, born and dead within it, so by the time it
 returns there is nothing borrowed left to name.
 
 Consequences worth knowing before you design around them:
@@ -41,7 +41,7 @@ Consequences worth knowing before you design around them:
 - Dispatch costs one virtual call **per batch**, amortized over every record in
   it. Everything inside the chain is monomorphized and inlines freely.
 - Nothing can hold a record beyond the call. Windowing, sorting and stateful
-  aggregation are structurally impossible rather than merely unimplemented.
+  aggregation are structurally impossible rather than unimplemented.
 
 ## Naming a borrowed record: `RecFamily`
 
@@ -56,7 +56,7 @@ pub trait RecFamily: 'static { type Rec<'buf>: Send; }
 ```
 
 You write a marker type whose only job is to carry the associated type. Use
-`Owned<T>` when your records do not borrow — most user-defined record types do
+`Owned<T>` when your records do not borrow. Most user-defined record types do
 not, and you never need to think about this again.
 
 This is the least intuitive part of the framework, and its error messages are
@@ -89,12 +89,12 @@ pub struct Record<T> {
 ```
 
 `RecordMeta` is `Copy`, so passing it around costs nothing. The `AckRef` is a
-clone of the batch's acknowledgment handle — see
+clone of the batch's acknowledgment handle. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for what
 happens when it drops.
 
 `push_batch` returns a `PushOutcome`. When it reports that it is blocked, the
-reason matters, and they are handled very differently:
+reason matters, and the two are handled differently:
 
 | Reason | Means | What the framework does |
 | --- | --- | --- |
@@ -118,7 +118,7 @@ pub trait Collector<T> { fn push(&mut self, rec: Record<T>) -> Flow; }
 ```
 
 `CollectorFor<F>` is the family-erased, dyn-compatible form, used by
-`flat_map`'s stack-borrowed emitter — which is what makes fan-out allocate
+`flat_map`'s stack-borrowed emitter, so fan-out allocates
 nothing. [Writing operators](custom-operators.mdx) covers this, including the
 language limitation that keeps `map` and `try_map` off a borrowing family and
 puts a `map_rec` tier there instead.
@@ -138,7 +138,7 @@ pub trait ShardWriter: Send + Sync + 'static {
 
 A `SealedBatch` carries pre-encoded wire frames, row and byte counts, a
 deterministic deduplication token, and the acknowledgment handles. Rows are
-encoded on the **pipeline threads** by your `RowEncoder`, not here — see
+encoded on the **pipeline threads** by your `RowEncoder`, not here. See
 [Writing a sink](custom-sink.mdx) for both halves and for the `Drop` obligation
 that comes with holding acknowledgment handles.
 

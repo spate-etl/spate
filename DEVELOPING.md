@@ -30,7 +30,7 @@ These sit outside `gates`, by cost or by dependency:
 | `make bench-check` | Builds the whole tree again in the release profile |
 | `make bench-gungraun` | Needs Linux and valgrind |
 | `make bench-gungraun-check` | Proves only that the benches build, not what they count |
-| `make bench-ab`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
+| `make bench-ab`, `make bench-arms`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
 | `make attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
 
 Two commands deliberately omit `--locked`, which everything else passes because
@@ -187,6 +187,7 @@ asks about a specific change on a machine they control.
 ```sh
 make bench-list                 # every case, with its flags
 make bench-ab REF=main REPS=10  # this tree against a reference
+make bench-arms HEAD_FEATURES=spate-json/simd   # two feature arms of this tree
 ```
 
 Targets follow the same rule as the counted tier — `benches/<name>_wall.rs` plus
@@ -201,7 +202,15 @@ first pass away. Anything that drifts over a run otherwise lands entirely on
 whichever arm goes last, and the first repetition hands one arm the cold-start
 cost, which has been large enough here to decide which arm looked faster. Report
 an interval and the repetition count beside the value, so a reader can tell a
-difference from a spread. `make bench-ab` does all of that.
+difference from a spread. `make bench-ab` and `make bench-arms` do all of that.
+
+Which of the two you want depends on what the arms are. `bench-ab` varies the
+tree; `bench-arms` varies the Cargo features and holds the tree still, building
+each arm into its own directory. **Two `bench run`s and a `bench compare` are
+not a substitute for either**: a lone leg calibrates its own iteration count, so
+two of them pin two different counts for the same case, and every case that
+happens to is dropped — and nothing interleaves them, which is the failure this
+section is about.
 
 ### Criterion
 

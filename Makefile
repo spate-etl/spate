@@ -27,7 +27,7 @@
 .PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
         test-examples \
         check-features check-examples bench-check bench-gungraun \
-        bench-gungraun-check bench-list bench-ab bench-compare loom \
+        bench-gungraun-check bench-list bench-ab bench-arms bench-compare loom \
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
@@ -158,6 +158,8 @@ REF ?= main
 REPS ?= 10
 FILTER ?=
 FORMAT ?= table
+BASE_FEATURES ?=
+HEAD_FEATURES ?=
 
 bench-list: ## Every wall-clock bench case, with its flags (FILTER=substr narrows it)
 	cargo run -p spate-bench --features driver --locked --bin bench -- list --cases \
@@ -170,9 +172,19 @@ bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=10 FIL
 	cargo run -p spate-bench --features driver --locked --bin bench -- ab "$(REF)" \
 		--replicates "$(REPS)" --format "$(FORMAT)" $(if $(FILTER),--filter "$(FILTER)")
 
+# The same comparison over the other axis: one tree, two feature sets. Each arm
+# builds into its own cached directory, so the repository's warm `target/` is
+# left alone and a second run of the same pair is cheap. An empty
+# `BASE_FEATURES` is the default feature set, which is usually what the base arm
+# should be.
+bench-arms: ## Compare two feature arms: make bench-arms HEAD_FEATURES=pkg/feat FILTER=substr
+	cargo run -p spate-bench --features driver --locked --bin bench -- arms \
+		--base-features "$(BASE_FEATURES)" --head-features "$(HEAD_FEATURES)" \
+		--replicates "$(REPS)" --format "$(FORMAT)" $(if $(FILTER),--filter "$(FILTER)")
+
 # Re-renders two legs a previous run left behind — in another format, say —
-# without measuring anything again. `bench-ab` prints the two paths when it
-# finishes.
+# without measuring anything again. `bench-ab` and `bench-arms` print the two
+# paths when they finish.
 bench-compare: ## Re-render two legs: make bench-compare BASE=dir HEAD=dir FORMAT=markdown
 	cargo run -p spate-bench --features driver --locked --bin bench -- compare \
 		"$(BASE)" "$(HEAD)" --format "$(FORMAT)"

@@ -132,6 +132,14 @@ pub struct Record {
     pub seed: u64,
     /// Digest of everything the case absorbed into its [`crate::Corpus`].
     pub corpus_digest: String,
+    /// Digest of everything the case *declared* about the build, absent when it
+    /// declared nothing.
+    ///
+    /// The compiled subject rather than the measured bytes. Two builds of one
+    /// commit must agree on it; two feature arms must not. A case that declares
+    /// nothing states neither, and is compared on its corpus alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_digest: Option<String>,
     /// The measured quantities. Absent is not zero — see the module docs.
     pub metrics: BTreeMap<String, Metric>,
     /// Why a metric is missing, or anything else about how the record was
@@ -189,6 +197,7 @@ mod tests {
             erratic: false,
             seed: 12345,
             corpus_digest: "0123456789abcdef".to_owned(),
+            build_digest: Some("fedcba9876543210".to_owned()),
             metrics: BTreeMap::from([
                 (
                     super::WALL_NS_PER_ITER.to_owned(),
@@ -203,6 +212,7 @@ mod tests {
             build: BuildFingerprint {
                 protocol: 1,
                 leg: "head".to_owned(),
+                axis: crate::fingerprint::Axis::Commit,
                 rustc: Some("rustc 1.94.0".to_owned()),
                 host_triple: Some("aarch64-apple-darwin".to_owned()),
                 profile: Some("bench".to_owned()),
@@ -232,13 +242,13 @@ mod tests {
             r#"{"schema":1,"#,
             r#""case":{"crate":"spate-bench","target":"selftest_wall","case":"sort_u64_16k"},"#,
             r#""replicate":3,"priming":false,"iters":64,"erratic":false,"seed":12345,"#,
-            r#""corpus_digest":"0123456789abcdef","#,
+            r#""corpus_digest":"0123456789abcdef","build_digest":"fedcba9876543210","#,
             r#""metrics":{"#,
             r#""records_per_s":{"value":987.0,"unit":"records/s","higher_is_better":true},"#,
             r#""wall_ns_per_iter":{"value":1234.5,"unit":"ns","higher_is_better":false}"#,
             r#"},"#,
             r#""notes":["peak_rss_bytes absent: the region never set the mark"],"#,
-            r#""build":{"protocol":1,"leg":"head","rustc":"rustc 1.94.0","#,
+            r#""build":{"protocol":1,"leg":"head","axis":"commit","rustc":"rustc 1.94.0","#,
             r#""host_triple":"aarch64-apple-darwin","profile":"bench","#,
             r#""codegen":"0f1e2d3c4b5a6978","features":["simd"],"#,
             r#""feature_args":["--features","simd"],"git_describe":"v0.1.0-3-gabc1234","dirty":true},"#,
@@ -266,11 +276,28 @@ mod tests {
         record.notes.clear();
         record.build.features.clear();
         record.build.feature_args.clear();
+        record.build_digest = None;
         let line = record.to_line().expect("serialises");
         assert!(!line.contains("notes"), "{line}");
         assert!(!line.contains("features"), "{line}");
+        assert!(!line.contains("build_digest"), "{line}");
 
         let parsed: Record = serde_json::from_str(&line).expect("parses");
+        assert_eq!(parsed, record);
+    }
+
+    /// A leg written before `build_digest` existed still parses, and parses as
+    /// "declared nothing" rather than failing. The comparator reads records
+    /// written by another checkout's copy of this crate, so a field this one
+    /// added has to be absent-tolerant in both directions.
+    #[test]
+    fn a_record_without_a_build_digest_parses_as_having_declared_nothing() {
+        let mut record = fixture();
+        record.build_digest = None;
+        let line = record.to_line().expect("serialises");
+
+        let parsed: Record = serde_json::from_str(&line).expect("parses");
+        assert_eq!(parsed.build_digest, None);
         assert_eq!(parsed, record);
     }
 

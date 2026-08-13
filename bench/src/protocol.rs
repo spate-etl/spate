@@ -42,6 +42,15 @@ use crate::case::{RunOptions, Suite};
 use crate::fingerprint::{BuildFingerprint, Host};
 use crate::record::{CaseId, Record, SCHEMA_VERSION};
 
+/// The exit code a target uses when it understood the call and refused it.
+///
+/// Distinct from the codes a target exits with for reasons of its own — libtest
+/// panics with 101 when a `*_wall.rs` is missing its `harness = false` — so the
+/// driver can tell "this binary does not speak the protocol" from "this binary
+/// spoke it and said no". The reason goes to stderr, which is inherited, so it
+/// has already reached the operator by the time the driver sees this.
+pub const ERROR_EXIT: i32 = 2;
+
 /// The protocol version this crate speaks.
 ///
 /// A driver refuses a binary answering with anything else. The two sides of an
@@ -113,7 +122,7 @@ pub fn run(suite: &Suite, krate: &str, target: &str, args: &[String]) -> i32 {
         }
         Err(message) => {
             let _ = writeln!(std::io::stderr(), "{target}: {message}");
-            2
+            ERROR_EXIT
         }
     }
 }
@@ -204,6 +213,7 @@ fn dispatch(
                 erratic: case.erratic().is_some(),
                 seed,
                 corpus_digest: outcome.corpus_digest,
+                build_digest: outcome.build_digest,
                 metrics: outcome.metrics,
                 notes,
                 build: BuildFingerprint::from_env()?,

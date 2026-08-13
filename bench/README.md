@@ -14,13 +14,22 @@ counting is comparable across shared machines and timing is not.
 make bench-list                              # every case, with its flags
 make bench-ab REF=main REPS=10               # compare this tree against a ref
 make bench-ab REF=main FILTER=decode         # only cases whose id contains this
+make bench-arms HEAD_FEATURES=spate-json/simd   # compare two feature arms
 make bench-compare BASE=dir HEAD=dir FORMAT=markdown
 ```
 
 `bench-ab` builds the reference in a detached worktree, builds this tree, and
 interleaves the two — expect two full bench-profile builds before the first
-measurement. Both legs are written under `$TMPDIR/spate-bench`, or
-`SPATE_BENCH_CACHE` when that is set, never inside the repository.
+measurement. `bench-arms` is the same comparison over the other axis: one tree,
+two feature sets, each arm in its own build directory. Both legs are written
+under `$TMPDIR/spate-bench`, or `SPATE_BENCH_CACHE` when that is set, never
+inside the repository.
+
+Two `bench run`s and a `bench compare` are not a substitute for either. A single
+leg has no partner to inherit an iteration count from, so it calibrates its own;
+two of them pin two counts for the same case, and the comparator drops every
+case that happens to — leaving an empty table and a non-zero exit. Nor does
+anything interleave them.
 
 Targets live at `crates/<pkg>/benches/<name>_wall.rs`, and `make bench-list` is
 what says which exist — the case list comes from the compiled target rather than

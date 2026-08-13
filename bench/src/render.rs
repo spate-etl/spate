@@ -60,19 +60,24 @@ pub fn decision_rule() -> String {
 
 /// What the significant-changes table has to say, decided once.
 ///
-/// Both human formats render this rather than each deciding for itself. The
-/// distinction it carries — the rule was applied and nothing cleared it, versus
-/// the rule was never applied — is the one a report gets wrong by stating the
-/// first when the second happened, so it is settled in one place and phrased in
-/// one place.
+/// Both human formats render this rather than each deciding for itself, and the
+/// CLI reads it for its exit code. The distinction it carries — the rule was
+/// applied and nothing cleared it, versus the rule was never applied — is the
+/// one a report gets wrong by stating the first when the second happened, so it
+/// is settled in one place and phrased in one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Summary {
+pub enum Summary {
     /// Nothing paired, so there is no table at all.
     NothingComparable,
     /// Rows exist, and not one of them was both judged and eligible to be
     /// flagged. `unjudged` fell short of the replicate floor; the rest come from
     /// cases marked erratic.
-    NothingJudged { unjudged: usize, total: usize },
+    NothingJudged {
+        /// How many rows fell short of the replicate floor.
+        unjudged: usize,
+        /// How many rows there were in total.
+        total: usize,
+    },
     /// The rule was applied and no metric cleared it.
     NoneCleared,
     /// There are findings to print.
@@ -80,7 +85,9 @@ enum Summary {
 }
 
 impl Summary {
-    fn of(comparison: &Comparison) -> Self {
+    /// Classifies what a comparison has to say.
+    #[must_use]
+    pub fn of(comparison: &Comparison) -> Self {
         if comparison.rows.is_empty() {
             return Self::NothingComparable;
         }
@@ -345,7 +352,9 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
         replicate_span(comparison),
         // Labelled `head` because that is the leg they describe. The guard makes
         // them true of the base leg too, right up until an `--allow` waives the
-        // field that stopped being true.
+        // field that stopped being true — or the run is an arm comparison, where
+        // the feature set differs by construction and the divergence line below
+        // is what names the other arm's.
         format!(
             "head {} · {} · {} · {}",
             head.build.rustc.as_deref().unwrap_or("rustc unknown"),
@@ -389,6 +398,41 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
             ),
         },
     );
+
+    // Only when something was declared. A tree whose cases have no feature axis
+    // would otherwise carry a line saying nothing, every run, forever.
+    //
+    // Two conditions, opposite to each other, so two lines rather than one
+    // count: on the commit axis a case is dropped for declaring *different*
+    // builds, on the arm axis for declaring the *same* one. Which is which comes
+    // from the `Cause` — a single line reading "did NOT match" over both would
+    // state the exact opposite of what happened to half of them.
+    for (waived, out, what) in [
+        (
+            count(Cause::BuildCompared),
+            count(Cause::BuildLeftOut),
+            "did NOT match",
+        ),
+        (
+            count(Cause::BuildSameCompared),
+            count(Cause::BuildSameLeftOut),
+            "declared the SAME build on both arms",
+        ),
+    ] {
+        if waived + out == 0 {
+            continue;
+        }
+        lines.push(match (waived, out) {
+            (0, out) => format!("declared builds: {out} case(s) {what} and were left out"),
+            (waived, 0) => {
+                format!("declared builds: {waived} case(s) {what} and were compared anyway")
+            }
+            (waived, out) => format!(
+                "declared builds: {out} case(s) {what} and were left out, \
+                 {waived} more were compared anyway"
+            ),
+        });
+    }
 
     if !comparison.allowed.is_empty() {
         lines.push(format!(
@@ -626,7 +670,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use super::{decision_rule, json, markdown, table};
+    use super::{Summary, decision_rule, json, markdown, table};
     use crate::compare::{Cause, Comparison, Leg, NotComparable, Row};
     use crate::fingerprint::{BuildFingerprint, Host};
     use crate::record::{CaseId, Record, WALL_NS_PER_ITER};
@@ -638,6 +682,7 @@ mod tests {
             build: BuildFingerprint {
                 protocol: 1,
                 leg: name.to_owned(),
+                axis: crate::fingerprint::Axis::Commit,
                 rustc: Some("rustc 1.94.0".to_owned()),
                 host_triple: Some("aarch64-apple-darwin".to_owned()),
                 profile: Some("bench".to_owned()),
@@ -862,6 +907,30 @@ mod tests {
             assert!(
                 !rendered.contains("No metric cleared both halves"),
                 "{rendered}"
+            );
+        }
+    }
+
+    /// The classification the CLI exits on, asserted directly rather than
+    /// through a rendered sentence. `NothingComparable` is the only one that
+    /// earns a non-zero exit, and a report with findings must not: a regression
+    /// is a result, not a failure, and nothing in this tier gates anything.
+    #[test]
+    fn only_a_comparison_with_no_rows_classifies_as_nothing_comparable() {
+        assert_eq!(
+            Summary::of(&comparison(Vec::new(), Vec::new())),
+            Summary::NothingComparable
+        );
+        for rows in [
+            vec![row("a", Verdict::Regressed, false)],
+            vec![row("a", Verdict::NoChange, false)],
+            vec![row("a", Verdict::Improved, true)],
+            vec![unjudged_row("a")],
+        ] {
+            assert_ne!(
+                Summary::of(&comparison(rows, Vec::new())),
+                Summary::NothingComparable,
+                "a run that paired something exited as though it had not"
             );
         }
     }
@@ -1262,21 +1331,110 @@ mod tests {
 
     #[test]
     fn every_cause_reaches_the_json_as_a_token() {
-        let not_comparable = [Cause::DigestLeftOut, Cause::DigestCompared, Cause::Other]
-            .into_iter()
-            .map(|cause| NotComparable {
-                what: "spate-bench/selftest_wall/a".to_owned(),
-                why: "because".to_owned(),
-                cause,
-            })
-            .collect();
+        let not_comparable = [
+            Cause::DigestLeftOut,
+            Cause::DigestCompared,
+            Cause::BuildLeftOut,
+            Cause::BuildCompared,
+            Cause::Other,
+        ]
+        .into_iter()
+        .map(|cause| NotComparable {
+            what: "spate-bench/selftest_wall/a".to_owned(),
+            why: "because".to_owned(),
+            cause,
+        })
+        .collect();
         let cmp = comparison(vec![row("a", Verdict::NoChange, false)], not_comparable);
         let text = json(&cmp).expect("serialises");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
 
         assert_eq!(parsed["not_comparable"][0]["cause"], "digest_left_out");
         assert_eq!(parsed["not_comparable"][1]["cause"], "digest_compared");
-        assert_eq!(parsed["not_comparable"][2]["cause"], "other");
+        assert_eq!(parsed["not_comparable"][2]["cause"], "build_left_out");
+        assert_eq!(parsed["not_comparable"][3]["cause"], "build_compared");
+        assert_eq!(parsed["not_comparable"][4]["cause"], "other");
+    }
+
+    /// The two declared-build conditions are opposite, so the header has to
+    /// tell them apart. A single "did NOT match" count over both would state
+    /// the exact reverse of what happened to an arm run, in the line a reader
+    /// reads first — the failure the header's own guardrail comment names.
+    #[test]
+    fn the_header_does_not_call_an_arm_agreement_a_mismatch() {
+        let arm = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![NotComparable {
+                what: "spate-json/decode_wall/b".to_owned(),
+                why: "both arms declare the same build".to_owned(),
+                cause: Cause::BuildSameLeftOut,
+            }],
+        );
+        let rendered = markdown(&arm);
+        assert!(
+            rendered.contains("declared the SAME build on both arms and were left out"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("did NOT match"),
+            "the header says the opposite of what happened: {rendered}"
+        );
+    }
+
+    /// Both conditions in one report get a line each rather than one merged
+    /// count, which could only be phrased wrongly for one of them.
+    #[test]
+    fn the_header_counts_the_two_declared_build_conditions_separately() {
+        let mixed = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![
+                NotComparable {
+                    what: "x".to_owned(),
+                    why: "differs".to_owned(),
+                    cause: Cause::BuildLeftOut,
+                },
+                NotComparable {
+                    what: "y".to_owned(),
+                    why: "same".to_owned(),
+                    cause: Cause::BuildSameCompared,
+                },
+            ],
+        );
+        let rendered = markdown(&mixed);
+        assert!(
+            rendered.contains("declared builds: 1 case(s) did NOT match and were left out"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "declared builds: 1 case(s) declared the SAME build on both arms and were \
+                 compared anyway"
+            ),
+            "{rendered}"
+        );
+    }
+
+    /// The declared-build line appears only when something was declared. Most
+    /// targets have no feature axis, and a line saying "0 case(s)" on every run
+    /// of those is noise in the most-read part of the report.
+    #[test]
+    fn the_declared_build_line_appears_only_when_a_build_was_declared() {
+        let quiet = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        assert!(!markdown(&quiet).contains("declared builds"), "{quiet:?}");
+
+        let loud = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![NotComparable {
+                what: "spate-bench/selftest_wall/b".to_owned(),
+                why: "the declared build differs".to_owned(),
+                cause: Cause::BuildLeftOut,
+            }],
+        );
+        assert!(
+            markdown(&loud).contains("declared builds: 1 case(s) did NOT match and were left out"),
+            "{}",
+            markdown(&loud)
+        );
     }
 
     #[test]

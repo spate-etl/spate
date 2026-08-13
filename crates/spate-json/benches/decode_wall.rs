@@ -18,31 +18,49 @@
 //! `simd` swaps the byte-slice → value seam to a different parser, which makes
 //! this the one crate where a report could silently pair two implementations.
 //! Two independent tripwires stop it. The harness guards `features`, which
-//! records what was passed to cargo; every case here also absorbs
-//! [`BACKEND_ID`] into its corpus, which records what actually *compiled*.
-//! Only the second catches a change that makes `simd` a default feature — the
-//! two legs would then agree on `features` while decoding through different
-//! parsers.
+//! records what was passed to cargo; every case here also *declares*
+//! [`BACKEND_ID`], which records what actually compiled. Only the second
+//! catches a change that makes `simd` a default feature — the two legs would
+//! then agree on `features` while decoding through different parsers.
 //!
-//! So comparing the backends is a deliberate act rather than an accident. It
-//! is two legs of one commit, not one A/B run. A leg directory has to sit
-//! outside the repository, which is where the driver keeps its own:
+//! Declared rather than absorbed into the corpus, so the digest over the
+//! measured bytes keeps meaning what it says: the two arms decode the same
+//! payloads, and a run that had to waive the guard on those bytes to compare
+//! them could not tell that from a corpus that had genuinely diverged.
+//!
+//! Comparing the backends is two builds of one commit rather than two commits,
+//! which is what `arms` is:
 //!
 //! ```sh
-//! legs="${TMPDIR:-/tmp}/spate-json-backends"
-//! bench run --out "$legs/serde" --leg base
-//! bench run --out "$legs/simd"  --leg head --features simd
-//! bench compare "$legs/serde" "$legs/simd" --allow features --allow digest
+//! make bench-arms HEAD_FEATURES=spate-json/simd FILTER=decode_
 //! ```
 //!
-//! and the report says in its header which guards were waived. Both waivers
-//! are needed: `--allow features` alone leaves every shared case demoted on
-//! its corpus digest, which is the second tripwire doing its job.
+//! It builds each arm into its own directory, calibrates one iteration count on
+//! the base arm and pins it for both, and interleaves them — the same discipline
+//! `bench-ab` applies to two commits, which a comparison needs whatever the two
+//! legs differ in. No waiver is involved: on this axis the feature set is the
+//! subject rather than a guard, the corpus digests match because the two arms
+//! decode the same payloads, and the declared backends differ because that is
+//! the thing being measured. Two arms that declared the *same* backend would be
+//! refused, which is what a feature name spelled for the wrong package looks
+//! like.
+//!
+//! Expect the three `decode_floor_simd_*` cases to appear as present only in the
+//! head arm: they are `cfg(feature = "simd")`, so the base arm does not declare
+//! them and nothing pairs them.
+//!
+//! The three `decode_floor_serde_*` cases pair and should read flat. They call
+//! `serde_json` on both arms, so what an arm run prices for them is the two
+//! builds and not the two parsers — which makes them the control: a figure there
+//! bounds how much of the framework cases' margin belongs to code layout rather
+//! than to the swap. Read them first, and treat a margin no larger than theirs
+//! as unresolved.
 //!
 //! A leg built with `--features simd` also carries that backend's own floors,
-//! so the library margin reads inside one leg without waiving anything —
+//! so the library margin reads inside one leg without a second leg at all —
 //! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
-//! libraries over one corpus in one binary.
+//! libraries over one corpus in one binary, and is the more direct answer when
+//! the question is about the parsers rather than about what this crate adds.
 //!
 //! ## Which cases carry a floor
 //!
@@ -78,11 +96,11 @@
 //! decode-everything-emit-nothing shape.
 //!
 //! Nothing here pins an iteration count. The harness calibrates every case to
-//! its `--target-ms`, and its degenerate-region guard resolves an empty loop
-//! at those counts with several orders of magnitude to spare — 64 iterations
-//! measure 291 ns against a clock that never failed to resolve one in two
-//! hundred passes. A case wanting a longer region wants `--target-ms`, which
-//! is the harness's knob for it and moves every case together.
+//! its `--target-ms`, and its degenerate-region guard measures its floor at
+//! whatever count that yields, growing its own reference loop when the clock
+//! cannot resolve one that short. A case wanting a longer region wants
+//! `--target-ms`, which is the harness's knob for it and moves every case
+//! together.
 //!
 //! Run it with `make bench-ab REF=main FILTER=decode_`.
 //!
@@ -113,9 +131,14 @@ use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 /// counters from being summed into another's there.
 const COMPONENT: &str = "json";
 
+/// Records the bytes a case measures, and the parser it compiled them through.
+///
+/// The payload is absorbed and the backend declared: the two arms of this crate
+/// decode the *same* bytes through *different* code, so the payload has to match
+/// across them and the backend has to be the thing that says they are two arms.
 fn absorb<D>(corpus: &mut Corpus, rig: &Rig<D>) {
     corpus.absorb("payload", &rig.payload);
-    corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+    corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
 }
 
 fn payload_bytes<D>(rig: &RefCell<Rig<D>>) -> u64 {
@@ -384,7 +407,7 @@ fn serde_floor<T: 'static>(
             move |corpus, _seed| {
                 let bytes = payload();
                 corpus.absorb("payload", &bytes);
-                corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 bytes
             },
             move |b, bytes: &Vec<u8>| {
@@ -498,7 +521,7 @@ fn simd_floor<T: 'static>(
             move |corpus, _seed| {
                 let bytes = payload();
                 corpus.absorb("payload", &bytes);
-                corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 let state = SimdFloor {
                     payload: bytes,
                     scratch: RefCell::new((Vec::new(), simd_json::Buffers::new(0))),

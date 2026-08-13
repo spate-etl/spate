@@ -54,6 +54,34 @@ pub fn cache_root() -> PathBuf {
     }
 }
 
+/// The cached target directory one feature arm builds into.
+///
+/// Keyed by the flags rather than named after them: a feature list is an
+/// arbitrary string, and `--features spate-json/simd,other` is not a directory
+/// name. Keyed by the leg as well, so two arms never share a directory even when
+/// they were asked for identically — which is a legitimate run, being the A/A
+/// that shows what two builds of the same source cost against each other. A
+/// second run of the same pair reuses both, a cache in the ordinary sense where
+/// `rm -rf` costs a rebuild and nothing else.
+///
+/// Neither arm uses the repository's own `target/`: cargo keeps one build per
+/// directory, so the arms would overwrite each other, and using the warm one
+/// would charge the next ordinary `cargo build` for a rebuild it did not ask
+/// for.
+#[must_use]
+pub fn arm_target_dir(leg: &str, feature_args: &[String]) -> PathBuf {
+    use std::hash::Hasher as _;
+
+    let mut hasher = twox_hash::XxHash64::with_seed(0);
+    for arg in feature_args {
+        // Lengths folded in as well, so `["--features", "a,b"]` and
+        // `["--features", "a", "b"]` cannot key the same directory.
+        hasher.write(&(arg.len() as u64).to_le_bytes());
+        hasher.write(arg.as_bytes());
+    }
+    cache_root().join(format!("target-arm-{leg}-{:016x}", hasher.finish()))
+}
+
 /// Whether Ctrl-C has been seen.
 #[must_use]
 pub fn interrupted() -> bool {
@@ -276,7 +304,55 @@ pub fn describe(dir: &Path) -> (Option<String>, bool) {
 mod tests {
     use std::path::Path;
 
-    use super::{CACHE_ENV, Worktree, cache_root, describe};
+    use super::{CACHE_ENV, Worktree, arm_target_dir, cache_root, describe};
+
+    /// The property the leg is in the key for. Two arms asked for identically
+    /// is a legitimate run — it is the A/A of the mode — and cargo keeps one
+    /// build per directory, so sharing one would have each arm overwrite the
+    /// other and both legs measure whichever built last.
+    #[test]
+    fn two_arms_never_share_a_target_directory_even_with_identical_flags() {
+        let flags = vec!["--features".to_owned(), "spate-json/simd".to_owned()];
+        assert_ne!(
+            arm_target_dir("base", &flags),
+            arm_target_dir("head", &flags)
+        );
+    }
+
+    /// Keyed by the flags, so a second run of the same pair reuses the build,
+    /// and a different pair does not collide with it.
+    #[test]
+    fn an_arm_directory_is_stable_for_its_flags_and_distinct_between_them() {
+        let simd = vec!["--features".to_owned(), "spate-json/simd".to_owned()];
+        assert_eq!(arm_target_dir("head", &simd), arm_target_dir("head", &simd));
+        assert_ne!(arm_target_dir("head", &simd), arm_target_dir("head", &[]));
+        assert_ne!(
+            arm_target_dir("head", &simd),
+            arm_target_dir("head", &["--all-features".to_owned()])
+        );
+    }
+
+    /// The lengths are folded in for the reason the corpus folds them: without
+    /// them, one flag holding two features and two flags holding one each hash
+    /// to the same directory, and the two arms would build over each other.
+    #[test]
+    fn an_arm_directory_distinguishes_a_re_split_flag_list() {
+        assert_ne!(
+            arm_target_dir("head", &["--features".to_owned(), "a,b".to_owned()]),
+            arm_target_dir(
+                "head",
+                &["--features".to_owned(), "a".to_owned(), "b".to_owned()]
+            )
+        );
+    }
+
+    /// Under the cache root, so `outside_repo` accepts it and cargo and git
+    /// never find the artifacts.
+    #[test]
+    fn an_arm_directory_sits_under_the_cache_root() {
+        let dir = arm_target_dir("base", &[]);
+        assert!(dir.starts_with(cache_root()), "{}", dir.display());
+    }
 
     #[test]
     fn the_cache_root_is_outside_any_repository_by_default() {

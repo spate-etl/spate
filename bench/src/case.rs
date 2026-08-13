@@ -104,6 +104,21 @@ const DEGENERATE_FACTOR: f64 = 2.0;
 /// that need three consecutive stalls.
 const DEGENERATE_PASSES: u32 = 3;
 
+/// How much longer the floor probe runs each time the clock cannot resolve it.
+///
+/// Eight, so a count the clock misses by a little clears it in one step and one
+/// it misses by a lot still arrives in a handful — the whole search costs three
+/// empty loops per step, and only on the path that would otherwise refuse the
+/// case outright.
+const DEGENERATE_PROBE_GROWTH: u64 = 8;
+
+/// The longest empty loop the floor probe will time.
+///
+/// About four million iterations, a few milliseconds. Past that the probe would
+/// cost more than the region it guards, and a clock that cannot resolve it is
+/// not one this tier can measure against.
+const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
+
 /// Nanoseconds per iteration of a loop that does nothing but keep its counter.
 ///
 /// The guard that catches a bench reporting a plausible number while measuring
@@ -118,33 +133,65 @@ const DEGENERATE_PASSES: u32 = 3;
 /// scratch target, the difference between the two forms was 232 ns and
 /// 0.24 ns.
 ///
-/// Measured here rather than assumed, and at the same iteration count, so it
-/// costs what the case's own loop overhead costs and moves with the machine.
+/// Measured here rather than assumed, and at the case's own iteration count
+/// where the clock can resolve one, so it costs what the case's own loop
+/// overhead costs and moves with the machine.
+///
+/// # When the count is too small to time
+///
+/// A case whose routine is expensive calibrates to very few iterations — one
+/// costing a millisecond and a half lands on about thirty at the default
+/// `--target-ms`. An empty loop of thirty iterations takes tens of nanoseconds,
+/// against a clock whose tick is also tens, so every pass can read zero and the
+/// floor is unmeasurable through no fault of the case. That refuses a
+/// legitimate case, and refusing one aborts the whole run.
+///
+/// So the probe grows the loop, by [`DEGENERATE_PROBE_GROWTH`] a step up to
+/// [`DEGENERATE_PROBE_MAX`] iterations, until the clock resolves it, and divides
+/// by what it actually ran. A per-iteration cost is what the floor is either
+/// way; the multiple only buys enough elapsed time to see it.
+///
+/// The growth never applies to a count the clock already resolves, so no case
+/// that passes this guard today sees a different floor because of it.
 fn empty_loop_ns_per_iter(iters: u64) -> Option<f64> {
-    // Measured at the case's own iteration count, and timed with the same
-    // stopwatch, so the clock's own overhead sits in both numerators and
-    // cancels. That is what lets the guard hold at a pinned `.iters(64)` as
-    // well as at ten million — the count a case is pinned to is exactly where
-    // an author is most likely to be measuring something expensive, and where a
-    // threshold would have switched the guard off.
-    let mut floor: Option<f64> = None;
-    for _ in 0..DEGENERATE_PASSES {
-        let clock = Stopwatch::start();
-        for i in 0..iters {
-            std::hint::black_box(i);
+    let mut count = iters.max(1);
+    loop {
+        // Timed with the same stopwatch as the case, so the clock's own
+        // overhead sits in both numerators and cancels. That is what lets the
+        // guard hold at a pinned `.iters(64)` as well as at ten million — the
+        // count a case is pinned to is exactly where an author is most likely
+        // to be measuring something expensive, and where a threshold would have
+        // switched the guard off.
+        let mut floor: Option<f64> = None;
+        for _ in 0..DEGENERATE_PASSES {
+            let clock = Stopwatch::start();
+            for i in 0..count {
+                std::hint::black_box(i);
+            }
+            let elapsed = clock.elapsed_ns();
+            // A pass the clock read as zero is not a floor of zero — it is the
+            // clock declining to resolve the loop, and taking it as a minimum
+            // would set the floor to nothing and switch the guard off for the
+            // one case it exists to catch.
+            if elapsed > 0 {
+                let per_iter = elapsed as f64 / count as f64;
+                floor = Some(floor.map_or(per_iter, |best: f64| best.min(per_iter)));
+            }
         }
-        let elapsed = clock.elapsed_ns();
-        // A pass the clock read as zero is not a floor of zero — it is the
-        // clock declining to resolve the loop, and taking it as a minimum
-        // would set the floor to nothing and switch the guard off for the one
-        // case it exists to catch. Ignored here; if *every* pass reads zero the
-        // caller is told so.
-        if elapsed > 0 {
-            let per_iter = elapsed as f64 / iters as f64;
-            floor = Some(floor.map_or(per_iter, |best: f64| best.min(per_iter)));
+        if floor.is_some() {
+            return floor;
         }
+        // Every pass read zero. Grow, unless there is nowhere left to grow to —
+        // a clock that cannot resolve four million empty iterations is not a
+        // clock this tier can measure against at all, and saying so is better
+        // than returning a floor nothing established.
+        if count >= DEGENERATE_PROBE_MAX {
+            return None;
+        }
+        count = count
+            .saturating_mul(DEGENERATE_PROBE_GROWTH)
+            .min(DEGENERATE_PROBE_MAX);
     }
-    floor
 }
 
 /// Starts a suite for `krate`.
@@ -385,6 +432,8 @@ pub(crate) struct Outcome {
     pub notes: Vec<String>,
     /// Digest of everything setup absorbed.
     pub corpus_digest: String,
+    /// Digest of everything setup declared, absent when it declared nothing.
+    pub build_digest: Option<String>,
 }
 
 impl Case {
@@ -602,6 +651,7 @@ impl Case {
             metrics,
             notes,
             corpus_digest: corpus.digest_hex(),
+            build_digest: corpus.build_digest_hex(),
         })
     }
 
@@ -996,6 +1046,49 @@ mod tests {
     fn the_reference_floor_reports_a_number_or_nothing() {
         let floor = super::empty_loop_ns_per_iter(1_000_000).expect("a million iterations resolve");
         assert!(floor > 0.0 && floor.is_finite(), "{floor}");
+    }
+
+    /// A count far below the clock's resolution still yields a floor.
+    ///
+    /// An expensive routine calibrates to a few dozen iterations, and an empty
+    /// loop of a few dozen is tens of nanoseconds against a clock that ticks in
+    /// tens — so every pass can read zero and the case is refused for a reason
+    /// that is about the clock rather than about the case. It is intermittent,
+    /// which is worse: `frame_lf_split_chunks` calibrates to about thirty and
+    /// failed roughly one A/A run in five before the probe grew itself.
+    ///
+    /// A flaky guard cannot be tested by running it once, so this asserts the
+    /// property that makes it not flaky: the probe reports a number at every
+    /// count, down to one.
+    #[test]
+    fn the_reference_floor_resolves_a_count_the_clock_cannot_time_directly() {
+        for iters in [1, 2, 31, 64, 1024] {
+            let floor = super::empty_loop_ns_per_iter(iters)
+                .unwrap_or_else(|| panic!("{iters} iteration(s) produced no floor"));
+            assert!(floor > 0.0 && floor.is_finite(), "{iters}: {floor}");
+        }
+    }
+
+    /// Once the loop is long enough to dominate the two clock reads around it,
+    /// the floor is a per-iteration cost — an empty iteration is a counter and
+    /// a `black_box`, which is nanoseconds rather than hundreds of them.
+    ///
+    /// Asserted only above a handful of iterations. Below that the stopwatch's
+    /// own overhead lands on very few iterations and inflates the figure, which
+    /// is deliberate rather than a defect: the case's region is timed with the
+    /// same stopwatch and carries the same overhead, so where it is large
+    /// enough to matter it sits in both numerators and cancels. It is also why
+    /// the probe grows only when the clock resolves *nothing* — a count it does
+    /// resolve has to keep the floor it has always had.
+    #[test]
+    fn the_reference_floor_is_a_per_iteration_cost_once_the_loop_dominates() {
+        for iters in [31, 64, 1024] {
+            let floor = super::empty_loop_ns_per_iter(iters).expect("resolves");
+            assert!(
+                floor < 100.0,
+                "{iters}: {floor} ns/iter is a total rather than one iteration"
+            );
+        }
     }
 
     /// A batched case's resident-set figure would be about the harness's own

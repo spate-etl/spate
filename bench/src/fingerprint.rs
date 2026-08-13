@@ -1,9 +1,10 @@
 //! What a record says about the build and the machine that produced it.
 //!
 //! Two records are only comparable if they came from the same toolchain, the
-//! same target, the same profile and the same resolved feature set. The
-//! comparator refuses on a mismatch rather than rendering the difference, so
-//! these fields are the ones that decide whether a report exists at all.
+//! same target and the same profile — and, on the commit axis, the same resolved
+//! feature set. The comparator refuses on a mismatch rather than rendering the
+//! difference, so these fields are the ones that decide whether a report exists
+//! at all. The feature set is the exception, and [`Axis`] below is why.
 //!
 //! # The guarded fields
 //!
@@ -32,9 +33,20 @@
 //!
 //! `--allow <field>` waives one by name. An unrecognised name is rejected rather
 //! than accepted as a waiver that does nothing, and the report says in its header
-//! which guards were waived and what the two legs disagreed about — so comparing
-//! two feature arms of one commit is a deliberate act with a disclosure attached,
-//! rather than an accident.
+//! which guards were waived and what the two legs disagreed about.
+//!
+//! # The axis is not one of them
+//!
+//! [`Axis`] says what the two legs vary — a commit or a feature arm — and it is
+//! deliberately outside the waivable set. Waiving it would not relax a check;
+//! it would apply the wrong one, since the declared-build guard requires
+//! agreement on one axis and disagreement on the other. Two legs that disagree
+//! about it are refused alongside a transposed pair and a duplicated leg, in
+//! [`crate::compare`]'s non-waivable family.
+//!
+//! On the arm axis `features` is likewise not a waiver but the subject: the two
+//! legs differ there by construction, so the guard steps aside for that one
+//! field and the report names both arms instead of announcing a bypass.
 //!
 //! # Who fills them in
 //!
@@ -69,6 +81,43 @@ pub const BASE_LEG: &str = "base";
 /// The leg name for the working tree.
 pub const HEAD_LEG: &str = "head";
 
+/// The guarded field holding the resolved feature set.
+///
+/// Named because it is the one field an arm comparison varies on purpose, and
+/// the exemption and the map key have to be the same string.
+pub const FIELD_FEATURES: &str = "features";
+
+/// What the two legs of a comparison vary.
+///
+/// It decides which way the declared-build guard points, and there is no way to
+/// infer it from the records: two legs of one commit built with different
+/// features and two legs of two commits look alike in everything the driver
+/// records except this. Stamped per leg rather than passed to the comparator, so
+/// a leg directory kept and re-rendered days later still knows what it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Axis {
+    /// Two builds compared as trees rather than as feature sets — what `ab`
+    /// produces, and what a lone `run` records. They must compile the same
+    /// subject: a difference there is a feature that moved, not a change to
+    /// measure. The trees may be the same one, as in an A/A.
+    #[default]
+    Commit,
+    /// Two builds of one tree at different features. They must compile
+    /// *different* subjects — that is what is being compared, and agreement
+    /// means the feature never reached the code.
+    Arm,
+}
+
+impl std::fmt::Display for Axis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Commit => "commit",
+            Self::Arm => "arm",
+        })
+    }
+}
+
 /// Provenance for one leg of a comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildFingerprint {
@@ -76,6 +125,14 @@ pub struct BuildFingerprint {
     pub protocol: u32,
     /// Which side of the comparison this is: `base`, `head`, or `local`.
     pub leg: String,
+    /// What the two legs of this comparison vary.
+    ///
+    /// The same on both legs by construction — two legs disagreeing about it
+    /// are not one comparison, which [`crate::compare`] refuses. Defaulted for
+    /// a leg written before the field existed, and for a hand-run binary, both
+    /// of which mean the ordinary [`Axis::Commit`].
+    #[serde(default)]
+    pub axis: Axis,
     /// `rustc --version` output for the toolchain that built the leg.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rustc: Option<String>,
@@ -129,6 +186,7 @@ impl BuildFingerprint {
         Self {
             protocol: crate::protocol::PROTOCOL_VERSION,
             leg: LOCAL_LEG.to_owned(),
+            axis: Axis::Commit,
             rustc: None,
             host_triple: None,
             profile: Some(
@@ -191,7 +249,7 @@ impl BuildFingerprint {
         fields.insert("host_triple", self.host_triple.clone().unwrap_or_default());
         fields.insert("profile", self.profile.clone().unwrap_or_default());
         fields.insert("codegen", self.codegen.clone().unwrap_or_default());
-        fields.insert("features", self.features.join(","));
+        fields.insert(FIELD_FEATURES, self.features.join(","));
         fields
     }
 }
@@ -314,7 +372,7 @@ fn sysctl_string(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildFingerprint, Host, LOCAL_LEG};
+    use super::{Axis, BuildFingerprint, Host, LOCAL_LEG};
 
     #[test]
     fn a_local_fingerprint_leaves_the_unknowable_absent() {
@@ -369,6 +427,23 @@ mod tests {
             BuildFingerprint::from_raw(Some(&round_tripped)).expect("parses"),
             BuildFingerprint::local()
         );
+    }
+
+    /// A fingerprint written before the axis existed reads as the ordinary one
+    /// rather than failing. This is the whole compatibility story for a leg kept
+    /// from an older checkout, and for the driver's own fingerprint reaching a
+    /// bench binary compiled from one.
+    #[test]
+    fn a_fingerprint_without_an_axis_reads_as_the_commit_one() {
+        let without = r#"{"protocol":1,"leg":"base","profile":"bench","dirty":false}"#;
+        let parsed = BuildFingerprint::from_raw(Some(without)).expect("parses");
+        assert_eq!(parsed.axis, Axis::Commit);
+
+        // And the default is the one that cannot mislead: an old leg read as an
+        // arm would have its build guard inverted, where read as a commit the
+        // worst case is a genuine arm leg refused for disagreeing about the
+        // axis — loud, rather than judged by the wrong rule.
+        assert_eq!(Axis::default(), Axis::Commit);
     }
 
     #[test]

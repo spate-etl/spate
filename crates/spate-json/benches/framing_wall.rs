@@ -39,7 +39,15 @@
 //!
 //! Nothing pins an iteration count; see `decode_wall.rs` for why.
 //!
+//! Every case declares [`BACKEND_ID`] as `decode_wall.rs` does, so the two arms
+//! of this crate are told apart here too — see that target's backend-axis
+//! section. Comparing them is `make bench-arms HEAD_FEATURES=spate-json/simd
+//! FILTER=frame_`, though the framer does not decode and the two arms should
+//! measure the same.
+//!
 //! Run it with `make bench-ab REF=main FILTER=frame_`.
+//!
+//! [`BACKEND_ID`]: spate_json::BACKEND_ID
 //!
 //! [`NdjsonFramer`]: spate_json::NdjsonFramer
 
@@ -111,10 +119,10 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
                     corpus.absorb("chunk", chunk);
                 }
                 // The framer does not decode, so the backend cannot change
-                // what this measures. Absorbed anyway, so that both of this
-                // crate's wall targets refuse a cross-backend pairing on the
-                // same two tripwires rather than on one each.
-                corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+                // what this measures. Declared anyway, so that both of this
+                // crate's wall targets state the arm they compiled on the same
+                // two tripwires rather than on one each.
+                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 rig
             },
             |b, rig: &Rig| {

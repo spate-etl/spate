@@ -1,4 +1,5 @@
-//! The digest that proves two legs measured the same bytes.
+//! The digest that proves two legs measured the same bytes, and the one that
+//! says what compiled.
 //!
 //! Every case builds its own input in `setup`, on both legs, from the same
 //! seed. That is a claim rather than a guarantee: a change to a generator, a
@@ -12,12 +13,27 @@
 //! records whose digests differ. It is a streaming hash, so absorbing is cheap
 //! enough to do unconditionally and the result is sensitive to the *order* of
 //! the inputs as well as their contents.
+//!
+//! # Two channels, because they answer opposite questions
+//!
+//! [`absorb`](Corpus::absorb) takes what the measured region *consumed*, and
+//! the comparator requires it to match: two legs that read different bytes are
+//! not measuring one thing.
+//!
+//! [`declare`](Corpus::declare) takes what *compiled* — a `cfg`-selected
+//! constant naming the subject a feature arm swapped in. It feeds a separate
+//! digest, and the comparator's requirement inverts with the axis: two builds
+//! of one commit must declare the same subject, and two feature arms must
+//! declare different ones. Folded into the corpus digest instead, a
+//! feature-arm comparison could only proceed by waiving the guard on the bytes,
+//! which is the guard that most needs to hold in exactly that run.
 
 use std::hash::Hasher;
 
 use twox_hash::XxHash64;
 
-/// A running digest over everything a case fed its measured region.
+/// A running digest over everything a case fed its measured region, and a
+/// second over what it declared about the build.
 ///
 /// Sensitive to the label, the length and the order of every absorbed input —
 /// see `digest_is_sensitive_to_label_length_and_order`.
@@ -26,6 +42,11 @@ pub struct Corpus {
     hasher: XxHash64,
     inputs: u32,
     bytes: u64,
+    /// Absent until something is declared, so a case that declares nothing
+    /// asserts nothing. `Some` of an empty stream and `None` are different
+    /// claims, and only the second is "this case has no compiled subject to
+    /// compare".
+    build: Option<XxHash64>,
 }
 
 impl Default for Corpus {
@@ -45,6 +66,7 @@ impl Corpus {
             hasher: XxHash64::with_seed(0),
             inputs: 0,
             bytes: 0,
+            build: None,
         }
     }
 
@@ -55,18 +77,28 @@ impl Corpus {
     /// one input of their concatenation, and a case that split its corpus
     /// differently between the legs would pair happily.
     pub fn absorb(&mut self, label: &str, bytes: &[u8]) {
-        // Lengths written as explicit little-endian bytes rather than through
-        // `write_u64`, whose default implementation is native-endian. The two
-        // legs of a comparison always share a host, so this cannot change an
-        // answer today — but a digest that quietly depended on the byte order
-        // of the machine would be a surprise waiting for whoever compares
-        // across one.
-        self.hasher.write(&(label.len() as u64).to_le_bytes());
-        self.hasher.write(label.as_bytes());
-        self.hasher.write(&(bytes.len() as u64).to_le_bytes());
-        self.hasher.write(bytes);
+        fold(&mut self.hasher, label, bytes);
         self.inputs += 1;
         self.bytes += bytes.len() as u64;
+    }
+
+    /// Folds one labelled input into the *build* digest instead.
+    ///
+    /// For what a feature arm swapped in rather than for what the region read:
+    /// a `cfg`-selected constant naming the compiled subject. It does not move
+    /// [`digest`](Self::digest) and it is not counted in
+    /// [`inputs`](Self::inputs) or [`bytes`](Self::bytes) — those describe the
+    /// workload, and the workload is what has to match across a feature arm.
+    ///
+    /// Declare a value the compiler chooses, never one passed in by hand: a
+    /// label the caller types agrees across two arms whatever was actually
+    /// built, which is the failure this exists to catch.
+    pub fn declare(&mut self, label: &str, bytes: &[u8]) {
+        fold(
+            self.build.get_or_insert_with(|| XxHash64::with_seed(0)),
+            label,
+            bytes,
+        );
     }
 
     /// The digest so far.
@@ -81,6 +113,14 @@ impl Corpus {
         format!("{:016x}", self.digest())
     }
 
+    /// The build digest as hex, or `None` when the case declared nothing.
+    #[must_use]
+    pub fn build_digest_hex(&self) -> Option<String> {
+        self.build
+            .as_ref()
+            .map(|hasher| format!("{:016x}", hasher.finish()))
+    }
+
     /// How many inputs have been absorbed.
     #[must_use]
     pub const fn inputs(&self) -> u32 {
@@ -92,6 +132,20 @@ impl Corpus {
     pub const fn bytes(&self) -> u64 {
         self.bytes
     }
+}
+
+/// Folds one labelled input into a hasher, identically for both channels.
+///
+/// Lengths are written as explicit little-endian bytes rather than through
+/// `write_u64`, whose default implementation is native-endian. The two legs of
+/// a comparison always share a host, so this cannot change an answer today —
+/// but a digest that quietly depended on the byte order of the machine would be
+/// a surprise waiting for whoever compares across one.
+fn fold(hasher: &mut XxHash64, label: &str, bytes: &[u8]) {
+    hasher.write(&(label.len() as u64).to_le_bytes());
+    hasher.write(label.as_bytes());
+    hasher.write(&(bytes.len() as u64).to_le_bytes());
+    hasher.write(bytes);
 }
 
 #[cfg(test)]
@@ -137,6 +191,72 @@ mod tests {
         // And the property the comparator relies on: the same inputs in the
         // same order always agree.
         assert_eq!(base, digest_of(&[("keys", b"abc"), ("values", b"def")]));
+    }
+
+    /// The property the whole split exists for: a feature arm declares a
+    /// different subject and the two legs still agree about the bytes they
+    /// measured. Folded into one digest, this case could only be compared by
+    /// waiving the guard on the bytes.
+    #[test]
+    fn declaring_moves_the_build_digest_and_not_the_corpus() {
+        let mut serde = Corpus::new();
+        serde.absorb("payload", b"{}");
+        serde.declare("backend", b"serde_json");
+
+        let mut simd = Corpus::new();
+        simd.absorb("payload", b"{}");
+        simd.declare("backend", b"simd-json");
+
+        assert_eq!(
+            serde.digest_hex(),
+            simd.digest_hex(),
+            "declaring a subject moved the digest over the measured bytes"
+        );
+        assert_ne!(serde.build_digest_hex(), simd.build_digest_hex());
+        assert_eq!(serde.digest_hex(), digest_of(&[("payload", b"{}")]));
+    }
+
+    /// A case that declares nothing asserts nothing, which is what keeps a
+    /// target with no feature axis comparable on either axis. `None` and a
+    /// digest of an empty stream are different claims.
+    #[test]
+    fn a_case_that_declares_nothing_has_no_build_digest() {
+        let mut corpus = Corpus::new();
+        assert_eq!(corpus.build_digest_hex(), None);
+        corpus.absorb("payload", b"abc");
+        assert_eq!(corpus.build_digest_hex(), None);
+        corpus.declare("backend", b"");
+        assert_eq!(corpus.build_digest_hex().map(|d| d.len()), Some(16));
+    }
+
+    /// The build digest is folded the same way as the corpus digest, so the
+    /// three confusions the corpus test names cannot reach it either.
+    #[test]
+    fn the_build_digest_is_sensitive_to_label_length_and_order() {
+        let build_of = |pairs: &[(&str, &[u8])]| {
+            let mut corpus = Corpus::new();
+            for (label, bytes) in pairs {
+                corpus.declare(label, bytes);
+            }
+            corpus.build_digest_hex().expect("declared")
+        };
+
+        let base = build_of(&[("backend", b"a"), ("guard", b"b")]);
+        assert_ne!(base, build_of(&[("Backend", b"a"), ("guard", b"b")]));
+        assert_ne!(base, build_of(&[("guard", b"b"), ("backend", b"a")]));
+        assert_ne!(base, build_of(&[("backend", b"ab")]));
+        assert_eq!(base, build_of(&[("backend", b"a"), ("guard", b"b")]));
+    }
+
+    /// Declared inputs are not workload, so they must not reach the counters a
+    /// case's throughput is derived against.
+    #[test]
+    fn declaring_does_not_count_towards_the_absorbed_totals() {
+        let mut corpus = Corpus::new();
+        corpus.absorb("payload", &[0; 10]);
+        corpus.declare("backend", &[0; 99]);
+        assert_eq!(corpus.inputs(), 1);
+        assert_eq!(corpus.bytes(), 10);
     }
 
     #[test]

@@ -1,17 +1,8 @@
 name: Release
 
-# Two jobs with different jobs to do, deliberately split rather than run as one
-# `release-plz` invocation:
-#
-#   release-pr — keeps a pull request open that bumps versions. Reopened and
-#                rewritten on every push to `main`.
-#   release    — publishes to crates.io and tags, but only once the versions in
-#                the tree are ahead of what is on the registry, which is only
-#                true after that pull request merges.
-#
-# Both run on every push to `main`, and `release` no-ops on the ones that are
-# not a merged release pull request. `release_always = false` in
-# release-plz.toml is what makes that no-op safe.
+# `release-pr` keeps a version-bump pull request open; `release` publishes and
+# tags once the tree is ahead of the registry, which holds after that pull
+# request merges. `release_always = false` is what makes the other no-ops safe.
 on:
   push:
     branches: [main]
@@ -20,10 +11,8 @@ on:
 permissions:
   contents: read
 
-# Never two of these at once: both mutate the same branch state, and a second
-# run started mid-publish could tag a version the first is still uploading.
-# `cancel-in-progress` stays false for the same reason — a half-finished
-# publish must be allowed to finish.
+# A second run started mid-publish could tag a version the first is still
+# uploading; `cancel-in-progress` stays false so a publish finishes.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -36,31 +25,20 @@ jobs:
     name: Release pull request
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skipped entirely when the release app is not configured. Without this the
-    # workflow fails on every push to `main` for want of a credential — and it
-    # fails that way in every fork too, where the secret cannot exist at all and
-    # nobody can do anything about it.
-    #
-    # Keyed on the variable rather than the private key because `secrets` is not
-    # available in a job-level `if:` and `vars` is. The two are configured
-    # together, so the variable's presence stands for the pair — and if only one
-    # were set, failing loudly at the token step is the right outcome anyway.
+    # Skipped when the release app is not configured, as in every fork. Keyed on
+    # the variable because `secrets` is unavailable in a job-level `if:` and
+    # `vars` is; the two are configured together.
     if: vars.RELEASE_APP_ID != ''
     steps:
-      # A GitHub App token, not GITHUB_TOKEN, and this is the whole reason the
-      # app exists: events raised by GITHUB_TOKEN do not trigger workflows, so a
-      # release pull request opened with it would never run CI. `ci-gate` is a
-      # required check, so that pull request would then be permanently
-      # unmergeable — the automation would produce exactly one artifact, and it
-      # would be a dead end.
+      # Events raised by GITHUB_TOKEN do not trigger workflows, so a release pull
+      # request opened with it never runs CI and `ci-gate`, a required check,
+      # leaves it permanently unmergeable.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Without these the token carries whatever the installation was
-          # granted, which is a strictly larger set than this job needs. It
-          # pushes a branch and opens a pull request; that is all it may do.
+          # It pushes a branch and opens a pull request; that is all it may do.
           permission-contents: write
           permission-pull-requests: write
 
@@ -85,31 +63,19 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Only on the merge of a release pull request, or when driven by hand.
-    #
-    # `release_always = false` already stops release-plz publishing anything on
-    # an ordinary commit, so this is not what makes the job safe — it is what
-    # stops it *running*. Without it, every merge mints an App token it does not
-    # use and, worse, enters the `crates-io` environment, writing a deployment
-    # record. That environment exists so the deployment history says what was
-    # published and when, and so a required reviewer can be put on it later;
-    # both stop working if every merge to `main` appears in it.
-    #
-    # The subject is matched rather than the tag, because the tag does not exist
-    # yet — this job is what creates it. `pr_name` in release-plz.toml pins the
-    # string on the other side of this comparison, and the repository's squash
-    # subject is the pull request title, so the two meet.
+    # `release_always = false` already stops the publish; this stops the *run*.
+    # Without it every merge mints an unused App token and writes a `crates-io`
+    # deployment record. The subject is matched rather than the tag, since this
+    # job creates the tag; `pr_name` in release-plz.toml pins the other side.
     if: >-
       vars.RELEASE_APP_ID != '' &&
       (github.event_name == 'workflow_dispatch' ||
        startsWith(github.event.head_commit.message, 'chore: release v'))
     permissions:
       contents: read
-      # crates.io Trusted Publishing. release-plz exchanges this OIDC token for
-      # a short-lived registry token itself, which is why there is no
-      # CARGO_REGISTRY_TOKEN secret anywhere in this repository — there is no
-      # long-lived credential to leak, and crates.io is configured to refuse
-      # token-authenticated publishes for these crates outright.
+      # Trusted Publishing: release-plz exchanges this for a short-lived registry
+      # token, so no CARGO_REGISTRY_TOKEN exists in this repository and crates.io
+      # refuses token-authenticated publishes for these crates.
       id-token: write
     environment:
       name: crates-io
@@ -120,8 +86,7 @@ jobs:
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Tags and opens the GitHub release, so contents is write. It only
-          # reads pull requests, to work out what went into the release.
+          # Tags and opens the GitHub release; it only reads pull requests.
           permission-contents: write
           permission-pull-requests: read
 
@@ -134,9 +99,6 @@ jobs:
         with:
           shared-key: release
 
-      # Publishes in dependency order, tags, and opens the GitHub release. It
-      # no-ops unless the tree's versions are ahead of the registry, so the
-      # pushes that are not a merged release pull request cost one no-op.
       - uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release

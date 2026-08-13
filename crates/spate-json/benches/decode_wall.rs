@@ -96,11 +96,11 @@
 //! decode-everything-emit-nothing shape.
 //!
 //! Nothing here pins an iteration count. The harness calibrates every case to
-//! its `--target-ms`, and its degenerate-region guard resolves an empty loop
-//! at those counts with several orders of magnitude to spare — 64 iterations
-//! measure 291 ns against a clock that never failed to resolve one in two
-//! hundred passes. A case wanting a longer region wants `--target-ms`, which
-//! is the harness's knob for it and moves every case together.
+//! its `--target-ms`, and its degenerate-region guard measures its floor at
+//! whatever count that yields, growing its own reference loop when the clock
+//! cannot resolve one that short. A case wanting a longer region wants
+//! `--target-ms`, which is the harness's knob for it and moves every case
+//! together.
 //!
 //! Run it with `make bench-ab REF=main FILTER=decode_`.
 //!

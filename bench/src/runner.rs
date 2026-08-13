@@ -223,6 +223,16 @@ impl Runner {
             _ if crate::worktree::interrupted() => {
                 Err("interrupted; the run is unwinding".to_owned())
             }
+            // The target spoke the protocol and refused the call. Its reason is
+            // already on the terminal — stderr is inherited — so the manifest
+            // advice below would only point somewhere the reader has no reason
+            // to look, about a binary that has just demonstrated it parses these
+            // arguments fine.
+            _ if output.status.code() == Some(crate::protocol::ERROR_EXIT) => Err(format!(
+                "{} refused '{}': its reason is on stderr, above.",
+                target_name(&self.binary),
+                args.join(" ")
+            )),
             _ => Err(hint(
                 &self.binary,
                 args,

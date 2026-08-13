@@ -134,20 +134,14 @@ const NARROW: usize = 16;
 
 /// Iterations the ack cases pin rather than calibrate.
 ///
-/// Not a statement about the workload — it is the harness's degenerate-region
-/// guard needing room to work. That guard times an empty loop of the case's
-/// own iteration count as its floor, and one drive here costs the better part
-/// of a millisecond, so calibrating to the default 50 ms target lands on a few
-/// dozen iterations. An empty loop that short is a couple of dozen nanoseconds
-/// against a clock whose granularity is tens, so the floor reads as zero and
-/// the case is refused for being unmeasurable — and *intermittently*, since
-/// whether it rounds to zero depends on where the read lands, which makes it a
-/// run that dies several replicates in rather than one that never starts.
+/// One drive here costs the better part of a millisecond, so the default 50 ms
+/// target lands on a few dozen iterations. Five hundred and twelve keeps a
+/// replicate's measured region long enough to sit well clear of the clock's
+/// granularity while staying under a second.
 ///
-/// Five hundred and twelve puts the reference loop a comfortable multiple
-/// above that granularity while keeping a replicate under a second. The
-/// guard's real job is unaffected: it exists to catch a routine the optimizer
-/// deleted, and one of those would still sit at the floor whatever the count.
+/// A pinned count does not weaken the degenerate-region guard: that guard
+/// exists to catch a routine the optimizer deleted, and one of those sits at
+/// the floor whatever the count.
 const ACK_ITERS: u64 = 512;
 
 /// Why every case that spawns a worker is reported but never flagged.

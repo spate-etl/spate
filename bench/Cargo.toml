@@ -10,11 +10,10 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-# Default is the *author* surface: the case builder, the measurement loop, the
-# counting allocator and the corpus generators. A crate's `benches/*_wall.rs`
-# needs nothing else, so building one never compiles the CLI: clap, git
-# worktrees, the cargo-metadata reader and the comparator are all behind
-# `driver`, which only the `bench` binary enables.
+# Default is the author surface: the case builder, the measurement loop, the
+# counting allocator and the corpus generators, all a crate's `benches/*_wall.rs`
+# needs. `driver` adds the CLI (clap, git worktrees, cargo-metadata, the
+# comparator) and only the `bench` binary enables it.
 default = []
 driver = ["dep:clap"]
 
@@ -23,31 +22,22 @@ driver = ["dep:clap"]
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# xxh64 for the corpus digest: the two legs have to prove they saw the same
-# bytes, and the digest is compared rather than stored, so speed matters more
-# than cryptographic strength.
 twox-hash = { workspace = true }
 clap = { workspace = true, optional = true }
 
 [dev-dependencies]
-# `load_leg` reads a directory of files. Testing what it refuses means writing
-# some, and a scratch directory that cleans itself up is the honest way to do
-# that.
 tempfile = { workspace = true }
 
 [lints]
 workspace = true
 
-# The CLI. `required-features` keeps it out of a default build entirely, so a
-# crate benching against this package's author surface does not pay for it.
 [[bin]]
 name = "bench"
 required-features = ["driver"]
 
-# The harness benching itself. `harness = false` is what the runner protocol
-# needs — under libtest, cargo's own harness would reject `--run` and friends
-# before this crate ever saw them. Named `_wall` like every crate-side target,
-# which is also what keeps it out of the `*_gungraun` discovery glob.
+# `harness = false` is what the runner protocol needs: under libtest, cargo's
+# own harness rejects `--run` before this crate sees it. Named `_wall` like
+# every crate-side target, keeping it out of the `*_gungraun` discovery glob.
 [[bench]]
 name = "selftest_wall"
 harness = false

@@ -23,12 +23,6 @@ spate-s3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 apache-avro = { workspace = true }
-# Unconditional, unlike the optional dependencies above: the examples using
-# them carry no `required-features`, and reach them as `spate_datagen` and
-# `spate_json` rather than through the facade's feature-gated `spate::datagen`
-# and `spate::json`. A dev-dependency is stripped from what a consumer
-# resolves. `storefront_pipeline` pairs the generator with the JSON
-# deserializer, so both are here.
 spate-datagen = { workspace = true }
 spate-json = { workspace = true }
 flate2 = { workspace = true }
@@ -49,7 +43,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tracing = { workspace = true }
 
 # Docker-backed end-to-end scenarios; one binary each because the metrics
-# recorder is process-global. All #[ignore]d — run with:
+# recorder is process-global. All #[ignore]d, run with:
 # `cargo test -p spate --all-features -- --ignored --test-threads=1`
 [[test]]
 name = "e2e_happy"
@@ -71,22 +65,10 @@ required-features = ["full"]
 name = "e2e_poison"
 required-features = ["full"]
 
-# The container tier of the example suite: the examples whose stanza carries no
-# `test = true`, driven as the shipped binaries against real servers. Excluded
-# from `[profile.docker]`'s default filter in .config/nextest.toml — it reports
-# nightly, not per pull request. `full` covers every feature the examples it
-# drives ask for.
 [[test]]
 name = "e2e_examples"
 required-features = ["full"]
 
-# `test = true` makes each example a one-test binary: the `#[cfg(test)]` runner
-# at its foot calls `main`, so the assertions an example already carries become
-# a gate instead of decoration. Only the examples that need no infrastructure
-# and terminate on their own carry it; the rest are driven by the container
-# suite. `harness` stays at its default — nextest lists every binary it
-# collects with `--list --format terse`, which a custom `main` would answer by
-# running the whole example and having its stdout parsed as a test list.
 [[example]]
 name = "memory_pipeline"
 test = true
@@ -172,42 +154,18 @@ test = true
 default = []
 avro = ["dep:spate-avro"]
 json = ["dep:spate-json"]
-# JSON fidelity knobs passed through to spate-json (each implies `json`). Kept
-# out of `full`: they are deliberate, documented trade-offs — `arbitrary-precision`
-# in particular is crate-wide and interacts with flatten/untagged/RawValue.
 json-float-roundtrip = ["json", "spate-json/float-roundtrip"]
 json-arbitrary-precision = ["json", "spate-json/arbitrary-precision"]
 json-raw-value = ["json", "spate-json/raw-value"]
-# Opt-in simd-json decode backend for JSON (implies `json`). Deliberately
-# excluded from `full`: it pulls in simd-json (SIMD JSON parsing) — a decode
-# speedup on the single-document/array path over serde_json, by a
-# payload- and architecture-dependent margin. Kept opt-in so `full` stays lean.
-# See the JSON connector docs.
 json-simd = ["json", "spate-json/simd"]
 kafka = ["dep:spate-kafka"]
 clickhouse = ["dep:spate-clickhouse"]
-# Multi-instance leader-assigned coordination for broker-less sources: the
-# protocol, StoreCoordinator, and the in-memory store — enough for tests
-# and single-process embedding with zero infrastructure. The seam types
-# (`spate::coordination`) and the CoordinationDriver need no feature.
-# Standalone: no connector implies it.
 coordination = ["dep:spate-coordination"]
-# The production NATS JetStream KV store (server >= 2.11) on top of
-# `coordination`; this is what pulls the async-nats dependency tree.
 coordination-nats = ["coordination", "spate-coordination/nats"]
 s3 = ["dep:spate-s3"]
-# The synthetic storefront-event source: a pipeline that runs with no broker,
-# bucket or coordination store. Not in `full`: it keeps no durable progress,
-# and it logs a `WARN` at open saying so.
 datagen = ["dep:spate-datagen"]
-# Avro payloads from the generator instead of JSON (implies `datagen`).
 datagen-avro = ["datagen", "spate-datagen/avro"]
-# Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) for the Kafka connector (implies
-# `kafka`). Deliberately excluded from `full`: it compiles OpenSSL from source
-# (rdkafka's `ssl-vendored`), so `full` stays buildable without the extra
-# toolchain and build time. See the securing-connections guide.
 kafka-tls = ["kafka", "spate-kafka/tls"]
-# ClickHouse ecosystem column types (each implies `clickhouse`).
 clickhouse-uuid = ["clickhouse", "spate-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "spate-clickhouse/chrono"]
 clickhouse-time = ["clickhouse", "spate-clickhouse/time"]

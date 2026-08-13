@@ -12,13 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# Opt-in TLS/mTLS + SASL (SCRAM-SHA-*/PLAIN) transport. Off by default: it
-# turns on rdkafka's `ssl-vendored`, which compiles OpenSSL from source into the
-# static build (longer builds; needs perl + a C compiler). SASL SCRAM/PLAIN ride
-# on OpenSSL's libcrypto, so no separate SASL feature is needed —
-# Kerberos/GSSAPI is intentionally not included. Security properties themselves
-# are set through the raw `rdkafka` passthrough (see the securing-connections
-# guide); this feature only compiles the transport in.
 tls = ["rdkafka/ssl-vendored"]
 
 [dependencies]
@@ -42,10 +35,6 @@ testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-# gungraun's `main!` is the harness; without this the default libtest one wraps
-# it and rejects the harness's own arguments at run time. Runs only where
-# valgrind and a same-version `gungraun-runner` are installed — see
-# `make bench-gungraun`.
 [[bench]]
 name = "encode_gungraun"
 harness = false

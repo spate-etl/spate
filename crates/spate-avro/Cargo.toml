@@ -42,9 +42,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 name = "decode"
 harness = false
 
-# gungraun's `main!` is the harness; without this the default libtest one wraps
-# the file and `cargo bench` runs nothing. Runs only where valgrind and a
-# same-version `gungraun-runner` are installed — see `make bench-gungraun`.
 [[bench]]
 name = "decode_gungraun"
 harness = false

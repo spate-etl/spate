@@ -57,8 +57,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 name = "encode"
 harness = false
 
-# gungraun's `main!` is the harness; without this the default libtest one wraps
-# it and rejects the harness's own arguments at run time.
 [[bench]]
 name = "encode_gungraun"
 harness = false

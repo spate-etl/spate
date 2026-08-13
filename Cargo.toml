@@ -22,53 +22,32 @@ license = "Apache-2.0"
 authors = ["Marcus Kainth <marcus@kainth.dev>"]
 repository = "https://github.com/spate-etl/spate"
 homepage = "https://spate.kainth.dev"
-# `etl` earns its slot: it is how someone looking for this finds it. The crate
-# name is already indexed by crates.io, so "spate" here would be a wasted one
-# of the five.
 keywords = ["etl", "pipeline", "streaming", "kafka", "clickhouse"]
 categories = ["asynchronous", "data-structures"]
 
 [workspace.dependencies]
-# Internal crates — exact pins, versions move in lockstep via workspace.package.
 spate-core = { version = "=0.1.0", path = "crates/spate-core" }
 spate-avro = { version = "=0.1.0", path = "crates/spate-avro" }
 spate-json = { version = "=0.1.0", path = "crates/spate-json" }
 spate-kafka = { version = "=0.1.0", path = "crates/spate-kafka" }
 spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
-# default-features = false so the spate facade can gate the NATS tree
-# behind its own `coordination-nats` feature (memory-only embedding must
-# not drag async-nats in).
+# default-features = false so a memory-only embedding never links async-nats.
 spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
 spate-datagen = { version = "=0.1.0", path = "crates/spate-datagen" }
 spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
 spate-test = { version = "=0.1.0", path = "crates/spate-test" }
-# The wall-clock benchmark harness. Deliberately versionless: a crate adding a
-# `benches/*_wall.rs` dev-depends on it by path alone, and cargo strips a
-# versionless path dev-dependency when the crate is packaged — so an unpublished
-# harness can be a dev-dependency of a published crate without appearing in what
-# consumers resolve.
+# Versionless: cargo strips a versionless path dev-dependency at package time,
+# letting a published crate dev-depend on this unpublished harness.
 spate-bench = { path = "bench" }
 
-# Async runtime and I/O edge.
 tokio = { version = "1.52", default-features = false }
 hyper = "1.10"
 hyper-util = "0.1.12"
 http-body-util = "0.1.2"
 
-# Serialization and config.
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-# Opt-in SIMD JSON decode backend behind spate-json's `simd` feature (off by
-# default, excluded from `full`). Apache-2.0 / MIT with a clean transitive tree,
-# so no deny.toml carve-out is needed. Default features stay on — they enable
-# `serde_impl` (the `from_slice` path used here) and `runtime-detection`.
-#
-# Was `=0.17.3`, to hold the licence review to one fixed release.
-# Cargo.lock already delivers that — it pins an exact version and
-# CI builds `--locked` — whereas an `=` requirement in a *published* manifest is
-# imposed on consumers, where it cannot be overridden and conflicts with any
-# other crate in their graph wanting a different 0.17.x. The blast radius was
-# limited only because `simd` is off by default.
+# Default features stay on: they carry `serde_impl` and `runtime-detection`.
 simd-json = "0.17.3"
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 serde_path_to_error = "0.1"
@@ -79,7 +58,6 @@ time = { version = "0.3.36", default-features = false, features = ["std", "macro
 rust_decimal = { version = "1.13", default-features = false, features = ["std"] }
 bytesize = { version = "2.4", features = ["serde"] }
 
-# Errors, logging, metrics.
 thiserror = "2.0.17"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.8", default-features = false }
@@ -87,37 +65,27 @@ metrics = "0.24.2"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2.4"
 
-# Concurrency and buffers.
 crossbeam-channel = "0.5.15"
 bytes = "1.11.1"
 core_affinity = "0.8"
 foldhash = "0.2"
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
-# Split identity in spate-s3: ids are persisted, so the digest must hold up
-# even for adversarially-named keys (a collision would silently drop work).
+# Split identity in spate-s3. Ids are persisted and a collision drops work
+# silently, so this must resist adversarially-named keys.
 sha2 = "0.11"
 
-# Connector dependencies. 0.x crates with breaking minors are held to a
-# single minor; Cargo.lock pins exact patches.
+# The connector clients below (rdkafka, clickhouse, apache-avro, object_store,
+# async-nats) are internal only, never in public signatures (INV-6).
 rdkafka = "0.39"
-# `spate-clickhouse` enables this crate's `lz4` feature, so the LZ4 codec used
-# on the wire arrives transitively and moves with it. Re-declaring that codec
-# here is what to avoid: a compatible requirement unifies with the client's and
-# silently widens its feature set for every workspace build while leaving what
-# a consumer of `spate-clickhouse` resolves untouched — so CI would exercise a
-# different implementation from the one anybody runs — and an incompatible one
-# puts two majors in the graph. If something ever needs to compress outside the
-# client, hold it to whatever `clickhouse` pulls and move the two together.
+# Do not declare the lz4 codec separately. It arrives transitively through this
+# crate's `lz4` feature, which spate-clickhouse enables; declaring it again
+# either widens the client's features for workspace builds only, or puts two
+# majors in the graph.
 clickhouse = "0.15"
 apache-avro = "0.21"
-# Object-storage client for spate-s3. 0.x like rdkafka/clickhouse: internal
-# only, no types in public APIs (dependency policy: INV-6).
 object_store = "0.14"
-# NATS client for spate-coordination's JetStream KV backend. 0.x policy as
-# above: single minor, internal only, never in public signatures. The
-# `server_2_11` feature (in defaults) gates the limit-marker KV config the
-# lease buckets depend on; the paired server version floor is asserted at
-# startup.
+# The `server_2_11` default feature gates the limit-marker KV config the lease
+# buckets depend on; the paired server floor is asserted at startup.
 async-nats = "0.49"
 url = "2.5"
 futures-util = { version = "0.3.31", default-features = false }
@@ -126,7 +94,6 @@ flate2 = "1.1"
 zstd = "0.13"
 schema_registry_converter = { version = "4.9", default-features = false }
 
-# Test and bench tooling.
 async-trait = "0.1.53"
 serde_repr = "0.1.16"
 tempfile = "3"
@@ -135,14 +102,7 @@ testcontainers-modules = "0.15"
 proptest = "1.11"
 loom = "0.7"
 criterion = "0.8"
-# The `bench` CLI's argument parser, behind `spate-bench`'s `driver` feature.
-# `default-features = false` with only the pieces a four-subcommand tool needs:
-# the derive macros, colours and wrapping are all unused here. Already in
-# Cargo.lock at this version through criterion, so the harness adds no
-# third-party package to the lockfile — it moves existing ones onto a normal
-# edge. That last part has a consequence worth naming: cargo-about ignores
-# dev-dependencies but not normal ones, so clap and its companions do reach
-# THIRD-PARTY.md — the superset that file says it deliberately is.
+# A normal (not dev) dependency, so cargo-about lists it in THIRD-PARTY.md.
 clap = { version = "4.6", default-features = false, features = [
     "std",
     "help",
@@ -150,28 +110,11 @@ clap = { version = "4.6", default-features = false, features = [
     "error-context",
     "suggestions",
 ] }
-# Platform bindings. `libc` is here for one call: `getrusage`, which is how the
-# harness reads the peak resident set and the CPU time the kernel already
-# tracked for it. No published crate *declares* it — `spate-bench`
-# (`publish = false`) is the only one that does, though several reach it
-# transitively through tokio and core_affinity, so it is already in the lockfile
-# and the attribution inventory. The Linux-only alternative, reading `VmHWM` out
-# of `/proc/self/status`, does not exist on macOS.
-#
-# The patch floor is not ours. Nothing here needs anything recent — `getrusage`
-# has been in this crate since it existed — but `-Z direct-minimal-versions`
-# pins every *direct* requirement to its literal floor, and `libc = "0.2"` there
-# means 0.2.0, which nothing else in the graph can resolve alongside: rdkafka
-# asks for `^0.2.172` and mio for `^0.2.183`. A bare major would leave the
-# nightly minimal-versions job failing every night on a floor that is honest
-# about our needs and false about the graph's. Raise this only when that job
-# says to; this crate is `publish = false`, so the figure constrains nobody
-# downstream.
+# `getrusage`, for the harness's peak resident set and CPU time in one call.
+# The patch floor tracks the graph, not our needs: the nightly
+# `-Z direct-minimal-versions` job pins direct requirements to their literal
+# floor. Raise this only when that job says to.
 libc = "0.2.183"
-# Instruction-count benches. Deterministic counters rather than wall time, so
-# they compare across the shared runners CI actually uses; running them needs
-# valgrind and a same-version `gungraun-runner`, which is why `bench-gungraun`
-# is its own target rather than part of `bench-check`.
 gungraun = "0.19.4"
 
 [workspace.lints.rust]

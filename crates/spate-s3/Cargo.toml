@@ -12,11 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# Development-only seams: `S3Source::with_store` for tests, and
-# `bench_seams` for the instruction-count benches. Off by default and never
-# enabled by the `spate` facade, so neither the `object_store` types the
-# first exposes nor the internals the second reaches touch a real consumer's
-# API surface.
+# Development-only seams: `S3Source::with_store` for tests, `bench_seams` for
+# the instruction-count benches. Off by default and not enabled by the `spate`
+# facade.
 testing = []
 
 [dependencies]
@@ -38,17 +36,9 @@ zstd = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-# Self dev-dependency purely to switch on the `testing` seams for this
-# crate's own integration tests; dependents never see them.
 spate-s3 = { path = ".", features = ["testing"] }
-# The NATS backend for the Docker-gated durable-resume suite; a dev-only
-# feature — dependents of spate-s3 never link async-nats through it.
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-test = { workspace = true }
-# The framer for the framing bench. This crate ships none of its own —
-# production wires the format's framer through `with_framer` — and object
-# storage carrying newline-delimited JSON is the pairing it really runs.
-# spate-json does not depend on spate-s3, so there is no cycle.
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
@@ -57,8 +47,6 @@ tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-# gungraun's `main!` is the harness; without these the default libtest one
-# wraps them and rejects the harness's own arguments at run time.
 [[bench]]
 name = "split_gungraun"
 harness = false

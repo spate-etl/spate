@@ -16,13 +16,11 @@ default = ["nats"]
 # The NATS JetStream KV store backend. Off leaves the store trait, the
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats"]
-# Test-only injection seam: exposes `clock::TestClock`, the deterministic
-# clock this crate's `tests/` binaries drive, and `bench_seams`, which the
-# instruction-count benches reach the pure decision core through. Off by
-# default and never enabled by the `spate` facade, so a `TestClock` can never
-# be wired into a real pipeline — it would stop the control loop dead — and
-# neither seam is part of this crate's semver surface. Enabled for our own
-# integration tests and benches via the self dev-dependency below.
+# Test-only injection seam: `clock::TestClock` for the `tests/` binaries, and
+# `bench_seams` for the instruction-count benches. Off by default and never
+# enabled by the `spate` facade, so a `TestClock` can never be wired into a real
+# pipeline, where it would stop the control loop dead. Not part of the semver
+# surface.
 testing = []
 
 [dependencies]
@@ -30,9 +28,8 @@ async-nats = { workspace = true, optional = true }
 base64 = { workspace = true }
 spate-core = { workspace = true }
 foldhash = { workspace = true }
-# `alloc` is load-bearing for the feature-off build: BoxStream and
-# StreamExt::boxed vanish without it once async-nats (which unified it
-# in) is disabled.
+# `alloc` is required for the feature-off build: BoxStream and StreamExt::boxed
+# vanish without it once async-nats, which unified it in, is disabled.
 futures-util = { workspace = true, features = ["alloc"] }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
@@ -51,12 +48,8 @@ proptest = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# The peer-join suite asserts on what the log says, so it needs a subscriber
-# to capture: `fmt` is the formatter, installed globally for that one binary.
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
-# gungraun's `main!` is the harness; without these the default libtest one
-# wraps them and rejects the harness's own arguments at run time.
 [[bench]]
 name = "assignment_gungraun"
 harness = false

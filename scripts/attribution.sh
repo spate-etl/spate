@@ -3,25 +3,16 @@
 # Regenerates THIRD-PARTY.md, the committed dependency attribution inventory.
 # CI runs this and fails on any diff, so the file cannot drift from Cargo.lock.
 #
-# This exists instead of a bare `cargo about generate` because the generator's
-# row order is not reproducible across machines. cargo-about emits one row per
-# licence *text*, grouping crates by which text they share; a crate that ships
-# several files scanning as the same licence at the same confidence has its
-# text picked by directory-read order, so which group it lands in — and with it
-# where its row falls — differs from machine to machine. The elected licence id
-# never changes. That is what made the gate alternate red/green on unrelated
-# commits (#87).
+# A bare `cargo about generate` emits one row per licence *text*, and a crate
+# shipping several files that scan as the same licence has its text picked by
+# directory-read order, so row order is not reproducible across machines. The
+# elected licence id never changes. That made the gate alternate red/green on
+# unrelated commits (#87).
 #
-# Two passes make the output a property of its content alone:
-#
-#   1. the crate table is sorted by (licence id, crate, version), and rows that
-#      a multi-notice crate duplicates are collapsed, so the table is one row
-#      per crate however the notices were grouped;
-#   2. the summary counts are recomputed from those rows, because cargo-about
-#      counts rows rather than crates and would otherwise disagree with them.
-#
-# The site artifact (about/html.hbs) is unaffected and still reproduces every
-# notice, including the several a crate like `bnum` carries.
+# Two passes make the output a property of its content alone: the crate table is
+# sorted by (licence id, crate, version) with duplicate rows collapsed, and the
+# summary counts are recomputed from those rows, because cargo-about counts rows
+# rather than crates.
 #
 # Usage: ./scripts/attribution.sh [output-file]
 set -euo pipefail
@@ -73,11 +64,10 @@ trailing=$(sed -n "$((crate_rule + 1)),\$p" "$tmp" | grep -v -e '^| ' -e '^$' | 
 
 # Rows look like: | `crate` | version | `LICENCE` |
 # Splitting on the backtick rather than the pipe means field 2 is the bare crate
-# name, so names sort as names — with the pipe, the trailing backtick of `spate`
-# would sort it after `spate-test`. Field 4 is the licence id (the grouping) and
-# field 3 carries the version, which separates two versions of one crate. Rows
-# tying on all three are byte-identical: one crate, one licence, several
-# notices, which `uniq` then collapses to the single row this table promises.
+# name, so names sort as names: with the pipe, the trailing backtick of `spate`
+# would sort it after `spate-test`. Field 4 is the licence id, field 3 the
+# version. Rows tying on all three are byte-identical, and `uniq` collapses
+# them.
 bt='`'
 rows=$(sed -n "$((crate_rule + 1)),\$p" "$tmp" | grep -e '^| ' |
     LC_ALL=C sort -t"$bt" -k4,4 -k2,2 -k3,3 | uniq) || true
@@ -97,10 +87,9 @@ summary=$(printf '%s\n' "$rows" |
     printf '%s\n' "$rows"
 } >"$staged"
 
-# The rebuild reorders and rewrites two tables, and a silent loss would look
-# identical to a legitimate removal on the next run. Check the outcome rather
-# than trust the pipeline: no licence id may disappear from the summary, and no
-# crate may disappear from the table.
+# A silent loss in the rebuild would look identical to a legitimate removal on
+# the next run: no licence id may disappear from the summary, no crate from the
+# table.
 ids_before=$(sed -n "$((summary_rule + 1)),${summary_end}p" "$tmp" | cut -d"$bt" -f2 | LC_ALL=C sort)
 ids_after=$(printf '%s\n' "$summary" | cut -d"$bt" -f2 | LC_ALL=C sort)
 [ "$ids_before" = "$ids_after" ] || fail "licence ids changed while rebuilding the summary"

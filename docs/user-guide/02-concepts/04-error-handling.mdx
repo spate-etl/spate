@@ -15,7 +15,7 @@ metrics. There are no dead-letter queues and no silent drops.
 ## Record-level policy: Skip or Fail — nothing else
 
 - **Skip**: count the record on a metric, resolve its acknowledgment as
-  delivered (so the watermark advances past it — an intentional drop must
+  delivered (so the watermark advances past it; an intentional drop must
   never stall commits), and continue.
 - **Fail**: stop the pipeline. The batch resolves as failed, the watermark
   stalls, the process exits non-zero, and the data replays after restart.
@@ -23,9 +23,9 @@ metrics. There are no dead-letter queues and no silent drops.
 Defaults follow the likely blast radius: **deserializers default to Skip**
 (one poison message on a topic shouldn't take the pipeline down),
 **operators default to Fail** (an error in your own transform is a bug you
-want to see immediately). Both are overridable per stage — the policy is the
+want to see immediately). Both are overridable per stage. The policy is the
 second argument. The stage below is an ordinary transform that happens to be
-able to reject its input, which is the common shape: it builds a row from a
+able to reject its input, which is the common shape. It builds a row from a
 decoded record, and the two inputs it cannot build one from take the policy
 rather than stopping the pipeline.
 
@@ -41,7 +41,7 @@ example end to end.
 There is deliberately no dead-letter queue in v1: the target environments
 have no owned DLQ topic, and a half-owned one is worse than none. If you
 need one, an `inspect`/`flat_map` stage that writes failures to your own
-side channel is the extension point — see
+side channel is the extension point. See
 [Custom operators](../06-extending/custom-operators.mdx).
 
 ## Everything is surfaced through metrics
@@ -58,11 +58,11 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 | `spate_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
 | `spate_deser_not_ready_total` | — | Deserialization deferred because an upstream dependency was not yet available. |
 
-That last one is not an error, and it is worth knowing why it has its own
-series. A deserializer can report that it is **not ready** rather than that it
-failed — waiting on a schema fetch, say. The framework retries it **without
-pausing the source**, because the source is not the problem and pausing it
-would slow a pipeline that is merely waiting on a lookup. A rising count is
+That last one is not an error. A deserializer can report that it is **not
+ready** rather than that it failed (waiting on a schema fetch, say). The
+framework retries it **without pausing the source**, because the source is
+not the problem and pausing it would slow a pipeline that is only waiting on
+a lookup. A rising count is
 normal during a cold start and suspicious in steady state: it means something
 upstream is repeatedly not answering in time.
 
@@ -72,23 +72,22 @@ report the push as blocked; only the reason differs. See
 
 A useful alert from [Metrics](../../METRICS.md): a non-zero
 `rate(spate_deser_records_dropped_total[5m])` means schema drift or poison
-messages are being skipped — Skip keeps you up, not uninformed. See
-[Monitoring](../05-deployment/monitoring.mdx) for the full alerting story.
+messages are being skipped. See
+[Monitoring](../05-deployment/monitoring.mdx) for the full set of alerts.
 
 ## Fatal errors, panics, and stalled watermarks
 
 - **Panic policy**: panics in user code (operators, encoders) are caught
-  per batch. The batch resolves as Failed — its partition's watermark
-  stalls — the pipeline transitions to Failed, and the process exits
+  per batch. The batch resolves as Failed, its partition's watermark
+  stalls, the pipeline transitions to Failed, and the process exits
   non-zero. There is no thread resurrection; the orchestrator restarts the
-  process and the data replays. This is at-least-once doing its job: a
-  crash never commits past unwritten data (see
-  [Delivery guarantees](02-delivery-guarantees.mdx)).
+  process and the data replays. A crash never commits past unwritten data
+  (see [Delivery guarantees](02-delivery-guarantees.mdx)).
 - **Stalled watermarks are bounded**: a fatal sink write abandons its batch
   and permanently stalls that partition's watermark. If any partition stays
   stalled behind a failed batch longer than
   `checkpoint.stalled_fail_after` (default 120s), the controller fails the
-  whole pipeline — restarting and replaying beats running indefinitely
+  whole pipeline, so it restarts and replays instead of running indefinitely
   while committing nothing for that partition. Alert on
   `spate_checkpoint_watermark_age_seconds` well before that deadline.
 - **Exit codes are the contract with the orchestrator**: `run` returns an
@@ -100,7 +99,7 @@ messages are being skipped — Skip keeps you up, not uninformed. See
 - Data you don't control (external topics): Skip at the deserializer, plus
   an alert on the drop rate.
 - Your own transforms: Fail. If a `try_map` starts erroring, you shipped a
-  bug or the upstream contract changed — either way you want a loud stop,
+  bug or the upstream contract changed. Either way you want a loud stop,
   not a quiet trickle of dropped records.
 - Skip is only safe where dropping is *semantically acceptable*. If every
   record is money, Fail everywhere and treat the replay as the recovery

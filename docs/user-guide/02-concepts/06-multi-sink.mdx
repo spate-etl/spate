@@ -1,7 +1,7 @@
 # Multi-sink split
 
 A pipeline can write to **more than one destination**, routing each record to
-exactly one of several typed sinks — each with its own schema, encoder, router,
+exactly one of several typed sinks, each with its own schema, encoder, router,
 and batch/linger tuning. Where [sink sharding](05-sink-sharding.mdx) fans one
 destination's writes across a cluster, the **split terminal** fans a
 heterogeneous stream across *different destinations*: one per record kind, so
@@ -9,7 +9,7 @@ each is laid out and indexed for the shape of the records it holds.
 
 The alternative is to land every kind in one destination and let the receiving
 system derive the per-kind ones itself. Splitting in the pipeline moves that
-fan-out CPU off the destination — usually the scarce, hard-to-scale tier — and
+fan-out CPU off the destination (usually the scarce, hard-to-scale tier) and
 onto the horizontally-scalable pipeline tier, and it puts each destination's
 write sizing under its own configuration.
 
@@ -21,8 +21,8 @@ source → deserialize →  ├─ branch "refunds"  → encoder → router → 
         (one stream)    └─ unmatched → ErrorPolicy (Fail | Skip)
 ```
 
-Each branch is an ordinary sink — the same route → encode → per-shard queue →
-worker path as a single `.sink(...)`, just one per destination. The addition is
+Each branch is an ordinary sink, the same route → encode → per-shard queue →
+worker path as a single `.sink(...)`, one per destination. The addition is
 the **classifier**: a single closure that inspects each record and dispatches it
 to one branch. Classification and the (per-branch, differently-typed) row
 extraction are the *same* `match` arm, so there is no double-dispatch.
@@ -31,8 +31,8 @@ extraction are the *same* `match` arm, so there is no double-dispatch.
 
 Each destination is declared with `add`, which returns a `Copy`, typed handle;
 `route` then takes a closure that emits each record to one of them. The closure
-mirrors [`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter — one
-`match`, doing classification and row extraction in the same arm.
+mirrors [`flat_map`](../03-guides/assembling-a-pipeline.mdx)'s emitter, one
+`match` doing classification and row extraction in the same arm.
 
 The chain below is the one in
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs),
@@ -43,9 +43,9 @@ which splits one stream of mixed event kinds across two destinations:
 
 The record family is explicit at every seam. The chain deserializes into
 `Owned<StorefrontEvent>`, a sum type over the kinds on the stream, which is
-what the classifier sees; and each `add` fixes its own branch's row family —
-`Owned<PaymentRow>` and `Owned<RefundRow>` here, two rows with genuinely
-different columns. `ctx.sink("<name>")` resolves the sink installed under that
+what the classifier sees; and each `add` fixes its own branch's row family,
+`Owned<PaymentRow>` and `Owned<RefundRow>` here, two rows with different
+columns. `ctx.sink("<name>")` resolves the sink installed under that
 name, handing the branch that sink's queues **and** its own resolved chunking
 (from that sink's `chunk:` block, so each branch tunes independently).
 Declaration order fixes the handle indices.
@@ -53,14 +53,14 @@ Declaration order fixes the handle indices.
 Classification against a decoded sum type is the shortest shape this takes:
 the arm that matches a variant already owns the row, so it emits what it
 matched. Where the kinds arrive as one record with a discriminator field
-instead, the arm reads that field and builds the row from the record's parts —
+instead, the arm reads that field and builds the row from the record's parts,
 the same `match`, one step longer.
 
 `out.emit(handle, row)` type-checks per arm (the handle fixes the row's family)
-and dispatches in O(1) — a branch index and one downcast, no per-record name
-lookup. Each branch stores its encoder and router boxed (that is what lets
+and dispatches in O(1), a branch index and one downcast, with no per-record
+name lookup. Each branch stores its encoder and router boxed (that is what lets
 branches with different encoders share one split), so relative to a single
-`.sink()` — whose encoder and router are concrete types — a split pays one
+`.sink()` (whose encoder and router are concrete types) a split pays one
 `Any` downcast plus a virtual call into the branch's router and encoder per
 record. No allocation, no locks; the routing closure itself stays monomorphic.
 
@@ -80,7 +80,7 @@ given is the one `ctx.sink(...)` resolves inside the closure.
 A record that reaches no branch (the closure emits to none) follows the
 `unmatched` [`ErrorPolicy`](04-error-handling.mdx) passed to `.split(...)`:
 
-- **`Fail`** (the operator default): the pipeline stops — the same fail-stop a
+- **`Fail`** (the operator default): the pipeline stops, the same fail-stop a
   `Fail`-policy encoder or `try_map` triggers. It fits where an unroutable
   record means the classifier is wrong and halting beats losing data.
 - **`Skip`**: the record is dropped, its ack share released as success (exactly
@@ -88,26 +88,26 @@ A record that reaches no branch (the closure emits to none) follows the
   `spate_operator_records_dropped_total{reason="unrouted"}`. It fits where
   unknown kinds are expected and discardable.
 
-There is **no built-in catch-all**. A catch-all *destination* is just another
-branch, added and routed to on purpose — it is not framework-special.
+There is **no built-in catch-all**. A catch-all *destination* is another
+branch, added and routed to on purpose.
 
 :::note
 The per-branch shard routers are unchanged and still **total** (see
 [sink sharding](05-sink-sharding.mdx)): they always return a shard for a record
-they're given. The Skip/Fail policy lives only on the classifier tier —
-the one place routing can legitimately produce "no destination".
+they're given. The Skip/Fail policy lives only on the classifier tier, the
+one place routing can legitimately produce "no destination".
 :::
 
 ## At-least-once across destinations is free
 
 The split adds **no new delivery machinery**. Each branch clones the source poll
-batch's ack handle, so — exactly as with [`flat_map` fan-out](02-delivery-guarantees.mdx)
-— a source batch's offsets commit only once **every** destination its records
-landed in has durably written. Properties fall straight out of the shared
+batch's ack handle, so, exactly as with [`flat_map` fan-out](02-delivery-guarantees.mdx),
+a source batch's offsets commit only once **every** destination its records
+landed in has durably written. These properties follow from the shared
 ack:
 
 - **Worst-status merge.** If the write to any one destination fails, that batch
-  resolves `Failed` and its watermark stalls — even if every other destination
+  resolves `Failed` and its watermark stalls, even if every other destination
   wrote successfully. A failure anywhere replays the whole batch. Nothing
   commits past unacknowledged data.
 - **Held until all.** A batch whose records fan across three destinations is not
@@ -122,7 +122,7 @@ means raising its `linger`. But the watermark is **poll-batch-granular**, and
 a batch is held until every destination it touched has flushed. The hold has
 two halves: the chain-side chunk buffer, which the framework bounds
 (partial chunks are sealed on every commit tick, so while the pipeline is
-unblocked this half stays within ~`checkpoint.interval` — even for a branch
+unblocked this half stays within ~`checkpoint.interval`, even for a branch
 too cold to ever fill a chunk), and
 the sink-side batch `linger`, which is the trade being made here:
 
@@ -137,7 +137,7 @@ coexist while rare and hot records occur in the same source batches.**
 These levers soften it:
 
 - **Seal on `max_rows` too, not just `linger`.** With `max_rows` sized to the
-  target write, `linger` only bites in genuine lulls, and steady-state a rare
+  target write, `linger` only bites in lulls, and steady-state a rare
   destination still emits target-size writes without paying the full linger
   hold every time.
 - **Segregate the source.** The tracker is per-partition: where a source
@@ -149,7 +149,7 @@ These levers soften it:
 
 Because the source is shared and records are typed to their destination, a
 destination that is **hard-down** (its shard unreachable, circuit breaker open
-past retries) correctly stalls the whole pipeline: its records cannot be
+past retries) stalls the whole pipeline: its records cannot be
 written, their batches cannot resolve, and the source cannot advance past them.
 This is fail-stop, not data loss. Whether the stall also ends the process
 follows from the [`retry`](../07-reference/configuration.mdx#sink-pool) policy:

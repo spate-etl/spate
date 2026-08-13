@@ -22,8 +22,8 @@ assembly with nothing left out is the example; the steps that follow fill each
 elision in with code that does compile.
 
 `to_row` stands for the stage that turns the decoded record into the row the
-sink encodes — a `map`, a `try_map` or a `flat_map`, whichever the conversion
-needs — and it is what makes the two type parameters line up. A chain whose
+sink encodes (a `map`, a `try_map` or a `flat_map`, whichever the conversion
+needs), and it is what makes the two type parameters line up. A chain whose
 decoded record is already the row it writes has no such stage and goes straight
 from the deserializer to the terminal.
 
@@ -72,17 +72,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
    (thread name `spate-io`) that will host sink workers, the checkpointer,
    and the admin server.
 
-Why does a builder do process init? Because **metric handles bind to the
+The constructor does process init because **metric handles bind to the
 recorder present at the moment they are constructed**. A handle built before
-the exporter exists silently records into the void — no error, just missing
-series. By making the constructor install the exporter, holding a `Pipeline`
+the exporter exists records into the void, with no error and missing
+series. Because the constructor installs the exporter, holding a `Pipeline`
 *guarantees* a live recorder: every handle built afterwards, framework or
-custom, is live. The ordering bug is not documented away; it is made
-unconstructible. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
+custom, is live. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
 § Metrics.)
 
 :::warning
-`Pipeline::from_config` must be called **outside any async runtime** —
+`Pipeline::from_config` must be called **outside any async runtime**,
 from a plain thread, usually `main`. It owns a blocking tokio runtime, and
 dropping or `block_on`-ing one inside async context panics, so the
 constructor refuses with `BuildError::AsyncContext` instead.
@@ -97,14 +96,14 @@ factories as opaque `ComponentConfig`s:
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=source
 ```
 
-A sink section resolves the same way, through `config().sink_config(name)` —
-the single `sink:` form is addressed as `"default"`.
+A sink section resolves the same way, through `config().sink_config(name)`,
+and the single `sink:` form is addressed as `"default"`.
 
 Some connectors need async edge work before the pipeline runs. The builder's
 I/O runtime is already alive, so:
 
 - `pipeline.io_handle()` — a `tokio::runtime::Handle` for background tasks
-  that must start before `run` — a schema-registry fetcher, say. A connector
+  that must start before `run` (a schema-registry fetcher, say). A connector
   that needs one says so on its page.
 - `pipeline.block_on(future)` — run an async pre-flight step to completion
   on the I/O runtime, blocking the current thread. The canonical use is a
@@ -116,7 +115,7 @@ I/O runtime is already alive, so:
 
 ## Step 3: `.sink(bundle)` / `.sink_with(bundle, options)`
 
-`sink` accepts anything implementing `spate::sink::SinkBundle` — every
+`sink` accepts anything implementing `spate::sink::SinkBundle`. Every
 connector's sink type does, and a hand-rolled `SinkParts` does too, so
 custom sinks need no extra impl. From the bundle the builder derives the
 per-shard chunk queues, registers per-shard metrics, spawns the sink workers
@@ -128,14 +127,14 @@ chunk queue depth in chunks (default 8), and `with_chunk`, the install-time
 equivalent of the per-sink YAML
 [`chunk:` block](../07-reference/configuration.mdx#chunk) (set the chunking in
 exactly one of the two places, not both). `queue_capacity` participates in the
-backpressure sizing rule — read
+backpressure sizing rule. Read
 [Backpressure](../02-concepts/03-backpressure.mdx) before raising it.
 
 `.sink(bundle)` is sugar for `.add_sink("default", bundle)`, so calling it
 twice is an error (`BuildError::DuplicateSinkName`). A pipeline that writes
 to several destinations installs each under its own name with
-`.add_sink(name, bundle)` and routes to them with the chain's split terminal —
-see [Multi-sink split](../02-concepts/06-multi-sink.mdx).
+`.add_sink(name, bundle)` and routes to them with the chain's split terminal.
+See [Multi-sink split](../02-concepts/06-multi-sink.mdx).
 
 ## Step 4: `.chains(|ctx| ...)` — one chain per pipeline thread
 
@@ -161,27 +160,27 @@ Move the fields into the chain you build:
 ```
 
 `KeyHashRouter` is the default meta-only router; to route on a record's own
-payload instead — matching a sink cluster's sharding key, or splitting
-`flat_map` children across shards — pass a record-aware `RecordRouter` here
+payload (matching a sink cluster's sharding key, or splitting
+`flat_map` children across shards), pass a record-aware `RecordRouter` here
 instead (see [Sink sharding](../02-concepts/05-sink-sharding.mdx)).
 
 :::warning
 **The drain contract: do not stash `ctx.queues` outside the chain.** The
-sink only begins draining once every `ShardQueues` clone is dropped —
-that is how workers know no more data can arrive. The builder discharges
+sink only begins draining once every `ShardQueues` clone is dropped, which
+is how workers know no more data can arrive. The builder discharges
 this structurally: queues are lent per factory call, `ChainCtx` is
 deliberately not `Clone`, and the chain's terminal stage drops its clone
 with the driver threads before the drain runs. A clone smuggled into
 long-lived state outside the returned chain outlives the drivers and turns
 a graceful drain into a deadline-bounded loud abandon (bounded by
-`checkpoint.drain_timeout` — see [Graceful shutdown](graceful-shutdown.mdx)).
+`checkpoint.drain_timeout`; see [Graceful shutdown](graceful-shutdown.mdx)).
 :::
 
 ## Step 5: `.runtime_options(...)` (optional)
 
 `RuntimeOptions` holds knobs that are deliberately not YAML: signal
 handling, poll loop timings, the version string on `spate_pipeline_info`. The
-defaults suit production. The one you will actually touch is
+defaults suit production. The one you will touch is
 `handle_signals: false` in tests and demos, where you drive shutdown
 yourself:
 
@@ -190,7 +189,7 @@ yourself:
 
 ## Step 6: `.run(source)` or `.into_runtime(source)`
 
-The source type enters only at this terminal call — the builder itself is
+The source type enters only at this terminal call, so the builder itself is
 non-generic, nameable, and storable.
 
 - **`.run(source)`** — assemble and run to completion, blocking until a
@@ -198,13 +197,13 @@ non-generic, nameable, and storable.
   production path.
 - **`.into_runtime(source)`** — assemble into a `PipelineRuntime` without
   running it, for callers that need a `shutdown_handle()` before a spawned
-  `run` — tests and embedded pipelines:
+  `run`, such as tests and embedded pipelines:
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=handoff title="memory_pipeline.rs"
 ```
 
 From there you drive data, trigger the shutdown and join the spawned run
-for its `ExitReport` — [Testing pipelines](testing-pipelines.mdx) walks the
+for its `ExitReport`. [Testing pipelines](testing-pipelines.mdx) walks the
 rest of that path.
 
 Skipping a step is caught here: `BuildError::MissingSink` /

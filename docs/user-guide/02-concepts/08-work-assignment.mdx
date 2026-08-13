@@ -2,10 +2,9 @@
 
 This page is the **source of truth for how coordinated work is
 distributed**. [Source coordination](./07-source-coordination.mdx) covers
-the substrate — splits, leases, fencing, quarantine, completion — and is
-deliberately separate: that substrate has outlived three different
-assignment algorithms, and mixing a stable contract with a changing one is
-how contracts drift.
+the substrate (splits, leases, fencing, quarantine, completion) and is
+deliberately separate, because that substrate has outlived three different
+assignment algorithms.
 
 If the code and this page disagree, one of them is a bug. The
 [invariants](#invariants) below name the tests that enforce them.
@@ -15,8 +14,8 @@ If the code and this page disagree, one of them is a bug. The
 **One worker decides; every worker reconciles.**
 
 The fleet elects a leader (a lease on a well-known key). The leader already
-runs the source's planner; it also computes a **desired assignment** — a
-map from instance to the splits that instance should hold — and publishes
+runs the source's planner; it also computes a **desired assignment** (a
+map from instance to the splits that instance should hold) and publishes
 one small record per instance at `assign.{instance}`. Every worker watches
 its own record and moves toward it:
 
@@ -28,15 +27,15 @@ its own record and moves toward it:
 | held, draining, assigned again | cancel the revocation; the drain finishes on its own |
 | no record at all | hold what it has, claim nothing |
 
-That last row is load-bearing. **Absence of an instruction is not an
-instruction to hold nothing.** A worker that has never seen a record — a
-cold start, a leader gap, a withdrawn assignment — keeps what it holds and
+The last row states the rule. **Absence of an instruction is not an
+instruction to hold nothing.** A worker that has never seen a record (a
+cold start, a leader gap, a withdrawn assignment) keeps what it holds and
 waits. Only a record that *exists and omits a split* means give it up.
 
 ### The store is the acknowledgment
 
 There is no ack protocol between leader and worker, and no barrier. The
-leader publishes the new assignment immediately — it does not wait for the
+leader publishes the new assignment immediately, without waiting for the
 previous owner to let go. What waits is the **claim**: the new owner cannot
 take the split until the previous owner's lease key has disappeared, which
 it observes directly through its watch. An assignment is permission to try,
@@ -44,11 +43,11 @@ not a promise the split is free yet.
 
 Other designs resolve the same dependency with an explicit acknowledgment:
 a unit of work is only assigned to its new owner once the old owner has
-confirmed the revocation. We do not need that acknowledgment, because
+confirmed the revocation. That acknowledgment is unnecessary here, because
 the store already publishes the fact one would have carried: the lease key
-is either there or it is not. That is the single property that removes the
-entire class of state which is visible to neither side of a negotiation —
-and it is why the leader can be careless about ordering here at all.
+is either there or it is not. No state is left that is visible to neither
+side of a negotiation, so the leader does not have to order its writes
+against the previous owner's.
 
 ### Reconciliation is continuous, not rounded
 
@@ -56,7 +55,6 @@ Workers converge independently and at their own pace. There are no
 rebalance rounds and no global pause; a worker whose assignment did not
 change never stops processing.
 
-Continuous reconciliation rather than a round-based assignor is deliberate.
 A round-based design computes revocations in one round and assignments in
 the next, which assumes the member count does not change in between; a
 worker that joins between the two leaves work stranded in a skew that never
@@ -70,26 +68,26 @@ self-corrects. Having no rounds means there is nothing to fall between.
 - A split absent from its assignment should be released, once a record
   exists at all.
 - Nothing else. In particular an assignment is **not** a lease, **not** a
-  fence, and **not** a promise the split is available yet — the previous
-  owner may still be draining it.
+  fence, and **not** a promise the split is available yet, since the
+  previous owner may still be draining it.
 
 **The leader guarantees:**
 
 - The assignment is total over the claimable pool, up to the fleet's total
   lane budget (`members × max_in_flight`). Splits above that budget are
-  the queue, exactly as unleased splits were.
+  the queue, exactly as unleased splits are.
 - No split is named in two instances' assignments.
 - The computation is deterministic and idempotent in its inputs.
 
-**Nobody guarantees:**
+**Not guaranteed:**
 
 - That the assignment is current. It is a decision published at a moment;
   membership may have changed since.
-- That two workers cannot briefly both believe they hold a split. They can
-  — and it does not matter, because **assignment is not the fence**. The
-  durable progress record's compare-and-swap is, and it is unchanged from
-  the substrate page. A stale, split-brained, or simply wrong leader
-  cannot produce two owners; it can only produce bad balance.
+- That two workers cannot briefly both believe they hold a split. They can.
+  **Assignment is not the fence**; the durable progress record's
+  compare-and-swap is, and it is unchanged from the substrate page. A stale,
+  split-brained, or wrong leader cannot produce two owners; it can only
+  produce bad balance.
 
 That last point is why this design needs no consensus algorithm. Raft was
 rejected for this system on the grounds that the problem needs
@@ -106,24 +104,24 @@ page.
 
 1. **Deterministic.** The same `(members, splits, ownership, reserved,
    lane budgets, seed)` always yields the same assignment. The seed keys
-   the tie-breaks and is the *job* fingerprint, never the leader's identity
-   — a leader-specific seed would re-break every tie on failover and churn
+   the tie-breaks and is the *job* fingerprint, never the leader's identity.
+   A leader-specific seed would re-break every tie on failover and churn
    the fleet for nothing. — `assignment_is_deterministic`
 2. **No split assigned twice.** No split appears in two instances'
    assignments. — `no_split_is_assigned_twice`
 3. **Stable under unchanged input.** Feeding the function's own output back
    as current ownership reproduces it exactly; the assignment is a
-   fixpoint. This is what makes a steady-state fleet publish nothing and
-   therefore drain nothing. — `assignment_is_stable_under_unchanged_input`
+   fixpoint. A steady-state fleet therefore publishes nothing and drains
+   nothing. — `assignment_is_stable_under_unchanged_input`
 4. **Locally optimal.** No single split can move to a member with lane
    budget and reduce imbalance. — `assignment_admits_no_improving_move`
 5. **Total over the claimable pool.** Every assignable split is assigned
    unless every lane in the fleet is full. —
    `assignment_is_total_over_the_claimable_pool`
 
-Invariant 4 is the one to watch. The improving-move pass is bounded by
-`MAX_IMPROVING_MOVES` as a termination backstop; if that bound ever binds,
-the assignment stops being locally optimal and this test is what says so.
+The improving-move pass is bounded by `MAX_IMPROVING_MOVES` as a termination
+backstop. If that bound ever binds, the assignment stops being locally
+optimal, and invariant 4's test is what says so.
 
 ## Balance objective
 
@@ -136,20 +134,20 @@ number of splits can be holding wildly different numbers of bytes. The
 planner already reports a weight per split; balancing uses it.
 
 `max_in_flight` still caps the split *count* per worker. It is a lane
-budget — a materialization limit — not a fairness knob.
+budget (a materialization limit), not a fairness knob.
 
 Each worker advertises its **own** budget on its presence key and the
 leader balances against that, so a fleet of unequally-sized pods works. The
-alternative — a leader assuming its own value — strands work permanently: a
+alternative, a leader assuming its own value, strands work permanently: a
 smaller worker looks least-loaded, keeps being assigned splits, and keeps
 refusing to claim them.
 
-It is also why balancing on *counts* rather than weight is a trap: equal
-counts of unequal work force the whole fleet to be provisioned for its
-worst-loaded member. We use bytes rather than measured CPU because bytes are
-already known at planning time and cost nothing to collect.
+Balancing on *counts* rather than weight is a trap: equal counts of unequal
+work force the whole fleet to be provisioned for its worst-loaded member.
+Balancing uses bytes rather than measured CPU because bytes are already
+known at planning time and cost nothing to collect.
 
-The three passes:
+The passes:
 
 1. **Sticky** — every split whose current owner is still a live member
    stays put, within the lane cap. A move costs a drain, so an assignment
@@ -171,7 +169,7 @@ When an instance's presence key expires, its splits are **withheld** rather
 than reassigned, for `rebalance_delay` (default 20s). A pod that comes back
 inside the window reclaims its own work and nothing moves. The window is
 cancelled the moment the instance reappears, so a fast restart pays
-nothing at all.
+nothing.
 
 The default is deliberately short. A long window suits systems whose work
 units are expensive to start; a split here starts by reading a descriptor
@@ -181,9 +179,8 @@ movement does.
 **`rebalance_delay: 0` means reassign immediately.** It is a supported
 configuration, not a disabled feature, and it takes a distinct code path
 rather than flowing through the delay logic with a zero comparison.
-A delay knob whose zero flows through the general path as just another
-value is how "reassign at once" silently becomes "withhold indefinitely";
-the shape of the code here is chosen so that bug is not expressible.
+A delay knob whose zero flows through the general path as another
+value is how "reassign at once" silently becomes "withhold indefinitely".
 Enforced by
 `a_zero_rebalance_delay_reassigns_immediately`.
 
@@ -193,12 +190,12 @@ A revocation is **cooperative first, forced second**.
 
 The owner is asked to give the split up. A cooperating source stops intake
 at a safe boundary, chases the split's tail to a final fenced commit, and
-releases — the next owner then resumes from a watermark covering
+releases. The next owner then resumes from a watermark covering
 everything the previous one emitted, so the transfer **replays nothing**.
 
 A source that declines, or whose drain outruns `drain_deadline` (default
 10s), has the release forced instead. The split still leaves; its
-uncommitted tail simply replays under the next owner, bounded by one commit
+uncommitted tail replays under the next owner, bounded by one commit
 interval. Declining is safe, but it is the expensive way to comply.
 
 It is the same distinction any rebalancing protocol has to draw: a clean
@@ -207,23 +204,22 @@ has already lost the right to write and must discard.
 
 **A revocation the leader takes back is cancelled.** If membership changes
 again mid-drain and the leader names the split for its current owner once
-more — while that owner still holds it — the pending forced release is
+more (while that owner still holds it), the pending forced release is
 dropped and the revocation ends as
 `revocations_total{outcome="cancelled"}`. The deadline exists to stop a
 slow drain from pinning a *rebalance* open, and there is no longer a
-rebalance to pin; forcing would charge one commit interval of replay to
-serve a move nobody wants. That is the whole of what cancelling buys: a
-drain that would have finished inside the deadline was never going to be
-forced anyway, so the only case this changes is the drain that is slower
-than the deadline. Enforced by
+rebalance to pin; forcing would charge one commit interval of replay for a
+move that is no longer wanted. Cancelling therefore changes only the drain
+that is slower than the deadline; a drain that would have finished inside
+it was never going to be forced. Enforced by
 `a_reassigned_split_cancels_its_own_revocation`.
 
-**What cancelling removes is the replay, not the lane teardown** — and
+**What cancelling removes is the replay, not the lane teardown**, and
 only if the source had accepted. It takes these shapes:
 
 - **The source had already stopped intake.** It keeps draining, so the
   split is still released and then re-claimed by the same worker on the
-  next pass — one teardown and re-open, replaying nothing. Going further
+  next pass, one teardown and re-open, replaying nothing. Going further
   would mean asking a source to *resume* intake it has stopped at a safe
   boundary, and that is a seam
   [`SplitSource`](../06-extending/custom-source.mdx) deliberately does not
@@ -232,25 +228,25 @@ only if the source had accepted. It takes these shapes:
   nothing leaves: the split stays and keeps being read, with no teardown at
   all.
 
-**A cancelled drain is still bounded — by silence, not by the deadline.**
+**A cancelled drain is still bounded, by silence and not by the deadline.**
 Cancelling ends the revocation, and with it the deadline that served the
 rebalance. It does not end the obligation to keep the split *readable*: a
 source that stopped intake cannot be asked to resume, so a drain that never
-finishes would leave the split owned, leased, assigned, and read by nobody
-for the life of the process — and a bounded job containing it could never
-complete. So a cancelled drain that commits nothing at all for
+finishes would leave the split owned, leased, assigned, and unread
+for the life of the process, and a bounded job containing it could never
+complete. So a cancelled drain that commits nothing for
 `drain_deadline` has its release forced anyway, and the same worker
 re-claims it with a fresh lane and starts reading, at a cost of one bounded
 replay. A live drain commits as its tail acks its way to the sink, so this
 fires only on a wedged one. Enforced by
 `a_stalled_cancelled_drain_is_still_released`.
 
-An absent assignment record cancels nothing — it means "nothing has been
-decided", which is the same load-bearing row of the table above read from
-the other side.
+An absent assignment record cancels nothing. It means "nothing has been
+decided", which is the last row of the table above read from the other
+side.
 
 `drain_deadline` may exceed `lease_duration`. A draining split is still
-owned and still heartbeated, so a long drain does not race its own lease —
+owned and still heartbeated, so a long drain does not race its own lease;
 it only makes the rebalance slow. Size it against how long the source needs
 to flush a split's tail through its sink, which for a paced sink can be
 minutes. The only floor is `op_timeout`: a deadline below one store
@@ -266,14 +262,13 @@ land.
 | Worker wedged but alive | Its lease stops being renewed and expires, and its presence key with it; the leader withholds its splits for `rebalance_delay` and then assigns them elsewhere. The expiry makes the split *claimable*; the assignment is still what makes someone claim it. |
 | Assignment write lost | The worker keeps its previous assignment. The leader republishes on its next step. |
 | Source refuses to drain | Forced revocation as soon as the decline lands, or after `drain_deadline` if it never does; bounded replay. If the revocation was cancelled first, the refusal costs nothing — the split was staying anyway. |
-| Drain wedges after its revocation was cancelled | Released after `drain_deadline` with no commit landing, then re-claimed by the same worker with a fresh lane; bounded replay. Without this the split would be owned and read by nobody. |
+| Drain wedges after its revocation was cancelled | Released after `drain_deadline` with no commit landing, then re-claimed by the same worker with a fresh lane; bounded replay. Without this the split would be owned and unread. |
 
 ## What this is not
 
 - **Not consensus.** The leader is cheap and may be wrong. Correctness
   lives in the record CAS.
-- **Not a fence.** See the contract above. This is the single most
-  important thing to keep true about this page.
+- **Not a fence.** See the contract above.
 - **Not exactly-once.** Forced revocations and takeovers duplicate; they
   never lose.
 - **Not work stealing.** Workers do not select work for themselves and

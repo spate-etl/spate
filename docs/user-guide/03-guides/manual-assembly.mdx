@@ -1,12 +1,12 @@
 # Manual assembly
 
-The `Pipeline` builder is a **thin composition of public primitives** — the
-hyper/axum layering contract: the convenience layer composes lower-level
-APIs that are themselves public, semver-committed, and documented. Nothing
-in the builder is magic or privileged; this page desugars every step into
-the primitives it calls, so you can drop below the builder at any point —
-for exotic wiring, for embedding, or just to understand what you are
-running. The rationale is in
+The `Pipeline` builder is a **thin composition of public primitives**,
+following the hyper/axum layering contract: the convenience layer composes
+lower-level APIs that are themselves public, semver-committed, and
+documented. Nothing in the builder is magic or privileged; this page
+desugars every step into the primitives it calls, so you can drop below the
+builder at any point, for exotic wiring, for embedding, or to understand
+what you are running. The rationale is in
 [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md).
 
 Every snippet below comes from
@@ -15,8 +15,8 @@ which assembles and drives a whole pipeline this way and runs as-is with
 `cargo run -p spate --example manual_assembly`.
 
 :::note
-Prefer the builder. Manual assembly re-exposes exactly the footguns the
-builder was designed to make unconstructible — init ordering, doubled I/O
+Prefer the builder. Manual assembly re-exposes the footguns the
+builder was designed to make unconstructible: init ordering, doubled I/O
 runtimes, leaked queue clones. Use it when you need it, not by default.
 :::
 
@@ -46,9 +46,9 @@ an assembly below it does not get for free.
   and a dashboard or an alert reading one needs a builder assembly.
 - **The sink writer's own `spate_<component_type>_sink_*` scope** — the
   `Meter` a connector registers its own families through. Attaching one is
-  public (`ShardWriter::attach_metrics`); what the builder owns is deriving
+  public (`ShardWriter::attach_metrics`); the builder derives
   that namespace from the bundle's `component_type` and the writer's wiring
-  position, so by hand you name it yourself with `Meter::with_namespace` and
+  position, so by hand you name it yourself with `Meter::with_namespace`, and
   a name that drifts from the connector's own docs takes its families with
   it.
 
@@ -61,8 +61,7 @@ whatever your own components register through a `Meter` of their own.
 ### Process init — what `from_config` does
 
 The config, telemetry, the exporter, the I/O runtime and the in-flight
-byte budget, in that order. The order is the entire reason the builder owns
-this step:
+byte budget, in that order. The order is why the builder owns this step:
 
 ```rust file=crates/spate/examples/manual_assembly.rs region=init
 ```
@@ -73,18 +72,18 @@ async context panics. The builder refuses that case up front with
 
 `metrics::install` is **idempotent**, which matters when you are embedding a
 pipeline in a larger program. A second call returns the first exporter rather
-than failing or replacing it, so you can install early — right after loading
-configuration, before anything else runs — and the runtime's own install
-reuses what you created. `exporter: none` never claims the process slot at
-all, so a pipeline with metrics disabled leaves the recorder free for
+than failing or replacing it, so you can install early (right after loading
+configuration, before anything else runs) and the runtime's own install
+reuses what you created. `exporter: none` never claims the process slot,
+so a pipeline with metrics disabled leaves the recorder free for
 whatever else in the process wants it.
 
 ### Connectors
 
 Exactly as under the builder: your factories read the opaque `source:`,
 `deserializer:` and `sink:` sections of the config. A connector that needs
-an async pre-step takes `io.handle()` or `io.block_on(...)` directly —
-that is all `Pipeline::io_handle` and `Pipeline::block_on` forward to.
+an async pre-step takes `io.handle()` or `io.block_on(...)` directly, which
+is all `Pipeline::io_handle` and `Pipeline::block_on` forward to.
 
 ### The sink — what `.sink(bundle)` does
 
@@ -99,7 +98,7 @@ runtime calls once at shutdown:
 
 `SinkRuntime::queues` takes one entry per installed sink, so a single-sink
 assembly passes a one-element vector. Writing to several destinations means
-repeating this step per sink and passing one entry each — see
+repeating this step per sink and passing one entry each. See
 [Multi-sink split](../02-concepts/06-multi-sink.mdx).
 
 ### The runtime — what `.chains` + `.into_runtime` do
@@ -112,13 +111,13 @@ source, that factory, the `SinkRuntime` and the budget:
 ```rust file=crates/spate/examples/manual_assembly.rs region=runtime
 ```
 
-`with_io_runtime` is not optional in practice: without it `run` builds a
-runtime of its own and the process quietly carries `2 × io_threads`
+Without `with_io_runtime`, `run` builds a runtime of its own and the process
+carries `2 × io_threads`
 workers. `run` owns that runtime's shutdown either way, so tasks you
 spawned on it earlier keep running until then.
 
 From the shutdown handle on, a manual assembly drives exactly as a builder
-assembly does — push records, wait for the watermark, trigger the drain and
+assembly does: push records, wait for the watermark, trigger the drain and
 join for the `ExitReport`. [Testing pipelines](testing-pipelines.mdx) walks
 that half.
 
@@ -144,12 +143,11 @@ impossibility; manually, they are yours again:
 
 ## The layering contract
 
-Both layers are public and semver-committed. The builder is a composition
-rather than a gatekeeper: it grows no capability the primitives cannot
-express, bar the standing exceptions above — the queue-depth series,
-which has no public seam, and resolving a per-sink `chunk:` block, which is
-the config layer's job — and the primitives will not break under you to
-make the builder prettier. If you
+Both layers are public and semver-committed. The builder grows no capability
+the primitives cannot express, bar the standing exceptions above (the
+queue-depth series, which has no public seam, and resolving a per-sink
+`chunk:` block, which is the config layer's job), and the primitives will
+not break under you to make the builder prettier. If you
 outgrow one builder step, desugar *that step* and keep the rest; the two
 paths compose because they are the same path.
 

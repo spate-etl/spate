@@ -2,12 +2,12 @@
 
 This tutorial builds the flagship shape: consume Confluent-framed Avro from
 Kafka, validate and transform records in an operator chain, and write them
-to ClickHouse in large batches — at-least-once, drained gracefully on
+to ClickHouse in large batches, at-least-once and drained gracefully on
 SIGTERM. It is
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs)
 and the YAML beside it
-([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)):
-every Rust block below is rendered from that source, so what you read is
+([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml)).
+Every Rust block below is rendered from that source, so what you read is
 what compiles.
 
 You need Kafka, a Confluent-compatible schema registry, and ClickHouse, plus
@@ -20,7 +20,7 @@ cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
 
 ## 1. Create the target table
 
-Before running anything, create the table — and note the deduplication
+Before running anything, create the table, and note the deduplication
 window setting:
 
 ```sql
@@ -35,7 +35,7 @@ CREATE TABLE orders (
 ```
 
 Two of those column types do not spell their Rust field the same way, and both
-are deliberate. `LowCardinality(String)` takes a plain `String` — the encoding
+are deliberate. `LowCardinality(String)` takes a plain `String`. The encoding
 is the server's business, not the row's. `DateTime64(3)` takes the
 `DateTime64Millis` wrapper in step 2, which is what declares the scale; a bare
 `i64` would encode identically and validate against nothing. `UInt32` does
@@ -48,7 +48,7 @@ table sets `non_replicated_deduplication_window` greater than 0 (the
 server default is 0). Without it, the sink's dedup tokens do nothing and
 a retried batch lands twice. `Replicated*MergeTree` tables keep a window
 by default and don't need the setting. Even with the window, dedup
-tokens only cover same-batch retries — not crash replay. Read
+tokens only cover same-batch retries, not crash replay. Read
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) before
 choosing a table engine for production.
 :::
@@ -56,7 +56,7 @@ choosing a table engine for production.
 ## 2. The record types
 
 The writer schema is what your producer registers and what the records on the
-topic are framed against — the pipeline fetches it by id and never declares it:
+topic are framed against. The pipeline fetches it by id and never declares it:
 
 ```json
 {
@@ -80,22 +80,22 @@ topic are framed against — the pipeline fetches it by id and never declares it
 The record is the `order_placed` event of the storefront stream the examples
 share, field for field with the one
 [`spate-datagen`](https://docs.rs/spate-datagen) mints. It is not a source you
-can point at this topic: that crate is a library with no producer of its own,
+can point at this topic. That crate is a library with no producer of its own,
 and it writes bare datums against a top-level union of the three event kinds
-rather than the Confluent frames this pipeline reads. What carries over between
-them is the shape, not the bytes.
+rather than the Confluent frames this pipeline reads. The shape carries over
+between them; the bytes do not.
 
-Three structs, two of which are the pipeline's ends. `Deserialize` reads
-`OrderPlaced` from the writer schema above, and `OrderLine` is the nested
-element its `lines` array holds. `Serialize` writes `OrderRow` as RowBinary.
-The chain's `try_map` in step 4 is what turns the first into the last,
-totaling the lines on the way:
+`Deserialize` reads `OrderPlaced` from the writer schema above, and
+`OrderLine` is the nested element its `lines` array holds. `Serialize` writes
+`OrderRow` as RowBinary. `OrderPlaced` and `OrderRow` are the pipeline's ends,
+and the chain's `try_map` in step 4 turns the first into the last, totaling
+the lines on the way:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
 
 :::warning
-RowBinary carries no column names — **`OrderRow`'s field declaration
+RowBinary carries no column names, so **`OrderRow`'s field declaration
 order must match the `columns` list in the YAML**. Order is the wire
 contract. The `validate_schema` option below catches mismatches against
 the live table at startup instead of at 3 a.m.
@@ -170,18 +170,18 @@ sink:
       max_per_shard: 2
 ```
 
-The backpressure comment is load-bearing: with a saturated source, an
-undersized budget collapses throughput. The rule and the arithmetic are in
-[Backpressure](../02-concepts/03-backpressure.mdx).
+With a saturated source, an undersized budget collapses throughput. The
+sizing rule quoted in that `backpressure` comment, and the arithmetic behind
+it, are in [Backpressure](../02-concepts/03-backpressure.mdx).
 
 ## 4. The binary
 
 The builder owns the process plumbing (telemetry, metrics exporter, the
 shared I/O runtime, shard queues, sink workers, probes). The code you write
-is only what is genuinely *this* pipeline's: connector construction, schema
+is only what is specific to *this* pipeline: connector construction, schema
 validation, and the chain.
 
-The imports — the framework prelude, one line per connector, and the serde
+The imports are the framework prelude, one line per connector, and the serde
 derives the record types in step 2 need:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=imports
@@ -196,11 +196,11 @@ Walking the assembly:
 
 - **`Pipeline::from_path`** loads the YAML and owns init: JSON logs
   (`RUST_LOG` overrides the filter; call `spate::telemetry::init` first to
-  customize), the metrics exporter — installed before any handle can exist —
+  customize), the metrics exporter (installed before any handle can exist),
   and the shared I/O runtime. Point `SPATE_CONFIG` elsewhere to reconfigure
   without recompiling.
 - **`pipeline.io_handle()` / `pipeline.block_on(..)`** give connectors the
-  I/O runtime *before* `run` — the schema-registry fetcher and the
+  I/O runtime *before* `run`. The schema-registry fetcher and the
   `validate_schema` pre-flight both use it.
 - **`.sink(sink)`** spawns the sharded sink workers and wires the drain and
   the `/readyz` probe. The single `sink:` section above is addressed as
@@ -208,13 +208,13 @@ Walking the assembly:
 - **`.chains(..)`** installs the per-thread chain factory. The `try_map`
   totals an order's lines into its row; an order carrying none cannot be
   totaled, so `ErrorPolicy::Skip` drops it, counts it on
-  `spate_operator_records_dropped_total`, and the chain keeps going — see
+  `spate_operator_records_dropped_total`, and the chain keeps going. See
   [Error handling](../02-concepts/04-error-handling.mdx).
 - **`.run(source)`** blocks until SIGTERM/SIGINT (drain) or a fatal error,
   then returns an exit report.
 
-Each step is a thin composition of public primitives you can drop down to —
-the full mapping is in the `spate::pipeline::Pipeline` module docs and in
+Each step is a thin composition of public primitives you can drop down to.
+The full mapping is in the `spate::pipeline::Pipeline` module docs and in
 [Manual assembly](../03-guides/manual-assembly.mdx).
 
 ## 5. Run it, watch it, stop it
@@ -234,12 +234,12 @@ curl localhost:9090/healthz   # poll loop alive, watermarks moving
 curl localhost:9090/metrics   # Prometheus scrape endpoint
 ```
 
-**The SIGTERM story.** Send the process SIGTERM (what Kubernetes does on
-pod termination) and it drains rather than dies: lanes stop polling, chains
-flush, sink batches complete — bounded by `checkpoint.drain_timeout` — and
+**On SIGTERM.** Send the process SIGTERM (what Kubernetes does on
+pod termination) and it drains instead of dying. Lanes stop polling, chains
+flush, sink batches complete, bounded by `checkpoint.drain_timeout`, and
 offsets commit synchronously before the process exits. If the sink is down
 at the deadline, unflushed batches are abandoned *loudly* (metric + log)
-and replay on restart: at-least-once holds either way. Keep `drain_timeout`
+and replay on restart, so at-least-once holds either way. Keep `drain_timeout`
 below your pod's `terminationGracePeriodSeconds` so the drain finishes
 before the SIGKILL. Details in
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).

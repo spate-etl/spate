@@ -11,24 +11,24 @@ during the drain means for your data, see
 ## The drain choreography
 
 Shutdown deliberately reuses the same drain path as a full partition
-revocation — one choreography, tested constantly by every rebalance:
+revocation, one choreography tested constantly by every rebalance:
 
 1. **Lanes stop.** The controller stops event polling and tells every
    driver thread to shut down. Each driver stops polling its lanes and
-   drops them — no new data enters the pipeline.
+   drops them, so no new data enters the pipeline.
 2. **Chains flush.** Each driver flushes its operator chain: parked chunks
    and partial buffers are pushed to the shard queues, then the chain (and
    with it that thread's `ShardQueues` clone) is dropped as the thread
    exits.
-3. **Sink batches complete** — bounded by `checkpoint.drain_timeout`. Once
+3. **Sink batches complete**, bounded by `checkpoint.drain_timeout`. Once
    every queue sender is gone, the sink workers see their queues close,
    force-seal partial batches, and get the remaining deadline to finish
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
    that is force-aborted a second later, so this step always terminates.
 4. **Offsets commit.** The controller drains the checkpointer and runs a
-   final synchronous commit + `flush_commits` — only watermarks covering
-   durably written data, per the at-least-once invariant.
+   final synchronous commit + `flush_commits`, committing only watermarks
+   that cover durably written data, per the at-least-once invariant.
 
 Then everything joins and `run` returns an `ExitReport`.
 
@@ -36,14 +36,14 @@ Then everything joins and `run` returns an `ExitReport`.
 
 `checkpoint.drain_timeout` (default 25s) is the total drain budget. On
 Kubernetes, SIGTERM starts both this drain and the pod's
-`terminationGracePeriodSeconds` clock (default 30s) — after which the
+`terminationGracePeriodSeconds` clock (default 30s), after which the
 kubelet sends SIGKILL. The rule:
 
 :::warning
 Keep `drain_timeout` comfortably **below**
 `terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
-gap has to absorb what follows it — the pool's one-second backstop, the
-final commit (step 4) and process teardown — so the commit always runs
+gap has to absorb what follows it: the pool's one-second backstop, the
+final commit (step 4) and process teardown. The commit therefore always runs
 before SIGKILL. The defaults (25s vs 30s) encode this; if you raise one,
 raise the other.
 :::
@@ -53,7 +53,7 @@ checkpoint:
   drain_timeout: 25s    # keep below terminationGracePeriodSeconds
 ```
 
-A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost —
+A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost;
 it replays), but it forfeits the clean commit, so the restart replays more
 than it needed to.
 
@@ -70,31 +70,30 @@ whatever point it arrives.
 ```rust file=crates/spate/examples/storefront_pipeline.rs region=run title="storefront_pipeline.rs"
 ```
 
-`report.log()` logs the outcome at the matching level — `info` when clean,
-`error` when failed. Pair `report.exit_code()` with `std::process::exit`
+`report.log()` logs the outcome at the matching level (`info` when clean,
+`error` when failed). Pair `report.exit_code()` with `std::process::exit`
 (`0` for a clean drain, `1` for a failure) so your orchestrator can tell one
 from the other, or take `report.ok()` when your `main` prefers `?`.
 
 `ExitState::Completed` means the drain finished and the final commit ran. A
 signal-initiated drain reports it even where the sink deadline expired and
 batches were abandoned (see below; the report's `sink_drain` field says so).
-A source that reaches the end of its input is held to more — every batch
-acknowledged and the final commit persisted, or the run exits `Failed`.
+A source that reaches the end of its input is held to more, needing every
+batch acknowledged and the final commit persisted, or the run exits `Failed`.
 `ExitState::Failed` carries the failing component and reason; Kubernetes
 restarts the pod and the data replays.
 
 ## Abandoned batches: replay, not loss
 
-If the sink cannot flush everything by the deadline — a destination outage
-mid-shutdown, say — the remaining batches are **abandoned loudly**: a log
+If the sink cannot flush everything by the deadline (a destination outage
+mid-shutdown, say), the remaining batches are **abandoned loudly**: a log
 line and a metric, their acknowledgments are failed, and their partitions'
 watermarks never advance past them. The final commit therefore commits only
-what was actually written, and the abandoned data **replays after restart**.
-That is at-least-once holding under the worst case: an abandon costs
-duplicate-tolerant replay, never silent loss.
+what was written, and the abandoned data **replays after restart**. An
+abandon costs duplicate-tolerant replay, never silent loss.
 
-Note the replay caveat: batch dedup tokens do not survive a restart
-(re-batching changes boundaries), so replayed rows land again — design
+Batch dedup tokens do not survive a restart
+(re-batching changes boundaries), so replayed rows land again. Design
 target tables to tolerate duplicates. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) and the
 [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx) deduplication notes.
@@ -103,20 +102,20 @@ target tables to tolerate duplicates. See
 
 The deadline is **cooperative**: each sink worker watches it and, when it
 fires, aborts its in-flight writes and abandons what is left. Underneath
-that sits a **hard backstop** — a worker that has not returned one second
+that sits a **hard backstop**. A worker that has not returned one second
 past the deadline is force-aborted by the pool. The backstop should never
 fire; it exists so that an unforeseen stall degrades shutdown to a lost
 drain report rather than an unbounded hang, and it says so on
 `spate_sink_drain_overrun_total`. A non-zero reading there is a framework
 bug worth reporting.
 
-One thing the framework cannot do for you: a `write_batch` that blocks its
-thread between await points cannot be aborted by anyone. Give your sink's
-client a request timeout and let the retry policy handle the failure.
+A `write_batch` that blocks its thread between await points cannot be
+aborted at all. Give your sink's client a request timeout and let the retry
+policy handle the failure.
 
 The cooperative layer is only sound because **nothing on a worker's intake path
 blocks outside the `select!` that arms the deadline.** Anything a worker waits
-on sits in a branch alongside the deadline branch — otherwise the deadline is
+on sits in a branch alongside the deadline branch. Otherwise the deadline is
 not being polled while the worker waits, and shutdown deadlocks rather than
 degrading. That is why dispatch parks a sealed batch waiting for a permit
 instead of awaiting one: an await there would be outside the `select!`, and the
@@ -126,19 +125,19 @@ backstop would become the normal path instead of the never-fires path.
 
 The sink workers only enter their drain phase once **every** `ShardQueues`
 clone is dropped. The builder makes the correct drop order structural
-(queues are lent per chain factory call and die with the driver threads —
+(queues are lent per chain factory call and die with the driver threads;
 see the drain contract in
 [Assembling a pipeline](assembling-a-pipeline.mdx)). If an assembly
 nevertheless smuggles a queue clone into long-lived state, shutdown does
 not hang: the drain deadline breaks the workers out of intake and the sink
-abandons loudly exactly as in an outage — a **deadline-bounded loud abandon**
-instead of an unbounded wait. Containment, not absolution: fix the leak,
-because every shutdown until then replays data unnecessarily.
+abandons loudly exactly as in an outage, a **deadline-bounded loud abandon**
+instead of an unbounded wait. Fix the leak anyway, because every shutdown
+until then replays data unnecessarily.
 
 ## Testing shutdown
 
 Disable signal handling with `handle_signals: false` in `runtime_options`
-and drive the drain yourself — the `into_runtime` + `shutdown_handle`
+and drive the drain yourself, with the `into_runtime` + `shutdown_handle`
 pattern in [Testing pipelines](testing-pipelines.mdx). From
 [`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs)
 (`cargo run -p spate --example memory_pipeline`):

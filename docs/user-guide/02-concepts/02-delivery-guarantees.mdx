@@ -3,8 +3,8 @@
 Spate delivers **at-least-once**: a source offset is committed only after
 every record derived from it has been durably written to the sink or
 intentionally dropped. This page explains the machinery that enforces it,
-what happens at the hard moments (rebalances, shutdown, crashes), and —
-honestly — what at-least-once does *not* give you.
+what happens at the hard moments (rebalances, shutdown, crashes), and what
+at-least-once does *not* give you.
 
 ## The ack chain: from record to watermark
 
@@ -14,17 +14,17 @@ every record deserialized from that batch carries a clone. The refcount
 follows the data wherever it goes:
 
 - A record dropped by `filter` (or a Skip policy) resolves its share as
-  success — an intentional drop must not stall commits.
+  success, since an intentional drop must not stall commits.
 - `flat_map` children clone the same ack, so fan-out is covered for free.
 - Routing to multiple outputs clones it per output and merges the worst
   status.
 
 When the last clone drops, `(partition, seq, status)` flows over an
-**unbounded** channel to the checkpointer — the ack path can never block
-behind data, by construction.
+**unbounded** channel to the checkpointer, so the ack path can never block
+behind data.
 
-**The contiguity tracker.** The checkpointer (a synchronous, tokio-free,
-loom-tested module — `spate::checkpoint`) keeps, per partition, a ring of
+**The contiguity tracker.** The checkpointer (`spate::checkpoint`, a
+synchronous, tokio-free, loom-tested module) keeps, per partition, a ring of
 outstanding batch sequence numbers. It pops the contiguous *acknowledged
 prefix* and advances that partition's committable watermark. Out-of-order
 acks are fine; the watermark only ever covers a gap-free prefix of
@@ -33,16 +33,16 @@ acknowledged data.
 **Commit cadence.** Watermarks are stored on advance and committed to the
 source on an interval (`checkpoint.interval`, default 5s). The invariant:
 **never commit past unacknowledged data.** A failed batch stalls its
-partition's watermark rather than being skipped — watch
+partition's watermark rather than being skipped. Watch
 `spate_checkpoint_watermark_age_seconds`, the primary "stuck pipeline" alert
 (see [Monitoring](../05-deployment/monitoring.mdx) and
 [Metrics](../../METRICS.md)).
 
-**Durability is the sink's ack.** The framework's definition is exactly one
-thing: the `ShardWriter` returned `Ok` for that sealed batch. Everything
-upstream — the watermark, the commit, the at-least-once claim — is anchored on
-that return, so what a sink must prove before returning `Ok` is the sharpest
-contract a sink implementation has. A synchronous end-to-end server
+**Durability is the sink's ack.** The framework defines it as the
+`ShardWriter` returning `Ok` for that sealed batch. Everything upstream (the
+watermark, the commit, the at-least-once claim) is anchored on that return,
+so what a sink must prove before returning `Ok` is the central contract in a
+sink implementation. A synchronous end-to-end server
 acknowledgment and a per-message delivery confirmation are both valid answers;
 a fire-and-forget write is not.
 
@@ -69,16 +69,15 @@ bulk (encoded chunks, worker ledgers, batch accumulators):
 
 When work is revoked from this process, the framework drains the owning
 threads, flushes and acks in-flight data, and commits watermarks
-**synchronously before the revocation completes** — so the next owner resumes
+**synchronously before the revocation completes**, so the next owner resumes
 from a correct position. The checkpointer also fences staleness: a full
 assignment opens a new per-partition *epoch*, an added partition extends the
-current one, and a revoked partition's tracking is dropped on the spot — so
-a completion issued under an assignment this process no longer holds is
+current one, and a revoked partition's tracking is dropped on the spot. A
+completion issued under an assignment this process no longer holds is
 discarded rather than advancing a watermark that is no longer its own.
 
-That fence is the reason revocation is safe rather than merely fast: it does
-not rely on the outgoing owner finishing in time, only on it being unable to
-succeed afterwards. The choreography is in
+That fence does not rely on the outgoing owner finishing in time, only on it
+being unable to succeed afterwards. The choreography is in
 [ADR-0012](../../adr/0012-single-kafka-consumer-with-split-partition-queues.md), and the
 fleet-level view in [Work assignment](08-work-assignment.mdx).
 
@@ -91,18 +90,18 @@ How each source is told its assignment changed:
 
 ## Shutdown and crashes
 
-**Graceful (SIGTERM):** the same drain barrier as a full revocation — lanes
+**Graceful (SIGTERM):** the same drain barrier as a full revocation. Lanes
 stop, chains flush, sinks force-seal and drain in-flight batches under
 `checkpoint.drain_timeout` (default 25s), then a final synchronous commit.
 If a sink is down at the deadline, the remaining batches are abandoned
 loudly (`spate_sink_abandoned_batches_total` plus a log line) and their
-offsets are *not* committed — they replay on restart. See
+offsets are *not* committed, so they replay on restart. See
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 
 **Crash (SIGKILL, OOM, panic-and-exit):** nothing was committed past the
 last durable write, so on restart the source resumes from the committed
 watermark and replays everything after it. At-least-once holds; duplicates
-happen. Which brings us to:
+happen.
 
 ## The honest part: duplicates and deduplication
 
@@ -112,8 +111,7 @@ sealed batch and reused unchanged across retries of that batch. A sink whose
 destination supports insert deduplication can hand the token over and make
 same-boundary retries idempotent.
 
-The line the token draws is worth internalizing, because it is not the line
-most people assume:
+What the token covers, and what it does not:
 
 - **Covered — same-batch retries.** A batch that fails and is retried carries
   the same token, so the destination can recognize and drop the repeat.
@@ -128,9 +126,9 @@ destination or at the query layer.
 :::
 
 So target tables must be designed for replay regardless of what the token
-covers. Whether a destination honors the token at all — and what it must be
-configured to do so — is the sink's business, and at least one shipped sink has
-a silent failure mode here worth reading before going to production.
+covers. Whether a destination honors the token at all, and what it must be
+configured to do so, is the sink's business. At least one shipped sink has a
+silent failure mode here, worth reading before going to production.
 
 :::note Connector specifics
 Dedup support, and the configuration it depends on:

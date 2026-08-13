@@ -1,8 +1,8 @@
 # Concepts
 
 The mental model behind Spate. These pages explain the contracts the
-framework holds — and expects you to hold — with the reasoning behind each.
-The reasoning behind each decision lives in the
+framework holds, and the ones it expects you to hold, with the reasoning
+behind each. The reasoning behind each decision lives in the
 [decision records](../../adr/README.mdx);
 these pages are the working subset a pipeline author needs.
 
@@ -15,11 +15,10 @@ process runs exactly one pipeline.
 
 ## [2. Delivery guarantees](02-delivery-guarantees.mdx)
 
-How at-least-once actually works: refcounted acknowledgments per source
-batch, the contiguity tracker, and watermarks that commit only after durable
-sink acks — across assignment changes and shutdown. Also the honest limits:
-what a dedup token does and does not cover, and how to design destinations for
-replay.
+How at-least-once works: refcounted acknowledgments per source batch, the
+contiguity tracker, and watermarks that commit only after durable sink acks,
+across assignment changes and shutdown. Also the limits: what a dedup token
+does and does not cover, and how to design destinations for replay.
 
 ## [3. Backpressure](03-backpressure.mdx)
 
@@ -30,22 +29,23 @@ keeps a saturated pipeline out of pause duty-cycling.
 ## [4. Error handling](04-error-handling.mdx)
 
 The error taxonomy (retryable, record-level, fatal), the two record-level
-policies (Skip and Fail — there is no dead-letter queue), and the metrics
+policies (Skip and Fail, with no dead-letter queue), and the metrics
 that make every drop and every error visible.
 
 ## [5. Sink sharding](05-sink-sharding.mdx)
 
 How the terminal stage fans writes across shards: what a shard is, the two
 router tiers (meta-only `KeyHashRouter` and record-aware `RecordRouter`), why
-one saturated shard pauses the whole pipeline, and the honest limit — hot
-shards are your data's shape, not the router's choice.
+one saturated shard pauses the whole pipeline, and the limit that hot shards
+are your data's shape, not the router's choice.
 
 ## [7. Source coordination](07-source-coordination.mdx)
 
 How several pipeline replicas divide one broker-less source's work: a
 leader-elected planner enumerates splits, workers lease them with
 heartbeats and reconcile toward a leader-computed assignment, and epoch-fenced commits make stale
-writes impossible — at-least-once preserved, duplicates never loss.
+writes impossible. At-least-once is preserved, and the failure mode is
+duplicates, never loss.
 
 ## Related
 

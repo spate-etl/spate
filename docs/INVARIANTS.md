@@ -38,7 +38,7 @@ year ago still means what it said.
   surface. The `metrics` facade is the one sanctioned exception, because the
   instrumentation API *is* that facade.
 - **INV-7 — record error policies are Skip or Fail only**, and both are surfaced
-  through metrics rather than only logged. There is deliberately no third policy
+  through metrics rather than only logged. There is no third policy
   that drops a record without counting it.
 - **INV-8 — metrics handles are pre-registered at build time.** A metric name or
   label resolved on the per-record path is a per-record allocation and a lookup
@@ -48,23 +48,24 @@ year ago still means what it said.
   `Meter`, which prefixes them and rejects a namespace shadowing a reserved
   root. The one sanctioned exception is a metric registered on the raw `metrics`
   facade, which is the deliberate opt-out for a name that must sit outside
-  `spate_` — an exporter's own series, or one a downstream contract fixes.
+  `spate_`, for example an exporter's own series or one a downstream contract
+  fixes.
 - **INV-10 — a gauge series has exactly one live owner per process.** A
   duplicate claim on the same key is refused rather than shared. Assembly makes
   it fatal (`BuildError`/`StartError`); direct construction cannot fail a build,
-  so it logs and the loser becomes a *shadow* — it still counts, since counters
+  so it logs and the loser becomes a *shadow*. It still counts, since counters
   sum, but it publishes no gauge. Two live owners would be two writers racing to
   describe one piece of state, and the exposition cannot show that happened.
 
 ## Where the reasoning lives
 
 An invariant states a property; it does not argue for it. The argument is in the
-decision record that established it — [`adr/`](adr/README.mdx) indexes them, and
+decision record that established it. [`adr/`](adr/README.mdx) indexes them, and
 each record's `Confirmation` section names the invariant, test or gate that holds
 it.
 
 One documentation page is normative rather than descriptive:
 [`user-guide/02-concepts/08-work-assignment.mdx`](user-guide/02-concepts/08-work-assignment.mdx).
 Its own numbered invariants name the property tests that enforce them, and are
-separate from these — changing the balancer means changing that page in the same
+separate from these. Changing the balancer means changing that page in the same
 commit.

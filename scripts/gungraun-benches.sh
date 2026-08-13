@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
 #
-# Discovers the workspace's gungraun bench targets, and runs them.
+# Discovers the workspace's gungraun bench targets, and runs them. This is the
+# single reader of the filesystem, and every consumer asks it:
 #
-# The instruction-count job measures a pull request twice: once on the merge
-# base and once on the head. Those two legs used to derive their bench list
-# from different places — the base leg globbed the merge-base tree, the head
-# leg ran a hand-written list in the Makefile — so adding a bench to one and
-# not the other was a silent, undetectable drift. This script is the single
-# reader of the filesystem, and every consumer asks it:
+#   Makefile: bench-gungraun        --run
+#   Makefile: bench-gungraun-check  --check
+#   ci.yml, both legs               --run
 #
-#   Makefile: bench-gungraun   --run
-#   Makefile: bench-gungraun-check, and any machine without valgrind  --check
-#   ci.yml, both legs          --run
-#
-# Discovery is by naming convention — `crates/<pkg>/benches/<name>_gungraun.rs`
-# — which is what lets the base leg work at all: it runs the *merge base's*
-# copy of this script against the merge base's tree, so a merge base that
-# predates a bench simply contributes no baseline for it rather than failing.
-# Crate directory names equal package names in this workspace.
+# Discovery is by naming convention: `crates/<pkg>/benches/<name>_gungraun.rs`.
+# The base leg runs the *merge base's* copy of this script against the merge
+# base's tree, so a merge base predating a bench contributes no baseline for it
+# rather than failing.
 #
 # Usage:
 #   ./scripts/gungraun-benches.sh                   # print `pkg bench` lines
@@ -28,32 +21,23 @@
 #
 # `--features LIST` may precede any of those and is forwarded verbatim to every
 # cargo invocation. The empty string means the package's default features and
-# no `--features` flag at all, which is what makes a one-arm package and a
-# multi-arm package's default arm the same build.
+# no `--features` flag at all.
 #
 # `--run` exits 0 when it ran at least one bench and all succeeded, 1 when any
-# bench failed, and 2 when nothing was discovered. Today's callers act on
-# zero-versus-nonzero only — the base leg wipes and reports no baseline either
-# way — but the two nonzero cases mean different things and the log line each
-# emits says which, so a reader of a failed run is not left guessing whether
-# the tree had no benches or a bench died. `GUNGRAUN_*` variables are
-# inherited by the cargo child, which is how the base leg passes
-# `GUNGRAUN_SAVE_BASELINE`.
+# bench failed, and 2 when nothing was discovered. `GUNGRAUN_*` variables are
+# inherited by the cargo child: the base leg passes `GUNGRAUN_SAVE_BASELINE`
+# that way.
 #
-# That trichotomy carries a second job once the counter tier measures feature
-# arms. The merge-base leg runs the *merge base's own copy* of this file, which
-# may predate `--features` entirely — and a copy that ignores the flag builds
-# the default arm while the head leg builds another, so the two legs would be
-# compared across arms and the difference rendered as a delta. The workflow
-# therefore probes first: `--features X --run __no_such_package__` matches no
-# package, so this script answers 2 without invoking cargo, while a copy that
-# does not know the flag falls through to `fail` and answers 1. A shard whose
-# merge base answers anything but 2 has no baseline, by construction.
+# The merge-base leg runs the merge base's own copy of this file, which may
+# predate `--features` and build the default arm while the head leg builds
+# another. The workflow probes first: `--features X --run __no_such_package__`
+# matches no package and answers 2 without invoking cargo, while a copy that
+# does not know the flag answers 1. A shard whose merge base answers anything
+# but 2 has no baseline.
 set -euo pipefail
 
 # Resolved before the `cd` below, because `$0` may be relative: `--self-test`
-# re-executes this file as a subprocess to assert the exit codes of the
-# argument parser itself, which cannot be reached from inside a function.
+# re-executes this file to assert the argument parser's own exit codes.
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
 cd "$(dirname "$0")/.."
@@ -63,10 +47,8 @@ fail() {
     exit 1
 }
 
-# The compiled feature arm, parsed before the subcommand. Empty means "default
-# features", expressed as no `--features` flag rather than as `--features
-# default`: not every package in this workspace declares a `default` key, and
-# cargo rejects the flag naming a feature the package does not have.
+# The compiled feature arm, parsed before the subcommand. Empty means default
+# features, expressed as no `--features` flag rather than `--features default`.
 features=""
 if [[ "${1:-}" == "--features" ]]; then
     # `$#` rather than `-z "$2"`: the empty string is a legitimate value and
@@ -76,16 +58,15 @@ if [[ "${1:-}" == "--features" ]]; then
     shift 2
 fi
 
-# The `--features` pair, or nothing. Held as an array so the feature list
-# reaches cargo as one argument whatever it contains, and expanded with the
-# `${a[@]+...}` guard because `set -u` treats an empty array as unset on bash
-# 3.2, which is what a contributor on macOS runs.
+# The `--features` pair, or nothing. An array so the feature list reaches cargo
+# as one argument whatever it contains, expanded with the `${a[@]+...}` guard
+# because `set -u` treats an empty array as unset on bash 3.2.
 feature_args=()
 [[ -z "$features" ]] || feature_args=(--features "$features")
 
-# One `pkg bench` line per discovered target, sorted so every consumer sees
-# the same order on every machine (glob order is filesystem-dependent and
-# `sort` is locale-dependent, and the report reads better when the tables do not shuffle).
+# One `pkg bench` line per discovered target, sorted under `LC_ALL=C` so every
+# consumer sees the same order on every machine: glob order is
+# filesystem-dependent and collation is locale-dependent.
 discover() {
     local bench_src pkg bench
     for bench_src in crates/*/benches/*_gungraun.rs; do
@@ -98,14 +79,13 @@ discover() {
 }
 
 # Every `*_gungraun.rs` must carry a `[[bench]]` stanza naming it with
-# `harness = false`. Without the stanza cargo still auto-discovers the file, but
-# under the default libtest harness, which finds no `#[bench]` functions and
-# reports `0 measured` with exit 0. The bench is then green while measuring
-# nothing, which is why the manifest is checked here.
+# `harness = false`. Without it cargo auto-discovers the file under the default
+# libtest harness, which reports `0 measured` and exit 0: green while measuring
+# nothing.
 declares_target() {
     local manifest=$1 bench=$2
     # Key ordering inside a block is free, so the verdict can only be reached
-    # at the block's end — which is either the next table header or EOF.
+    # at the block's end: either the next table header or EOF.
     awk -v want="$bench" '
         /^[[:space:]]*\[/ {
             if (in_bench && name == want) { found = harness_false; settled = 1; exit }
@@ -126,19 +106,14 @@ declares_target() {
 }
 
 # A stub `cargo` that records the argument list it was handed, one line per
-# invocation, and exits with $2.
-#
-# Recording is the whole point. The earlier stub discarded its arguments, so
-# every assertion built on it held whether or not the caller forwarded what it
-# claimed to — `--features` could have been dropped on the floor and
-# `--self-test` would still have been green. A flag asserted only in prose is
-# the failure shape every past defect in this tier has taken.
+# invocation, and exits with $2. A stub that discarded its arguments would hold
+# every assertion built on it whether or not the caller forwarded the flag.
 make_stub_cargo() {
     local dir=$1 exit_code=$2 log=$3
     {
         printf '#!/bin/sh\n'
         # `%q` quotes the log path for the generated shell; `"$*"` is the
-        # whole argument list on one line, which is what the greps below read.
+        # whole argument list on one line, the form the greps below read.
         printf 'printf "%%s\\n" "$*" >>%q\n' "$log"
         printf 'exit %s\n' "$exit_code"
     } >"$dir/cargo"
@@ -146,9 +121,8 @@ make_stub_cargo() {
 }
 
 # The base leg branches on `--run`'s exit status to decide whether it has a
-# usable baseline, so the trichotomy is a contract rather than an
-# implementation detail. Proving it needs no valgrind and no real bench: a
-# stub `cargo` on PATH exercises every branch in milliseconds, on any host.
+# usable baseline, so the trichotomy is a contract. A stub `cargo` on PATH
+# exercises every branch without valgrind or a real bench.
 assert_run_exit() {
     local cargo_exit=$1 want=$2 desc=$3
     shift 3
@@ -169,20 +143,16 @@ capture_argv() {
     stub=$(mktemp -d)
     make_stub_cargo "$stub" 0 "$log"
     # A subprocess through the real argument parser, not a call into the
-    # subcommand with the globals assigned by hand. Assigning them would prove
-    # only that *those variables* reach cargo, which is weaker than the claim
-    # the seam makes: a later rename that updated `run`, `check_only` and this
-    # helper but missed the parser at file scope would keep every assertion
-    # here green while real runs measured the default arm. Going through `$0`
-    # is what makes the parsed flag the thing under test.
+    # subcommand with the globals assigned by hand: a rename that missed the
+    # parser at file scope would keep every assertion here green while real runs
+    # measured the default arm.
     PATH="$stub:$PATH" "$self" --features "$arm" "$@" >/dev/null 2>&1 || true
     rm -rf "$stub"
 }
 
 # Every recorded line carries $2, or fail with $3. Counted rather than
-# `grep -q`ed: "some invocation had the flag" is not the property — every one
-# must, or one bench of a package is measured under a different arm than its
-# siblings and the shard's rows are not comparable with each other.
+# `grep -q`ed: one bench measured under a different arm than its siblings is
+# not comparable with them.
 assert_every_line() {
     local log=$1 needle=$2 desc=$3 lines matches
     lines=$(grep -c '' "$log" || true)
@@ -202,25 +172,21 @@ self_test() {
     local pkg bench manifest checked=0 sample log rc
 
     # First, because everything below asserts something about discovered
-    # benches: an empty tree would otherwise surface as an exit-code mismatch
-    # and send the reader looking in the wrong place.
+    # benches: an empty tree would surface as an exit-code mismatch.
     [[ -n "$(discover)" ]] || fail \
-        "discovered no gungraun benches at all — the naming convention or the
+        "discovered no gungraun benches at all. The naming convention or the
     glob has changed, and both CI legs are measuring nothing."
 
     assert_run_exit 0 0 "every bench succeeding"
     assert_run_exit 3 1 "a bench failing"
     # An empty selection and a failure must not look alike: an old merge base
-    # legitimately has no benches, while a failure means wipe the partial
-    # measurement. Filtering to a package that cannot exist is the cheapest
-    # way to reach the empty branch without touching the tree.
+    # legitimately has no benches, a failure means wipe the measurement.
     assert_run_exit 0 2 "a filter matching no package" __no_such_package__
 
     # --- the feature axis reaches cargo ------------------------------------
     #
     # A sample package taken from discovery rather than named, for the same
-    # reason ci-changes.sh derives its samples: naming one would put this file
-    # in the path of every pull request that adds or removes a bench.
+    # reason ci-changes.sh derives its samples.
     sample=$(discover)
     sample=${sample%%$'\n'*}
     sample=${sample%% *}
@@ -236,8 +202,7 @@ self_test() {
     : >"$log"
 
     # `--check` is what the cache-warming job builds each arm with, so a
-    # feature it failed to forward would warm the wrong graph — silently, and
-    # only visible as a shard that compiles from scratch.
+    # feature it failed to forward would warm the wrong graph.
     capture_argv "simd" "$log" --check "$sample"
     assert_every_line "$log" "--no-run" "--check"
     assert_every_line "$log" "--features simd" "--check with a feature arm"
@@ -249,11 +214,10 @@ self_test() {
 
     # --- the capability probe the merge-base leg depends on -----------------
     #
-    # `--features X --run <no such package>` must reach the empty-selection
-    # exit without invoking cargo. That is how the workflow tells a merge base
-    # that understands the feature axis from one that predates it: the older
-    # copy has no `--features` case and answers 1 from its `unknown argument`
-    # arm. Run as a subprocess because the argument parser runs at file scope.
+    # `--features X --run <no such package>` must reach the empty-selection exit
+    # without invoking cargo. A copy predating the feature axis answers 1 from
+    # its `unknown argument` arm. A subprocess, because the parser runs at file
+    # scope.
     rc=0
     "$self" --features simd --run __no_such_package__ >/dev/null 2>&1 || rc=$?
     [[ "$rc" -eq 2 ]] || fail \
@@ -287,11 +251,9 @@ pkgs_json() {
     printf '%s]\n' "$out"
 }
 
-# Is package $1 in the filter given as $2..? An empty filter selects
-# everything. The right-hand side of `[[ == ]]` is quoted so a package name is
-# compared as data: unquoted, a filter of `spate-*` would be a glob and select
-# every benched crate. The filter is passed rather than read from an enclosing
-# function's local, so this stays callable without a caller's scope.
+# Is package $1 in the filter given as $2..? An empty filter selects everything.
+# The right-hand side of `[[ == ]]` is quoted so a package name is compared as
+# data: unquoted, a filter of `spate-*` would be a glob.
 selected_pkg() {
     local pkg=$1 w
     shift
@@ -303,11 +265,8 @@ selected_pkg() {
 }
 
 # Builds each discovered bench without running it, optionally filtered to the
-# named packages. The useful check on a machine without valgrind, and far
-# cheaper than the workspace-wide `bench-check`, which builds every rig in the
-# release profile. The filter is what lets the cache-warming job build one
-# feature arm for the one package that has it, rather than handing
-# `--features simd` to a package with no such feature — which cargo rejects.
+# named packages. The filter lets the cache-warming job build one feature arm
+# for the one package that has it; cargo rejects `--features simd` elsewhere.
 check_only() {
     local wanted=("$@") pkg bench failed=0 ran=0
     while read -r pkg bench; do
@@ -327,18 +286,17 @@ check_only() {
 
 # Runs each discovered bench, optionally filtered to the named packages.
 # Named explicitly with `--bench`: an unnamed `cargo bench -p X` also builds and
-# runs the lib's own test harness, which is not what is being measured.
+# runs the lib's own test harness, and that is not the measurement.
 run() {
     local wanted=("$@") pkg bench failed=0 ran=0
     while read -r pkg bench; do
         selected_pkg "$pkg" ${wanted[@]+"${wanted[@]}"} || continue
-        # Traced in a subshell so the log shows the real cargo invocation —
-        # `make` echoes its recipe lines and this preserves that — without
-        # tracing the surrounding bookkeeping.
-        # `</dev/null`: this loop reads `discover` on stdin, so a child that
-        # read stdin would swallow the remaining benches and the run would
-        # report success having measured a subset — which the base leg would
-        # then save as a complete baseline.
+        # Traced in a subshell so the log shows the real cargo invocation
+        # without the surrounding bookkeeping.
+        # `</dev/null`: this loop reads `discover` on stdin, so a child that read
+        # stdin would swallow the remaining benches, the run would report success
+        # having measured a subset, and the base leg would save that as a
+        # complete baseline.
         if (set -x; cargo bench -p "$pkg" --locked --bench "$bench" \
             ${feature_args[@]+"${feature_args[@]}"} </dev/null); then
             ran=$((ran + 1))

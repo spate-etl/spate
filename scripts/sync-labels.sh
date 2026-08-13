@@ -4,16 +4,12 @@
 # missing, updates the colour and description of one that exists, and never
 # deletes.
 #
-# Uses `gh`, which is preinstalled on the runners, rather than a labeling
-# action. The organisation restricts Actions to GitHub-owned, verified-publisher
-# and an explicit pattern list, so a third-party action here needs an allowlist
-# entry — and a refused one does not fail the job, it reports `startup_failure`
-# with nothing naming the action.
+# Deleting is not implemented: it would remove GitHub's stock labels that open
+# issues still carry, and deleting a label destroys the record that anything was
+# filed under it. Retiring one is a manual step.
 #
-# Deleting is deliberately not implemented. Left to prune, this would remove
-# GitHub's stock labels that open issues still carry, and deleting a label
-# destroys the record that anything was filed under it. Retiring one is a
-# manual step.
+# Uses `gh` rather than a labeling action: the organisation restricts Actions to
+# an allowlist, and a refused one reports `startup_failure` without naming it.
 #
 # Usage:
 #   scripts/sync-labels.sh [--dry-run] [--repo OWNER/NAME]
@@ -21,9 +17,7 @@
 # Environment:
 #   GH_TOKEN  a token with `issues: write` on the repository
 #   DRY_RUN   `true` is the same as passing --dry-run, so a caller can select
-#             the mode without building an argument list that is sometimes
-#             empty — an unquoted expansion the workflow linter rejects, and a
-#             quoted one that arrives as an empty argument
+#             the mode without building an argument list that is sometimes empty
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -58,8 +52,7 @@ fail() {
 command -v gh >/dev/null || fail "gh is not installed"
 
 # One TAB-separated name/colour/description row per entry. The quoted, fixed
-# key order is the file's own convention, so this stays a fixed-string parse
-# rather than pulling in a YAML reader.
+# key order is the file's own convention.
 rows=$(awk '
     function value(line,   s) {
         s = line
@@ -76,7 +69,7 @@ rows=$(awk '
     END                { emit() }
 ' "$definitions")
 
-[ -n "$rows" ] || fail "no labels parsed from $definitions — has the format changed?"
+[ -n "$rows" ] || fail "no labels parsed from $definitions. Has the format changed?"
 
 created=0
 total=0
@@ -90,9 +83,8 @@ while IFS=$'\t' read -r name color desc; do
         continue
     fi
 
-    # `--force` updates colour and description when the label already exists,
-    # which is what repairs one created by something else with a default grey
-    # and no description.
+    # `--force` updates colour and description when the label exists, repairing
+    # one created elsewhere with a default grey and no description.
     if gh label create "$name" \
         --color "$color" \
         --description "$desc" \

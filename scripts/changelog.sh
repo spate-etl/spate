@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 #
 # The changelog fragment tool: adds fragments, checks a change carries one, and
-# assembles them into CHANGELOG.md at release.
+# assembles them into CHANGELOG.md at release. `changelog.d/README.md` states
+# the format and the policy.
 #
-# Entries are written per pull request into `changelog.d/` rather than straight
-# into CHANGELOG.md. `changelog.d/README.md` says why and states the format; the
-# short version is that a fragment is a separate reviewable diff, and that
-# checking "a file was added" has no fail-open mode, where checking "the
-# `## [Unreleased]` section grew" does — a section extractor that loses its end
-# boundary silently accepts any edit anywhere in the file.
-#
-# The conventions follow towncrier. The implementation does not: `towncrier
-# check` can only ask "was any fragment added", and the interesting half of the
-# question here is *whether one was required*, which is this repository's own
-# policy and is not expressible there.
+# The conventions follow towncrier; `towncrier check` can only ask "was any
+# fragment added", where the question here is whether one was *required*.
 #
 # Usage:
 #   ./scripts/changelog.sh --check              # the gate (reads env, see below)
@@ -28,19 +20,11 @@
 #   PR_TITLE    github.event.pull_request.title     (pull_request only)
 #   PR_BODY     github.event.pull_request.body      (pull_request only)
 #
-# Both PR_TITLE and PR_BODY are free text somebody else typed. They arrive
-# through the environment and are only ever matched against, never evaluated —
-# same handling as the filenames in ci-changes.sh, for the same reason.
+# PR_TITLE and PR_BODY are free text somebody else typed: matched against, never
+# evaluated. A `pull_request` run executes the pull request's own copy of this
+# script. See the note in scripts/ci-changes.sh.
 #
-# What this cannot defend against: a `pull_request` run executes the pull
-# request's *own* copy of this script, so a change here narrows the gate of the
-# very change proposing it. That is inherent to `pull_request` — the
-# alternative, `pull_request_target`, hands a writable token to a job running
-# alongside untrusted code, which is a far worse trade. `scripts/` is a
-# CODEOWNERS path, and reviewing what a diff does to CI is part of reviewing the
-# diff. Same property, same compensating control, as ci-changes.sh.
-#
-# Targets `bash` 3.2, which is what stock macOS ships as /bin/bash: no
+# Targets `bash` 3.2, the version stock macOS ships as /bin/bash: no
 # associative arrays, no `mapfile`, no `${var,,}`, and every array expansion
 # guarded, because `"${arr[@]}"` on an empty array is an unbound-variable error
 # under `set -u` there.
@@ -52,33 +36,16 @@ fragments=changelog.d
 changelog=CHANGELOG.md
 repo_url=https://github.com/spate-etl/spate
 
-# The Keep a Changelog six, in the order a release renders them. 2.0.0 is
-# explicit that there are "only six types on purpose" — a breaking change is not
-# a seventh type, it is a `**Breaking:**` marker on whichever of these it is.
+# The Keep a Changelog six, in the order a release renders them. A breaking
+# change is not a seventh type; it is a `**Breaking:**` marker on one of these.
 TYPES="added changed deprecated removed fixed security"
 
 # The scopes that do not reach a crate. Typed out rather than derived from the
-# `area:` labels in .github/labels.yml, because that list also contains
-# `supply-chain` — and a `fix(supply-chain):` closing an advisory is precisely a
-# release note.
+# `area:` labels in .github/labels.yml, which also contains `supply-chain`.
+# A `fix(supply-chain):` closing an advisory is a release note.
 #
-# `bench` is the benchmark tier: the unpublished `spate-bench` harness and the
-# `benches/` targets inside published crates. Both are exempt for the same
-# reason, and it is a semantic one rather than a convenience: neither reaches a
-# published crate's *surface*. The harness is `publish = false`, and a bench
-# target is compiled by `cargo bench` and by nothing a consumer runs — cargo
-# does not build `benches/` for a dependency, and a versionless path
-# dev-dependency on the harness is stripped when the crate is packaged. So a
-# change confined to the tier cannot be something a reader upgrading has to be
-# told.
-#
-# What that leaves open is generic and is not this gate's job. A change that
-# does reach a crate's surface, filed under `bench` because it also touched a
-# bench, is exempted by a subject that is not true — exactly as `feat(docs)`
-# would exempt a feature. The gate reads the subject; review reads the diff.
-# Deriving the exemption from changed paths instead would trade this for a worse
-# failure: a pull request that legitimately touches both would then need a
-# fragment for a change nobody upgrading can observe.
+# `bench` covers the unpublished `spate-bench` harness and the `benches/`
+# targets inside published crates: neither reaches a published crate's surface.
 EXEMPT_SCOPES="ci docs examples bench workspace website"
 
 fail() {
@@ -86,15 +53,13 @@ fail() {
     exit 1
 }
 
-# A scratch directory rather than a list of files, so the cleanup is one quoted
-# expansion. Declared here rather than `local` to whichever function makes it:
-# an EXIT trap runs after that function has returned, so a `local` is already
-# out of scope by then and `set -u` turns the cleanup itself into the error.
+# A scratch directory, not a list of files. Declared here rather than `local`
+# to whichever function makes it: an EXIT trap runs after that function has
+# returned, and `set -u` would turn the cleanup itself into the error.
 #
-# `return 0` is load-bearing, and only bash 3.2 shows why: with `scratch` empty
-# the `[ -n ]` test is the last command in the function, so the trap exits
-# non-zero and takes the whole script's status with it — printing success and
-# returning 1.
+# `return 0` matters on bash 3.2: with `scratch` empty the `[ -n ]` test is the
+# last command in the function, so the trap exits non-zero and takes the whole
+# script's status with it, printing success and returning 1.
 scratch=""
 cleanup() {
     [ -n "$scratch" ] && rm -rf "$scratch"
@@ -103,10 +68,8 @@ cleanup() {
 trap cleanup EXIT
 
 # The crate scopes are derived, never typed: a tenth crate must not become
-# exempt by being left out of a list. Only `crates/*` is read, so a workspace
-# member outside it keeps whatever exemption its area scope carries, and
-# reading the directory needs no toolchain — which matters, because the job that
-# runs this has none.
+# exempt by being left out of a list. Only `crates/*` is read, and reading the
+# directory needs no toolchain: the job that runs this has none.
 crate_scopes() {
     local dir
     for dir in crates/*/; do
@@ -118,43 +81,23 @@ crate_scopes() {
 # The classifier.
 # ---------------------------------------------------------------------------
 # Returns 0 = "this needs a fragment", 1 = "exempt". Reads a subject line and
-# the crate list, and nothing else, so --self-test can drive it with no git
+# the crate list and nothing else, so --self-test can drive it with no git
 # state at all.
 #
-# An ignore-list, not an allow-list, on *both* axes — the same doctrine
-# ci-changes.sh states in its own header, and for the same reason. Stated the
-# other way round ("required iff the scope names a crate") it fails *open*, and
-# this repository's history is the proof: `feat: multi-sink split`,
-# `feat: record-aware sink sharding`, `feat!: leader-computed sticky
-# assignment`, `feat: dynamic work-stealing coordination` and `refactor!: rename
-# the framework to spate` name no scope at all, and are among the largest
-# user-visible changes ever made here. So:
-#
-#   * no scope is not an exemption. An exemption is earned by *naming* one of
-#     the non-crate areas, not by declining to name anything;
-#   * an unrecognised scope is not an exemption. `feat(spate-kafkaa):` is one
-#     keystroke from a crate;
-#   * an unparseable subject is not an exemption. `feature(spate-core):` must
-#     not be a silent way out.
+# An ignore-list on *both* axes. Stated the other way round ("required iff the
+# scope names a crate") it fails *open*.
 needs_entry() {
     local subject=$1 type scopes bang scope reaches_crate=0 known
 
-    # type(scope)!: text — the scope and the bang optional, text required.
+    # type(scope)!: text. The scope and the bang are optional, the text is not.
     [[ "$subject" =~ ^([a-zA-Z]+)(\(([^\)]*)\))?(!)?:[[:space:]]*[^[:space:]] ]] || return 0
     type=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
     scopes="${BASH_REMATCH[3]}"
     bang="${BASH_REMATCH[4]}"
 
-    # `!` decides on its own, before either axis. It is the author declaring a
-    # breaking change, and a breaking change is the one thing a reader upgrading
-    # cannot afford to have omitted — so the scope it was filed under does not
-    # get to overrule it.
-    #
-    # This is not hypothetical. `c6a7a5c docs(workspace)!:` was scoped to a
-    # documentation area and carried, inside it, `fix(spate-core,spate-kafka,
-    # spate-clickhouse)!: validate breaker config at load` with a BREAKING
-    # CHANGE footer — `breaker.open_for: 0s` stopped loading. Reading the scope
-    # first exempted it, and 0.2.0 was assembled without the entry it owed.
+    # `!` decides on its own, before either axis. Reading the scope first
+    # exempted `c6a7a5c docs(workspace)!:`, which carried a BREAKING CHANGE to
+    # `breaker.open_for`, and 0.2.0 shipped without the entry.
     [ -n "$bang" ] && return 0
 
     # --- scope axis: can this reach something somebody depends on? ---
@@ -177,27 +120,16 @@ needs_entry() {
 
     # --- type axis: would somebody upgrading care? ---
     case "$type" in
-    # `revert` and `build` are in with the obvious three. Reverting a released
-    # feature takes something away that people are using, and a `build` scoped to
-    # a crate is where an MSRV floor moves — both are things a reader upgrading
-    # has to be told, and neither is inferable from the version number.
     feat | fix | perf | revert | build) return 0 ;;
-    # What is left cannot reach a consumer of the published crates: prose, tests,
-    # formatting, a dependency bump the lockfile already records, and a refactor
-    # — which is by definition behaviour-preserving, and carries `!` if it is not.
     docs | test | chore | style | ci | refactor) return 1 ;;
     *) return 0 ;;
     esac
 }
 
 # ---------------------------------------------------------------------------
-# Self-test.
+# Self-test. Runs inline on every invocation as well as under --self-test: a
+# few dozen pattern matches, and one fewer target to remember.
 # ---------------------------------------------------------------------------
-# Runs inline on every invocation as well as under --self-test. That is a
-# departure from `ci-changes.sh --self-test`, which is a separate `make` target
-# because it needs a toolchain; this one is a few dozen pattern matches against
-# a here-document and costs microseconds, and a separate target is a target
-# somebody forgets to run.
 self_test() {
     local failures=0 subject want got crate scope n=0 sample extracted probe
 
@@ -267,29 +199,26 @@ feat( spate-core ): a spaced scope|need
 FEAT(spate-core): a shouty type|need
 TABLE
 
-    # The table above stays green if `crate_scopes` returns nothing: every scope
-    # would become "unrecognised", every case would still classify as `need`,
-    # and the classifier would have silently stopped consulting the tree. That
-    # is the failure ci-changes.sh describes at the top of its own self-test, so
-    # both sides are derived here too.
+    # The table above stays green if `crate_scopes` returns nothing: every
+    # scope would become "unrecognised", every case would still classify as
+    # `need`, and the classifier would have silently stopped reading the tree.
     while IFS= read -r crate; do
         [ -n "$crate" ] || continue
         n=$((n + 1))
         if ! needs_entry "feat($crate): x"; then
-            echo "changelog.sh: 'feat($crate): x' is exempt — crates/ is not being read" >&2
+            echo "changelog.sh: 'feat($crate): x' is exempt, so crates/ is not being read" >&2
             failures=$((failures + 1))
         fi
         if needs_entry "docs($crate): x"; then
-            echo "changelog.sh: 'docs($crate): x' needs a fragment — the type axis is dead" >&2
+            echo "changelog.sh: 'docs($crate): x' needs a fragment, so the type axis is dead" >&2
             failures=$((failures + 1))
         fi
     done < <(crate_scopes)
-    # Zero, not a count. A hard-coded floor would mean retiring a crate fails
-    # `--check` for everybody with "this script is wrong, not your change" — and
-    # the failure this is guarding against is the extractor going blind, which
-    # looks like nothing at all, not like one fewer.
+    # Zero, not a count. A hard-coded floor would fail `--check` for everybody
+    # the day a crate is retired, and the failure guarded against is the
+    # extractor going blind, which looks like nothing at all, not one fewer.
     if [ "$n" -lt 1 ]; then
-        echo "changelog.sh: no crate scopes derived from crates/ — the extractor has gone" >&2
+        echo "changelog.sh: no crate scopes derived from crates/, so the extractor has gone" >&2
         echo "  blind, and every scope is now unrecognised rather than checked." >&2
         failures=$((failures + 1))
     fi
@@ -299,10 +228,9 @@ TABLE
             echo "changelog.sh: '$scope' is in EXEMPT_SCOPES but still requires a fragment" >&2
             failures=$((failures + 1))
         fi
-        # No exempt scope may name a crate: that would exempt a crate through a
-        # typo in our own list rather than through a decision.
+        # No exempt scope may name a crate.
         if [ -d "crates/$scope" ]; then
-            echo "changelog.sh: EXEMPT_SCOPES names 'crates/$scope', which is a crate" >&2
+            echo "changelog.sh: EXEMPT_SCOPES names 'crates/$scope', a crate" >&2
             failures=$((failures + 1))
         fi
     done
@@ -322,17 +250,16 @@ TABLE
     # here would pass the gate on a fragment the release cannot see.
     extracted=$(fragment_type "changelog.d/sub/x.fixed.md" || true)
     if [ -n "$extracted" ]; then
-        echo "changelog.sh: fragment_type accepted a nested path as type '$extracted' —" >&2
+        echo "changelog.sh: fragment_type accepted a nested path as type '$extracted':" >&2
         echo "  --build globs one level, so the gate would pass and the release would omit it" >&2
         failures=$((failures + 1))
     fi
 
-    # A fragment has to say something. This is the guard that keeps the
-    # design claim in this file's header true.
+    # A fragment has to say something.
     probe="$(mktemp -d)/probe.fixed.md"
     : >"$probe"
     if fragment_has_prose "$probe"; then
-        echo "changelog.sh: an empty file counts as a fragment — the gate is fail-open" >&2
+        echo "changelog.sh: an empty file counts as a fragment, so the gate is fail-open" >&2
         failures=$((failures + 1))
     fi
     printf '   \n\n\t\n' >"$probe"
@@ -347,17 +274,15 @@ TABLE
     fi
     rm -rf "$(dirname "$probe")"
 
-    [ "$failures" -eq 0 ] || fail "$failures self-test failure(s) — this script is wrong, not your change"
+    [ "$failures" -eq 0 ] || fail "$failures self-test failure(s). This script is wrong, not your change"
 }
 
 # The type embedded in a fragment filename, or nothing if the name is not a
-# fragment. Keeping this a function rather than a glob is what lets the
-# self-test assert that README.md is not mistaken for one.
+# fragment. A function rather than a glob so the self-test can assert that
+# README.md is not mistaken for one.
 #
-# The path must be exactly `changelog.d/<slug>.<type>.md` — one level, no
-# subdirectories. `--build` globs one level, so accepting a nested path here
-# would let `--check` pass on a fragment the release then cannot see: the gate
-# would say the note exists and the release would ship without it.
+# One level exactly: `--build` globs one level, so accepting a nested path
+# would let `--check` pass on a fragment the release cannot see.
 fragment_type() {
     local path=$1 base type
     case "$path" in
@@ -377,9 +302,7 @@ fragment_type() {
 }
 
 # A fragment has to say something. An empty or whitespace-only file satisfied
-# the gate and shipped as an empty bullet — which refutes the property this
-# whole approach is chosen for, that checking a file was added has no fail-open
-# mode. It has one if the file's contents are never looked at.
+# the gate and shipped as an empty bullet.
 fragment_has_prose() {
     [ -s "$1" ] || return 1
     grep -qE '[^[:space:]]' "$1"
@@ -387,15 +310,12 @@ fragment_has_prose() {
 
 # Does the message this subject came from carry `Changelog: none`?
 #
-# `git interpret-trailers --parse`, never a grep. The commit bodies here are
-# dense prose, and a line like `Tests: the two fault-injection knobs ...` starts
-# a sentence, not a trailer. git's own parser reads only the final block of a
-# message and gets that right.
+# `git interpret-trailers --parse`, never a grep: a body line like `Tests: the
+# two fault-injection knobs ...` starts a sentence, not a trailer.
 #
-# One message at a time, too, and that is not stylistic: interpret-trailers
-# reads *its whole input* as a single message and takes the trailers from the
-# last block of it, so handing it a concatenated log finds only the oldest
-# commit's trailers and silently reports none for every other commit.
+# One message at a time: interpret-trailers takes the trailers from the last
+# block of its whole input, so a concatenated log reports none for every commit
+# but the oldest.
 has_changelog_none() {
     local source=$1 parsed
     if [ "$source" = body ]; then
@@ -416,32 +336,26 @@ cmd_check() {
     local subjects_file offenders_file empty_file subject origin source file sha line
     local offenders=0 added=0 excused=0
 
-    [ -d "$fragments" ] || fail "$fragments/ not found — it holds the changelog fragments"
+    [ -d "$fragments" ] || fail "$fragments/ not found. It holds the changelog fragments"
     [ -f "$fragments/README.md" ] ||
         fail "$fragments/README.md not found. It states the format and, less obviously,
   is what keeps the directory in git once a release has consumed every fragment."
 
     case "${EVENT_NAME:-}" in
     pull_request)
-        # Against the *merge base*, not `base.sha`. `base.sha` is the base
-        # branch tip, so a two-dot diff also reports everything main has gained
-        # since this branch last moved — the same note ci-changes.sh carries.
-        #
-        # A missing merge base is a hard failure here, where ci-changes.sh falls
-        # open to running everything. The safe direction there is "run more"; the
-        # analogue here would be "demand a fragment", which the contributor
-        # cannot act on. A missing merge base means the checkout lost its
-        # `fetch-depth: 0`, and that should be loud.
+        # Against the *merge base*, not `base.sha`; ci-changes.sh carries the
+        # same note. A missing merge base is a hard failure here where
+        # ci-changes.sh falls open: "demand a fragment" is not something the
+        # contributor can act on. It means the checkout lost `fetch-depth: 0`.
         if ! base=$(git merge-base "${BASE_SHA:-}" "${HEAD_SHA:-}" 2>/dev/null) || [ -z "$base" ]; then
-            fail "no merge base for ${BASE_SHA:-?}..${HEAD_SHA:-?} — does the checkout still set fetch-depth: 0?"
+            fail "no merge base for ${BASE_SHA:-?}..${HEAD_SHA:-?}. Does the checkout still set fetch-depth: 0?"
         fi
         head="${HEAD_SHA}"
         mode=require
         ;;
     "")
         # A laptop. Orient against the obvious upstream so `make gates` answers
-        # the question before you push, and fall back to structure-only rather
-        # than failing on a repository we cannot orient ourselves in.
+        # the question before you push, and fall back to structure-only.
         for ref in origin/main upstream/main main; do
             if candidate=$(git rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) &&
                 base=$(git merge-base HEAD "$candidate" 2>/dev/null) &&
@@ -454,24 +368,16 @@ cmd_check() {
         ;;
     *)
         # push, merge_group, schedule, workflow_dispatch. On `push` the
-        # requirement was already proven on the pull request and `main` cannot be
-        # rewritten, so a failure here is one nobody can fix. A merge queue entry
-        # has no pull request title of its own, and inventing a subject for its
-        # synthetic merge commit would be a second classifier with no test behind
-        # it. Structure only — and it still reports, rather than skipping, so
-        # ci-gate sees a real success.
+        # requirement was proven on the pull request and `main` cannot be
+        # rewritten, so a failure here cannot be acted on. Structure only, and
+        # it still reports, so ci-gate sees a real success.
         ;;
     esac
 
-    # Structure-only is the honest answer on a laptop with no branch and on the
-    # events that have no pull request to reason about. It must never be the
-    # answer on a pull request, and the way that could happen is a workflow edit:
-    # `ci-lint` and the CI job that runs its members have diverged before, and
-    # collapsing the four steps into `- run: make ci-lint` would call this with
-    # no `EVENT_NAME`, in a shallow checkout, where it would take the laptop arm
-    # and report success having evaluated nothing.
-    #
-    # So: inside Actions, on a pull request, refusing to be inert is the point.
+    # Structure-only must never be the answer on a pull request. A workflow
+    # edit collapsing the four steps into `- run: make ci-lint` would call this
+    # with no `EVENT_NAME`, in a shallow checkout, where it takes the laptop arm
+    # and reports success having evaluated nothing.
     if [ "$mode" = structure ] && [ -n "${GITHUB_ACTIONS:-}" ] &&
         [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         fail "running on a pull request inside GitHub Actions with no EVENT_NAME, so this
@@ -489,18 +395,13 @@ cmd_check() {
     fi
 
     # The union of the pull request title and the branch's own subjects, where
-    # the branch can only ever *add* the requirement — the same add-only shape
-    # as ci-changes.sh's `apply_ci_labels`.
+    # the branch can only ever *add* the requirement. The title is
+    # authoritative, since this repository squashes with it as the commit
+    # subject, but title-only fails open: a pull request titled `chore: tidy
+    # up` carrying a `feat(spate-core)` commit would escape.
     #
-    # The title is authoritative: this repository squashes with it as the commit
-    # subject, so it is what lands on main and what release-plz reads to pick the
-    # version. But title-only fails open — a pull request titled `chore: tidy up`
-    # carrying a `feat(spate-core)` commit would escape — so the commits are a
-    # second opinion.
-    #
-    # `--no-merges`, because `Merge branch 'main' into x` is unparseable, and an
-    # unparseable subject is not exempt: without this every rebase-by-merge would
-    # demand a fragment.
+    # `--no-merges`, because `Merge branch 'main' into x` is unparseable and an
+    # unparseable subject is not exempt.
     scratch=$(mktemp -d)
     subjects_file="$scratch/subjects"
     offenders_file="$scratch/offenders"
@@ -517,22 +418,15 @@ cmd_check() {
         [ -n "$subject" ] && printf '%s\tcommit %s\t%s\n' "$subject" "$sha" "$sha" >>"$subjects_file"
     done < <(git log --no-merges --format='%s%x09%h' "$base..${head:-HEAD}" 2>/dev/null || true)
 
-    # Collected quietly and reported only if it turns out to matter. Classifying
-    # straight to stderr would put an alarming list in front of a contributor
-    # whose change goes on to satisfy the gate on the very next line.
+    # Collected quietly and reported only if it matters: classifying straight
+    # to stderr would put an alarming list in front of a contributor whose
+    # change satisfies the gate on the next line.
     #
-    # A trailer excuses the message it is written on, and the scope of that
-    # differs by where it is written.
-    #
-    # In the **pull request body** it excuses the whole pull request, because
-    # the body is what the squash commit carries: it is the author's deliberate,
-    # reviewable statement about the one commit that will exist on `main`.
-    #
-    # On an individual **commit** it excuses only that commit's subject. Any
-    # trailer anywhere used to excuse the whole range, which is wider than the
-    # trailer says — a pull request carrying a genuine feature *and* a
-    # never-released fix was let through on the fix's trailer, and the feature
-    # shipped with no note.
+    # A trailer excuses the message it is written on. In the pull request
+    # **body** that is the whole pull request, because the body is what the
+    # squash commit carries; on a **commit** it is that commit's subject only,
+    # after one carrying a feature *and* a never-released fix shipped the
+    # feature with no note.
     if has_changelog_none body; then
         echo "changelog.sh: the pull request body carries a 'Changelog: none' trailer, which"
         echo "  is what the squash commit will carry. Taken at its word for this pull request."
@@ -561,15 +455,13 @@ cmd_check() {
         return 0
     fi
 
-    # Added, not modified. Editing an existing fragment — someone else's, or one
-    # from an earlier unreleased pull request — is not this change's release
-    # note, and counting it would let a typo fix satisfy the gate for a feature.
+    # Added, not modified. Editing an existing fragment is not this change's
+    # release note, and counting it would let a typo fix satisfy the gate.
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         fragment_type "$file" >/dev/null 2>&1 || continue
-        # Read the worktree, not the indexed blob: locally the file is right
-        # there, and in CI the checkout is of the head commit anyway. An empty
-        # fragment is not a fragment.
+        # Read the worktree, not the indexed blob: locally the file is there,
+        # and in CI the checkout is of the head commit anyway.
         if [ -f "$file" ] && ! fragment_has_prose "$file"; then
             printf '    %s\n' "$file" >>"$empty_file"
             continue
@@ -578,16 +470,14 @@ cmd_check() {
     done < <(git diff --no-ext-diff --no-textconv --name-only --diff-filter=A \
         "$base" "${head:-HEAD}" -- "$fragments/" 2>/dev/null || true)
 
-    # Locally, a fragment that has been written but not yet committed counts.
-    # `make gates` runs this, and a gate that tells you to create the file you
-    # just created is one people learn to ignore. In CI `head` is a real commit
-    # and the worktree is a clean checkout of it, so this finds nothing new.
+    # Locally, a fragment written but not yet committed counts: `make gates`
+    # runs this, and a gate that tells you to create the file you just created
+    # is one people learn to ignore. In CI the worktree is a clean checkout.
     if [ -z "${head:-}" ]; then
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             # Only new files: `A ` staged-added and `??` untracked. A modified
-            # fragment is somebody else's note being edited, which is the same
-            # reason the committed side filters on `--diff-filter=A`.
+            # fragment is somebody else's note being edited.
             case "$line" in
             'A '* | '??'*) ;;
             *) continue ;;
@@ -605,7 +495,7 @@ cmd_check() {
 
 $(cat "$empty_file")
   A fragment is the release note. Write what the change means for somebody
-  upgrading — $fragments/README.md has the conventions."
+  upgrading. $fragments/README.md has the conventions."
     fi
 
     if [ "$added" -gt 0 ]; then
@@ -624,22 +514,22 @@ $(cat "$empty_file")
         echo
         echo "      make changelog-new TYPE=fixed SLUG=short-description"
         echo
-        echo "  and write what the change means for somebody upgrading — not what moved."
+        echo "  and write what the change means for somebody upgrading, not what moved."
         echo "  $fragments/README.md has the format and the conventions."
         echo
-        echo "  If it is genuinely not user-visible, say so in the subject. There is no"
-        echo "  label and no opt-out checkbox for this, on purpose — .github/labels.yml"
-        echo "  says why. The exemption is derived from the type and scope you write:"
+        echo "  If it is not user-visible, say so in the subject. There is no label and"
+        echo "  no opt-out checkbox for this, and .github/labels.yml says why. The exemption"
+        echo "  is derived from the type and scope you write:"
         echo
         echo "      feat(spate-core): ...  ->  refactor(spate-core): ...  nothing user-facing moved"
         echo "      fix(spate-core): ...   ->  test(spate-core): ...      it only touched tests"
         echo "      feat(spate-core): ...  ->  feat(docs): ...            it only touched docs"
         echo
-        echo "  For a fix to a bug that was never released, a 'Changelog: none' trailer on"
-        echo "  the commit is the honest way out."
+        echo "  For a fix to a bug that was never released, put a 'Changelog: none'"
+        echo "  trailer on the commit."
         echo
-        echo "  The pull request title is what lands on main — this repository squashes with"
-        echo "  the title as the subject — so the title is the one that has to be right."
+        echo "  The pull request title is what lands on main, since this repository squashes"
+        echo "  with the title as the subject, so the title is the one that has to be right."
     } >&2
     exit 1
 }
@@ -660,13 +550,12 @@ cmd_new() {
     esac
 
     # `LC_ALL=C grep`, not a `case` glob. A bracket range in a glob is collated,
-    # and under bash 3.2 — the version this targets, and what stock macOS ships
-    # — `[!a-z0-9-]` in a UTF-8 locale accepts uppercase, so `BarUpper` passed
-    # there and was rejected everywhere else. Nothing dangerous followed from it;
-    # the point is that the check meant different things on different machines.
+    # and under bash 3.2, the version this targets and what stock macOS ships,
+    # `[!a-z0-9-]` in a UTF-8 locale accepts uppercase, so `BarUpper` passed
+    # there and was rejected everywhere else.
     if ! printf '%s' "$slug" | LC_ALL=C grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
         fail "'$slug' should be lowercase letters, digits and hyphens, starting and ending
-  with one of the first two — it becomes a filename."
+  with one of the first two. It becomes a filename."
     fi
     path="$fragments/$slug.$type.md"
     [ -e "$path" ] && fail "$path already exists"
@@ -695,42 +584,35 @@ cmd_build() {
     [ -f "$changelog" ] || fail "$changelog not found"
 
     grep -qxF '## [Unreleased]' "$changelog" ||
-        fail "no '## [Unreleased]' heading in $changelog — --build inserts the new release below it,
+        fail "no '## [Unreleased]' heading in $changelog. --build inserts the new release below it,
   so a release that removed it has to put it back, empty, before the next one."
 
     # Running the same version twice would insert a second section and rewrite
-    # the links to match it, and the result reads like a released version that
-    # has changed. A published version can never be replaced, so the number is
-    # the one thing here that has to be right before anything else happens.
+    # the links to match it. A published version can never be replaced.
     grep -qF "## [$version]" "$changelog" &&
         fail "$changelog already has a '## [$version]' section. Pick the next version,
   or if the previous attempt failed part-way, undo it before running this again."
 
-    # The Unreleased section has to be empty. Anything sitting under it would
-    # otherwise fall through the insertion below and land *inside* the new
-    # release, out of section order and dated into a version it was not part of
-    # — and the heading it came from would be left empty, so nothing would look
-    # wrong. There is one legitimate way to get text under there (the
-    # no-fragments error a few lines down says to write a section by hand), so
-    # this says what to do rather than only refusing.
+    # The Unreleased section has to be empty. Anything under it would fall
+    # through the insertion below into the new release, out of section order and
+    # dated into a version it was not part of, leaving its own heading empty.
     if awk '/^## \[Unreleased\]$/{f=1;next} f&&/^## /{exit} f&&/[^[:space:]]/{found=1} END{exit !found}' \
         "$changelog"; then
         fail "the '## [Unreleased]' section in $changelog is not empty.
 
   --build assembles from $fragments/, and anything written under that heading by
   hand would be swept into '## [$version]' below the link definitions rather than
-  read as part of it. Move it into a fragment — one file per entry, typed by its
-  Keep a Changelog section — and run this again."
+  read as part of it. Move it into a fragment, one file per entry, typed by its
+  Keep a Changelog section, and run this again."
     fi
 
     # A fragment has to say something; an empty one would ship as an empty
-    # bullet. `--check` rejects these on the pull request, so reaching here means
-    # one was committed before that gate existed, or edited to nothing since.
+    # bullet. `--check` rejects these on the pull request.
     for file in "$fragments"/*.md; do
         [ -e "$file" ] || continue
         fragment_type "$file" >/dev/null 2>&1 || continue
         fragment_has_prose "$file" ||
-            fail "$file is empty. A fragment is the release note — write it, or delete the file."
+            fail "$file is empty. A fragment is the release note: write it, or delete the file."
     done
 
     today=$(date -u +%Y-%m-%d)
@@ -748,12 +630,10 @@ cmd_build() {
         for file in "$fragments"/*."$type".md; do
             [ -e "$file" ] || continue
             if [ "$found" -eq 0 ]; then
-                # Sentence case for the section heading, as Keep a Changelog
-                # spells them: Added, Changed, Fixed. The leading blank is
-                # emitted here rather than after each entry so that entries
-                # within a section stay adjacent — a blank line between list
-                # items makes it a *loose* list, which renders every bullet
-                # wrapped in its own paragraph and does not match 0.1.0.
+                # Sentence case for the heading, as Keep a Changelog spells
+                # them. The leading blank is emitted here rather than after each
+                # entry: a blank line between list items makes it a *loose*
+                # list, which renders every bullet in its own paragraph.
                 [ -s "$block" ] && printf '\n' >>"$block"
                 printf '### %s%s\n\n' "$(printf '%s' "${type%"${type#?}"}" | tr '[:lower:]' '[:upper:]')" "${type#?}" >>"$block"
                 found=1
@@ -762,21 +642,14 @@ cmd_build() {
             body=$(sed -e 's/[[:space:]]*$//' "$file")
             body=$(printf '%s\n' "$body" | sed -e '/./,$!d')
 
-            # A `([#N])` written at the very *end* of the entry wins over the
-            # derived one, and only its link definitions are emitted. That is
-            # what lets an entry point at the pull request that actually did the
-            # work when the fragment was written somewhere else — a retroactive
-            # entry, or one restored after a release went out without it.
+            # A `([#N])` at the very *end* of the entry wins over the derived
+            # one, for an entry pointing at the pull request that did the work.
             #
-            # Anchored to the end on purpose. Matching anywhere would read a
-            # mid-sentence citation of some earlier pull request as this entry's
-            # own reference, drop the derived link, and point the reader at the
-            # wrong change — and citing a prior pull request mid-sentence is a
-            # style the README itself models.
+            # Anchored to the end: matching anywhere would read a mid-sentence
+            # citation of an earlier pull request as this entry's reference.
             #
-            # Every `[#N]` the prose mentions gets a link definition regardless,
-            # or a citation renders as literal text instead of a link. Only the
-            # trailing one decides whether to skip deriving.
+            # Every `[#N]` in the prose gets a link definition regardless, or it
+            # renders as literal text. Only the trailing one skips deriving.
             printf '%s' "$body" | grep -oE '\[#[0-9]+\]' | tr -d '[]#' |
                 while IFS= read -r n; do
                     [ -n "$n" ] && printf '[#%s]: %s/pull/%s\n' "$n" "$repo_url" "$n"
@@ -787,43 +660,36 @@ cmd_build() {
             if [ -n "$explicit" ]; then
                 : # already collected above
             else
-                # Otherwise the number comes from the subject of the commit that
-                # *added* the fragment — this repository's squash subjects end in
-                # `(#NN)`, and every commit since v0.1.0 does. A fragment added by
-                # a direct push has no number, and that renders without a link
-                # rather than failing: the entry is still the point.
+                # Otherwise the number comes from the subject of the commit
+                # that *added* the fragment: squash subjects end in `(#NN)`. A
+                # fragment added by a direct push renders without a link.
                 pr=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null |
                     sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p' | head -n 1)
                 if [ -n "$pr" ]; then
-                    # On its own line, never appended to the last one. A fragment
-                    # may legitimately end in a fenced code block, and CommonMark
-                    # allows only whitespace after a closing fence — appending
-                    # there leaves the fence unclosed and the block swallows every
-                    # section below it, including earlier releases.
+                    # On its own line, never appended to the last one. A
+                    # fragment may end in a fenced code block, and CommonMark
+                    # allows only whitespace after a closing fence: appending
+                    # leaves it unclosed and swallows every section below.
                     body="$body
 ([#$pr])"
                     printf '[#%s]: %s/pull/%s\n' "$pr" "$repo_url" "$pr" >>"$links"
                 fi
             fi
 
-            # A fragment is prose, not a list item: the bullet and its
-            # continuation indent are applied here so the file stays readable on
-            # its own. Blank lines stay blank — indenting them to `"  "` leaves
-            # trailing whitespace and makes the section a *loose* list, undoing
-            # the adjacency the section heading above works to keep.
+            # The bullet and continuation indent are applied here so the file
+            # stays readable on its own. Blank lines stay blank: indenting them
+            # leaves trailing whitespace and makes the section a *loose* list.
             printf '%s\n' "$(printf '%s\n' "$body" |
                 sed -e '1s/^/- /' -e '2,$s/^\(.\)/  \1/')" >>"$block"
         done
     done
 
-    [ -s "$block" ] || fail "no fragments in $fragments/ — nothing to release.
+    [ -s "$block" ] || fail "no fragments in $fragments/, so nothing to release.
   Every user-visible change since $previous should have left one; if the release
   genuinely contains none, write the section by hand and say why in the commit."
 
-    # Contributors over the whole range, not only the ones who left a fragment:
-    # the CI, documentation and test work that never earns an entry is still the
-    # release. Bots are filtered; they are not contributors and listing them
-    # reads as padding.
+    # Contributors over the whole range, not only the ones who left a fragment.
+    # Bots are filtered.
     contributors=$(git shortlog -sn "$range" 2>/dev/null |
         sed -e 's/^[[:space:]]*[0-9][0-9]*[[:space:]]*//' |
         grep -v '\[bot\]$' || true)
@@ -842,15 +708,13 @@ cmd_build() {
         sort -u "$links" | sort -t'#' -k2 -n >>"$block"
     fi
 
-    # Trim trailing blank lines. Whichever section ended the block left one, and
-    # the line the block is inserted above already supplies the separator — two
-    # of them leave a double gap over the previous release. `$(cat)` drops every
-    # trailing newline and the `printf` puts exactly one back.
+    # Trim trailing blank lines: the insertion line already supplies the
+    # separator. `$(cat)` drops every trailing newline; `printf` puts one back.
     printf '%s\n' "$(cat "$block")" >"$block.trimmed"
     mv "$block.trimmed" "$block"
 
-    # Insert the new release directly below the (emptied) Unreleased heading,
-    # and rewrite the two link references at the foot of the file.
+    # Insert the new release below the Unreleased heading, and rewrite the two
+    # link references at the foot of the file.
     VERSION="$version" TODAY="$today" BLOCK="$block" REPO="$repo_url" \
         awk '
         BEGIN { version = ENVIRON["VERSION"]; today = ENVIRON["TODAY"] }
@@ -875,24 +739,14 @@ cmd_build() {
         }
     ' "$changelog" >"$scratch/changelog.new"
 
-    # Everything that can fail happens before anything is written back.
-    #
-    # The removals used to run after the file had already been replaced, with
-    # `git rm` as the last command of an `&&` list — so an uncommitted fragment
-    # (`--new` and forgot to `git add`) aborted the loop under `set -e` with the
-    # changelog rewritten, some fragments staged for deletion and others not, and
-    # the duplicate-version guard then blocking the retry. `git rm --cached`
-    # cannot fail that way, but the ordering is the real fix: prove the removals
-    # first, then commit to the write.
-    #
-    # The scratch copy also means an awk failure leaves nothing behind. It used
-    # to write `CHANGELOG.md.new` into the repository root, untracked and not
-    # ignored.
+    # Everything that can fail happens before anything is written back. With
+    # the removals after the rewrite, an uncommitted fragment aborted the loop
+    # under `set -e` with the changelog rewritten and fragments half-staged.
     for type in $TYPES; do
         for file in "$fragments"/*."$type".md; do
             [ -e "$file" ] || continue
             git ls-files --error-unmatch "$file" >/dev/null 2>&1 ||
-                fail "$file is not tracked. Commit it before assembling a release —
+                fail "$file is not tracked. Commit it before assembling a release:
   a fragment that never reached git is not part of what is being released."
         done
     done
@@ -906,7 +760,7 @@ cmd_build() {
     done
 
     echo "changelog.sh: wrote ## [$version] — $today into $changelog and consumed the fragments."
-    echo "  Read what it wrote before committing — the assembly is mechanical, the release note is not."
+    echo "  Read what it wrote before committing: the assembly is mechanical, the release note is not."
 }
 
 # ---------------------------------------------------------------------------

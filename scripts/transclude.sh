@@ -4,45 +4,32 @@
 # page names a source and a region that exist, every `repo:` link names a path
 # that exists, and every anchor marker under `crates/` is well formed.
 #
-# Why this exists alongside the remark plugins, which already throw on all of
-# the above. They run during the site build, and the site build has a
-# persistent Rspack cache (`future.faster` in website/docusaurus.config.ts,
-# restored in the `site` job of ci.yml) — a cached MDX module can be served
-# against a source that has since moved. The pass-through loader in
-# website/src/plugins/transcludeDepsLoader.cjs closes that window, but it closes
-# it by leaning on the bundler's dependency tracking. This script leans on
-# nothing: it reads both sides off disk on every run and needs neither a Rust
-# toolchain nor node, which is why it can run in the job that has neither. The
-# plugins give the fast feedback; this gives the promise.
+# The remark plugins throw on the same things during the site build, which
+# caches MDX modules and can serve a cached page against a source that has since
+# moved. This script reads both sides off disk on every run.
 #
 # The `repo:` scan reads text, not a syntax tree, so it cannot tell a link from
-# inline code quoting one. Documentation *of* the form therefore belongs in a
-# fence, which this skips — the same constraint `file=` carries, and the reason
-# docs/STYLE.md states both inside one.
+# inline code quoting one. Documentation *of* the form belongs in a fence.
 #
-# What --check holds is the mechanical half only: that a page's pointer
-# resolves. Whether the region it points at is the *right* code for the
-# paragraph around it is review's job and is not expressible here — see
-# .claude/skills/docs-review/SKILL.md step 1.
+# --check holds the mechanical half only: that a page's pointer resolves.
+# Whether the region is the right code for the paragraph around it is review's
+# job. See .claude/skills/docs-review/SKILL.md step 1.
 #
 # Usage:
 #   ./scripts/transclude.sh --check      # the gate
 #   ./scripts/transclude.sh --sources    # every source a page transcludes from
 #   ./scripts/transclude.sh --self-test  # the parsers, alone
 #
-# Targets `bash` 3.2, which is what stock macOS ships as /bin/bash: no
-# associative arrays, no `mapfile`, no `${var,,}`, and every array expansion
-# guarded, because `"${arr[@]}"` on an empty array is an unbound-variable error
-# under `set -u` there.
+# Targets `bash` 3.2 (stock macOS /bin/bash): no associative arrays, no
+# `mapfile`, no `${var,,}`, and every array expansion guarded under `set -u`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 docs=docs
 # The trees a page may quote from. Anything here is compiled by
-# `cargo clippy --workspace --all-targets`, which is what makes a region
-# trustworthy. Keep in step with ALLOWED_PREFIXES in
-# website/src/remark/transclude.ts.
+# `cargo clippy --workspace --all-targets`. Keep in step with ALLOWED_PREFIXES
+# in website/src/remark/transclude.ts.
 allowed_prefix=crates/
 
 failures=0
@@ -53,9 +40,7 @@ fail_at() { # file, line, message
 }
 
 # The value of a `key=` attribute in a fence info string, or nothing.
-#
-# Handles `k=v`, `k="v"` and `k='v'`. Written with parameter expansion rather
-# than sed so it costs no subprocess per fence; the tree has 163 of them.
+# Handles `k=v`, `k="v"` and `k='v'`.
 meta_value() { # info, key
     local info=$1 key=$2 rest
     case " $info" in
@@ -78,10 +63,8 @@ meta_value() { # info, key
 
 # Is this line a fence delimiter? Echoes the run of markers if so.
 #
-# Only column-zero fences are recognised. Every fence in this tree starts at
-# column zero, and an indented fence inside a list item would need the list's
-# own indentation tracked to be read correctly — a parser that guessed would be
-# worse than one that says it does not look.
+# Only column-zero fences are recognised: an indented one inside a list item
+# would need the list's indentation tracked to be read correctly.
 fence_marker() { # line
     case "$1" in
     '```'*) printf '```' ;;
@@ -94,8 +77,7 @@ fence_marker() { # line
 #
 # A Markdown link destination cannot contain unescaped whitespace, so `](repo:`
 # and its closing parenthesis are always on the same line however the paragraph
-# wraps — which is what makes a line-at-a-time scan sound here. Mirrors
-# resolveTarget() in website/src/remark/repoLinks.ts.
+# wraps. Mirrors resolveTarget() in website/src/remark/repoLinks.ts.
 check_repo_links() { # page, lineno, line
     local page=$1 lineno=$2 rest=$3 target
     while :; do
@@ -132,15 +114,13 @@ check_repo_links() { # page, lineno, line
 # Every region name defined in a file, one per line, or a diagnostic on stderr
 # and a non-zero status if the marker set is malformed.
 #
-# `ANCHOR_END` contains `ANCHOR`, so the end pattern is tested FIRST — the trap
-# this whole file is one typo away from. Mirrors indexRegions() in
-# website/src/remark/transclude.ts; the two must agree, or the build and the
-# gate disagree about whether a file is well formed.
+# `ANCHOR_END` contains `ANCHOR`, so the end pattern is tested FIRST. Mirrors
+# indexRegions() in website/src/remark/transclude.ts; the two must agree, or the
+# build and the gate disagree about whether a file is well formed.
 scan_markers() { # file
     # `read_from` is the redirect's variable and `file` the one that appears in
-    # diagnostics. Two names for one path so shellcheck does not read
-    # `fail_at "$file"` as writing to the file the loop is reading (SC2094);
-    # `fail_at` only ever writes to stderr.
+    # diagnostics: two names for one path so shellcheck does not read
+    # `fail_at "$file"` as writing to the file the loop is reading (SC2094).
     local file=$1 read_from=$1 line lineno=0 name starts='' ends='' bad=0
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
@@ -240,11 +220,10 @@ region_ok() { # file, region
 }
 
 # Walk one page's fences, reporting every `file=`/`region=` problem on it.
-#
-# Emits `<source>` on stdout for each transclusion found, which is what
-# --sources collects and what --check uses to spot an orphaned region.
+# Emits `<source>` on stdout for each transclusion found: --sources collects
+# those, and --check uses them to spot an orphaned region.
 check_page() { # file
-    # Two names for one path, as in scan_markers — see the note there.
+    # Two names for one path, as in scan_markers.
     local page=$1 read_from=$1 line lineno=0 marker='' open='' info='' openline=0 body=0
     local src region
     while IFS= read -r line || [ -n "$line" ]; do
@@ -309,19 +288,13 @@ check_page() { # file
     return 0
 }
 
-# Every documentation page, NUL-separated into a temp file.
+# Every documentation page, NUL-separated into a temp file. `find` writes to a
+# file whose creation is checked, not to a pipeline whose exit status would be
+# the reader's.
 #
-# `find` writes to a file whose creation is checked, rather than feeding a
-# pipeline whose exit status would be the reader's. AGENTS.md is explicit about
-# this: a piped `grep`/`tail` reports the last command's status and has masked
-# real failures in this repository more than once.
-#
-# Scaffolds are excluded by name. A `_template` file is placeholders by
-# construction — `crates/spate-NAME/src/config.rs` is the shape a new page
-# fills in, not a path that resolves — so holding one to a real tree would
-# force the scaffold to teach a form no page copied from it can use. Other
-# `_`-prefixed files are not excluded: an MDX partial renders into the pages
-# that import it, and its pointers are as load-bearing as theirs.
+# Scaffolds are excluded by name: `crates/spate-NAME/src/config.rs` in a
+# `_template` file is a shape, not a path that resolves. Other `_`-prefixed
+# files are not excluded; an MDX partial renders into the pages importing it.
 pages_into() { # destination
     if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) \
         ! -name '_template.*' -print0 >"$1"; then
@@ -332,9 +305,9 @@ pages_into() { # destination
 
 # Every file under crates/ that carries a marker.
 #
-# grep's exit 1 means "no matches", which is a legitimate state (a tree with no
-# markers yet); exit 2 or more is a real error. Distinguished explicitly rather
-# than swallowed with `|| true`, which would hide a permissions failure.
+# grep's exit 1 means "no matches", a legitimate state; exit 2 or more is a real
+# error. Distinguished explicitly rather than swallowed with `|| true`, which
+# would hide a permissions failure.
 marked_sources_into() { # destination
     local rc=0
     grep -rlE 'ANCHOR(_END)?:' "$allowed_prefix" >"$1" 2>/dev/null || rc=$?
@@ -366,7 +339,7 @@ run_check() {
     collect >"$used"
 
     # Every marker set under crates/ is well formed, whether a page uses it or
-    # not — a malformed set is a defect wherever it sits.
+    # not. A malformed set is a defect wherever it sits.
     marked_sources_into "$sources" || return 1
     while IFS= read -r file; do
         [ -n "$file" ] || continue
@@ -374,8 +347,7 @@ run_check() {
     done <"$sources"
 
     # A region nothing references is the shape a half-finished rename leaves
-    # behind: the page moved on, the markers did not. It is invisible from the
-    # page side, so it is caught here or not at all.
+    # behind, and it is invisible from the page side.
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         names=$(scan_markers "$file" 2>/dev/null || true)
@@ -400,11 +372,10 @@ run_sources() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-test. Runs before every dispatch, the way scripts/adr.sh does: a gate
-# whose own parsers have quietly stopped working reports success either way.
+# Self-test. Runs before every dispatch: a gate whose own parsers have quietly
+# stopped working reports success either way.
 # ---------------------------------------------------------------------------
-# shellcheck disable=SC2016  # the backticks in the fixtures are markdown fences,
-# not command substitution — the fixtures are Markdown and Rust source.
+# shellcheck disable=SC2016  # the fixtures are Markdown fences and Rust source
 self_test() {
     local tmp rc got saved_failures=$failures
     tmp=$(mktemp -d)
@@ -483,7 +454,7 @@ self_test() {
     st "source outside crates/ rejected" "1" "$rc"
 
     # check_repo_links: a link is checked against the tree, not against the
-    # `crates/` prefix — a page may point at any file in the repository.
+    # `crates/` prefix: a page may point at any file in the repository.
     failures=0
     check_repo_links "$tmp/x.md" 1 'see [STYLE](repo:docs/STYLE.md) and [c](repo:crates).'
     st "existing file and directory targets accepted" "0" "$failures"
@@ -504,8 +475,8 @@ self_test() {
     check_repo_links "$tmp/x.md" 1 'no links here, and a bare repo: word'
     st "prose without a link is not a target" "0" "$failures"
 
-    # A `repo:` link inside a fence is literal text — the fence skip in
-    # check_page is what documentation of the form relies on.
+    # A `repo:` link inside a fence is literal text; documentation of the form
+    # relies on the fence skip in check_page.
     printf '# T\n\n```markdown\n[x](repo:crates/no_such_file.rs)\n```\n' >"$tmp/fenced.md"
     failures=0
     check_page "$tmp/fenced.md" >/dev/null 2>&1

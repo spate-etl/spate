@@ -1,15 +1,8 @@
 name: Labels
 
-# Applies `.github/labels.yml` to the repository.
-#
-# A pull request touching the file gets a dry run, so a malformed entry or a bad
-# colour fails before merge rather than after, when the only signal would be a
-# label quietly missing. Merging to main applies it.
-#
-# The work is a script rather than a labeling action because the organisation
-# allows only GitHub-owned, verified-publisher and explicitly listed actions.
-# `gh` is preinstalled on the runners, so this needs no allowlist entry and adds
-# no dependency, and the same script runs locally.
+# Applies `.github/labels.yml`. A pull request touching it gets a dry run, so a
+# bad entry fails before merge rather than leaving a label quietly missing. A
+# script, since the organisation allows only allowlisted actions and `gh` ships.
 on:
   push:
     branches: [main]
@@ -20,8 +13,7 @@ on:
     paths:
       - .github/labels.yml
       - .github/workflows/labels.yml
-  # Applying the file is idempotent, so a manual run is always safe — useful
-  # after a label is changed by hand in the web UI and needs putting back.
+  # Idempotent, so a manual run is safe after a hand-edit in the web UI.
   workflow_dispatch:
 
 concurrency:
@@ -38,18 +30,15 @@ jobs:
     permissions:
       contents: read
       # Labels are an issues-scoped resource even though most of ours end up on
-      # pull requests. On a fork's pull request GitHub downgrades this to read
-      # regardless of what is written here, which is harmless: that path only
-      # ever dry-runs.
+      # pull requests. A fork's pull request gets read here, and only dry-runs.
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # The script never deletes: pruning would remove GitHub's stock labels
-      # that open issues still carry, and deleting a label destroys the record
-      # that anything was filed under it. Retiring one is a manual step.
+      # No pruning: deleting a label destroys the record of what was filed under
+      # it, stock labels included. Retiring one is a manual step.
       - env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ github.event_name == 'pull_request' }}

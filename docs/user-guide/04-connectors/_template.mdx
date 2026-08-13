@@ -30,7 +30,7 @@ Construct it from the pipeline's opaque section:
   This fence is a placeholder: `SECTION` and `NameThing` name nothing, so it
   cannot compile, and it claims docs/STYLE.md §10's third exemption for exactly
   as long as it stays a scaffold. A real page's Rust is rendered from a
-  compiled source instead — leave the fence empty and put
+  compiled source instead. Leave the fence empty and put
   `file=crates/spate/examples/<example>.rs region=<name>` on the info string,
   with `// ANCHOR: <name>` and `// ANCHOR_END: <name>` around those lines in the
   example. Say once in prose which example it is and how to run it; the fence
@@ -68,7 +68,7 @@ SECTION:
 ## The `PASSTHROUGH` passthrough and the denylist
 
 {/* Only if the connector has a raw passthrough. If it has one, it needs this
-    section — a table row on its own is not enough. */}
+    section; a table row on its own is not enough. */}
 
 Why the passthrough exists, and that properties the framework owns for
 correctness are rejected at load time with an explanation.
@@ -82,7 +82,7 @@ correctness are rejected at load time with an explanation.
 {/* MANDATORY if the connector takes credentials of any kind. Link the hub. */}
 
 Connector-specific auth. Prose shared with another page goes in an MDX partial
-(`_name.mdx`) imported by both — and rendered at the same position in both.
+(`_name.mdx`) imported by both, and rendered at the same position in both.
 
 See [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model (secrets via `${VAR}`, auth failure is fatal).
@@ -95,7 +95,7 @@ generic model (secrets via `${VAR}`, auth failure is fatal).
 ## Metrics
 
 {/* The families this connector registers, with their labels. This page is
-    their only home — docs/METRICS.md carries the taxonomy and the framework
+    their only home; docs/METRICS.md carries the taxonomy and the framework
     families, not connector registries. */}
 
 Registered through a `Meter` under the `NAME` namespace, so every family is

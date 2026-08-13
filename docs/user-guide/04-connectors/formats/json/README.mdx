@@ -1,8 +1,8 @@
 # JSON format
 
 The JSON deserializer (`spate-json`, feature `json` on the `spate` facade) decodes
-JSON payloads carried by a source into records — either serde types or
-dynamically-typed values. Three framings map onto the framework's "one payload →
+JSON payloads carried by a source into records, either serde types or
+dynamically-typed values. The framings map onto the framework's "one payload →
 0..N records" contract, and `serde_json` (stable 1.x) does the parsing.
 
 Construct it from the pipeline's opaque section with
@@ -13,8 +13,8 @@ Construct it from the pipeline's opaque section with
 ```
 
 That example is
-[`json_skip_bad_records.rs`](repo:crates/spate/examples/json_skip_bad_records.rs)
-— one payload of four lines, one of them malformed, over the in-memory
+[`json_skip_bad_records.rs`](repo:crates/spate/examples/json_skip_bad_records.rs):
+one payload of four lines, one of them malformed, over the in-memory
 connectors, so it needs nothing running:
 `cargo run -p spate --features json --example json_skip_bad_records`.
 `from_component` yields that same builder behind a `Result`, and `with_metrics`
@@ -54,7 +54,7 @@ deserializer:
   fails as one payload (`ndjson` is the framing with per-record isolation).
 
 A source that frames its own byte stream supplies this crate's `NdjsonFramer`
-instead, and then the granularity is derived rather than configured — see
+instead, and then the granularity is derived rather than configured; see
 [Framing vs deserialization](../README.mdx#framing-vs-deserialization).
 
 ## Typed or dynamic records
@@ -81,16 +81,16 @@ record-level error, handled by `on_error`:
 pipeline or **drops the payload** is then the chain's deserializer error policy
 (`ErrorPolicy`, default `Skip`). Set the chain's policy to `Fail`
 (`.deser_error_policy(ErrorPolicy::Fail)`) for a bad record to stop the pipeline.
-The common case — per-record **skip** — needs no chain-side change.
+The common case, per-record **skip**, needs no chain-side change.
 :::
 
-Undecodable data that stops the pipeline replays under at-least-once — replay
+Undecodable data that stops the pipeline replays under at-least-once; replay
 never loses records.
 
 ## Fidelity & features
 
 - `reject_duplicate_keys` (config) turns `serde_json`'s silent last-value-wins on
-  duplicate object keys into a hard error — a guard against upstream corruption.
+  duplicate object keys into a hard error, a guard against upstream corruption.
 - The `float-roundtrip` Cargo feature makes `f64` values survive
   text→float→text exactly.
 - The `raw-value` feature exposes `serde_json`'s `RawValue` for late/partial
@@ -113,21 +113,21 @@ rejected.
 Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value step
 sits behind an internal seam, so the opt-in **`simd`** Cargo feature (`json-simd`
 on the `spate` facade) swaps in [`simd-json`](https://github.com/simd-lite/simd-json),
-a SIMD-accelerated parser, with no change to the builder API — `build_serde` and
+a SIMD-accelerated parser, with no change to the builder API; `build_serde` and
 `build_value` are identical either way. `from_reader` is never used on the hot
-path — decoding always operates on the in-memory payload slice, which is both
+path. Decoding always operates on the in-memory payload slice, which is both
 faster and lets the parser see the whole document at once.
 
 `simd` decodes faster than `serde_json` on the single-document and array
 framings, where one large document is parsed in a pass; the margin narrows on
 NDJSON, where per-parse overhead across many small lines dominates. How much
 faster is both payload- and architecture-sensitive, and aarch64 is the only
-side measured for throughput — an x86-64 host with AVX2 is unknown territory
+side measured for throughput; an x86-64 host with AVX2 is unknown territory
 here. It is **off by default** and excluded from the facade's `full`
 feature: it is a per-deployment choice worth benchmarking against real
 hardware and payloads.
 
-A note on how it works — simd-json parses a mutable buffer in place, so the
+simd-json parses a mutable buffer in place, so the
 framework copies each borrowed payload into a reused thread-local buffer
 first (measured at ~1% of the decode on flat and nested records, by a rig this
 repository no longer carries). The
@@ -135,16 +135,16 @@ repository no longer carries). The
 always runs on `serde_json`, so duplicate-key handling is identical either
 way.
 
-`simd` is **not** byte-for-byte identical to `serde_json` on numbers, though — it
+`simd` is **not** byte-for-byte identical to `serde_json` on numbers, because it
 is a different parser. `simd-json` **rejects integer literals outside the
 `i64`/`u64` range** (which `serde_json` accepts, coercing to `f64`), so a document
-`serde_json` decodes may instead be dropped as `malformed` — or fail the whole
-payload under `on_error: fail` — under `simd`; it also normalizes `-0` to `0`.
+`serde_json` decodes may instead be dropped as `malformed` under `simd`, or fail
+the whole payload under `on_error: fail`; it also normalizes `-0` to `0`.
 And because parsing is done by `simd-json` rather than `serde_json`, the
 `serde_json`-specific knobs `json-float-roundtrip`, `json-arbitrary-precision`,
 and `json-raw-value` do **not** apply under `simd` (arbitrary precision is
 silently lost; `RawValue` capture is unsupported). For payloads of ordinary-range
-numbers the backends agree — but benchmark **and** validate against real data
+numbers the backends agree, but benchmark **and** validate against real data
 before switching.
 
 ## Metrics
@@ -160,8 +160,8 @@ so the `deserialize` call returns `Ok` and no
 `spate_deser_records_total{outcome="error"}` is counted.
 
 The family carries the standard labels (`pipeline`, `component`,
-`component_type="deserializer"`) — the first two from that call, the third
-fixed by the crate — which is what makes it join against the generic
+`component_type="deserializer"`), the first two from that call and the third
+fixed by the crate, which is what makes it join against the generic
 families. Extras are noted per family.
 
 | Metric | Type | Extra labels | Description |

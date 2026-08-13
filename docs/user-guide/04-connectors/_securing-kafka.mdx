@@ -9,7 +9,7 @@
 The bundled librdkafka is built **without TLS/SASL by default**, so connecting
 to a secured cluster needs the opt-in **`kafka-tls`** feature. Once enabled,
 every security property is set through the connector's raw `rdkafka:`
-passthrough — these keys are **not** on the denylist, and the configuration is
+passthrough; these keys are **not** on the denylist, and the configuration is
 identical for the Kafka source and the Kafka sink. Setting any security
 property **without** the feature fails fast at config load with an actionable
 message rather than an obscure runtime error.
@@ -21,7 +21,7 @@ spate = { version = "0.1", features = ["kafka-tls"] }   # implies "kafka"
 
 ### TLS (server authentication only)
 
-Encrypt the connection and verify the broker's certificate against a CA — the
+Encrypt the connection and verify the broker's certificate against a CA, the
 minimum for a cluster that terminates TLS but authenticates clients by SASL (or
 not at all):
 
@@ -51,7 +51,7 @@ if you prefer a single bundle to separate PEM files.
 ### SASL SCRAM or PLAIN over TLS
 
 Username/password authentication carried inside the TLS tunnel. Use `sasl_ssl`
-— never `sasl_plaintext`, which sends credentials in the clear:
+and never `sasl_plaintext`, which sends credentials in the clear:
 
 ```yaml
 rdkafka:
@@ -63,7 +63,7 @@ rdkafka:
 ```
 
 Keep secrets out of the file with
-[environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation)
-— `${VAR}` is substituted before parsing. For the build rationale (why the
+[environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation);
+`${VAR}` is substituted before parsing. For the build rationale (why the
 feature is opt-in, and the Kerberos/GSSAPI scope) see the generic
 [Securing connections](../03-guides/securing-connections.mdx) guide.

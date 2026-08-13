@@ -1,6 +1,6 @@
 # ClickHouse AggregatingMergeTree ingestion
 
-ClickHouse `AggregateFunction(func, …)` columns do not store values — they
+ClickHouse `AggregateFunction(func, …)` columns do not store values; they
 store the **internal, serialized state** of an aggregate function (what the
 `-State` combinators produce and the `-Merge` combinators consume). That state
 is opaque, carries no length framing, and its byte layout is **version-tagged
@@ -18,13 +18,13 @@ Pointing the sink straight at an `AggregateFunction` column is a
 misconfiguration. With `validate_schema: names` or `full` (and always under
 `format: native`), the sink **fails fast at startup** with an error naming the
 column and the Null-table + MV remedy. With `validate_schema: off` there is no
-schema fetch, so nothing catches it — set validation to `names` for these
-tables, or simply point the sink at the plain Null table as shown below.
+schema fetch, so nothing catches it. Set validation to `names` for these
+tables, or point the sink at the plain Null table as shown below.
 :::
 
 ## The pattern
 
-Three objects — the operator creates them (the sink issues no DDL). The
+The operator creates the objects below; the sink issues no DDL. The
 example below covers `min`/`max` over `DateTime` and `sumMap` over
 `Map(String, UInt64)`.
 
@@ -66,7 +66,7 @@ sink:
     validate_schema: names
 ```
 
-Read the finalized values back with the `-Merge` combinators — the stored
+Read the finalized values back with the `-Merge` combinators; the stored
 columns stay `AggregateFunction`, and `FINAL` alone does **not** finalize them:
 
 ```sql
@@ -80,16 +80,16 @@ A full runnable version is the `clickhouse_aggregating_mv` example
 
 ## Exactly-once through the view
 
-The framework is at-least-once: it retries batches, reusing one
+The framework is at-least-once, so it retries batches, reusing one
 `insert_deduplication_token` per batch. On **ClickHouse ≥ 26.1** that
 deduplication propagates to dependent Materialized Views, so a retried batch
-does not double-count into the aggregate — but only when **both** of these
+does not double-count into the aggregate, but only when **both** of these
 hold:
 
 1. The sink sets `deduplicate_blocks_in_dependent_materialized_views: "1"`
-   (it is not on by default, and the framework does not force it — enable it
+   (it is not on by default, and the framework does not force it; enable it
    in the sink's `settings`).
-2. The **target** table has a deduplication window — a
+2. The **target** table has a deduplication window: a
    `non_replicated_deduplication_window` setting (as above) or a `Replicated*`
    engine. The `Null` landing table stores nothing, so its own dedup is a
    no-op; the token can only protect the `AggregatingMergeTree`.
@@ -101,7 +101,7 @@ sink:
       deduplicate_blocks_in_dependent_materialized_views: "1"
 ```
 
-This is the setting, not the version, that makes retries exactly-once — treat
+This is the setting, not the version, that makes retries exactly-once; treat
 it as mandatory for MV-fed aggregates regardless of your server version. Note
 that idempotent functions (`min`, `max`) are unaffected by a replay either
 way; `sumMap`/`count`-style states are the ones that would over-count.
@@ -113,21 +113,21 @@ partial-state part per block per group. Larger inserts therefore collapse more
 per block and produce fewer partial-state parts (less merge pressure, fewer
 `TOO_MANY_PARTS` risks). The sink's defaults (`batch.max_rows: 500000`,
 `batch.max_bytes: 128MiB`, `batch.linger: 1s`) are already large and suit this
-well — raise them, not lower, if the target accumulates too many parts. For
+well; raise them, not lower, if the target accumulates too many parts. For
 finer control the server-side `max_insert_block_size` is reachable through the
 sink's `settings` map. See [performance tuning](./performance-tuning.mdx).
 
 ## Why not precompute states in the client?
 
 Because the state wire format is opaque and version-dependent (the reason for
-the `AggregateFunction(vN, …)` versioning scheme — state layouts have changed
-across releases). The community and ClickHouse guidance is to let the server
-serialize states. If you truly must precompute (e.g. a distributed
+the `AggregateFunction(vN, …)` versioning scheme, since state layouts have
+changed across releases). The community and ClickHouse guidance is to let the
+server serialize states. If you must precompute (e.g. a distributed
 pre-aggregation tier), do it inside ClickHouse via `INSERT … SELECT
-fooState(…)`, `input()`, or `arrayReduce('fooState', …)` — never by hand in the
+fooState(…)`, `input()`, or `arrayReduce('fooState', …)`, never by hand in the
 client.
 
-`SimpleAggregateFunction(func, T)` is a separate case: it stores the **plain
+`SimpleAggregateFunction(func, T)` is a separate case that stores the **plain
 value** `T` (the partial state equals the final value, e.g. for `min`/`max`/
 `sumMap`), so those columns *are* directly insertable with the ordinary
 encoders and are not subject to any of the above. Use them when you control

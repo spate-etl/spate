@@ -3,15 +3,15 @@
 import SecuringKafka from '../../_securing-kafka.mdx';
 
 The Kafka sink (`spate-kafka`, feature `kafka` on the `spate` facade) is the
-producer half of the Kafka connector: pipelines terminate in a Kafka topic
-— Kafka → operator chain → Kafka for filter/reshape/fan-out. It is built
+producer half of the Kafka connector: pipelines terminate in a Kafka topic,
+running Kafka → operator chain → Kafka for filter/reshape/fan-out. It is built
 on `rdkafka` with exactly **one producer per sink instance**, and a batch
-acknowledges only once **every** message's delivery report has confirmed —
+acknowledges only once **every** message's delivery report has confirmed,
 which is what lets the framework commit source offsets past it. Rationale
 and the ack wiring are in [ADR-0016](../../../../adr/0016-kafka-sink-ack-wiring.md).
 
 Construct it from the pipeline's opaque section, and terminate the chain
-with one of the sink's encoder helpers — `encoder_bytes` for payload
+with one of the sink's encoder helpers: `encoder_bytes` for payload
 passthrough, `encoder_json::<Owned<MyRow>>` for `serde_json`, and
 `encoder_with` for any `MessageEncoder` carrying keys, headers or tombstones.
 All of them bake the configured `max_message_bytes` guard into the encoder:
@@ -100,7 +100,7 @@ anything runs.
 
 The framework hands the writer a sealed batch of framed messages; the
 writer produces all of them and returns only after every delivery report
-confirmed — that return is the durable-ack point the checkpointer commits
+confirmed, and that return is the durable-ack point the checkpointer commits
 behind. Producer queue-full pushback is absorbed with a bounded async
 backoff inside the write (never blocking a worker unboundedly, never the
 poll loop). Report errors map onto the framework taxonomy:
@@ -108,19 +108,19 @@ poll loop). Report errors map onto the framework taxonomy:
 - **Retryable** (timed-out reports, broker transport failures, purges,
   unknown codes): the framework retries the whole sealed batch with capped
   exponential backoff. Messages already delivered in the failed attempt
-  are re-produced — duplicates, never loss.
+  are re-produced, which duplicates records but never loses them.
 - **Fatal** (unknown topic, authorization failures, a message over the
   broker limit, the idempotent producer's fenced states): the batch is
   abandoned, its partition watermark stalls, and the pipeline fails fast
   (`checkpoint.stalled_fail_after`) instead of spinning.
 
-Oversized records never reach the writer: the encoder's
+Oversized records never reach the writer. The encoder's
 `max_message_bytes` guard fails them record-level, where the sink stage's
 Skip/Fail policy applies (default Skip: dropped and counted).
 
 ## Delivery semantics, honestly
 
-At-least-once, with distinct duplicate windows — none of them loss:
+At-least-once, with distinct duplicate windows, none of them loss:
 
 - **In-session producer retries** — covered by the forced
   `enable.idempotence` (per-partition sequence numbers). No duplicates.
@@ -133,20 +133,20 @@ At-least-once, with distinct duplicate windows — none of them loss:
 
 The framework's `dedup_token` has no Kafka equivalent (there is no
 server-side dedup window to hand it to), so it is unused here. Downstream
-consumers must tolerate duplicates — idempotent handling keyed on a payload
+consumers must tolerate duplicates: idempotent handling keyed on a payload
 identity, or compacted topics keyed on the message key.
 
 :::danger
 Nothing in Spate is exactly-once, and no configuration makes it so. In
 particular, `enable.idempotence` does **not** mean exactly-once delivery
-of the stream — it only dedupes librdkafka's own in-session retries.
+of the stream; it only dedupes librdkafka's own in-session retries.
 :::
 
 ## Keys, headers, tombstones
 
 A produce message is (key, headers, payload). Source message keys do
-**not** survive deserialization — a record carries only the key *hash* in
-its metadata — so a Kafka→Kafka pipeline that must preserve keys re-derives
+**not** survive deserialization (a record carries only the key *hash* in
+its metadata), so a Kafka→Kafka pipeline that must preserve keys re-derives
 them from the payload (`KafkaBytesEncoder::with_key_fn`,
 `KafkaJsonEncoder::with_key_fn`) or carries them in its record type with a
 custom `MessageEncoder`, which can also set headers and mark tombstones
@@ -157,21 +157,21 @@ producer-side worker parallelism, not Kafka partitions.
 ## Backpressure and shutdown
 
 A slow or unreachable broker slows `write_batch`, which holds the shard's
-in-flight permits, fills its queue, and pauses the source — the standard
+in-flight permits, fills its queue, and pauses the source, the standard
 sink backpressure path, surfaced as `spate_sink_shard_healthy == 0` when the
 breaker quarantines the endpoint. At shutdown the drain force-seals and
 writes the partial batch under `checkpoint.drain_timeout`; if the broker
 is down at the deadline, remaining batches are abandoned loudly
 (`spate_sink_abandoned_batches_total` + log) and replay after restart.
-Producer teardown is bounded: rdkafka's own drop purges queued and
-in-flight messages, flushes, and joins its poll thread — a bound that is
-rdkafka's to move rather than ours
+Producer teardown is bounded by rdkafka's own drop, which purges queued and
+in-flight messages, flushes, and joins its poll thread, a bound that rdkafka
+owns
 (see [ADR-0022](../../../../adr/0022-kafka-producer-teardown-and-stats.md),
 which records the figure it was measured at).
 
 ## Dependency note
 
-`spate-kafka` deliberately re-exports nothing from `rdkafka`: its types stay out
+`spate-kafka` deliberately re-exports nothing from `rdkafka`, so its types stay out
 of public signatures so `rdkafka` major bumps are not breaking changes here (see
 [ADR-0011](../../../../adr/0011-msrv-and-dependency-policy.md)).
 
@@ -181,7 +181,7 @@ Registered through this sink's `Meter` (namespace `kafka`, role `sink`), so
 every family is prefixed `spate_kafka_sink_`. They translate the producer's
 librdkafka statistics snapshot, emitted every `statistics_interval` (default
 `5s`; `0s` disables the whole family) and published from the producer's poll
-thread — never on the record path.
+thread, never on the record path.
 
 The conventions match the Kafka source's families: counters are
 **absolute-mapped librdkafka totals** scoped to one producer lifetime
@@ -193,11 +193,11 @@ across brokers or processes (`max()` is the only defensible cross-series
 operator). Windows that sampled nothing are absent rather than `0`.
 
 Batch-level write latency is framework-side
-(`spate_sink_write_duration_seconds` — the family comparable with the
+(`spate_sink_write_duration_seconds`, the family comparable with the
 producer's own round-trip; `spate_sink_flush_duration_seconds` spans seal to
 settle and would fold this sink's queueing in on top); these families add
 the producer's internal view. Per-partition produce-queue detail is
-deferred — aggregate only, so sink cardinality stays independent of topic
+deferred, leaving aggregate only, so sink cardinality stays independent of topic
 partition count (see
 [ADR-0022](../../../../adr/0022-kafka-producer-teardown-and-stats.md)). The
 produce-queue gauges below show that the producer is backing up, not which
@@ -205,7 +205,7 @@ partition is backing it up. `metrics.per_partition_detail` has no sink
 counterpart.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
-them; extras — `broker` among them — are noted per family.
+them; extras, `broker` among them, are noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
@@ -219,7 +219,7 @@ them; extras — `broker` among them — are noted per family.
 | `spate_kafka_sink_produce_queue_bytes` | gauge | | Bytes waiting in the producer's client-side queue. |
 | `spate_kafka_sink_broker_tx_retries_total` | counter | | Request retries, summed across brokers. |
 | `spate_kafka_sink_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
-| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while any connection to the broker — regular or a logical coordinator link — is up; `sum()` gives the brokers-up count. |
+| `spate_kafka_sink_broker_up` | gauge | `broker` | 1 while any connection to the broker (regular or a logical coordinator link) is up; `sum()` gives the brokers-up count. |
 | `spate_kafka_sink_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
 | `spate_kafka_sink_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
 | `spate_kafka_sink_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |
@@ -234,7 +234,7 @@ them; extras — `broker` among them — are noted per family.
 `queue.buffering.max.messages` (default 100k) means the producer cannot drain
 to the brokers. Batch writes are absorbing queue-full backoff, so
 `spate_sink_write_duration_seconds{outcome="ok"}` rises before the source
-pauses — the backoff happens inside the produce call, so it lands in the write
+pauses; the backoff happens inside the produce call, so it lands in the write
 histogram rather than in `spate_sink_retry_backoff_seconds`.
 
 See [Metrics](../../../../METRICS.md) for the taxonomy, the reserved roots and

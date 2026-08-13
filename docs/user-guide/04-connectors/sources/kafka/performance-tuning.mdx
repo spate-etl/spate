@@ -1,16 +1,16 @@
 # Kafka source performance tuning
 
-This page is about making the Kafka source **faster**: which knobs move
-consumption throughput, in what order to reach for them, and how to tell when
-you have run out of vertical headroom and should scale out instead. It assumes
-you have already established that the source is the binding side — see
+Making the Kafka source **faster** comes down to which knobs move consumption
+throughput, in what order to reach for them, and how to tell when you have run
+out of vertical headroom and should scale out instead. It assumes you have
+already established that the source is the binding side; see
 [Where to start](../../../05-deployment/tuning.mdx#where-to-start).
 
 Numbers here come from a source-ceiling study: a backlogged 16-partition topic
 on a single local Redpanda broker, every arm interleaved with every other,
 medians over three runs. Your optimum depends on message size, partition
 count, broker fan-out, and compression, so treat every value as a place to
-start measuring — the shape of each curve transfers, the absolute numbers do
+start measuring; the shape of each curve transfers, the absolute numbers do
 not.
 
 ## The mental model
@@ -41,7 +41,7 @@ consumer "regardless of the number of partitions", and **per partition** when
 separate partition queues are used
 ([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)).
 This connector calls `split_partition_queue` per partition, so aggregate
-prefetch — and the memory arithmetic below — scales with your assignment
+prefetch (and the memory arithmetic below) scales with your assignment
 rather than being divided by it.
 :::
 
@@ -49,7 +49,7 @@ rather than being divided by it.
 
 This is the highest-leverage knob by a wide margin. On a backlogged consumer
 the measured spread between a shallow queue and a deep one is **22x at 64 B
-messages and 76x at 256 B** — larger than every other knob on this page put
+messages and 76x at 256 B**, larger than every other knob on this page put
 together.
 
 The mechanism is fact 3 above. A partition is only included in the next Fetch
@@ -60,14 +60,14 @@ proportionally more round trips.
 **There is no single right number, and in particular there is no invariant
 byte target.** The study sweeps eight depths at 64 B and six at 256 B:
 
-- **256 B** is saturated by `queued.min.messages` **10000** — about 2.5 MB
+- **256 B** is saturated by `queued.min.messages` **10000**, about 2.5 MB
   buffered per partition.
-- **64 B** is still climbing at 100000 and only plateaus at **300000** — about
+- **64 B** is still climbing at 100000 and only plateaus at **300000**, about
   18 MB per partition, and **14% faster than the default**.
 
 So the byte volume at the knee differs by roughly 7x between the two sizes;
 sizing by a fixed byte target would under-provision small messages badly. The
-message count is not invariant either — it differs by 30x. Treat both as
+message count is not invariant either; it differs by 30x. Treat both as
 starting points and measure:
 
 1. Start at librdkafka's default (100000).
@@ -97,7 +97,7 @@ documentation.
 
 ### The byte cap wins
 
-`queued.max.messages.kbytes` has higher priority than the message count —
+`queued.max.messages.kbytes` has higher priority than the message count;
 whichever binds first stops the fetch. librdkafka multiplies it by 1000, so
 the default of **65536** is **65.5 MB per partition**, and raising
 `queued.min.messages` past `65.5 MB / avg_message_bytes` does nothing until
@@ -114,8 +114,8 @@ worst-case prefetch = partitions x min(queued.min.messages x avg_message_bytes,
 
 At the defaults a 100-partition assignment can hold **up to ~6.6 GB**. This
 sits outside the [in-flight budget](../../../02-concepts/03-backpressure.mdx)
-entirely — the budget governs what the pipeline holds, not what the client
-prefetches — so if your pod has a memory limit, set
+entirely, because the budget governs what the pipeline holds, not what the
+client prefetches. If your pod has a memory limit, set
 `queued.max.messages.kbytes` explicitly.
 
 :::warning Capping the queue also shrinks the fetch
@@ -123,7 +123,7 @@ Unless you set `fetch.max.bytes` yourself, librdkafka clamps it to
 `queued.max.messages.kbytes x 1024` at client construction
 ([`rdkafka_conf.c`](https://github.com/confluentinc/librdkafka/blob/master/src/rdkafka_conf.c)).
 Setting `queued.max.messages.kbytes: "4096"` to bound memory therefore also
-drops `fetch.max.bytes` from 50 MB to 4 MiB — a second throughput cut you did
+drops `fetch.max.bytes` from 50 MB to 4 MiB, a second throughput cut you did
 not ask for. Set `fetch.max.bytes` explicitly whenever you lower the byte cap.
 :::
 
@@ -131,37 +131,36 @@ not ask for. Set `fetch.max.bytes` explicitly whenever you lower the byte cap.
 
 When a partition's queue crosses a threshold, librdkafka stops fetching it and
 waits `fetch.queue.backoff.ms` (default **1000**) before reconsidering. With a
-shallow queue and a fast consumer, that backoff — not the queue size — becomes
-the limiter: the queue drains in milliseconds and then idles. If a memory limit
+shallow queue and a fast consumer, the backoff becomes the limiter instead of
+the queue size: the queue drains in milliseconds and then idles. If a memory limit
 forces you to cap prefetch, drop this to a few tens of milliseconds so the
 partition is re-offered promptly.
 
 ### Diagnosing it
 
-The honest answer is that **no gauge tells you prefetch is mis-set — only a
-sweep does.** Raise `queued.min.messages`, re-measure, and see whether
-throughput moves. Two series are still worth reading, with their limits
-understood:
+**No gauge tells you prefetch is mis-set; only a sweep does.** Raise
+`queued.min.messages`, re-measure, and see whether throughput moves. These
+series are still worth reading, with their limits understood:
 
 `spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at or
 near **zero** means the pipeline is draining the queue as fast as the broker
 refills it, i.e. the source is **broker-bound** rather than chain- or
 sink-bound. It does *not* separate "prefetch is too shallow" from "prefetch is
-fine and the broker is simply the limit": in our own benchmark it reads ~0 both
-at the shallow depth that runs 22x slow *and* at the depth we recommend. Use it
+fine and the broker is the limit": in the source-ceiling study it reads ~0 both
+at the shallow depth that runs 22x slow *and* at the recommended depth. Use it
 to decide whether the bottleneck is upstream or downstream of the source, not
 to size the queue.
 
 `sum(spate_source_lag_records)` is the total consumer lag across the partitions
-this member owns — the family is per-partition, so it must be aggregated in the
+this member owns; the family is per-partition, so it must be aggregated in the
 query. A lag that is large and not shrinking is the signal that catching up
-matters at all: prefetch depth is only worth tuning when there is a backlog to
+matters at all, since prefetch depth is only worth tuning when there is a backlog to
 prefetch.
 
 :::note Prefetch only matters when there is a backlog
-A consumer caught up with its producers is tail-following: nothing is buffered
-to prefetch, so the caps are inert. Prefetch depth matters when you are
-*catching up* — after a deployment, a rebalance, an outage, or a backfill —
+A consumer caught up with its producers is tail-following, so nothing is
+buffered to prefetch and the caps are inert. Prefetch depth matters when you are
+*catching up* (after a deployment, a rebalance, an outage, or a backfill),
 which is exactly when throughput matters.
 :::
 
@@ -178,13 +177,13 @@ caps how much a single round trip can return.
 | `fetch.wait.max.ms` | `500` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
 
 Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
-`fetch.max.bytes`, but only while you leave it unset — pinning it is a
+`fetch.max.bytes`, but only while you leave it unset; pinning it is a
 documented way to break fetches after raising `fetch.max.bytes`
 ([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md)).
 
 :::warning Property-name trap
 librdkafka spells it **`fetch.wait.max.ms`**. Apache/Java spells it
-`fetch.max.wait.ms` — the words are transposed. The `rdkafka` map takes
+`fetch.max.wait.ms`, with the words transposed. The `rdkafka` map takes
 librdkafka names, and an unrecognized property is not silently ignored, so copy
 settings from librdkafka's documentation rather than from Java tuning guides.
 :::
@@ -198,7 +197,7 @@ requests and less broker CPU per byte.
 
 But on a **backlogged** consumer the data is already there, so `fetch.min.bytes`
 is satisfied instantly and neither knob binds. They are worth tuning for
-steady-state topics and for reducing broker request load — not for catch-up
+steady-state topics and for reducing broker request load, not for catch-up
 throughput.
 
 One interaction specific to at-least-once delivery: an outstanding Fetch blocks
@@ -209,8 +208,8 @@ window after a crash.
 ### Knobs that are already optimal here
 
 `check.crcs` defaults to **false** in librdkafka and this connector leaves it
-there. `enable.partition.eof` also defaults to false, and the connector pins it
-— it is on the framework-owned denylist, because EOF events would pollute the
+there. `enable.partition.eof` also defaults to false, and the connector pins
+it. It is on the framework-owned denylist, because EOF events would pollute the
 partition queues the pipeline polls, so you cannot change it either way.
 Advice to disable both for throughput is written for the Java client, where
 `check.crcs` defaults to true. There is nothing to win.
@@ -220,13 +219,13 @@ Advice to disable both for throughput is written for the Java client, where
 Partitions map onto pipeline threads as lanes
 ([Lanes](./README.mdx#lanes-partitions-on-pipeline-threads)), so raising
 `pipeline.threads` looks like it should speed up consumption. **For the fetch
-path alone it does the opposite** — draining one client's partition queues from
+path alone it does the opposite.** Draining one client's partition queues from
 several threads contends inside librdkafka, and the measured curve
 falls monotonically from one thread to eight at both message sizes: 5.15M to
 2.06M msg/s at 64 B, 5.18M to 2.71M at 256 B.
 
-That curve was measured with **no chain work at all** — threads spinning on
-`poll()` and discarding, which is maximal contention and the one regime where
+That curve was measured with **no chain work at all**, threads spinning on
+`poll()` and discarding. That is maximal contention and the one regime where
 threads cannot pay. Real pipelines decode, transform and encode between polls,
 and the picture inverts as soon as they do. Sweeping per-record work at 1 KiB
 messages, 1→8 thread scaling:
@@ -238,7 +237,7 @@ messages, 1→8 thread scaling:
 | 5 µs | 5.02× |
 | 20 µs | **7.16×** — 89% of linear |
 
-The transferable number is the contention itself: draining one client from eight
+The transferable number is the contention itself. Draining one client from eight
 threads costs a roughly **constant 2.4–3 µs per record per thread**, converging
 as work rises. So thread efficiency is approximately:
 
@@ -247,24 +246,24 @@ efficiency ≈ work / (work + ~2.8 µs)
 ```
 
 Worked example: simd-json on ~900 B records is roughly 1–3 µs including encode,
-which predicts 26–52% efficiency — eight threads buying about 2–4× of one, with
+which predicts 26–52% efficiency, so eight threads buy about 2–4× of one, with
 the knee near **four threads**. The measured 2 µs arm agrees at 2.57×. The knee
 moves right as per-record work grows; at 20 µs it is past eight.
 
 While prefetch is shallow, thread count barely moves at all: a starved source
 is waiting on the broker, not on CPU. That flatness is itself a useful
-diagnostic — **if adding threads changes nothing, you are fetch-bound, not
+diagnostic. **If adding threads changes nothing, you are fetch-bound, not
 CPU-bound.**
 
-So size `pipeline.threads` for what your **chain and sink** need —
-deserialization, transforms and encoding are what genuinely parallelize — and
-expect diminishing returns from the fetch path, not a cliff.
+So size `pipeline.threads` for what your **chain and sink** need, since
+deserialization, transforms and encoding are what parallelize. Expect
+diminishing returns from the fetch path, not a cliff.
 
 :::note More clients in one process is not the answer
-`MODE=perthread` — several `BaseConsumer`s in one process instead of one client
-with several drain threads — wins only while fetch-bound (+108% at four threads
+`MODE=perthread` (several `BaseConsumer`s in one process instead of one client
+with several drain threads) wins only while fetch-bound (+108% at four threads
 with no work) and loses heavily once work is present (−56% at 5 µs). This says
-nothing about **replicas**: separate pods do not share a NIC, a page cache or a
+nothing about **replicas**, since separate pods do not share a NIC, a page cache or a
 CPU, and a single-box rig cannot measure that. See
 [More replicas](#when-you-have-run-out-of-vertical-headroom).
 :::
@@ -276,31 +275,31 @@ In roughly this order:
 1. **More brokers.** In-flight fetches scale with the number of *leader* brokers
    you consume from, because each broker connection carries one. This is the
    only way to add fetch concurrency to a single consumer instance.
-2. **More partitions — but only if they spread across more brokers.** Extra
+2. **More partitions, but only if they spread across more brokers.** Extra
    partitions on brokers you already consume from add queue depth, not fetch
    concurrency, since they multiplex into the same request.
 3. **More replicas.** Each pod is an independent client with its own thread and
    connection per broker, so this multiplies fetch concurrency. The ceiling is
-   one consuming member per partition — beyond that, members sit idle.
+   one consuming member per partition; beyond that, members sit idle.
 
 :::warning Scaling events are stop-the-world here
 This connector uses eager assignment; cooperative-sticky is rejected at load
 time. Every replica added or removed triggers a full group rebalance during
-which no member consumes. Scaling out is not free, which is the practical
-argument for extracting vertical throughput first.
+which no member consumes. Scaling out is not free, so extract vertical
+throughput first.
 :::
 
 ### Compression
 
-Decompression happens on the **per-broker fetch thread** — the same thread doing
-that broker's network I/O — so it is parallelized per broker, not per partition.
+Decompression happens on the **per-broker fetch thread** (the same thread doing
+that broker's network I/O), so it is parallelized per broker, not per partition.
 A broker leading many hot partitions decompresses all of them on one core.
 
 If you control the producers and consumption is decompression-bound, **lz4**
 decompresses fastest; zstd buys a better ratio at higher CPU cost, worth it when
-you are network- or storage-bound rather than CPU-bound. We have not measured
-the message rate at which decompression saturates a fetch thread, so treat this
-as directional.
+you are network- or storage-bound rather than CPU-bound. The message rate at
+which decompression saturates a fetch thread is not measured here, so treat
+this as directional.
 
 ## Related
 

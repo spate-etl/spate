@@ -1,25 +1,25 @@
 # ClickHouse permissions
 
-This page lists the ClickHouse privileges the **sink machinery itself**
-(`spate-clickhouse`, feature `clickhouse` on the `spate` facade) needs. The set is
-small and mostly conditional: the default configuration needs a single
-`INSERT`, and each extra grant is pulled in only by a specific feature.
+The ClickHouse privileges the **sink machinery itself** (`spate-clickhouse`,
+feature `clickhouse` on the `spate` facade) needs are small and mostly
+conditional: the default configuration needs a single `INSERT`, and each extra
+grant is pulled in only by a specific feature.
 
 Everything runs over the **HTTP interface** with the account named by the
 `user:`/`password:` config fields. Grant these to that account (directly or via
-a role), on **every replica of every shard** in the `shards:` list — the sink
+a role), on **every replica of every shard** in the `shards:` list; the sink
 writes direct-to-shard, so each node sees the traffic first-hand.
 
 :::note Your own table grants are assumed
-This page covers only the framework's privileges. You will of course also need
-`INSERT` on your destination table(s) and whatever `SELECT` your readers use —
+This page covers only the framework's privileges. You also need
+`INSERT` on your destination table(s) and whatever `SELECT` your readers use;
 those are yours to grant and are not enumerated here.
 :::
 
 ## The minimal grant
 
-With the default configuration — `validate_schema: off`, `format: rowbinary`,
-no `distributed_check` — the sink issues exactly one kind of statement: the
+With the default configuration (`validate_schema: off`, `format: rowbinary`,
+no `distributed_check`) the sink issues exactly one kind of statement: the
 per-batch `INSERT`. One grant covers it:
 
 ```sql
@@ -29,16 +29,16 @@ GRANT INSERT ON analytics.orders_local TO spate_writer;
 **Grant the local table, on every node.** The sink writes to **shard-local**
 tables, never a `Distributed` table (see
 [Why direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table)).
-Grant `INSERT` on the local table on **every replica of every shard** — not on
+Grant `INSERT` on the local table on **every replica of every shard**, not on
 a Distributed table, which the sink never inserts through.
 
 :::warning The writer profile must allow changing settings
 Every insert sets `insert_deduplicate`, `insert_deduplication_token`, and
-`wait_end_of_query` (these three are managed by the sink and cannot be
+`wait_end_of_query` (these are managed by the sink and cannot be
 overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
 or a settings **constraint** that pins any of these, fails the write. Keep the
 writer's profile at `readonly = 0` and leave those settings unconstrained. The
-tokens are what make retries idempotent — see the
+tokens are what make retries idempotent; see the
 [dedup-window warning](./README.mdx#deduplication-tokens--and-the-window-warning).
 :::
 
@@ -48,7 +48,7 @@ additional privilege.
 ## Grants by feature
 
 These features add read access to system tables. The sink only ever
-**reads** them — it issues no DDL against them.
+**reads** them; it issues no DDL against them.
 
 | Feature (config) | Extra grant | What the sink reads it for |
 |---|---|---|
@@ -68,8 +68,8 @@ GRANT SELECT ON system.tables  TO spate_writer;
 :::note System-table reads are already row-filtered
 ClickHouse only shows a user the `system.columns`/`system.tables` rows for
 objects it has some grant on. Because the writer already holds `INSERT` on the
-target table, it sees that table's rows — no extra object grant is needed for
-introspection to succeed.
+target table, it sees that table's rows, and no extra object grant is needed
+for introspection to succeed.
 :::
 
 The `distributed_check` guard reads from its `endpoint` (defaults to the first
@@ -100,12 +100,12 @@ GRANT spate_sink TO spate_writer;
 ## What the sink never does
 
 To scope the account for a security review: the framework issues **no** DDL or
-maintenance statements at all — no `CREATE`, `ALTER`, `OPTIMIZE`, `TRUNCATE`,
+maintenance statements at all: no `CREATE`, `ALTER`, `OPTIMIZE`, `TRUNCATE`,
 `DROP`, `RENAME`, `KILL`, `ON CLUSTER`, `SYSTEM …`, or temporary tables.
 Partitioning, the deduplication window, and table engines are properties of
 tables **you** create; the sink only inserts into them and reads the system
-tables above. An account with just the grants on this page — and no
-`CREATE`/`DROP`/`ALTER` — is sufficient.
+tables above. An account with only the grants on this page, and no
+`CREATE`/`DROP`/`ALTER`, is sufficient.
 
 ## Related
 

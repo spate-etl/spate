@@ -1,8 +1,8 @@
 # Memory connectors (spate-test)
 
 The `spate-test` crate ships in-memory connectors that run a **complete,
-real pipeline** — checkpointing, backpressure, graceful drain, the actual
-`SinkPool` — with no external infrastructure. They are not stubs of the
+real pipeline** (checkpointing, backpressure, graceful drain, the actual
+`SinkPool`) with no external infrastructure. They are not stubs of the
 engine; they are real `Source` and `SinkBundle` implementations whose I/O
 happens in process, each paired with a scripting/observation handle.
 
@@ -23,14 +23,14 @@ spate-test = { version = "...", path = "..." }   # same workspace/registry as sp
   test their own chains, covered step by step in
   [Testing pipelines](../03-guides/testing-pipelines.mdx).
 
-They are not production connectors: nothing is durable, and the source is
+They are not production connectors. Nothing is durable, and the source is
 driven entirely by the test that owns it.
 
 ## The source: `memory_source()` + `SourceHandle`
 
 {/*
-  This fence and the `capture_sink` one below are each two or three lines — an
-  import and the call it illustrates — so both claim docs/STYLE.md §10's first
+  This fence and the `capture_sink` one below are each two or three lines (an
+  import and the call it illustrates), so both claim docs/STYLE.md §10's first
   exemption and stay hand-written. Either outgrowing that gets a region of
   `crates/spate/examples/memory_pipeline.rs` rendered here instead.
 */}
@@ -54,8 +54,8 @@ its control plane and observes everything the runtime asks of it:
 | `paused_lanes()` | Which lanes backpressure has paused. |
 | `flush_commits_calls()`, `is_open()` | Lifecycle observation. |
 
-The mock is deliberately strict: misuse that would indicate a runtime bug —
-pausing an unassigned lane, duplicate lane ids, revoking an unknown lane —
+The mock is deliberately strict: misuse that would indicate a runtime bug
+(pausing an unassigned lane, duplicate lane ids, revoking an unknown lane)
 panics with a clear message instead of passing silently.
 
 ## The sink: `capture_sink(shards, replicas)` + `SinkScript`
@@ -96,8 +96,8 @@ usually shrink `batch.linger` so flushes are fast.
 
 ## Configuration tags
 
-In pipeline YAML, the sections are informational — the in-memory pieces are
-constructed programmatically, and their factories read nothing:
+In pipeline YAML, the sections are informational, because the in-memory pieces
+are constructed programmatically and their factories read nothing:
 
 ```yaml
 pipeline: { name: memory-demo, threads: 1 }

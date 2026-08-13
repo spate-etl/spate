@@ -1,8 +1,8 @@
 # Avro format
 
 The Avro deserializer (`spate-avro`, feature `avro` on the `spate` facade)
-decodes bare Avro datums carried by a source into records — either serde types
-or dynamically-typed values. Three framings are supported; the framework
+decodes bare Avro datums carried by a source into records, either serde types
+or dynamically-typed values. Several framings are supported; the framework
 handles the framing bytes, so schemas and structs only ever describe the datum
 itself.
 
@@ -16,8 +16,8 @@ That is from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
 a complete program that builds under the `full` facade feature. The
 `deserializer:` section is optional in the framework's config, so the factory
-takes the unwrapped section: a pipeline whose source emits ready-made records
-configures none.
+takes the unwrapped section, and a pipeline whose source emits ready-made
+records configures none.
 
 ## Configuration
 
@@ -50,9 +50,9 @@ deserializer:
 | `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
 | `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
-Mode requirements are validated at construction with explicit messages —
+Mode requirements are validated at construction with explicit messages:
 `confluent` without a `registry`, `raw` without a `schema`, `prewarm_subjects`
-outside `confluent`, and so on, all fail fast at startup.
+outside `confluent`, and so on all fail fast at startup.
 
 ## Security (registry credentials)
 
@@ -69,7 +69,7 @@ generic model.
   5-byte header (magic byte `0` plus a 4-byte schema id) followed by the
   datum. The framework parses the header, resolves the id against the
   registry, and decodes; producers using Confluent-ecosystem serializers
-  just work.
+  work without adaptation.
 - **`raw`** — bare datums with a fixed configured schema (`inline` or a
   mounted `.avsc` file).
 - **`single_object`** — Avro single-object encoding (marker plus Rabin
@@ -87,14 +87,14 @@ The builder hands out these deserializer flavors:
   point straight into the payload buffer (zero-copy;
   [`spate-avro/tests/zero_copy_flat_map.rs`](repo:crates/spate-avro/tests/zero_copy_flat_map.rs)
   is the worked example).
-  The constraints: no `reader_schema` (rejected at build time — records
+  The constraints: no `reader_schema` (rejected at build time, since records
   decode in the writer schema's shape; additive evolution works through
   `#[serde(default)]`/`#[serde(alias)]`, and unknown fields are skipped),
   and no `duration`/`big-decimal` logical types. A fixed schema breaks the
   logical-type rule at build time; in registry mode the writer schema only
   arrives at runtime, so an incompatible schema id surfaces **per record**
-  as `SchemaUnavailable` — dropped and counted under the Skip policy, fatal
-  under Fail — while the same id stays fully decodable on the two paths
+  as `SchemaUnavailable`, dropped and counted under the Skip policy and fatal
+  under Fail, while the same id stays fully decodable on the paths
   below.
 - `build_serde::<T>()` — decodes each datum into a
   `T: serde::de::DeserializeOwned` struct via an intermediate `AvroValue`,
@@ -118,7 +118,7 @@ pipeline threads never perform I/O. These knobs shape the edge cases:
   startup, so the first batch does not pay the miss.
 - Ids the registry *cannot* serve are negatively cached for
   `negative_cache_ttl` and then handled by the deserializer's
-  `ErrorPolicy` (Skip or Fail) like any other poison payload — a permanent
+  `ErrorPolicy` (Skip or Fail) like any other poison payload, so a permanent
   bad id cannot wedge the pipeline into an infinite retry.
 
 ## Error handling
@@ -129,7 +129,7 @@ Skip drops it and continues. A schema id the registry cannot serve reaches the
 same policy once its negative-cache entry expires, so a permanently bad id is
 an error rather than an infinite retry.
 
-The unit is the payload: one datum is one record here, so there is no partial
+The unit is the payload. One datum is one record here, so there is no partial
 outcome to reason about. Drops surface in the framework's stage families,
 below.
 
@@ -137,7 +137,7 @@ below.
 
 Writer schemas come from the payload (registry id or fingerprint) or
 configuration; an optional `reader_schema` pins the shape records resolve
-into, using Avro's standard schema-resolution rules — field reordering,
+into, using Avro's standard schema-resolution rules: field reordering,
 defaults for missing fields, type promotions, aliases. Pin a reader schema to
 keep a struct stable while producers evolve. Registry schemas using schema
 references are not supported yet and surface as unavailable.
@@ -146,9 +146,9 @@ references are not supported yet and surface as unavailable.
 
 This deserializer registers no families of its own. Decode outcomes surface in
 the framework's stage families: `spate_deser_records_total{outcome}`,
-`spate_deser_records_dropped_total{reason="skip_policy"}`, and — for payloads
-held waiting on a registry fetch — `spate_deser_not_ready_total`, which is
-neither an error nor backpressure. See [Metrics](../../../../METRICS.md).
+`spate_deser_records_dropped_total{reason="skip_policy"}`, and
+`spate_deser_not_ready_total` for payloads held waiting on a registry fetch,
+which is neither an error nor backpressure. See [Metrics](../../../../METRICS.md).
 
 ## Related
 

@@ -1,7 +1,7 @@
 # Formats
 
 A **format** (deserializer) decodes raw source payloads into typed records
-before they reach the operator chain. It is optional — a source that already
+before they reach the operator chain. It is optional; a source that already
 emits ready-made records needs none. Configure one with a single-key
 `deserializer:` section in the pipeline YAML.
 
@@ -17,10 +17,10 @@ Two distinct steps turn source bytes into records:
 - **Framing** — cutting a byte stream into records. This is *source* territory,
   because record boundaries must line up with the source's offsets and resume
   (an S3 backfill runs the format's framer over each object so it can checkpoint
-  mid-object). A message source like Kafka does no framing — the message
+  mid-object). A message source like Kafka does no framing, because the message
   boundary is the record boundary. Framing is a *format* concern, so the framer
   is owned by the format crate (`spate-json`'s `NdjsonFramer`, ...) and wired into
-  a streaming source in code — the source stays format-agnostic.
+  a streaming source in code, leaving the source format-agnostic.
 - **Deserialization** — decoding one framed payload into a typed record. This is
   also the *format*, and it is identical whatever the source: the same JSON or
   Avro decoder serves Kafka and S3 alike.
@@ -28,7 +28,7 @@ Two distinct steps turn source bytes into records:
 When a streaming source is given a framer it frames one record per payload, and
 the framework derives the deserializer's granularity from the source's contract.
 The framer is wired onto the source in code, so the `deserializer:` section
-carries only decode knobs — no `framing:`:
+carries only decode knobs and no `framing:`:
 
 ```rust file=crates/spate/examples/s3_backfill.rs region=framer
 ```
@@ -49,9 +49,9 @@ deserializer:
 Setting `framing: ndjson` here while the source already line-frames is a
 **double-framing** error, rejected at startup. A source that emits *whole*
 payloads (Kafka, or a future whole-object mode) instead lets the deserializer
-frame — `framing: ndjson` / `array` then apply. The rule is: exactly one side
+frame, so `framing: ndjson` / `array` then apply. The rule is: exactly one side
 frames.
 
-Deserialization is a small trait — the same [Extending](../../06-extending/README.mdx)
+Deserialization is a small trait; the same [Extending](../../06-extending/README.mdx)
 guide covers writing your own decoder, and the framing seam (`RecordFramer`) that
 sits in front of it.

@@ -3,9 +3,9 @@
 The datagen source (`spate-datagen`, feature `datagen` on the `spate` facade)
 generates a synthetic storefront event stream in process, so a pipeline can be
 assembled, run and measured with no broker, bucket or coordination store behind
-it. **It keeps no durable progress**: every run regenerates its stream from the
-beginning, which makes it reproducible and not resumable. It is a demo and test
-source, and a pipeline that depends on it for delivery is depending on
+it. **It keeps no durable progress**, since every run regenerates its stream
+from the beginning, which makes it reproducible and not resumable. It is a demo
+and test source, and a pipeline that depends on it for delivery is depending on
 something that replays in full after any restart. It is not part of the `full`
 feature; the reasoning is in
 [ADR-0042](../../../../adr/0042-first-party-load-generator-source.md), which
@@ -17,10 +17,10 @@ Construct it from the pipeline's opaque section:
 let source = DatagenSource::from_component_config(&pipeline.config().source)?;
 ```
 
-One runnable example drives this source end to end and needs nothing installed:
+A runnable example drives this source end to end and needs nothing installed:
 [`storefront_pipeline.rs`](repo:crates/spate/examples/storefront_pipeline.rs)
-runs a bounded stream through a whole pipeline — deserializer, filter, split
-terminal, admin server — and exits `Completed` on its own
+runs a bounded stream through a whole pipeline (deserializer, filter, split
+terminal, admin server) and exits `Completed` on its own
 (`cargo run -p spate --example storefront_pipeline`).
 
 ## Configuration
@@ -62,7 +62,7 @@ rate runs below it and counts the shortfall in
 `spate_datagen_source_tick_overrun_total`. There is no `rate` key.
 
 Validation rejects `partitions` outside 1 to 1024, `events_per_tick` at zero,
-`count` at zero, and a `count` smaller than `partitions` — the budget is split
+`count` at zero, and a `count` smaller than `partitions`; the budget is split
 across lanes, so the last lanes would be born exhausted.
 
 ## What it generates
@@ -79,7 +79,7 @@ on each document:
 ```
 
 Under `encoding: avro` the same three records are a bare datum against a
-top-level union, selected by branch index — there is no `type` field, and
+top-level union, selected by branch index. There is no `type` field, and
 neither encoding derives from the other. The schema a downstream reader is
 pinned to is `spate_datagen::EVENT_SCHEMA_JSON`, also reachable as
 `DatagenSource::avro_schema()`. The Rust types for both encodings are
@@ -97,14 +97,14 @@ placed itself, so a payment always lands on the same partition, at a strictly
 greater offset, than its order. That holds with no coordination between lanes,
 which is what lets the guarantee survive lanes running on different threads.
 
-The record key carries the order id — unique per order, so it is the key that
+The record key carries the order id, unique per order, so it is the key that
 decides routing, not the dimension fields above. A key-hashing router therefore
 colocates an order, its payment and its refund on one shard.
 
 ## Determinism
 
 Under `clock: fixed`, the stream is a pure function of `seed`, `partitions`,
-`dataset`, `encoding` and `epoch_ms` — the same configuration produces
+`dataset`, `encoding` and `epoch_ms`. The same configuration produces
 byte-identical payloads on every run, which is what lets a test assert an exact
 count. `epoch_ms` is in that set because a `fixed` timestamp is `epoch_ms` plus
 the record's offset, and it reaches the payload as `placed_at`. `count`,
@@ -117,13 +117,13 @@ payload bytes do not.
 ## Delivery semantics
 
 `commit` records watermarks in memory and nowhere else. There is no durable
-upstream to resume from: a restart begins every lane at offset 0, so with a
-fixed seed the entire stream replays — strictly more duplication than a real
+upstream to resume from. A restart begins every lane at offset 0, so with a
+fixed seed the entire stream replays, strictly more duplication than a real
 source would produce, not less. There is no `resume_from` key.
 
-A bounded run — one with `count` set — reaches `ExitState::Completed` only
+A bounded run (one with `count` set) reaches `ExitState::Completed` only
 once every batch is acknowledged and the final watermark committed, so a clean
-exit from a bounded run is a real end-to-end delivery assertion. That is the
+exit from a bounded run is an end-to-end delivery assertion. That is the
 one durability claim this source makes.
 
 Payloads are framed one record each, so a deserializer takes its granularity
@@ -140,9 +140,9 @@ noted per family.
 |---|---|---|---|
 | `spate_datagen_source_events_generated_total` | counter | `event` | Events emitted, by kind: `order_placed`, `payment_captured`, `refund_issued`. |
 | `spate_datagen_source_ticks_total` | counter | — | Release cadences that fired, summed across lanes — `partitions` per cadence. Stays at zero when unthrottled. |
-| `spate_datagen_source_tick_overrun_total` | counter | — | Cadences that fired a whole interval or more late, summed across lanes: the lane re-anchors to the present and the missed ticks are not replayed. A lane merely late within one interval counts nothing. Stays at zero when unthrottled. |
+| `spate_datagen_source_tick_overrun_total` | counter | — | Cadences that fired a whole interval or more late, summed across lanes: the lane re-anchors to the present and the missed ticks are not replayed. A lane late by less than one interval counts nothing. Stays at zero when unthrottled. |
 | `spate_datagen_source_events_remaining` | gauge | — | Events left in a bounded budget across all lanes. Zero when unbounded. |
-| `spate_datagen_source_open_orders` | gauge | — | Orders placed but not yet captured, summed across lanes. Rises for as long as the run lasts — the mix places faster than it captures, and an order the lane's ring evicts is never captured — so it is not a backlog that settles. |
+| `spate_datagen_source_open_orders` | gauge | — | Orders placed but not yet captured, summed across lanes. The mix places faster than it captures, and an order the lane's ring evicts is never captured, so this rises for as long as the run lasts and is not a backlog that settles. |
 | `spate_datagen_source_committed_offset` | gauge | `partition` | The last watermark committed. Registered only when `metrics.per_partition_detail` is on. |
 
 Counters are incremented by the lanes and gauges are published by the control

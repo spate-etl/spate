@@ -188,8 +188,10 @@
 //! **No path normalization between the legs.** The base leg builds in a worktree
 //! under the cache root and the head in the repository itself, so the two
 //! binaries carry different absolute paths — a difference the compiler can act
-//! on. Measured on the self-test suite it moves a metric by at most 0.34%,
-//! against a 5% floor. Source-path remapping would not settle it on its own
+//! on. Comparing the self-test suite against itself on one otherwise-idle
+//! machine, the largest difference any metric showed was 0.34%, against the 5%
+//! floor that applies to the timing metrics — the allocation metrics, judged at
+//! 1%, showed none. Source-path remapping would not settle it on its own
 //! while the legs also build into different target directories, which the linker
 //! records separately. A case whose difference tracks its paths rather than its
 //! code is the thing that would make this worth revisiting.

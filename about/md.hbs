@@ -1,6 +1,6 @@
 # Third-party licences
 
-**Generated file — do not edit.** Regenerate with:
+**Generated file. Do not edit.** Regenerate with:
 
 ```sh
 ./scripts/attribution.sh
@@ -11,29 +11,28 @@ CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
 Spate itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
 inventories the **dependencies** it links, and the terms each is used under.
 Where a dependency offers a choice (`MIT OR Apache-2.0` and similar), the term
-listed here is the one elected — the priority order in `about.toml` decides,
-and the rationale is documented there.
+listed here is the one elected. The priority order in `about.toml` decides, and
+the rationale is documented there.
 
-Two things to know when reading it:
+When reading it:
 
 - **This is the union across every optional feature** (`--all-features`). A
   default build links a strict subset; the extra crates come from opt-in
   features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
-  more than you distribute is safe, so this file is deliberately the superset.
+  more than you distribute is safe, so this file is the superset.
 - **Full licence texts are not reproduced here**, to keep the file diffable.
   They are published at <https://spate.kainth.dev/licenses/>, generated
   from the same lockfile by the same tool.
 
 Dev-dependencies are excluded: they are never distributed and so require no
 attribution. Build-dependencies are included, since a build script can
-contribute generated code to the shipped artifact — as can a proc-macro, which
-is why compile-time-only crates are listed.
+contribute generated code to the shipped artifact, as can a proc-macro, so
+compile-time-only crates are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) appear in the table too, each
 under Apache-2.0. `cargo-about` only omits workspace members that are
-unpublished, and leaving the published ones in is useful: it shows at a glance
-that every crate you receive from this project carries the same terms as the
-repository.
+unpublished. Every crate you receive from this project carries the same terms as
+the repository.
 
 
 ## Summary
@@ -47,17 +46,16 @@ repository.
 
 One row per crate, grouped by the licence elected for it and sorted by name
 within each group. `cargo-about` records each crate's own licence text
-separately — the copyright lines differ — so the full texts live on the site
+separately, since the copyright lines differ, so the full texts live on the site
 rather than here.
 
-That is also why this table is post-processed. `cargo-about` emits one row per
-licence *text*, grouping crates by which text they share, and a crate that
-ships several files scanning as the same licence has its text chosen by the
-order those files are read off disk. Group membership, and so each row's
-position, then varies from machine to machine. `scripts/attribution.sh` sorts
-the rows, collapses the duplicates a crate with several notices produces, and
-recomputes the counts above from what is left, which is what makes this file
-reproducible. The elected licence ids are unaffected either way.
+This table is post-processed. `cargo-about` emits one row per licence *text*,
+grouping crates by which text they share, and a crate that ships several files
+scanning as the same licence has its text chosen by the order those files are
+read off disk. Group membership, and so each row's position, then varies from
+machine to machine. `scripts/attribution.sh` sorts the rows, collapses the
+duplicates a crate with several notices produces, and recomputes the counts
+above from what is left. The elected licence ids are unaffected either way.
 
 | Crate | Version | Licence |
 |---|---|---|

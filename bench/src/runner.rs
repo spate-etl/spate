@@ -43,11 +43,10 @@ const PERIOD_MULTIPLE: u64 = 20;
 /// How long a protocol call runs before the driver reports it, and the interval
 /// between reports after that.
 ///
-/// Twenty times what one measured region was asked to cost, and never less than
-/// thirty seconds. A case measures for `target_ms` after warming for
-/// `warmup_ms`, so the multiple is what a child may spend on everything else —
-/// process start, corpus construction, the calibrated iterations — before the
-/// run says so.
+/// Twenty times `target_ms` + `warmup_ms` — what a child was asked to spend
+/// inside its region and warming up for it — and never less than thirty
+/// seconds. The multiple is the headroom for everything the child does outside
+/// that: process start, and building the corpus, which nothing bounds.
 #[must_use]
 pub fn slow_period(target_ms: u64, warmup_ms: u64) -> Duration {
     Duration::from_millis(
@@ -466,7 +465,10 @@ mod tests {
             .expect("the stub answers the protocol");
 
         assert_eq!(answer.protocol, PROTOCOL_VERSION);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // Well inside the 5s period: the failure this rules out is a guard that
+        // waits the period out instead of disconnecting, and the margin is wide
+        // enough that a loaded machine is not what fails it.
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

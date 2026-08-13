@@ -689,9 +689,9 @@ fn divergences(
     fields
         .iter()
         .filter_map(|(field, base)| {
-            // The maps hold the same keys, so the fallback is unreachable
-            // today. It is here so a field one side stops recording reads as a
-            // difference rather than panicking.
+            // The maps hold the same keys, so the fallback is unreachable. It
+            // is here so a field one side stops recording reads as a difference
+            // rather than panicking.
             let head = theirs.get(field).cloned().unwrap_or_default();
             (*base != head).then(|| Divergence {
                 field,

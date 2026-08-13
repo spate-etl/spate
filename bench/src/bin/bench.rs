@@ -37,11 +37,11 @@
 //! filter on case ids, so it needs the case list to filter. `run` takes
 //! `--leg NAME` (default `head`) for the name stamped into every record.
 //!
-//! A child still running thirty seconds in — or twenty times `--target-ms` plus
-//! `--warmup-ms`, whichever is longer — prints a `SLOW` line naming its leg, its
-//! target and the call, and prints it again at every period after that. Nothing
-//! is stopped: the line says which of a run's many children is the slow one, and
-//! Ctrl-C is what ends it.
+//! A child still running thirty seconds in — or twenty times
+//! `--target-ms` + `--warmup-ms`, whichever is longer — prints a `SLOW` line
+//! naming its leg, its target and the call, and prints it again at every period
+//! after that. Nothing is stopped: the line says which of a run's many children
+//! is the slow one, and Ctrl-C is what ends it.
 //!
 //! `compare` and `ab` take `--format` — `table`, `markdown` or `json` — and
 //! `--allow`, whose values are the guarded field names. `--format markdown`
@@ -50,10 +50,11 @@
 //! full table in collapsed sections, then anything that could not be compared,
 //! then the decision rule — also collapsed, because a reader who wants it knows
 //! to look and a reader who does not should see the table first. `--format json`
-//! carries every row with its interval and verdict, and everything that could
-//! not be compared with the reason it could not. Its `schema` field is the
-//! report's version; its `verdict` and `cause` fields are tokens a script
-//! matches on rather than the phrases the other two formats print.
+//! carries every row with its interval and verdict, everything that could not be
+//! compared with the reason it could not, and any guarded field the two legs
+//! disagree about. Its `schema` field is the report's version; its `verdict` and
+//! `cause` fields are tokens a script matches on, where the two human formats
+//! phrase a verdict for a reader and state a cause only as prose.
 //!
 //! # Exit codes, and two refusals worth knowing in advance
 //!

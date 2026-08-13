@@ -9,9 +9,11 @@
 //! cannot.
 //!
 //! The JSON view is the one a script reads, and it is versioned by
-//! [`REPORT_SCHEMA_VERSION`]. Its `verdict` and `cause` fields carry tokens
-//! rather than the phrases the other two formats print, so a consumer matches on
-//! a string that changes only when the version does.
+//! [`REPORT_SCHEMA_VERSION`]. Its `verdict` and `cause` fields are tokens a
+//! consumer matches on, stable for a version, where the two human formats
+//! phrase a verdict for a reader and state a cause only as prose. It carries the
+//! guarded fields the two legs disagree about as data, which the human formats
+//! put in the header.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -56,6 +58,106 @@ pub fn decision_rule() -> String {
     )
 }
 
+/// What the significant-changes table has to say, decided once.
+///
+/// Both human formats render this rather than each deciding for itself. The
+/// distinction it carries — the rule was applied and nothing cleared it, versus
+/// the rule was never applied — is the one a report gets wrong by stating the
+/// first when the second happened, so it is settled in one place and phrased in
+/// one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Summary {
+    /// Nothing paired, so there is no table at all.
+    NothingComparable,
+    /// Rows exist, and not one of them was both judged and eligible to be
+    /// flagged. `unjudged` fell short of the replicate floor; the rest come from
+    /// cases marked erratic.
+    NothingJudged { unjudged: usize, total: usize },
+    /// The rule was applied and no metric cleared it.
+    NoneCleared,
+    /// There are findings to print.
+    Findings,
+}
+
+impl Summary {
+    fn of(comparison: &Comparison) -> Self {
+        if comparison.rows.is_empty() {
+            return Self::NothingComparable;
+        }
+        // Erratic *or* unjudged, per row: a row excluded for being noisy and a
+        // row that never reached the rule are different reasons for the same
+        // thing, and a run can hold both at once.
+        let judged = comparison
+            .rows
+            .iter()
+            .any(|row| !row.erratic && row.analysis.verdict.is_judged());
+        if !judged {
+            return Self::NothingJudged {
+                unjudged: comparison.unjudged().count(),
+                total: comparison.rows.len(),
+            };
+        }
+        if comparison.significant().next().is_none() {
+            return Self::NoneCleared;
+        }
+        Self::Findings
+    }
+
+    /// The sentence, or `None` when there is a table to print instead.
+    ///
+    /// Free of markup so both formats state it identically.
+    fn sentence(&self) -> Option<String> {
+        match *self {
+            Self::NothingComparable => Some(
+                "None — and no metric was comparable at all, so the rule below was never \
+                 applied. See Not comparable."
+                    .to_owned(),
+            ),
+            Self::NothingJudged { unjudged: 0, .. } => Some(
+                "None — and no metric was judged at all: every metric comes from a case marked \
+                 erratic, which the rule below never flags. See Informational."
+                    .to_owned(),
+            ),
+            Self::NothingJudged { unjudged, total } if unjudged == total => Some(format!(
+                "None — and no metric was judged at all: all {total} have fewer than \
+                 {MIN_REPLICATES} paired replicates, so the rule below was never applied. Re-run \
+                 with --replicates {MIN_REPLICATES} or more."
+            )),
+            Self::NothingJudged { unjudged, total } => Some(format!(
+                "None — and no metric was judged at all: {unjudged} of {total} have fewer than \
+                 {MIN_REPLICATES} paired replicates and the rest come from cases marked erratic, \
+                 so the rule below was never applied."
+            )),
+            Self::NoneCleared => {
+                Some("None. No metric cleared both halves of the rule below.".to_owned())
+            }
+            Self::Findings => None,
+        }
+    }
+}
+
+/// The count of rows the rule was not applied to, when that is worth saying
+/// beside a table rather than instead of one.
+///
+/// Stated whether or not anything cleared the rule: a reader acting on a report
+/// with findings in it is the one least likely to notice that part of the run
+/// was never judged. Silent when the summary already says nothing was judged,
+/// which would otherwise state the same shortfall twice.
+fn shortfall(comparison: &Comparison, summary: &Summary) -> Option<String> {
+    if !matches!(summary, Summary::NoneCleared | Summary::Findings) {
+        return None;
+    }
+    let unjudged = comparison.unjudged().count();
+    let total = comparison.rows.len();
+    (unjudged > 0).then(|| {
+        format!(
+            "{unjudged} of the {total} metric(s) below have fewer than {MIN_REPLICATES} paired \
+             replicates and were not judged; the rule was not applied to them. Re-run with \
+             --replicates {MIN_REPLICATES} or more."
+        )
+    })
+}
+
 /// Renders the terminal view.
 #[must_use]
 pub fn table(comparison: &Comparison) -> String {
@@ -63,35 +165,16 @@ pub fn table(comparison: &Comparison) -> String {
     let _ = writeln!(out, "{}", header_lines(comparison).join("\n"));
 
     let significant: Vec<&Row> = comparison.significant().collect();
-    let unjudged = comparison.unjudged().count();
-    let erratic = comparison.informational().count();
+    let summary = Summary::of(comparison);
     let _ = writeln!(out, "\nSignificant changes");
-    if comparison.rows.is_empty() {
-        let _ = writeln!(out, "  none — and nothing was comparable; see below");
-    } else if unjudged == comparison.rows.len() {
-        let _ = writeln!(
-            out,
-            "  none — and nothing was judged: every row has fewer than {MIN_REPLICATES} paired \
-             replicates, so the rule below was never applied"
-        );
-    } else if erratic == comparison.rows.len() {
-        let _ = writeln!(
-            out,
-            "  none — and nothing was judged: every metric comes from a case marked erratic, \
-             which the rule below never flags. See Informational."
-        );
-    } else if significant.is_empty() {
-        let _ = writeln!(out, "  none");
-    } else {
-        write_plain_rows(&mut out, &significant);
+    match summary.sentence() {
+        Some(sentence) => {
+            let _ = writeln!(out, "  {sentence}");
+        }
+        None => write_plain_rows(&mut out, &significant),
     }
-    if unjudged > 0 && unjudged < comparison.rows.len() {
-        let _ = writeln!(
-            out,
-            "  note: {unjudged} of {} rows have fewer than {MIN_REPLICATES} paired replicates and \
-             were not judged",
-            comparison.rows.len()
-        );
+    if let Some(note) = shortfall(comparison, &summary) {
+        let _ = writeln!(out, "  note: {note}");
     }
 
     let informational: Vec<&Row> = comparison.informational().collect();
@@ -128,53 +211,18 @@ pub fn markdown(comparison: &Comparison) -> String {
     }
 
     let significant: Vec<&Row> = comparison.significant().collect();
-    let unjudged = comparison.unjudged().count();
-    let erratic = comparison.informational().count();
+    let summary = Summary::of(comparison);
     let _ = writeln!(out, "\n### Significant changes\n");
-    if comparison.rows.is_empty() {
-        // Not "no metric cleared the rule": no metric was judged by it. The two
-        // are the same table and opposite claims.
-        let _ = writeln!(
-            out,
-            "None — and no metric was comparable at all, so the rule below was never \
-             applied. See *Not comparable*."
-        );
-    } else if unjudged == comparison.rows.len() {
-        // The replicate floor is checked before the rule, so these rows carry a
-        // difference and no conclusion.
-        let _ = writeln!(
-            out,
-            "None — and no metric was judged at all: all {} have fewer than {MIN_REPLICATES} \
-             paired replicates, so the rule below was never applied. Re-run with \
-             `--replicates {MIN_REPLICATES}` or more.",
-            comparison.rows.len()
-        );
-    } else if erratic == comparison.rows.len() {
-        // Erratic rows are excluded before the rule's outcome is consulted, so
-        // this is the same claim as above with a different cause.
-        let _ = writeln!(
-            out,
-            "None — and no metric was judged at all: every metric comes from a case marked \
-             erratic, which the rule below never flags. See *Informational*."
-        );
-    } else if significant.is_empty() {
-        let _ = writeln!(
-            out,
-            "None. No metric cleared both halves of the rule below."
-        );
-    } else {
-        write_markdown_rows(&mut out, &significant);
+    match summary.sentence() {
+        Some(sentence) => {
+            let _ = writeln!(out, "{sentence}");
+        }
+        None => write_markdown_rows(&mut out, &significant),
     }
-    // Appended rather than folded into a branch above: a partial shortfall is
-    // true whether or not anything cleared the rule, and it is least likely to
-    // be noticed exactly when the table is not empty.
-    if unjudged > 0 && unjudged < comparison.rows.len() {
-        let _ = writeln!(
-            out,
-            "\n{unjudged} of the {} metric(s) below have fewer than {MIN_REPLICATES} paired \
-             replicates and were not judged; the rule was not applied to them.",
-            comparison.rows.len()
-        );
+    if let Some(note) = shortfall(comparison, &summary) {
+        // A blank line first: a paragraph directly under a table is part of the
+        // table to a Markdown renderer.
+        let _ = writeln!(out, "\n{note}");
     }
 
     let informational: Vec<&Row> = comparison.informational().collect();
@@ -243,6 +291,18 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
             (ALLOC_COUNT_PER_ITER, ALLOC_FLOOR),
         ]),
         allowed: comparison.allowed.clone(),
+        // The waiver alone would leave a consumer to diff the two fingerprints,
+        // which over-reports: `leg`, `git_describe`, `dirty` and `feature_args`
+        // are serialised and none of them is guarded.
+        divergences: comparison
+            .divergences()
+            .into_iter()
+            .map(|d| DivergenceReport {
+                field: d.field,
+                base: d.base,
+                head: d.head,
+            })
+            .collect(),
         base: LegReport::of(&comparison.base),
         head: LegReport::of(&comparison.head),
         rows: comparison.rows.iter().map(RowReport::of).collect(),
@@ -279,12 +339,15 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
     let mut lines = vec![
         format!("base {} · {}", describe(base), base.dir.display()),
         format!("head {} · {}", describe(head), head.dir.display()),
+        // The replicate span is the *paired* count over both legs, so it carries
+        // no leg label — a case that lost a base-leg record would otherwise be
+        // reported as the head leg running short.
+        replicate_span(comparison),
         // Labelled `head` because that is the leg they describe. The guard makes
         // them true of the base leg too, right up until an `--allow` waives the
         // field that stopped being true.
         format!(
-            "head {} · {} · {} · {} · {}",
-            replicate_span(comparison),
+            "head {} · {} · {} · {}",
             head.build.rustc.as_deref().unwrap_or("rustc unknown"),
             head.build
                 .host_triple
@@ -474,6 +537,7 @@ struct Report {
     min_replicates: usize,
     floors: BTreeMap<&'static str, f64>,
     allowed: Vec<String>,
+    divergences: Vec<DivergenceReport>,
     base: LegReport,
     head: LegReport,
     rows: Vec<RowReport>,
@@ -541,6 +605,13 @@ impl RowReport {
             significant: !row.erratic && row.analysis.verdict.is_significant(),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct DivergenceReport {
+    field: &'static str,
+    base: String,
+    head: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -639,7 +710,8 @@ mod tests {
 
 - base v0.1.0-2-gaaaaaaa · /legs/base
 - head v0.1.0-3-gbbbbbbb (dirty) · /legs/head
-- head 10 replicate(s) · rustc 1.94.0 · aarch64-apple-darwin · bench · default features
+- 10 replicate(s)
+- head rustc 1.94.0 · aarch64-apple-darwin · bench · default features
 - head host macos/aarch64 · Apple M5 Max · 16 core(s) · label local
 - corpus digests: every compared case matched
 
@@ -682,8 +754,6 @@ mod tests {
         assert!(!rendered.contains("Not comparable"));
     }
 
-    /// An erratic case must never appear in the significant table, however
-    /// large its difference.
     /// A row the rule never reached, as a run of fewer than `MIN_REPLICATES`
     /// produces one.
     fn unjudged_row(case: &str) -> Row {
@@ -710,9 +780,9 @@ mod tests {
         );
 
         let plain = table(&cmp);
-        assert!(plain.contains("nothing was judged"), "{plain}");
+        assert!(plain.contains("no metric was judged at all"), "{plain}");
         assert!(
-            !plain.contains("note: 2 of 2 rows"),
+            !plain.contains("note:"),
             "the whole-run case is stated once, not twice: {plain}"
         );
     }
@@ -730,13 +800,70 @@ mod tests {
             Vec::new(),
         );
 
-        let rendered = markdown(&cmp);
-        assert!(rendered.contains("marked erratic"), "{rendered}");
-        assert!(
-            !rendered.contains("No metric cleared both halves"),
-            "{rendered}"
+        for rendered in [markdown(&cmp), table(&cmp)] {
+            // Not "marked erratic": `decision_rule()` carries that phrase and
+            // every format appends the rule, so it is present whatever this
+            // branch does.
+            assert!(
+                rendered.contains("no metric was judged at all"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("comes from a case marked erratic"),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("No metric cleared both halves"),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// The two causes can split a run between them, and the claim the report
+    /// must not make is the same one.
+    #[test]
+    fn a_run_judged_on_neither_count_says_so() {
+        let cmp = comparison(
+            vec![unjudged_row("a"), row("b", Verdict::Regressed, true)],
+            Vec::new(),
         );
-        assert!(table(&cmp).contains("marked erratic"));
+
+        for rendered in [markdown(&cmp), table(&cmp)] {
+            assert!(
+                rendered.contains("no metric was judged at all"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("1 of 2"), "{rendered}");
+            assert!(
+                !rendered.contains("No metric cleared both halves"),
+                "a metric excluded for being erratic never failed the rule: {rendered}"
+            );
+        }
+    }
+
+    /// Two legs sharing no case produce no rows at all, which is a different
+    /// claim again from a rule nothing cleared.
+    #[test]
+    fn a_comparison_with_no_rows_says_nothing_was_comparable() {
+        let cmp = comparison(
+            Vec::new(),
+            vec![NotComparable {
+                what: "spate-bench/selftest_wall/gone".to_owned(),
+                why: "present only in the base leg".to_owned(),
+                cause: Cause::Other,
+            }],
+        );
+
+        for rendered in [markdown(&cmp), table(&cmp)] {
+            assert!(
+                rendered.contains("no metric was comparable at all"),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("No metric cleared both halves"),
+                "{rendered}"
+            );
+        }
     }
 
     /// A shortfall that covers part of the run is counted beside the table
@@ -758,7 +885,7 @@ mod tests {
             rendered.contains("`spate-bench/selftest_wall/a`"),
             "{rendered}"
         );
-        assert!(table(&cmp).contains("note: 1 of 3 rows"));
+        assert!(table(&cmp).contains("note: 1 of the 3 metric(s)"));
     }
 
     /// The shortfall line is independent of the significant table being empty,
@@ -778,6 +905,8 @@ mod tests {
         assert!(rendered.contains("1 of the 2 metric(s)"), "{rendered}");
     }
 
+    /// An erratic case must never appear in the significant table, however
+    /// large its difference.
     #[test]
     fn an_erratic_row_renders_as_informational_only() {
         let rendered = markdown(&comparison(
@@ -939,28 +1068,174 @@ mod tests {
         assert!((parsed["floors"]["peak_rss_bytes"].as_f64().expect("f64") - 0.10).abs() < 1e-12);
     }
 
-    /// Every floor key is a metric a row can carry, apart from the fallback the
-    /// rule genuinely has: a consumer holding a row's metric can resolve it.
+    /// Driven from the metrics themselves rather than from the map: a metric
+    /// that gains a floor in `floor_for` and is not keyed here would resolve to
+    /// the wrong number for a consumer, which is the defect this map was fixed
+    /// for.
     #[test]
-    fn every_floor_is_keyed_by_a_metric_a_row_carries() {
+    fn every_metric_resolves_to_the_floor_the_rule_applies() {
+        use crate::record::{
+            ALLOC_BYTES_PER_ITER, ALLOC_COUNT_PER_ITER, BYTES_PER_S, CPU_NS_PER_ITER,
+            PEAK_RSS_BYTES, RECORDS_PER_S, WALL_NS_PER_ITER,
+        };
+
         let cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
         let text = json(&cmp).expect("serialises");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
         let floors = parsed["floors"].as_object().expect("floors");
+        let default = floors["default"].as_f64().expect("f64");
 
+        // Every metric a record can carry. A new one added to `record.rs`
+        // without a decision about its floor fails to compile here.
         for metric in [
-            crate::record::PEAK_RSS_BYTES,
-            crate::record::ALLOC_BYTES_PER_ITER,
-            crate::record::ALLOC_COUNT_PER_ITER,
+            WALL_NS_PER_ITER,
+            CPU_NS_PER_ITER,
+            RECORDS_PER_S,
+            BYTES_PER_S,
+            PEAK_RSS_BYTES,
+            ALLOC_BYTES_PER_ITER,
+            ALLOC_COUNT_PER_ITER,
         ] {
-            let floor = floors[metric].as_f64().expect("f64");
+            let resolved = floors
+                .get(metric)
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(default);
             assert!(
-                (floor - crate::stats::floor_for(metric)).abs() < 1e-12,
-                "{metric} disagrees with the rule that applies it"
+                (resolved - crate::stats::floor_for(metric)).abs() < 1e-12,
+                "{metric} resolves to {resolved}, the rule applies {}",
+                crate::stats::floor_for(metric)
             );
         }
-        let default = floors["default"].as_f64().expect("f64");
-        assert!((default - crate::stats::floor_for(crate::record::WALL_NS_PER_ITER)).abs() < 1e-12);
+
+        // And no key that is neither a metric nor the fallback: a stale one
+        // resolves for nobody.
+        for key in floors.keys() {
+            assert!(
+                key == "default"
+                    || [
+                        WALL_NS_PER_ITER,
+                        CPU_NS_PER_ITER,
+                        RECORDS_PER_S,
+                        BYTES_PER_S,
+                        PEAK_RSS_BYTES,
+                        ALLOC_BYTES_PER_ITER,
+                        ALLOC_COUNT_PER_ITER,
+                    ]
+                    .contains(&key.as_str()),
+                "{key} is not a metric a row carries"
+            );
+        }
+    }
+
+    /// The key set a script pins against. A renamed or dropped field is a test
+    /// failure here rather than a consumer discovering it, which is what
+    /// [`REPORT_SCHEMA_VERSION`](super::REPORT_SCHEMA_VERSION) exists to make
+    /// deliberate.
+    #[test]
+    fn the_json_report_is_the_shape_a_script_pins_against() {
+        let mut cmp = comparison(
+            vec![row("a", Verdict::Regressed, false)],
+            vec![NotComparable {
+                what: "spate-bench/selftest_wall/gone".to_owned(),
+                why: "present only in the base leg".to_owned(),
+                cause: Cause::Other,
+            }],
+        );
+        cmp.head.build.rustc = Some("rustc 1.95.0".to_owned());
+        cmp.allowed = vec!["rustc".to_owned()];
+
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+
+        let keys = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_object()
+                .expect("object")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut top = keys(&parsed);
+        top.sort();
+        assert_eq!(
+            top,
+            [
+                "allowed",
+                "base",
+                "confidence",
+                "decision_rule",
+                "divergences",
+                "floors",
+                "head",
+                "min_replicates",
+                "not_comparable",
+                "replicates_max",
+                "replicates_min",
+                "rows",
+                "schema",
+            ]
+        );
+
+        let mut row_keys = keys(&parsed["rows"][0]);
+        row_keys.sort();
+        assert_eq!(
+            row_keys,
+            [
+                "base_mean",
+                "case",
+                "ci_high",
+                "ci_low",
+                "delta",
+                "erratic",
+                "erratic_reason",
+                "floor",
+                "head_mean",
+                "higher_is_better",
+                "metric",
+                "replicates",
+                "significant",
+                "unit",
+                "verdict",
+            ]
+        );
+
+        let mut leg_keys = keys(&parsed["base"]);
+        leg_keys.sort();
+        assert_eq!(leg_keys, ["build", "dir", "host", "priming", "records"]);
+
+        let mut nc_keys = keys(&parsed["not_comparable"][0]);
+        nc_keys.sort();
+        assert_eq!(nc_keys, ["cause", "what", "why"]);
+
+        let mut case_keys = keys(&parsed["rows"][0]["case"]);
+        case_keys.sort();
+        assert_eq!(case_keys, ["case", "crate", "target"]);
+    }
+
+    /// The machine format has to disclose a waived difference too. A consumer
+    /// cannot derive it from the two fingerprints: they carry fields that differ
+    /// on every run and are not guarded.
+    #[test]
+    fn a_waived_divergence_reaches_the_json() {
+        let mut cmp = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        cmp.head.build.rustc = Some("rustc 1.95.0".to_owned());
+        cmp.allowed = vec!["rustc".to_owned()];
+
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+
+        assert_eq!(parsed["divergences"].as_array().expect("array").len(), 1);
+        assert_eq!(parsed["divergences"][0]["field"], "rustc");
+        assert_eq!(parsed["divergences"][0]["base"], "rustc 1.94.0");
+        assert_eq!(parsed["divergences"][0]["head"], "rustc 1.95.0");
+
+        let agreeing = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        let text = json(&agreeing).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        assert!(
+            parsed["divergences"].as_array().expect("array").is_empty(),
+            "legs that agree have nothing to disclose"
+        );
     }
 
     /// The JSON verdict is matched on rather than read, so it must not drift

@@ -2,8 +2,8 @@
 
 Connectors are the technology-specific edges of a pipeline: a **source**
 feeds it, a **format** (deserializer) decodes payloads into records, and a
-**sink** writes them out. Everything between — batching, routing, retries,
-acknowledgments, backpressure — is framework-owned, so each connector is a
+**sink** writes them out. Everything between (batching, routing, retries,
+acknowledgments, backpressure) is framework-owned, so each connector is a
 thin implementation of a small trait. Configuration reaches every connector
 the same way: an opaque single-key section in the pipeline YAML, handed to
 the connector's factory (see
@@ -35,13 +35,14 @@ Connectors are grouped by role:
 connectors. The connectors outside it are the ones no deployment should
 reach for: Datagen, which keeps no durable progress and needs its own
 `datagen` feature, and Memory / Capture, which ships as a separate
-dev-dependency. Memory / Capture is dual-role — neither a production source
-nor sink — so it lives at the connectors root rather than under `sources/` or
-`sinks/`; Datagen fills the source role only and sits with the other sources.
+dev-dependency. Memory / Capture is dual-role, being neither a production
+source nor a sink, so it lives at the connectors root rather than under
+`sources/` or `sinks/`; Datagen fills the source role only and sits with the
+other sources.
 
 ## Guarantee notes per connector
 
-- **Kafka (source)** — at-least-once anchored here: offsets are *stored*
+- **Kafka (source)** — at-least-once anchored here. Offsets are *stored*
   only when checkpoint watermarks advance (auto-offset-store is disabled)
   and committed on an interval; rebalances and shutdown drain and commit
   synchronously before partitions are released. Backpressure pauses
@@ -55,30 +56,30 @@ nor sink — so it lives at the connectors root rather than under `sources/` or
   quarantine their split instead of silently skipping; the
   self-terminating `Completed` exit additionally guarantees every record
   was acknowledged and committed. Scales horizontally by running more
-  replicas with a shared coordinator — see
+  replicas with a shared coordinator; see
   [the connector page](sources/s3/README.mdx).
 - **Datagen (source)** — no durable upstream, so it claims no resumability:
   a restart begins every lane at offset 0 and the whole stream replays, which
   is strictly more duplication than a real source produces. Its one durability
-  claim is the bounded case — a run with `count` set reaches `Completed` only
+  claim is the bounded case. A run with `count` set reaches `Completed` only
   after every record was acknowledged and the final watermark committed, so a
-  clean exit is a real end-to-end assertion. A demo and test source, and
+  clean exit is an end-to-end assertion. A demo and test source, and
   deliberately outside the `full` feature.
 - **Kafka (sink)** — a batch acknowledges only after **every** message's
   delivery report confirms, under forced `acks=all` + idempotence; a failed
   or timed-out report stalls the watermark and the batch replays.
-  Idempotence covers only in-session producer retries — batch retries after
+  Idempotence covers only in-session producer retries. Batch retries after
   partial delivery and crash replay both duplicate (never lose), so
   downstream consumers must tolerate duplicates. See the
   [honesty section](sinks/kafka/README.mdx).
 - **ClickHouse (sink)** — a batch acknowledges only after the server
   confirms the insert end-to-end (`wait_end_of_query=1`, materialized views
-  included). Deterministic dedup tokens make same-batch retries idempotent
-  — **only if the table keeps a deduplication window**; crash replay is not
+  included). Deterministic dedup tokens make same-batch retries idempotent,
+  but **only if the table keeps a deduplication window**; crash replay is not
   covered, so target tables must tolerate duplicates. See the
-  [warning](sinks/clickhouse/README.mdx) — it is the sharpest edge in the framework.
+  [warning](sinks/clickhouse/README.mdx), the sharpest edge in the framework.
 - **Avro (format)** — schema fetches never block a pipeline thread: a
-  cache miss holds the batch and replays it when the schema lands — records
+  cache miss holds the batch and replays it when the schema lands. Records
   are never dropped or duplicated by the mechanism. Undecodable payloads
   follow the deserializer's Skip/Fail policy like any poison payload.
 - **JSON (format)** — one payload decodes to 0..N records across the
@@ -102,6 +103,6 @@ sink is `RowEncoder` + `ShardWriter`. Start with
 [Extending](../06-extending/README.mdx); the dependency policy that keeps
 third-party connector crates viable (no 0.x types in public trait bounds)
 is [ADR-0011](../../adr/0011-msrv-and-dependency-policy.md). For wiring your
-component into the metrics taxonomy — feeding a framework handle, labels, and
-naming rules — see
+component into the metrics taxonomy (feeding a framework handle, labels, and
+naming rules), see
 [Instrumenting connectors](../06-extending/instrumenting-connectors.mdx).

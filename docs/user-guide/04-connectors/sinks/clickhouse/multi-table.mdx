@@ -1,12 +1,12 @@
 # ClickHouse multi-table split
 
 One pipeline can write to **several ClickHouse tables**, routing each record to
-the table for its kind — each table with its own columns, encoder, shard router,
+the table for its kind, each table with its own columns, encoder, shard router,
 and part tuning. This is the connector-specific side of the
 [multi-sink split](../../../02-concepts/06-multi-sink.mdx) concept: the split
 terminal is generic; here is how the pieces line up for ClickHouse.
 
-It applies to a stream carrying genuinely different record types, each wanting
+It applies to a stream carrying different record types, each wanting
 its own columns and `ORDER BY`: the pipeline fans them out instead of a `Null`
 table with one `MATERIALIZED VIEW` per type. The trade is pipeline-side fan-out
 CPU and part control against server-side fan-out.
@@ -14,8 +14,8 @@ CPU and part control against server-side fan-out.
 ## Configuration: a `sinks:` map
 
 Replace the single `sink:` section with a `sinks:` map keyed by name. Each entry
-is a full, ordinary ClickHouse sink section — its own `table`, `columns`,
-`format`, `shards`, and `batch`/`inflight` — so per-table part sizing is tuned
+is a full, ordinary ClickHouse sink section with its own `table`, `columns`,
+`format`, `shards`, and `batch`/`inflight`, so per-table part sizing is tuned
 independently. The map key is the name the chain resolves with `ctx.sink(...)`.
 
 ```yaml
@@ -63,13 +63,13 @@ and runs with
 
 `payments_sink` and `refunds_sink` come from the `sinks:` map's `payments` and
 `refunds` entries, resolved by `sink_config(name)`. Each mints a
-`NativeEncoder` over the row family that table receives —
-`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different columns
-— from its own fetched schema, and a `DistributedRouter` over the same family
-from the `ShardKey` extractors `payment_key` and `refund_key`, which shard both
-tables on `order_id`. Sharding both on the same key is what keeps an order's
-payment and its refund on one shard, so a join across the two tables stays
-local — but only while the two sinks also carry the same `shards` topology.
+`NativeEncoder` over the row family that table receives
+(`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different
+columns) from its own fetched schema, and a `DistributedRouter` over the same
+family from the `ShardKey` extractors `payment_key` and `refund_key`, which
+shard both tables on `order_id`. Sharding both on the same key is what keeps an
+order's payment and its refund on one shard, so a join across the two tables
+stays local, but only while the two sinks also carry the same `shards` topology.
 Placement is the key's hash over the shard weights, so scaling one table's
 shard list without the other separates the rows the shared key was chosen to
 keep together. The split's input family is `Owned<StorefrontEvent>`, the sum type the
@@ -82,7 +82,7 @@ Each branch is a full ClickHouse sink, so everything on the
 [ClickHouse sink page](README.mdx) holds **per table**:
 
 - **Native (or RowBinary) encoding on pipeline threads**, positional against
-  that table's `columns`. Mixed formats across tables are fine — each sink
+  that table's `columns`. Mixed formats across tables are fine; each sink
   chooses its own.
 - **Direct-to-shard writes** with `wait_end_of_query=1`; a table's write is its
   own durable-ack point. The split holds the source batch until *every* table it
@@ -99,24 +99,24 @@ Each branch is a full ClickHouse sink, so everything on the
 
 ## Per-table part tuning — and the checkpoint-lag cost
 
-The whole point of splitting in the pipeline is per-table part control: each
+Splitting in the pipeline buys per-table part control: each
 table's `batch.max_rows`/`max_bytes`/`linger` is sized for *its* volume. A hot
 table seals on rows in milliseconds; a rare table would trickle, so a longer
 `linger` builds bigger parts for it.
 
 :::warning
-`linger` on a rare table is **not free**: because the source watermark is
+`linger` on a rare table is **not free**. Because the source watermark is
 held until every table a batch touched has flushed, a long rare-table
 `linger` holds the offsets of every source batch that carried even one rare
-record — inflating checkpoint lag and restart replay. The framework bounds
+record, inflating checkpoint lag and restart replay. The framework bounds
 the *pre-batch* half of that hold: a rare table's below-target chunk
 buffer is sealed on every commit tick, so worst-case checkpoint lag is
 `checkpoint.interval` (chunk seal) + that table's `linger` (batch close) +
 the write. The `linger` half is sized in config: sealing on a modest
-`max_rows` keeps `linger` biting only in genuine lulls. (A *pending* batch never
-trips `checkpoint.stalled_fail_after` — that watchdog fires only when a
-batch has permanently **failed**.) The full reasoning — including
-segregating the source by kind to dissolve the tension — is in the
+`max_rows` keeps `linger` biting only in lulls. (A *pending* batch never
+trips `checkpoint.stalled_fail_after`; that watchdog fires only when a
+batch has permanently **failed**.) The full reasoning, including
+segregating the source by kind to dissolve the tension, is in the
 [concept page's trade-off section](../../../02-concepts/06-multi-sink.mdx#the-trade-write-size-vs-checkpoint-lag).
 :::
 

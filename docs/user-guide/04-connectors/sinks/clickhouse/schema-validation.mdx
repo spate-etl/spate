@@ -2,7 +2,7 @@
 
 A ClickHouse pipeline has three descriptions of the same row: the `columns`
 list in the YAML, the field order of the Rust row struct, and the live
-table's schema. RowBinary — the wire format — carries **no column names**,
+table's schema. RowBinary, the wire format, carries **no column names**,
 so nothing catches a disagreement at the protocol level: misaligned columns
 are silent data corruption, not an error. Opt-in schema validation closes
 that gap at startup and at the first record, before any misaligned batch
@@ -15,10 +15,10 @@ row serialized field by field, in declaration order. The server maps bytes to
 columns purely by position, so the row struct's field order is the wire
 contract. `OrderRow` below is the row, matching `columns: [order_id,
 customer_id, region, placed_at, total_cents]`; the two types above it are what
-the chain decodes and totals into it. All three come — like the wiring further
-down — from
+the chain decodes and totals into it. All three come from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
-a complete program that builds under the `full` facade feature:
+a complete program that builds under the `full` facade feature, as does the
+wiring further down:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```
@@ -40,7 +40,7 @@ crate's `rowbinary` module docs.
 The `full` type check is deliberately permissive: a `u32` may feed
 `UInt32`, `DateTime`, or `IPv4`; server types the client does not know
 always pass. One mismatch always fails regardless: `Nullable` on the server
-versus a non-`Option` field (or the reverse) — that one is wire corruption,
+versus a non-`Option` field (or the reverse). That one is wire corruption,
 not a judgment call.
 
 ## Wiring it up
@@ -78,17 +78,17 @@ serde behavior, so it cannot be inspected at startup; instead the encoder
 checks the first record each pipeline thread encodes: field names and order
 always, type classes in `full` mode. A mismatch is a fatal error that stops
 the pipeline before the batch is sent. Steady-state cost after the first
-record is one predictable branch — nothing on the per-record hot path.
+record is one predictable branch, with nothing on the per-record hot path.
 
 Together the two halves pin all three descriptions to each other:
 `columns` ↔ live table at startup, struct ↔ `columns` at the first record.
 Because the startup half queries every replica independently, it also catches
-replica drift — a replica whose table was altered out of step with the others.
+replica drift, a replica whose table was altered out of step with the others.
 
 :::warning
-`validate_schema: off` preserves the historical behavior: nothing is
-checked, and a wrong column order writes garbage that ClickHouse may
-happily accept. Turn on at least `names` for any table not created in the
+`validate_schema: off` preserves the historical behavior, so nothing is
+checked and a wrong column order writes garbage that ClickHouse may
+accept. Turn on at least `names` for any table not created in the
 same commit as the pipeline.
 :::
 

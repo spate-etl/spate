@@ -1,8 +1,8 @@
 # ClickHouse Native format
 
 The ClickHouse sink defaults to **RowBinary** (row-wise). It can instead
-encode the **Native** format — ClickHouse's own columnar, block-framed
-representation — with one config knob:
+encode the **Native** format (ClickHouse's own columnar, block-framed
+representation) with one config knob:
 
 ```yaml
 sink:
@@ -13,7 +13,7 @@ sink:
 Native transposes each chunk of rows into per-column buffers and emits one
 self-describing **block** (`INSERT … FORMAT Native`). Because a Native insert
 body is a stream of complete blocks, the sink's batching, deduplication, and
-at-least-once semantics are **unchanged** — only the encoding differs.
+at-least-once semantics are **unchanged**; only the encoding differs.
 
 ## When to use it
 
@@ -33,22 +33,22 @@ measuring it rather than from this table:
 | Server CPU end-to-end (`MergeTree`) | 123.6 ms | 37.1 ms | **70% less** |
 
 The server win is largest when the destination has `LowCardinality`,
-`Array`, or `Map` columns — RowBinary makes the *server* build those
+`Array`, or `Map` columns. RowBinary makes the *server* build those
 dictionaries and columnar structures row-by-row; Native hands it the finished
 block.
 
 **Choose `native` when** the ClickHouse cluster is CPU-bound, or when network
 egress / wire size is the constraint (cross-region, metered links).
-**Keep `rowbinary` (the default) when** ETL-worker CPU is the constraint —
+**Keep `rowbinary` (the default) when** ETL-worker CPU is the constraint;
 RowBinary's row encode is near-memcpy-fast and hard to beat.
 
 ## Enabling it
 
-`format: native` is **type-driven**: the encoder needs each column's
+`format: native` is **type-driven**. The encoder needs each column's
 ClickHouse type to lay bytes out columnar, so selecting it always fetches
 `system.columns` (it upgrades `validate_schema: off` to `names`).
 
-The row is an ordinary `serde::Serialize` struct — the same one RowBinary
+The row is an ordinary `serde::Serialize` struct, the same one RowBinary
 takes.
 [`kafka_avro_flatmap_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_flatmap_clickhouse.rs)
 decodes a placed order and fans it out into one such row per line; it needs
@@ -58,13 +58,13 @@ a Kafka topic of Avro orders and the target table, and runs with
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=record
 ```
 
-`OrderLineRow` is the row the terminal stage encodes — the two types above it
+`OrderLineRow` is the row the terminal stage encodes; the two types above it
 are what the chain decodes and explodes into it. Its field order is the
 positional contract against the configured `columns`, and `DateTime64Millis`
 declares the timestamp's scale, which is what lets `validate_schema: full`
 check it against the column's declared precision.
 
-The encoder is built from the schema that sink fetched — `sink` here is the
+The encoder is built from the schema that sink fetched, where `sink` is the
 [ClickHouse sink](./README.mdx) constructed from its config section:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=encoder
@@ -86,18 +86,18 @@ Bool; `Int`/`UInt` 8–256; `Float32/64`; `Date`, `Date32`; `DateTime`,
 `UUID`; `IPv4`; `IPv6`; `Nullable(T)`; `Array(T)`; `Tuple(…)`; `Map(K, V)`;
 `Nested` (as parallel dotted `Array` columns); `LowCardinality(String)` and
 `LowCardinality(Nullable(String))`; and the Geo aliases (`Point`, `Ring`,
-`Polygon`, …). Field encodings match the [RowBinary type table](./README.mdx)
-— use the same wire-wrapper newtypes (`DateTime64Millis`, `Decimal64<S>`, …)
+`Polygon`, …). Field encodings match the [RowBinary type table](./README.mdx):
+use the same wire-wrapper newtypes (`DateTime64Millis`, `Decimal64<S>`, …)
 and `#[serde(with = "…")]` modules (`uuid`, `ipv4`).
 
 :::warning
 The Native writer emits the raw little-endian `Int64` and does not rescale
-to the column's declared precision — a `DateTime64(6)` column fed
+to the column's declared precision, so a `DateTime64(6)` column fed
 milli-scaled values silently lands wrong timestamps. Declare the scale
 through the wrapper (`DateTime64Millis`, …) and set `validate_schema:
 full`: a wrapper whose scale disagrees with the table's declared precision
 then fails fatally on the first record, before anything is inserted. A
-plain `i64` field declares no scale, so nothing can validate it — the
+plain `i64` field declares no scale, so nothing can validate it and the
 mismatch stays silent.
 :::
 
@@ -108,12 +108,12 @@ mismatch stays silent.
 with `flatten_nested = 0`. A column of an unsupported type is rejected
 **at construction** (before any row is sent) with a clear error naming the
 column and type. Fall back to `format: rowbinary` (which supports the wider
-set — see the [RowBinary type table](./README.mdx)) for tables that use
+set; see the [RowBinary type table](./README.mdx)) for tables that use
 them.
 
-`AggregateFunction` is unsupported by design in *both* formats — its state is
-opaque and version-dependent. Feed those tables with raw rows through a Null
-table + Materialized View instead: see
+`AggregateFunction` is unsupported by design in *both* formats, because its
+state is opaque and version-dependent. Feed those tables with raw rows through a Null
+table + Materialized View instead; see
 [Ingesting into AggregatingMergeTree](./aggregating-mergetree.mdx).
 
 ## Semantics that do **not** change

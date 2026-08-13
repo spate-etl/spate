@@ -4,35 +4,35 @@ The S3 source (`spate-s3`, feature `s3` on the `spate` facade) runs a
 **coordinated, bounded backfill** over a bucket prefix. It streams every
 object's records through the pipeline, and it terminates the pipeline
 itself: `run()` returns `ExitState::Completed` once every split of the
-prefix is committed complete. `Completed` is a strong claim here — every
-record was durably written by the sink(s) *and* committed; an
+prefix is committed complete. `Completed` is a strong claim here. Every
+record was durably written by the sink(s) *and* committed. An
 unacknowledged tail converts the exit into a failure, so an incomplete
 backfill is never reported as done.
 
 Work is planned as
 [**splits**](../../../07-reference/glossary.mdx#split). The fleet's
 elected leader lists the prefix once and packs the sorted listing into
-splits — batches of whole objects, ~`split_target_bytes` each — with
+splits, each a batch of whole objects of roughly `split_target_bytes`, with
 deterministic ids and self-contained descriptors (member keys, sizes,
 ETags). Workers lease splits through the coordination store and read them
-straight from the descriptors: **workers never list**. Solo and
+straight from the descriptors, so **workers never list**. Solo and
 multi-worker are the same code path; the only difference is which
 coordination store the coordinator points at.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
-client (internal only — no `object_store` types in the public API), so
+client (internal only, with no `object_store` types in the public API), so
 `s3://`, and `file://` for infrastructure-free runs and tests, work out of
 the box.
 
 Construct it from the pipeline's opaque section, with the pipeline's I/O
-runtime handle and a framer (the framer is **required** — see
+runtime handle and a framer (the framer is **required**; see
 [Decoding records](#decoding-records)):
 
 ```rust file=crates/spate/examples/s3_backfill.rs region=source
 ```
 
 Runnable examples carry the Rust on this page, and none needs
-infrastructure — each stages a `file://` bucket in a temporary directory.
+infrastructure; each stages a `file://` bucket in a temporary directory.
 [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) runs the solo
 backfill (`cargo run -p spate --features s3,json --example s3_backfill`), and
 [`s3_coordinated_backfill.rs`](repo:crates/spate/examples/s3_coordinated_backfill.rs)
@@ -44,7 +44,7 @@ runs two instances over one shared store
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
 ([`spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs)); unknown
 fields are rejected with the offending key. Coordination is deliberately
-**not** here — it is assembly wiring
+**not** here. It is assembly wiring
 ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
 covered under [Scaling out](#scaling-out--and-the-solo-default).
 
@@ -71,18 +71,18 @@ source:
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
 `split_target_bytes` enters the job fingerprint as its **decoded byte
-count** — so a worker spelling it `64MB` is refused at startup against a
+count**, so a worker spelling it `64MB` is refused at startup against a
 fleet on the `64MiB` default. Spellings that decode to the same number of
 bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
 match across workers, not the text.
 
-The record **format is not a config key** — the S3 source is a transport and
+The record **format is not a config key**. The S3 source is a transport and
 owns no framing. The format's framer is wired into the source in code (see
 [Decoding records](#decoding-records)); the per-record size bound lives on the
 framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
 
 A stale config still carrying `lanes` (read parallelism is the coordinator's
-`max_in_flight` — one data lane per in-flight split) or the source's own
+`max_in_flight`, one data lane per in-flight split) or the source's own
 `checkpoint:` block (progress lives in the coordination store) fails at load
 with the offending key. The pipeline-level
 [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint) section is
@@ -91,7 +91,7 @@ unaffected and still governs commit cadence.
 ### Sizing splits against `pipeline.threads`
 
 A split is read by one lane, and a lane is pinned to the pipeline thread it
-was handed to — there is no work stealing between threads. So the split
+was handed to; there is no work stealing between threads. So the split
 count, not just the split size, sets how evenly the work divides: a plan
 yielding five equal splits across two threads gives one thread three and the
 other two, and the job finishes when the loaded thread does.
@@ -101,21 +101,21 @@ enough that one extra split is a small share of the total. Prefixes of many
 small objects get this for free (packing coalesces them); a handful of large
 objects is where it bites, since an object at or above the target always
 gets a split of its own and the count is then fixed by the data. Raising
-`split_target_bytes` coarsens the split set and can make imbalance *worse* —
-check the resulting count rather than assuming bigger is better.
+`split_target_bytes` coarsens the split set and can make imbalance *worse*,
+so check the resulting count instead of assuming bigger is better.
 
 ## The `store` passthrough and the denylist
 
 `store` reaches any `object_store` client option without waiting for a typed
-field — `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
+field: `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
 built from `url`, so a passthrough bucket could never take effect; rejecting it
 keeps the configuration honest instead of leaving two sources of truth to
-disagree silently. `object_store` accepts several spellings of the same option —
-with and without the `aws_` prefix, plus historic aliases — and lowercases keys
+disagree silently. `object_store` accepts several spellings of the same option
+(with and without the `aws_` prefix, plus historic aliases) and lowercases keys
 before parsing, so every spelling is denied and the match is case-insensitive:
 
 | Denied property | Why |
@@ -135,7 +135,7 @@ invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by t
 ## Security (credentials and region)
 
 For `s3://` URLs, credentials and region resolve from the **standard AWS
-environment variables** automatically — the source seeds the client with
+environment variables** automatically; the source seeds the client with
 `AmazonS3Builder::from_env()`. That covers **EKS Pod Identity**
 (`AWS_CONTAINER_CREDENTIALS_FULL_URI` +
 `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), **IRSA**
@@ -145,7 +145,7 @@ static keys (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
 configured EKS pod (Pod Identity or IRSA) needs **no** `store` credentials at
 all.
 
-Only **environment variables** are read — **not** file-based profiles
+Only **environment variables** are read, **not** file-based profiles
 (`AWS_PROFILE`, `~/.aws/credentials`, `~/.aws/config`) or SSO token caches;
 `object_store` carries no AWS SDK, so it resolves neither. To authenticate
 locally with a named profile or `aws sso login`, materialize that profile's
@@ -173,8 +173,8 @@ from the environment):
 ```
 
 Credential, permission and client-configuration errors fail the pipeline
-immediately — no peer would fare better. Non-S3 schemes (`file://`) do not read
-the AWS environment. See
+immediately, because no peer would fare better. Non-S3 schemes (`file://`) do
+not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
@@ -182,7 +182,7 @@ generic model.
 
 The coordinator is **assembly wiring**: build one over a durable
 [coordination store](../../coordination/README.mdx) and inject it, and every
-worker running the same pipeline shares the backfill — splits are leased, moved
+worker running the same pipeline shares the backfill. Splits are leased, moved
 between live workers by the elected leader, and taken over from dead ones, with
 per-split [fenced](../../../07-reference/glossary.mdx#fencing-token) commits
 making revocations replay-safe.
@@ -191,7 +191,7 @@ making revocations replay-safe.
 ```
 
 `store` is the coordination store the fleet meets in, and building it is the
-store's business — [NATS JetStream](../../coordination/nats/README.mdx) is the
+store's business; [NATS JetStream](../../coordination/nats/README.mdx) is the
 production backend. The `CoordinationConfig` literal is that example's
 demo-fast tuning, chosen so two instances trade splits within seconds;
 deployment shape, the production values, and failure modes are in
@@ -201,7 +201,7 @@ deployment shape, the production values, and failure modes are in
 
 With no `with_coordinator(...)`, the source runs the same coordinated
 path over an internal in-process store. That is correct and
-self-terminating — but the store dies with the process, so **a restart
+self-terminating, but the store dies with the process, so **a restart
 replays the whole prefix** (at-least-once: wasteful, never lossy). A
 startup WARN says exactly this. Durable resume requires a durable
 coordination store, which is the only place split progress lives.
@@ -215,7 +215,7 @@ packing-version constant), and every GET is pinned `If-Match` to the
 descriptor's ETag. What that buys:
 
 - **Replans are no-ops** over an unchanged prefix: same listing, same
-  packing, same ids — create-if-absent in the store, completed splits
+  packing, same ids; create-if-absent in the store, completed splits
   stay completed.
 - **An overwritten object can never splice.** Under an in-flight split
   the pin trips (a `Precondition` failure poisons the split); on a
@@ -228,45 +228,45 @@ By default the listing is taken once (`refresh_listing: false`), so keys
 that arrive later are not part of the job; with
 `refresh_listing: true` the leader re-lists on the coordinator's replan
 interval and plans new objects as additional splits (an **open** job that
-never self-terminates — stop it with a signal drain).
+never self-terminates; stop it with a signal drain).
 
 ## Offsets, progress, resume
 
 A lane's `i64` offset packs *(member ordinal within the split, record
 index within the object)*, which keeps one monotonic offset stream per
-split across object boundaries — the same watermark contract every other
+split across object boundaries, the same watermark contract every other
 source honors. `commit` routes acked watermarks into **per-split fenced
 progress records** in the coordination store; each carries a versioned
 key/ETag pin for its position. Fencing means a split's previous owner can
-never overwrite its successor's progress — a stale commit loses the CAS,
-writes nothing, and the split simply replays its uncommitted tail on the
+never overwrite its successor's progress. A stale commit loses the CAS,
+writes nothing, and the split replays its uncommitted tail on the
 new owner.
 
 On a gain with carried progress, the source drift-checks the progress
 against the split's descriptor (key and ETag at the watermark's ordinal;
 a mid-object resume with no pin anywhere is refused), replays the
 in-progress object from its start discarding exactly the committed record
-count, and continues. Delivery is **at-least-once**: everything after the
+count, and continues. Delivery is **at-least-once**. Everything after the
 last committed watermark replays after a crash or forced revocation; duplicates are
 possible, loss is not.
 
 Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
-overflows it **poisons its split** before any offset can be corrupted —
+overflows it **poisons its split** before any offset can be corrupted:
 handed back, retried, and quarantined at the attempt cap like any other
 [object-terminal failure](#errors-poison-splits-not-skipped-objects). Split
 member counts are structurally capped by the packing floor, far below the
 ordinal limit.
 
-The leader holds the **whole listing** in memory for the duration of a plan —
+The leader holds the **whole listing** in memory for the duration of a plan:
 one entry per object, carrying that object's key and ETag. Packing moves those
 entries into splits rather than copying them, so the keys are held once. Peak
 scales with object count *and* key length: a prefix of long keys costs
 materially more than the same number of short ones. Only the leader pays it, and
-only while planning — which for an open plan is every replan tick.
+only while planning, which for an open plan is every replan tick.
 
 ## Decoding records
 
-The source frames records but is **format-agnostic** — it streams object
+The source frames records but is **format-agnostic**. It streams object
 bytes through a [`RecordFramer`](../../../06-extending/custom-source.mdx#framing-turning-bytes-into-records)
 supplied by the caller, and **deserialization stays in the operator chain**.
 Framing a byte stream is a format concern, so the framer is owned by the format
@@ -283,8 +283,8 @@ built with (`64 << 20` here) caps a single record's decoded bytes:
 A framed source emits one record per payload, so its framing contract is
 `PerRecord` and the deserializer decodes a single document. Let
 `for_source_framing` derive the deserializer's granularity from the source's
-`ctx.source_framing` — no hand-set `framing: single`, and a `framing:` that
-would double-frame is rejected at startup:
+`ctx.source_framing`. There is no hand-set `framing: single`, and a `framing:`
+that would double-frame is rejected at startup:
 
 ```rust file=crates/spate/examples/s3_backfill.rs region=deserializer
 ```
@@ -292,23 +292,24 @@ would double-frame is rejected at startup:
 `deser_section` is the pipeline's `deserializer:` section, cloned before the
 chain factory so each thread's closure owns it.
 
-A different object layout needs a different `RecordFramer` — a custom one via
-`S3Source::with_framer`, or another format's framer — no fork required. The
-framer is **required**: a source built without one refuses to start.
+A different object layout needs a different `RecordFramer`, either a custom one
+via `S3Source::with_framer` or another format's framer, and no fork is
+required. The framer is **required**: a source built without one refuses to
+start.
 
 ## Errors: poison splits, not skipped objects
 
 Object-level read problems are not record errors, and they are not instant
 pipeline failures either. Transient failures are retried inside the source
-(capped backoff, ranged re-reads pinned to the ETag). Anything
-object-terminal — a key deleted after planning, an overwrite tripping the
-`If-Match` pin, corrupt or truncated content, an exhausted retry budget —
-**poisons the split**: the split is handed back to the coordinator (counted in
+(capped backoff, ranged re-reads pinned to the ETag). Anything object-terminal
+**poisons the split**: a key deleted after planning, an overwrite tripping the
+`If-Match` pin, corrupt or truncated content, or an exhausted retry budget. The
+split is handed back to the coordinator (counted in
 `spate_s3_source_objects_failed_total{reason}`), retried on another
 delivery attempt, and
 [**quarantined**](../../../07-reference/glossary.mdx#quarantine) at the attempt
-cap. A bounded job with quarantined splits ends **stalled** — fatal by default,
-so `run()` returns `ExitState::Failed` rather than a silently partial
+cap. A bounded job with quarantined splits ends **stalled**, which is fatal by
+default, so `run()` returns `ExitState::Failed` rather than a silently partial
 `Completed`. `CoordinationDriver::stall_drains(true)` trades that for a drain
 with a WARN. Either way, alert on
 `spate_coordination_splits_quarantined > 0`.
@@ -321,18 +322,17 @@ lets the rest of the backfill finish first.
 ## Testing
 
 The whole coordinated lifecycle runs against `file://` URLs with no
-infrastructure, which is what the two examples this page draws on do — solo,
+infrastructure, which is what the examples this page draws on do: solo,
 and two-instance over a shared in-process store. The Docker-gated suites run
-against a
-**SeaweedFS** S3 gateway, and — for durable resume and multi-instance
-over the production backend — SeaweedFS plus a NATS 2.11 container
+against a **SeaweedFS** S3 gateway, and, for durable resume and multi-instance
+over the production backend, SeaweedFS plus a NATS 2.11 container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 ## Metrics
 
 Registered through this source's `Meter` (namespace `s3`, role `source`), so
 every family is prefixed `spate_s3_source_`. All handles are resolved once at
-`open`, and counters are incremented at object/chunk/batch boundaries — never
+`open`, and counters are incremented at object/chunk/batch boundaries, never
 per record. The framework's `spate_source_records_total` /
 `spate_source_bytes_total` count framed records as for any source; these
 families add the object-level view of a bounded backfill. Standard labels

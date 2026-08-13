@@ -4,12 +4,12 @@ The NATS JetStream store (`spate-coordination`, feature `coordination-nats` on
 the `spate` facade) is the production coordination backend. Coordinated
 instances of one job meet in it to agree who holds which
 [split](../../../07-reference/glossary.mdx#split). Records never flow through
-it — it carries split records, leases, and the plan, at roughly one small write
+it; it carries split records, leases, and the plan, at roughly one small write
 per held split per third of a lease, so a handful of writes per second per
 worker.
 
 Construct it and hand it to a `StoreCoordinator`, which the source takes as
-assembly wiring — there is no `coordination:` section in the pipeline YAML
+assembly wiring; there is no `coordination:` section in the pipeline YAML
 ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
 
 ```rust file=crates/spate/examples/nats_coordinated_backfill.rs region=coordinator
@@ -22,7 +22,7 @@ whose `lease_duration` is the TTL the store is handed. That code comes from
 one instance per process against a JetStream server on `nats://127.0.0.1:4222`
 (override with `NATS_URL`) meeting the [Requirements](#requirements) below.
 Two terminals, each with a
-distinct `POD_NAME` — the example's `instance_id` — divide one backfill between
+distinct `POD_NAME` (the example's `instance_id`), divide one backfill between
 them, and two live workers claiming one identity is detected and fatal:
 
 ```sh
@@ -30,7 +30,7 @@ POD_NAME=worker-a cargo run -p spate --features s3,json,coordination-nats --exam
 POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 ```
 
-Construction is synchronous and lazy: the connection and bucket provisioning
+Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
 Connect failures therefore ride the startup retry budget, and misconfiguration
 is fatal at startup with an actionable message rather than surfacing later.
@@ -40,10 +40,10 @@ is fatal at startup with an actionable message rather than surfacing later.
 `NatsConfig` is built in code, not deserialized from the pipeline file.
 Construct it with `NatsConfig::new(servers, job)` and set the optional fields;
 the struct is `#[non_exhaustive]`, so new knobs are added without breaking
-callers. `Debug` is safe to log — every secret field redacts itself.
+callers. `Debug` is safe to log, because every secret field redacts itself.
 
 {/*
-  Two lines — a constructor and the one optional field being set — so this
+  Two lines (a constructor and the one optional field being set), so this
   fence claims docs/STYLE.md §10's first exemption and stays hand-written.
   Outgrow that and render it from a region of a compiled source instead.
 */}
@@ -62,7 +62,7 @@ cfg.replicas = 3;
 | `replicas` | `usize` | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
 
 The second argument to `NatsStore::new` is the lease TTL. It must be the same
-value as the coordinator's `lease_duration` — one drives the bucket's age limit
+value as the coordinator's `lease_duration`. One drives the bucket's age limit
 and the other drives the lease protocol, and they only agree if you pass the
 same number. The floor is 2s, because expiry-marker precision is one second.
 
@@ -81,11 +81,11 @@ split descriptor cannot grow into an unwritable record.
 | `CredsFile(PathBuf)` | A `.creds` file (NKey + JWT) — the NATS-native mechanism, and the right choice for a managed cluster. |
 
 `NatsTls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
-`client_key` for mutual TLS. Those two are set together or not at all — half a
+`client_key` for mutual TLS. Those two are set together or not at all; half a
 client identity fails at startup rather than connecting without mutual TLS.
 Setting the `tls` field at all requires TLS on every server in `servers`.
 
-Auth failure is fatal at startup, not retried — see
+Auth failure is fatal at startup, not retried. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
@@ -99,7 +99,7 @@ One job means two KV buckets, split by durability:
   `max_age` equal to the lease TTL.
 
 The lease bucket is where the server version floor comes from. NATS KV cannot
-re-arm a per-key TTL on update, but `max_age` applies per *message* — so every
+re-arm a per-key TTL on update, but `max_age` applies per *message*, so every
 compare-and-swap rewrite restarts that key's clock, which **is** the heartbeat.
 An untouched key expires on its own, and the expiry surfaces to watchers as a
 limit marker (a graceful delete surfaces differently, which is what lets a
@@ -137,7 +137,7 @@ For production, run a 3-node cluster with JetStream and set `replicas: 3` on
 ## What an outage does
 
 Heartbeats fail, and workers **self-fence** after one full lease without a
-successful write — they stop their splits rather than run unfenced. Commits
+successful write, stopping their splits rather than running unfenced. Commits
 surface as retryable. Everything resumes where it left off when the store
 returns: degraded, never corrupted.
 
@@ -148,7 +148,7 @@ partitioned worker cannot win.
 ## Metrics
 
 This store registers no families of its own. Its round-trips appear in the
-framework's coordination families — `spate_coordination_store_op_duration_seconds`
+framework's coordination families: `spate_coordination_store_op_duration_seconds`
 by `op`, and `spate_coordination_writes_total{outcome="conflict"}` for lost
 compare-and-swaps, which is fencing working as designed and alarming only in
 bulk. See [Metrics](../../../../METRICS.md) § Coordination.

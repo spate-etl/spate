@@ -6,7 +6,7 @@ encoded to RowBinary on the pipeline threads, shipped to sink workers as
 pre-formatted frames, and inserted one `INSERT ... FORMAT RowBinary` per
 sealed batch with a deterministic `insert_deduplication_token`. RowBinary is
 the default; `format: native` encodes columnar blocks and inserts
-`FORMAT Native` instead — see [Native format](./native-format.mdx).
+`FORMAT Native` instead; see [Native format](./native-format.mdx).
 
 Construct it from the pipeline's opaque section; the result is a
 `SinkBundle` that drops straight into the builder:
@@ -19,7 +19,7 @@ That is from
 a complete program that builds under the `full` facade feature. The single
 `sink:` section is addressed as `"default"`; a named sink resolves under its
 own name. Between this line and `pipeline.sink(sink)?` sits the optional
-pre-flight check — see [Schema validation](./schema-validation.mdx).
+pre-flight check; see [Schema validation](./schema-validation.mdx).
 
 To write to **several tables** from one pipeline (one per record kind), see
 [multi-table split](./multi-table.mdx).
@@ -71,12 +71,12 @@ sink:
 ## The `settings` passthrough and the denylist
 
 `settings` reaches any per-insert ClickHouse setting without waiting for a
-typed field — `insert_quorum`, `async_insert`, `max_insert_block_size` and the
+typed field: `insert_quorum`, `async_insert`, `max_insert_block_size` and the
 rest are all set through it, and its values are applied verbatim to every
 insert.
 
-Three settings are managed by the sink and **cannot be overridden**, because
-the delivery guarantees are defined in terms of them:
+The settings below are managed by the sink and **cannot be overridden**,
+because the delivery guarantees are defined in terms of them:
 
 | Reserved setting | Why |
 |---|---|
@@ -86,7 +86,7 @@ the delivery guarantees are defined in terms of them:
 
 ## Security (TLS)
 
-No feature flag is needed for TLS: point a replica at an `https://` URL and the
+No feature flag is needed for TLS. Point a replica at an `https://` URL and the
 connection is encrypted (rustls is always compiled in), with `user`/`password`
 authenticating over it. Keep the password out of the file with `${VAR}`
 [interpolation](../../../03-guides/configuring-pipelines.mdx#environment-interpolation).
@@ -100,27 +100,27 @@ sink:
     password: "${CLICKHOUSE_PASSWORD}"
 ```
 
-Client-certificate (**mTLS**) authentication is not yet supported — a tracked
-follow-up. For the framework-wide view of transport security across connectors,
+Client-certificate (**mTLS**) authentication is not yet supported; it is a
+tracked follow-up. For the framework-wide view of transport security across connectors,
 see [Securing connections](../../../03-guides/securing-connections.mdx).
 
 ## RowBinary on pipeline threads
 
-Encoding is CPU work, so it happens on the pinned pipeline threads —
+Encoding is CPU work, so it happens on the pinned pipeline threads:
 `ClickHouseEncoder` (the sink's `RowEncoder`) serializes each row to RowBinary
 using the crate's own serializer. Its type parameter is the record *family*,
-not the row type: owned rows are wrapped as `Owned<Row>` (e.g.
+not the row type, so owned rows are wrapped as `Owned<Row>` (e.g.
 `ClickHouseEncoder::<Owned<OrderRow>>::new()`), while the encode path itself needs
 only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
 frames, seal batches, and drive inserts; they never touch a record.
 
 :::warning
-RowBinary carries no column names — position is everything. The
+RowBinary carries no column names; position is everything. The
 configured `columns` list and the row struct's **field declaration
 order** must match; reordering either is a breaking change to the
 pipeline. `validate_schema: names` (or `full`) plus
 `ClickHouseEncoder::with_schema` turns this contract into a fail-fast
-check — see [Schema validation](./schema-validation.mdx). The
+check; see [Schema validation](./schema-validation.mdx). The
 full type mapping is in the crate's `rowbinary` module docs.
 :::
 
@@ -128,13 +128,13 @@ full type mapping is in the crate's `rowbinary` module docs.
 
 Every sealed batch carries a deterministic `insert_deduplication_token`, so
 a retry of the same batch (including on another replica after a timeout) is
-idempotent — the server drops the duplicate insert.
+idempotent, and the server drops the duplicate insert.
 
 :::warning
 **Deduplication is silently off on plain `MergeTree`.** Token
 deduplication only works if the server keeps a deduplication window.
 `Replicated*MergeTree` keeps one by default;
-**plain `MergeTree` defaults to `0`, and the token does nothing** — no
+**plain `MergeTree` defaults to `0`, and the token does nothing**: no
 error, no warning, duplicates on every retry. Set it explicitly:
 
 ```sql
@@ -143,9 +143,9 @@ SETTINGS non_replicated_deduplication_window = 100;
 ```
 :::
 
-And the honest limit: tokens cover *same-batch retries* only. Crash replay
+Tokens cover *same-batch retries* only. Crash replay
 re-batches with different boundaries and different tokens, so replayed rows
-land again. Design target tables to tolerate duplicates —
+land again. Design target tables to tolerate duplicates;
 `ReplacingMergeTree` with a version column is the sanctioned pattern. See
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 
@@ -157,40 +157,40 @@ that shard's **healthy** replicas. A failed write retries the *same sealed
 batch* (same token) on the next healthy replica with capped exponential
 backoff. Per-replica circuit breakers quarantine a replica after
 `failure_threshold` consecutive failures for `open_for`, then admit trial
-writes again: the first probe to succeed closes the breaker, and
+writes again. The first probe to succeed closes the breaker, and
 `half_open_probes` caps how many probes run concurrently in one half-open
-episode rather than how many must succeed. Per-shard workers
-(rather than per-replica) keep batches full-sized — ClickHouse wants few
-big inserts — while `max_per_shard` still provides replica parallelism.
+episode rather than how many must succeed. ClickHouse wants few big inserts,
+so per-shard workers (rather than per-replica) keep batches full-sized while
+`max_per_shard` still provides replica parallelism.
 
 ## Durability and replica loss
 
 The sink writes to **one** healthy replica per shard and relies on
 `ReplicatedMergeTree` (via ClickHouse Keeper) to replicate the part to the
 shard's other replicas and to heal a replica that was down when it returns.
-This is the client-side equivalent of `internal_replication=true`: the sink
-never *fans out* a block to several replicas as a delivery strategy (that is
-the `internal_replication=false` footgun — replicas drift). Cross-replica
-**retries** are the one deliberate exception — a failed write re-sends the
-same sealed batch to the next healthy replica, and the deduplication token
+This is the client-side equivalent of `internal_replication=true`, where the
+sink never *fans out* a block to several replicas as a delivery strategy (that is
+the `internal_replication=false` footgun, where replicas drift).
+Cross-replica **retries** are the one deliberate exception. A failed write
+re-sends the same sealed batch to the next healthy replica, and the deduplication token
 makes an ambiguous double-landing a server-side no-op rather than a
 duplicate.
 
 Replication is **asynchronous** by default (`insert_quorum=0`), which is the
-right posture for high-throughput streams. The honest boundary this creates:
+right posture for high-throughput streams. That creates a boundary:
 a batch acknowledged by one replica that is destroyed before the part
-replicates is lost. That window — one confirming replica, no quorum — is the
+replicates is lost. That window, one confirming replica and no quorum, is the
 explicit edge of the sink's at-least-once guarantee. Pipelines that cannot
 tolerate it can require a write quorum by passing `insert_quorum` (and, if
 wanted, `insert_quorum_parallel` / `insert_quorum_timeout`) through the sink's
-[**`settings` passthrough**](#the-settings-passthrough-and-the-denylist) — they are not among
-the three reserved settings, so
-they work today without framework changes. Quorum composes correctly with
-the deduplication the sink always enables: when a retried batch is
+[**`settings` passthrough**](#the-settings-passthrough-and-the-denylist); they
+are not among the reserved settings, so
+they work without framework changes. Quorum composes correctly with
+the deduplication the sink always enables. When a retried batch is
 recognized as a duplicate of an already-committed part, ClickHouse still
 waits for quorum on that *existing* part before acknowledging, and throws
-`UNKNOWN_STATUS_OF_INSERT` if it cannot verify — a deduplicated retry cannot
-silently bypass the quorum (verified against the `ReplicatedMergeTreeSink`
+`UNKNOWN_STATUS_OF_INSERT` if it cannot verify, so a deduplicated retry cannot
+bypass the quorum (verified against the `ReplicatedMergeTreeSink`
 implementation in ClickHouse 24.8 LTS and current master; treat older
 servers with suspicion). The cost is availability: a quorum insert fails
 with `TOO_FEW_LIVE_REPLICAS` when live replicas drop below the quorum, so a
@@ -203,12 +203,12 @@ the next half-open probe window, or until a probe already in flight reports
 probe's own duration, since the re-open deadline is stamped when the failure is
 reported), in-flight slots
 stay held, and the shard's queue fills, so backpressure reaches the source and
-the source watermark stalls rather than losing or misrouting data — records
+the source watermark stalls rather than losing or misrouting data. Records
 are never rerouted to another shard (that would break the record→shard
 placement and the dedup-token scheme).
 With the default unbounded `retry.max_attempts` this holds indefinitely;
 with a bounded one, exhausted batches fail their acks and replay after
-restart instead — the watermark stalls either way. Recovery is automatic
+restart instead, and the watermark stalls either way. Recovery is automatic
 once any probe succeeds. This whole-shard condition is surfaced distinctly
 as `spate_sink_shard_healthy == 0` (with per-replica
 `spate_sink_replica_errors_total` to attribute the failures); see
@@ -218,7 +218,7 @@ as `spate_sink_shard_healthy == 0` (with per-replica
 
 Writes go to shard-local tables (with `internal_replication=true` topology)
 rather than through a `Distributed` table: bigger blocks, less merge
-pressure, and — crucially for checkpointing — a **synchronous server
+pressure, and (crucially for checkpointing) a **synchronous server
 acknowledgment**. The sink always sets `wait_end_of_query=1`, so a
 successful write means the server fully processed the insert, materialized
 views included; that success is the durable-ack point that lets watermarks
@@ -230,21 +230,21 @@ the dedup tokens.
 
 `ClickHouseSink` implements `SinkBundle`, so `pipeline.sink(sink)` derives
 everything: per-shard queues, per-shard metrics labeled by replica URL, the
-workers, the drain hook — and a readiness probe (`probe_fn`) over **every
+workers, the drain hook, and a readiness probe (`probe_fn`) over **every
 replica of every shard** that drives the sinks-connected half of
-`/readyz`. The probe deliberately uses its own client set: sharing the
-insert clients would report the write path healthy merely because probing
+`/readyz`. The probe deliberately uses its own client set, since sharing the
+insert clients would report the write path healthy only because probing
 keeps its connections warm. Manual assemblies hand `probe_fn()` to
 `SinkRuntime.probe` directly (see
 [Manual assembly](../../../03-guides/manual-assembly.mdx)).
 
 ## Metrics
 
-This sink registers no families of its own: its behavior is fully described by
+This sink registers no families of its own. Its behavior is fully described by
 the framework's `spate_sink_*` stage families, labeled
-`component_type="clickhouse"`. Most are per shard; the three replica-level
-families — `spate_sink_replica_healthy`, `spate_sink_replica_errors_total` and
-`spate_sink_breaker_opens_total` — carry `replica` as well. Both labels are
+`component_type="clickhouse"`. Most are per shard; the replica-level
+families (`spate_sink_replica_healthy`, `spate_sink_replica_errors_total` and
+`spate_sink_breaker_opens_total`) carry `replica` as well. Both labels are
 bounded by the configured topology rather than by the assignment, so neither
 sits behind `metrics.per_partition_detail` and both are always on.
 

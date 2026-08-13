@@ -1,8 +1,8 @@
 # ClickHouse Distributed parity
 
 The sink writes **directly to shard-local tables**, never through a
-`Distributed` table — that is the whole point of the connector (bigger
-blocks, less merge pressure, a synchronous durable ack; see
+`Distributed` table, for bigger blocks, less merge pressure and a synchronous
+durable ack (see
 [Why direct-to-shard, not a Distributed table](./README.mdx#why-direct-to-shard-not-a-distributed-table)).
 But you may still want to *read* through a `Distributed` table and have
 ClickHouse **prune** shards with `optimize_skip_unused_shards`, so a query
@@ -14,9 +14,9 @@ covers how to line the two up, and the parity check that keeps them lined up.
 
 :::warning
 If placement and the DDL's sharding expression diverge, pruned queries
-**silently return wrong results** — not an error. ClickHouse trusts the
+**silently return wrong results**, not an error. ClickHouse trusts the
 sharding key: a query pruned to shard 2 never visits shard 1, so a row the
-sink placed on the wrong shard is simply invisible. This is documented
+sink placed on the wrong shard is invisible. This is documented
 ClickHouse behavior. The opt-in startup check below is the guard.
 :::
 
@@ -30,14 +30,15 @@ must be in the same order as the `<shard>` entries in the cluster's
   sink config shards[i]   ⟷   remote_servers <shard> number i+1  (shard_num i+1)
 ```
 
-This 1:1 positional mapping is the **one thing the framework cannot verify**
-— nothing in the wire protocol ties your `shards[0]` to the cluster's
+This 1:1 positional mapping is the **one thing the framework cannot verify**:
+nothing in the wire protocol ties your `shards[0]` to the cluster's
 `shard_num = 1`. The startup check verifies counts, weights, and the sharding
 expression; the *ordering* is yours to get right. As a best effort it also
 cross-checks your replica URL hostnames against `system.clusters` and logs a
-**warning** when one appears under a different `shard_num` — advisory only
-(HTTP URLs are not reliably mappable onto the cluster's native `host:port`
-entries), it never fails startup, and its silence proves nothing. Own the
+**warning** when one appears under a different `shard_num`. That warning is
+advisory only (HTTP URLs are not reliably mappable onto the cluster's native
+`host:port` entries), it never fails startup, and its silence proves
+nothing. Own the
 ordering operationally: list the shards in cluster order and keep the two
 configs under one review.
 
@@ -46,7 +47,7 @@ configs under one review.
 ### 1. The cluster (`remote_servers`)
 
 Two single-replica shards, written with `internal_replication=true` (the
-topology this sink assumes — see the README):
+topology this sink assumes; see the README):
 
 ```xml
 <clickhouse>
@@ -96,7 +97,7 @@ sharding expression the sink must reproduce exactly.
 
 ### 3. The sink
 
-`table:` names the **local** table — the sink never inserts through the
+`table:` names the **local** table; the sink never inserts through the
 `Distributed` one. Weights must equal the cluster's `<weight>` values, and
 `distributed_check` names the `Distributed` table for the startup guard:
 
@@ -119,18 +120,18 @@ sink:
 ```
 
 `distributed_check` takes **exactly one** of `sharding_key` (the shipped,
-verified form — the check builds `xxHash64(<key>)` for you) or `sharding_expr`
+verified form, where the check builds `xxHash64(<key>)` for you) or `sharding_expr`
 (a raw-expression escape hatch, compared textually and therefore brittle).
 `endpoint` defaults to the first replica of shard 0; override it when the
 `Distributed` table lives on a front node outside the `shards` list.
 
 The guard reads `system.clusters` and `system.tables` from that endpoint, so
-the sink account needs `SELECT` on both — see
+the sink account needs `SELECT` on both; see
 [Permissions](./permissions.mdx#grants-by-feature).
 
 ### 4. The router
 
-The key extractor returns a `ShardKey` and is passed as a fn pointer — a named
+The key extractor returns a `ShardKey` and is passed as a fn pointer: a named
 `fn` item, or a closure that captures nothing. The router owns the
 `xxHash64(seed 0)` and the weight-interval selection. Both blocks below come
 from
@@ -144,7 +145,7 @@ target table, and runs with
 
 `OrderLineRow` is the row the chain emits, and `ShardKey::U64` carries its
 `order_id` by value, so extraction allocates nothing on the per-record path.
-The variant is the column's declared width, not a free choice — the parity
+The variant is the column's declared width, not a free choice; the parity
 rules below say what goes wrong when it is not.
 
 The router is minted from the sink itself, which is where the validated
@@ -155,13 +156,13 @@ weights live. The single `sink:` section above resolves under the name
 ```
 
 `sink.router::<F>` is parameterized by the record family the terminal stage
-carries — `Owned<OrderLineRow>` for an owned row struct, matching the family the
-encoder is built over.
+carries, which is `Owned<OrderLineRow>` for an owned row struct, matching the
+family the encoder is built over.
 
 `router` then drops into the chain's terminal stage in place of
 `KeyHashRouter` (`.sink(encoder.clone(), router.clone(), ...)`). It is
-shard-count-agnostic: a single-shard config behaves identically — every hash
-lands on shard 0 — so the same code runs in dev and scales out unchanged.
+shard-count-agnostic, and a single-shard config behaves identically, with every
+hash landing on shard 0, so the same code runs in dev and scales out unchanged.
 
 ## Parity rules
 
@@ -175,7 +176,7 @@ For placement to match ClickHouse bit-for-bit:
   does not reproduce; do not use it (or any other hash) as the sharding key.
 - **Integer keys hash at their declared column width, little-endian.**
   `ShardKey::U64` hashes 8 LE bytes; `ShardKey::U32` hashes 4 LE bytes. They
-  differ — `xxHash64(toUInt64(42))` ≠ `xxHash64(toUInt32(42))` — so the
+  differ (`xxHash64(toUInt64(42))` ≠ `xxHash64(toUInt32(42))`), so the
   `ShardKey` variant must match the column's declared type (`Int64`: pass the
   value as `ShardKey::U64`; `DateTime`: `ShardKey::U32`).
 - **Non-Nullable key column.** A `Nullable` key changes the value ClickHouse
@@ -192,15 +193,15 @@ WHERE order_id = 42
 SETTINGS optimize_skip_unused_shards = 1;
 ```
 
-Preconditions — pruning fires **only** when all hold:
+Pruning fires **only** when all these preconditions hold:
 
 - The predicate is a literal `=` or `IN` (combined with `AND`/`OR`) over the
   deterministic sharding key. **Ranges** (`>`, `BETWEEN`) and **query
-  parameters** (`{p:String}`) do **not** prune — the optimizer can't evaluate
-  the sharding expression at planning time.
-- The sharding key is deterministic (it is — `xxHash64` of a column).
+  parameters** (`{p:String}`) do **not** prune, because the optimizer can't
+  evaluate the sharding expression at planning time.
+- The sharding key is deterministic (it is, being `xxHash64` of a column).
 
-To assert the query is actually prunable in a test or CI, add
+To assert the query is prunable in a test or CI, add
 `force_optimize_skip_unused_shards = 2`, which makes ClickHouse **throw** if
 the optimizer could not engage.
 
@@ -219,19 +220,19 @@ through consecutive half-open weight intervals in shard order. All-weights-1
 degenerates to `hash % num_shards`. Weights are the documented rebalancing
 lever: when you add capacity, give the new (or larger) shard a higher
 `weight` so it takes proportionally more keys, and keep the sink's weights
-**equal to** the cluster's `<weight>` values — the parity check enforces this
+**equal to** the cluster's `<weight>` values; the parity check enforces this
 on startup, and drift would misplace rows.
 
 :::danger
 Changing weights, changing the sharding key, or adding/removing a shard
-**re-homes** keys to different shards — and rows already written do not
-move. Nothing merges across shards: the old shard keeps its copies
+**re-homes** keys to different shards, and rows already written do not
+move. Nothing merges across shards, so the old shard keeps its copies
 permanently (`ReplacingMergeTree` collapses within one shard's local
 table only), so unpruned queries through the `Distributed` table return
 both homes' rows, while *pruned* queries return only the new home's.
-Plan such a change as a migration — backfill or rebuild the moved keys'
+Plan such a change as a migration: backfill or rebuild the moved keys'
 rows, or delete the old shard's copies. A plain restart with unchanged
-topology is the benign case: replayed rows land on the same shard, where
+topology is the benign case, where replayed rows land on the same shard and
 dedup tokens and the collapse pattern apply as usual. See
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 :::

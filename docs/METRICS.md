@@ -5,7 +5,7 @@ facade. The framework installs an exporter selected by the `metrics` config
 section: `prometheus` exposes a scrape endpoint on the admin server, which the
 `admin` section binds; `none` disables export, and that endpoint answers 404.
 Pipeline authors and connectors register their own metrics through the same
-facade — anything recorded is exported alongside the framework's. The
+facade, and anything recorded is exported alongside the framework's. The
 recommended path is a `Meter`: it attaches the three standard labels below and
 **auto-prefixes the name `spate_<namespace>_`**, so custom series live under the
 same `spate_` umbrella and an operator finds everything under one root. You pass a
@@ -34,7 +34,7 @@ a metric you deliberately want *outside* the `spate_` namespace. See
   cardinality-sensitive: `partition` labels appear only when
   `metrics.per_partition_detail: true` (default `false`); `shard` and
   `replica` are bounded by cluster topology and always on.
-  **`spate_source_lag_records` is the one exception** — its `partition` label is
+  **`spate_source_lag_records` is the one exception.** Its `partition` label is
   unmarked because consumer lag is always published. It is the family's only
   representation, and a cardinality knob that could delete a golden signal is
   how a maximally backlogged consumer ends up reporting nothing.
@@ -47,7 +47,7 @@ a metric you deliberately want *outside* the `spate_` namespace. See
 
 This file documents the framework's taxonomy and its own families. A
 connector's families are documented **on that connector's page**, under its
-`## Metrics` heading — the same split the `Meter` API enforces in code, where
+`## Metrics` heading. The `Meter` API enforces the same split in code, where
 the framework owns the reserved stage roots and a connector claims a namespace
 beneath `spate_`.
 
@@ -103,9 +103,9 @@ shrinking is a catch-up working as intended, while a small lag that is not
 shrinking is a stalled pipeline.
 
 Give the absence and partial-measurement alerts a `for:` window of a minute or
-so. Both are legitimately true at startup — a series appears only after the
+so. Both are legitimately true at startup. A series appears only after the
 first commit *and* the following statistics tick (with the defaults, `5s +
-5s`, longer if the first assignment is slow) — so a bare `absent()` pages on
+5s`, longer if the first assignment is slow), so a bare `absent()` pages on
 every deploy.
 
 ### Absent, zero, and stale
@@ -131,11 +131,11 @@ states are therefore distinguished by value, not by presence:
 The same "no deletion, no idle timeout" fact has a second consequence: a gauge
 series is backed by one shared atomic in the recorder, so two handle sets that
 resolve the *same* `(name, labels)` are two writers on one cell. Counters
-survive that — they only ever add, so a duplicate degrades into a sum a reader
-can still make sense of. Gauges do not: the interesting ones here are
+survive that, because they only ever add, so a duplicate degrades into a sum a
+reader can still make sense of. Gauges do not: the interesting ones here are
 **edge-triggered** (sink shard health flips on a breaker transition, retry
 backoff on a retry), so a second writer's reading stands until the owner's next
-transition — which for a quarantined shard may be never. A duplicated gauge
+transition, which for a quarantined shard may be never. A duplicated gauge
 degrades into a lie.
 
 So every framework handle struct that owns gauges **claims** its series at
@@ -143,15 +143,15 @@ construction, keyed by its stage root and the standard labels (plus `shard` or
 the queue name where those identify the instance). One claim per series per
 process:
 
-- The **owner** — the first to claim — publishes normally.
-- A **shadow** — any later handle set on the same key — still records its
+- The **owner**, the first to claim, publishes normally.
+- A **shadow**, any later handle set on the same key, still records its
   counters and histograms (they aggregate), but every gauge write is dropped,
   so the owner's readings are never overwritten. This is what lets each pipeline
   thread keep its own `SourceMetrics` for counting polls while only the
   controller's instance publishes lag and active lanes.
 
 On the assembly path (`Pipeline`) a collision is a hard `BuildError` /
-`StartError` — two pipelines, or two components, sharing a name in one process
+`StartError`. Two pipelines, or two components, sharing a name in one process
 is a wiring mistake caught before any data flows. Constructing a handle struct
 directly (a hand-built harness, a test fixture) logs an error and shadows
 instead, because a metrics label collision must never take down a healthy data
@@ -160,7 +160,7 @@ path.
 Consequences worth stating outright:
 
 - **A shadow is never promoted.** The claim frees when the owner is dropped, so
-  a pipeline rebuilt *sequentially* — drop the old one, then build — re-owns its
+  a pipeline rebuilt *sequentially* (drop the old one, then build) re-owns its
   series cleanly. But an *overlapping* rebuild (build the replacement while the
   original still runs) leaves the newcomer a permanent shadow: on the assembly
   path it fails to build; on the direct path it runs gauge-silent for its whole
@@ -169,8 +169,8 @@ Consequences worth stating outright:
   its own recorder and Prometheus attaches `instance` at scrape, so identical
   label sets from different pods are different TSDB series. The one way to
   re-create the collision across pods is an aggregation layer that *strips*
-  `instance` — a Pushgateway with `honor_labels`, or a recording rule / remote
-  write relabeling that drops it — which is outside the framework's reach.
+  `instance` (a Pushgateway with `honor_labels`, or a recording rule / remote
+  write relabeling that drops it), which is outside the framework's reach.
 
 ## Deserializer (`spate_deser_*`)
 
@@ -241,7 +241,7 @@ series carry its name as the `component` label (a single sink uses
 ### What a flush contains
 
 A flush is a batch's whole journey from the moment it was sealed to the moment
-it settled, and only the last leg of that is the sink actually writing:
+it settled, and only the last leg of that is the sink writing:
 
 ```
 seal ────────────────────────────────────────────────────────► settle
@@ -256,13 +256,13 @@ seal ─────────────────────────
 ```
 
 Note where the span starts. `linger` and the chunk's time in the shard queue
-both elapse *before* the seal, so neither is in this histogram — if you are
+both elapse *before* the seal, so neither is in this histogram. If you are
 budgeting end-to-end freshness rather than commit lag, `spate_e2e_latency_seconds`
 is the family that spans them.
 
 So a rising flush p99 is not evidence about the sink. It is equally consistent
 with a sink that has not slowed down at all while the shard queues behind its
-`inflight.max_per_shard` cap — which is how a healthy ClickHouse cluster
+`inflight.max_per_shard` cap. That is how a healthy ClickHouse cluster
 (40% CPU, merges keeping up) came to be investigated as a slow one. Ask the
 questions separately:
 
@@ -285,7 +285,7 @@ histogram_quantile(0.99, sum by (le, pipeline, component) (
 
 Keep `component` in the `by` clause. A pipeline with several sinks puts them
 all on these families, distinguished only by that label, and aggregating it
-away blends a fast sink's distribution with a slow one's — the tail you are
+away blends a fast sink's distribution with a slow one's. The tail you are
 looking for gets diluted below the threshold, and the quantile cannot tell you
 *which* sink it came from. Aggregating `shard` away is fine: those are one
 population.
@@ -304,14 +304,14 @@ and reading the wrong one is how the residual becomes a mystery:
   half-open probe rather than waiting.
 
 So a flush p99 that exceeds write + permit wait is a shard sleeping rather than
-a shard writing — but check `spate_sink_shard_healthy` before you check the
+a shard writing. Check `spate_sink_shard_healthy` before you check the
 backoff gauge. A quarantined shard can hold a flush open for a whole `open_for`
 window with the backoff gauge flat at zero throughout.
 
 Asymmetries worth knowing before you subtract one family from another.
 Flush is observed once per **batch** and only for batches that settled. Write
 is observed once per **attempt**, so a batch that retried contributes several
-observations — including a batch that is later abandoned, whose completed
+observations, including a batch that is later abandoned, whose completed
 attempts stay in `{outcome="error"}` with no matching flush. And "abandoned" is
 not only a drain-deadline event: a fatal class, exhausted `retry.max_attempts`,
 or a panicking write task all abandon in steady state with no drain in sight
@@ -372,27 +372,28 @@ shrink. An assignment wait is timed on the worker *gaining* a split,
 anchored on that worker observing its own `assign` record grow. The leader
 publishes those two records separately and each worker sees its own on its
 own clock, so even for a single split's move neither window reliably
-contains the other — a gaining worker that observes its assignment late can
+contains the other. A gaining worker that observes its assignment late can
 start its wait after the drain has already finished.
 
 Their populations differ too. Every assigned split is waited for, including
-brand-new splits nobody has held and a dead owner's work reclaimed after
-lease expiry; no revocation was involved in either, and no drain was timed.
+brand-new splits that no worker has held and a dead owner's work reclaimed
+after lease expiry; no revocation was involved in either, and no drain was
+timed.
 `assignment_latency_seconds` is therefore not a revocation measurement at
 all, which is the deeper reason it is not a `phase` of one.
 
 Two families rather than one label also makes the meaningless query
-unwritable instead of merely discouraged: with a shared family,
-`histogram_quantile` over `sum by (le)` — aggregating the `phase` away —
-looks like an ordinary panel expression while silently merging two
-populations recorded on two machines.
+unwritable instead of discouraged: with a shared family,
+`histogram_quantile` over `sum by (le)`, aggregating the `phase` away,
+looks like an ordinary panel expression while merging two populations
+recorded on two machines.
 
 Cardinality note: a coordinated source's checkpoint partitions are minted
 per split *tenancy* (monotonic), so per-partition series under
 `metrics.per_partition_detail: true` grow over a long, churny job; the
 default (off) is unaffected. `spate_source_lag_records` is ungated, so a source
 that both publishes lag and mints monotonic partition ids would grow without
-bound — no shipped source does (Kafka's partitions are bounded by the topic;
+bound. No shipped source does (Kafka's partitions are bounded by the topic;
 the S3 source publishes no lag), but a new connector must not.
 
 ## End-to-end
@@ -433,8 +434,8 @@ config section):
 - `spate_sink_shard_healthy == 0` — no replica of the shard is circuit-closed;
   intake stalls and the shard back-pressures the source (the whole-shard
   escalation of the per-replica `replica_healthy` signal). Recovery probes keep
-  firing — every `open_for` plus the failing probe's own duration, since the
-  re-open deadline is stamped when the failure is reported — so the gauge stays
+  firing every `open_for` plus the failing probe's own duration, since the
+  re-open deadline is stamped when the failure is reported, so the gauge stays
   0 through failed probe cycles until one succeeds. Pair with a rising
   `spate_sink_replica_errors_total{replica}` to identify the failing endpoints.
 - `spate_sink_retry_backoff_seconds` sustained near `retry.max` — the shard is
@@ -446,12 +447,12 @@ config section):
   `SinkPool::spawn` warns about at startup) this is the *only* live signal:
   `spate_sink_retries_total` goes flat because it moves on attempts,
   `spate_sink_inflight_batches` stays pinned, and `spate_sink_shard_healthy` can
-  read `1` throughout *as long as no replica's breaker opens* — a batch can
-  keep failing retryably while other batches keep the breakers closed. Pair
+  read `1` throughout *as long as no replica's breaker opens*, because a batch
+  can keep failing retryably while other batches keep the breakers closed. Pair
   with `spate_sink_errors_total{error_type="retryable"}` for the cause.
   Complementary, not overlapping: a shard whose every replica *is* quarantined
   also sleeps, and this gauge reads `0` there because no attempt is being
-  backed off. `spate_sink_shard_healthy == 0` covers that state — the write loop
+  backed off. `spate_sink_shard_healthy == 0` covers that state. The write loop
   waits only when no replica is circuit-closed, though a shard with none can
   still be handing out a half-open probe rather than waiting, so the gauge is
   the wider of the two. Alert on both to cover every parked state.
@@ -463,9 +464,9 @@ config section):
   duration is flat while flush p99 climbs, read
   `spate_sink_permit_wait_duration_seconds` next, and `spate_sink_shard_healthy`
   after it: the answer is shards, `inflight.max_per_shard`, or a quarantined
-  replica set — not the server. Keep a flush-duration alert too if you have a
-  commit-lag SLO — that is the family the watermark waits on — but do not read
-  it as sink latency.
+  replica set, not the server. Keep a flush-duration alert too if you have a
+  commit-lag SLO, since that is the family the watermark waits on, but do not
+  read it as sink latency.
 Each connector adds alerts over its own families; those live in the
 connector's `## Metrics` section, indexed under
 [Connector families](#connector-families).

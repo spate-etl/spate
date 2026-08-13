@@ -3,7 +3,7 @@
 The sink is partitioned into **shards**, and the chain's terminal stage
 sends every record to exactly one of them. Sharding is how a single pipeline
 process fans writes across a cluster: more shards means more concurrent
-insert streams, and — when it matters — a record's shard can be made to
+insert streams, and, where it matters, a record's shard can be made to
 match where the destination itself expects that record to live.
 
 ## What a shard is
@@ -20,25 +20,25 @@ A shard is one lane of the sink's write topology, identified by an index in
 
 The route → encode → queue path and the per-shard workers that drain those
 queues are the terminal stage in [Architecture](01-architecture.mdx). Because
-the index means the same thing everywhere, the order the shards are listed in
-config is load-bearing: shard `i` is the config's `i`-th entry, the `i`-th
-worker, and the `i`-th endpoint. Reordering the list re-homes data. A
-connector that mirrors an external cluster's placement can verify parts of
-this contract at startup and warn (advisorily) on apparent mis-ordering —
-see the [ClickHouse `distributed_check`](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
-— but the ordering itself is the deployment's to get right.
+the index means the same thing everywhere, shard `i` is the config's `i`-th
+entry, the `i`-th worker, and the `i`-th endpoint. Reordering the list
+re-homes data. A connector that mirrors an external cluster's placement can
+verify parts of this contract at startup and warn (advisorily) on apparent
+mis-ordering, as the
+[ClickHouse `distributed_check`](../04-connectors/sinks/clickhouse/distributed-parity.mdx)
+does. The ordering itself is the deployment's to get right.
 
 ## Routing happens once, at the terminal stage
 
 Routing is not a pipeline operator. It runs exactly once, per emitted record,
-at the chain's terminal `.sink(...)` stage — after every `map` / `filter` /
+at the chain's terminal `.sink(...)` stage, after every `map` / `filter` /
 `flat_map`, and strictly **before** the record is encoded to wire format. The
 router sees the record exactly as the encoder will.
 
-That "per emitted record, post-transform" timing is the whole reason the
-record-aware tier exists. A `flat_map` that explodes one source record into
+The record-aware tier depends on that "per emitted record, post-transform"
+timing. A `flat_map` that explodes one source record into
 many children gives every child the **same** `RecordMeta` as its parent (the
-ack fan-out relies on this — see [Delivery guarantees](02-delivery-guarantees.mdx)).
+ack fan-out relies on this; see [Delivery guarantees](02-delivery-guarantees.mdx)).
 So a router that reads only metadata necessarily colocates all children of
 one parent on one shard. To route those children independently, the router
 has to look at each child's own payload.
@@ -51,11 +51,11 @@ One builder seam accepts either tier, and a router implements exactly one.
   source partition). The default `KeyHashRouter` lives here: it routes by the
   record's key hash and falls back to a stable per-partition hash for keyless
   records, keeping a partition's keyless records together and the
-  distribution stable. This is the right default and stays front and center.
+  distribution stable.
 - **Record-aware** — `RecordRouter<F>`, routing on the payload itself. It
-  earns its place where shard affinity derives from a field of the terminal
-  record type — matching a destination cluster's own sharding expression, for
-  instance — or where `flat_map` children have to be routed by their own
+  applies where shard affinity derives from a field of the terminal
+  record type (matching a destination cluster's own sharding expression, for
+  instance), or where `flat_map` children have to be routed by their own
   fields.
 
 The record-aware trait mirrors the row encoder's family-generic shape. The
@@ -72,19 +72,19 @@ half of [`custom_source_sink.rs`](repo:crates/spate/examples/custom_source_sink.
 a generator source feeding a stdout sink that needs no infrastructure and runs
 with `cargo run -p spate --example custom_source_sink`. The chain there explodes
 each upload into its order lines, so the placement of one upload's children is
-exactly the case the record-aware tier exists for:
+the case the record-aware tier exists for:
 
 ```rust file=crates/spate/examples/custom_source_sink.rs region=router
 ```
 
-`DefaultHasher` is the trap the spelled-out FNV-1a avoids: that hasher is
-seeded, and its output is not guaranteed stable across releases, so two
-processes given the same record can disagree about where it belongs.
+The spelled-out FNV-1a avoids `DefaultHasher`, which is seeded and whose
+output is not guaranteed stable across releases, so two processes given the
+same record can disagree about where it belongs.
 
 Every `ShardRouter` is automatically a `RecordRouter` for every family
 through a blanket bridge, so meta-only routers plug into the same seam
-unchanged. The bridge is also why a router implements **one** tier, never
-both: implementing both is a coherence overlap the compiler rejects.
+unchanged. The bridge is also why a router implements **one** tier and not
+both; implementing both is a coherence overlap the compiler rejects.
 
 :::note
 Routers are on the per-record hot path: pure, cheap, no I/O, no blocking,
@@ -97,13 +97,13 @@ counter) holds its state behind `&self` and interior mutability.
 Shards do not share a queue. Each has its own bounded chunk queue between the
 pipeline threads and its worker. When one shard's destination slows down, its
 queue fills, and the terminal stage's `try_send` for that shard starts
-failing — which pauses the source lanes rather than blocking them (the source
+failing, which pauses the source lanes rather than blocking them (the source
 never blocks on a channel send). So a single saturated shard back-pressures
 the **whole** pipeline.
 
-This is deliberate: bounded memory over unbounded buffering. The alternative
-— letting healthy shards race ahead while one shard's backlog grows without
-limit — trades a bounded, observable slowdown for an unbounded memory leak
+This is deliberate: bounded memory over unbounded buffering. The alternative,
+letting healthy shards race ahead while one shard's backlog grows without
+limit, trades a bounded, observable slowdown for an unbounded memory leak
 and an ever-widening watermark gap. See [Backpressure](03-backpressure.mdx)
 for the pause/resume machinery and the sizing rule.
 
@@ -117,24 +117,24 @@ attempts **park** until the earliest of these:
 3. a re-check heartbeat, clamped to `[100ms, 30s]`.
 
 The second exists because a shard whose every replica is *already* probing has
-no next window to wait for — without it, such a shard would wait out the
+no next window to wait for. Without it, such a shard would wait out the
 heartbeat despite an answer being seconds away. The heartbeat itself is a
 backstop against a wake that never arrives, not the recovery path; a shard
 woken by it has something else wrong with it.
 
-Parked attempts **hold their in-flight permits**, which is precisely how the
-stall reaches the source: intake blocks, the queue fills, and lanes pause. The
+Parked attempts **hold their in-flight permits**, which is how the stall
+reaches the source: intake blocks, the queue fills, and lanes pause. The
 shard reports `spate_sink_shard_healthy == 0` throughout. With a bounded
-`retry.max_attempts` the batch instead fails and replays after restart — the
+`retry.max_attempts` the batch instead fails and replays after restart. The
 watermark stalls either way.
 
 ## The honest part: hot shards
 
 **A hot shard is the data's shape, not the router's choice.** Any router
-that gives a key stable shard affinity — which is the entire point of
-payload routing — sends every record for a hot key to the same shard. Where
-one key (or a handful) dominates the volume, that shard runs hot, and no
-router setting fixes it: affinity makes the skew *irreducible* by design.
+that gives a key stable shard affinity sends every record for a hot key to
+the same shard. Where one key (or a handful) dominates the volume, that shard
+runs hot, and no router setting fixes it, because affinity makes the skew
+*irreducible*.
 
 The responses that remain:
 
@@ -142,54 +142,54 @@ The responses that remain:
   values. A key with many roughly-even values spreads naturally; a low-
   cardinality key (a region code, a status flag) concentrates.
 - **Watching the skew.** It is already observable per shard via
-  `spate_sink_records_total{shard}` and `spate_sink_bytes_total{shard}` — a
+  `spate_sink_records_total{shard}` and `spate_sink_bytes_total{shard}`. A
   persistent imbalance across shard labels is a hot shard (see
   [Metrics](../../METRICS.md)).
 - **Resharding deliberately.** Adding or removing shards changes `num_shards`
   and therefore reshuffles which shard each key maps to. It rebalances, but
-  it is a topology change, not a live knob — it re-homes keys, with the
+  it is a topology change and not a live knob; it re-homes keys, with the
   consequences below.
 
-CPU is not the victim here: routing runs after transform, per lane, so the
-hot path stays spread across pipeline threads. What a hot shard costs is the
+Routing runs after transform, per lane, so the hot path stays spread across
+pipeline threads and CPU is not the bottleneck. What a hot shard costs is the
 one shard's write throughput, and the pipeline-wide backpressure it induces.
 
 ## Deterministic routing is a correctness requirement
 
 The router must be a pure function of the record: the same record routes to
-the same shard on every *processing* — across restarts, rebalances, and
+the same shard on every *processing*, across restarts, rebalances, and
 replays. These guarantees depend on it:
 
 - **Duplicates must colocate to be collapsible.** At-least-once delivery
   means a reprocessed record lands again, and it lands with new batch
-  boundaries and a new dedup token — no dedup window catches it (see
+  boundaries and a new dedup token, so no dedup window catches it (see
   [Delivery guarantees](02-delivery-guarantees.mdx)). What absorbs those
-  duplicates is a destination-side collapse pattern — last-write-wins on a key
-  — and collapse works **within
-  one shard's table**: it can only absorb a duplicate that lands on the same
-  shard as the original. A nondeterministic router scatters a key's
-  duplicates across shards, where nothing ever collapses them.
+  duplicates is a destination-side collapse pattern (last-write-wins on a
+  key), and collapse works **within one shard's table**, absorbing only a
+  duplicate that lands on the same shard as the original. A nondeterministic
+  router scatters a key's duplicates across shards, where nothing ever
+  collapses them.
 - **Reads must find a key where the routing function says it lives.**
-  Anything that maps a key to a location at read time — a pruned SELECT
-  through a parity router, a per-shard dedup query — assumes every record
+  Anything that maps a key to a location at read time (a pruned SELECT
+  through a parity router, a per-shard dedup query) assumes every record
   for that key sits on the shard the function names. One
-  nondeterministically-placed record is silently invisible to such reads.
+  nondeterministically-placed record is invisible to such reads.
 
 The dedup token's own role is narrower than either of these: a token
 deduplicates **same-batch retries** within one shard's replica set. A sealed
-batch is bound to one shard's worker and retried under one token — routing
-runs strictly before batches are sealed and never re-runs for a retry — so
-tokens need no help from the router. It is *reprocessing*, which tokens do
-not cover, that makes deterministic placement a correctness requirement.
+batch is bound to one shard's worker and retried under one token (routing
+runs strictly before batches are sealed and never re-runs for a retry), so
+tokens need no help from the router. *Reprocessing*, which tokens do not
+cover, is what makes deterministic placement a correctness requirement.
 
-The corollary: any change that re-homes keys to different shards — a
-resharding, a weight change, a routing-key change — is **not** covered by
+As a corollary, any change that re-homes keys to different shards (a
+resharding, a weight change, a routing-key change) is **not** covered by
 the collapse mechanism. Rows already written stay where they are; nothing
-merges across shards, so the old shard's copies are never absorbed: unpruned
+merges across shards, so the old shard's copies are never absorbed. Unpruned
 reads return both homes' rows indefinitely, while pruned reads see only the
-new home. Treat re-homing as a deliberate migration — backfill or rebuild
-the moved keys' rows, or delete the old copies — not as replay noise that
-settles. A plain restart with an unchanged topology is the benign case:
+new home. Re-homing needs a deliberate migration: backfill or rebuild the
+moved keys' rows, or delete the old copies. It does not settle on its own.
+A plain restart with an unchanged topology is the benign case:
 replayed records re-route to the **same** shard, where the collapse pattern
 absorbs them.
 

@@ -23,7 +23,7 @@ shared tokio runtime, and a control plane coordinating both.
 Pipeline threads are plain `std::thread`s, optionally core-pinned. Their
 count defaults to `available_parallelism` minus an I/O reserve and is always
 overridable in YAML (`pipeline.threads`). Each thread owns a set of source
-**lanes** — pollable data-plane units, whatever the source calls them — and
+**lanes** (pollable data-plane units, whatever the source calls them) and
 runs the whole hot path single-threaded:
 
 ```text
@@ -37,7 +37,7 @@ These decisions define this stage:
   Keeping deserialization on the pipeline thread makes zero-copy legal and
   keeps all CPU work on the pinned cores.
 - **The chain is monomorphized.** Operators (`map`, `filter`, `flat_map`,
-  `try_map`, ...) compose statically — the whole chain compiles to one
+  `try_map`, ...) compose statically, and the whole chain compiles to one
   loop. Type erasure happens exactly once, at the chain boundary, with one
   virtual call per **batch**. Per-record dynamic dispatch would defeat
   cross-operator inlining; the chain bench measures this design at roughly ten
@@ -46,12 +46,12 @@ These decisions define this stage:
 
 The chain's terminal stage encodes records into the sink's wire format
 (encoding is CPU work, so it happens *on the pipeline thread*) and routes them to
-per-shard bounded queues with `try_send` — never a blocking send. When a
+per-shard bounded queues with `try_send`, never a blocking send. When a
 queue is full, the source lanes pause and the thread keeps polling; see
 [Backpressure](03-backpressure.mdx).
 
 You build one chain per pipeline thread via the builder's `.chains(|ctx| ...)`
-factory — each call receives a `ChainCtx` carrying that thread's queue
+factory. Each call receives a `ChainCtx` carrying that thread's queue
 clones, the shared byte budget, and the pipeline name. See
 [Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx).
 
@@ -65,9 +65,8 @@ min(lanes, pipeline.threads)
 ```
 
 Lanes beyond the thread count add read-ahead memory and open connections
-**without adding throughput** — they are more places to read from, not more
-capacity to decode. Size a source's lane count near `pipeline.threads` rather
-than raising it in the hope of going faster.
+**without adding throughput**. They are more places to read from, not more
+capacity to decode. Size a source's lane count near `pipeline.threads`.
 
 :::note Connector specifics
 What a lane is, and the knob that sets how many there are:
@@ -94,13 +93,13 @@ A single shared multi-thread tokio runtime (default 2 workers,
   `pipeline.block_on(..)`.
 
 The builder constructs this runtime in `Pipeline::from_config` and the
-pipeline runtime adopts it — there is exactly one I/O runtime per process,
+pipeline runtime adopts it. There is exactly one I/O runtime per process,
 so `io_threads` means what it says.
 
 :::note
 Because `Pipeline` owns a blocking tokio runtime, `Pipeline::from_config`
 refuses to be called from inside an async context (`BuildError::AsyncContext`).
-Build pipelines from a plain thread — usually `main`.
+Build pipelines from a plain thread, usually `main`.
 :::
 
 ## The control plane
@@ -108,16 +107,15 @@ Build pipelines from a plain thread — usually `main`.
 A controller thread services source events (rebalances, statistics), runs
 commit ticks, owns shutdown, and enforces liveness policies (e.g. failing
 the pipeline when a partition's watermark stays stalled behind a failed
-batch). The **checkpointer** it drives is a synchronous, tokio-free module:
-acknowledgments arrive over an unbounded channel — the ack path can never
-block behind data — and per-partition contiguity tracking turns them into
+batch). The **checkpointer** it drives is a synchronous, tokio-free module.
+Acknowledgments arrive over an unbounded channel, so the ack path can never
+block behind data, and per-partition contiguity tracking turns them into
 committable watermarks. [Delivery guarantees](02-delivery-guarantees.mdx)
 covers that machinery.
 
 ## Why one process = one pipeline
 
-This is a deliberate Kubernetes-native constraint, not a limitation to
-engineer around:
+This is a deliberate Kubernetes-native constraint:
 
 - **Scaling** is `replicas: N` on a Deployment; how the work divides across
   those pods is the source's business (see
@@ -130,16 +128,16 @@ engineer around:
   [Graceful shutdown](../03-guides/graceful-shutdown.mdx) and
   [Deployment](../05-deployment/README.mdx).
 
-Pipelines are linear — source → chain → sharded sink — with routing across
+Pipelines are linear (source → chain → sharded sink), with routing across
 shards at the sink end. General DAGs, windowing, and stateful operators are
 explicit non-goals for v1 (see the guide's [overview](../README.mdx) §
 Non-goals).
 
 ## Further reading
 
-- [ADR-0003](../../adr/0003-poll-based-source-api.md) and [ADR-0004](../../adr/0004-static-operator-chain.md) — the source
-  abstraction, § Operator chain — the canonical version, with the trade-offs
-  and the measurements behind them.
+- [ADR-0003](../../adr/0003-poll-based-source-api.md) and [ADR-0004](../../adr/0004-static-operator-chain.md) — the canonical
+  versions of the source abstraction and the operator chain, with the
+  trade-offs and the measurements behind them.
 - [Custom sources](../06-extending/custom-source.mdx) /
   [Custom sinks](../06-extending/custom-sink.mdx) — implementing the seams
   this page describes.

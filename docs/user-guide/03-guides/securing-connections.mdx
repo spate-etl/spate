@@ -3,8 +3,8 @@
 Spate has no framework-wide security layer: **transport security is a property
 of each connector**, because every connector talks to its system over that
 system's own client, with that client's own TLS and auth knobs. This page is
-the hub. It covers what *is* framework-wide — how secrets reach the config, and
-what happens when authentication fails — and points at each connector for the
+the hub. It covers what *is* framework-wide (how secrets reach the config, and
+what happens when authentication fails) and points at each connector for the
 concrete mechanism.
 
 ## Where each connector documents its security
@@ -18,13 +18,13 @@ concrete mechanism.
 | Avro format | Registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-registry-credentials) |
 | NATS JetStream store | TLS, mTLS, token, creds file | opt-in `coordination-nats` feature | [NATS → Security](../04-connectors/coordination/nats/README.mdx#security-authentication-and-tls) |
 
-Connectors that share a client share a matrix — the Kafka source and sink
+Connectors that share a client share a matrix; the Kafka source and sink
 render the same one, from the same partial.
 
 ## Secrets stay out of the file
 
-Never commit credentials. Every value in the config — including inside connector
-bodies — is
+Never commit credentials. Every value in the config, including inside connector
+bodies, is
 [environment-interpolated](configuring-pipelines.mdx#environment-interpolation)
 before parsing, so pass secrets in from the environment (a Kubernetes
 Secret, a vault sidecar) and reference them with `${VAR}`:
@@ -40,7 +40,7 @@ may contain YAML-significant characters. The four `${...}` forms and the
 quoting rules are in
 [Configuring pipelines](configuring-pipelines.mdx#environment-interpolation).
 
-Secrets that never enter the config file at all are better still: a connector
+Secrets that never enter the config file are better still: a connector
 that resolves ambient cloud credentials, or reads a mounted credentials file,
 gives you nothing to leak.
 
@@ -49,8 +49,8 @@ gives you nothing to leak.
 Authentication and TLS failures are a **fatal error class**, not a retryable
 one: a wrong password, an untrusted CA, or a rejected client certificate fails
 the pipeline fast with an actionable message rather than silently stalling or
-looping. That is deliberate — a security misconfiguration should surface at
-startup (or at the first connection), not degrade into a stuck pipeline. See
+looping. A security misconfiguration therefore surfaces at startup, or at the
+first connection, instead of degrading into a stuck pipeline. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for how fatal
 error classes propagate, and [Error handling](../02-concepts/04-error-handling.mdx)
 for the Skip/Fail taxonomy they sit outside of.

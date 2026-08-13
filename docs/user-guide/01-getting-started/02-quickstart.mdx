@@ -1,10 +1,10 @@
 # Quickstart: a pipeline in five minutes
 
-This page builds the "hello world" pipeline — everything in memory, no
-external systems — yet it exercises the full assembly every real pipeline
-follows: source → deserializer → operator chain → sharded sink →
-checkpointed commits, with backpressure and graceful shutdown. If you have
-the repository checked out, it runs as-is:
+The "hello world" pipeline runs everything in memory, with no external
+systems, yet it exercises the full assembly every real pipeline follows:
+source → deserializer → operator chain → sharded sink → checkpointed
+commits, with backpressure and graceful shutdown. If you have the
+repository checked out, it runs as-is:
 
 ```sh
 cargo run -p spate --example memory_pipeline
@@ -14,19 +14,19 @@ The full version is
 [`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs);
 everything below is lifted from it. To run it in your own project you need
 `spate` and `spate-test` (here as a regular dependency, since the example uses
-the mocks in `main`) — see [Installation](01-installation.mdx).
+the mocks in `main`). See [Installation](01-installation.mdx).
 
 ## 1. Configuration
 
 Framework tuning comes from YAML. The `source` and `sink` sections are
-opaque bags that each connector's factory reads — here the in-memory pieces
+opaque bags that each connector's factory reads. Here the in-memory pieces
 are built programmatically, so the tags are informational:
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=config
 ```
 
 Real configs add backpressure budgets, metrics exporters, and connector
-sections — see [Configuring pipelines](../03-guides/configuring-pipelines.mdx)
+sections. See [Configuring pipelines](../03-guides/configuring-pipelines.mdx)
 and the [configuration reference](../07-reference/configuration.mdx).
 
 ## 2. Construct the builder
@@ -41,18 +41,18 @@ Then the builder itself:
 ```rust file=crates/spate/examples/memory_pipeline.rs region=init
 ```
 
-`Pipeline::from_config` owns process initialization: it installs the
+`Pipeline::from_config` owns process initialization. It installs the
 metrics exporter *before any metric handle can exist* (so nothing records
 into the void) and builds the shared tokio I/O runtime the sink workers run
-on. Telemetry init is idempotent and first-call-wins — call
+on. Telemetry init is idempotent and first-call-wins. Call
 `spate::telemetry::init` yourself first if you want pretty logs instead of
 the builder's JSON default. The why behind this ordering is in
 [Architecture](../02-concepts/01-architecture.mdx).
 
 ## 3. Source and sink
 
-The `spate-test` mocks come paired with scripting handles — the source handle
-pushes records and reads back committed watermarks, the sink script reads
+The `spate-test` mocks come paired with scripting handles. The source handle
+pushes records and reads back committed watermarks; the sink script reads
 back every durable write:
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=mocks
@@ -60,7 +60,7 @@ back every durable write:
 
 A Kafka source gets its lane assignments from the broker instead of a
 handle; a ClickHouse sink gets its shards and replicas from YAML. The seams
-are identical — see the [memory connector](../04-connectors/memory.mdx).
+are identical. See the [memory connector](../04-connectors/memory.mdx).
 
 ## 4. The chain, assembled and spawned
 
@@ -75,12 +75,12 @@ carries that thread's plumbing (queues, byte budget, pipeline name):
 
 Things to notice:
 
-- Everything inside the closure is statically composed — `filter` and `map`
+- Everything inside the closure is statically composed. `filter` and `map`
   monomorphize into one loop, with a single virtual call per *batch* at the
   chain boundary. See [Architecture](../02-concepts/01-architecture.mdx).
 - `.into_runtime(source)` instead of `.run(source)` hands you the runtime
-  *before* it starts, so you can grab a `ShutdownHandle` and spawn the run —
-  exactly the pattern for [testing pipelines](../03-guides/testing-pipelines.mdx).
+  *before* it starts, so you can grab a `ShutdownHandle` and spawn the run.
+  That is the pattern for [testing pipelines](../03-guides/testing-pipelines.mdx).
   Production binaries usually call `.run(source)`, which blocks until
   SIGTERM or a fatal error.
 
@@ -92,9 +92,9 @@ committed watermark to cover the last offset:
 ```rust file=crates/spate/examples/memory_pipeline.rs region=drive
 ```
 
-That wait loop *is* the at-least-once contract in action: the watermark
-advances only after the sink acknowledged the data durably. The filtered
-empty word counts as delivered too — an intentional drop must not stall the
+The wait loop observes the at-least-once contract: the watermark advances
+only after the sink acknowledged the data durably. The filtered empty word
+counts as delivered too, since an intentional drop must not stall the
 commit. [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)
 explains the machinery.
 

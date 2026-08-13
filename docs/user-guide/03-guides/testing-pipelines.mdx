@@ -3,11 +3,11 @@
 The `spate-test` crate is the first-class way to test pipelines you build
 with this framework: deterministic in-memory mocks, no Docker, no external
 infrastructure. Every mock pairs with a scripting/observation handle (the
-`tower-test` philosophy) — you drive the source side, script the sink side,
-and assert on what actually got written and committed.
+`tower-test` philosophy). You drive the source side, script the sink side,
+and assert on what got written and committed.
 
 Everything below comes from
-[`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs) —
+[`memory_pipeline.rs`](repo:crates/spate/examples/memory_pipeline.rs),
 the same pattern as a runnable demo, which runs as-is with
 `cargo run -p spate --example memory_pipeline`. In your own project you
 need `spate` and `spate-test`, the latter as a dev-dependency.
@@ -34,36 +34,36 @@ A test config is an ordinary config:
 ```
 
 The `memory` and `capture` tags in `source:` and `sink:` are informational
-here — the in-memory pieces are built programmatically, not from those
+here, since the in-memory pieces are built programmatically, not from those
 sections. What bites once a second pipeline runs beside this one is whatever
 is process-wide:
 
 - **The admin server's address.** A pipeline naming no address takes
   `0.0.0.0:9090`, so two of them want the same port and the second one to
   start fails. Where the test neither scrapes an endpoint nor answers a
-  probe, `admin: { listen: none }` is the answer — no port at all — and
+  probe, `admin: { listen: none }` is the answer (no port at all), and
   `metrics: { exporter: none }` beside it leaves the process-global recorder
   free too. Where the test does read an endpoint, `admin: { listen:
   "127.0.0.1:0" }` lets the kernel pick a free port instead.
 - **Metric series ownership.** A gauge series has one live owner per
-  process, keyed on the pipeline and component labels — so two pipelines
+  process, keyed on the pipeline and component labels, so two pipelines
   alive at once under the same `pipeline.name` fail to build rather than
   quietly describing one series from two writers. Name each one for its
   test. A claim is released when its handles drop, so pipelines built one
   after another may share a name.
 
-Each mock comes back paired with its handle — the source handle pushes
-records and reads committed watermarks back, the sink script reads every
+Each mock comes back paired with its handle. The source handle pushes
+records and reads committed watermarks back; the sink script reads every
 durable write back:
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=mocks
 ```
 
 The batch `linger` defaults to 1s, which is a long time to wait for a
-flush. Shrinking it on the sink's pool config, as above, is what lets a
-test finish in milliseconds.
+flush. Shrinking it on the sink's pool config, as above, lets a test finish
+in milliseconds.
 
-Assemble with the ordinary `Pipeline` builder — the sink, the chain factory
+Assemble with the ordinary `Pipeline` builder. The sink, the chain factory
 and the chunking are the production steps unchanged, and
 [Assembling a pipeline](assembling-a-pipeline.mdx) walks them. The
 differences are in the runtime setup. Turn signal handling off with
@@ -92,7 +92,7 @@ last offset, then trigger the drain and join the spawned run for its
 
 - `assign_lanes` queues an assignment event, exactly as a real rebalance
   would surface one. Pushing to a partition with no active lane yet is
-  allowed — payloads wait.
+  allowed; payloads wait.
 - `push` / `push_many` queue payloads and return their offsets;
   `push_at` sets an explicit event timestamp.
 - `revoke_lanes` returns a `DrainBarrierProbe` for testing rebalance drain
@@ -105,8 +105,8 @@ last offset, then trigger the drain and join the spawned run for its
 
 Waiting for the watermark is the strongest assertion a test can make,
 because watermarks advance only after the sink durably acknowledged every
-record — the at-least-once contract itself. **Committed positions are one past the last
-offset** — the "next position to read", the same convention the framework
+record, which is the at-least-once contract. **Committed positions are one past the last
+offset**, the "next position to read", the same convention the framework
 commits everywhere, which is why the target is `last + 1`.
 
 Bound the wait, whichever way you write it: an unbounded one turns a broken
@@ -145,8 +145,8 @@ failure paths:
 
 You do not need a whole pipeline to test a deserializer or encoder:
 `TestDeserializer`, `TestEncoder`, and `EmitCollector` exercise single
-stages, and the `spate-test` crate docs walk the full life of one record —
-poll, deserialize, encode, acknowledge, commit — against a real
+stages, and the `spate-test` crate docs walk the full life of one record
+(poll, deserialize, encode, acknowledge, commit) against a real
 `Checkpointer` with no runtime at all. For property tests, the `proptest`
 feature adds ready-made `strategies`.
 

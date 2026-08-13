@@ -2,31 +2,31 @@
 
 When the sink slows down, something upstream has to give. Spate's answer is one
 invariant and the two mechanisms that hold it: one detects the pressure, the
-other acts on it. A separate, per-partition ceiling bounds acknowledgment debt
-— [the checkpoint ceiling](#the-checkpoint-ceiling) below.
+other acts on it. A separate, per-partition ceiling bounds acknowledgment
+debt, described in [the checkpoint ceiling](#the-checkpoint-ceiling) below.
 
 ## The invariant: a source thread never blocks on a channel send
 
 The [chain](../07-reference/glossary.mdx#chain)'s terminal stage hands
 encoded [chunks](../07-reference/glossary.mdx#chunk) to the per-shard
-queues with `try_send` — never a blocking `send`. When a queue rejects (or
+queues with `try_send`, never a blocking `send`. When a queue rejects (or
 the byte budget crosses its high watermark), the source loop **pauses the
 offending [lanes](../07-reference/glossary.mdx#lane) and keeps polling**.
 
-The reason this is non-negotiable rather than a tuning choice: the source
-loop is what services the [assignment protocol](08-work-assignment.mdx),
+The source loop is what services the
+[assignment protocol](08-work-assignment.mdx),
 and a loop parked inside `send()` stops servicing it. For a source whose
 liveness proof rides the read loop itself, the proof lapses and the
 assignment is withdrawn. For a source whose liveness runs in the
 background, the [leases](../07-reference/glossary.mdx#lease) stay healthy
 but the parked loop cannot answer a reassignment request, so the handoff
 stalls to its deadline and the work is
-[revoked forcibly](../07-reference/glossary.mdx#cooperative-revocation) —
-and replayed by the next owner. Either way the damage is fleet-wide, not
-local: peers absorb the moved work, they pause in turn, and "the sink is
-slow" has been converted into a churning fleet. Pausing lanes while keeping
-the loop running keeps the protocol serviced and confines the slowdown to
-exactly where it belongs.
+[revoked forcibly](../07-reference/glossary.mdx#cooperative-revocation)
+and replayed by the next owner. Either way the damage is fleet-wide. Peers
+absorb the moved work, they pause in turn, and "the sink is slow" has been
+converted into a churning fleet. Pausing lanes while keeping the loop
+running keeps the protocol serviced and confines the slowdown to where it
+belongs.
 
 The same reasoning protects the ack path: acknowledgments travel over an
 unbounded channel and atomic counters, so a full data path can never block
@@ -41,18 +41,18 @@ a completion signal (see
   never a block).
 - **A global in-flight byte budget** (`backpressure.max_inflight_bytes`)
   counts every byte that has left the source but has not yet been durably
-  written — queued chunks plus
+  written, both queued chunks and
   [sealed batches](../07-reference/glossary.mdx#sealed-batch) in flight at the
   sink. The two are separate units: a worker merges chunks into the batch it
   writes, so chunk size does not bound insert size.
 
 ## Acting on it: the pause controller
 
-Pausing a lane is not free for every source, which is what the hysteresis
-is for. The pause controller releases a lane only once both pressure
-signals have cleared — the budget back below its **low watermark**, the
-queues back below their fill threshold — and a minimum pause has elapsed on
-top of that. A rejection arriving while paused restarts that timer, since
+Pausing a lane is not free for every source, so the pause controller applies
+hysteresis. It releases a lane only once both pressure signals have cleared
+(the budget back below its **low watermark**, the queues back below their
+fill threshold) and a minimum pause has elapsed on top of that. A rejection
+arriving while paused restarts that timer, since
 it is proof the downstream is still congested. Without the delay, a budget
 resting at the boundary would pause and resume every cycle. Observe it via
 `spate_backpressure_paused`,
@@ -60,14 +60,14 @@ resting at the boundary would pause and resume every cycle. Observe it via
 and `spate_backpressure_inflight_bytes` (see
 [Metrics](../../METRICS.md)).
 
-Backpressure is resumable mid-batch: if `try_send` fails partway through a
-batch, the chain records the exact resume point — already-processed records
+Backpressure is resumable mid-batch. If `try_send` fails partway through a
+batch, the chain records the exact resume point, so already-processed records
 are never re-run through the operators.
 
 The budget bounds what the *framework* holds. A source client with its own
 read-ahead buffer holds that data before the framework ever sees it, so it
-sits outside the budget entirely — which is a connector-sizing question,
-not a framework one, and can dominate a process's memory footprint.
+sits outside the budget entirely. Sizing it is a connector question, and it
+can dominate a process's memory footprint.
 
 :::note Connector specifics
 What "pause a lane" costs, and whether a source holds prefetched data
@@ -80,7 +80,7 @@ outside the budget:
 ## The checkpoint ceiling: `max_pending_batches` {#the-checkpoint-ceiling}
 
 The byte budget bounds *data* in flight; `checkpoint.max_pending_batches`
-bounds *acknowledgment debt* — batches a partition has registered with the
+bounds *acknowledgment debt*, the batches a partition has registered with the
 checkpointer that no watermark advance has retired. The two move
 independently: a slow acknowledging leg (a low-volume `split` branch, a
 stalled write) can hold a partition's watermark still while its data has
@@ -90,17 +90,17 @@ The ceiling is enforced where batches are created. Each partition's owning
 pipeline thread compares the batches it has issued against the batches the
 controller has retired, and skips the partition's lanes at the poll
 boundary while the difference sits at the limit. It is a hard per-partition
-bound, not a request: pending never exceeds the configured value. A gated
+bound, so pending never exceeds the configured value. A gated
 thread keeps servicing its control traffic (the invariant above holds), a
 gated partition costs its siblings nothing, and the gate reopens as soon as
-the controller's next acknowledgment harvest retires batches — within one
-control cycle, well inside a commit interval.
+the controller's next acknowledgment harvest retires batches, within one
+control cycle and well inside a commit interval.
 
 Consequences worth designing around:
 
 - A partition stalled behind a permanently failed batch accumulates at most
   `max_pending_batches` of replay before `checkpoint.stalled_fail_after`
-  fails the pipeline: the restart replays a bounded tail rather than
+  fails the pipeline. The restart replays a bounded tail rather than
   everything fetched during the stall.
 - `spate_checkpoint_pending_batches` reads at or below the configured
   limit; a value above it is a defect, not a tuning signal.
@@ -122,42 +122,42 @@ max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
 ```
 
 `SinkOptions::queue_capacity` is the one factor that is not a configuration
-key — it is set on the builder. Configuration rejects unknown fields naming
+key; it is set on the builder. Configuration rejects unknown fields naming
 the offending one, so a pipeline that reads `queue_capacity` off this rule
 and puts it in YAML fails at startup.
 
 In words: the budget's low watermark must comfortably hold everything the
 sink *legitimately* keeps in flight during steady-state operation. If it
 can't, a saturated pipeline lives permanently above the high watermark and
-the pause controller duty-cycles at its minimum pause — throughput collapses
-even though nothing is wrong.
+the pause controller duty-cycles at its minimum pause, and throughput
+collapses even though nothing is wrong.
 
 The framework defaults are deliberately not self-consistent under
 saturation: 2 shards at the default batch settings hold about 512 MiB of
 pending writes alone, already past the default 256 MiB budget. That is fine
 for throttled sources that never fill batches and wrong for saturated ones,
-where the budget has to be raised or the batches capped —
+where the budget has to be raised or the batches capped.
 [Tuning](../05-deployment/tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes)
 carries both, worked through.
 
 The flagship example's YAML
 ([`kafka_avro_to_clickhouse.yaml`](repo:crates/spate/examples/kafka_avro_to_clickhouse.yaml))
-carries this rule as a comment next to the knobs — a convention worth copying.
+carries this rule as a comment next to the knobs, a convention worth copying.
 See [Configuring pipelines](../03-guides/configuring-pipelines.mdx) for the
 config section itself.
 
 :::note
 Symptoms of an undersized budget: `spate_backpressure_paused` pinned at 1
 or `spate_backpressure_pause_events_total` climbing fast, low sink batch
-sizes, and throughput far below what the sink can absorb — while
+sizes, and throughput far below what the sink can absorb, while
 `spate_sink_errors_total` stays quiet. The sink isn't failing; the source
 is being duty-cycled.
 :::
 
 ## What backpressure looks like when it engages
 
-Sustained `spate_backpressure_paused == 1` means the sink genuinely can't
-keep up (a capacity problem: add replicas or shards, or tune batching) —
+Sustained `spate_backpressure_paused == 1` means the sink can't
+keep up (a capacity problem: add replicas or shards, or tune batching),
 or the budget is undersized as above. Paused lanes translate into a growing
 backlog at the source, visible as `sum(spate_source_lag_records)` for
 sources that publish lag. That is the correct, bounded failure mode: data

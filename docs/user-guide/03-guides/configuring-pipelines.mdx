@@ -3,7 +3,7 @@
 One process runs one pipeline; one YAML file configures one process. The
 file has two kinds of sections: **typed framework sections** the engine
 validates strictly, and **opaque connector sections** handed through to your
-connector factories. YAML configures connectors and tuning — never the
+connector factories. YAML configures connectors and tuning, never the
 operator graph, which you define in code
 (see [Assembling a pipeline](assembling-a-pipeline.mdx)).
 
@@ -59,8 +59,7 @@ Load it with `Pipeline::from_path`, or parse a string with
 
 ## The typed framework sections
 
-These top-level sections belong to the framework — `pipeline`, `admin`,
-`checkpoint`, `backpressure`, and `metrics`:
+These top-level sections belong to the framework:
 
 - **`pipeline`** — identity and thread budget: `name` (required; the
   `pipeline` label on every metric), `threads`, `io_threads`, `pinning`.
@@ -74,7 +73,7 @@ These top-level sections belong to the framework — `pipeline`, `admin`,
   `per_partition_detail`, `e2e_basis`.
 
 Only `pipeline`, `source`, and `sink` are required; every other section and
-field has a documented default (`deserializer` is optional entirely —
+field has a documented default (`deserializer` is optional entirely, since
 sources that emit ready-made records need none).
 
 These conventions apply throughout:
@@ -86,15 +85,15 @@ These conventions apply throughout:
 - **Durations are humantime strings**: `5s`, `250ms`, `2m`, `1h`.
 - **Byte sizes are humane too**: `256MiB`, `1GiB`, plain integers for bytes.
 
-Cross-field validation runs at load as well — for example
+Cross-field validation runs at load as well. For example,
 `checkpoint.interval` has a 100ms floor, and the backpressure ratios must
 satisfy `0 < low_ratio < high_ratio <= 1`.
 
 ## Environment interpolation
 
 `${VAR}` forms interpolate from the process environment **on the raw text
-before YAML parsing** (Vector-compatible semantics) — the standard way to
-feed Kubernetes ConfigMap/Secret values in. The forms (`${VAR}`,
+before YAML parsing** (Vector-compatible semantics), which is the standard
+way to feed Kubernetes ConfigMap/Secret values in. The forms (`${VAR}`,
 `${VAR:-default}`, `${VAR:?message}`, `$$`) and their exact unset-vs-empty
 semantics are tabulated in the
 [configuration reference](../07-reference/configuration.mdx#environment-interpolation).
@@ -102,7 +101,7 @@ semantics are tabulated in the
 Because substitution is textual and pre-parse, values are spliced verbatim:
 a value containing a newline is rejected outright (it would change the
 document structure), and YAML-significant characters in a value are your
-responsibility — quote the site (`password: "${PASSWORD}"`) so a password
+responsibility. Quote the site (`password: "${PASSWORD}"`) so a password
 like `p@ss #1` cannot turn into a YAML comment.
 
 ## Opaque connector sections
@@ -121,16 +120,16 @@ source:
 
 The framework records the tag and hands the raw body to your connector
 factory's `from_component_config`,
-which deserializes it into its own typed config — with its own
+which deserializes it into its own typed config, with its own
 `deny_unknown_fields` and its own validation. Errors still carry the full
 dotted path from the file root (`source.<tag>.<key>: missing field ...`).
-This is what keeps connectors fully decoupled from the framework schema; the
-single-key shape is what lets every typed struct keep `deny_unknown_fields`.
+Connectors stay fully decoupled from the framework schema, and the
+single-key shape lets every typed struct keep `deny_unknown_fields`.
 
 One key inside the body is the exception: **`chunk` is framework-reserved**
 ([reference](../07-reference/configuration.mdx#chunk)). The framework peels it
 out before the connector sees the body, so a connector schema must not declare
-its own `chunk` field — on a sink it would never receive a value, and on a
+its own `chunk` field; on a sink it would never receive a value, and on a
 `source`/`deserializer` the key is rejected at load.
 
 Each connector's body schema is documented on its page:
@@ -141,8 +140,8 @@ Each connector's body schema is documented on its page:
 
 ## Multiple named sinks {#multiple-named-sinks}
 
-A pipeline that writes to more than one destination declares `sinks:` — a
-`name -> component` map — **instead of** `sink:` (setting both, or neither, is a
+A pipeline that writes to more than one destination declares a `sinks:` map
+of `name -> component` **instead of** `sink:` (setting both, or neither, is a
 load error). Each entry is an ordinary single-key component with its own full
 configuration:
 
@@ -158,8 +157,8 @@ The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)
 resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on
 that sink's `spate_sink_*` metrics. A single `sink:` is exactly equivalent to a
 one-entry `sinks:` map under the reserved name `"default"` (which keeps the
-historical label `component="sink"`). The precise rules — reserved names, label
-equivalence — are tabulated in the
+historical label `component="sink"`). The precise rules (reserved names, label
+equivalence) are tabulated in the
 [configuration reference](../07-reference/configuration.mdx#sinks). See
 [multi-sink split](../02-concepts/06-multi-sink.mdx) for the routing DSL and
 [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) for the
@@ -169,7 +168,7 @@ connector end-to-end.
 
 Configuration is loaded once at startup. There is deliberately no hot
 reload: reconfigure with a rolling restart (the Kubernetes
-checksum-annotation pattern — hash the config into a pod annotation so a
+checksum-annotation pattern, hashing the config into a pod annotation so a
 config change rolls the deployment). Graceful drain on SIGTERM makes the
 restart lossless; see [Graceful shutdown](graceful-shutdown.mdx) and the
 rationale in the guide's [overview](../README.mdx).

@@ -1,37 +1,37 @@
 # Source coordination
 
 Brokered sources bring their own coordination: the broker's group protocol
-assigns work across processes, and running a second replica Just
-Works. Broker-less sources — object-store backfills, database range
-scans, file tails — have no group protocol. Two processes pointed at the
+assigns work across processes, and running a second replica needs no
+further setup. Broker-less sources (object-store backfills, database range
+scans, file tails) have no group protocol. Two processes pointed at the
 same input each see *all* of it, so scaling out means duplicating every
 record.
 
 The coordination layer closes that gap with a **leader-assigned
-coordinator–worker model**. It is not a data path — records never flow
-through it — and it is not a new deployable: every pipeline replica runs
-the same binary, and the only added infrastructure is a small,
-low-latency key-value store — see
+coordinator–worker model**. It is not a data path (records never flow
+through it), and it is not a new deployable, since every pipeline replica
+runs the same binary. The only added infrastructure is a small,
+low-latency key-value store. See
 [Coordination stores](../04-connectors/coordination/README.mdx) for the shipped
 backends.
 
 ## The model
 
 **A planner enumerates the work as splits.** A split is one leasable unit
-of work — an object-store source plans object lists bin-packed by bytes;
+of work. An object-store source plans object lists bin-packed by bytes;
 a database source plans balanced id ranges. Each split has a
 deterministic id, an opaque descriptor (everything a worker needs to
 process it), and a weight. The planner is source code, provided by the
-connector; the framework decides *where* and *when* it runs: only on the
-fleet's current **leader**, elected by a lease on a well-known key in the
-store. Workers receive split descriptors through the store and never
-re-enumerate the input — one listing per plan, fleet-wide.
+connector; the framework decides *where* and *when* it runs, and it runs
+only on the fleet's current **leader**, elected by a lease on a well-known
+key in the store. Workers receive split descriptors through the store and
+never re-enumerate the input, so there is one listing per plan, fleet-wide.
 
 **Workers lease the splits they are assigned.** The leader computes a
 desired assignment and publishes it; each worker claims what it is named
 for, up to `max_in_flight`, and materializes a data lane per split it
 holds. Splits above the fleet's total lane budget sit unleased in the
-store: they are the queue. A lease is a TTL'd key the owner heartbeats at
+store, forming the queue. A lease is a TTL'd key the owner heartbeats at
 a third of the lease duration; distribution is push-driven (workers watch
 the store), so an assignment or a release is acted on in milliseconds,
 not poll intervals.
@@ -44,19 +44,18 @@ a split, and the worker drains that split (intake stopped, the emitted
 tail acknowledged, the final watermark committed) and releases it, so the
 transfer replays nothing. A source that cannot stop cleanly has the
 release forced after `drain_deadline` instead, and its uncommitted tail
-replays under the next owner — bounded by one commit interval. A leader
-that changes its mind mid-drain cancels the revocation, and the split stays
-where it is.
+replays under the next owner, bounded by one commit interval. A revocation
+the leader cancels mid-drain leaves the split where it is.
 
-How the assignment itself is computed — the balance objective, the
-stickiness and convergence guarantees, the rebalance delay, and the
-invariants the implementation is held to — is specified in
-[Work assignment](./08-work-assignment.mdx).
+[Work assignment](./08-work-assignment.mdx) specifies how the assignment
+itself is computed: the balance objective, the stickiness and convergence
+guarantees, the rebalance delay, and the invariants the implementation is
+held to.
 
 **Commits are fenced.** Every split's durable record carries a
 monotonically increasing epoch, bumped on every ownership change, and a
-progress commit is a compare-and-swap on that record. A stale owner — a
-network-partitioned zombie, a GC-paused straggler whose lease was stolen —
+progress commit is a compare-and-swap on that record. A stale owner (a
+network-partitioned zombie, a GC-paused straggler whose lease was stolen)
 loses the swap: **nothing is written**, the worker is told the split is
 lost, and the durable progress remains exactly what the live owner
 committed. Progress can replay; it can never regress. The same fence
@@ -67,7 +66,7 @@ swap and a stale plan is never published.
 ## Delivery contract
 
 At-least-once, nothing stronger. A cooperative revocation transfers
-cleanly — the owner drains and commits before releasing — but takeovers
+cleanly (the owner drains and commits before releasing), but takeovers
 and forced revocations may briefly overlap ownership: a taken-over split's
 uncommitted tail is replayed by the new owner, and a zombie may emit
 records for one commit interval before its next write fences. Overlaps
@@ -80,12 +79,12 @@ A split that keeps killing its owners (or that the source explicitly
 reports as unprocessable) consumes a delivery attempt per failed tenancy.
 At the attempt cap it is **quarantined**: parked, visible in the store
 and in `spate_coordination_splits_quarantined`, and never re-offered.
-Graceful releases and revocations — cooperative or forced — consume no
-attempts — only non-graceful ends are poison evidence.
+Graceful releases and revocations, cooperative or forced, consume no
+attempts. Only non-graceful ends are poison evidence.
 
 Quarantine deliberately blocks completion: a bounded job with quarantined
-splits finishes as **stalled**, not complete — declaring success over
-planned-but-unprocessed data would dress loss up as a green exit. The
+splits finishes as **stalled**, not complete, so planned-but-unprocessed
+data never reports as a successful exit. The
 embedding source decides whether a stall is fatal (the default) or a
 drain-with-warning.
 
@@ -93,26 +92,25 @@ drain-with-warning.
 
 A planner declares its enumeration **final** (a bounded backfill) or
 **open** (a discovery job the leader re-plans on an interval). For final
-plans, once every split has committed terminal progress, every worker —
-including idle standbys that never owned a split — observes completion
-and drains. The standby matters: it covers an owner dying at the finish
-line.
+plans, once every split has committed terminal progress, every worker,
+including idle standbys that never owned a split, observes completion
+and drains. The standby covers an owner dying at the finish line.
 
 ## Why an external store
 
 An earlier design coordinated instances over the checkpoint object store
 itself, using its conditional writes, trading latency for zero extra
 infrastructure. It was rejected on review before merging: it made an
-object store the required substrate for *every* coordinated source — a
-database source would have deployed one purely to coordinate — and object-store
+object store the required substrate for *every* coordinated source (a
+database source would have deployed one purely to coordinate), and object-store
 round-trips are poll-based and slow, which caps how fast work can be
 distributed. The full record of that reversal lives in the
 [ADR-0024](../../adr/0024-coordination-store-external-kv.md). The store dependency is deliberately
 narrow: six primitives (create-if-absent, compare-and-swap, guarded
 delete, point read, prefix watch, listing) behind a public trait, so
 Redis- or etcd-class backends can be added without touching the protocol.
-Correctness never leans on the store's clock or its watch semantics —
-fencing is the only correctness mechanism; the store supplies latency.
+Correctness never leans on the store's clock or its watch semantics.
+Fencing is the only correctness mechanism; the store supplies latency.
 
 ## What this is not
 
@@ -120,8 +118,8 @@ fencing is the only correctness mechanism; the store supplies latency.
 - **Not a data path.** Only coordination metadata (split records, leases,
   the plan) touches the store; records flow through the pipeline as
   always.
-- **Not required.** A single instance without a coordinator behaves
-  exactly as before; coordination is opt-in per source.
+- **Not required.** A single instance without a coordinator is
+  unaffected; coordination is opt-in per source.
 
 Continue with [Scaling out](../05-deployment/scaling-out.mdx) for
 deployment, or [Custom sources](../06-extending/custom-source.mdx#coordination-aware-sources)

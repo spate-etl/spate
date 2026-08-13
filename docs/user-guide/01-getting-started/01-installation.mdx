@@ -1,6 +1,6 @@
 # Installation
 
-Applications depend on exactly one crate: the `spate` facade. It re-exports
+Applications depend on exactly one crate, the `spate` facade. It re-exports
 the engine (`spate-core`) at the root and forwards connector crates behind
 cargo features, so your dependency list stays a single line no matter which
 connectors you use.
@@ -21,7 +21,7 @@ and the [memory connector](../04-connectors/memory.mdx)).
 
 ## Feature matrix
 
-The default feature set is empty — a bare `spate` gives you the full engine
+The default feature set is empty. A bare `spate` gives you the full engine
 (operator chains, checkpointing, backpressure, metrics, the pipeline
 builder) with no connectors. Enable what you need:
 
@@ -59,7 +59,7 @@ is documented as exempt from Spate's stability promises.
 - **MSRV: Rust 1.94** — checked in CI, on a rolling N-2 policy.
 - **Edition 2024.**
 - The `kafka` feature builds `rdkafka`, which compiles librdkafka from
-  vendored sources — a working C toolchain on the build host is all it
+  vendored sources. A working C toolchain on the build host is all it
   needs (the standard `rust` Docker images qualify), and the first build
   takes a few minutes. The [Docker guide](../05-deployment/docker.mdx)
   shows the flagship build image.
@@ -70,7 +70,7 @@ is documented as exempt from Spate's stability promises.
 cargo check
 ```
 
-Then head to the [Quickstart](02-quickstart.mdx) — it runs a full pipeline
+Then head to the [Quickstart](02-quickstart.mdx), which runs a full pipeline
 with zero infrastructure, using only what you just installed.
 
 ## API documentation

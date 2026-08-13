@@ -8,7 +8,7 @@
 ## Context and problem statement
 
 A coordinated source needs a coordination backend. The natural-looking place to
-say which one is the source's own configuration section — the same place its
+say which one is the source's own configuration section, the same place its
 bucket and credentials live.
 
 That does not scale. Every coordinated source would need configuration for every
@@ -30,7 +30,7 @@ right owner of "which store". It is where the dependency is already declared,
 and it is the one place that knows what infrastructure the deployment has.
 
 A source accepts a boxed coordinator and keeps in its YAML only what shapes the
-work itself — planner knobs like the split target size and whether to refresh the
+work itself, planner knobs like the split target size and whether to refresh the
 listing. Nothing about *where coordination lives* appears in a connector's
 configuration or features. A new backend is then a new crate implementing the
 store trait, with **zero connector changes**.
@@ -50,7 +50,7 @@ owns the seam, the deployer supplies the implementation.
   supports every backend automatically.
 - Good, because connector cargo features stay about the connector rather than
   about infrastructure.
-- Bad, because coordination cannot be configured from YAML — switching backends
+- Bad, because coordination cannot be configured from YAML. Switching backends
   is a code change and a redeploy, not a configuration change.
 - Bad, because assembly is now the only place the wiring is visible, so a reader
   of the configuration file cannot tell how the source coordinates.

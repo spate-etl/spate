@@ -9,8 +9,8 @@
 
 An instance disappearing is usually not a failure. A rolling restart takes each
 pod down and brings it back within seconds, and reassigning its splits the moment
-it goes means the fleet churns work that is about to come home — every pod in the
-rollout causing a full rebalance, twice.
+it goes means the fleet churns work that is about to come home, with every pod in
+the rollout causing a full rebalance, twice.
 
 But withholding work is not free either: while the splits are held back, nobody
 is reading them.
@@ -28,8 +28,8 @@ Chosen option: "Withhold for a delay, cancelled the moment it reappears", with a
 default of 20 seconds.
 
 The default is deliberately **short**, and the reasoning is specific to this
-source model rather than borrowed. Starting a split is cheap here — read a
-descriptor, spawn a fetcher — unlike joining a consumer group, which rebuilds a
+source model rather than borrowed. Starting a split is cheap here (read a
+descriptor, spawn a fetcher), unlike joining a consumer group, which rebuilds a
 connector's clients and re-establishes broker connections. **When starting is
 cheap, idle work costs more than movement**, so the balance tips toward
 reassigning sooner than a broker-based system would.
@@ -37,7 +37,7 @@ reassigning sooner than a broker-based system would.
 **Zero takes a distinct code path** meaning "immediately", rather than flowing
 through the general path as a delay of zero duration. That is a deliberate shape:
 a delay knob whose zero is just another value is how "reassign at once" silently
-becomes "withhold indefinitely" — an off-by-one or a comparison flipped the wrong
+becomes "withhold indefinitely". An off-by-one or a comparison flipped the wrong
 way turns the fast path into a stall, and it looks like nothing at all. Making
 zero a separate branch means the bug is not expressible, and a regression test
 asserts it.

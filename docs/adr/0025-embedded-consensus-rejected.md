@@ -9,7 +9,7 @@
 
 Coordinating ownership of work across instances is a distributed-agreement
 problem, and the textbook answer to distributed agreement is a consensus
-protocol. Embedding one — Raft inside the workers — would remove the external
+protocol. Embedding one (Raft inside the workers) would remove the external
 store dependency that [ADR-0024](0024-coordination-store-external-kv.md)
 introduces.
 
@@ -21,8 +21,8 @@ introduces.
 ## Decision outcome
 
 Chosen option: "Depend on an external store", because the problem needs
-linearizability at exactly one point — the per-split ownership commit — and that
-is precisely what a single compare-and-set provides. Consensus would be buying a
+linearizability at exactly one point, the per-split ownership commit, and that
+is what a single compare-and-set provides. Consensus would be buying a
 guarantee the fence already gives.
 
 The decisive argument is operational rather than theoretical. **A voter set
@@ -37,9 +37,9 @@ weighing.
 **Centralizing assignment does not reopen this.** A later change made the leader
 compute the whole assignment rather than workers negotiating it
 ([ADR-0038](0038-leader-computed-sticky-assignment.md)), which looks like it
-needs the leader to be authoritative — and therefore like it needs consensus to
+needs the leader to be authoritative, and therefore like it needs consensus to
 elect. It does not, because an assignment carries **no correctness**. A stale
-leader, a split-brained pair of leaders, or simply a wrong leader can produce bad
+leader, a split-brained pair of leaders, or a wrong leader can produce bad
 balance, but never two owners of one split, because the durable record's
 compare-and-set still decides ownership. The worst a bad leader can do is
 distribute work poorly.
@@ -48,7 +48,7 @@ distribute work poorly.
 
 - Good, because workers stay stateless and disposable, so the fleet scales to
   zero and back without a membership protocol.
-- Good, because there is one mechanism to reason about for safety — the fence —
+- Good, because there is one mechanism to reason about for safety, the fence,
   rather than a consensus layer and a fence that must agree.
 - Bad, because a store dependency is a runtime dependency with its own
   availability, and when it is down, coordination stops.

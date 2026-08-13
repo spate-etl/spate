@@ -13,7 +13,7 @@ work that way: a produce call enqueues a message locally and returns, and
 durability is reported later, per message, through a delivery-report callback.
 
 So the connector has to turn N per-message reports into one per-batch outcome,
-without blocking the callback — librdkafka invokes it from its own poll thread —
+without blocking the callback, which librdkafka invokes from its own poll thread,
 and without allocating per message at batch sizes reaching hundreds of thousands.
 
 ## Considered options
@@ -37,7 +37,7 @@ decrements and never blocks. The write awaits the countdown once, and returning
 Fire-and-forget was rejected outright: it would resolve acknowledgments from a
 local enqueue, so offsets would commit ahead of durability, which is
 at-most-once wearing at-least-once's clothes. Per-message futures were rejected
-on cost — at 500,000 messages in a batch, that is 500,000 allocations and wakers
+on cost. At 500,000 messages in a batch, that is 500,000 allocations and wakers
 for one outcome.
 
 ### Consequences

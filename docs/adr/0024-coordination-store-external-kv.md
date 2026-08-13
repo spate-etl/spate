@@ -16,9 +16,9 @@ and was the argument at the time.
 Then the requirement changed. What began as "coordinate one object-storage
 backfill" became "a general work-distribution seam" that any broker-less source
 could use. With that, the object store stops being incidental infrastructure the
-source already needed and becomes the substrate for *every* coordinated source —
-and its poll-based round trips, on the order of 10 to 100 ms, cap how fast work
-can be distributed.
+source already needed and becomes the substrate for *every* coordinated source.
+Its poll-based round trips, on the order of 10 to 100 ms, cap how fast work can
+be distributed.
 
 ## Considered options
 
@@ -37,13 +37,13 @@ that will ever use the seam.
 
 The store supplies **latency and watch, never safety**. Correctness lives
 entirely in the fencing protocol
-([ADR-0026](0026-coordination-fencing.md)) — the store's job is to make the
+([ADR-0026](0026-coordination-fencing.md)). The store's job is to make the
 protocol fast, not to make it correct. That separation is what keeps the trait
 small: compare-and-set, a TTL keyspace, watch, and list, six primitives in all,
 so a Redis or etcd backend is one implementation away.
 
 This reverses a decision taken and implemented; the earlier design's pull request
-was closed unmerged. The reversal is recorded rather than quietly dropped,
+was closed unmerged. The reversal is recorded rather than dropped,
 because the reasoning that led to it was sound for the requirement it was given.
 
 ### Consequences
@@ -53,25 +53,25 @@ because the reasoning that led to it was sound for the requirement it was given.
 - Good, because `watch` exists, so a worker learns about a change instead of
   discovering it on its next poll.
 - Bad, because a coordinated deployment now needs infrastructure it did not
-  before. That is a real operational cost, and the in-process store exists so a
+  before. That is an operational cost, and the in-process store exists so a
   single-instance deployment does not pay it.
 - Bad, because the trait's six primitives are a contract we now have to hold
-  stable across backends, and a store whose semantics differ subtly — a
-  compare-and-set that is not linearizable — would be unsound in a way the trait
+  stable across backends, and a store whose semantics differ subtly, such as a
+  compare-and-set that is not linearizable, would be unsound in a way the trait
   cannot express.
 
 ### Confirmation
 
 Correctness does not depend on the store beyond linearizable compare-and-set;
-[ADR-0026](0026-coordination-fencing.md) states what is actually relied on. The
+[ADR-0026](0026-coordination-fencing.md) states what is relied on. The
 in-memory store implementation doubles as the test backend, so the seam is
 exercised by every coordination test.
 
 ## More information
 
 - Landed in `d92b3d4` (#40).
-- The superseded object-store design was never recorded in the decision log —
-  its pull request was closed unmerged, so there is no earlier record to
+- The superseded object-store design was never recorded in the decision log.
+  Its pull request was closed unmerged, so there is no earlier record to
   supersede. Its reasoning is preserved in the context above rather than in a
   record of its own.
 - [ADR-0025](0025-embedded-consensus-rejected.md) — why the third option stays

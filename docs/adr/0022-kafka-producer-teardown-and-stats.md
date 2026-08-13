@@ -13,7 +13,8 @@ something.
 Teardown: the sink holds a producer with messages queued and in flight, and each
 carries a raw opaque pointer to its batch's countdown
 ([ADR-0016](0016-kafka-sink-ack-wiring.md)). Dropping that naively would leak the
-countdowns and could hang shutdown waiting for messages nobody will report on.
+countdowns and could hang shutdown waiting for messages that will never be
+reported on.
 
 Statistics: librdkafka reports produce-queue depth both in aggregate and per
 partition. Per-partition detail is more useful for diagnosing a hot partition,
@@ -29,7 +30,7 @@ but it multiplies series count by partition count.
 ## Decision outcome
 
 Chosen for teardown: "Rely on rdkafka's own `Drop`", because it already does the
-right thing and the purge closes the loop for free — **purged messages' delivery
+right thing and the purge closes the loop for free. **Purged messages' delivery
 reports still fire, and those reports reclaim the countdown opaques.** A custom
 `Drop` would duplicate that logic and then have to be kept correct as the client
 changes, for no behavior we do not already get. The whole sequence is bounded at
@@ -37,7 +38,7 @@ roughly 600 ms.
 
 Chosen for statistics: "Aggregate only, deferred". Not because per-partition
 detail is unwanted, but because the metrics attachment seam has no
-per-partition-detail channel today — that is a source-side concept, and the sink
+per-partition-detail channel today. That is a source-side concept, and the sink
 has no equivalent. Adding one is additive and can happen when the need is
 concrete rather than anticipated.
 
@@ -51,8 +52,8 @@ concrete rather than anticipated.
 - Bad, because teardown behavior is inherited rather than owned: a change to
   rdkafka's `Drop` semantics would change ours silently, and the 600 ms bound is
   theirs to move.
-- Bad, because a hot partition is currently invisible from the sink's metrics —
-  the aggregate queue depth shows pressure but not where.
+- Bad, because a hot partition is currently invisible from the sink's metrics.
+  The aggregate queue depth shows pressure but not where.
 
 ### Confirmation
 

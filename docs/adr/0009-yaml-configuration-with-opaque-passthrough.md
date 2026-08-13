@@ -9,7 +9,7 @@
 
 A deployment needs to change broker addresses, batch sizes and credentials
 without recompiling. But the framework cannot know the shape of a connector's
-configuration — that is the connector's business, and a framework-owned schema
+configuration. That is the connector's business, and a framework-owned schema
 covering every connector would have to change whenever any of them did.
 
 Separately, the YAML library situation in Rust was unsettled: `serde_yaml` is
@@ -39,14 +39,14 @@ table syntax makes nesting painful. Configuration-in-code-only was rejected for
 the operational reason: a rebuild to change a broker address is not viable in a
 container image.
 
-The topology stays in code regardless — YAML configures connectors and tuning,
+The topology stays in code regardless. YAML configures connectors and tuning,
 never the operator graph. That boundary is what keeps the chain monomorphized.
 
 Library choice: **`yaml_serde`**, whose provenance was verified rather than
 assumed. It is the YAML organization's own successor, at
 `github.com/yaml/yaml-serde`, published by the maintainer who co-created YAML.
-Given that both obvious candidates were unusable — one archived, one with an
-advisory — checking who actually publishes the replacement was the minimum due
+Given that both obvious candidates were unusable, one archived and one carrying
+an advisory, checking who publishes the replacement was the minimum due
 diligence.
 
 ### Consequences
@@ -56,7 +56,7 @@ diligence.
 - Good, because unknown keys are rejected everywhere rather than silently
   ignored, so a typo fails at startup instead of at 3am.
 - Bad, because there is no single schema to validate a whole file against ahead
-  of time — validation happens when each component is constructed.
+  of time; validation happens when each component is constructed.
 - Bad, because a raw passthrough (the librdkafka property map) can express
   settings that break framework guarantees, which then needs a denylist rather
   than being impossible.
@@ -64,7 +64,7 @@ diligence.
 ### Confirmation
 
 `deny_unknown_fields` at every level of the typed section, and a validation
-denylist for passthrough properties that would break framework guarantees — for
+denylist for passthrough properties that would break framework guarantees, for
 example `enable.auto.offset.store`, which would let the client commit offsets the
 checkpointer has not authorized.
 

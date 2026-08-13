@@ -9,12 +9,12 @@
 
 Assembling a pipeline by hand meant installing telemetry, installing the metrics
 exporter, building an I/O runtime, constructing a source and a sink, wiring
-queues, and running the whole thing — in an order where several steps are
+queues, and running the whole thing, in an order where several steps are
 silently wrong if taken out of sequence. The sharpest was metrics: a handle binds
 to whichever recorder exists when it is constructed, so anything built before
 `metrics::install` records into the void, with no error and no missing series to
-notice. The ordering was documented, which is another way of saying it was
-somebody's responsibility to remember.
+notice. The ordering was documented, which is another way of saying it had to be
+remembered.
 
 ## Considered options
 
@@ -51,7 +51,7 @@ Four design points, each earned by a specific footgun:
   construction remains one explicit line.
 
 The registry was rejected on principle: topology is code-defined, and a
-tag-to-constructor registry would reintroduce it as data — the thing
+tag-to-constructor registry would reintroduce it as data, the thing
 [ADR-0009](0009-yaml-configuration-with-opaque-passthrough.md) deliberately keeps
 YAML out of.
 
@@ -69,9 +69,9 @@ monomorphized behind the same one-call-per-batch boundary.
 - Bad, because two assembly paths now exist. The manual primitives stay public
   and semver-committed, so both have to keep working and the convenience layer
   has to document its exact desugaring.
-- Bad, because connector-typed flows the framework cannot name — the ClickHouse
-  schema validation path producing an encoder — stay concrete pre-steps outside
-  the trait, so the seam is not quite uniform.
+- Bad, because connector-typed flows the framework cannot name, such as the
+  ClickHouse schema validation path producing an encoder, stay concrete
+  pre-steps outside the trait, so the seam is not quite uniform.
 
 ### Confirmation
 

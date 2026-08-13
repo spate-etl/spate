@@ -12,7 +12,7 @@ to block. The obvious place is the backend: it holds the store connection and
 the watch subscription, so it knows when a coordination event arrives.
 
 But coordination events are not the only thing worth waking for. A lane reaching
-**end of input** — on a pipeline thread, entirely outside the backend's view — is
+**end of input**, on a pipeline thread and entirely outside the backend's view, is
 what triggers a terminal commit and frees the split. A backend that owns the wait
 can only ever be woken by half the things that matter.
 
@@ -41,8 +41,8 @@ single-slot waker, which lanes clone and signal on two edges: end of input, and
 poison.
 
 The waker setter is deliberately **not defaulted**. A default would let a backend
-silently skip it and park internally, which is strictly the worst arrangement —
-the backend parks *and* the driver parks on top, so a wakeup has to traverse
+silently skip it and park internally, which is strictly the worst arrangement.
+The backend parks *and* the driver parks on top, so a wakeup has to traverse
 both. Making it required means a backend that has not thought about this does not
 compile.
 
@@ -55,7 +55,7 @@ compile.
 - Bad, because "must not block" is a contract on a trait method that the type
   system cannot express, so a backend violating it compiles and misbehaves
   subtly.
-- Bad, because the waker is single-slot, so signals coalesce — the driver learns
+- Bad, because the waker is single-slot, so signals coalesce. The driver learns
   that *something* happened, not what or how many.
 
 ### Confirmation

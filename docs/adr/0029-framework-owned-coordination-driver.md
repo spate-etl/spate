@@ -13,7 +13,7 @@ sweeping for completion, and turning all of it into the lane assignment and
 revocation events the pipeline runtime understands.
 
 None of that is specific to object storage. Any broker-less source needs the
-same sequence. But it is also where the subtle bugs live — the ordering
+same sequence. But it is also where the subtle bugs live, the ordering
 mistakes that only appear under a rebalance during a drain.
 
 ## Considered options

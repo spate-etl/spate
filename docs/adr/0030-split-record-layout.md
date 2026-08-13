@@ -7,10 +7,10 @@
 
 ## Context and problem statement
 
-A split has to persist two very different things. Its **specification** — which
-objects it covers, with their keys and versions — is written once at planning
+A split has to persist two very different things. Its **specification** (which
+objects it covers, with their keys and versions) is written once at planning
 time and never changes, and for a bin-packed object list it can run to hundreds
-of kilobytes. Its **progress** — owner, epoch, attempt count, watermark — is
+of kilobytes. Its **progress** (owner, epoch, attempt count, watermark) is
 small and is rewritten on every claim, fence and commit.
 
 Under a single-record layout, every commit rewrites the descriptor too. Commit
@@ -37,9 +37,9 @@ A second problem is solved alongside it. The count of planned splits is
 **recounted from an authoritative listing at every publish**, rather than carried
 forward. Without that, a leader that crashed between seeding the split records
 and publishing the plan would leave the two permanently disagreeing, and terminal
-detection — "are all splits complete?" — would be wrong forever with nothing to
+detection ("are all splits complete?") would be wrong forever with nothing to
 correct it. Recounting makes that failure self-healing: the next publish observes
-what actually exists.
+what exists.
 
 ### Consequences
 
@@ -48,15 +48,15 @@ what actually exists.
 - Good, because a leader crash mid-publish heals on the next publish instead of
   desynchronizing terminal detection permanently.
 - Bad, because a split is now two keys that must be created and cleaned up
-  together, and a spec without progress — or the reverse — is a state the code
+  together, and a spec without progress, or the reverse, is a state the code
   has to tolerate.
 - Bad, because recounting at every publish costs an authoritative listing each
   time, which is the expensive operation on an object store.
 
 ### Confirmation
 
-The recount is what holds terminal detection, and the failure it prevents — a
-crash between seeding and publishing — is exercised directly in the coordination
+The recount is what holds terminal detection, and the failure it prevents, a
+crash between seeding and publishing, is exercised directly in the coordination
 test suite.
 
 ## More information

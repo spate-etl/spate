@@ -14,9 +14,9 @@ the client, and the client is designed to be one long-lived instance per
 process, not one per shard.
 
 Mapping shards onto producers would mean several clients against one cluster,
-each batching independently — and librdkafka's statistics counters are
-absolute, so several clients reporting into one metric family would produce
-sums that mean nothing.
+each batching independently. And librdkafka's statistics counters are absolute,
+so several clients reporting into one metric family would produce sums that mean
+nothing.
 
 ## Considered options
 
@@ -33,10 +33,10 @@ because the absolute-mapped statistics counters are only sound with a single
 client.
 
 Framework shards remain as worker parallelism. Each has one replica, so replica
-rotation degenerates to a no-op — but the rest of the pool machinery keeps
-working and keeps earning its place: the circuit breaker still quarantines a
-failing destination, and `spate_sink_shard_healthy` still provides the
-backpressure signal that stalls intake.
+rotation degenerates to a no-op, but the rest of the pool machinery keeps
+working: the circuit breaker still quarantines a failing destination, and
+`spate_sink_shard_healthy` still provides the backpressure signal that stalls
+intake.
 
 Collapsing to a single shard was rejected because it would remove that
 machinery entirely, along with the concurrency the workers provide.
@@ -47,7 +47,7 @@ machinery entirely, along with the concurrency the workers provide.
   connection pool is shared as librdkafka intends.
 - Good, because the framework's breaker and health signaling work unchanged,
   with no Kafka-specific backpressure path.
-- Bad, because replica rotation is dead code in this connector — present,
+- Bad, because replica rotation is dead code in this connector. It is present,
   exercised by no Kafka deployment, and potentially confusing to read.
 - Bad, because shard count means something different here than for a sharded
   database sink: it is write concurrency, not placement. Raising it past a small

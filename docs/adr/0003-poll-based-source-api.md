@@ -7,8 +7,8 @@
 
 ## Context and problem statement
 
-A source has to do two unrelated jobs: service lifecycle events — assignment,
-revocation, watermark commits, pause and resume — and hand records to the
+A source has to do two unrelated jobs: service lifecycle events (assignment,
+revocation, watermark commits, pause and resume), and hand records to the
 pipeline as fast as the pipeline can take them. The second job is on the hot
 path and the first is not, and the shape chosen for the second decides whether
 records can be handed over as **borrowed** bytes or have to be copied.
@@ -29,16 +29,16 @@ the pipeline where a per-record allocation is least affordable.
 
 Chosen option: "A poll-based API split in two", because it is what allows a
 payload to be handed to the operator chain as a borrow of the source's own
-buffer, and because the two jobs have genuinely different shapes — the control
-plane is called from one thread and returns events, while a lane is pinned to a
-pipeline thread and returns batches.
+buffer, and because the two jobs have different shapes. The control plane is
+called from one thread and returns events, while a lane is pinned to a pipeline
+thread and returns batches.
 
-The split has a second consequence that matters more than it first appears:
-because a lane is pinned to one thread and its payloads never cross a thread
-boundary, **deserialization has to happen on the pipeline thread**. That is not
-a separate decision so much as the same one seen from the other end — the borrow
-lifetimes force it. It also happens to be where the CPU work belongs, since
-those threads are the ones that can be pinned to cores.
+The split has a second consequence. Because a lane is pinned to one thread and
+its payloads never cross a thread boundary, **deserialization has to happen on
+the pipeline thread**. That is not a separate decision so much as the same one
+seen from the other end, since the borrow lifetimes force it. It also happens to
+be where the CPU work belongs, since those threads are the ones that can be
+pinned to cores.
 
 A single combined trait was rejected because a rebalance callback and a hot poll
 loop have different callers, different frequencies and different failure modes,
@@ -48,7 +48,7 @@ and merging them makes every source implement locking it does not need.
 
 - Good, because a record can borrow from the source's buffer for its whole life,
   so the chain allocates nothing per record.
-- Good, because CPU work — decode, operators, encode — lands on threads that can
+- Good, because CPU work (decode, operators, encode) lands on threads that can
   be pinned, and the async runtime is left to do I/O.
 - Bad, because a connector author implements two traits instead of one, and has
   to understand which of their methods runs on which thread.
@@ -65,7 +65,7 @@ never blocking on a channel send.
 ## Evidence
 
 The borrowed arm of the production chain emits a record roughly every 10 ns and
-allocates a fixed handful per *batch* — none per record — where the owned
+allocates a fixed handful per *batch*, none per record, where the owned
 equivalent allocates once per record. Measured by
 `crates/spate-core/benches/chain_wall.rs`, with
 `crates/spate-core/tests/chain_alloc.rs` holding it to absolute bounds under a
@@ -82,4 +82,4 @@ spike-measured and hand-recorded, with no committed rig.
 - [ADR-0013](0013-zero-copy-seam.md) — the erasure boundary that lets these
   borrowed types cross into a `dyn` object.
 - [Writing a source](../user-guide/06-extending/custom-source.mdx) — what
-  implementing the two traits actually involves.
+  implementing the two traits involves.

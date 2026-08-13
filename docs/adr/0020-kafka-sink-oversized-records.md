@@ -8,7 +8,7 @@
 ## Context and problem statement
 
 A single record can be too large for the broker to accept. That is a
-**record-level** problem — one bad record among many good ones — and
+**record-level** problem, one bad record among many good ones, and
 [ADR-0010](0010-skip-or-fail-record-error-policies.md) says record-level problems
 get a Skip or Fail policy.
 
@@ -36,8 +36,8 @@ like any other record-level error.
 The same value is then applied client-side as librdkafka's `message.max.bytes`.
 That gives a useful property: because every record was already checked against
 that limit at encode time, **a writer-side size rejection can only mean the
-broker's limit is lower than ours** — a misconfiguration, not a data problem. So
-it is fatal rather than retried, and the error says so.
+broker's limit is lower than ours**, a misconfiguration and not a data problem.
+So it is fatal rather than retried, and the error says so.
 
 Letting the broker reject was rejected because it converts a record-level
 problem into a batch-level one, and the batch has no policy to apply.
@@ -46,9 +46,9 @@ problem into a batch-level one, and the batch has no policy to apply.
 
 - Good, because an oversized record follows the same Skip or Fail semantics as a
   malformed one, with the same metrics.
-- Good, because a size error from the writer is unambiguous — it means the
-  broker limit and the configured limit disagree — so it fails fast instead of
-  retrying forever.
+- Good, because a size error from the writer is unambiguous, meaning the broker
+  limit and the configured limit disagree, so it fails fast instead of retrying
+  forever.
 - Bad, because the limit is configured in two places from one value, and an
   operator reading the librdkafka properties will see `message.max.bytes` set by
   the framework rather than by them.

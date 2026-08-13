@@ -7,7 +7,7 @@
   step with it. The underscore prefix keeps Docusaurus from rendering it.
 
   The format is MADR 4.0.0 (https://adr.github.io/madr/), minimal variant, with
-  two additions of our own — `Confirmation` and `Evidence`. Where we depart from
+  two additions of our own, `Confirmation` and `Evidence`. Where we depart from
   upstream MADR the departure is noted below, so the next person can tell a
   decision from a mistake.
 
@@ -20,13 +20,13 @@
 
   A decision does NOT earn one when it is none of those: a dependency bump,
   a rename, a formatting choice, a fix with only one sensible shape. Nor when
-  an existing ADR already covers it — amend nothing, write nothing, just cite
+  an existing ADR already covers it. Amend nothing, write nothing, just cite
   it.
 
   This exclusion rule is the whole guard against decay. Decision logs die by
-  filling with records nobody needed, not by missing one; when every commit
-  seems to want an ADR, people stop writing them at all. "No ADR" should be a
-  decision this rule makes, not a rule somebody forgot.
+  filling with unneeded records, not by missing one; when every commit seems to
+  want an ADR, people stop writing them at all. "No ADR" should be a decision
+  this rule makes, not an oversight.
 
   ---------------------------------------------------------------------------
   THE RULES
@@ -34,9 +34,9 @@
   One decision per record. A record arguing three things is three records.
 
   Accepted records are immutable. Never rewrite the body of an accepted ADR to
-  say something different — that is exactly the failure that motivated moving
-  off the decision-log table, where reversals were written over the decisions
-  they reversed and the originals were lost. A changed decision is a NEW ADR.
+  say something different. That is the failure that motivated moving off the
+  decision-log table, where reversals were written over the decisions they
+  reversed and the originals were lost. A changed decision is a NEW ADR.
   The old one keeps its body, gains `Superseded by`, and the new one names what
   it replaces. Both directions, always.
 
@@ -64,7 +64,7 @@
   in `Considered options` below rather than in a file of its own.
 
   `deprecated` is for a decision that stopped applying without anything
-  replacing it — a knob that was removed rather than changed.
+  replacing it, such as a knob that was removed rather than changed.
 
   Status is a body line rather than YAML front matter, which is where upstream
   MADR 4 puts it. `docs/STYLE.md` §8 forbids front matter on published pages:
@@ -90,7 +90,7 @@ REPLACE-ME
 
 <!--
   Two or three sentences, or a question. What forces were in play, stated
-  value-neutrally — the reader should be able to disagree with the outcome
+  value-neutrally. The reader should be able to disagree with the outcome
   without disputing the context.
 
   Make the scope explicit by naming the components involved. "The sink worker's
@@ -111,8 +111,9 @@ REPLACE-ME
   that makes a decision record worth more than a commit message, and it is the
   first thing lost when a record is written from memory.
 
-  Do not pad it with an option nobody would have taken. An alternative included
-  to make the chosen one look better is worse than listing one option honestly.
+  Do not pad it with an option that would never have been taken. An alternative
+  included to make the chosen one look better is worse than listing one option
+  honestly.
 -->
 
 ## Decision outcome
@@ -126,7 +127,7 @@ Chosen option: "REPLACE-ME", because REPLACE-ME.
 
 <!--
   At least one of each. A record with no `Bad, because` line is either not
-  finished or not honest — every decision worth recording cost something, and
+  finished or not honest. Every decision worth recording cost something, and
   naming the cost is what lets a future reader recognize when the trade has
   stopped paying.
 
@@ -160,23 +161,24 @@ REPLACE-ME
   measurement. An empty Evidence section reads as though a number was lost.
 
   Measured claims only, each with its provenance. A figure with no provenance
-  is an assertion, and this repository has learned to tell the difference: some
-  of our load-bearing numbers came from rigs that no longer exist, and saying
-  so is what keeps them usable. Acceptable provenance lines look like:
+  is an assertion, and this repository has learned to tell the difference:
+  some of the numbers these decisions rest on came from rigs that no longer
+  exist, and saying so is what keeps them usable. Acceptable provenance lines
+  look like:
 
     Measured by `crates/spate-core/benches/chain_wall.rs`.
     Spike-measured, hand-recorded; no committed rig.
     Measured by a rig this repository no longer carries.
 
   State what the number does NOT establish where that has caught someone
-  before — an A/B whose arms differ in more than one way measures the pair,
-  not either arm.
+  before. An A/B whose arms differ in more than one way measures the pair, not
+  either arm.
 -->
 
 ## More information
 
 <!--
-  The commit or pull request that landed the decision — this is what makes the
+  The commit or pull request that landed the decision. This is what makes the
   `Date` above citable rather than asserted. Then related ADRs, and the user
   guide pages that describe the resulting behavior.
 

@@ -30,9 +30,9 @@ makes a replan **create-if-absent**: the same work computes the same id, so a
 second planner run over unchanged input is a no-op rather than a duplication. A
 leader failover mid-job costs nothing.
 
-The character constraint is not cosmetic. An id embeds in store keys, and
-backends differ in what they accept in a key — the conservative alphabet works
-everywhere, so a new backend never needs an escaping scheme.
+An id embeds in store keys, and backends differ in what they accept in a key.
+The conservative alphabet works everywhere, so a new backend never needs an
+escaping scheme.
 
 Sequential ids were rejected because allocation requires a leader to be
 authoritative, which [ADR-0025](0025-embedded-consensus-rejected.md) deliberately
@@ -44,7 +44,7 @@ avoids. Random ids were rejected because they make replanning destructive.
   unchanged work.
 - Good, because ids are portable across store backends without escaping.
 - Bad, because the id is derived from content, so any change to how a split is
-  composed changes every id — a repacking is a new set of splits, and progress
+  composed changes every id. A repacking is a new set of splits, and progress
   against the old ones is orphaned. That has to be handled as an explicit epoch
   rather than happening by accident.
 - Bad, because a derivation collision would silently merge two distinct splits,

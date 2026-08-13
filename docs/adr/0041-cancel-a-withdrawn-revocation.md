@@ -9,11 +9,11 @@
 
 [ADR-0039](0039-split-revocation-cooperative-then-forced.md) gives a revocation a
 deadline: drain cooperatively, or be forced. But a leader can change its mind
-mid-drain — it names the split for its current owner again, while that owner
+mid-drain. It names the split for its current owner again, while that owner
 still holds it, because a subsequent rebalance made the move unnecessary.
 
-The pending forced release is now protecting a handoff nobody is waiting for.
-Letting it fire charges a replay for nothing.
+The pending forced release is now protecting a handoff with nothing waiting on
+it. Letting it fire charges a replay for nothing.
 
 ## Considered options
 
@@ -29,7 +29,7 @@ mattering.
 
 The deadline exists to serve the **rebalance**. Once the leader withdraws the
 move there is no rebalance left to protect, so forcing would charge a replay for
-a handoff nobody is waiting on. Hence the cancel — whose only effect is on a
+a handoff with nothing waiting on it. Hence the cancel, whose only effect is on a
 drain slower than the deadline, since a faster one was never going to be forced.
 
 But cancelling ends the *revocation*, not necessarily the *drain*. Resuming
@@ -38,8 +38,8 @@ deliberately lacks, so a drain in flight still runs to completion and hands the
 split back, after which the same worker re-claims it replay-free.
 
 What the cancel must **not** drop is the obligation to keep the split readable. A
-wedged drain with nothing over it would leave the split owned, leased, and read
-by nobody forever — and a bounded job containing it could never finish. So the
+wedged drain with nothing over it would leave the split owned, leased and unread
+forever, and a bounded job containing it could never finish. So the
 deadline stays in a weaker form: a **no-progress timeout**. If nothing commits
 for the deadline's duration, release it and let the same worker re-claim with a
 fresh lane. A live drain commits as its tail acknowledges, so only a wedged one
@@ -51,9 +51,9 @@ trips it.
   for a handoff that was cancelled.
 - Good, because a wedged drain still cannot strand a split, so bounded jobs stay
   able to finish.
-- Bad, because there are now two timeout semantics over the same duration —
-  a hard deadline while a revocation is live, a no-progress timeout after it is
-  cancelled — and which applies depends on state that is not local to the timer.
+- Bad, because there are now two timeout semantics over the same duration
+  (a hard deadline while a revocation is live, a no-progress timeout after it is
+  cancelled), and which applies depends on state that is not local to the timer.
 - Bad, because a legitimately slow drain that commits nothing for the whole
   window is released and re-claimed, costing the replay the cancel was meant to
   avoid.
@@ -68,5 +68,5 @@ Both are in the coordination test suite, which is what caught the original defec
 
 - Landed in `9767280` (#68), amending
   [ADR-0039](0039-split-revocation-cooperative-then-forced.md) rather than
-  replacing it — the cooperative-then-forced shape is unchanged, and this
+  replacing it. The cooperative-then-forced shape is unchanged, and this
   records what happens on the withdrawal path it did not cover.

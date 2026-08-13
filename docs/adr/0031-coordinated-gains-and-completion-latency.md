@@ -8,7 +8,7 @@
 ## Context and problem statement
 
 The checkpointer's epoch model replaces every tracker when an assignment
-changes, because that is what a consumer-group rebalance does — full revocation
+changes, because that is what a consumer-group rebalance does, full revocation
 followed by full assignment. Applied to coordinated sources it is badly wrong in
 two ways.
 
@@ -16,7 +16,7 @@ A worker that merely *gains* a split would have to drain and reassign every lane
 it already holds, so a routine gain crashes commits that are mid-flight and costs
 a re-read of every uncommitted tail. And a split that finishes has to wait for
 its final acknowledgments to be noticed on a commit tick, so completion costs a
-tick quantum — with several splits in flight, that is a meaningful fraction of a
+tick quantum. With several splits in flight, that is a meaningful fraction of a
 short job.
 
 ## Considered options
@@ -45,11 +45,12 @@ coordinated sources experience.
 
 ### Consequences
 
-- Good, because a gain is free for lanes already running — no drain, no re-read.
+- Good, because a gain is free for lanes already running, with no drain and no
+  re-read.
 - Good, because split completion is bounded by one commit interval instead of a
   tick quantum divided by in-flight count.
-- Bad, because there are now two assignment paths — eager replacement and
-  additive extension — and a source that uses the wrong one is subtly incorrect
+- Bad, because there are now two assignment paths (eager replacement and
+  additive extension), and a source that uses the wrong one is subtly incorrect
   rather than obviously broken.
 - Bad, because lanes are never reused, so lane identifiers grow over a long job.
 

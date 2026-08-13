@@ -11,7 +11,7 @@ A delivery report can fail for many reasons, and the writer has to decide for
 each whether to retry the batch. Two things make this harder than it looks.
 
 A retry re-produces the **whole** sealed batch, including any prefix that was
-already delivered — the framing carries no per-message progress, and the
+already delivered. The framing carries no per-message progress, and the
 deduplication token that makes a ClickHouse retry idempotent has no Kafka
 equivalent. So every retry is a known duplicate window.
 
@@ -31,19 +31,19 @@ two-minute silence.
 
 Chosen option: "Classify as retryable unless provably permanent", because
 at-least-once means preferring replay to loss, and the default has to lean that
-way — but the permanent cases have to be carved out or the pipeline hides a
+way, but the permanent cases have to be carved out or the pipeline hides a
 clear failure behind a timeout.
 
 Authorization failures, unknown topic, and fenced idempotent-producer states are
-fatal: they will not resolve by trying again, and failing fast reports the actual
+fatal: they will not resolve by trying again, and failing fast reports the
 problem. Everything else retries.
 
 The stance is stated explicitly for one case rather than left implicit:
 `NotEnoughReplicasAfterAppend` means the append happened but the replication
-requirement was not met. Retrying it **knowingly duplicates** — the data is
-already there. That is the correct trade under at-least-once, and it is recorded
-here so the duplicate is understood as a decision rather than found later as a
-surprise.
+requirement was not met. Retrying it **knowingly duplicates**, because the data
+is already there. That is the correct trade under at-least-once, and it is
+recorded here so the duplicate is understood as a decision rather than found
+later as a surprise.
 
 Never retrying was rejected because it converts every transient broker hiccup
 into a pipeline restart.
@@ -57,8 +57,8 @@ into a pipeline restart.
   documented duplicate window alongside crash replay, and it is wider than the
   ClickHouse sink's because no token suppresses it.
 - Bad, because the classification is a list, and a broker error code not on it
-  is treated as retryable — the safe direction, but it means a new permanent
-  failure mode presents as a spin until somebody adds it.
+  is treated as retryable. That is the safe direction, but it means a new
+  permanent failure mode presents as a spin until the code is added to the list.
 
 ### Confirmation
 

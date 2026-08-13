@@ -9,7 +9,7 @@
 
 [ADR-0028](0028-deterministic-split-ids.md) requires split ids to be
 deterministic and derived from content. For the object-storage source, "content"
-is a list of object keys and their versions — which can be long, arbitrary, and
+is a list of object keys and their versions, which can be long, arbitrary, and
 chosen by whoever writes to the bucket.
 
 The id is **persisted identity**: progress is recorded against it. A collision
@@ -32,7 +32,7 @@ version", because it is fixed-length regardless of member count, uses the
 portable alphabet ids need, and is collision-resistant against chosen input.
 
 Concatenation was rejected on both length and safety: keys can be long enough to
-blow a store key limit, and a naive concatenation is trivially ambiguous — two
+blow a store key limit, and a naive concatenation is trivially ambiguous. Two
 different member sets can produce the same string when a key contains the
 separator. That is exactly the adversarial case that matters here.
 
@@ -42,8 +42,8 @@ progress. Including a **packing-version constant** means a change to the packing
 algorithm is an explicit epoch: every id changes at once, deliberately, rather
 than some splits coincidentally matching.
 
-The derivation is public, so out-of-process producers — an event-driven planner,
-a single-shot invocation — can mint identical ids for the same work.
+The derivation is public, so out-of-process producers (an event-driven planner,
+a single-shot invocation) can mint identical ids for the same work.
 
 ### Consequences
 
@@ -53,9 +53,9 @@ a single-shot invocation — can mint identical ids for the same work.
   object's progress.
 - Bad, because the id is opaque: an operator looking at a stuck split cannot tell
   from its id which objects it covers, and has to look up the spec record.
-- Bad, because a packing change orphans all existing progress. That is correct —
-  the splits genuinely are different — but it means a packing tweak is a
-  full re-run, not a rolling change.
+- Bad, because a packing change orphans all existing progress. That is correct,
+  since the splits are different, but it means a packing tweak is a full re-run,
+  not a rolling change.
 
 ### Confirmation
 

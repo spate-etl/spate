@@ -32,8 +32,8 @@ same handle, so the parent is satisfied only when every child is; a split clones
 per destination and merges with worst-status. None of those needed special
 cases.
 
-The handle is created **per poll batch** rather than per record — the
-Vector-finalizer shape — so the cost is one `Arc` clone and drop per record
+The handle is created **per poll batch** rather than per record, following the
+Vector-finalizer shape, so the cost is one `Arc` clone and drop per record
 rather than an allocation. When the last clone drops, the tuple of partition,
 sequence and status flows over an unbounded channel to the checkpointer, which
 keeps a ring of outstanding sequence numbers per partition and per epoch, pops
@@ -41,14 +41,13 @@ the contiguous acknowledged prefix, and advances the committable watermark.
 
 The inverted default was evaluated as structural hardening and **rejected for
 records, adopted for collections**: every legitimate record drop is
-framework-mediated and
-zero-ceremony today, and inverting would turn each into explicit bookkeeping
-whose failure mode — a forgotten `deliver()` — is a watermark stall that halts a
-pipeline on correct data. Teardown loss, the thing the inversion would have
-fixed, only materializes where acknowledgments travel in **bulk**, so the
-inversion is applied there instead: every *collection* of handles on the sink
-path is an `AckSet`, which fails its handles on drop and delivers only after a
-durable write.
+framework-mediated and zero-ceremony today, and inverting would turn each into
+explicit bookkeeping whose failure mode, a forgotten `deliver()`, is a watermark
+stall that halts a pipeline on correct data. Teardown loss, the thing the
+inversion would have fixed, only materializes where acknowledgments travel in
+**bulk**, so the inversion is applied there instead: every *collection* of
+handles on the sink path is an `AckSet`, which fails its handles on drop and
+delivers only after a durable write.
 
 ### Consequences
 
@@ -58,11 +57,11 @@ durable write.
 - Good, because the per-record cost is roughly two atomics, not an allocation.
 - Bad, because "drop means delivered" is a silent default, so any component
   holding handles for data not yet written must explicitly `fail()` them in its
-  `Drop` — the chain's terminal stage does this for parked chunks and partial
+  `Drop`. The chain's terminal stage does this for parked chunks and partial
   buffers, and sink workers for abandoned batches. Over-failing is always safe;
   it costs replay, never loss.
-- Bad, because two different defaults now exist — records deliver on drop,
-  collections fail on drop — and which applies has to be learned rather than
+- Bad, because two different defaults now exist (records deliver on drop,
+  collections fail on drop), and which applies has to be learned rather than
   inferred.
 
 ### Confirmation
@@ -77,7 +76,7 @@ drop, and worker or runtime teardown.
 - Landed in `c8973e6`; the contracts were frozen in `93229b3`.
 - The fail-by-default inversion was evaluated and recorded alongside the
   original design rather than as a later change; it is documented here because
-  the outcome — records deliver, collections fail — is one decision with two
+  the outcome (records deliver, collections fail) is one decision with two
   halves.
 - [Delivery guarantees](../user-guide/02-concepts/02-delivery-guarantees.mdx) —
   the acknowledgment chain from record to watermark.

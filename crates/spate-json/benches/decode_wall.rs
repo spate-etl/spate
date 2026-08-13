@@ -28,25 +28,39 @@
 //! payloads, and a run that had to waive the guard on those bytes to compare
 //! them could not tell that from a corpus that had genuinely diverged.
 //!
-//! So comparing the backends is a deliberate act rather than an accident. It
-//! is two legs of one commit, not one A/B run. A leg directory has to sit
-//! outside the repository, which is where the driver keeps its own:
+//! Comparing the backends is two builds of one commit rather than two commits,
+//! which is what `arms` is:
 //!
 //! ```sh
-//! legs="${TMPDIR:-/tmp}/spate-json-backends"
-//! bench run --out "$legs/serde" --leg base
-//! bench run --out "$legs/simd"  --leg head --features simd
-//! bench compare "$legs/serde" "$legs/simd" --allow features --allow build
+//! make bench-arms HEAD_FEATURES=spate-json/simd FILTER=decode_
 //! ```
 //!
-//! and the report says in its header which guards were waived. Both waivers
-//! are needed: `--allow features` alone leaves every case here demoted on its
-//! declared build, which is the second tripwire doing its job.
+//! It builds each arm into its own directory, calibrates one iteration count on
+//! the base arm and pins it for both, and interleaves them — the same discipline
+//! `bench-ab` applies to two commits, which a comparison needs whatever the two
+//! legs differ in. No waiver is involved: on this axis the feature set is the
+//! subject rather than a guard, the corpus digests match because the two arms
+//! decode the same payloads, and the declared backends differ because that is
+//! the thing being measured. Two arms that declared the *same* backend would be
+//! refused, which is what a feature name spelled for the wrong package looks
+//! like.
+//!
+//! Expect the three `decode_floor_simd_*` cases to appear as present only in the
+//! head arm: they are `cfg(feature = "simd")`, so the base arm does not declare
+//! them and nothing pairs them.
+//!
+//! The three `decode_floor_serde_*` cases pair and should read flat. They call
+//! `serde_json` on both arms, so what an arm run prices for them is the two
+//! builds and not the two parsers — which makes them the control: a figure there
+//! bounds how much of the framework cases' margin belongs to code layout rather
+//! than to the swap. Read them first, and treat a margin no larger than theirs
+//! as unresolved.
 //!
 //! A leg built with `--features simd` also carries that backend's own floors,
-//! so the library margin reads inside one leg without waiving anything —
+//! so the library margin reads inside one leg without a second leg at all —
 //! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
-//! libraries over one corpus in one binary.
+//! libraries over one corpus in one binary, and is the more direct answer when
+//! the question is about the parsers rather than about what this crate adds.
 //!
 //! ## Which cases carry a floor
 //!

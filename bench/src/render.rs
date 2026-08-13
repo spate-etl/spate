@@ -352,7 +352,9 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
         replicate_span(comparison),
         // Labelled `head` because that is the leg they describe. The guard makes
         // them true of the base leg too, right up until an `--allow` waives the
-        // field that stopped being true.
+        // field that stopped being true — or the run is an arm comparison, where
+        // the feature set differs by construction and the divergence line below
+        // is what names the other arm's.
         format!(
             "head {} · {} · {} · {}",
             head.build.rustc.as_deref().unwrap_or("rustc unknown"),
@@ -399,15 +401,34 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
 
     // Only when something was declared. A tree whose cases have no feature axis
     // would otherwise carry a line saying nothing, every run, forever.
-    let (build_waived, build_out) = (count(Cause::BuildCompared), count(Cause::BuildLeftOut));
-    if build_waived + build_out > 0 {
-        lines.push(match (build_waived, build_out) {
-            (0, out) => format!("declared builds: {out} case(s) did NOT match and were left out"),
+    //
+    // Two conditions, opposite to each other, so two lines rather than one
+    // count: on the commit axis a case is dropped for declaring *different*
+    // builds, on the arm axis for declaring the *same* one. Which is which comes
+    // from the `Cause` — a single line reading "did NOT match" over both would
+    // state the exact opposite of what happened to half of them.
+    for (waived, out, what) in [
+        (
+            count(Cause::BuildCompared),
+            count(Cause::BuildLeftOut),
+            "did NOT match",
+        ),
+        (
+            count(Cause::BuildSameCompared),
+            count(Cause::BuildSameLeftOut),
+            "declared the SAME build on both arms",
+        ),
+    ] {
+        if waived + out == 0 {
+            continue;
+        }
+        lines.push(match (waived, out) {
+            (0, out) => format!("declared builds: {out} case(s) {what} and were left out"),
             (waived, 0) => {
-                format!("declared builds: {waived} case(s) did NOT match and were compared anyway")
+                format!("declared builds: {waived} case(s) {what} and were compared anyway")
             }
             (waived, out) => format!(
-                "declared builds: {out} case(s) did NOT match and were left out, \
+                "declared builds: {out} case(s) {what} and were left out, \
                  {waived} more were compared anyway"
             ),
         });
@@ -661,6 +682,7 @@ mod tests {
             build: BuildFingerprint {
                 protocol: 1,
                 leg: name.to_owned(),
+                axis: crate::fingerprint::Axis::Commit,
                 rustc: Some("rustc 1.94.0".to_owned()),
                 host_triple: Some("aarch64-apple-darwin".to_owned()),
                 profile: Some("bench".to_owned()),
@@ -1332,6 +1354,64 @@ mod tests {
         assert_eq!(parsed["not_comparable"][2]["cause"], "build_left_out");
         assert_eq!(parsed["not_comparable"][3]["cause"], "build_compared");
         assert_eq!(parsed["not_comparable"][4]["cause"], "other");
+    }
+
+    /// The two declared-build conditions are opposite, so the header has to
+    /// tell them apart. A single "did NOT match" count over both would state
+    /// the exact reverse of what happened to an arm run, in the line a reader
+    /// reads first — the failure the header's own guardrail comment names.
+    #[test]
+    fn the_header_does_not_call_an_arm_agreement_a_mismatch() {
+        let arm = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![NotComparable {
+                what: "spate-json/decode_wall/b".to_owned(),
+                why: "both arms declare the same build".to_owned(),
+                cause: Cause::BuildSameLeftOut,
+            }],
+        );
+        let rendered = markdown(&arm);
+        assert!(
+            rendered.contains("declared the SAME build on both arms and were left out"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("did NOT match"),
+            "the header says the opposite of what happened: {rendered}"
+        );
+    }
+
+    /// Both conditions in one report get a line each rather than one merged
+    /// count, which could only be phrased wrongly for one of them.
+    #[test]
+    fn the_header_counts_the_two_declared_build_conditions_separately() {
+        let mixed = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![
+                NotComparable {
+                    what: "x".to_owned(),
+                    why: "differs".to_owned(),
+                    cause: Cause::BuildLeftOut,
+                },
+                NotComparable {
+                    what: "y".to_owned(),
+                    why: "same".to_owned(),
+                    cause: Cause::BuildSameCompared,
+                },
+            ],
+        );
+        let rendered = markdown(&mixed);
+        assert!(
+            rendered.contains("declared builds: 1 case(s) did NOT match and were left out"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "declared builds: 1 case(s) declared the SAME build on both arms and were \
+                 compared anyway"
+            ),
+            "{rendered}"
+        );
     }
 
     /// The declared-build line appears only when something was declared. Most

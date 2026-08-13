@@ -188,10 +188,12 @@
 //! **No absolute claims.** Every number is one machine on one afternoon. A
 //! figure only reaches the documentation carrying how it was established.
 //!
-//! **No path normalization between the legs.** The base leg builds in a worktree
-//! under the cache root and the head in the repository itself, so the two
-//! binaries carry different absolute paths — a difference the compiler can act
-//! on. Comparing the self-test suite against itself on one otherwise-idle
+//! **No path normalization between the legs.** An `ab` builds its base leg in a
+//! worktree under the cache root and its head in the repository itself; an
+//! `arms` builds both arms under the cache root, in directories named for their
+//! flags. Either way the two binaries carry different absolute paths — a
+//! difference the compiler can act on. Comparing the self-test suite against
+//! itself on one otherwise-idle
 //! machine, the largest difference any metric showed was 0.34%, against the 5%
 //! floor that applies to the timing metrics — the allocation metrics, judged at
 //! 1%, showed none. Source-path remapping would not settle it on its own

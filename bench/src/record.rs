@@ -212,6 +212,7 @@ mod tests {
             build: BuildFingerprint {
                 protocol: 1,
                 leg: "head".to_owned(),
+                axis: crate::fingerprint::Axis::Commit,
                 rustc: Some("rustc 1.94.0".to_owned()),
                 host_triple: Some("aarch64-apple-darwin".to_owned()),
                 profile: Some("bench".to_owned()),
@@ -247,7 +248,7 @@ mod tests {
             r#""wall_ns_per_iter":{"value":1234.5,"unit":"ns","higher_is_better":false}"#,
             r#"},"#,
             r#""notes":["peak_rss_bytes absent: the region never set the mark"],"#,
-            r#""build":{"protocol":1,"leg":"head","rustc":"rustc 1.94.0","#,
+            r#""build":{"protocol":1,"leg":"head","axis":"commit","rustc":"rustc 1.94.0","#,
             r#""host_triple":"aarch64-apple-darwin","profile":"bench","#,
             r#""codegen":"0f1e2d3c4b5a6978","features":["simd"],"#,
             r#""feature_args":["--features","simd"],"git_describe":"v0.1.0-3-gabc1234","dirty":true},"#,

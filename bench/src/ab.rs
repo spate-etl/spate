@@ -1,9 +1,19 @@
 //! Running a leg, and running two of them against each other.
 //!
+//! # Two axes, one comparison
+//!
+//! Two legs can differ in the tree they were built from or in the features they
+//! were built with, and both are things somebody wants measured. [`ab`] takes
+//! the first, checking the reference out into a worktree; [`arms`] takes the
+//! second, building one tree twice into two directories. Everything after "both
+//! legs exist" is [`two_legs`], shared rather than restated — so the properties
+//! below hold on both axes because there is one implementation of them, not
+//! because two were kept in agreement.
+//!
 //! # The order things happen in, and why
 //!
-//! 1. **Resolve the reference.** A mistyped one costs nothing if it is caught
-//!    here, and ten minutes of building if it is not.
+//! 1. **Resolve the reference**, on the commit axis. A mistyped one costs
+//!    nothing if it is caught here, and ten minutes of building if it is not.
 //! 2. **Build both legs, completely, before measuring anything.** A build
 //!    interleaved with measurement would put a compile on one leg's replicate
 //!    and not the other's, and the machine is never quieter than while it is
@@ -27,21 +37,25 @@
 //!
 //! # Where the run puts things
 //!
-//! Legs, worktrees and the reference's build artifacts all live under
+//! Legs, worktrees and every build directory a run of its own makes live under
 //! `$TMPDIR/spate-bench`, or under `SPATE_BENCH_CACHE` when that is set — never
 //! inside the repository, where cargo and git would both find them. The worktree
-//! is removed when a run ends; the legs and the reference's target directory are
-//! kept, and nothing prunes either.
+//! is removed when a run ends; the legs and the target directories are kept, and
+//! nothing prunes either.
 //!
-//! The target directory is keyed by the reference's commit, so a second run
-//! against the same reference reuses its compiled dependencies. The workspace's
-//! own crates are recompiled either way, since the worktree is recreated. It is
-//! a cache in the ordinary sense: `rm -rf` on it costs a rebuild and nothing
-//! else.
+//! A target directory is keyed by what makes its build distinct — the
+//! reference's commit for an [`ab`] base, the feature flags for either
+//! [`arms`] arm — so a second run of the same pair reuses the compiled
+//! dependencies. `ab`'s base recompiles the workspace's own crates either way,
+//! since the worktree is recreated; `arms` recompiles only what its features
+//! changed. They are caches in the ordinary sense: `rm -rf` costs a rebuild and
+//! nothing else.
 //!
 //! Because a leg is a directory of self-describing records, a run that took
 //! twenty minutes can be re-rendered as Markdown, or as JSON for a script,
-//! without repeating it — an `ab` prints both leg paths when it finishes.
+//! without repeating it — both leg paths are printed when a run finishes, and a
+//! leg carries which axis produced it, so a re-render applies the rule the run
+//! was measured under.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -50,7 +64,7 @@ use std::path::{Path, PathBuf};
 use crate::cargo;
 use crate::compare::{Cause, Comparison, Leg, NotComparable, guard_fingerprints, load_leg};
 use crate::fingerprint::BuildFingerprint;
-pub use crate::fingerprint::{BASE_LEG, HEAD_LEG};
+pub use crate::fingerprint::{Axis, BASE_LEG, HEAD_LEG};
 use crate::note;
 use crate::protocol::Listing;
 use crate::record::{CaseId, Record};
@@ -79,7 +93,12 @@ pub struct Plan {
     /// Unmeasured warm-up before each region.
     pub warmup_ms: u64,
     /// Feature flags, forwarded verbatim to cargo.
+    ///
+    /// The one field an `arms` run deliberately differs on between the two
+    /// plans; every other mode passes the same value to both.
     pub feature_args: Vec<String>,
+    /// What the comparison this leg belongs to varies.
+    pub axis: Axis,
 }
 
 /// One leg, built and interrogated, ready to measure.
@@ -122,6 +141,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
     let fingerprint = BuildFingerprint {
         protocol: crate::protocol::PROTOCOL_VERSION,
         leg: plan.leg.clone(),
+        axis: plan.axis,
         rustc: Some(rustc),
         host_triple: Some(host_triple),
         profile: Some("bench".to_owned()),
@@ -249,13 +269,7 @@ pub fn ab(
     head_plan: &Plan,
     allow: &[String],
 ) -> Result<AbOutcome, String> {
-    if base_plan.out == head_plan.out {
-        return Err(format!(
-            "both legs would be written to {}. Two runs' records in one directory pair \
-             half of themselves away.",
-            head_plan.out.display()
-        ));
-    }
+    guard_out(base_plan, head_plan)?;
 
     // Before anything is built: a mistyped reference must not cost a
     // compilation.
@@ -275,19 +289,81 @@ pub fn ab(
         dir: tree.path().to_owned(),
         ..base_plan.clone()
     };
+    two_legs(&base_plan, head_plan, allow)
+}
 
+/// Compares two feature arms of one tree.
+///
+/// Both plans name the same directory and differ in `feature_args` and
+/// `target_dir` — a second target directory is not a nicety, since cargo holds
+/// one build per directory and two arms sharing one would rebuild each other
+/// away between the legs.
+///
+/// Everything that makes a comparison a comparison is [`two_legs`], shared with
+/// [`ab`] rather than restated: one calibration pinned across both, a priming
+/// pass, and interleaving with the leg order flipped on replicate parity.
+///
+/// # Errors
+///
+/// When either arm fails to build, or when the two arms turn out not to be
+/// comparable.
+pub fn arms(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
+    guard_out(base_plan, head_plan)?;
+    if base_plan.target_dir == head_plan.target_dir {
+        return Err(format!(
+            "both arms would build into {}. Cargo keeps one build per target directory, \
+             so the second arm would overwrite the first and both legs would measure it.",
+            head_plan.target_dir.display()
+        ));
+    }
+    // Guarded, not merely documented: the axis's whole claim is that the two
+    // legs differ in their features and in nothing else, and two different
+    // trees under `axis: Arm` would carry that claim while varying the code as
+    // well — with the feature guard stepped aside, so nothing downstream
+    // notices.
+    if base_plan.dir != head_plan.dir {
+        return Err(format!(
+            "the two arms name different trees: {} and {}. An arm comparison varies the \
+             features and holds the tree still; two trees is what `ab` measures.",
+            base_plan.dir.display(),
+            head_plan.dir.display()
+        ));
+    }
+    worktree::install_interrupt_handler();
+    two_legs(base_plan, head_plan, allow)
+}
+
+/// Refuses two legs that would be written to one directory.
+fn guard_out(base_plan: &Plan, head_plan: &Plan) -> Result<(), String> {
+    if base_plan.out == head_plan.out {
+        return Err(format!(
+            "both legs would be written to {}. Two runs' records in one directory pair \
+             half of themselves away.",
+            head_plan.out.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Builds two legs and measures them against each other.
+///
+/// What both [`ab`] and [`arms`] are, once each has decided what its two legs
+/// *are*. The five properties that make the result a comparison — build both
+/// before measuring, intersect, calibrate once and pin, prime, interleave — live
+/// here and are therefore the same on both axes by construction.
+fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
     // Both legs built before either is measured.
     let (head_describe, head_dirty) = worktree::describe(&head_plan.dir);
     if head_dirty {
         note("the working tree has uncommitted changes; the head leg records dirty: true");
     }
-    // Described from the checkout rather than from the reference it was made
-    // for, so a leg's provenance names the tree that was built. It also makes
-    // an A/A run — the base and the head at the same commit — produce two
-    // fingerprints that differ in nothing but `leg`, which is what makes an
-    // empty significant table mean something.
-    let (base_describe, base_dirty) = worktree::describe(tree.path());
-    let base = prepare(&base_plan, base_describe, base_dirty)?;
+    // Described from the directory that was built rather than from the
+    // reference it was made for, so a leg's provenance names the tree it
+    // measured. It also makes an A/A run — the base and the head at the same
+    // commit — produce two fingerprints that differ in nothing but `leg`, which
+    // is what makes an empty significant table mean something.
+    let (base_describe, base_dirty) = worktree::describe(&base_plan.dir);
+    let base = prepare(base_plan, base_describe, base_dirty)?;
     let head = prepare(head_plan, head_describe, head_dirty)?;
 
     // The comparability guard runs here, before a single replicate, rather than
@@ -334,7 +410,7 @@ pub fn ab(
     // Calibrated on the base leg alone, and pinned for both — and only over the
     // cases both legs share, since a base-only case is never measured and
     // calibrating it costs a subprocess that could fail the run.
-    let iters = calibrate(&base, &shared, &base_plan)?;
+    let iters = calibrate(&base, &shared, base_plan)?;
 
     let mut base_writer = Writer::create(&base.out)?;
     let mut head_writer = Writer::create(&head.out)?;
@@ -354,7 +430,7 @@ pub fn ab(
         measure_one(
             &base,
             case,
-            &base_plan,
+            base_plan,
             iters[case],
             0,
             true,
@@ -383,13 +459,13 @@ pub fn ab(
             check_interrupt()?;
             let legs: [(&Prepared, &Plan, &mut Writer); 2] = if base_first(replicate) {
                 [
-                    (&base, &base_plan, &mut base_writer),
+                    (&base, base_plan, &mut base_writer),
                     (&head, head_plan, &mut head_writer),
                 ]
             } else {
                 [
                     (&head, head_plan, &mut head_writer),
-                    (&base, &base_plan, &mut base_writer),
+                    (&base, base_plan, &mut base_writer),
                 ]
             };
             for (leg, plan, writer) in legs {
@@ -480,7 +556,10 @@ const fn base_first(replicate: u32) -> bool {
 
 fn check_interrupt() -> Result<(), String> {
     if worktree::interrupted() {
-        return Err("interrupted; the worktree is being removed".to_owned());
+        // No mention of the worktree: a `run` and an `arms` reach this too and
+        // neither made one, so naming it would describe cleanup that is not
+        // happening. An `ab`'s worktree is removed by its own `Drop` regardless.
+        return Err("interrupted".to_owned());
     }
     Ok(())
 }

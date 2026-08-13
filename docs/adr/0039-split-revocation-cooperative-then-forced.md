@@ -9,12 +9,12 @@
 
 When the leader moves a split from one worker to another
 ([ADR-0038](0038-leader-computed-sticky-assignment.md)), the current owner is
-probably mid-read. Fencing it immediately is safe — the compare-and-set
-guarantees it cannot write — but it costs up to a commit interval of duplicated
+probably mid-read. Fencing it immediately is safe, since the compare-and-set
+guarantees it cannot write, but it costs up to a commit interval of duplicated
 work, because everything read since the last commit is re-read by the new owner.
 
 So consent is worth asking for. But it cannot be worth waiting indefinitely for:
-under the previous peer-negotiated design a worker could simply ignore a request
+under the previous peer-negotiated design a worker could ignore a request
 and the requester waited out a round budget, which was acceptable when the
 request was **advisory**. A leader's revocation is a **decision**, and a worker
 refusing it must not be able to pin a rebalance open.
@@ -32,14 +32,14 @@ takes the cheap path when it is available and keeps the rebalance bounded when i
 is not.
 
 The leader stops assigning the split. The owner stops intake at a safe boundary,
-chases its tail to a final fenced commit, and releases — **replaying nothing**. A
+chases its tail to a final fenced commit, and releases, **replaying nothing**. A
 source that declines, or whose drain outruns the deadline, has its release forced
 and its uncommitted tail replays under the next owner.
 
 This deliberately reverses the earlier "no driver-side deadline" decision taken
 with the negotiated handoff. That decision was correct while the request was
 advisory; it is wrong once the request is a decision, because the thing the
-deadline protects — the rebalance — did not exist as an obligation before.
+deadline protects, the rebalance, did not exist as an obligation before.
 
 Graceful-then-forced with a bounded wait between is the shape mature rebalancing
 protocols converge on.

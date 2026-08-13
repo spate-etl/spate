@@ -8,12 +8,12 @@
 ## Context and problem statement
 
 The framework moves records from a source that tracks consumption by offset to a
-sink that acknowledges writes. A failure between those two points — a crash, a
-rebalance, a shutdown — leaves a window where it is not known whether the data
-arrived. What the framework promises about that window determines almost every
-other structure in it: how acknowledgments are tracked, when watermarks commit,
-what a sink connector must implement, and what a destination schema has to
-tolerate.
+sink that acknowledges writes. A failure between those two points, whether a
+crash, a rebalance or a shutdown, leaves a window where it is not known whether
+the data arrived. What the framework promises about that window determines
+almost every other structure in it: how acknowledgments are tracked, when
+watermarks commit, what a sink connector must implement, and what a destination
+schema has to tolerate.
 
 ## Considered options
 
@@ -36,21 +36,20 @@ versioned destination table removes for free. At-most-once was never a serious
 candidate: silent loss is not a trade an ingestion framework gets to make on its
 operator's behalf.
 
-The consequence is stated rather than softened: **duplicates happen, and
-deduplication tokens do not cover crash replay.** A token makes a retry of the
-same sealed batch idempotent, but after a restart the data re-batches with
-different boundaries and different tokens, so those rows land twice. Documentation
-must never imply exactly-once.
+**Duplicates happen, and deduplication tokens do not cover crash replay.** A
+token makes a retry of the same sealed batch idempotent, but after a restart the
+data re-batches with different boundaries and different tokens, so those rows
+land twice. Documentation must never imply exactly-once.
 
 ### Consequences
 
-- Good, because sink connectors implement one method — write this sealed batch —
+- Good, because sink connectors implement one method, writing a sealed batch,
   with no transactional protocol and no coordination with the source.
 - Good, because recovery is replay, which is a path exercised on every rebalance
   rather than a rare branch that only runs during an incident.
-- Bad, because the destination has to tolerate duplicates. That is real work
-  pushed onto whoever designs the target table, and it is why the deduplication
-  boundary has to be documented precisely rather than waved at.
+- Bad, because the destination has to tolerate duplicates. That is work pushed
+  onto whoever designs the target table, and it is why the deduplication
+  boundary has to be documented precisely.
 - Bad, because a stalled watermark is the failure mode for anything the sink
   cannot write, so a wedged destination stops progress rather than degrading.
 

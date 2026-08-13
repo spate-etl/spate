@@ -9,11 +9,11 @@
 
 The frozen sink contract carries a sealed batch as a list of opaque byte frames:
 the encoder produces them on the pipeline threads and the writer sends them. That
-shape came from a row-oriented destination, where a frame is simply rows.
+shape came from a row-oriented destination, where a frame is rows.
 
-Kafka's unit is not a row. It is a message — a key, a set of headers, a payload,
-and possibly a tombstone marker. Four fields that the contract has nowhere to
-put.
+Kafka's unit is not a row. It is a message, made of a key, a set of headers, a
+payload, and possibly a tombstone marker. Four fields that the contract has
+nowhere to put.
 
 ## Considered options
 
@@ -30,14 +30,14 @@ frozen contract untouched.
 
 The encoder writes key, headers, payload and a tombstone bit with length
 delimiters; the writer parses them back. Because the format never leaves the
-connector — it is written and read by the same crate, in the same process, for
-the duration of one batch — it carries no compatibility obligation and is free
+connector (it is written and read by the same crate, in the same process, for
+the duration of one batch), it carries no compatibility obligation and is free
 to change.
 
 Widening the contract was rejected because it would push a Kafka-shaped concept
 into a trait every sink implements, for the benefit of one. Bypassing the pool
 was rejected because it would give up batching, breaker quarantine, health
-signaling and drain choreography — all of which work unchanged.
+signaling and drain choreography, all of which work unchanged.
 
 ### Consequences
 
@@ -49,7 +49,7 @@ signaling and drain choreography — all of which work unchanged.
   there is a serialization round trip that exists only to satisfy the seam's
   shape.
 - Bad, because a reader of the sealed batch cannot tell what is in it; the frames
-  are genuinely opaque and only the owning connector can interpret them.
+  are opaque and only the owning connector can interpret them.
 
 ### Confirmation
 

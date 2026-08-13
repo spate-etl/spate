@@ -7,7 +7,7 @@
 
 ## Context and problem statement
 
-The operator chain — `map`, `filter`, `flat_map` and the terminal sink stage —
+The operator chain (`map`, `filter`, `flat_map` and the terminal sink stage)
 runs on every record. Whatever dispatch it uses is paid per record per operator,
 so a chain of five operators over a million records a second is five million
 dispatch decisions a second. At the same time the chain has to be *storable*:
@@ -48,7 +48,7 @@ reintroduces the per-record allocation the design exists to avoid.
 
 - Good, because adding a stage costs an inlined function call rather than a
   dispatch, so chain length is close to free.
-- Good, because fan-out allocates nothing — the emitter lives on the stack.
+- Good, because the emitter lives on the stack, so fan-out allocates nothing.
 - Bad, because the chain is monomorphized, so compile time and binary size grow
   with the number of distinct chains in a program.
 - Bad, because higher-ranked lifetimes hit a language limit for borrowing

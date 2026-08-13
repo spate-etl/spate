@@ -19,9 +19,9 @@ the superseded reasoning was overwritten rather than kept. Two rows say so
 outright: the coordination-model row records that it "supersedes the dynamic
 work-stealing model this row used to describe", and the split-revocation row
 that it "deliberately reverses the 'no driver-side deadline' decision taken with
-the negotiated handoff". In both cases the earlier decision — what was believed,
-and why it was abandoned — survives only as a gesture inside the row that
-replaced it. That is precisely the history a decision record exists to keep.
+the negotiated handoff". In both cases the earlier decision (what was believed,
+and why it was abandoned) survives only as a gesture inside the row that
+replaced it. That is the history a decision record exists to keep.
 
 The question is what structure keeps a reversal without destroying what it
 reverses, at a scale one maintainer can sustain.
@@ -39,22 +39,22 @@ reverses, at a scale one maintainer can sustain.
 
 Chosen option: "Architecture Decision Records, one file per decision, in the
 MADR format", because one decision per file makes supersession structural rather
-than a convention somebody has to honor — a superseded record is a file nobody
-edits, so it cannot be overwritten by the decision that replaced it, which is
-the specific failure being fixed.
+than a convention to be honored by hand. A superseded record is a file that is
+never edited, so it cannot be overwritten by the decision that replaced it,
+which is the specific failure being fixed.
 
 MADR 4.0.0 minimal is the variant, plus two sections of our own. `Confirmation`
 names what enforces a decision, which fits a repository whose `AI_POLICY.md`
 holds that a correctness claim is judged on a failing test rather than on
 reasoning that reads well. `Evidence` carries measured claims with their
-provenance, because several load-bearing figures here came from rigs that no
-longer exist, and a number is only reusable if it says so.
+provenance, because several of the figures these decisions rest on came from
+rigs that no longer exist, and a number is only reusable if it says so.
 
 MADR over Nygard because its `Considered options` section is exactly the
 dimension the table already argued well and Nygard's four sections lack. MADR
 over an RFC process because the two answer different questions: an RFC gates a
 decision *before* it is taken, which is what a project needs when a distributed
-group holds veto power — Kafka's KIPs, Flink's FLIPs, Rust's RFCs all exist to
+group holds veto power. Kafka's KIPs, Flink's FLIPs and Rust's RFCs all exist to
 run a vote. Spate has one maintainer. There is no vote to run, so what is needed
 is a record, not a process. Formless was rejected because commit messages,
 which this repository does already require to be self-contained, are indexed by
@@ -66,7 +66,7 @@ change rather than by decision: they answer "what did this commit do" and not
 - Good, because a reversal preserves what it reverses. The superseded record
   keeps its body and gains a pointer, so the reasoning that was abandoned stays
   readable alongside the reasoning that replaced it.
-- Good, because one decision per file makes each one citable — `ADR-0012` works
+- Good, because one decision per file makes each one citable. `ADR-0012` works
   in a commit message, a code comment or a review the same way `INV-5` already
   does.
 - Good, because `Considered options` gives the rejected alternatives a home.
@@ -88,8 +88,8 @@ change rather than by decision: they answer "what did this commit do" and not
 `scripts/adr.sh --check`, run by `make ci-lint` and therefore by CI. It holds
 the mechanical half: numbers unique and never reused, status values from the
 permitted set, no unfilled `REPLACE-ME` placeholder, and every record present in
-the index. The judgment half — whether a decision warranted a record at all,
-and whether `Considered options` is honest — is review, and cannot be automated.
+the index. The judgment half, whether a decision warranted a record at all and
+whether `Considered options` is honest, is review, and cannot be automated.
 
 ## More information
 

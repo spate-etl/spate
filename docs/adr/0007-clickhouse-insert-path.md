@@ -9,7 +9,7 @@
 
 The ClickHouse sink has to get rows from the pipeline into a table. The obvious
 route is the client crate's typed insert path, which serializes a Rust value per
-row. That puts encoding on whichever thread calls it — an async I/O thread — and
+row. That puts encoding on whichever thread calls it, an async I/O thread, and
 makes the batch boundary a property of the client's internal buffering rather
 than something the framework controls.
 
@@ -32,15 +32,15 @@ to shard-local tables", because it is the only option where the framework owns
 the batch boundary, which is what makes both acknowledgment accounting and
 idempotent retry possible.
 
-Rows are encoded by the connector's own serializer — the client crate's is
-private, so writing our own is also a semver win — and shipped through
+Rows are encoded by the connector's own serializer (the client crate's is
+private, so writing our own is also a semver win) and shipped through
 `Client::insert_formatted_with` and `InsertFormatted::send`, the same transport
 the crate's typed path uses internally. Each sealed batch becomes one `INSERT`
 carrying a deterministic `insert_deduplication_token`, so an in-session retry
 after a timeout is idempotent.
 
 Writing direct to shard-local tables rather than through a Distributed table
-gives bigger blocks, less merge pressure, and — decisively — a **synchronous
+gives bigger blocks, less merge pressure, and, decisively, a **synchronous
 server acknowledgment**, which checkpointing requires. A Distributed insert can
 return before the data is durable anywhere the framework can observe.
 

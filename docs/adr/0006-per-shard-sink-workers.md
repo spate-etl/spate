@@ -9,7 +9,7 @@
 
 The sink has to turn a stream of records into writes against a destination that
 has several shards, each with several replicas. Two things pull against each
-other. Analytical destinations want **few large inserts** — a small insert
+other. Analytical destinations want **few large inserts**. A small insert
 becomes a small part, and small parts become merge pressure that outlives the
 ingest. But a single writer per shard leaves replica capacity idle and makes one
 slow response stall the shard entirely.
@@ -39,8 +39,8 @@ backoff, which is what makes a deduplication token meaningful: the retry carries
 identical bytes and an identical token.
 
 Per-replica workers were rejected because they divide the record stream by
-replica count, so each batch is a fraction of the size, which is exactly the
-merge pressure the design is avoiding. Strictly-one-in-flight was rejected
+replica count, so each batch is a fraction of the size, which is the merge
+pressure the design is avoiding. Strictly-one-in-flight was rejected
 because it makes shard throughput a function of round-trip latency.
 
 Records are never rerouted to another shard when one is unhealthy. Rerouting
@@ -54,11 +54,11 @@ depends on, so an unhealthy shard back-pressures the source instead.
 - Good, because replica parallelism is a knob (`max_inflight`) rather than a
   consequence of topology.
 - Bad, because a shard whose replicas are all unhealthy stalls rather than
-  shedding load — surfaced as `spate_sink_shard_healthy == 0`, and the watermark
+  shedding load, surfaced as `spate_sink_shard_healthy == 0`, and the watermark
   stalls behind it.
 - Bad, because parked write attempts hold their in-flight permits, so intake
-  stalls too. That is deliberate — it is how the shard back-pressures the source
-  — but it means one bad shard slows the whole pipeline.
+  stalls too. That stall is deliberate, being how the shard back-pressures the
+  source, but it means one bad shard slows the whole pipeline.
 
 ### Confirmation
 

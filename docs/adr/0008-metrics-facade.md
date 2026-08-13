@@ -9,8 +9,8 @@
 
 The framework needs instrumentation that a Kubernetes deployment can scrape, and
 connector and pipeline authors need to register families of their own. The
-question is what type they speak when they do — a framework-owned abstraction
-that wraps some backend, or the ecosystem's own facade.
+question is whether that type is a framework-owned abstraction wrapping some
+backend, or the ecosystem's own facade.
 
 There is a complication. The `metrics` crate is 0.x, and
 [ADR-0011](0011-msrv-and-dependency-policy.md)'s dependency policy says 0.x types
@@ -28,17 +28,17 @@ ours.
 
 Chosen option: "The `metrics` facade directly, as a sanctioned exception,
 re-exported from `spate-core`", because the framework's instrumentation API *is*
-that facade — a wrapper would be a second vocabulary for the same concepts, and
+that facade. A wrapper would be a second vocabulary for the same concepts, and
 anyone registering a metric would have to learn ours instead of the one they
 already know.
 
-The exception is mitigated rather than merely accepted: `spate-core` re-exports
+The exception is mitigated rather than accepted: `spate-core` re-exports
 the handle types, and connectors never take a direct `metrics` dependency. That
 keeps exactly one facade version in the tree, so a breaking `metrics` release is
 one coordinated edit rather than per-crate drift.
 
 A concrete Prometheus client was rejected because it forecloses any other
-backend for no gain — the facade already resolves to Prometheus at the exporter.
+backend for no gain. The facade already resolves to Prometheus at the exporter.
 
 Two rules follow from the hot path rather than from the choice of facade. Metric
 handles are **pre-registered at build time**, because resolving a name or a
@@ -49,15 +49,15 @@ affordable. And counting happens at batch boundaries, not per record.
 
 - Good, because a connector author registering a family writes ordinary
   `metrics` code with no framework-specific wrapper.
-- Good, because the backend stays pluggable — the facade is the registry
+- Good, because the backend stays pluggable. The facade is the registry
   abstraction, and the Prometheus exporter is one implementation mounted on the
   admin server.
 - Bad, because a 0.x crate is in our public API, so a breaking `metrics` release
   is a breaking release for us. This is the one place that is true, and it is
   named in the dependency policy rather than discovered.
-- Bad, because assembly order becomes load-bearing: a handle binds to whichever
-  recorder exists when it is constructed, so one built before `metrics::install`
-  records into the void.
+- Bad, because assembly order decides where a handle records. A handle binds to
+  whichever recorder exists when it is constructed, so one built before
+  `metrics::install` records into the void.
 
 ### Confirmation
 

@@ -15,7 +15,7 @@ the planner needs.
 The obvious quality-maximizing approach is to sort by size and pack
 largest-first. That requires the whole listing in memory before packing can
 start, which makes planner memory a function of object count, and it destroys
-**prefix locality** — objects that share a key prefix, and therefore usually
+**prefix locality**. Objects that share a key prefix, and therefore usually
 share physical locality, get scattered across splits.
 
 ## Considered options
@@ -34,11 +34,11 @@ bins, and objects that listed together stay together.
 Three parameters carry the design. A lookback of ten bins is enough to place a
 small object well without unbounded search. Each object is charged
 `max(size, target/16)` as its **open cost**, so a split of many tiny objects is
-bounded by request overhead rather than by bytes — the cost of a split is
+bounded by request overhead rather than by bytes. The cost of a split is
 dominated by opening objects, not by reading them. And an object at or above the
 target gets its own split.
 
-That cost floor has a second effect worth naming, because it is what makes
+That cost floor has a second effect, and it is what makes
 [ADR-0030](0030-split-record-layout.md) work: it structurally caps a split at
 about sixteen members, which keeps a descriptor comfortably under store value
 limits. The bound is a consequence of the cost model rather than a separate
@@ -53,12 +53,12 @@ count, and every split carries coordination overhead.
   physically close.
 - Neutral, because the lookback bounds only the open-bin window. The planner
   collects and sorts the full listing by key before packing sees it, so planner
-  memory is a function of object count either way — the same cost the sorted
+  memory is a function of object count either way, the same cost the sorted
   pack was charged with above. Packing adds a bounded window on top of it.
 - Bad, because bin evenness is worse than a sorted pack would achieve, so some
   splits are meaningfully larger than others.
 - Bad, because the target size and the divisor in the open cost are tuned
-  constants, and their interaction — which is what caps descriptor size — is not
+  constants, and their interaction, which is what caps descriptor size, is not
   obvious from either one alone.
 
 ### Confirmation

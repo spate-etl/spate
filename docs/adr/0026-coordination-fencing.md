@@ -10,7 +10,7 @@
 Coordination has several mechanisms that *look* like they establish ownership: a
 lease with a TTL, a watch event announcing a change, a leader publishing an
 assignment. Each is a plausible place to put the safety argument, and each is
-wrong in the same way — they all depend on timing.
+wrong in the same way. They all depend on timing.
 
 A lease TTL expiring says the holder *probably* stopped, not that it did; the
 holder may be in a long garbage-collection pause and about to resume mid-write.
@@ -32,7 +32,7 @@ in the correctness path.
 
 Every claim, fence and commit targets the split's progress record and carries the
 revision it expects. An ownership change bumps an epoch. A worker whose epoch is
-stale loses its compare-and-set, and **a fenced commit writes nothing** — it then
+stale loses its compare-and-set, and **a fenced commit writes nothing**. It then
 receives a `Lost` event and stops. It does not matter how long the worker was
 paused, whether its lease had expired, or whether it ever saw the watch event
 telling it so: it cannot write, because the revision moved.
@@ -40,15 +40,15 @@ telling it so: it cannot write, because the revision moved.
 Leaders are fenced the same way. A new leader's generation bump moves the plan
 record's revision, so a deposed leader's plan write loses its compare-and-set.
 
-Lease TTLs and watch events remain, and are load-bearing for *speed* — they are
-how the fleet notices a change in under a second rather than on the next poll.
-They are simply not allowed to be the reason anything is safe.
+Lease TTLs and watch events remain, and what they buy is *speed*. They are how
+the fleet notices a change in under a second rather than on the next poll. They
+are not allowed to be the reason anything is safe.
 
 ### Consequences
 
 - Good, because correctness is independent of clock skew, pause duration and
-  message delivery — the properties hardest to reason about and impossible to
-  test exhaustively.
+  message delivery, which are the properties hardest to reason about and
+  impossible to test exhaustively.
 - Good, because there is exactly one thing to verify for safety, and it is a
   single conditional write.
 - Bad, because every write on the coordination path costs a compare-and-set

@@ -14,7 +14,7 @@ varies per call, and the record type here *is* lifetime-parameterized, because
 records borrow from the source's buffers ([ADR-0003](0003-poll-based-source-api.md)).
 
 Storing `Box` of a chain whose record type is `Record<'buf, T>` is not
-expressible. The naive fix — make records owned at the boundary — is a copy per
+expressible. The naive fix, making records owned at the boundary, is a copy per
 record, which is the thing the borrowing design exists to avoid.
 
 ## Considered options
@@ -52,11 +52,11 @@ naming it.
   survives contact with a trait object.
 - Good, because the boundary costs one virtual call per batch, amortized over
   every record in it.
-- Bad, because the family indirection is genuinely hard to read: a connector
-  author writes a marker type whose only job is to carry an associated type, and
-  the error messages when it is wrong are poor.
-- Bad, because anything that would need to *hold* a record beyond the call —
-  windowing, sorting, stateful aggregation — is structurally impossible. That is
+- Bad, because the family indirection is hard to read: a connector author writes
+  a marker type whose only job is to carry an associated type, and the error
+  messages when it is wrong are poor.
+- Bad, because anything that would need to *hold* a record beyond the call
+  (windowing, sorting, stateful aggregation) is structurally impossible. That is
   consistent with the v1 non-goals, but it is a ceiling rather than a
   preference.
 
@@ -69,14 +69,14 @@ implementation tried.
 ## Evidence
 
 The borrowed arm emits a record roughly every 10 ns and allocates a fixed handful
-per *batch* — none per record — where the owned equivalent allocates once per
+per *batch*, none per record, where the owned equivalent allocates once per
 record. Measured by `crates/spate-core/benches/chain_wall.rs`, held to absolute
 bounds by `crates/spate-core/tests/chain_alloc.rs` under a counting allocator.
 
 The allocation contrast is what that rig establishes. **Its two arms fan out
-differently, so a wall-clock ratio between them is not a quantity it measures** —
-a distinction worth keeping, because the ratio is the number people want to
-quote. A separate seam prototype shaped to compare put that ratio at 3.7×:
+differently, so a wall-clock ratio between them is not a quantity it measures.**
+That distinction is worth keeping, because the ratio is the number people want
+to quote. A separate seam prototype shaped to compare put that ratio at 3.7×:
 spike-measured and hand-recorded, with no committed rig.
 
 ## More information

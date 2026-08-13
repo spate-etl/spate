@@ -28,7 +28,7 @@ change to resume semantics has to be made twice and reconciled.
 
 Chosen option: "One always-coordinated path", because at this stage of the
 project a dual path is pure liability: twice the surface for a capability
-— durable solo resume — that a durable coordination store already provides.
+(durable solo resume) that a durable coordination store already provides.
 
 A solo run gets an in-process store, linked unconditionally, so no configuration
 or feature flag is needed to run one instance. Its progress is **ephemeral**, and

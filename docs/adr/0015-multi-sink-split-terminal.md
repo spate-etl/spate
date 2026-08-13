@@ -10,8 +10,8 @@
 A single source stream often carries records of several kinds that belong in
 several destination tables. The established way to do this on the database side
 is to insert everything into one table and let materialized views fan it out.
-That works, but it puts the fan-out cost on the database — the least scalable
-tier in the deployment — and it means every row is parsed and written twice.
+That works, but it puts the fan-out cost on the database, the least scalable
+tier in the deployment, and it means every row is parsed and written twice.
 
 The framework could instead route each record to one of several sinks. The
 question is whether the acknowledgment design survives a record having more
@@ -36,7 +36,7 @@ A pipeline installs one or more named sinks; the chain ends either in a single
 sink or in a split whose branches are each a full sink with their own family,
 encoder, router and queues, resolved by name. Each branch clones the poll
 batch's acknowledgment handle, so a source watermark holds until **every**
-destination it touched has durably written, merging with worst status — which is
+destination it touched has durably written, merging with worst status, which is
 exactly the behavior [ADR-0005](0005-refcounted-per-batch-acknowledgements.md)
 already gave `flat_map`. Unmatched records follow a configurable policy: Fail by
 default, or Skip which drops and counts with `reason="unrouted"`.
@@ -52,7 +52,7 @@ destination count and gives each its own independent watermark.
   rather than needing a parallel mechanism.
 - Bad, because a branch stores its encoder and router type-erased so the branch
   type keys on the destination family alone. Per record that costs a downcast
-  plus a virtual route and encode call — the single-sink terminal uses concrete
+  plus a virtual route and encode call. The single-sink terminal uses concrete
   types and pays neither. The user's routing closure stays monomorphic.
 - Bad, because a low-volume branch can hold acknowledgments for a long time:
   its chunk buffer fills slowly, and everything behind it waits. That was a real
@@ -69,7 +69,7 @@ Against a null table plus materialized views on a skewed type mix: **+56% to
 +212% throughput, 4–10× larger parts, and 16–31% lower server CPU per row.**
 Measured by a rig this repository no longer carries.
 
-The range is wide because the win depends on how skewed the type mix is — the
+The range is wide because the win depends on how skewed the type mix is. The
 more the fan-out favors one branch, the less there is to move off the server.
 
 ## More information

@@ -62,6 +62,12 @@
 //! a reference or directory that does not exist. Exit code 1 means something
 //! failed while running.
 //!
+//! A comparison in which *nothing* was comparable also exits 1, after writing
+//! the report. That is "the command did no work", not a verdict: a comparison
+//! that pairs cases and finds a regression exits 0, because nothing in this tier
+//! gates anything. The report is written either way, since the reason nothing
+//! paired is the part of it worth reading.
+//!
 //! Two refusals are easier to recognise than to diagnose: two packages declaring
 //! a `_wall` target of the same name, and an `ab` whose two legs share no case at
 //! all — which a `--filter` matching nothing looks exactly like.
@@ -443,7 +449,23 @@ fn write_report(comparison: &Comparison, args: &ArgMatches) -> Result<(), Failur
     writeln!(std::io::stdout().lock(), "{rendered}").map_err(|e| Failure {
         message: format!("could not write the report: {e}"),
         code: 1,
-    })
+    })?;
+
+    // The report is written first, then the exit code decided — the reason
+    // nothing paired is in the report's *Not comparable* section, and a
+    // non-zero exit that suppressed it would take the diagnosis with it.
+    //
+    // Classified by `Summary`, the same value both renderers print their
+    // headline from, so the sentence a reader sees and the code a script
+    // branches on cannot disagree.
+    if render::Summary::of(comparison) == render::Summary::NothingComparable {
+        return Err(Failure {
+            message: "nothing was comparable; the report says why under 'Not comparable'"
+                .to_owned(),
+            code: 1,
+        });
+    }
+    Ok(())
 }
 
 fn feature_args(args: &ArgMatches) -> Vec<String> {

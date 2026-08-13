@@ -60,19 +60,24 @@ pub fn decision_rule() -> String {
 
 /// What the significant-changes table has to say, decided once.
 ///
-/// Both human formats render this rather than each deciding for itself. The
-/// distinction it carries — the rule was applied and nothing cleared it, versus
-/// the rule was never applied — is the one a report gets wrong by stating the
-/// first when the second happened, so it is settled in one place and phrased in
-/// one place.
+/// Both human formats render this rather than each deciding for itself, and the
+/// CLI reads it for its exit code. The distinction it carries — the rule was
+/// applied and nothing cleared it, versus the rule was never applied — is the
+/// one a report gets wrong by stating the first when the second happened, so it
+/// is settled in one place and phrased in one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Summary {
+pub enum Summary {
     /// Nothing paired, so there is no table at all.
     NothingComparable,
     /// Rows exist, and not one of them was both judged and eligible to be
     /// flagged. `unjudged` fell short of the replicate floor; the rest come from
     /// cases marked erratic.
-    NothingJudged { unjudged: usize, total: usize },
+    NothingJudged {
+        /// How many rows fell short of the replicate floor.
+        unjudged: usize,
+        /// How many rows there were in total.
+        total: usize,
+    },
     /// The rule was applied and no metric cleared it.
     NoneCleared,
     /// There are findings to print.
@@ -80,7 +85,9 @@ enum Summary {
 }
 
 impl Summary {
-    fn of(comparison: &Comparison) -> Self {
+    /// Classifies what a comparison has to say.
+    #[must_use]
+    pub fn of(comparison: &Comparison) -> Self {
         if comparison.rows.is_empty() {
             return Self::NothingComparable;
         }
@@ -626,7 +633,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use super::{decision_rule, json, markdown, table};
+    use super::{Summary, decision_rule, json, markdown, table};
     use crate::compare::{Cause, Comparison, Leg, NotComparable, Row};
     use crate::fingerprint::{BuildFingerprint, Host};
     use crate::record::{CaseId, Record, WALL_NS_PER_ITER};
@@ -862,6 +869,30 @@ mod tests {
             assert!(
                 !rendered.contains("No metric cleared both halves"),
                 "{rendered}"
+            );
+        }
+    }
+
+    /// The classification the CLI exits on, asserted directly rather than
+    /// through a rendered sentence. `NothingComparable` is the only one that
+    /// earns a non-zero exit, and a report with findings must not: a regression
+    /// is a result, not a failure, and nothing in this tier gates anything.
+    #[test]
+    fn only_a_comparison_with_no_rows_classifies_as_nothing_comparable() {
+        assert_eq!(
+            Summary::of(&comparison(Vec::new(), Vec::new())),
+            Summary::NothingComparable
+        );
+        for rows in [
+            vec![row("a", Verdict::Regressed, false)],
+            vec![row("a", Verdict::NoChange, false)],
+            vec![row("a", Verdict::Improved, true)],
+            vec![unjudged_row("a")],
+        ] {
+            assert_ne!(
+                Summary::of(&comparison(rows, Vec::new())),
+                Summary::NothingComparable,
+                "a run that paired something exited as though it had not"
             );
         }
     }

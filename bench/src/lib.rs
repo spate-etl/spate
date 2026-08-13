@@ -143,13 +143,16 @@
 //!   rig borrowed from the instruction-count tier is where this bites, because
 //!   that tier builds one and drives it once. A case whose subject keeps state
 //!   is worth driving twice in a test before it is worth measuring.
-//! - **A feature-selected subject has to be absorbed into the corpus.** The
-//!   guarded `features` field records what was passed to cargo, which is a
-//!   different question: a change moving a feature into the default set leaves
-//!   both legs agreeing on it while the compiled code diverges. A crate that
-//!   selects a backend that way exposes the compiled backend's identity as a
-//!   constant and folds it into every case, so the two tripwires stay
-//!   independent.
+//! - **A feature-selected subject has to be declared.** The guarded `features`
+//!   field records what was passed to cargo, which is a different question: a
+//!   change moving a feature into the default set leaves both legs agreeing on
+//!   it while the compiled code diverges. A crate that selects a backend that
+//!   way exposes the compiled backend's identity as a constant and passes it to
+//!   [`Corpus::declare`] in every case, so the two tripwires stay independent.
+//!   Declare it rather than absorbing it: absorbed, it would move the digest
+//!   over the *measured bytes*, and comparing two arms of that crate would then
+//!   require waiving the one guard that most needs to hold there — the two arms
+//!   are meant to read identical input.
 //!
 //! Where a crate wraps a third-party library, that library's own floor belongs
 //! beside the crate's path over the same bytes, so a regression in the

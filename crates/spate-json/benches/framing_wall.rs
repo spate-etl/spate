@@ -111,10 +111,10 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
                     corpus.absorb("chunk", chunk);
                 }
                 // The framer does not decode, so the backend cannot change
-                // what this measures. Absorbed anyway, so that both of this
-                // crate's wall targets refuse a cross-backend pairing on the
-                // same two tripwires rather than on one each.
-                corpus.absorb("backend", spate_json::BACKEND_ID.as_bytes());
+                // what this measures. Declared anyway, so that both of this
+                // crate's wall targets state the arm they compiled on the same
+                // two tripwires rather than on one each.
+                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 rig
             },
             |b, rig: &Rig| {

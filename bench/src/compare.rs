@@ -2,7 +2,7 @@
 //!
 //! The arithmetic is the easy half. What a comparator has to be built against
 //! is the failure that produces a *plausible answer* rather than an error: a
-//! well-formed table off a comparison that paired the wrong records. Five
+//! well-formed table off a comparison that paired the wrong records. Six
 //! hazards, each of which has a guard below:
 //!
 //! - **The builds must be the same build.** Two legs from different toolchains,
@@ -22,6 +22,12 @@
 //!   demotes that case; a mismatch on *every* case is systemic — a changed
 //!   generator, a changed seed — and is a hard error rather than a report with
 //!   nothing in it.
+//! - **The compiled subject must be the same subject.** A case may declare what
+//!   a feature arm swapped in, and the two legs have to agree about it. This is
+//!   the guard the `features` fingerprint cannot be: `features` records what was
+//!   passed to cargo, and a feature that became a default agrees there while
+//!   compiling something else. Demoted per case, systemic on every case, and
+//!   asserting nothing for a case that declares nothing.
 //! - **A metric can exist on one side only.** `peak_rss_bytes` is conditional
 //!   by construction, and a newly added metric is on the head side alone. Its
 //!   unit and direction come from the records rather than from a table here, so
@@ -65,6 +71,9 @@ use crate::stats::{Analysis, analyse, seed_for};
 /// The `--allow` value that waives the wholesale corpus-digest guard.
 pub const ALLOW_DIGEST: &str = "digest";
 
+/// The `--allow` value that waives the declared-build guard.
+pub const ALLOW_BUILD: &str = "build";
+
 /// Every value `--allow` recognises.
 ///
 /// Validated rather than accepted, because an unrecognised one waives nothing
@@ -87,6 +96,7 @@ pub fn allowable() -> Vec<&'static str> {
         )
         .collect();
     names.push(ALLOW_DIGEST);
+    names.push(ALLOW_BUILD);
     names.sort_unstable();
     names
 }
@@ -228,6 +238,12 @@ pub enum Cause {
     /// The two legs measured different bytes and were compared anyway, under
     /// [`ALLOW_DIGEST`].
     DigestCompared,
+    /// The two legs declared different compiled subjects, and the case was left
+    /// out.
+    BuildLeftOut,
+    /// The two legs declared different compiled subjects and were compared
+    /// anyway, under [`ALLOW_BUILD`].
+    BuildCompared,
     /// Anything else: a one-sided case, mismatched iteration counts, an
     /// unpaired replicate, a metric that could not be analysed.
     Other,
@@ -245,6 +261,8 @@ impl Cause {
         match self {
             Self::DigestLeftOut => "digest_left_out",
             Self::DigestCompared => "digest_compared",
+            Self::BuildLeftOut => "build_left_out",
+            Self::BuildCompared => "build_compared",
             Self::Other => "other",
         }
     }
@@ -346,13 +364,14 @@ impl Comparison {
 ///
 /// `allow` waives a named guard: any key of
 /// [`BuildFingerprint::guarded_fields`] or [`Host::guarded_fields`], or
-/// [`ALLOW_DIGEST`].
+/// [`ALLOW_DIGEST`] or [`ALLOW_BUILD`].
 ///
 /// # Errors
 ///
 /// When either leg cannot be loaded, when the builds or machines disagree on a
 /// guarded field that was not waived, or when every shared case's corpus digest
-/// differs — which is systemic rather than per-case.
+/// or declared build differs — either of which is systemic rather than
+/// per-case.
 pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, String> {
     let waived: BTreeSet<&str> = allow.iter().map(String::as_str).collect();
     guard_legs(&base, &head)?;
@@ -371,6 +390,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         .collect();
     let mut shared = 0usize;
     let mut digest_mismatches = 0usize;
+    let mut build_mismatches = 0usize;
 
     for case in all_cases {
         let (Some(base_reps), Some(head_reps)) = (base_cases.get(case), head_cases.get(case))
@@ -437,6 +457,54 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
                     what: case.to_string(),
                     why,
                     cause: Cause::DigestLeftOut,
+                });
+                continue;
+            }
+        }
+
+        // The compiled subject, which the corpus digest deliberately says
+        // nothing about. Same shape as the block above, opposite question: that
+        // one asks whether the two legs read the same bytes, this one whether
+        // they ran the same code through them.
+        let base_builds: BTreeSet<Option<&str>> = base_reps
+            .values()
+            .map(|r| r.build_digest.as_deref())
+            .collect();
+        let head_builds: BTreeSet<Option<&str>> = head_reps
+            .values()
+            .map(|r| r.build_digest.as_deref())
+            .collect();
+        if base_builds != head_builds || base_builds.len() != 1 {
+            let within_one_leg = base_builds.len() != 1 || head_builds.len() != 1;
+            if !within_one_leg {
+                build_mismatches += 1;
+            }
+            let why = if within_one_leg {
+                format!(
+                    "the declared build is not constant within a leg — base {}, head {}; \
+                     the replicates of one leg did not all measure the same compiled code",
+                    declared(&base_builds),
+                    declared(&head_builds)
+                )
+            } else {
+                format!(
+                    "the declared build differs — base {}, head {}; the two legs compiled \
+                     different code for this case",
+                    declared(&base_builds),
+                    declared(&head_builds)
+                )
+            };
+            if waived.contains(ALLOW_BUILD) && !within_one_leg {
+                not_comparable.push(NotComparable {
+                    what: case.to_string(),
+                    why: format!("{why} — compared anyway because --allow {ALLOW_BUILD}"),
+                    cause: Cause::BuildCompared,
+                });
+            } else {
+                not_comparable.push(NotComparable {
+                    what: case.to_string(),
+                    why,
+                    cause: Cause::BuildLeftOut,
                 });
                 continue;
             }
@@ -602,6 +670,20 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         ));
     }
 
+    // The same escalation, for the same reason: every shared case compiling
+    // differently is not twenty per-case findings, it is one — the two legs are
+    // two different builds of the subject, and the report should say so once
+    // rather than demote the whole run a case at a time.
+    if shared > 1 && build_mismatches == shared && !waived.contains(ALLOW_BUILD) {
+        return Err(format!(
+            "every shared case ({shared}) declares a different build on the two legs. \
+             Two builds of one commit are meant to compile the same subject, so this is a \
+             feature arm rather than a change — measure it with `bench arms`, which pins \
+             one iteration count across both arms and interleaves them. Pass \
+             `--allow {ALLOW_BUILD}` to compare them anyway."
+        ));
+    }
+
     if shared == 0 {
         return Err(format!(
             "the two legs share no case. {} holds {} case(s), {} holds {}. An empty table \
@@ -624,6 +706,19 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         not_comparable,
         allowed: allow.to_vec(),
     })
+}
+
+/// How a set of declared build digests reads in a refusal.
+///
+/// A case that declared nothing renders as `none` rather than as an empty
+/// string: "base none, head [\"a1b2…\"]" says which side declared, where two
+/// bracketed lists one of which is empty says it much less clearly.
+fn declared(digests: &BTreeSet<Option<&str>>) -> String {
+    let rendered: Vec<&str> = digests
+        .iter()
+        .map(|digest| digest.unwrap_or("none"))
+        .collect();
+    format!("{rendered:?}")
 }
 
 /// Non-priming records, keyed by case and then by replicate index.
@@ -753,7 +848,7 @@ fn guard_fields(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{ALLOW_DIGEST, Cause, Leg, compare, load_leg};
+    use super::{ALLOW_BUILD, ALLOW_DIGEST, Cause, Leg, compare, load_leg};
     use crate::fingerprint::{BuildFingerprint, Host};
     use crate::record::{CaseId, Metric, Record, SCHEMA_VERSION, WALL_NS_PER_ITER};
     use crate::stats::Verdict;
@@ -809,6 +904,7 @@ mod tests {
                 erratic: false,
                 seed: 1,
                 corpus_digest: "aaaaaaaaaaaaaaaa".to_owned(),
+                build_digest: None,
                 metrics: BTreeMap::from([(
                     WALL_NS_PER_ITER.to_owned(),
                     Metric::minimize(wall, "ns"),
@@ -947,6 +1043,142 @@ mod tests {
             out.not_comparable
                 .iter()
                 .any(|n| n.what.ends_with("b") && n.why.contains("corpus digest"))
+        );
+    }
+
+    /// The point of the split: a case whose corpus matches and whose compiled
+    /// subject does not is demoted on the build, with the corpus guard left
+    /// intact for every other case. Before the two lived in one digest, this
+    /// could only be compared by waiving the guard on the bytes.
+    #[test]
+    fn a_per_case_build_mismatch_demotes_only_that_case() {
+        let mut base = Builder::new("base")
+            .series("a", &ten(1000.0))
+            .series("b", &ten(2000.0))
+            .build();
+        for record in &mut base.records {
+            if record.case.case == "b" {
+                record.build_digest = Some("5e12e5e12e5e12e5".to_owned());
+            }
+        }
+
+        let mut head = Builder::new("head")
+            .series("a", &ten(1000.0))
+            .series("b", &ten(2000.0))
+            .build();
+        for record in &mut head.records {
+            if record.case.case == "b" {
+                record.build_digest = Some("51md51md51md51md".to_owned());
+            }
+        }
+
+        let out = compare(base, head, &[]).expect("compares");
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0].case.case, "a");
+        let demotion = out
+            .not_comparable
+            .iter()
+            .find(|n| n.what.ends_with("b"))
+            .expect("b was demoted");
+        assert_eq!(demotion.cause, Cause::BuildLeftOut);
+        assert!(demotion.why.contains("declared build differs"), "{demotion:?}");
+        assert!(
+            !demotion.why.contains("corpus digest"),
+            "the bytes matched; only the build differed: {demotion:?}"
+        );
+    }
+
+    /// A case that declares nothing asserts nothing. Every existing target is
+    /// this case, so the guard must be silent for them rather than demoting a
+    /// whole run on an absent field.
+    #[test]
+    fn a_case_that_declares_no_build_is_compared_as_before() {
+        let base = Builder::new("base").series("a", &ten(1000.0)).build();
+        let head = Builder::new("head").series("a", &ten(1000.0)).build();
+        assert!(base.records.iter().all(|r| r.build_digest.is_none()));
+
+        let out = compare(base, head, &[]).expect("compares");
+        assert_eq!(out.rows.len(), 1);
+        assert!(
+            out.not_comparable.is_empty(),
+            "{:?}",
+            out.not_comparable
+        );
+    }
+
+    /// One leg declaring and the other not is a mismatch, not an absence. It is
+    /// what a case gaining a `declare` between two commits looks like, and
+    /// treating it as "nothing to check" would compare the very pair the field
+    /// was added to separate.
+    #[test]
+    fn a_build_declared_on_one_leg_only_is_a_mismatch() {
+        let base = Builder::new("base").series("a", &ten(1000.0)).build();
+        let mut head = Builder::new("head").series("a", &ten(1000.0)).build();
+        for record in &mut head.records {
+            record.build_digest = Some("5e12e5e12e5e12e5".to_owned());
+        }
+
+        let out = compare(base, head, &[]).expect("compares");
+        assert!(out.rows.is_empty());
+        let demotion = &out.not_comparable[0];
+        assert_eq!(demotion.cause, Cause::BuildLeftOut);
+        assert!(demotion.why.contains("none"), "{demotion:?}");
+    }
+
+    /// A leg disagreeing with its own replicates about what it compiled is not
+    /// waivable, for the same reason the corpus version is not: there is no
+    /// single build left to compare against.
+    #[test]
+    fn a_build_that_varies_within_a_leg_is_not_waivable() {
+        let base = Builder::new("base").series("a", &ten(1000.0)).build();
+        let mut head = Builder::new("head").series("a", &ten(1000.0)).build();
+        head.records[0].build_digest = Some("5e12e5e12e5e12e5".to_owned());
+
+        for allow in [Vec::new(), vec![ALLOW_BUILD.to_owned()]] {
+            let out = compare(base.clone(), head.clone(), &allow).expect("compares");
+            assert!(out.rows.is_empty(), "{:?}", out.rows);
+            assert_eq!(out.not_comparable[0].cause, Cause::BuildLeftOut);
+            assert!(
+                out.not_comparable[0].why.contains("within a leg"),
+                "{:?}",
+                out.not_comparable
+            );
+        }
+    }
+
+    /// Every shared case compiling differently is one finding, not twenty. It
+    /// is what pointing `compare` at two feature arms looks like, so the
+    /// refusal names the command that measures those properly.
+    #[test]
+    fn a_wholesale_build_mismatch_is_a_hard_error_and_waivable() {
+        let mut base = Builder::new("base")
+            .series("a", &ten(1000.0))
+            .series("b", &ten(2000.0))
+            .build();
+        for record in &mut base.records {
+            record.build_digest = Some("5e12e5e12e5e12e5".to_owned());
+        }
+        let mut head = Builder::new("head")
+            .series("a", &ten(1000.0))
+            .series("b", &ten(2000.0))
+            .build();
+        for record in &mut head.records {
+            record.build_digest = Some("51md51md51md51md".to_owned());
+        }
+
+        let err = compare(base.clone(), head.clone(), &[]).expect_err("refused");
+        assert!(err.contains("declares a different build"), "{err}");
+        assert!(err.contains("bench arms"), "the refusal names no way out: {err}");
+
+        let waived = compare(base, head, &[ALLOW_BUILD.to_owned()]).expect("waived");
+        assert_eq!(waived.rows.len(), 2);
+        assert!(
+            waived
+                .not_comparable
+                .iter()
+                .all(|n| n.cause == Cause::BuildCompared),
+            "{:?}",
+            waived.not_comparable
         );
     }
 

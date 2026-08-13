@@ -385,6 +385,8 @@ pub(crate) struct Outcome {
     pub notes: Vec<String>,
     /// Digest of everything setup absorbed.
     pub corpus_digest: String,
+    /// Digest of everything setup declared, absent when it declared nothing.
+    pub build_digest: Option<String>,
 }
 
 impl Case {
@@ -602,6 +604,7 @@ impl Case {
             metrics,
             notes,
             corpus_digest: corpus.digest_hex(),
+            build_digest: corpus.build_digest_hex(),
         })
     }
 

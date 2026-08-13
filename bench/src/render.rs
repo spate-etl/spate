@@ -397,6 +397,22 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
         },
     );
 
+    // Only when something was declared. A tree whose cases have no feature axis
+    // would otherwise carry a line saying nothing, every run, forever.
+    let (build_waived, build_out) = (count(Cause::BuildCompared), count(Cause::BuildLeftOut));
+    if build_waived + build_out > 0 {
+        lines.push(match (build_waived, build_out) {
+            (0, out) => format!("declared builds: {out} case(s) did NOT match and were left out"),
+            (waived, 0) => {
+                format!("declared builds: {waived} case(s) did NOT match and were compared anyway")
+            }
+            (waived, out) => format!(
+                "declared builds: {out} case(s) did NOT match and were left out, \
+                 {waived} more were compared anyway"
+            ),
+        });
+    }
+
     if !comparison.allowed.is_empty() {
         lines.push(format!(
             "GUARDS WAIVED with --allow: {}",
@@ -1293,21 +1309,52 @@ mod tests {
 
     #[test]
     fn every_cause_reaches_the_json_as_a_token() {
-        let not_comparable = [Cause::DigestLeftOut, Cause::DigestCompared, Cause::Other]
-            .into_iter()
-            .map(|cause| NotComparable {
-                what: "spate-bench/selftest_wall/a".to_owned(),
-                why: "because".to_owned(),
-                cause,
-            })
-            .collect();
+        let not_comparable = [
+            Cause::DigestLeftOut,
+            Cause::DigestCompared,
+            Cause::BuildLeftOut,
+            Cause::BuildCompared,
+            Cause::Other,
+        ]
+        .into_iter()
+        .map(|cause| NotComparable {
+            what: "spate-bench/selftest_wall/a".to_owned(),
+            why: "because".to_owned(),
+            cause,
+        })
+        .collect();
         let cmp = comparison(vec![row("a", Verdict::NoChange, false)], not_comparable);
         let text = json(&cmp).expect("serialises");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
 
         assert_eq!(parsed["not_comparable"][0]["cause"], "digest_left_out");
         assert_eq!(parsed["not_comparable"][1]["cause"], "digest_compared");
-        assert_eq!(parsed["not_comparable"][2]["cause"], "other");
+        assert_eq!(parsed["not_comparable"][2]["cause"], "build_left_out");
+        assert_eq!(parsed["not_comparable"][3]["cause"], "build_compared");
+        assert_eq!(parsed["not_comparable"][4]["cause"], "other");
+    }
+
+    /// The declared-build line appears only when something was declared. Most
+    /// targets have no feature axis, and a line saying "0 case(s)" on every run
+    /// of those is noise in the most-read part of the report.
+    #[test]
+    fn the_declared_build_line_appears_only_when_a_build_was_declared() {
+        let quiet = comparison(vec![row("a", Verdict::NoChange, false)], Vec::new());
+        assert!(!markdown(&quiet).contains("declared builds"), "{quiet:?}");
+
+        let loud = comparison(
+            vec![row("a", Verdict::NoChange, false)],
+            vec![NotComparable {
+                what: "spate-bench/selftest_wall/b".to_owned(),
+                why: "the declared build differs".to_owned(),
+                cause: Cause::BuildLeftOut,
+            }],
+        );
+        assert!(
+            markdown(&loud).contains("declared builds: 1 case(s) did NOT match and were left out"),
+            "{}",
+            markdown(&loud)
+        );
     }
 
     #[test]

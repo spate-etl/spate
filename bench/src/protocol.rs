@@ -204,6 +204,7 @@ fn dispatch(
                 erratic: case.erratic().is_some(),
                 seed,
                 corpus_digest: outcome.corpus_digest,
+                build_digest: outcome.build_digest,
                 metrics: outcome.metrics,
                 notes,
                 build: BuildFingerprint::from_env()?,

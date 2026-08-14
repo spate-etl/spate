@@ -116,6 +116,16 @@ metric series ownership is process-wide (INV-10). Fixtures therefore need
 per-test `pipeline` and `component` labels; a local recorder does not isolate the
 claim.
 
+A test file reaching an optional feature is declared in its crate's
+`Cargo.toml` with the `required-features` it needs. `autotests` is left at its
+default, so an undeclared file is collected regardless, carrying no
+`required-features`, and every build compiles it — including the ones its
+imports do not exist under. `crates/spate/tests/manifest.rs` holds each test
+target to its stanza, and `cargo check --workspace --all-targets` in
+`make check-features` is what builds them on the default feature set;
+`cargo hack --no-dev-deps` strips dev-dependencies and reaches no test target
+at all.
+
 ## Benchmarks
 
 The tiers below answer different questions. Only the counted one gates a pull

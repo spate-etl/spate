@@ -14,8 +14,8 @@
 //! compiled decode spec already hot; one payload measures the first of those
 //! walks, which is the least representative one. The size is chosen so
 //! per-payload decode dominates the once-per-batch memo refresh, and so every
-//! case — from the cheapest error return to the most expensive resolved
-//! decode — lands inside the counter tier's useful range rather than in the
+//! case, from the cheapest error return to the most expensive resolved
+//! decode, lands inside the counter tier's useful range rather than in the
 //! noise below it.
 //!
 //! # Determinism
@@ -29,26 +29,26 @@
 //! through `to_avro_datum` produces different bytes on every run. The map
 //! field in [`shapes_schema`] is therefore framed here by
 //! [`encode_map_of_long`] and appended to a head record that carries every
-//! other field — `tests/bench_fixtures.rs` decodes the result through the
+//! other field. `tests/bench_fixtures.rs` decodes the result through the
 //! public API, so the hand-framing cannot drift from what the schema says.
 //!
 //! ## What a deterministic corpus still does not pin
 //!
 //! Identical input bytes do not make every count bit-identical, and it is
-//! worth knowing exactly which cases are not. A `HashMap`'s seed is drawn per
-//! process, so where one is *built during the decode* the probe sequence — not
-//! the hash itself — differs between the merge-base leg and the head leg with
-//! no code change at all. Two places do that: `apache-avro`'s `resolve_record`
+//! worth knowing which cases are not. A `HashMap`'s seed is drawn per
+//! process, so where one is *built during the decode* the probe sequence,
+//! though not the hash itself, differs between the merge-base leg and the head
+//! leg with no code change at all. Two places do that: `apache-avro`'s `resolve_record`
 //! builds one per record whenever a reader schema is applied, and the
 //! logical-type target holds a `HashMap` field.
 //!
-//! Running the same binary twice moves exactly those four cases — the three
-//! resolving readers and `logical_types` — and nothing else: the writer-only
+//! Running the same binary twice moves exactly those four cases (the three
+//! resolving readers and `logical_types`) and nothing else: the writer-only
 //! reader, the recursive datum, the Confluent cases and every pre-existing
 //! case come back bit-identical. That controlled comparison bounds the seed's
 //! own contribution at roughly a thousandth of a percent. Across two *builds*
 //! the same four are still the only cases that move, by up to a twentieth of
-//! a percent — the difference is ordinary codegen jitter, which every case is
+//! a percent. The difference is ordinary codegen jitter, which every case is
 //! exposed to and which these four cannot be separated from.
 //!
 //! So the caveat is narrow: on those four, do not read a near-zero delta as
@@ -60,7 +60,7 @@ use apache_avro::types::Value;
 use apache_avro::{Decimal, Schema, Uuid, to_avro_datum};
 use std::collections::HashMap;
 
-/// Payloads in one corpus — a poll batch's worth. See the module docs.
+/// Payloads in one corpus, a poll batch's worth. See the module docs.
 ///
 /// The floor is set by the cheapest case, not the most expensive one: the
 /// Confluent cases that resolve to a missing schema id return before any
@@ -84,7 +84,7 @@ pub(crate) const READY_ID: u32 = 4_211;
 /// every payload carrying it resolves to `Lookup::Failed`.
 pub(crate) const POISON_ID: u32 = 4_212;
 
-/// A schema id that is never fetched at all — the deserializer's runtime is
+/// A schema id that is never fetched at all. The deserializer's runtime is
 /// never driven, so the fetcher task never runs and the id stays
 /// `Lookup::Missing` for the whole corpus.
 pub(crate) const UNKNOWN_ID: u32 = 4_213;
@@ -144,7 +144,7 @@ pub(crate) fn order_datums() -> Vec<Vec<u8>> {
     (0..BATCH).map(|i| order_datum(&schema, i)).collect()
 }
 
-/// The same corpus truncated mid-record — the poison-pill storm's payload.
+/// The same corpus truncated mid-record, the poison-pill storm's payload.
 /// Truncation, not emptiness: an empty payload is a tombstone and decodes to
 /// nothing without touching the error path at all.
 pub(crate) fn truncated_order_datums() -> Vec<Vec<u8>> {
@@ -262,11 +262,11 @@ pub(crate) const EVENT_DEFAULTED: &str = r#"{"type":"record","name":"Event","fie
 ///
 /// **Not a bench case.** The two-pass path resolves through
 /// `apache_avro::types::Value::resolve`, whose `resolve_record` matches
-/// writer fields to reader fields by name only — a reader field alias is
+/// writer fields to reader fields by name only, and a reader field alias is
 /// registered when the schema is parsed and then never consulted, so this
 /// reader rejects every payload the other four resolve.
 /// `tests/bench_fixtures.rs` pins that, so the case can be added the day the
-/// dependency starts honoring it — which is also why this reader is `allow`ed
+/// dependency starts honoring it, which is also why this reader is `allow`ed
 /// rather than deleted: it is the input that pin needs.
 #[allow(dead_code, reason = "used only by the fixtures test's alias pin")]
 pub(crate) const EVENT_ALIASED: &str = r#"{"type":"record","name":"Event","fields":[
@@ -279,7 +279,7 @@ pub(crate) const EVENT_ALIASED: &str = r#"{"type":"record","name":"Event","field
 /// The one decode target all five evolution cases share.
 ///
 /// A superset of every reader shape, so the only thing that differs between
-/// the five counts is the resolution rule under test — a per-reader target
+/// the five counts is the resolution rule under test; a per-reader target
 /// would fold each struct's own field count into the comparison. The widths
 /// are the promoted ones and serde's integer and float visitors accept the
 /// narrower wire values; the two renamed halves and the defaulted field carry
@@ -375,7 +375,7 @@ impl<'de> serde::Deserialize<'de> for Blob {
     }
 }
 
-/// The enum target — decoded from the symbol name on both paths.
+/// The enum target, decoded from the symbol name on both paths.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) enum Colour {
     #[serde(rename = "RED")]

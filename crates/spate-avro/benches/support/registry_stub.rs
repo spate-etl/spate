@@ -7,9 +7,9 @@
 //! schema (and, for the poison case, a negative entry). Both states are
 //! reachable only through a registry fetch: `insert_ready` and
 //! `insert_failed` are private to the crate and the fetcher task is the only
-//! caller. The public API can express it — point `registry.url` at a socket
-//! this process owns, which is what `tests/registry_flow.rs` already does —
-//! so the benches stay on the public API rather than growing a seam.
+//! caller. The public API can express it by pointing `registry.url` at a
+//! socket this process owns, which is what `tests/registry_flow.rs` already
+//! does, so the benches stay on the public API rather than growing a seam.
 //!
 //! Nothing here runs inside a measured region. The fetch happens in the
 //! `#[bench]` argument expression, the stub is shut down and joined before
@@ -157,10 +157,10 @@ fn serve(mut stream: TcpStream, ready_segment: &str, body: &str) {
         .unwrap_or_default()
         .to_owned();
 
-    // The id segment must end where the path does, not merely start there:
-    // `starts_with` alone would serve the ready schema for id 42110 as well as
-    // for 4211, and a case that quietly stopped 404ing would measure the
-    // decode it is named for the absence of.
+    // The id segment must end where the path does rather than only start
+    // there: `starts_with` alone would serve the ready schema for id 42110 as
+    // well as for 4211, and a case that silently stopped 404ing would measure
+    // the decode it is named for the absence of.
     let id_segment = path.split('?').next().unwrap_or_default();
     let (status, payload) = if id_segment == ready_segment {
         ("200 OK", body.to_owned())

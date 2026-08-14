@@ -3,10 +3,10 @@
 //! # Two axes, one comparison
 //!
 //! Two legs can differ in the tree they were built from or in the features they
-//! were built with, and both are things somebody wants measured. [`ab`] takes
+//! were built with, and both are worth measuring. [`ab`] takes
 //! the first, checking the reference out into a worktree; [`arms`] takes the
 //! second, building one tree twice into two directories. Everything after "both
-//! legs exist" is [`two_legs`], shared rather than restated — so the properties
+//! legs exist" is [`two_legs`], shared rather than restated, so the properties
 //! below hold on both axes because there is one implementation of them, not
 //! because two were kept in agreement.
 //!
@@ -22,7 +22,7 @@
 //!    reported as not comparable rather than silently skipped.
 //! 4. **Calibrate once, on the base leg, and pin the count for both.** A
 //!    self-calibrating head leg would answer a slowdown by running fewer
-//!    iterations, which hides it — and would make the resident-set and
+//!    iterations, which hides it, and would make the resident-set and
 //!    allocation totals incomparable, since those are per-region rather than
 //!    per-iteration.
 //! 5. **Prime each (leg, case) once and mark the record `priming: true`.** The
@@ -38,14 +38,14 @@
 //! # Where the run puts things
 //!
 //! Legs, worktrees and every build directory a run of its own makes live under
-//! `$TMPDIR/spate-bench`, or under `SPATE_BENCH_CACHE` when that is set — never
+//! `$TMPDIR/spate-bench`, or under `SPATE_BENCH_CACHE` when that is set, never
 //! inside the repository, where cargo and git would both find them. The worktree
 //! is removed when a run ends; the legs and the target directories are kept, and
 //! nothing prunes either.
 //!
-//! A target directory is keyed by what makes its build distinct — the
+//! A target directory is keyed by what makes its build distinct: the
 //! reference's commit for an [`ab`] base, the feature flags for either
-//! [`arms`] arm — so a second run of the same pair reuses the compiled
+//! [`arms`] arm. A second run of the same pair reuses the compiled
 //! dependencies. `ab`'s base recompiles the workspace's own crates either way,
 //! since the worktree is recreated; `arms` recompiles only what its features
 //! changed. They are caches in the ordinary sense: `rm -rf` costs a rebuild and
@@ -53,7 +53,7 @@
 //!
 //! Because a leg is a directory of self-describing records, a run that took
 //! twenty minutes can be re-rendered as Markdown, or as JSON for a script,
-//! without repeating it — both leg paths are printed when a run finishes, and a
+//! without repeating it. Both leg paths are printed when a run finishes, and a
 //! leg carries which axis produced it, so a re-render applies the rule the run
 //! was measured under.
 
@@ -193,7 +193,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
 /// Builds every wall-clock target in a tree and asks each what it declares.
 ///
 /// What `bench list --cases` prints. It builds, because the case list lives in
-/// the compiled target rather than in a manifest — which is what stops the list
+/// the compiled target rather than in a manifest, which is what stops the list
 /// and the run ever disagreeing.
 ///
 /// # Errors
@@ -254,7 +254,7 @@ pub struct AbOutcome {
 
 /// Compares the working tree against a reference.
 ///
-/// `base_plan.dir` is ignored — the reference decides it — and `head_plan.dir`
+/// `base_plan.dir` is ignored, since the reference decides it, and `head_plan.dir`
 /// is the working tree as it stands, dirty or not. `head_plan.replicates` is
 /// what both legs run: a comparison has one replicate count by definition.
 ///
@@ -295,7 +295,7 @@ pub fn ab(
 /// Compares two feature arms of one tree.
 ///
 /// Both plans name the same directory and differ in `feature_args` and
-/// `target_dir` — a second target directory is not a nicety, since cargo holds
+/// `target_dir`. The second target directory is required, since cargo holds
 /// one build per directory and two arms sharing one would rebuild each other
 /// away between the legs.
 ///
@@ -316,11 +316,10 @@ pub fn arms(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
             head_plan.target_dir.display()
         ));
     }
-    // Guarded, not merely documented: the axis's whole claim is that the two
-    // legs differ in their features and in nothing else, and two different
-    // trees under `axis: Arm` would carry that claim while varying the code as
-    // well — with the feature guard stepped aside, so nothing downstream
-    // notices.
+    // Guarded rather than only documented: the axis claims the two legs
+    // differ in their features and in nothing else, and two different trees
+    // under `axis: Arm` would carry that claim while varying the code as well,
+    // with the feature guard stepped aside, so nothing downstream notices.
     if base_plan.dir != head_plan.dir {
         return Err(format!(
             "the two arms name different trees: {} and {}. An arm comparison varies the \
@@ -348,8 +347,8 @@ fn guard_out(base_plan: &Plan, head_plan: &Plan) -> Result<(), String> {
 /// Builds two legs and measures them against each other.
 ///
 /// What both [`ab`] and [`arms`] are, once each has decided what its two legs
-/// *are*. The five properties that make the result a comparison — build both
-/// before measuring, intersect, calibrate once and pin, prime, interleave — live
+/// *are*. The five properties that make the result a comparison (build both
+/// before measuring, intersect, calibrate once and pin, prime, interleave) live
 /// here and are therefore the same on both axes by construction.
 fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
     // Both legs built before either is measured.
@@ -359,8 +358,8 @@ fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
     }
     // Described from the directory that was built rather than from the
     // reference it was made for, so a leg's provenance names the tree it
-    // measured. It also makes an A/A run — the base and the head at the same
-    // commit — produce two fingerprints that differ in nothing but `leg`, which
+    // measured. It also makes an A/A run, the base and the head at the same
+    // commit, produce two fingerprints that differ in nothing but `leg`, which
     // is what makes an empty significant table mean something.
     let (base_describe, base_dirty) = worktree::describe(&base_plan.dir);
     let base = prepare(base_plan, base_describe, base_dirty)?;
@@ -407,7 +406,7 @@ fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
         })
         .collect();
 
-    // Calibrated on the base leg alone, and pinned for both — and only over the
+    // Calibrated on the base leg alone, pinned for both, and only over the
     // cases both legs share, since a base-only case is never measured and
     // calibrating it costs a subprocess that could fail the run.
     let iters = calibrate(&base, &shared, base_plan)?;
@@ -416,7 +415,7 @@ fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
     let mut head_writer = Writer::create(&head.out)?;
 
     // Announced before anything is measured, not after. Everything from here on
-    // can fail — a case, a guard, a digest — and every one of those errors
+    // can fail: a case, a guard, a digest. Every one of those errors
     // gives advice that starts with re-reading these two directories, whose
     // names carry a timestamp the operator has no other way to learn.
     note(&format!(
@@ -547,9 +546,9 @@ fn no_cases(plan: &Plan) -> String {
 
 /// Whether the base leg runs first at this replicate.
 ///
-/// Flipped on parity, so neither leg is systematically the one that ran second
-/// — a machine that warms up over a pair would otherwise hand the same leg the
-/// cold half every time.
+/// Flipped on parity, so neither leg is systematically the one that ran
+/// second. A machine that warms up over a pair would otherwise hand the same
+/// leg the cold half every time.
 const fn base_first(replicate: u32) -> bool {
     replicate.is_multiple_of(2)
 }
@@ -604,9 +603,9 @@ impl Writer {
 
     fn write(&mut self, record: &Record) -> Result<(), String> {
         // One `write_all` of the line *and* its newline. `writeln!` issues two,
-        // and an interrupt between them leaves a record without its terminator
-        // — which `load_leg` reads as a corrupt leg and refuses whole, taking
-        // every completed replicate with it.
+        // and an interrupt between them leaves a record without its
+        // terminator, which `load_leg` reads as a corrupt leg and refuses
+        // whole, taking every completed replicate with it.
         let mut line = record.to_line().map_err(|e| e.to_string())?;
         line.push('\n');
         self.file

@@ -2,19 +2,19 @@
 //!
 //! Operators in `spate` are **stateful closures** over the push model: `map`,
 //! `filter`, `flat_map`, and `try_map` compose statically into one loop, and
-//! a closure capturing its own state (here: a dedup set) is a full-blown
-//! custom operator — no trait to implement. (The underlying `Collector` /
+//! a closure capturing its own state (here a dedup set) is a full custom
+//! operator, with no trait to implement. (The underlying `Collector` /
 //! `StageLifecycle` traits in [`spate::ops`] are public for advanced stages,
 //! but closures are the intended API.)
 //!
 //! Two chains are driven here: one over owned records, where bare closures
 //! infer everywhere, and one over records that borrow the source buffer,
-//! which is what the `map_rec` tier exists for.
+//! which the `map_rec` tier handles.
 //!
-//! This example drives a chain by hand — poll a batch, push it through,
-//! flush — which is exactly what a pipeline thread does in production. It
-//! deliberately bypasses the runtime; for a full assembly around a chain
-//! like this one, see `memory_pipeline.rs` and `spate::pipeline::Pipeline`:
+//! This example drives a chain by hand (poll a batch, push it through,
+//! flush), which is what a pipeline thread does in production. It bypasses
+//! the runtime; for a full assembly around a chain like this one, see
+//! `memory_pipeline.rs` and `spate::pipeline::Pipeline`:
 //!
 //! ```sh
 //! cargo run -p spate --example custom_operator
@@ -44,9 +44,9 @@ use std::time::Duration;
 
 // ─── A borrowing record family ──────────────────────────────────────────
 
-/// One order header — the order's id and the customer who placed it — still
-/// pointing into the payload buffer the source lane handed the chain, so
-/// decoding copies nothing out of it.
+/// One order header, holding the order's id and the customer who placed it,
+/// still pointing into the payload buffer the source lane handed the chain,
+/// so decoding copies nothing out of it.
 #[derive(Debug)]
 struct OrderHeader<'buf> {
     order_id: &'buf str,
@@ -54,8 +54,8 @@ struct OrderHeader<'buf> {
 }
 
 /// The family tag: a type-level function from a buffer lifetime to the
-/// record type. It is what lets a lifetime-parameterized record cross the
-/// chain's generic boundaries.
+/// record type. It lets a lifetime-parameterized record cross the chain's
+/// generic boundaries.
 struct OrderHeaderF;
 
 impl RecFamily for OrderHeaderF {
@@ -91,8 +91,8 @@ impl Deserializer<OrderHeaderF> for OrderHeaderDeser {
 }
 
 /// The `map_rec` stage: a borrowed order header in, the owned billing key the
-/// sink stores out. A `fn` item, which satisfies the stage's higher-ranked
-/// bound at every buffer lifetime — the call site explains the bound.
+/// sink stores out. A `fn` item satisfies the stage's higher-ranked bound at
+/// every buffer lifetime; the call site explains the bound.
 fn billing_key(order: OrderHeader<'_>) -> Vec<u8> {
     format!("{}/{}", order.customer_id, order.order_id).into_bytes()
 }
@@ -109,8 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
         // Custom operator #1: stateful deduplication. `flat_map` emits
-        // 0..N records; emitting zero drops the duplicate (its ack share
-        // is released — dropping counts as success, not loss).
+        // 0..N records; emitting zero drops the duplicate. Its ack share is
+        // released, and a drop counts as success rather than loss.
         .flat_map::<Owned<Vec<u8>>, _>(move |word, out| {
             if seen.insert(word.clone()) {
                 out.emit(word);
@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
     // ANCHOR_END: chain
 
-    // Drive it exactly like a pipeline thread: poll a batch from a lane,
+    // Drive it the way a pipeline thread does: poll a batch from a lane,
     // push it through the chain, flush the terminal buffers.
     let mut cp = Checkpointer::new();
     let (mut source, handle) = memory_source();
@@ -203,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // by construction and satisfies the bound at every lifetime, where a
     // closure does so only when the compiler infers a higher-ranked
     // signature for it. `filter`, `inspect` and `flat_map` serve both
-    // tiers from one method — their output family, where they have one,
+    // tiers from one method. Their output family, where they have one,
     // sits in an argument type (`&mut Emitter<'_, OutF>`) rather than in
     // an `Output` binding, so the same `for<'buf>` bound stays legal and
     // the `filter` below takes an ordinary closure.
@@ -261,7 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

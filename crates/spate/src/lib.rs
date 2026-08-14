@@ -45,7 +45,7 @@
 //!
 //! Delivery is **at-least-once**: a batch's offsets commit only after every
 //! record derived from it was durably written (or intentionally dropped).
-//! Duplicates are possible after a crash — design target tables to
+//! Duplicates are possible after a crash, so design target tables to
 //! tolerate replays.
 //!
 //! # A minimal pipeline
@@ -53,7 +53,7 @@
 //! Operators are stateful closures chained into a graph; the YAML
 //! carries tuning and connector configuration; [`pipeline::Pipeline`]
 //! assembles and runs the process. This compiles and runs against the
-//! `spate-test` mocks — swap in `KafkaSource::from_component_config` and a
+//! `spate-test` mocks; swap in `KafkaSource::from_component_config` and a
 //! ClickHouse sink for the production version (see
 //! `examples/kafka_avro_to_clickhouse.rs`):
 //!
@@ -129,8 +129,8 @@ pub use spate_core::*;
 /// brings in the builder, chain entry points, and the types every
 /// assembly touches.
 ///
-/// Connector constructors are deliberately excluded — import those from
-/// their feature-gated modules ([`kafka`], [`clickhouse`], [`avro`]).
+/// Connector constructors are excluded; import those from their
+/// feature-gated modules ([`kafka`], [`clickhouse`], [`avro`]).
 /// Additions to this module are semver-additive; nothing is ever removed.
 pub mod prelude {
     pub use spate_core::config::PipelineConfig;
@@ -168,26 +168,26 @@ pub use spate_clickhouse as clickhouse;
 #[cfg(feature = "s3")]
 pub use spate_s3 as s3;
 
-/// Synthetic storefront-event source — a pipeline with no prerequisites. A
-/// demo and test source; it keeps no durable progress.
+/// Synthetic storefront-event source for a pipeline with no prerequisites.
+/// A demo and test source; it keeps no durable progress.
 #[cfg(feature = "datagen")]
 pub use spate_datagen as datagen;
 
 // Without the feature, `spate::coordination` resolves to the seam module
 // (traits, events, the driver) through the `spate_core::*` glob above. With
-// it, this explicit re-export shadows the glob with the backend crate —
-// which itself re-exports the same seam types — so the one path serves
-// both worlds and the backend types simply appear alongside.
+// it, this explicit re-export shadows the glob with the backend crate,
+// which itself re-exports the same seam types, so the one path serves both
+// worlds and the backend types appear alongside.
 /// Multi-instance leader-assigned coordination backend (NATS JetStream KV
 /// + in-memory store). The seam and driver need no feature.
 #[cfg(feature = "coordination")]
 pub use spate_coordination as coordination;
 
 /// Compile-checks the README's example, so it cannot drift from the builder
-/// API the way an `ignore`d block silently did.
+/// API.
 ///
 /// `cfg(doctest)` is stripped before macro expansion, so `include_str!` never
-/// runs in an ordinary build — the README escaping this crate's directory
+/// runs in an ordinary build. The README escaping this crate's directory
 /// cannot break `cargo publish`, and the file is not appended to the rendered
 /// documentation.
 #[cfg(doctest)]

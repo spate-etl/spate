@@ -3,8 +3,8 @@
 //!
 //! Everything here runs cargo as a subprocess in a named directory, because the
 //! two legs of an A/B run are two different checkouts. A leg's targets, its
-//! resolved features and its toolchain are all properties of *its* tree — a
-//! `rust-toolchain.toml` can differ between them — so nothing is read from this
+//! resolved features and its toolchain are all properties of *its* tree, and a
+//! `rust-toolchain.toml` can differ between them, so nothing is read from this
 //! process's own environment.
 //!
 //! # Discovery is by naming convention
@@ -14,7 +14,7 @@
 //! to the instruction-count tier and its discovery script globs for exactly
 //! that, the weekly criterion targets carry neither suffix, and this one globs
 //! for `_wall`. A target that forgets `harness = false` is invisible to this
-//! module — `cargo metadata` reports no harness setting — and is refused later,
+//! module, since `cargo metadata` reports no harness setting, and is refused later,
 //! at the runner protocol's handshake, with an error naming the stanza to add.
 //! Both legs are built by the time it arrives.
 //!
@@ -102,8 +102,8 @@ struct MetaNode {
 ///
 /// # Errors
 ///
-/// When cargo fails, or when two packages declare a target of the same name —
-/// the driver keys build artifacts by target name, and two of them would make
+/// When cargo fails, or when two packages declare a target of the same name.
+/// The driver keys build artifacts by target name, and two of them would make
 /// one leg's binary stand in for the other's.
 pub fn discover(dir: &Path, feature_args: &[String]) -> Result<Discovery, String> {
     let raw = run(
@@ -283,7 +283,7 @@ pub fn build(
 /// The bench executables cargo reported, keyed by target name.
 ///
 /// Split from the subprocess so a test can drive it with a fixture of the lines
-/// cargo actually emits — including the ones this crate does not model, which a
+/// cargo emits, including the ones this crate does not model, which a
 /// future cargo will add and which must be skipped rather than fatal.
 fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, PathBuf> {
     let mut built = BTreeMap::new();
@@ -309,7 +309,7 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
 ///
 /// The profile *name* is not this. Both legs are built with `cargo bench`, so
 /// the name is `bench` on each by construction and a guard on it can never
-/// fire — while the settings behind that name are exactly what a performance
+/// fire, while the settings behind that name are what a performance
 /// change is likely to touch. A head that adds `lto = "fat"` to
 /// `[profile.bench]` is a real and plausible pull request, and without this the
 /// two legs would fingerprint identically and the win would be attributed to
@@ -319,10 +319,10 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
 ///
 /// - every `[profile...]` table in the root manifest,
 /// - every `.cargo/config.toml` from the leg's directory upward, whole, since
-///   all of it is build configuration and cargo reads all of them — except
+///   all of it is build configuration and cargo reads all of them, except
 ///   `$CARGO_HOME`'s, which cargo reads for every invocation whatever the
 ///   directory, so it applies to both legs and cannot separate them,
-/// - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` — read from the driver's own
+/// - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, read from the driver's own
 ///   environment, so they are the same for both legs and can never *separate*
 ///   them. They are here so a leg written under one setting and compared later
 ///   against a leg written under another is refused.
@@ -344,7 +344,7 @@ pub fn codegen_digest(dir: &Path) -> String {
         "profiles",
         &profile_tables(&std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default()),
     );
-    // Every ancestor's config, nearest first, contents only — cargo reads them
+    // Every ancestor's config, nearest first, contents only. Cargo reads them
     // from the invocation's directory upward, and the two legs have different
     // ancestors by construction (the head is the repository, the base a
     // worktree under the cache root). Hashing the *contents* rather than the
@@ -371,7 +371,7 @@ fn ancestor_cargo_configs(dir: &Path) -> Vec<String> {
         let candidate = ancestor.join(".cargo");
         // `$CARGO_HOME/config.toml` is skipped. Cargo reads it for *every*
         // invocation whatever the working directory, so it applies to both legs
-        // equally — but it is a path ancestor of a repository under `$HOME` and
+        // equally, but it is a path ancestor of a repository under `$HOME` and
         // not of a worktree under the cache root, so hashing it would make the
         // two digests differ over a file that changed nothing. One inert alias
         // in `~/.cargo/config.toml` was enough to abort a whole A/B run.
@@ -405,7 +405,7 @@ fn profile_tables(manifest: &str) -> String {
     for line in manifest.lines() {
         // Trimmed before the test: TOML permits leading whitespace before a
         // table header, and reading only column 0 would let an indented
-        // `[profile.bench]` past — or, worse, let an indented `[dependencies]`
+        // `[profile.bench]` past, or, worse, let an indented `[dependencies]`
         // *fail* to close the profile table and drag itself into the digest.
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
@@ -413,7 +413,7 @@ fn profile_tables(manifest: &str) -> String {
         }
         // `profile.bench.lto = "fat"` is a dotted key, valid at the top level
         // and outside any `[profile...]` header. Over-capturing a key that
-        // merely starts with `profile.` is safe here; missing one is not.
+        // that only starts with `profile.` is safe here; missing one is not.
         if inside || trimmed.starts_with("profile.") {
             out.push_str(trimmed);
             out.push('\n');
@@ -470,7 +470,7 @@ fn run(
         // rustup's proxy exports the toolchain it resolved for *this* process
         // into every child. The two legs of a comparison are two checkouts that
         // may pin different toolchains in their own `rust-toolchain.toml`, and
-        // an inherited override would silently build both with one of them —
+        // an inherited override would silently build both with one of them,
         // which the build fingerprint would then record as agreement.
         .env_remove("RUSTUP_TOOLCHAIN");
     for (key, value) in env {
@@ -573,7 +573,7 @@ mod tests {
         assert!(err.contains("must be unique"), "{err}");
     }
 
-    /// `executables_in` itself, over the lines cargo emits — including a
+    /// `executables_in` itself, over the lines cargo emits, including a
     /// `reason` this crate does not model, which a future cargo will add and
     /// which must be skipped rather than fatal.
     #[test]

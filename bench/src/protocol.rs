@@ -2,8 +2,8 @@
 //!
 //! The driver never links a bench target; it runs it. That keeps a crate's
 //! benchmarks buildable with `cargo bench --no-run` alone and lets one CLI
-//! drive targets compiled from two different checkouts — which is the whole
-//! point, since an A/B run is exactly that.
+//! drive targets compiled from two different checkouts, which is what an A/B
+//! run is.
 //!
 //! **JSON on stdout, humans on stderr.** Every mode below writes one JSON
 //! value to stdout and nothing else, so the driver parses the stream rather
@@ -28,7 +28,7 @@
 //! The seed, the iteration count, the replicate index and the priming flag all
 //! arrive from outside, because all four have to be identical on both legs and
 //! a binary cannot know what the other leg did. The build fingerprint arrives
-//! through the environment — see [`crate::fingerprint`].
+//! through the environment; see [`crate::fingerprint`].
 //!
 //! `--seed` seeds the corpus and nothing else. `--replicate` seeds nothing at
 //! all: it is an index, so the comparator can pair replicate *k* of one leg
@@ -44,8 +44,8 @@ use crate::record::{CaseId, Record, SCHEMA_VERSION};
 
 /// The exit code a target uses when it understood the call and refused it.
 ///
-/// Distinct from the codes a target exits with for reasons of its own — libtest
-/// panics with 101 when a `*_wall.rs` is missing its `harness = false` — so the
+/// Distinct from the codes a target exits with for reasons of its own (libtest
+/// panics with 101 when a `*_wall.rs` is missing its `harness = false`) so the
 /// driver can tell "this binary does not speak the protocol" from "this binary
 /// spoke it and said no". The reason goes to stderr, which is inherited, so it
 /// has already reached the operator by the time the driver sees this.
@@ -103,7 +103,7 @@ pub struct Calibration {
 /// Runs a bench target's side of the protocol.
 ///
 /// Returns the process exit code. Use [`crate::bench_main!`] rather than
-/// calling this directly — the macro also installs the counting allocator,
+/// calling this directly; the macro also installs the counting allocator,
 /// without which every record reports absent allocation metrics.
 ///
 /// `krate` and `target` are the compiling package and bench target;

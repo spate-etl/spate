@@ -40,7 +40,7 @@ fn happy_path_delivers_exactly_and_commits() {
     // asserted around here: (1) the driver never increments
     // spate_source_records_total; (2) sink-shard metric handles are created
     // before the runtime installs the recorder (flagship pattern), binding
-    // them to the noop recorder — spate_sink_* families render empty. The
+    // them to the noop recorder, so spate_sink_* families render empty. The
     // chain's operator metrics are registered post-install and are live:
     wait_until(Duration::from_secs(30), "operator counted records", || {
         let (_, body) = http_get(pipeline.admin, "/metrics");

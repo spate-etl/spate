@@ -37,8 +37,8 @@ struct StubRegistry {
     routes: Arc<Mutex<HashMap<String, Vec<Scripted>>>>,
     hits: Arc<AtomicUsize>,
     paths: Arc<Mutex<Vec<String>>>,
-    /// While `true`, requests to `hold_path` block until released — used to
-    /// prove one slow id does not head-of-line-block other fetches.
+    /// While `true`, requests to `hold_path` block until released, which
+    /// shows one slow id does not head-of-line-block other fetches.
     hold: Arc<AtomicBool>,
     hold_path: Option<String>,
 }
@@ -356,8 +356,8 @@ async fn non_retriable_5xx_is_transient_not_poison() {
     // A single non-retriable 500 (the registry restarting behind an LB) must
     // NOT be negatively cached: doing so would surface SchemaUnavailable for
     // the whole TTL and silently drop valid records under ErrorPolicy::Skip.
-    // The id is left absent and refetched — this fails on the old code, which
-    // called insert_failed on any non-retriable error.
+    // The id is left absent and refetched. Calling insert_failed on any
+    // non-retriable error fails this test.
     let stub = StubRegistry::default();
     stub.script("/schemas/ids/7", 500, "internal error", 1);
     stub.script("/schemas/ids/7", 200, &schema_body(SCHEMA_V1), 0);
@@ -487,10 +487,10 @@ async fn prewarm_loads_subjects_at_startup() {
 }
 
 /// apache-avro 0.21 `Schema::parse_str` *panics* (not `Err`) on some
-/// malformed names — `"my-record"` trips an internal unwrap. The compile
+/// malformed names: `"my-record"` trips an internal unwrap. The compile
 /// catches the panic and stores it as an ordinary failure, so the id
 /// surfaces a per-record poison (SchemaUnavailable) the ErrorPolicy can act
-/// on — never a permanent NotReady stall, and never an unwind on whichever
+/// on, never a permanent NotReady stall and never an unwind on whichever
 /// pipeline thread touched it first. (The caught panic prints a backtrace to
 /// stderr; that is expected and harmless.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -559,7 +559,7 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
 
     // id 61: plain Event.
     let p61 = confluent_payload(61, 7);
-    // id 62: Event2, whose extra `tag` field the target type skips — a
+    // id 62: Event2, whose extra `tag` field the target type skips, giving a
     // different writer schema (and datum spec) on the same deserializer.
     let p62 = {
         let schema = Schema::parse_str(SCHEMA_V2).unwrap();
@@ -600,7 +600,7 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
 async fn duration_schema_gates_only_the_datum_path() {
     // A schema the datum path refuses (`duration` logical type) must stay
     // fully usable on the Value path: the id is published Ready with the
-    // datum-side reason stored per path — never negative-cached.
+    // datum-side reason stored per path, and never negative-cached.
     const DURATION_SCHEMA: &str = r#"{"type":"record","name":"D","fields":[
         {"name":"id","type":"long"},
         {"name":"d","type":{"type":"fixed","name":"F","size":12,"logicalType":"duration"}}]}"#;
@@ -649,7 +649,7 @@ async fn duration_schema_gates_only_the_datum_path() {
     assert_eq!(values.len(), 1);
 
     // Datum path on the SAME (now Ready) id: per-record SchemaUnavailable
-    // with the stored reason — not NotReady, not Malformed.
+    // with the stored reason, not NotReady and not Malformed.
     let mut datum_deser = builder
         .build_serde_datum::<EventRec>()
         .expect("datum builder");

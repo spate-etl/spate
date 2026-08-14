@@ -1,18 +1,18 @@
 //! E2E scenario: shutdown *during* a sink outage (#83).
 //!
 //! [`e2e_sink_outage`](e2e_sink_outage.rs) recovers the sink before stopping,
-//! so it never exercises the drain against a sink that is still down — the
-//! case the graceful-shutdown guide names explicitly ("a ClickHouse outage
+//! so it never exercises the drain against a sink that is still down. That
+//! is the case the graceful-shutdown guide names ("a ClickHouse outage
 //! mid-shutdown, say").
 //!
 //! With ClickHouse paused, `write_batch` does not return: the container holds
 //! the connection open and answers nothing, and the client's default `end`
-//! timeout is 180s — longer than any sane `drain_timeout`. Every in-flight
+//! timeout is 180s, longer than any sane `drain_timeout`. Every in-flight
 //! permit is therefore held by a write that will not finish, so the sink
 //! worker reaches `dispatch` with no permit available and nothing to release
 //! one. The drain deadline is the only thing that can free it, which is why
 //! `acquire_owned()` has to be polled inside the `select!` that watches that
-//! deadline rather than awaited outside it — a worker parked outside it never
+//! deadline rather than awaited outside it. A worker parked outside it never
 //! wakes, and the process runs past `terminationGracePeriodSeconds` to
 //! SIGKILL.
 //!
@@ -67,10 +67,9 @@ fn shutdown_during_a_sink_outage_still_exits_under_its_deadline() {
     h.pause_clickhouse();
     h.produce(&params.topic, second_wave);
 
-    // Backpressure engaging is the precondition this scenario needs, not a
-    // side observation: the queues only fill once the worker has stopped
-    // consuming them, which is precisely the state of having sealed a batch
-    // it cannot get a permit for.
+    // Backpressure engaging is the precondition this scenario needs. The
+    // queues only fill once the worker has stopped consuming them, which is
+    // the state of having sealed a batch it cannot get a permit for.
     wait_until(
         Duration::from_secs(90),
         "backpressure engaged (worker holds a batch it cannot dispatch)",
@@ -107,15 +106,14 @@ fn shutdown_during_a_sink_outage_still_exits_under_its_deadline() {
     );
     println!("drain-during-outage: exited in {exited_in:?}, report {report:?}");
 
-    // The drain honored its own budget, not merely some bound.
+    // The exit sits inside the drain's own budget, not some looser bound.
     assert!(
         exited_in < Duration::from_secs(30),
         "exit took {exited_in:?} against a 10s drain_timeout"
     );
 
-    // Abandoning is the *correct* outcome here, and asserting it is what
-    // proves the drain actually ran its deadline sweep rather than finding
-    // nothing to do.
+    // Abandoning is the correct outcome here. Asserting it shows the drain
+    // ran its deadline sweep rather than finding nothing to do.
     let drain = report.sink_drain.expect("a sink drain report");
     assert!(
         drain.abandoned > 0,

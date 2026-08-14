@@ -1,13 +1,13 @@
 //! The wall-clock A/B benchmark harness.
 //!
-//! **Not published.** This crate exists inside the Spate repository to measure
+//! **Not published.** This crate lives inside the Spate repository to measure
 //! it; it is `publish = false` and is not installable from crates.io.
 //!
-//! Benchmarks here answer one question — *did this change move it* — by
+//! Benchmarks here answer one question, *did this change move it*, by
 //! measuring two builds against each other in one sitting, on one machine.
 //! Nothing is stored: a comparison is produced, read, and thrown away, so there
 //! is no archive to keep honest and no threshold learned from history. That is
-//! a deliberate limit rather than a gap. A stored figure is only comparable
+//! a limit rather than a gap. A stored figure is only comparable
 //! with a later one when the machine, the toolchain and the corpus were all the
 //! same, and none of those hold across time; two builds measured minutes apart
 //! need none of it.
@@ -27,11 +27,11 @@
 //! through `cargo metadata`, builds both legs, drives each binary over the
 //! [`protocol`], and renders a [`compare::Comparison`].
 //!
-//! The split is load-bearing. A crate's bench target must not drag clap, git
+//! The split has to hold. A crate's bench target must not drag clap, git
 //! worktrees and the comparator into `cargo bench --no-run`, so no bench target
-//! ever enables `driver`. A workspace-wide `--all-features` build does — that
-//! is what `--all-features` means — and it is why the CLI is still linted and
-//! compile-checked on every pull request.
+//! ever enables `driver`. A workspace-wide `--all-features` build does enable
+//! it, which is why the CLI is still linted and compile-checked on every pull
+//! request.
 //!
 //! # The smallest complete target
 //!
@@ -58,8 +58,8 @@
 //! ```
 //!
 //! That is the whole of the minimum. `benches/selftest_wall.rs` carries every
-//! shape the builder supports — an allocating workload, the same workload
-//! through `iter_batched`, a non-allocating one and an erratic one — and is
+//! shape the builder supports (an allocating workload, the same workload
+//! through `iter_batched`, a non-allocating one and an erratic one) and is
 //! also what the A/A acceptance run drives: `make bench-ab REF=HEAD REPS=6`
 //! compares it against itself and must flag nothing, because a flag there means
 //! the harness is measuring its own noise rather than the code under test.
@@ -67,7 +67,7 @@
 //! # Declaring a target
 //!
 //! A wall-clock target is a bench target whose name ends in `_wall`, in any
-//! workspace member — conventionally `crates/<pkg>/benches/<name>_wall.rs`. The
+//! workspace member, conventionally `crates/<pkg>/benches/<name>_wall.rs`. The
 //! suffix is what keeps the tiers apart: `_gungraun` belongs to the
 //! instruction-count tier, and neither discovery can see the other's targets.
 //! The name has to be a valid Rust identifier, because the record carries the
@@ -80,7 +80,7 @@
 //! consumer resolves. `harness = false` is required: without it cargo runs the
 //! target under libtest, which rejects the runner protocol's arguments before
 //! the target's own `main` is reached. The driver detects that and says so, but
-//! only once both legs have been built — so `make ci-lint` checks the manifest
+//! only once both legs have been built, so `make ci-lint` checks the manifest
 //! first and names the file.
 //!
 //! The name passed to [`suite`] must be the package cargo compiles the target
@@ -102,8 +102,8 @@
 //! - **Build byte-identical input on both legs.** They are two checkouts that
 //!   may straddle a dependency bump, and a generator whose output stream changed
 //!   between them makes every number incomparable while looking healthy.
-//!   [`rng::SplitMix64`] is the answer where a corpus wants pseudo-random bytes
-//!   — a few lines held to a known-answer test, so it cannot drift the way a
+//!   [`rng::SplitMix64`] covers a corpus that wants pseudo-random bytes: a few
+//!   lines held to a known-answer test, so it cannot drift the way a
 //!   general-purpose generator's does. A corpus that is a pure function of the
 //!   record index satisfies the rule at least as strongly, and ignores the seed
 //!   argument entirely. What the rule rules out is anything environmental: a
@@ -112,7 +112,7 @@
 //!   amount.** That is what turns a duration into a throughput.
 //!
 //! `.iters(n)` pins the iteration count for a case that cannot be calibrated
-//! meaningfully — `iter_batched` builds one input per iteration, so a case with
+//! meaningfully. `iter_batched` builds one input per iteration, so a case with
 //! a large input should pin rather than let calibration choose. `.erratic(why)`
 //! marks a case whose numbers are decided by something other than the code; it
 //! is measured and reported like any other and can never reach the
@@ -120,7 +120,7 @@
 //!
 //! [`bench_main!`] installs the counting allocator and the runner protocol. A
 //! target with a hand-written `main` still runs, and reports absent allocation
-//! metrics with a note saying why — the harness detects the allocator by
+//! metrics with a note saying why. The harness detects the allocator by
 //! watching it rather than by trusting a flag.
 //!
 //! # The traps
@@ -139,7 +139,7 @@
 //!   of times against one piece of state, so a rig that moves a budget or a
 //!   watermark by relative amounts leaves each drive starting where the last one
 //!   finished; within a few, the case exercises a different branch of the state
-//!   machine than its name claims — and returns a stable number throughout. A
+//!   machine than its name claims, and returns a stable number throughout. A
 //!   rig borrowed from the instruction-count tier is where this bites, because
 //!   that tier builds one and drives it once. A case whose subject keeps state
 //!   is worth driving twice in a test before it is worth measuring.
@@ -151,8 +151,8 @@
 //!   [`Corpus::declare`] in every case, so the two tripwires stay independent.
 //!   Declare it rather than absorbing it: absorbed, it would move the digest
 //!   over the *measured bytes*, and comparing two arms of that crate would then
-//!   require waiving the one guard that most needs to hold there — the two arms
-//!   are meant to read identical input.
+//!   require waiving the one guard that most needs to hold there, since the two
+//!   arms are meant to read identical input.
 //!
 //! Where a crate wraps a third-party library, that library's own floor belongs
 //! beside the crate's path over the same bytes, so a regression in the
@@ -177,7 +177,7 @@
 //! - `stats` — the decision rule, the per-metric floors, and the bootstrap.
 //! - `compare` — pairing two legs, and the refusals that stop a well-formed
 //!   table being drawn off records that should never have met.
-//! - `ab` — the order a run happens in, and why each step is where it is.
+//! - `ab` — the order a run happens in, and where each step sits.
 //!
 //! # What this tier does not do
 //!
@@ -191,11 +191,11 @@
 //! **No path normalization between the legs.** An `ab` builds its base leg in a
 //! worktree under the cache root and its head in the repository itself; an
 //! `arms` builds both arms under the cache root, in directories named for their
-//! flags. Either way the two binaries carry different absolute paths — a
+//! flags. Either way the two binaries carry different absolute paths, a
 //! difference the compiler can act on. Comparing the self-test suite against
 //! itself on one otherwise-idle
 //! machine, the largest difference any metric showed was 0.34%, against the 5%
-//! floor that applies to the timing metrics — the allocation metrics, judged at
+//! floor that applies to the timing metrics; the allocation metrics, judged at
 //! 1%, showed none. Source-path remapping would not settle it on its own
 //! while the legs also build into different target directories, which the linker
 //! records separately. A case whose difference tracks its paths rather than its
@@ -234,9 +234,9 @@ pub mod ab;
 /// stderr, and a formatted write can otherwise reach the descriptor in several
 /// pieces.
 ///
-/// Unbuffered, and it must stay that way. A run bounded from outside — a CI job
-/// reaching its own timeout — keeps only what already reached the log, so a
-/// buffered line is a line the operator never sees in the one case it exists
+/// Unbuffered, and it must stay that way. A run bounded from outside, such as
+/// a CI job reaching its own timeout, keeps only what already reached the log,
+/// so a buffered line is one the operator never sees in the case it is there
 /// for.
 #[cfg(feature = "driver")]
 pub(crate) fn note(message: &str) {

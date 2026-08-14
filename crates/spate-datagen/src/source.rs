@@ -66,7 +66,7 @@ impl DatagenSource {
         ))
     }
 
-    /// The Avro schema the `avro` encoding writes against, as JSON — the same
+    /// The Avro schema the `avro` encoding writes against, as JSON. The same
     /// string as [`EVENT_SCHEMA_JSON`](crate::EVENT_SCHEMA_JSON).
     #[must_use]
     pub fn avro_schema() -> &'static str {
@@ -74,7 +74,7 @@ impl DatagenSource {
     }
 
     /// Every watermark this source has been asked to commit. In memory, and
-    /// nowhere else — see the crate docs.
+    /// nowhere else; see the crate docs.
     #[must_use]
     pub fn committed(&self) -> &BTreeMap<PartitionId, i64> {
         &self.watermarks
@@ -310,8 +310,8 @@ mod tests {
         );
     }
 
-    /// The budget split, observed through what the lanes actually release:
-    /// exactly `count` events, and never more than one lane apart.
+    /// The budget split, observed through what the lanes release: exactly
+    /// `count` events, and never more than one lane apart.
     #[test]
     fn a_bounded_run_releases_exactly_count_events() {
         for (partitions, count) in [(4u32, 100u64), (4, 101), (3, 10), (1, 9)] {
@@ -498,7 +498,7 @@ mod tests {
     }
 
     /// `events_remaining` answers for a bounded run from the moment the lanes
-    /// exist — before any of them has generated anything, when a scrape would
+    /// exist, before any of them has generated anything, when a scrape would
     /// otherwise read the finished value.
     #[test]
     fn events_remaining_reads_the_budget_before_the_first_fill() {

@@ -8,8 +8,8 @@
 //! - **The builds must be the same build.** Two legs from different toolchains,
 //!   targets, profiles or resolved feature sets are not a comparison, whatever
 //!   the numbers look like. That is a hard error before any pairing, with an
-//!   `--allow` escape hatch that is printed in the report header — along with
-//!   what the two legs disagreed about — so a reader is never shown a bypassed
+//!   `--allow` escape hatch that is printed in the report header, along with
+//!   what the two legs disagreed about, so a reader is never shown a bypassed
 //!   guard silently.
 //! - **A record with no partner is a finding, never a drop.** A case one leg
 //!   added or removed goes into *Not comparable* and is named. An empty
@@ -19,8 +19,8 @@
 //!   process would shift every later replicate against its partner and
 //!   fabricate a difference.
 //! - **The corpora must be the same corpora.** A digest mismatch on one case
-//!   demotes that case; a mismatch on *every* case is systemic — a changed
-//!   generator, a changed seed — and is a hard error rather than a report with
+//!   demotes that case; a mismatch on *every* case is systemic, from a changed
+//!   generator or a changed seed, and is a hard error rather than a report with
 //!   nothing in it.
 //! - **The compiled subject must be what the axis says.** A case may declare
 //!   what a feature arm swapped in. Two builds of one commit have to agree about
@@ -40,16 +40,15 @@
 //! # Three more that produce a number rather than an error
 //!
 //! **The two directories are a base and a head, in that order.** The leg name is
-//! not a guarded field — it differs by construction — so nothing else could tell
-//! the arguments apart, and transposing them would render every difference with
+//! not a guarded field, since it differs by construction, so nothing else could
+//! tell the arguments apart, and transposing them would render every difference with
 //! its sign inverted. Two directories that are not a base and a head in that
 //! order are refused.
 //!
 //! **A change from nothing has no relative size.** A metric that is zero on the
-//! base leg and non-zero on the head — a path that begins allocating — goes to
+//! base leg and non-zero on the head, a path that begins allocating, goes to
 //! *Not comparable* rather than into the findings table, because there is no
-//! percentage to state. The entry names both values, which is the information a
-//! reader actually wanted.
+//! percentage to state. The entry names both values.
 //!
 //! **One replicate missing a metric removes that metric entirely**, rather than
 //! shrinking its sample. A mean over nine pairs and a mean over ten are not the
@@ -58,8 +57,8 @@
 //! removal is disclosed under *Not comparable*, never silent.
 //!
 //! A single case whose corpus digest differs is demoted like any other, and the
-//! run succeeds with an empty table and the demotion beside it — which matters
-//! because a `--filter` routinely puts exactly one case in scope, and one case
+//! run succeeds with an empty table and the demotion beside it, which matters
+//! because a `--filter` routinely puts one case in scope, and one case
 //! differing is not evidence about the corpora as a whole. One leg disagreeing
 //! with *itself* across its own replicates is a different failure and is not
 //! waivable: there is no single corpus left to compare against.
@@ -80,7 +79,7 @@ pub const ALLOW_BUILD: &str = "build";
 /// Every value `--allow` recognises.
 ///
 /// Validated rather than accepted, because an unrecognised one waives nothing
-/// while the report header announces a waived guard — the worst combination
+/// while the report header announces a waived guard, the worst combination
 /// available.
 #[must_use]
 pub fn allowable() -> Vec<&'static str> {
@@ -131,7 +130,7 @@ impl Leg {
 ///
 /// When the directory cannot be read, holds no records, holds a record this
 /// schema version does not recognise, or mixes records from more than one build
-/// or machine — a leg assembled from two runs is not a leg.
+/// or machine. A leg assembled from two runs is not a leg.
 pub fn load_leg(dir: &Path) -> Result<Leg, String> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
@@ -167,8 +166,8 @@ pub fn load_leg(dir: &Path) -> Result<Leg, String> {
     }
 
     // A leg is one run. Two runs' records merged into one directory would
-    // otherwise collapse silently — `group` keeps the last record per
-    // (case, replicate) — and the report would state the halved replicate count
+    // otherwise collapse silently, because `group` keeps the last record per
+    // (case, replicate), and the report would state the halved replicate count
     // as fact.
     let mut seen: BTreeSet<(&CaseId, u32, bool)> = BTreeSet::new();
     for record in &records {
@@ -241,8 +240,8 @@ pub enum Cause {
     /// The two legs measured different bytes and were compared anyway, under
     /// [`ALLOW_DIGEST`].
     DigestCompared,
-    /// The two legs declared different compiled subjects — or one leg
-    /// disagreed with its own replicates — and the case was left out.
+    /// The two legs declared different compiled subjects, or one leg
+    /// disagreed with its own replicates, and the case was left out.
     BuildLeftOut,
     /// The same, compared anyway under [`ALLOW_BUILD`]. Never reached by a leg
     /// that disagreed with itself, which is not waivable.
@@ -252,7 +251,7 @@ pub enum Cause {
     ///
     /// The opposite condition to [`Cause::BuildLeftOut`], and a separate token
     /// because it is the opposite: a renderer that had to tell them apart by
-    /// reading the prose is the failure this type exists to prevent.
+    /// reading the prose is the failure this type prevents.
     BuildSameLeftOut,
     /// The two arms declared the same compiled subject and were compared anyway,
     /// under [`ALLOW_BUILD`].
@@ -265,7 +264,7 @@ pub enum Cause {
 impl Cause {
     /// The machine token, as `--format json` carries it.
     ///
-    /// Stable for a report schema version — see
+    /// Stable for a report schema version; see
     /// [`crate::render::REPORT_SCHEMA_VERSION`]. Written out rather than
     /// derived from the variant names, so renaming a variant does not rewrite
     /// what a consumer matches on.
@@ -312,7 +311,7 @@ impl std::fmt::Display for Divergence {
 /// Something that could not be compared, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NotComparable {
-    /// What could not be compared — a case, or a case's metric.
+    /// What could not be compared: a case, or a case's metric.
     pub what: String,
     /// Why not, in a sentence a reader can act on.
     pub why: String,
@@ -394,7 +393,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
     guard_legs(&base, &head)?;
     guard(&base, &head, &waived)?;
     // Read after `guard_legs`, which has refused two legs that disagree about
-    // it — so one value describes both.
+    // it, so one value describes both.
     let axis = base.build.axis;
 
     let base_cases = group(&base);
@@ -412,7 +411,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
     let mut digest_mismatches = 0usize;
     // How many cases reached the declared-build question at all, and how each
     // answered it. Counted separately from `shared` because a case demoted on
-    // its corpus never reaches the block — measured against `shared`, the
+    // its corpus never reaches the block. Measured against `shared`, the
     // wholesale escalations below could not fire once any case had been dropped
     // earlier, which is the run most in need of a systemic answer.
     let mut build_judged = 0usize;
@@ -451,8 +450,8 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
             let within_one_leg = base_digests.len() != 1 || head_digests.len() != 1;
             // Only a cross-leg mismatch counts towards "the corpora changed".
             // A leg disagreeing with its own replicates is a different failure,
-            // and the systemic error's advice — check the generators and the
-            // seed — is not the advice for it.
+            // and the systemic error's advice, to check the generators and
+            // the seed, is not the advice for it.
             if !within_one_leg {
                 digest_mismatches += 1;
             }
@@ -472,7 +471,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
                 )
             };
             // `--allow digest` is what turns the demotion into a disclosure. It
-            // has to actually compare, or the flag whose message says "compare
+            // has to compare, or the flag whose message says "compare
             // anyway" would only convert a hard error into an empty table.
             if waived.contains(ALLOW_DIGEST) && !within_one_leg {
                 not_comparable.push(NotComparable {
@@ -493,7 +492,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         // The compiled subject, which the corpus digest deliberately says
         // nothing about. Same shape as the block above, opposite question: that
         // one asks whether the two legs read the same bytes, this one whether
-        // they ran the same code through them — and the answer it wants inverts
+        // they ran the same code through them. The answer it wants inverts
         // with the axis.
         let base_builds: BTreeSet<Option<&str>> = base_reps
             .values()
@@ -515,10 +514,10 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         // One leg declaring nothing while the other does is neither agreement
         // nor disagreement about a subject: the case gained or lost its
         // declaration between the two builds, which is what comparing against a
-        // commit older than the field looks like. It is still not comparable —
-        // an undeclared side cannot be checked — but it is a third thing, and
-        // saying "the two legs compiled different code" about it would state
-        // something nobody established.
+        // commit older than the field looks like. It is still not comparable,
+        // because an undeclared side cannot be checked, but it is a third
+        // thing, and saying "the two legs compiled different code" about it
+        // would state something no run established.
         let one_sided = declared_anything
             && (base_builds == BTreeSet::from([None]) || head_builds == BTreeSet::from([None]));
         let wrong = match axis {
@@ -527,7 +526,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
             Axis::Arm => agree && declared_anything,
         };
         // Counted only where the case could have been judged, so the wholesale
-        // escalations below measure against what they actually saw.
+        // escalations below measure against what they saw.
         if !within_one_leg {
             build_judged += 1;
         }
@@ -609,8 +608,8 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
         }
 
         // Pairing by replicate index. An index present on one side only is
-        // disclosed rather than quietly dropped: a leg that lost a process is
-        // exactly the situation in which the remaining numbers look fine.
+        // disclosed rather than silently dropped: a leg that lost a process is
+        // the situation in which the remaining numbers look fine.
         let paired: Vec<u32> = base_reps
             .keys()
             .filter(|k| head_reps.contains_key(*k))
@@ -664,7 +663,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
             // Seeded from *any* record carrying the metric, paired or not.
             // Taken from the paired ones alone, a metric that exists only on an
             // unpaired replicate leaves the shape unset and the whole metric
-            // falls out of the report without a word — which is the one thing
+            // falls out of the report without a word, which is the one thing
             // this module promises never to do.
             let mut shape: Option<(String, bool)> = base_reps
                 .values()
@@ -737,11 +736,11 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
     }
 
     // A digest mismatch on every shared case is not a per-case problem. It
-    // means the corpora themselves changed — a generator, a seed, a framing —
-    // and a report of nothing but demotions reads as "no cases" rather than as
-    // the finding it is.
-    // `shared > 1`, not `shared > 0`. With one case in scope — which `--filter`
-    // routinely produces — "every case differs" is one case differing, and the
+    // means the corpora themselves changed, through a generator, a seed or a
+    // framing, and a report of nothing but demotions reads as "no cases"
+    // rather than as the finding it is.
+    // `shared > 1`, not `shared > 0`. With one case in scope, which `--filter`
+    // routinely produces, "every case differs" is one case differing, and the
     // right answer for that is the demotion above rather than a claim about the
     // corpora as a whole.
     if shared > 1 && digest_mismatches == shared && !waived.contains(ALLOW_DIGEST) {
@@ -755,7 +754,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
     }
 
     // The same escalation, for the same reason: every shared case compiling
-    // differently is not twenty per-case findings, it is one — the two legs are
+    // differently is not twenty per-case findings, it is one: the two legs are
     // two different builds of the subject, and the report should say so once
     // rather than demote the whole run a case at a time.
     if build_judged > 1 && !waived.contains(ALLOW_BUILD) {
@@ -845,8 +844,8 @@ fn group(leg: &Leg) -> BTreeMap<&CaseId, BTreeMap<u32, &Record>> {
 
 /// Refuses two directories that are not a base and a head, in that order.
 ///
-/// The leg name is deliberately not a guarded field — it differs by
-/// construction — so nothing else here distinguishes the two arguments. Without
+/// The leg name is not a guarded field, since it differs by construction, so
+/// nothing else here distinguishes the two arguments. Without
 /// this, `bench compare <head> <base>` renders a fully inverted report: a 30%
 /// regression comes out as a 23% improvement, with tight intervals and a header
 /// saying every guard passed. The only tell in the output is a `git describe`
@@ -890,7 +889,7 @@ fn guard_legs(base: &Leg, head: &Leg) -> Result<(), String> {
     Ok(())
 }
 
-/// Every guarded field of one leg — build and machine — in one map.
+/// Every guarded field of one leg, build and machine alike, in one map.
 fn guarded(leg: &Leg) -> BTreeMap<&'static str, String> {
     let mut fields = leg.build.guarded_fields();
     fields.extend(leg.host.guarded_fields());
@@ -1261,9 +1260,9 @@ mod tests {
 
     /// One leg declaring and the other not is neither agreement nor
     /// disagreement, and it is what an `ab` against a commit older than the
-    /// field looks like. Still not comparable — an undeclared side cannot be
-    /// checked — but the reason must not claim the two legs compiled different
-    /// code, which nobody established.
+    /// field looks like. Still not comparable, because an undeclared side
+    /// cannot be checked, but the reason must not claim the two legs compiled
+    /// different code, which no run established.
     #[test]
     fn a_build_declared_on_one_leg_only_says_only_that() {
         let base = Builder::new("base").series("a", &ten(1000.0)).build();
@@ -1288,8 +1287,8 @@ mod tests {
     }
 
     /// A whole run of one-sided declarations gets its own systemic answer, and
-    /// specifically not the "measure it with `bench arms`" one — that advice
-    /// cannot help somebody comparing two commits.
+    /// specifically not the "measure it with `bench arms`" one, which cannot
+    /// help a reader comparing two commits.
     #[test]
     fn a_wholesale_one_sided_declaration_names_the_older_leg() {
         let base = Builder::new("base")
@@ -1318,7 +1317,7 @@ mod tests {
     /// A case dropped on its corpus never reaches the declared-build question,
     /// so the wholesale answer has to be measured against the cases that did.
     /// Against `shared` it could not fire at all once anything was dropped
-    /// earlier — which is the run most in need of a systemic answer.
+    /// earlier, which is the run most in need of a systemic answer.
     #[test]
     fn a_corpus_demotion_does_not_hide_the_wholesale_build_finding() {
         let mut base = Builder::new("base")
@@ -1481,7 +1480,7 @@ mod tests {
             Some("5e12e5e12e5e12e5"),
             "spate-json/simd",
         );
-        // Only `a` genuinely swapped; `b` compiled the same code on both arms.
+        // Only `a` swapped; `b` compiled the same code on both arms.
         for record in &mut base.records {
             if record.case.case == "a" {
                 record.build_digest = Some("51md51md51md51md".to_owned());
@@ -1504,8 +1503,8 @@ mod tests {
     }
 
     /// Every case agreeing is one finding about the run rather than a demotion
-    /// per case. The refusal states only what is known — that these cases
-    /// declare no difference — because a feature can change something they do
+    /// per case. The refusal states only what is known, that these cases
+    /// declare no difference, because a feature can change something they do
     /// not declare, and it names both ways out.
     #[test]
     fn an_arm_run_whose_cases_declare_no_difference_is_refused() {
@@ -1586,7 +1585,7 @@ mod tests {
     #[test]
     fn a_wholesale_digest_mismatch_is_a_hard_error_and_waivable() {
         // Two cases, because one case differing is not evidence about the
-        // corpora as a whole — see the test above.
+        // corpora as a whole; see the test above.
         let mut base = Builder::new("base")
             .series("a", &ten(1000.0))
             .series("b", &ten(2000.0))
@@ -1804,8 +1803,8 @@ mod tests {
         );
     }
 
-    /// `load_leg`'s refusals, through `load_leg`. Asserting the *setup* — that
-    /// two records differ — proves nothing about the function that is supposed
+    /// `load_leg`'s refusals, through `load_leg`. Asserting the *setup*, that
+    /// two records differ, proves nothing about the function that is supposed
     /// to notice.
     #[test]
     fn load_leg_refuses_what_it_says_it_refuses() {

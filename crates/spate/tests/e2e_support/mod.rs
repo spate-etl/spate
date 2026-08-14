@@ -2,7 +2,7 @@
 //!
 //! Each scenario lives in its **own test binary** (`tests/e2e_*.rs`): the
 //! metrics recorder is process-global, so any scenario asserting on
-//! `/metrics` needs a fresh process — a shared binary would leave every
+//! `/metrics` needs a fresh process. A shared binary would leave every
 //! pipeline after the first with a no-op exporter. Containers are started
 //! per binary and shared across that binary's tests.
 //!
@@ -98,7 +98,7 @@ impl Harness {
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
 
-        // Pinned modern ClickHouse with a password — the stock module image
+        // Pinned modern ClickHouse with a password; the stock module image
         // (23.3-alpine, no auth) is unrepresentative of production.
         let ch = GenericImage::new("clickhouse/clickhouse-server", "26.3")
             .with_env_var("CLICKHOUSE_PASSWORD", CH_PASSWORD)
@@ -169,7 +169,7 @@ impl Harness {
         self.scalar(&format!("SELECT count() FROM {table}"))
     }
 
-    /// Distinct record ids — the row-conservation measure (duplicates from
+    /// Distinct record ids, the row-conservation measure (duplicates from
     /// at-least-once replay inflate `count`, never `uniq`).
     pub fn uniq(&self, table: &str) -> u64 {
         self.scalar(&format!("SELECT uniqExact(id) FROM {table}"))
@@ -242,7 +242,7 @@ impl Harness {
     }
 
     /// A payload that fails Avro decoding (valid Confluent header, torn
-    /// datum) — exercises the deserializer's Skip policy.
+    /// datum), exercising the deserializer's Skip policy.
     pub fn produce_poison(&self, topic: &str, partition: i32, n: usize) {
         let producer: BaseProducer = ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)
@@ -520,8 +520,8 @@ fn docker(args: &[&str]) {
 }
 
 /// Minimal Confluent-compatible registry: serves the registered schemas from
-/// `/schemas/ids/{id}` — `SCHEMA_JSON` under `SCHEMA_ID` out of the box — and
-/// 404s everything else, including the subject lookups a `prewarm_subjects`
+/// `/schemas/ids/{id}`, with `SCHEMA_JSON` under `SCHEMA_ID` out of the box,
+/// and 404s everything else, including the subject lookups a `prewarm_subjects`
 /// list makes (a pre-warm miss is logged, never fatal).
 async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

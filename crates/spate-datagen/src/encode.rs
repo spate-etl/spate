@@ -41,8 +41,8 @@ impl Encoder {
                     })?;
                 Ok(Encoder::Avro(Box::new(schema)))
             }
-            // Unreachable through configuration — `validate` rejects this
-            // combination at load time — but a hand-built config reaches
+            // Unreachable through configuration, since `validate` rejects
+            // this combination at load time, but a hand-built config reaches
             // `open` without passing through it.
             #[cfg(not(feature = "avro"))]
             Encoding::Avro => Err(SourceError::Client {
@@ -63,9 +63,9 @@ impl Encoder {
     ) -> Result<(), SourceError> {
         let start = out.len();
         let result = match self {
-            // Infallible in practice — the event model has no map keys, no
-            // non-finite floats and no custom `Serialize` — but the writer
-            // API is fallible.
+            // Infallible in practice, since the event model has no map
+            // keys, no non-finite floats and no custom `Serialize`, but the
+            // writer API is fallible.
             Encoder::Json => serde_json::to_writer(&mut *out, event)
                 .map_err(|e| format!("encoding a datagen event as JSON: {e}")),
             #[cfg(feature = "avro")]
@@ -88,8 +88,8 @@ impl Encoder {
 /// An event in the shape `EVENT_SCHEMA_JSON`'s top-level union declares,
 /// serialized straight into the caller's buffer.
 ///
-/// [`StorefrontEvent`]'s own `Serialize` is the JSON contract — internally
-/// tagged by `type` — which is not a union. This view selects the branch by
+/// [`StorefrontEvent`]'s own `Serialize` is the JSON contract, internally
+/// tagged by `type`, which is not a union. This view selects the branch by
 /// **index** instead, and those indices are the contract this crate publishes:
 /// they follow the union order in
 /// [`EVENT_SCHEMA_JSON`](crate::EVENT_SCHEMA_JSON) and cannot be reordered
@@ -165,11 +165,11 @@ mod tests {
         }
     }
 
-    /// A warm arena is never reallocated, which is what makes a steady-state
-    /// poll allocation-free.
+    /// A warm arena is never reallocated, which keeps a steady-state poll
+    /// allocation-free.
     ///
-    /// Every batch here is *different* — the lane runs on rather than
-    /// restarting from its seed — so the assertion is about the encoder rather
+    /// Every batch here is *different*, because the lane runs on rather than
+    /// restarting from its seed, so the assertion is about the encoder rather
     /// than about `Vec::clear` keeping a capacity that identical input refills.
     #[test]
     fn a_warm_arena_is_never_reallocated() {
@@ -215,11 +215,11 @@ mod tests {
     /// reference implementation and compared against the event that wrote it.
     ///
     /// `apache-avro` catches a datum whose *shape* drifts from the published
-    /// schema — a misnamed field, a wrong type, a branch index past the union
-    /// — on its own, and rejects it at encode time. What it cannot catch is a
-    /// field carrying the wrong value, so that is what the assertions here
-    /// are for: two fields of the same Avro type transposed, or one zeroed,
-    /// fails on this test rather than on a consumer.
+    /// schema on its own (a misnamed field, a wrong type, a branch index past
+    /// the union) and rejects it at encode time. It cannot catch a field
+    /// carrying the wrong value, which is what the assertions here cover: two
+    /// fields of the same Avro type transposed, or one zeroed, fails on this
+    /// test rather than on a consumer.
     #[cfg(feature = "avro")]
     #[test]
     fn every_avro_datum_reads_back_field_for_field() {

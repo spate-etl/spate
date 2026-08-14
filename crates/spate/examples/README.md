@@ -91,7 +91,7 @@ Work that finishes, and work shared across instances.
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
 | [`nats_coordinated_backfill`](nats_coordinated_backfill.rs) | How to coordinate a fleet over the durable store with **NATS JetStream** | `s3,json,coordination-nats` | a NATS server with JetStream; run the binary twice |
-| [`s3_backfill`](s3_backfill.rs) | How to backfill historical records from object storage and stop when the prefix is done with **object storage** | `s3,json` | nothing — it stages a `file://` bucket |
+| [`s3_backfill`](s3_backfill.rs) | How to backfill historical records from object storage and stop when the prefix is done with **object storage** | `s3,json` | nothing; it stages a `file://` bucket |
 | [`s3_coordinated_backfill`](s3_coordinated_backfill.rs) | How to split one backfill across two instances without either duplicating it with **object storage and coordination** | `s3,json,coordination` | nothing |
 
 ## 4. Operating
@@ -110,7 +110,7 @@ Writing your own components against the v1 contracts.
 
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
-| [`custom_coordinated_source`](custom_coordinated_source.rs) | How to write a coordination-aware source — planner, splits and driver with **the coordination seam** | `coordination` | nothing |
+| [`custom_coordinated_source`](custom_coordinated_source.rs) | How to write a coordination-aware source from planner to driver with **the coordination seam** | `coordination` | nothing |
 | [`custom_operator`](custom_operator.rs) | How to drive a chain of stateful operators over owned and borrowed records by hand with **no infrastructure** | — | nothing |
 | [`custom_source_sink`](custom_source_sink.rs) | How to write a source, a payload-aware router and a sink from scratch with **no infrastructure** | — | nothing |
 | [`manual_assembly`](manual_assembly.rs) | How to drop below the builder to the primitives it composes with **no infrastructure** | — | nothing |

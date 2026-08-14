@@ -18,8 +18,8 @@
 //!   isolation.
 //!
 //! Those three frame a payload already resident in memory (a Kafka message).
-//! For a **streaming** source that never holds a whole object in RAM — an
-//! `spate-s3` object, an HTTP body — the connector also owns the byte-stream
+//! For a **streaming** source that never holds a whole object in RAM (an
+//! `spate-s3` object, an HTTP body) the connector also owns the byte-stream
 //! framer: [`NdjsonFramer`] is a chunk-fed, bounded
 //! [`RecordFramer`](spate_core::framing::RecordFramer) the source runs to cut the
 //! stream into records, then hands each to the deserializer in `single` mode.
@@ -43,7 +43,7 @@
 //! # Fidelity knobs
 //!
 //! `reject_duplicate_keys` (config) turns serde_json's silent last-value-wins
-//! on duplicate object keys into a hard error — a guard against upstream
+//! on duplicate object keys into a hard error, guarding against upstream
 //! corruption. The optional Cargo features `float-roundtrip`,
 //! `arbitrary-precision`, and `raw-value` pass straight through to
 //! `serde_json`; `arbitrary-precision` in particular is crate-wide and
@@ -53,17 +53,17 @@
 //!
 //! Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value
 //! step sits behind an internal seam, so the opt-in **`simd`** Cargo feature
-//! swaps in `simd-json` (SIMD-accelerated parsing) with no change to this API —
-//! [`BACKEND_ID`] reports which is compiled. `simd` is a decode speedup over
+//! swaps in `simd-json` (SIMD-accelerated parsing) with no change to this
+//! API, and [`BACKEND_ID`] reports which is compiled. `simd` is a decode speedup over
 //! serde_json on the single-document and array paths (the Kafka-message
 //! default), by a margin that depends on the payload and the host
 //! architecture. It is off by default and excluded from the facade's `full`
 //! feature. `simd` is *not* byte-for-byte identical to serde_json on every
-//! input — it rejects integer literals outside the `i64`/`u64` range that
+//! input: it rejects integer literals outside the `i64`/`u64` range that
 //! serde_json accepts as `f64`, and does not honor serde_json's
 //! `arbitrary_precision` / `raw_value` / `float_roundtrip` features; see the
 //! JSON connector guide's Backends section. `from_reader` is never used on the
-//! hot path — decoding always operates on the in-memory payload slice.
+//! hot path, and decoding always operates on the in-memory payload slice.
 
 mod backend;
 mod config;

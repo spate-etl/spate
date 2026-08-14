@@ -1,12 +1,12 @@
-//! Synthetic commerce-event source for Spate — a pipeline you can run with
-//! nothing installed.
+//! Synthetic commerce-event source for Spate, giving a pipeline you can run
+//! with nothing installed.
 //!
 //! Every other source in this workspace needs infrastructure before it says
 //! anything: a broker, a bucket, a coordination store. That prerequisite is
 //! the first thing between a reader and a running pipeline, and it is the only
 //! thing this crate removes. Point a pipeline at a [`DatagenSource`] and it
-//! produces a stream of storefront events — orders, their payments, and
-//! refunds against those payments — on as many partitions as you ask for, at a
+//! produces a stream of storefront events (orders, their payments, and
+//! refunds against those payments) on as many partitions as you ask for, at a
 //! rate you set, for as long as you want.
 //!
 //! ```yaml
@@ -25,7 +25,7 @@
 //!
 //! The reason is the thing that makes the stream worth generating. A payment
 //! must name an order that was really placed, for an amount that matches its
-//! lines, on the same partition, at a later offset — and *that* is a property
+//! lines, on the same partition, at a later offset. That is a property
 //! of the whole dataset, not of any field in it. A field-wise schema can say
 //! "a `u64` here"; it cannot say "this `u64`, drawn from the ids the same lane
 //! minted earlier and not yet drawn". Every generator that has tried to
@@ -48,7 +48,7 @@
 //!   first.
 //!
 //! A payment settles the order's line total exactly. A refund is that total,
-//! or its half, third or quarter rounded down — never more than was captured,
+//! or its half, third or quarter rounded down, never more than was captured,
 //! which is what a balance check downstream rests on.
 //!
 //! The mix places faster than it captures, so orders placed and never paid
@@ -72,11 +72,12 @@
 //!   when the process exits.
 //! - The source claims **no resumability**. A restart begins every lane at
 //!   offset 0, so with a fixed seed the entire stream is regenerated from the
-//!   beginning — strictly *more* duplication than a real at-least-once source,
-//!   which would replay only from its last committed position.
-//! - A `resume_from:` file is **deliberately declined**. A demo source that
-//!   appears to resume durably is one somebody builds on, and the failure
-//!   would surface as silent data loss in a deployment nobody meant to make.
+//!   beginning, which is strictly *more* duplication than a real
+//!   at-least-once source, which would replay only from its last committed
+//!   position.
+//! - A `resume_from:` file is **declined**. A demo source that appears to
+//!   resume durably gets built on, and the failure surfaces as silent data
+//!   loss in a deployment that never meant to take one.
 //!
 //! Opening the source logs a `WARN` saying so, once, on the same principle.
 //!

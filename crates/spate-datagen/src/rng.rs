@@ -1,4 +1,4 @@
-//! SplitMix64 — the generator's whole source of randomness.
+//! SplitMix64, the generator's whole source of randomness.
 //!
 //! One additive Weyl step over a 64-bit state, then a finalizing avalanche:
 //! period 2^64, and the same seed yields the same sequence on every platform.

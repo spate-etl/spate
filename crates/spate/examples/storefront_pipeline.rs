@@ -1,11 +1,11 @@
-//! A realistic pipeline that needs nothing installed — and the only
+//! A realistic pipeline that needs nothing installed, and the only
 //! infrastructure-free example that ends the way production does.
 //!
 //! The flagship examples show the shape a deployment takes, and every one of
 //! them wants a broker, a schema registry or a database first. This one has
-//! the same shape — a live event stream, a JSON deserializer, a filter, a
+//! the same shape (a live event stream, a JSON deserializer, a filter, a
 //! normalizing map, a split terminal fanning out to three destinations, the
-//! admin server up — over [`spate_datagen`], which manufactures the stream
+//! admin server up) over [`spate_datagen`], which manufactures the stream
 //! in-process:
 //!
 //! ```sh
@@ -16,16 +16,16 @@
 //!
 //! The shipped config sets `count:` on the source, so the generator exhausts
 //! its budget, reports `Drained`, and the pipeline exits
-//! [`ExitState::Completed`] on its own — which is what lets this file also be
-//! a test.
+//! [`ExitState::Completed`] on its own, which lets this file also be a
+//! test.
 //!
 //! **Delete `count:` and the stream never ends.** `SIGTERM` (or `Ctrl-C`) is
 //! then the only way out, and it is the reason `handle_signals` is left at its
 //! default here while every other infrastructure-free example turns it off:
 //! this is the one place the production shutdown path is demonstrable without
-//! a broker. Both routes run the *same* drain — stop the source, finish the
+//! a broker. Both routes run the *same* drain: stop the source, finish the
 //! records already in flight, flush every sink, commit the final watermarks,
-//! then exit — so what you watch here under `Ctrl-C` is what a pod does when
+//! then exit. What you watch here under `Ctrl-C` is what a pod does when
 //! Kubernetes evicts it.
 //!
 //! # What it demonstrates
@@ -39,7 +39,7 @@
 //!   order id; [`KeyHashRouter`] hashes that key, so an order and its payment
 //!   land on the same shard index even though they land in different sinks.
 //! - **The admin server.** `/metrics`, `/healthz` and `/readyz` are printed
-//!   before the run starts — curl them while it is going, or delete `count:`
+//!   before the run starts. Curl them while it is going, or delete `count:`
 //!   and take your time.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
@@ -70,11 +70,11 @@ const SHARDS: usize = 2;
 /// reverses a mistake rather than returning goods.
 const UNBOOKED_REASON: &str = "duplicate_order";
 
-/// This is the one example that serves the admin endpoints — `main` prints
-/// their URLs to curl — so it names an address where the others ask for
-/// `none`. Port 0 rather than the `0.0.0.0:9090` default, because several
+/// This is the one example that serves the admin endpoints, and `main`
+/// prints their URLs to curl, so it names an address where the others ask
+/// for `none`. Port 0 rather than the `0.0.0.0:9090` default, because several
 /// examples run concurrently under `cargo test`. `pipeline.name` is unique to
-/// this file because a gauge series has exactly one live owner per process
+/// this file because a gauge series has one live owner per process
 /// (INV-10). Everything else is ordinary framework tuning.
 const CONFIG: &str = r#"
 pipeline: { name: storefront-demo, threads: 2 }
@@ -107,10 +107,9 @@ sinks:
 
 /// The map stage's output: one ledger entry per event, whatever its kind.
 ///
-/// This is the normalization worth doing at the edge — `order_placed` carries
-/// its value spread over `lines`, the other two carry it directly, and a
-/// downstream balance check should not have to know that. `kind` is what the
-/// split matches on.
+/// The normalization belongs at the edge: `order_placed` carries its value
+/// spread over `lines`, the other two carry it directly, and a downstream
+/// balance check should not have to know that. The split matches on `kind`.
 #[derive(Debug)]
 struct Ledger {
     kind: &'static str,
@@ -137,8 +136,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipeline = Pipeline::from_config(config)?;
 
-    // The source reads the opaque `source:` section, exactly as a broker-backed
-    // one does — nothing above this line knows the stream is manufactured.
+    // The source reads the opaque `source:` section, as a broker-backed one
+    // does. Nothing above this line knows the stream is manufactured.
     let source = DatagenSource::from_component_config(&pipeline.config().source)?;
     // The same section, read again for the one number the assertions need. A
     // constant here would be free to drift from the YAML above.
@@ -207,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 split.add::<Owned<Vec<u8>>, _, _>(TestEncoder, KeyHashRouter, ctx.sink("refunds"));
 
             // One match: classify and project in the same arm. `KeyHashRouter`
-            // shards on the payload key the generator set — the order id — so
+            // shards on the payload key the generator set, the order id, so
             // every event about one order takes the same shard index in
             // whichever sink it lands in.
             split
@@ -245,7 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         refund_rows.len()
     );
 
-    // Both of these hold however the run ended — the exit state because both
+    // Both of these hold however the run ended: the exit state because both
     // routes out are the same drain, the filter because it is per record.
     assert_eq!(
         report.state,
@@ -278,8 +277,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Referential integrity, end to end: a payment names an order this run
-    // already wrote, and a refund names a payment it already wrote. Sets, not
-    // counts — at-least-once permits a replayed duplicate after a retry.
+    // already wrote, and a refund names a payment it already wrote. Compared
+    // as sets rather than counts, because at-least-once permits a replayed
+    // duplicate after a retry.
     let placed: HashSet<u64> = order_shards.keys().copied().collect();
     for id in payment_shards.keys() {
         assert!(placed.contains(id), "payment for unplaced order {id}");
@@ -290,10 +290,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Colocation: the same key hashes to the same shard index in every sink.
-    // Naming the shard the key hashes to is what makes this a test of the
-    // key rather than of determinism — `KeyHashRouter` falls back to the
-    // source partition for a keyless record, and all three events of an order
-    // come from one partition, so the two sinks would agree either way.
+    // Naming the shard the key hashes to makes this a test of the key rather
+    // than of determinism. `KeyHashRouter` falls back to the source partition
+    // for a keyless record, and all three events of an order come from one
+    // partition, so the two sinks would agree either way.
     for (id, shard) in &payment_shards {
         let by_key = (stable_key_hash(id.to_string().as_bytes()) % SHARDS as u64) as usize;
         assert_eq!(
@@ -378,7 +378,7 @@ fn resolve_port(listen: SocketAddr) -> std::io::Result<SocketAddr> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

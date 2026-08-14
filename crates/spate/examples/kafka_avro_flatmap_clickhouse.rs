@@ -33,15 +33,15 @@
 //! 4. `sink.native_schema()` — fetches `system.columns` and builds the columnar
 //!    template; `NativeEncoder::new` mints one encoder per shard on `.clone()`.
 //! 5. `.flat_map` fans out the line array; `.filter` drops a line ordering no
-//!    units. Native column mapping is **positional** — the `OrderLineRow`
-//!    field order must equal the YAML `columns` order — with a first-record
+//!    units. Native column mapping is **positional** (the `OrderLineRow`
+//!    field order must equal the YAML `columns` order), with a first-record
 //!    field-name check off the hot path.
 //! 6. `sink.router::<Owned<OrderLineRow>>(order_key)` — a record-aware
 //!    [`DistributedRouter`](spate::clickhouse::DistributedRouter): each exploded
 //!    line routes by **its own** `order_id` field, placing every order's lines
 //!    on the shard a ClickHouse `Distributed` table with sharding key
 //!    `xxHash64(order_id)` would pick. With the YAML's single shard it routes
-//!    identically to the default — scaling out is a YAML change (see the
+//!    identically to the default; scaling out is a YAML change (see the
 //!    `shards:` comment there).
 //! 7. `.run(source)` — the runtime, reusing the builder's I/O runtime.
 //!
@@ -56,8 +56,8 @@
 //! name matches the struct field so the positional check passes.
 //!
 //! Caveat: the Native leaf writer does not rescale to the column's declared
-//! precision — pointed at a `DateTime64(6)` column, these milli-scaled values
-//! would land as 1970-era timestamps. The wrapper is what makes that
+//! precision. Pointed at a `DateTime64(6)` column, these milli-scaled values
+//! would land as 1970-era timestamps. The wrapper makes that
 //! checkable: under the YAML's `validate_schema: full` a wrapper/precision
 //! mismatch fails fatally on the first record, before anything is inserted
 //! (a plain `i64` field declares no scale, so nothing could validate it).
@@ -107,11 +107,11 @@ use std::path::Path;
 /// and region too; a target type declares the fields it reads and the rest are
 /// discarded.
 ///
-/// Discarded, not skipped: `build_serde` decodes the datum into an
-/// intermediate value and then reads the target out of it by name, so an
-/// undeclared field still costs what decoding it costs.
+/// `build_serde` decodes the datum into an intermediate value and then reads
+/// the target out of it by name, so an undeclared field is decoded and then
+/// discarded rather than stepped over, and still costs what decoding it costs.
 /// [`build_serde_datum`](spate::avro::AvroDeserializerBuilder::build_serde_datum)
-/// is the path that steps over it without materializing it.
+/// steps over it without materializing it.
 #[derive(Debug, Deserialize)]
 struct OrderPlaced {
     order_id: u64,
@@ -128,7 +128,7 @@ struct OrderLine {
 }
 
 /// The `flat_map` output = one ClickHouse row. **Field order must match the
-/// `columns` list in the YAML** — Native maps fields to columns positionally.
+/// `columns` list in the YAML**, because Native maps fields positionally.
 /// [`DateTime64Millis`] declares the timestamp's scale so `validate_schema:
 /// full` can check it against the column's declared precision (it still
 /// encodes as the raw `Int64`).
@@ -143,13 +143,13 @@ struct OrderLineRow {
 // ANCHOR_END: record
 
 // ANCHOR: shard_key
-/// Sharding key: the `order_id` column — an order's lines always land
-/// together, matching a `Distributed` DDL of `xxHash64(order_id)`. A named fn
-/// item: the extractor is a fn pointer, so it cannot capture.
+/// Sharding key: the `order_id` column, so an order's lines land together,
+/// matching a `Distributed` DDL of `xxHash64(order_id)`. A named fn item,
+/// because the extractor is a fn pointer and cannot capture.
 ///
 /// `ShardKey::U64` hashes eight little-endian bytes, which is what ClickHouse
 /// hashes for a `UInt64` column. The variant has to match the column's
-/// declared width — `U32` over the same value hashes differently.
+/// declared width; `U32` over the same value hashes differently.
 fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
     ShardKey::U64(row.order_id)
 }
@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.
     pipeline.block_on(sink.validate_distributed())?;
-    // Weights come from the validated YAML — router and endpoints can't
+    // Weights come from the validated YAML, so router and endpoints cannot
     // drift. With a single shard this routes identically to the default
     // (everything to shard 0); with N it matches `xxHash64(order_id)`.
     let router = sink.router::<Owned<OrderLineRow>>(order_key);

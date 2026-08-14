@@ -4,7 +4,7 @@
 //! The infrastructure-free examples carry `[[example]] test = true` and run on
 //! every pull request. The ones whose stanza carries no `test = true` cannot:
 //! they need a broker, a table, or a coordination store, and most of them run
-//! until SIGTERM. This binary is what runs those — one test per infrastructure
+//! until SIGTERM. This binary runs those, one test per infrastructure
 //! shape, each booting its containers once and then spawning the real example
 //! binaries against them.
 //!
@@ -18,7 +18,7 @@
 //!   the drain deadline.
 //! - **Exit status is never the whole assertion.** Every example is asserted on
 //!   what it produced, and every example stopped by `SIGTERM` is additionally
-//!   asserted on the watermark its drain committed — exit status 0 does not
+//!   asserted on the watermark its drain committed. Exit status 0 does not
 //!   imply one on a signal-initiated shutdown; see `Example::terminate`.
 //!
 //! These are `#[ignore]`d and excluded from `[profile.docker]`'s default
@@ -74,7 +74,7 @@ const ORDER_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace":
 /// Writer schema of `kafka_avro_flatmap_clickhouse.yaml`, restated here. It
 /// must stay identical to that file's `inline:` schema, or the example's
 /// decoder cannot read what this test produces. It is the same `order_placed`
-/// record [`ORDER_SCHEMA`] carries — one domain, two framings.
+/// record [`ORDER_SCHEMA`] carries, in a second framing.
 const PLACED_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace":"spate.datagen","fields":[
     {"name":"order_id","type":"long"},
     {"name":"customer_id","type":"int"},
@@ -89,7 +89,7 @@ const PLACED_SCHEMA: &str = r#"{"type":"record","name":"OrderPlaced","namespace"
 /// Writer schema of `multi_table_split.yaml`: the storefront event union,
 /// taken from the crate that defines it rather than restated. The example
 /// selects its enum variant by the union's **branch index**, so the branch
-/// order is a contract — borrowing the constant is what keeps this test from
+/// order is a contract, and borrowing the constant keeps this test from
 /// silently disagreeing with it.
 const EVENT_UNION_SCHEMA: &str = spate_datagen::EVENT_SCHEMA_JSON;
 
@@ -101,7 +101,7 @@ const EVENT_UNION_SCHEMA: &str = spate_datagen::EVENT_SCHEMA_JSON;
 /// binary in `target/<profile>/deps/<test>-<hash>`, so the location is derived
 /// from `current_exe`. Keep the existence assertion: if the runner ever stops
 /// building example targets alongside test targets, this suite must fail
-/// loudly instead of quietly testing nothing.
+/// loudly instead of testing nothing.
 fn example_bin(name: &str) -> PathBuf {
     let mut dir = std::env::current_exe().expect("current_exe");
     dir.pop();
@@ -212,8 +212,8 @@ impl Example {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Poll `cond` until it holds, failing early — with the log — if the
-    /// example exits first.
+    /// Poll `cond` until it holds, failing early (and printing the log) if
+    /// the example exits first.
     fn wait_for(&mut self, what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = Instant::now() + OUTPUT_DEADLINE;
         loop {
@@ -242,11 +242,11 @@ impl Example {
         self.reap("exit", within)
     }
 
-    /// Stop an example the way production does — `SIGTERM`, then drain — and
-    /// require a clean exit within [`DRAIN_DEADLINE`].
+    /// Stop an example the way production does, with `SIGTERM` and then a
+    /// drain, and require a clean exit within [`DRAIN_DEADLINE`].
     ///
     /// Exit status 0 is `ExitState::Completed`: the drain ran without a fatal
-    /// error. It does not on its own say the tail was acknowledged — the
+    /// error. It does not on its own say the tail was acknowledged. The
     /// unacknowledged-tail backstop fires only for a bounded source's drained
     /// exit, and a signal-initiated drain that abandons batches at
     /// `drain_timeout` still exits 0. Callers assert what landed, and where a
@@ -307,8 +307,8 @@ fn ch_env(h: &Harness) -> Vec<(&'static str, String)> {
 }
 
 /// Produce keyed payloads to `topic`, letting the client's default partitioner
-/// place them — an example that routes on the key sees the placement a real
-/// producer would give it.
+/// place them, so an example that routes on the key sees the placement a
+/// real producer would give it.
 fn produce_raw(brokers: &str, topic: &str, payloads: &[(Vec<u8>, Vec<u8>)]) {
     let producer: BaseProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -401,12 +401,12 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     h.create_topic("orders", 2);
     let orders: i64 = 500;
     // Ten orders carrying no lines. There is nothing for the example's
-    // `try_map` to total, so `ErrorPolicy::Skip` drops each one — they are
-    // produced, and the row count below is what says they never landed.
+    // `try_map` to total, so `ErrorPolicy::Skip` drops each one. They are
+    // produced, and the row count below says they never landed.
     //
-    // They are produced **first**, and that ordering is load-bearing: a
-    // skipped record puts no row in the table, so nothing observable would
-    // prove the tail had been consumed before the drain. Producing them first
+    // They are produced **first**, and that ordering matters: a skipped
+    // record puts no row in the table, so nothing observable would show the
+    // tail had been consumed before the drain. Producing them first
     // puts each one at a lower offset than every lined order on whichever
     // partition it lands, so the wait below covers them by construction.
     let unlined: i64 = 10;
@@ -457,16 +457,16 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         h.count("orders") >= u64::try_from(orders).expect("orders")
     });
     example.terminate();
-    // `uniqExact` holds the at-least-once claim (INV-1) — every lined order
-    // landed, and nothing was invented — and is by construction blind to a
-    // replayed duplicate, which inflates `count`. It is also what says the ten
+    // `uniqExact` holds the at-least-once claim (INV-1), that every lined
+    // order landed and nothing was invented, and is by construction blind to
+    // a replayed duplicate, which inflates `count`. It also says the ten
     // line-less orders were skipped rather than landed with a zero total.
     assert_eq!(
         h.scalar("SELECT uniqExact(order_id) FROM orders"),
         u64::try_from(orders).expect("orders"),
         "every lined order landed, and no line-less one did"
     );
-    // The `try_map` really totaled the lines: 2 x 7900 + 1 x 3500.
+    // The `try_map` totaled the lines: 2 x 7900 + 1 x 3500.
     assert_eq!(
         h.scalar("SELECT uniqExact(total_cents) FROM orders"),
         1,
@@ -479,10 +479,10 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     );
     // What the drain committed, which exit status 0 does not imply on a
     // signal-initiated shutdown: the group's watermark covers every record
-    // produced — the skipped ones included — so nothing was left for a restart
-    // to replay. The wait above is what makes this reachable: every lined
-    // order landing means every partition was consumed past the line-less
-    // ones ahead of them.
+    // produced, the skipped ones included, so nothing was left for a restart
+    // to replay. The wait above makes this reachable: every lined order
+    // landing means every partition was consumed past the line-less ones
+    // ahead of them.
     let committed: i64 = h.committed("orders", "orders-etl", 2).into_iter().sum();
     assert_eq!(
         committed,
@@ -545,16 +545,16 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         h.count("order_lines") >= rows
     });
     example.terminate();
-    // `flat_map` exploded each order into exactly its `per_order` lines — an
-    // under-count would have hung the wait above, an over-count lands here.
+    // `flat_map` exploded each order into exactly its `per_order` lines. An
+    // under-count would have hung the wait above; an over-count lands here.
     assert_eq!(
         h.count("order_lines"),
         rows,
         "each order exploded into its lines and no more"
     );
     // Every line kept its parent's order id, which is what the router shards
-    // on. A distinct-id count alone would not say that — 500 rows over 100
-    // ids holds however the ids were assigned. The producer sets
+    // on. A distinct-id count alone would not say that, since 500 rows over
+    // 100 ids holds however the ids were assigned. The producer sets
     // `placed_at = 1_700_000_000_000 + order_id`, so the pairing is checkable:
     // a line carrying another order's id breaks the identity.
     assert_eq!(
@@ -647,17 +647,17 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     });
     let log = example.terminate();
     // The placed orders must reach the split and be dropped there as
-    // `unrouted` — not fail to decode and be dropped a stage earlier. Both
-    // leave the tables identical and both commit their offsets, so the tables
-    // cannot tell them apart and the log is what does.
+    // `unrouted` rather than fail to decode and be dropped a stage earlier.
+    // Both leave the tables identical and both commit their offsets, so the
+    // tables cannot tell them apart and the log does.
     assert!(
         !log.contains("payload skipped by deserializer error policy"),
         "a record was dropped by the deserializer, so the unmatched policy is \
          not what this test exercised\n--- log ---\n{log}"
     );
     // One event of each kind per order, so an equality here fails if the
-    // placed orders — which match no branch and follow the `unmatched` policy
-    // — had reached either table.
+    // placed orders, which match no branch and follow the `unmatched` policy,
+    // had reached either table.
     assert_eq!(
         h.count("payments"),
         per_table,
@@ -668,9 +668,9 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         per_table,
         "the refunds branch took the issued refunds and nothing else"
     );
-    // The variant's payload is the row, and Native maps it positionally — so
-    // check the values, not just the counts. A column swap or a mis-selected
-    // branch keeps both counts at 100 and fails here.
+    // The variant's payload is the row, and Native maps it positionally, so
+    // the values are checked as well as the counts. A column swap or a
+    // mis-selected branch keeps both counts at 100 and fails here.
     assert_eq!(
         h.scalar("SELECT count() FROM payments WHERE amount_cents = 19300"),
         per_table,
@@ -721,7 +721,7 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     // Order ids are disjoint across regions, as the domain has them: an order
     // is placed from one region, so reusing an id across five would be a
     // stream no generator produces. The key is the id, so this is also what
-    // makes the produce key mean something — records sharing a key share a
+    // makes the produce key mean something: records sharing a key share a
     // partition, and here nothing shares one by accident.
     let regions = ["eu-west", "eu-north", "us-east", "us-west", "apac"];
     for i in 0..per_region {
@@ -746,8 +746,8 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     });
     example.terminate();
     // Equal fifths were produced, one fifth of them unroutable. Both
-    // equalities fail if the `apac` records — which match no branch and follow
-    // the `unmatched` policy — had reached either destination topic. An
+    // equalities fail if the `apac` records, which match no branch and follow
+    // the `unmatched` policy, had reached either destination topic. An
     // under-count is caught earlier: the wait above never reaches `per_topic`
     // and times out, so a prefix match that took only one sub-region per side
     // fails there rather than here.
@@ -778,7 +778,7 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
 
 /// `clickhouse_aggregating_mv`: rows into a `Null` landing table, aggregate
 /// states built by the materialized view. This example feeds a fixed set of
-/// orders and stops itself, so there is no SIGTERM to send — only a clean exit
+/// orders and stops itself, so there is no SIGTERM to send, only a clean exit
 /// and the states to read back.
 #[test]
 #[ignore = "requires Docker"]
@@ -846,10 +846,10 @@ fn clickhouse_aggregating_mv_example_builds_states() {
     // whole map rather than a sum over its values: `mapValues` discards the
     // keys, and every eu-west total is 3, so a key-side regression that
     // collapsed all three into one would still add to 9. Reading the map back
-    // through the state is what holds the sink's `Map(String, UInt64)`
-    // encoding end to end — `validate_schema: names` rejects an
-    // `AggregateFunction` column but does not check a field's shape against
-    // its column type; only `full` does that.
+    // through the state holds the sink's `Map(String, UInt64)` encoding end
+    // to end. `validate_schema: names` rejects an `AggregateFunction` column
+    // but does not check a field's shape against its column type; only `full`
+    // does that.
     assert_eq!(
         h.scalar(
             "SELECT toUInt64(length(m) = 3 AND m['KBD-01'] = 3 \
@@ -878,15 +878,15 @@ fn clickhouse_aggregating_mv_example_builds_states() {
 /// coordination store. A single instance is assigned every split and exits
 /// `Completed` once they are all done, so this one also stops on its own.
 ///
-/// Coverage on its own is not a coordination result — an `S3Source` with no
+/// Coverage on its own is not a coordination result: an `S3Source` with no
 /// coordinator injected reads the whole prefix too, over an in-process store
-/// that dies with it. What separates the two is durability, so the store is
-/// what this asserts: the first run must not fall back to the solo store, and
-/// a second run against the same NATS must find the job already finished.
+/// that dies with it. Durability separates the two, so this asserts on the
+/// store: the first run must not fall back to the solo store, and a second
+/// run against the same NATS must find the job already finished.
 #[test]
 #[ignore = "requires Docker"]
 fn nats_coordinated_backfill_example_covers_the_prefix() {
-    // The store version floor is 2.11 — the coordinator refuses anything older
+    // The store version floor is 2.11. The coordinator refuses anything older
     // at startup, so this tag cannot be lowered.
     let nats: Container<GenericImage> = GenericImage::new("nats", "2.11-alpine")
         .with_exposed_port(4222.tcp())

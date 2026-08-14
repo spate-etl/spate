@@ -10,10 +10,10 @@
 //!
 //! Lines are written by hand rather than serialized. This bench measures
 //! framing, and pulling a serializer into the fixture builder would put its
-//! cost in the corpus rather than leave the corpus a fixed quantity of bytes —
-//! and, more importantly, a serializer cannot be asked for a line of an exact
-//! width, which is what makes "the chunk is smaller than a line" a statement
-//! about the framer rather than about the record generator.
+//! cost in the corpus rather than leave the corpus a fixed quantity of bytes.
+//! A serializer also cannot be asked for a line of an exact width, which is
+//! what makes "the chunk is smaller than a line" a statement about the framer
+//! rather than about the record generator.
 //!
 //! Every line is nonetheless valid JSON: the framer is fed what a JSON source
 //! would really carry, and `tests/bench_fixtures.rs` holds it to that.
@@ -54,9 +54,9 @@ pub(crate) const SPLIT_CHUNK_BYTES: usize = 32;
 /// Which terminator the producer wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Eol {
-    /// `\n` — the NDJSON convention.
+    /// `\n`, the NDJSON convention.
     Lf,
-    /// `\r\n` — what a Windows producer, or an HTTP-framed export, writes. The
+    /// `\r\n`, what a Windows producer or an HTTP-framed export writes. The
     /// framer strips exactly one trailing `\r`, and that strip is the only
     /// difference between the two streams beyond one byte per line.
     Crlf,
@@ -123,9 +123,9 @@ pub(crate) fn line(index: usize, width: usize) -> Vec<u8> {
 ///
 /// `blank_every` interleaves a bare terminator after every nth record (0 for
 /// none). A blank line is skipped by the framer and consumes no record index,
-/// so the record count is `records` whatever the density — which is what
-/// `expect_bytes` below relies on, and what makes the blank case a controlled
-/// comparison rather than a smaller corpus.
+/// so the record count is `records` whatever the density. `expect_bytes`
+/// below relies on that, and it makes the blank case a controlled comparison
+/// rather than a smaller corpus.
 pub(crate) fn stream(records: usize, width: usize, eol: Eol, blank_every: usize) -> Vec<u8> {
     let eol = eol.bytes();
     let mut out = Vec::with_capacity(records * (width + eol.len() + 1));
@@ -149,10 +149,9 @@ pub(crate) fn chunks(bytes: &[u8], size: usize) -> Vec<Vec<u8>> {
 /// The decoded bytes a stream of `records` lines of `width` must frame into.
 ///
 /// Terminators and blank lines are not part of a record, so this is
-/// independent of both — which is why asserting it in the bench is worth
-/// something: a CRLF stream whose `\r` stopped being stripped, or a blank line
-/// that started counting, fails here rather than reading as a slightly larger
-/// number.
+/// independent of both, so asserting it in the bench catches something: a
+/// CRLF stream whose `\r` stopped being stripped, or a blank line that started
+/// counting, fails here rather than reading as a slightly larger number.
 pub(crate) const fn expect_bytes(records: usize, width: usize) -> usize {
     records * width
 }

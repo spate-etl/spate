@@ -45,7 +45,7 @@ pub(crate) fn kind(event: &StorefrontEvent) -> usize {
 
 impl LaneCounters {
     /// Add one batch's tally, indexed by [`kind`]. Called once per batch, not
-    /// once per record — [the metrics reference] puts counter increments on
+    /// once per record; [the metrics reference] puts counter increments on
     /// batch boundaries.
     ///
     /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
@@ -73,7 +73,7 @@ pub(crate) struct DatagenMetrics {
     /// Orders placed and not yet captured, across every lane.
     open_orders: Gauge,
     /// Last committed watermark per partition, indexed by partition id.
-    /// Empty unless `metrics.per_partition_detail` is on — this is the one
+    /// Empty unless `metrics.per_partition_detail` is on. It is the one
     /// cardinality-sensitive family here.
     committed_offset: Vec<Gauge>,
 }

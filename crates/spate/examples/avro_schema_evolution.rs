@@ -1,11 +1,11 @@
-//! Evolving a producer's Avro schema without stopping the pipeline — no
-//! broker, no registry, no server.
+//! Evolving a producer's Avro schema without stopping the pipeline, with no
+//! broker, no registry and no server.
 //!
 //! "The producer added a field" is the question that decides whether a team
 //! commits to a typed pipeline. Avro answers it with *schema resolution*: the
 //! payload was written in the **writer** schema's shape, a configured
 //! `reader_schema` states the shape you want, and the decoder reconciles the
-//! two per record. This runs the whole thing in memory — bytes from the old
+//! two per record. This runs the whole thing in memory: bytes from the old
 //! producer in, evolved records out, asserted:
 //!
 //! ```sh
@@ -14,7 +14,7 @@
 //!
 //! Four mechanisms, labelled § 1 to § 4 throughout: a **new field with a
 //! default**, a **renamed record**, an **`int`→`long` promotion**, and
-//! `#[serde(default)]` on the Rust type — which solves an overlapping problem
+//! `#[serde(default)]` on the Rust type, which solves an overlapping problem
 //! one layer further up. All four ride the one pipeline decode; § 2 and § 3
 //! carry standalone sections after it for the cases a decode that succeeds
 //! cannot show.
@@ -26,16 +26,16 @@
 //!
 //! - A reader field carrying a `default` fills in for a writer that never
 //!   wrote it. Works; § 1 asserts it.
-//! - A renamed **record** resolves — but not because of its alias. Resolution
-//!   never compares record names, so both the reader's name and its `aliases`
+//! - A renamed **record** resolves, though not because of its alias.
+//!   Resolution never compares record names, so the reader's name and its `aliases`
 //!   are ignored, and a payload resolves against any structurally compatible
 //!   reader record whatever it is called. § 2 asserts that, and keeps the
 //!   alias in the schema anyway: the specification and a registry's
 //!   compatibility check both read it.
 //! - A **field**-level alias does **not** resolve. A reader field that renames
 //!   the producer's field and lists the old name in `aliases` fails *every*
-//!   payload with `Missing field in record` — which, under the default Skip
-//!   policy, drops and acks the whole stream. § 2 asserts that failure rather
+//!   payload with `Missing field in record`, which under the default Skip
+//!   policy drops and acks the whole stream. § 2 asserts that failure rather
 //!   than describing it, and renames on the Rust side with `#[serde(alias)]`,
 //!   which does work. Tracked as spate issue #74.
 //! - `int`→`long` promotion resolves. Works; § 3 asserts it, and asserts what
@@ -45,7 +45,7 @@
 //!
 //! Nothing here can miss: `mode: raw` pins both schemas inline, so no registry
 //! is involved. In `confluent` mode a payload can arrive carrying a schema id
-//! that is not cached yet, and that is not an error and not a drop — the
+//! that is not cached yet. That is neither an error nor a drop: the
 //! deserializer returns `DeserError::NotReady`, the chain converts it into a
 //! retriable `Blocked`, the fetch runs on the I/O runtime, and the driver
 //! re-pushes the same batch from the payload that blocked until the schema
@@ -74,7 +74,7 @@ use std::error::Error;
 use std::time::Duration;
 
 /// **The producer, last year.** Three fields, `quantity` as an `int`, no
-/// currency — every byte on the wire in this example was written in this
+/// currency. Every byte on the wire in this example was written in this
 /// shape, and the producer is not being redeployed to suit us.
 const WRITER_V1: &str = r#"{"type":"record","name":"OrderPlaced","fields":[
     {"name":"order_id","type":"string"},
@@ -97,8 +97,8 @@ const READER_V2: &str = r#"{"type":"record","name":"Order","aliases":["OrderPlac
     {"name":"currency","type":"string","default":"USD"}]}"#;
 
 /// § 2, the schema we would rather have written: rename the *field* `sku` to
-/// `item_code` and keep the old name as an alias. This one does not resolve —
-/// `main` asserts the failure.
+/// `item_code` and keep the old name as an alias. This one does not resolve,
+/// and `main` asserts the failure.
 const READER_FIELD_ALIAS: &str = r#"{"type":"record","name":"Order","aliases":["OrderPlaced"],"fields":[
     {"name":"order_id","type":"string"},
     {"name":"item_code","type":"string","aliases":["sku"]},
@@ -123,8 +123,8 @@ const NARROW_READER: &str =
     r#"{"type":"record","name":"Count","fields":[{"name":"quantity","type":"int"}]}"#;
 
 /// `pipeline.name` is the `pipeline` label on every series this run mints, and
-/// a gauge series has exactly one live owner per process (INV-10), so a run
-/// builds one pipeline under one name.
+/// a gauge series has one live owner per process (INV-10), so a run builds
+/// one pipeline under one name.
 ///
 /// This example asserts on decoded records rather than on the exposition, so
 /// it asks for neither an exporter nor an admin server. A pipeline that names
@@ -139,7 +139,7 @@ source: { memory: {} }
 sink: { capture: {} }
 "#;
 
-/// The shape the pipeline works in. Nothing here knows about Avro — the two
+/// The shape the pipeline works in. Nothing here knows about Avro; the two
 /// `serde` attributes are the Rust-side half of § 2 and § 4.
 #[derive(Debug, Deserialize)]
 struct Order {
@@ -148,25 +148,25 @@ struct Order {
     /// so resolution hands us `sku` and the rename happens one layer up: serde
     /// matches either name onto `item_code`. Renaming the field in the reader
     /// schema instead is the path that does not resolve, which `main` asserts.
-    /// A serde alias is a *name* mapping only — it cannot invent a field,
+    /// A serde alias is a *name* mapping only. It cannot invent a field,
     /// cannot promote a type, and does not survive the field changing meaning.
     #[serde(alias = "sku")]
     item_code: String,
     /// § 3. The payload holds a 4-byte `int`; `READER_V2` says `long`, and
     /// resolution widens it before serde ever sees it.
     quantity: i64,
-    /// § 1. Deliberately *no* `#[serde(default)]`: if Avro's reader-schema
-    /// default did not fire, serde would fail with `missing field currency`
-    /// and this example would not run. The assertion below is therefore about
-    /// Avro's mechanism and nothing else.
+    /// § 1. No `#[serde(default)]` here: if Avro's reader-schema default did
+    /// not fire, serde would fail with `missing field currency` and this
+    /// example would not run. The assertion below is about Avro's mechanism
+    /// and nothing else.
     currency: String,
-    /// § 4. In neither schema — Avro never produces this field, so there is
-    /// nothing for resolution to do and serde fills it. The distinction that
-    /// matters: an Avro default is *in the contract*, visible to every
-    /// consumer of the schema and applied during decode; a serde default is
-    /// private to this struct and applied after. Use the Avro default when the
-    /// producer's schema is the thing that changed; use the serde default when
-    /// your struct wants a field the schema was never going to carry.
+    /// § 4. In neither schema. Avro never produces this field, so there is
+    /// nothing for resolution to do and serde fills it. An Avro default is
+    /// *in the contract*, visible to every consumer of the schema and applied
+    /// during decode; a serde default is private to this struct and applied
+    /// after. Use the Avro default when the producer's schema is the thing
+    /// that changed; use the serde default for a field the schema was never
+    /// going to carry.
     #[serde(default = "direct_channel")]
     channel: String,
 }
@@ -176,7 +176,7 @@ fn direct_channel() -> String {
 }
 
 /// One datum in the old producer's shape: a bare Avro record with no framing,
-/// which is exactly what `mode: raw` expects on the wire.
+/// which is what `mode: raw` expects on the wire.
 fn v1_datum(order_id: &str, sku: &str, quantity: i32) -> Result<Vec<u8>, Box<dyn Error>> {
     let schema = Schema::parse_str(WRITER_V1)?;
     let mut record =
@@ -187,8 +187,8 @@ fn v1_datum(order_id: &str, sku: &str, quantity: i32) -> Result<Vec<u8>, Box<dyn
     Ok(to_avro_datum(&schema, record)?)
 }
 
-/// Resolve one datum against a reader schema — the same `from_avro_datum`
-/// call the deserializer makes internally, reached directly here so a section
+/// Resolve one datum against a reader schema, through the same
+/// `from_avro_datum` call the deserializer makes internally, reached directly here so a section
 /// can assert on one reader schema at a time without a pipeline around it.
 fn resolve(writer: &str, reader: &str, datum: &[u8]) -> Result<AvroValue, apache_avro::Error> {
     let writer = Schema::parse_str(writer)?;
@@ -200,10 +200,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
 
     // ── The pipeline: § 1, § 2 and § 3 in one decode ────────────────────
-    // `mode: raw` with both schemas inline — the payload carries no schema id,
-    // so nothing contacts a registry. `build_serde` is the path that applies
-    // resolution: the single-pass `build_serde_datum` rejects a reader schema
-    // at build time, because it decodes in the writer's shape by design.
+    // `mode: raw` with both schemas inline, so the payload carries no schema
+    // id and nothing contacts a registry. `build_serde` applies resolution;
+    // the single-pass `build_serde_datum` rejects a reader schema at build
+    // time, because it decodes in the writer's shape.
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
     let settings = AvroSettings {
         mode: AvroMode::Raw,
@@ -292,7 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Every payload here predates `currency`, predates the record's new name,
-    // and wrote `quantity` four bytes narrower than it is read — and all three
+    // and wrote `quantity` four bytes narrower than it is read. All three
     // decode, carrying the values resolution yields.
     assert_eq!(rows.len(), 3, "every old-format payload must decode");
     assert!(
@@ -314,15 +314,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The alias is not what matched `OrderPlaced` to `Order`: resolution never
     // compares record names, so the same payload resolves against a reader
     // named for nothing in particular and carrying no alias at all. Keep the
-    // alias in the schema — the specification and a registry's compatibility
-    // check both read it — and do not rely on this decoder to enforce a name.
+    // alias in the schema, which the specification and a registry's
+    // compatibility check both read, and do not rely on this decoder to
+    // enforce a name.
     resolve(WRITER_V1, READER_UNRELATED_NAME, &datum)
         .expect("record names are not compared during resolution");
 
     // ── § 2, the part that does not work ────────────────────────────────
     // The same payload, read through the schema a reader *would* write to
     // rename `sku` to `item_code`. Resolution matches reader fields by name
-    // alone and never consults their aliases, so this fails per record — which
+    // alone and never consults their aliases, so this fails per record, which
     // under the default Skip policy would drop and ack 100% of the stream,
     // counted on `spate_deser_records_dropped_total`. A dependency bump that
     // fixes it fails this assertion.
@@ -332,9 +333,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── § 3, the promotion's forbidden direction ────────────────────────
     // Avro permits `int`→`long` and not the reverse. This decoder does not
-    // enforce the rule: it narrows, and wraps — a quantity of five billion
+    // enforce the rule: it narrows and wraps, so a quantity of five billion
     // arrives as seven hundred million, with no error anywhere. Widen a field
-    // freely; never narrow one.
+    // freely; do not narrow one.
     let wide_schema = Schema::parse_str(WIDE_WRITER)?;
     let mut wide =
         apache_avro::types::Record::new(&wide_schema).ok_or("WIDE_WRITER is not a record")?;
@@ -360,7 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

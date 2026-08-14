@@ -4,16 +4,16 @@
 //! callgrind's instruction count is deterministic, so it compares across the
 //! shared CI runners where a wall-clock number is only noise. DHAT runs
 //! alongside callgrind in the same invocation, so every case also reports
-//! deterministic heap counts — allocated blocks, bytes, and the t-gmax peak.
-//! Not the full criterion matrix — callgrind runs the workload under
+//! deterministic heap counts: allocated blocks, bytes, and the t-gmax peak.
+//! Not the full criterion matrix, because callgrind runs the workload under
 //! emulation, and the published comparison corpus (200 batches, 20,000 events
 //! per iteration) is far too large to emulate.
 //!
-//! # `decode` — one payload, three backends
+//! # `decode`: one payload, three backends
 //!
 //! - `flat_record` × `value` / `serde_typed` / `datum_typed` — the three
 //!   decode paths over one 15-field record. This is the comparison the crate
-//!   exists to settle, and instructions attribute it without a timer; the
+//!   is built to settle, and instructions attribute it without a timer; the
 //!   heap counts attribute the `Value`-tree allocations that separate the
 //!   dynamically-typed path from the single-pass one.
 //! - `batch50` × `value` / `datum_typed` — the same two ends of that spread
@@ -25,7 +25,7 @@
 //!   for every bad record (INV-7 admits no other policy), so this count is
 //!   the per-record price of a poison-pill storm.
 //!
-//! # `confluent`, `evolution`, `shapes`, `errors` — one poll batch
+//! # `confluent`, `evolution`, `shapes`, `errors`: one poll batch
 //!
 //! Those six cases decode a single payload. The four groups below decode a
 //! batch of them (`corpora::BATCH`), because what they measure is a
@@ -36,9 +36,9 @@
 //!
 //! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo
-//!   holds the id, so `SchemaCache::lookup` never touches the shared lock —
-//!   the memo exists precisely because taking a read lock per payload
-//!   ping-ponged that lock's cache line across pinned pipeline threads.
+//!   holds the id, so `SchemaCache::lookup` never touches the shared lock.
+//!   A read lock per payload ping-pongs that lock's cache line across pinned
+//!   pipeline threads, which is what the memo avoids.
 //!   `unknown_schema_id` and `poisoned_schema_id` are the two states that do
 //!   *not* memo-hit, so each payload refreshes the snapshot under the read
 //!   lock and clones the map's `Arc`: they are the cold-lookup regime, and
@@ -46,8 +46,8 @@
 //!   Read `unknown_schema_id`'s **heap** numbers with one correction: its
 //!   fetch requests queue on a channel whose fetcher never runs, so the
 //!   queue's blocks accumulate for the whole corpus where a live pipeline's
-//!   fetcher would be draining them. The instruction count is unaffected —
-//!   the send is the same send either way — but the DHAT peak is an
+//!   fetcher would be draining them. The instruction count is unaffected,
+//!   since the send is the same send either way, but the DHAT peak is an
 //!   overstatement, and only for that case.
 //! - **`evolution`** — the only path that applies a `reader_schema`, over one
 //!   writer schema and three readers that isolate one resolution rule each.
@@ -57,7 +57,7 @@
 //!   alias case: the resolution the two-pass path delegates to matches
 //!   fields by name and never consults a reader field's aliases, which
 //!   `tests/bench_fixtures.rs` pins. The three resolving readers are also the
-//!   cases whose counts are not bit-reproducible across processes — see
+//!   cases whose counts are not bit-reproducible across processes; see
 //!   `corpora`'s note on what a deterministic corpus does not pin.
 //! - **`shapes`** — decode shapes with bespoke handling in the single-pass
 //!   path and none of which any other case reaches: a map, an enum, a fixed,
@@ -106,7 +106,7 @@ use registry_stub::{StubRegistry, Warm};
 /// Long enough that a negative entry cannot expire part-way through an
 /// emulated walk of the corpus. If it did, the payloads after the expiry
 /// would take the `Missing` arm instead of the `Failed` one and the count
-/// would depend on how long valgrind took — which is the one thing an
+/// would depend on how long valgrind took, which is the one thing an
 /// instruction count is supposed to be free of.
 const NEGATIVE_TTL: Duration = Duration::from_secs(3_600);
 
@@ -166,7 +166,7 @@ where
 /// The stage applies the `ErrorPolicy` after `deserialize` returns, so
 /// decode-until-error plus building the `Err` is the cost shared by Skip and
 /// Fail. The assert mirrors `decode_once`'s `unwrap`: if the fixture ever
-/// decodes cleanly, the bench panics instead of quietly counting the happy
+/// decodes cleanly, the bench panics instead of silently counting the happy
 /// path.
 fn decode_once_err<F, D>(rig: &mut Rig<D>)
 where
@@ -183,10 +183,10 @@ where
 /// The measured work for every batch case: the whole corpus through one
 /// deserializer.
 ///
-/// **`#[inline(never)]` is a measurement property, not a style choice.**
-/// Collection is bounded by a callgrind toggle on the glob
-/// `*::__gungraun_wrapper_mod::*`, which the macro wraps each benchmark
-/// function in — and a toggle *flips* collection rather than forcing it on.
+/// `#[inline(never)]` is a measurement property. Collection is bounded by a
+/// callgrind toggle on the glob `*::__gungraun_wrapper_mod::*`, which the
+/// macro wraps each benchmark function in, and a toggle *flips* collection
+/// rather than forcing it on.
 /// A loop written inline in the benchmark function can be reshaped by the
 /// optimizer into a symbol under that same module path, and entering it turns
 /// collection back **off**: the case then reports a plausible number that is
@@ -230,8 +230,8 @@ where
     );
 }
 
-/// Build a builder over a fixed inline schema in raw mode — no registry, so
-/// nothing in the measured path touches the network.
+/// Build a builder over a fixed inline schema in raw mode, with no registry,
+/// so nothing in the measured path touches the network.
 fn rig<D>(
     schema: &str,
     payload: Vec<u8>,
@@ -248,7 +248,7 @@ fn rig<D>(
     let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
     let deser = build(&builder);
     // The rig holds the only `AckRef`, so the batch never resolves and no
-    // message is ever sent — the receiver has nothing to keep alive.
+    // message is ever sent, so the receiver has nothing to keep alive.
     let (ack, _ack_rx) = AckRef::test_pair();
     Rig {
         deser,
@@ -357,7 +357,7 @@ fn warmed_confluent_rig(id: u32, want: Warm) -> BatchRig<AvroValueDeserializer> 
     let stub = StubRegistry::start(corpora::READY_ID, orders::SCHEMA);
     let settings = confluent_settings(stub.url());
     // `enable_all`: this runtime does drive the fetcher, but only inside the
-    // warm-up below — never again once the rig is handed over.
+    // warm-up below, and never again once the rig is handed over.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -392,7 +392,7 @@ fn confluent_poisoned_rig() -> BatchRig<AvroValueDeserializer> {
 /// The `Lookup::Missing` corpus, and the one Confluent rig that needs no
 /// stub at all: its runtime is never driven, so the fetcher task never polls,
 /// the request it queues is never read, and the id stays missing for every
-/// payload. Nothing here — setup included — opens a socket.
+/// payload. Nothing here, setup included, opens a socket.
 fn confluent_unknown_rig() -> BatchRig<AvroValueDeserializer> {
     let settings = confluent_settings("http://127.0.0.1:1".to_owned());
     batch_rig(
@@ -601,14 +601,14 @@ library_benchmark_group!(
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough that heap blocks attribute to the decode under measurement
 // rather than to whichever frame the default depth of 4 happens to cut at.
 main!(
     config = LibraryBenchmarkConfig::default().tool(Dhat::with_args(["--num-callers=500"])),
     // Bracketed: with a `config`, `main!` takes more than one group only as
-    // an array — the bare comma-separated form is a single-group spelling and
+    // an array; the bare comma-separated form is a single-group spelling and
     // is rejected outright rather than silently measuring the first.
     library_benchmark_groups = [decode, confluent, evolution, shapes, errors]
 );

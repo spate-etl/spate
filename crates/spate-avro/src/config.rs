@@ -43,7 +43,7 @@ pub enum AvroMode {
     SingleObject,
 }
 
-/// A schema provided inline or from a file — set exactly one field.
+/// A schema provided inline or from a file. Set exactly one field.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SchemaSource {
@@ -315,7 +315,7 @@ impl AvroDeserializerBuilder {
     /// The fixed schema's compile failure, if any. Fixed-schema modes
     /// compile eagerly at build time, so an unusable schema fails the
     /// builders *here* rather than surfacing per record as
-    /// `SchemaUnavailable` — which under the default Skip policy would drop
+    /// `SchemaUnavailable`, which under the default Skip policy would drop
     /// and ack 100% of the input while watermarks advance. Confluent writer
     /// schemas arrive per id at runtime and cannot be checked until then.
     fn fixed_schema_error(&self) -> Option<String> {
@@ -332,7 +332,7 @@ impl AvroDeserializerBuilder {
     /// # Errors
     ///
     /// Rejects a fixed schema (`raw`/`single_object`) that cannot be
-    /// parsed — deferring it would surface every record as
+    /// parsed. Deferring it would surface every record as
     /// `SchemaUnavailable` and drop it under the default Skip policy.
     pub fn build_value(&self) -> Result<AvroValueDeserializer, AvroConfigError> {
         if let Some(reason) = self.fixed_schema_error() {
@@ -345,7 +345,7 @@ impl AvroDeserializerBuilder {
     ///
     /// # Errors
     ///
-    /// Rejects a fixed schema that cannot be parsed — see
+    /// Rejects a fixed schema that cannot be parsed; see
     /// [`Self::build_value`].
     pub fn build_serde<T>(&self) -> Result<AvroSerdeDeserializer<T>, AvroConfigError>
     where
@@ -357,7 +357,7 @@ impl AvroDeserializerBuilder {
         Ok(AvroSerdeDeserializer::new(self.core.clone()))
     }
 
-    /// The fixed schema's datum-path failure, if any — the
+    /// The fixed schema's datum-path failure, if any. The
     /// [`Self::fixed_schema_error`] twin for the single-pass spec, which
     /// can reject a schema the other paths accept (`duration`,
     /// `big-decimal`).
@@ -370,18 +370,18 @@ impl AvroDeserializerBuilder {
         }
     }
 
-    /// The single-pass datum deserializer for any record family — owned or
+    /// The single-pass datum deserializer for any record family, owned or
     /// borrowed (see [`AvroDatumDeserializer`]'s zero-copy notes). For a
     /// plain owned `T`, [`Self::build_serde_datum`] reads better.
     ///
     /// # Errors
     ///
-    /// Rejects a configured `reader_schema` — this path decodes in the
+    /// Rejects a configured `reader_schema`, because this path decodes in the
     /// writer schema's shape only (use `#[serde(default)]`/`#[serde(alias)]`
     /// on the record type for additive evolution, or [`Self::build_serde`]
     /// for Avro's full resolution rules). Also rejects a fixed schema that
     /// cannot be parsed, or that the datum path cannot decode
-    /// (`duration`/`big-decimal` logical types) — deferring either would
+    /// (`duration`/`big-decimal` logical types). Deferring either would
     /// surface every record as `SchemaUnavailable` and drop the whole
     /// stream under the default Skip policy.
     pub fn build_datum<F>(&self) -> Result<AvroDatumDeserializer<F>, AvroConfigError>
@@ -407,7 +407,7 @@ impl AvroDeserializerBuilder {
         Ok(AvroDatumDeserializer::new(self.core.clone()))
     }
 
-    /// The single-pass datum deserializer emitting an owned `T` — the
+    /// The single-pass datum deserializer emitting an owned `T`, the
     /// convenience form of [`Self::build_datum`] for the common case.
     ///
     /// # Errors

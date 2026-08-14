@@ -3,13 +3,13 @@
 //!
 //! Deliberately absent: a raw option passthrough. Every other connector has
 //! one because it wraps a client with its own configuration surface, and the
-//! deployer needs a way to reach it. This source wraps nothing — there is no
-//! second surface to pass through to, and a map that accepted keys nothing
+//! deployer needs a way to reach it. This source wraps nothing, so there is
+//! no second surface to pass through to, and a map that accepted keys nothing
 //! reads would be worse than no map at all.
 //!
 //! Also deliberately absent: a `rate:` key. The release rate is
-//! `partitions × events_per_tick ÷ tick_interval` — 400 events/s at the
-//! defaults — and expressing it twice is how the two spellings come to
+//! `partitions × events_per_tick ÷ tick_interval`, which is 400 events/s at
+//! the defaults. Expressing it twice is how the two spellings come to
 //! disagree.
 
 use serde::Deserialize;
@@ -55,7 +55,7 @@ fn default_epoch_ms() -> i64 {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Dataset {
-    /// Orders, payments and refunds over a small catalog — the model in
+    /// Orders, payments and refunds over a small catalog, the model in
     /// [`crate::storefront`].
     #[default]
     Storefront,
@@ -105,7 +105,7 @@ pub struct DatagenSourceConfig {
     pub encoding: Encoding,
     /// How many lanes to run, and therefore how many framework partitions
     /// the pipeline sees. Each lane owns a disjoint slice of the order-id
-    /// space and generates independently — no lane ever reads another's
+    /// space and generates independently; no lane ever reads another's
     /// state. At least 1, and at most 1024.
     #[serde(default = "default_partitions")]
     pub partitions: u32,
@@ -243,8 +243,8 @@ mod tests {
         ComponentConfig::new("datagen", value["datagen"].clone())
     }
 
-    /// The two default paths — serde's and `Default::default()` — must not be
-    /// able to drift. This is the assertion that keeps them one thing.
+    /// The two default paths, serde's and `Default::default()`, must not be
+    /// able to drift. This assertion keeps them one thing.
     #[test]
     fn an_empty_section_deserializes_to_the_default_config() {
         let cfg = DatagenSourceConfig::from_component_config(&section("  {}\n")).unwrap();

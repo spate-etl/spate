@@ -1,7 +1,7 @@
 //! The harness benching itself.
 //!
-//! Two jobs. It is the worked example a bench author copies — four cases
-//! covering the shapes the builder supports — and it is what the acceptance run
+//! Two jobs. It is the worked example a bench author copies, with four cases
+//! covering the shapes the builder supports, and it is what the acceptance run
 //! drives: `make bench-ab REF=HEAD REPS=6` compares this target against itself
 //! and must flag nothing. A flag there means the harness is measuring its own
 //! noise rather than the code under test.
@@ -19,7 +19,7 @@ fn suite() -> Suite {
     spate_bench::suite("spate-bench")
         // Clone-and-sort: one allocation per iteration, inside the region. This
         // is the case that gives the acceptance run a *flaggable* allocation
-        // comparison — `alloc_churn` below allocates far more, but it is
+        // comparison. `alloc_churn` below allocates far more, but it is
         // erratic and can never reach the significant table.
         .case(
             "sort_u64_16k",
@@ -70,7 +70,7 @@ fn suite() -> Suite {
         .iters(64)
         .done()
         // A scan over borrowed bytes: no allocation at all, so its allocation
-        // metrics are a true zero rather than an absent one — the distinction
+        // metrics are a true zero rather than an absent one, the distinction
         // the record schema turns on. Its resident set is legitimately
         // unattributable: the corpus is already resident when the region opens
         // and nothing else grows, so none is emitted and the record says why.

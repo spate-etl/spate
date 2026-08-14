@@ -8,13 +8,13 @@
 //! `cargo test` does.
 //!
 //! It also carries the fixtures' semantics. Every batch case asserts that its
-//! whole corpus decodes, or that none of it does; a corpus that quietly
+//! whole corpus decodes, or that none of it does; a corpus that silently
 //! flipped would re-baseline the case rather than fail it, and here that
 //! failure arrives on the pull request instead of after the fact. The
 //! hand-framed map and the reader schemas get the same treatment: each is
 //! decoded through the public API and checked against what the schema says,
 //! so neither the framing nor a resolution rule can silently stop doing what
-//! its case is named for — including the alias rule, which does not work at
+//! its case is named for, including the alias rule, which does not work at
 //! all and is pinned as such.
 
 use spate_avro::{
@@ -34,8 +34,7 @@ mod registry_stub;
 
 use registry_stub::{StubRegistry, Warm};
 
-/// A runtime that can actually drive a registry fetch. Only the stub test
-/// needs one.
+/// A runtime that can drive a registry fetch. Only the stub test needs one.
 fn io_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -76,7 +75,7 @@ fn raw_settings(schema: &str, reader: Option<&str>) -> AvroSettings {
     }
 }
 
-/// How many of a corpus decode, and how many fail — the pair every batch
+/// How many of a corpus decode, and how many fail, the pair every batch
 /// case's `decodes` flag claims.
 fn outcomes<F, D>(mut deser: D, payloads: &[Vec<u8>]) -> (usize, usize)
 where
@@ -163,7 +162,7 @@ fn the_corpora_are_reproducible() {
 }
 
 /// Two calls in one process only prove the generator is pure. The property
-/// the benches need is stronger — that the corpus is the same *across
+/// the benches need is stronger: that the corpus is the same *across
 /// revisions*, since a merge-base leg and a head leg run different builds.
 /// The digest is the witness: any edit to a derivation, a schema, a batch
 /// size or an encoder moves it, and moving it silently would re-baseline
@@ -402,7 +401,7 @@ fn the_recursive_fixture_is_a_chain_not_a_pair() {
     assert_eq!(nodes, corpora::LIST_NODES);
 }
 
-/// Each reader schema has to actually apply its rule. An alias that silently
+/// Each reader schema has to apply its rule. An alias that silently
 /// stopped resolving, or a default that stopped being filled, would leave the
 /// case measuring plain identity resolution under an evolution name.
 #[test]
@@ -497,7 +496,7 @@ fn the_confluent_corpus_carries_the_wire_header() {
 /// registry on a loopback socket, driven once in setup. Everything below runs
 /// in the bench's `#[bench]` argument expression, where a failure surfaces as
 /// a bench that dies under valgrind on a machine most contributors do not
-/// have — so it is exercised here, under plain `cargo test`, first.
+/// have, so it is exercised here, under plain `cargo test`, first.
 #[test]
 fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
     let stub = StubRegistry::start(corpora::READY_ID, orders::SCHEMA);

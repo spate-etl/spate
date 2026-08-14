@@ -4,10 +4,10 @@
 //! aggregate *states*, so the sink never writes them directly. Instead it
 //! INSERTs plain order rows into an `ENGINE = Null` table, and a
 //! `MATERIALIZED VIEW` computes the states (`minState`/`maxState`/
-//! `sumMapState`) into the target `AggregatingMergeTree` — a per-region
+//! `sumMapState`) into the target `AggregatingMergeTree`, a per-region
 //! rollup of when orders were placed and how many units of each SKU they
 //! carried. ClickHouse owns the state construction and its versioning; the
-//! framework just ships rows.
+//! framework ships rows.
 //!
 //! This example uses `spate-test`'s in-memory source, so it runs against
 //! nothing but ClickHouse.
@@ -15,7 +15,7 @@
 //! # Run it
 //!
 //! Needs only ClickHouse (`CLICKHOUSE_URL`, default `http://localhost:8123`).
-//! Create the three objects first — target ClickHouse >= 26.1 so insert
+//! Create the three objects first. Target ClickHouse >= 26.1 so insert
 //! deduplication reaches the view (exactly-once under at-least-once retries):
 //!
 //! ```sql
@@ -47,7 +47,7 @@
 //! cargo run -p spate --example clickhouse_aggregating_mv --features full
 //! ```
 //!
-//! Read the finalized values back with the `-Merge` combinators — the stored
+//! Read the finalized values back with the `-Merge` combinators. The stored
 //! columns stay `AggregateFunction`, and `FINAL` alone does not finalize them:
 //!
 //! ```sql
@@ -58,7 +58,7 @@
 //!
 //! An alternative row shape carries one `(sku, qty)` pair per row; the view
 //! would then use `sumMapState(map(sku, qty))`. The whole-`Map` shape used
-//! here — an order's lines already collapsed to a per-SKU total — exercises
+//! here, an order's lines already collapsed to a per-SKU total, exercises
 //! the sink's `Map(String, UInt64)` encoding.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
@@ -129,8 +129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fail-fast validation against the *Null* table (plain columns). If this
     // sink is ever repointed at the AggregatingMergeTree, validation fails
-    // here with an actionable "insert into a Null table + MV" error — the
-    // sink cannot write aggregate states directly.
+    // here with an actionable "insert into a Null table + MV" error, because
+    // the sink cannot write aggregate states directly.
     let encoder = match pipeline.block_on(sink.validate_schema())? {
         Some(schema) => ClickHouseEncoder::<Owned<OrderRollup>>::with_schema(schema),
         None => ClickHouseEncoder::<Owned<OrderRollup>>::new(),
@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last = handle.push(p0, Some(b"demo"), payload);
     }
 
-    // Watermarks advance once the sink acknowledges durably — wait for the
+    // Watermarks advance once the sink acknowledges durably. Wait for the
     // commit covering the last event, then drain gracefully.
     let deadline = Instant::now() + Duration::from_secs(10);
     while handle.last_committed(p0) != Some(last + 1) {

@@ -8,9 +8,8 @@
 //! source. If the two ever encoded different datums, a wall-clock result and
 //! an instruction count would not be talking about the same bytes.
 //!
-//! The published comparison corpus is deliberately *not* here — it lives in
-//! `decode.rs` with the golden self-check that pins it to the benchmark
-//! repository.
+//! The published comparison corpus is not here. It lives in `decode.rs`
+//! with the golden self-check that pins it to the benchmark repository.
 
 use apache_avro::{Schema, to_avro_datum};
 use spate_core::record::{Flow, Record};
@@ -96,8 +95,8 @@ pub(crate) fn order_datum() -> Vec<u8> {
 
 /// One [`SCHEMA`] datum cut off mid-record: the front half of
 /// [`order_datum`]'s bytes, ending inside a field. Decoding it must fail on
-/// every path — truncation, not emptiness, because an empty payload is a
-/// tombstone and decodes to nothing without touching the error path.
+/// every path. Truncation rather than emptiness, because an empty payload is
+/// a tombstone and decodes to nothing without touching the error path.
 pub(crate) fn malformed_datum() -> Vec<u8> {
     let mut datum = order_datum();
     datum.truncate(datum.len() / 2);
@@ -107,7 +106,7 @@ pub(crate) fn malformed_datum() -> Vec<u8> {
 /// The batch shape: one datum is an array of lines, so throughput is
 /// measured per line. Tracks the `flat_map` use case.
 ///
-/// Do not change the field *types* — one string, then an array of (string,
+/// Do not change the field *types*: one string, then an array of (string,
 /// long, string). They are the workload the counted tier compares against, and
 /// `tests/bench_fixtures.rs` pins them. The names are free.
 pub(crate) const BATCH_SCHEMA: &str = r#"{"type":"record","name":"PlacedOrder","fields":[

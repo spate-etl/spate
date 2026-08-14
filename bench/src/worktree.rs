@@ -7,7 +7,7 @@
 //! # Never inside the repository
 //!
 //! A worktree under the repository would be picked up by `cargo metadata`,
-//! `git status`, the docs build's file walk and every `git grep` in the tree —
+//! `git status`, the docs build's file walk and every `git grep` in the tree,
 //! and, worst, a `cargo bench --workspace` would find a second copy of every
 //! package. The default location is under `$TMPDIR`, overridable with
 //! `SPATE_BENCH_CACHE`, and the constructor refuses a path inside the
@@ -18,11 +18,11 @@
 //! [`Worktree`] removes itself on [`Drop`], which covers a normal return and a
 //! panic. Ctrl-C is the case a destructor cannot cover on its own, so
 //! [`install_interrupt_handler`] sets a flag that the run loop checks between
-//! steps — for `SIGINT`, `SIGTERM` and `SIGHUP` alike. The interrupt reaches
+//! steps, for `SIGINT`, `SIGTERM` and `SIGHUP` alike. The interrupt reaches
 //! the child processes too, so the loop notices quickly and unwinds through
-//! the same `Drop`. A second interrupt exits
-//! immediately, on the principle that somebody pressing it twice means it —
-//! and that one *does* leave the checkout behind, which is why
+//! the same `Drop`. A second interrupt exits immediately, on the principle
+//! that pressing it twice means it. That one *does* leave the checkout
+//! behind, which is why
 //! [`Worktree::add`] says how to remove a leftover rather than only refusing
 //! one.
 
@@ -44,8 +44,8 @@ pub fn cache_root() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("spate-bench"));
 
     // Absolutised against the working directory, so a relative
-    // `SPATE_BENCH_CACHE=cache` is refused for being inside the repository —
-    // which it is — rather than failing later with "cannot resolve any
+    // `SPATE_BENCH_CACHE=cache` is refused for being inside the repository,
+    // which it is, rather than failing later with "cannot resolve any
     // ancestor".
     if configured.is_absolute() {
         configured
@@ -59,7 +59,7 @@ pub fn cache_root() -> PathBuf {
 /// Keyed by the flags rather than named after them: a feature list is an
 /// arbitrary string, and `--features spate-json/simd,other` is not a directory
 /// name. Keyed by the leg as well, so two arms never share a directory even when
-/// they were asked for identically — which is a legitimate run, being the A/A
+/// they were asked for identically, which is a legitimate run, being the A/A
 /// that shows what two builds of the same source cost against each other. A
 /// second run of the same pair reuses both, a cache in the ordinary sense where
 /// `rm -rf` costs a rebuild and nothing else.
@@ -95,12 +95,12 @@ pub fn interrupted() -> bool {
 /// disposition terminates the process, and a terminated process runs no
 /// destructor. `SIGTERM` and `SIGHUP` are handled alongside `SIGINT` because a
 /// `kill` and a closed terminal leave exactly the same mess as a Ctrl-C, and
-/// the mess is not inert — the leftover checkout stays registered in the
+/// the mess is not inert: the leftover checkout stays registered in the
 /// repository, and the next run against that commit refuses.
 pub fn install_interrupt_handler() {
     // SAFETY: `signal` with a handler function pointer is the documented C
     // interface, and the handler below does nothing that is not
-    // async-signal-safe — one relaxed atomic store, or `_exit`.
+    // async-signal-safe: one relaxed atomic store, or `_exit`.
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: as above; the handler is the same async-signal-safe function
         // for each.
@@ -112,9 +112,9 @@ pub fn install_interrupt_handler() {
 
 extern "C" fn on_interrupt(_signal: libc::c_int) {
     if INTERRUPTED.swap(true, Ordering::Relaxed) {
-        // The second one. Nothing here can wait for a lock or allocate — not
-        // even to print a path — so the only honest way out is the one that
-        // skips the destructors. `Worktree::add` is where a leftover checkout
+        // The second one. Nothing here can wait for a lock or allocate, not
+        // even to print a path, so the only way out is the one that skips
+        // the destructors. `Worktree::add` is where a leftover checkout
         // is explained, on the next run that trips over it.
         // SAFETY: `_exit` is async-signal-safe and does not return.
         unsafe { libc::_exit(130) };
@@ -124,7 +124,7 @@ extern "C" fn on_interrupt(_signal: libc::c_int) {
 /// Refuses a path that would put harness output inside the repository.
 ///
 /// Checked against the nearest existing ancestor rather than the path itself,
-/// which does not exist yet — and the check runs *before* anything is created,
+/// which does not exist yet, and the check runs *before* anything is created,
 /// so a refusal leaves no directory behind. On macOS `$TMPDIR` is a symlink, so
 /// comparing uncanonicalised forms would prove nothing.
 ///
@@ -199,7 +199,7 @@ impl Worktree {
             .canonicalize()
             .map_err(|e| format!("cannot resolve {}: {e}", repo.display()))?;
         // The parent is canonicalised rather than the path itself, which does
-        // not exist yet — and on macOS `$TMPDIR` is a symlink, so comparing the
+        // not exist yet, and on macOS `$TMPDIR` is a symlink, so comparing the
         // uncanonicalised forms would miss nothing but would also prove
         // nothing.
         ensure_outside(&repo_abs, path, "a worktree")?;
@@ -283,7 +283,7 @@ impl Drop for Worktree {
 
 /// `git describe --always --dirty` for a checkout, and whether it is dirty.
 ///
-/// Provenance only. Nothing downstream resolves a reference from it — a `run`
+/// Provenance only. Nothing downstream resolves a reference from it; a `run`
 /// against a worktree must report the checkout it measured, not the name it was
 /// asked for.
 #[must_use]
@@ -307,7 +307,7 @@ mod tests {
     use super::{CACHE_ENV, Worktree, arm_target_dir, cache_root, describe};
 
     /// The property the leg is in the key for. Two arms asked for identically
-    /// is a legitimate run — it is the A/A of the mode — and cargo keeps one
+    /// is a legitimate run, the A/A of the mode, and cargo keeps one
     /// build per directory, so sharing one would have each arm overwrite the
     /// other and both legs measure whichever built last.
     #[test]

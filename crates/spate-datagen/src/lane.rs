@@ -20,7 +20,7 @@
 //!
 //! A tick's quota is spread over as many polls as it takes. `max_records`
 //! caps a single batch, so an `events_per_tick` above it is released across
-//! several polls of the same tick rather than truncated — the release rate is
+//! several polls of the same tick rather than truncated. The release rate is
 //! `partitions × events_per_tick ÷ tick_interval` at any `events_per_tick`.
 //!
 //! A lane polled a whole interval late counts an overrun and re-anchors to the

@@ -2,19 +2,18 @@
 //! `Pipeline` composes.
 //!
 //! [`Pipeline::from_config`] → `.sink` → `.chains` → `.run` is a thin
-//! composition of public, semver-committed primitives — not a privileged
-//! path. This example spends each of those four lines by hand, in the order
-//! the builder spends them, so the layering contract is a program that
-//! compiles and runs:
+//! composition of public, semver-committed primitives. This example spends
+//! each of those four lines by hand, in the order the builder spends them,
+//! so the layering contract is a program that compiles and runs:
 //!
 //! ```sh
 //! cargo run -p spate --example manual_assembly
 //! ```
 //!
-//! Reach for this when you need to drop below one builder step — embedding
-//! the runtime in a host process, exotic sink wiring, or simply reading what
-//! you are running. Prefer the builder otherwise: every ordering rule
-//! commented below is a rule the builder makes structurally impossible to
+//! Use this when you need to drop below one builder step, for example
+//! embedding the runtime in a host process, exotic sink wiring, or reading
+//! what you are running. Prefer the builder otherwise: every ordering rule
+//! commented below is one the builder makes structurally impossible to
 //! break, and manual assembly hands all of them back.
 //!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
@@ -42,12 +41,12 @@ use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source, wai
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The same YAML a builder assembly loads — nothing about manual assembly
-/// changes the configuration layer. The exporter stays on, since step 3
+/// The same YAML a builder assembly loads; manual assembly changes nothing
+/// in the configuration layer. The exporter stays on, since step 3
 /// renders through it, while `admin.listen: none` asks for no HTTP server:
 /// nothing here scrapes one, and a pipeline naming no address takes
 /// `0.0.0.0:9090`. Starting an exporter that no server publishes draws a
-/// warning at startup naming this exact pattern.
+/// warning at startup naming this pattern.
 const CONFIG: &str = r#"
 pipeline: { name: manual-assembly-demo, threads: 1, io_threads: 1 }
 admin: { listen: none }
@@ -67,10 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a binary wanting pretty logs calls `telemetry::init` before it.
     telemetry::init(telemetry::LogFormat::Pretty, "info");
 
-    // The exporter goes in BEFORE any metric handle is constructed —
-    // handles bind to the recorder present at their construction, so one
-    // built earlier records into a no-op recorder forever, silently. The
-    // shard handles in step 3 are exactly such handles.
+    // The exporter goes in BEFORE any metric handle is constructed. Handles
+    // bind to the recorder present at their construction, so one built
+    // earlier records silently into a no-op recorder forever. The shard
+    // handles in step 3 are such handles.
     //
     // `install` errors only when a recorder some other library made global
     // already owns the process. The builder demotes that to a warning and
@@ -123,8 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `into_parts` is the seam every sink crosses: writer, `[shard][replica]`
     // topology, pool tuning, labels, probe. The builder validates the
-    // topology here — non-empty, no ragged shards, replica labels shaped like
-    // the endpoints — and returns `BuildError::Sink`. By hand the first two
+    // topology here (non-empty, no ragged shards, replica labels shaped like
+    // the endpoints) and returns `BuildError::Sink`. By hand the first two
     // are panics instead (an empty topology out of `shard_queues`, a shard
     // with no replicas out of `SinkPool::spawn`), and the third is caught
     // nowhere: a surplus replica label publishes `spate_sink_replica_healthy`
@@ -165,8 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `ShardQueues`, so an assembly below the builder publishes no queue
     // series at all. The sink writer's own `spate_<component_type>_sink_*`
     // scope attaches through the public `ShardWriter::attach_metrics`; only
-    // the derivation of its prefix is crate-internal — `Meter::for_component`
-    // appends the sink role to the component type — so by hand the namespace
+    // the derivation of its prefix is crate-internal (`Meter::for_component`
+    // appends the sink role to the component type), so by hand the namespace
     // is one you name yourself with `Meter::with_namespace`. Everything else
     // in the taxonomy is identical.
 
@@ -199,15 +198,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: runtime
     // ── 4. The runtime — what `.chains` + `.into_runtime` do ────────────
     // The factory takes a bare thread index and threads the queues, budget
-    // and pipeline name itself — most of what `ChainCtx` carries. The rest is
-    // `source_framing`, read from `Source::framing_contract` before the source
-    // moves into the runtime so a deserializer derives its granularity from
-    // the source rather than restating it (this chain's deserializer takes
-    // none), and, for a split pipeline, each named sink's queues and chunking.
+    // and pipeline name itself, covering most of what `ChainCtx` carries.
+    // The rest is `source_framing`, read from `Source::framing_contract`
+    // before the source moves into the runtime so a deserializer derives its
+    // granularity from the source rather than restating it (this chain's
+    // deserializer takes none), and, for a split pipeline, each named sink's
+    // queues and chunking.
     //
     // The contract `ChainCtx` discharges structurally is yours here: every
     // `ShardQueues` clone must die with the chains that hold it, because the
-    // sink drains only once the last one is gone — one smuggled into
+    // sink drains only once the last one is gone. One smuggled into
     // longer-lived state turns a graceful drain into a deadline-bounded
     // abandon. This closure is dropped by the runtime before the drain, so
     // its clone is safe.
@@ -222,9 +222,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .sink(
                 TestEncoder,
                 KeyHashRouter,
-                // The one builder step with no manual equivalent: resolving
-                // this sink's chunking — the YAML `chunk:` block, or
-                // `SinkOptions::with_chunk` — is the config layer's job and
+                // The one builder step with no manual equivalent. Resolving
+                // this sink's chunking, from the YAML `chunk:` block or
+                // `SinkOptions::with_chunk`, is the config layer's job and
                 // its resolver is crate-internal. By hand it is a
                 // `ChunkConfig` you pass, and a `chunk:` block on the config
                 // above is read by nothing.
@@ -256,8 +256,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last = handle.push(orders, Some(b"eu-west"), payload);
     }
 
-    // Bounded on purpose: an unbounded wait turns a broken pipeline into a
-    // hung process rather than a failing one.
+    // The wait is bounded. Without a deadline a broken pipeline hangs the
+    // process instead of failing it.
     wait_until(Duration::from_secs(10), "the last offset to commit", || {
         handle.last_committed(orders) == Some(last + 1)
     });
@@ -274,8 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(rows.len(), 5, "six fields minus one filtered empty");
     assert!(rows.contains(&"ORDER-1".to_string()));
 
-    // The hand-installed exporter is the live one: the shard handles built
-    // in step 3 render, which is the ordering rule of step 1 holding.
+    // The hand-installed exporter is the live one. The shard handles built
+    // in step 3 render through it, so the ordering rule from step 1 held.
     let exposition = metrics.render();
     assert!(
         exposition.contains("spate_sink_"),
@@ -292,7 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

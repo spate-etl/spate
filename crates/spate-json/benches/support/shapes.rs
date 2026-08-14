@@ -5,7 +5,7 @@
 //! are the rest of it: an object far wider than any struct, a document nested
 //! far deeper than one, an array that is almost entirely numbers, and a
 //! document that is almost entirely one string. Each isolates a different part
-//! of a parser — key lookup, recursion, number conversion, string handling —
+//! of a parser (key lookup, recursion, number conversion, string handling),
 //! and each is a shape a real payload takes.
 //!
 //! Two of them do a second job. The duplicate-key guard parses a document a
@@ -16,8 +16,8 @@
 //! whose difference is the guard and nothing else.
 //!
 //! Written as bytes rather than serialized from a type: none of these shapes
-//! has a Rust type to serialize from — that is what makes them the shapes a
-//! struct cannot express — and building them by hand keeps the corpus a fixed
+//! has a Rust type to serialize from, which is what makes them the shapes a
+//! struct cannot express, and building them by hand keeps the corpus a fixed
 //! quantity of bytes rather than whatever a serializer happens to emit.
 
 // Each target that includes this module uses a different subset of it, so an
@@ -28,8 +28,8 @@
 
 /// Fields in the wide flat object.
 ///
-/// Wide enough that per-field work — a key string, a map insertion, one value
-/// — is what the count is made of, rather than the per-document setup a
+/// Wide enough that per-field work (a key string, a map insertion, one value)
+/// is what the count is made of, rather than the per-document setup a
 /// fifteen-field record is dominated by.
 pub(crate) const WIDE_FIELDS: usize = 4_000;
 
@@ -39,7 +39,7 @@ pub(crate) const WIDE_FIELDS: usize = 4_000;
 /// than a preference: `serde_json` refuses to recurse past 128 levels and the
 /// duplicate-key guard inherits the limit, so no single document can be made
 /// large by nesting. The array is what gets the corpus into the instruction
-/// band while every document in it is still deep — which is also the shape a
+/// band while every document in it is still deep, which is also the shape a
 /// real nested export takes.
 ///
 /// Half the limit rather than as close to it as the array wrapper allows, so
@@ -58,7 +58,7 @@ pub(crate) const NUMBERS: usize = 40_000;
 ///
 /// Half a megabyte: large enough that whatever a backend does per byte
 /// dominates whatever it does per document, which is the claim this case
-/// exists to test. The `simd` backend must copy the whole payload into its
+/// tests. The `simd` backend must copy the whole payload into its
 /// scratch buffer before it can parse destructively, and this is the case
 /// where that copy is big enough to see.
 pub(crate) const TEXT_BYTES: usize = 512 * 1024;
@@ -67,10 +67,10 @@ pub(crate) const TEXT_BYTES: usize = 512 * 1024;
 ///
 /// Not zero, deliberately. A string with no escapes is one the parser can hand
 /// over as a single copy, and a case built that way would be measuring
-/// `memcpy` in the C runtime rather than either parser — including on the
+/// `memcpy` in the C runtime rather than either parser, including on the
 /// backend that has no scratch copy to make, which would leave the comparison
-/// saying nothing. Text carrying the odd quote and newline is both the honest
-/// corpus and the one whose count belongs to the decoder.
+/// saying nothing. Text carrying the odd quote and newline is the corpus whose
+/// count belongs to the decoder.
 pub(crate) const ESCAPE_EVERY: usize = 64;
 
 /// Deterministic filler bytes from a 64-bit LCG (Knuth's MMIX constants),
@@ -105,9 +105,9 @@ pub(crate) fn wide_flat() -> Vec<u8> {
 /// guard pays for the whole object and then rejects, which is the worst case
 /// and the one worth knowing.
 ///
-/// The decode itself would succeed — `serde_json` is last-value-wins on a
-/// repeated key — so a case over this corpus emitting a record is a guard that
-/// stopped guarding, not a fixture that stopped being duplicated.
+/// The decode itself would succeed, because `serde_json` is last-value-wins
+/// on a repeated key, so a case over this corpus emitting a record is a guard
+/// that stopped guarding rather than a fixture that stopped being duplicated.
 pub(crate) fn wide_flat_duplicate_key() -> Vec<u8> {
     wide_flat_with_duplicate(true)
 }
@@ -142,9 +142,9 @@ fn wide_flat_with_duplicate(duplicate_last: bool) -> Vec<u8> {
 /// with `DEEP_WIDTH` scalar fields beside the recursive one at every level.
 ///
 /// The recursive key is last at each level, so a visitor walking the object in
-/// order reads the scalars before it descends — the order a real nested
-/// document is written in, and the one that keeps the recursion from being the
-/// first thing every level does.
+/// order reads the scalars before it descends, which is the order a real
+/// nested document is written in, and the one that keeps the recursion from
+/// being the first thing every level does.
 pub(crate) fn deep_nested() -> Vec<u8> {
     let mut next = lcg(0x5EED_0002);
     let mut out = Vec::with_capacity(DEEP_DOCS * DEEP_DEPTH * DEEP_WIDTH * 24);
@@ -182,8 +182,8 @@ pub(crate) fn deep_nested() -> Vec<u8> {
 /// An array of `NUMBERS` numeric literals: integers, negatives, decimals and
 /// one in ten in exponent form.
 ///
-/// Almost nothing but number conversion — no keys to hash, no strings to
-/// unescape — which is the one part of a parser the record-shaped corpora
+/// Almost nothing but number conversion, with no keys to hash and no strings
+/// to unescape, which is the one part of a parser the record-shaped corpora
 /// never put under load.
 pub(crate) fn numeric_array() -> Vec<u8> {
     let mut next = lcg(0x5EED_0003);

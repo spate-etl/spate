@@ -7,14 +7,14 @@
 //! and the driver's blocked-batch retry picks it up.
 //!
 //! `schema_registry_converter` is used strictly as the registry HTTP
-//! client — its decoders never appear on the hot path.
+//! client; its decoders never appear on the hot path.
 //!
 //! # Transient vs permanent failures
 //!
-//! Only a *permanent* verdict about an id — the registry answering `404`
-//! (unknown id/subject/version), a schema that uses unsupported references,
-//! or a schema the parser rejects (`CompiledSchema` pre-renders the reason)
-//! — is negatively cached. A *transient* outage
+//! Only a *permanent* verdict about an id is negatively cached: the registry
+//! answering `404` (unknown id/subject/version), a schema that uses
+//! unsupported references, or a schema the parser rejects (`CompiledSchema`
+//! pre-renders the reason). A *transient* outage
 //! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
 //! leaves the id **absent** so the deserializer's next replay refetches it:
 //! poisoning a transient blip would drop (and ack) perfectly decodable
@@ -57,7 +57,7 @@ pub(crate) struct RegistryHandle {
 impl RegistryHandle {
     /// Request an asynchronous fetch of `id`. Never blocks; duplicate
     /// requests are deduplicated by the fetcher. A dropped fetcher (I/O
-    /// runtime shut down) makes this a no-op — the pipeline is draining.
+    /// runtime shut down) makes this a no-op; the pipeline is draining.
     pub(crate) fn request(&self, id: u32) {
         let _ = self.tx.send(id);
     }
@@ -116,8 +116,8 @@ pub(crate) fn spawn_fetcher(
                 // Drain finished fetches first so slots free promptly.
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     let Ok((id, outcome)) = joined else {
-                        // A fetch task panicked. The known panic source —
-                        // apache-avro's `Schema::parse_str` — is caught inside
+                        // A fetch task panicked. The known panic source,
+                        // apache-avro's `Schema::parse_str`, is caught inside
                         // `fetch_one` and negative-cached, so reaching here
                         // means an unexpected panic elsewhere in the task. The
                         // `JoinError` does not carry our schema id, so that id
@@ -184,7 +184,7 @@ pub(crate) fn spawn_fetcher(
 
 /// Fetch, parse, and publish schema `id`, or classify the failure. A single
 /// HTTP attempt: transient failures are retried by the deserializer replaying
-/// the payload (bounded by this id's backoff), not by blocking here — which
+/// the payload (bounded by this id's backoff), not by blocking here, which
 /// also stops one slow id from monopolizing a fetch slot for minutes.
 async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> FetchOutcome {
     match schema_registry::get_schema_by_id_and_type(id, settings, SchemaType::Avro).await {
@@ -202,7 +202,7 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
             }
             // `CompiledSchema::compile` catches apache-avro 0.21's parse
             // *panics* on malformed names (like `"my-record"`), so a schema
-            // the parser rejects negative-caches as an ordinary failure — a
+            // the parser rejects negative-caches as an ordinary failure, a
             // poison payload for every pipeline. Either way the id resolves;
             // a bad schema can never stall it at NotReady forever.
             let compiled = CompiledSchema::compile(id, &registered.schema);
@@ -218,7 +218,7 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
             FetchOutcome::Resolved
         }
         Err(e) if is_permanent(&e) => {
-            // A genuinely unknown id (registry 404). Negative-cache it so we
+            // An unknown id (registry 404). Negative-cache it so we
             // don't hammer the registry for an id that will never resolve;
             // the deserializer applies its ErrorPolicy to the poison payload.
             tracing::warn!(schema_id = id, error = %e, "registry reports schema id unknown");
@@ -241,11 +241,11 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
 /// not-found) rather than a transient outage.
 ///
 /// `schema_registry_converter` (a 0.x dependency) does not expose the HTTP
-/// status as a field — it only formats it into the error message
-/// (`"...failed with status 404 Not Found"`) — so we match on that. This is
-/// deliberately narrow: anything we cannot positively identify as a `404` is
-/// treated as transient, because the safe failure mode is to refetch (a
-/// bounded stall), never to negatively cache and silently drop valid records.
+/// status as a field, only formatting it into the error message
+/// (`"...failed with status 404 Not Found"`), so we match on that. The match
+/// is narrow: anything we cannot positively identify as a `404` is treated as
+/// transient, because the safe failure mode is to refetch (a bounded stall),
+/// never to negatively cache and silently drop valid records.
 fn is_permanent(e: &SRCError) -> bool {
     e.error.contains("status 404")
 }

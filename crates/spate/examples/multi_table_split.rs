@@ -5,8 +5,8 @@
 //! with its own schema, encoder, and batch/linger tuning**, instead of one
 //! wide table, through a [`split`](spate::ops::ChainBuilder) terminal. A
 //! captured payment carries an amount; a refund carries an amount and a
-//! reason — genuinely different columns — so each lands in a table shaped for
-//! it.
+//! reason, so the two need different columns and each lands in a table shaped
+//! for it.
 //!
 //! The stream arrives as a **top-level Avro union**, the idiomatic spelling of
 //! a sum type, which decodes straight into a Rust enum: the wire branch index
@@ -17,8 +17,8 @@
 //!
 //! Each destination is declared once with [`SplitBuilder::add`](spate::ops::SplitBuilder),
 //! which returns a `Copy` typed handle. The `route` closure then does one
-//! `match` — classify **and** extract in the same arm — and dispatches with
-//! `out.emit(handle, row)`; an event kind with no branch follows the
+//! `match`, classifying **and** extracting in the same arm, and dispatches
+//! with `out.emit(handle, row)`; an event kind with no branch follows the
 //! `unmatched` policy (`Skip` here: dropped and counted on
 //! `spate_operator_records_dropped_total{reason="unrouted"}`). A placed order
 //! is that kind: this pipeline settles money and has no table for it.
@@ -28,8 +28,8 @@
 //! Each branch clones the source batch's ack, so a Kafka batch's offsets commit
 //! only after **every** table its events landed in has durably written; a
 //! failed write to any one table stalls the batch and replays it. This falls
-//! straight out of the shared ack handle — the split terminal adds no new
-//! delivery machinery.
+//! out of the shared ack handle; the split terminal adds no new delivery
+//! machinery.
 //!
 //! ```sql
 //! CREATE TABLE payments (
@@ -70,30 +70,30 @@ use spate::prelude::*;
 use std::path::Path;
 
 /// One Kafka datum: whichever of the three storefront events it happens to
-/// be. The writer schema is a top-level Avro union — the idiomatic spelling
-/// of a sum type — and the branch is selected **positionally**, so these
+/// be. The writer schema is a top-level Avro union, the idiomatic spelling
+/// of a sum type, and the branch is selected **positionally**, so these
 /// variants must stay in the union's declaration order.
 #[derive(Debug, Deserialize)]
 enum StorefrontEvent {
     /// Routed nowhere by this pipeline, and decoded as
     /// [`IgnoredAny`](serde::de::IgnoredAny) to say so at the type level:
-    /// no arm reads a placed order, so no field is declared for one. It is
-    /// what exercises the `unmatched` policy below.
+    /// no arm reads a placed order, so no field is declared for one. It
+    /// exercises the `unmatched` policy below.
     ///
     /// The branch is still decoded. `build_serde` materializes the datum and
     /// then reads the target out of it, so `IgnoredAny` discards a value that
     /// already exists rather than stepping over the bytes.
     /// [`build_serde_datum`](spate::avro::AvroDeserializerBuilder::build_serde_datum)
-    /// is the path that skips it without materializing it, and this pipeline
-    /// declares no `reader_schema`, so it could take it.
+    /// skips it without materializing it, and this pipeline declares no
+    /// `reader_schema`, so it could take that path.
     OrderPlaced(serde::de::IgnoredAny),
     PaymentCaptured(PaymentRow),
     RefundIssued(RefundRow),
 }
 
 /// The payments table's row, and the decoded shape of the event that fills
-/// it — one type, because the event *is* the row here. Field order matches
-/// the YAML `columns`; Native maps positionally.
+/// it. One type serves both, because the event is the row here. Field order
+/// matches the YAML `columns`; Native maps positionally.
 #[derive(Debug, Deserialize, Serialize)]
 struct PaymentRow {
     order_id: u64,
@@ -101,7 +101,7 @@ struct PaymentRow {
 }
 
 /// The refunds table's row, which carries a `reason` a payment has no column
-/// for — the reason there are two tables rather than one wide one.
+/// for. That is why there are two tables rather than one wide one.
 #[derive(Debug, Deserialize, Serialize)]
 struct RefundRow {
     order_id: u64,
@@ -142,8 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Sinks: one ClickHouse table per event kind, from the `sinks:` map ─
     // Each sink mints its own Native encoder (its table's column types) and an
-    // order-sharded router, exactly as a single-sink pipeline would — just N
-    // of them. Built before `add_sink` moves each sink into its worker pool.
+    // order-sharded router, as a single-sink pipeline does, with N of them
+    // here. Built before `add_sink` moves each sink into its worker pool.
     let payments_sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("payments")?,
     )?;
@@ -187,8 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             // The routing logic: one match, O(1) dispatch, type-checked per
-            // arm. Classify and extract in the same arm — the variant's
-            // payload is already the row its table takes.
+            // arm. Classify and extract in the same arm, because the
+            // variant's payload is already the row its table takes.
             split
                 .route(move |event: StorefrontEvent, out| match event {
                     StorefrontEvent::PaymentCaptured(row) => out.emit(payments, row),

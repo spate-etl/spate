@@ -17,14 +17,14 @@
 //! building it, and that peak has nothing to do with the code under test.
 //!
 //! [`PeakWatch`] is a **validity gate, not a subtraction**. It takes a baseline
-//! when setup is done — before any warm-up, since a warm-up runs the same
+//! when setup is done, before any warm-up, since a warm-up runs the same
 //! routine and would otherwise set the mark the measurement is then judged
-//! against — and reports the process peak only if the process rose above that
-//! baseline afterwards. What that buys is narrow and worth stating
-//! precisely: it proves running the case set the mark, so the number is about
-//! the case rather than about whatever preceded it. It does not remove the
-//! baseline from the figure — the value reported is the process peak, and
-//! anything still resident from setup is inside it.
+//! against, and reports the process peak only if the process rose above that
+//! baseline afterwards. What that buys is narrow: it shows running the case
+//! set the mark, so the number is about the case rather than about whatever
+//! preceded it. It does not remove the baseline from the figure. The value
+//! reported is the process peak, and anything still resident from setup is
+//! inside it.
 //!
 //! A case that never sets the mark reports no `peak_rss_bytes` at all and says
 //! so in a note. An absent metric is not a zero: the comparator leaves it out
@@ -62,19 +62,19 @@ pub fn peak_rss_bytes() -> Option<u64> {
     let raw = u64::try_from(usage.ru_maxrss).ok()?;
 
     // Enumerated rather than split on one platform with a catch-all, because a
-    // catch-all here is the 1024× error this function exists to prevent, just
-    // deferred to whichever platform nobody thought of. `ru_maxrss` is bytes on
-    // every Darwin kernel, kibibytes on Linux, and *pages* on Solaris and
-    // illumos — where a `* 1024` fallback would under-report by 4-8× while
-    // compiling perfectly. An unknown platform reports nothing, which the
-    // record schema already handles, rather than a number nobody has checked.
+    // catch-all here is the 1024× error this function prevents, deferred to
+    // whichever platform was not thought of. `ru_maxrss` is bytes on every
+    // Darwin kernel, kibibytes on Linux, and *pages* on Solaris and illumos,
+    // where a `* 1024` fallback would under-report by 4-8× while compiling
+    // perfectly. An unknown platform reports nothing, which the record schema
+    // already handles, rather than an unchecked number.
     #[cfg(target_vendor = "apple")]
     {
         Some(raw)
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        // Kibibytes — this is the kernel's `VmHWM`, which `/proc/self/status`
+        // Kibibytes: this is the kernel's `VmHWM`, which `/proc/self/status`
         // prints as `kB` and means KiB.
         Some(raw * 1024)
     }
@@ -106,8 +106,8 @@ pub fn cpu_ns() -> Option<u64> {
 }
 
 fn raw_usage() -> Option<libc::rusage> {
-    // SAFETY: `rusage` is a plain struct of integer fields — no references, no
-    // niches, no padding an all-zero pattern could make invalid — so zero is a
+    // SAFETY: `rusage` is a plain struct of integer fields, with no references,
+    // no niches and no padding an all-zero pattern could make invalid, so zero is a
     // valid inhabitant of the type and this is a sound way to obtain one to
     // write into.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -127,10 +127,10 @@ fn raw_usage() -> Option<libc::rusage> {
 /// A gate that reports the process peak only when running the case set it.
 ///
 /// Construct it when setup is finished and the thing worth measuring is about
-/// to begin — **before any warm-up**, not after. `ru_maxrss` is monotonic and a
+/// to begin, **before any warm-up** and not after. `ru_maxrss` is monotonic and a
 /// warm-up runs the same routine, so a baseline taken afterwards finds the mark
 /// already set by the routine's own first pass and reports nothing. Starting
-/// before the warm-up keeps what the gate is actually for: excluding a case
+/// before the warm-up keeps what the gate is for: excluding a case
 /// whose *corpus building* set the mark, so the figure describes running the
 /// case rather than preparing it.
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +155,7 @@ impl PeakWatch {
     /// high-water mark minus another high-water mark is not a quantity anything
     /// consumes. `None` means running the case never took the process above
     /// what setup had already made resident, so the only figure available
-    /// describes the setup — and the harness reports nothing rather than that.
+    /// describes the setup, and the harness reports nothing rather than that.
     #[must_use]
     pub fn peak_rss_bytes(self) -> Option<u64> {
         let baseline = self.baseline_rss?;
@@ -169,7 +169,7 @@ mod tests {
     use super::{PeakWatch, cpu_ns, peak_rss_bytes};
 
     /// One test rather than several, because they would interfere. `make test`
-    /// runs nextest, which gives each test its own process — but a bare
+    /// runs nextest, which gives each test its own process, but a bare
     /// `cargo test -p spate-bench --lib` does not, and there the quantity under
     /// test is process-wide and monotonic, so a sibling that allocated more
     /// would decide this one's answer. Everything the module claims is asserted
@@ -181,8 +181,8 @@ mod tests {
 
         let watch = PeakWatch::start();
 
-        // Touched, not merely allocated: an untouched allocation may never be
-        // faulted in and would not move a resident-set figure at all.
+        // Touched rather than only allocated: an untouched allocation may
+        // never be faulted in and would not move a resident-set figure at all.
         const BALLAST: usize = 256 << 20;
         let mut ballast: Vec<u8> = vec![0; BALLAST];
         for page in ballast.chunks_mut(4096) {
@@ -193,7 +193,7 @@ mod tests {
         let peak = peak_rss_bytes().expect("readable");
         let grew = peak.saturating_sub(before);
 
-        // The unit, pinned in BOTH directions — which a plausible-range check
+        // The unit, pinned in BOTH directions, which a plausible-range check
         // on the absolute value cannot do. A test binary's own resident set is
         // a few megabytes, so reading kilobytes as bytes (or the reverse) still
         // lands inside any range wide enough to hold both platforms. Measuring
@@ -224,7 +224,7 @@ mod tests {
             "the peak fell after a free, so this is a reading and not a high-water mark"
         );
 
-        // A watch started now — after the ballast has already set the mark —
+        // A watch started now, after the ballast has already set the mark,
         // sees no rise and reports nothing. That is what keeps a case's
         // corpus-building cost from being emitted as if it were a measurement.
         // Asserted here rather than in a test of its own: the quantity is

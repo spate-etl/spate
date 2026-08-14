@@ -1,5 +1,5 @@
 //! End-to-end: an NDJSON payload decoded through a real operator chain via the
-//! public API and `spate-test`'s memory source — one payload → N records, with a
+//! public API and `spate-test`'s memory source: one payload → N records, with a
 //! malformed line skipped and a filtered record dropped. Driven the way the
 //! runtime drives a source (lane poll → `push_batch`), so it is deterministic
 //! and needs no threads. This is the template for testing your own JSON
@@ -28,7 +28,7 @@ fn ndjson_payload_explodes_and_skips_poison_through_the_chain() {
     const P0: PartitionId = PartitionId(0);
     const L0: LaneId = LaneId(0);
 
-    // Build the deserializer through the public builder — NDJSON, skip policy.
+    // Build the deserializer through the public builder, NDJSON with the skip policy.
     let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
         framing: JsonFraming::Ndjson,
         on_error: OnError::Skip,

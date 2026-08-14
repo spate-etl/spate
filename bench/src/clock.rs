@@ -1,6 +1,6 @@
 //! Wall time, and the one place it is converted for display.
 //!
-//! Records always carry nanoseconds. Adaptive units — ns, µs, ms, s — are a
+//! Records always carry nanoseconds. Adaptive units (ns, µs, ms, s) are a
 //! rendering concern and live here, applied when a table is written and never
 //! when a number is stored, so two reports of the same run cannot disagree
 //! about a value because one of them rounded it to milliseconds first.
@@ -72,7 +72,7 @@ pub fn human_bytes(bytes: f64) -> String {
     }
 }
 
-/// Renders a rate with an SI prefix — 10^3, not 2^10, because a rate of
+/// Renders a rate with an SI prefix: 10^3, not 2^10, because a rate of
 /// records per second has no binary meaning.
 #[cfg(feature = "driver")]
 #[must_use]

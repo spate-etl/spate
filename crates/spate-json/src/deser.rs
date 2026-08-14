@@ -48,7 +48,7 @@ impl Reason {
 /// [`DupGuard`](backend) accepts every JSON shape, so a *data* error is our
 /// injected duplicate-key rejection, while a *syntax*/EOF error is just
 /// malformed input the structural pass happened to reach before the decode
-/// did — which must still be reported as `malformed`, not `duplicate_key`.
+/// did, which must still be reported as `malformed`, not `duplicate_key`.
 fn dup_check_reason(e: &backend::DecodeError) -> Reason {
     if e.is_data {
         Reason::DuplicateKey
@@ -133,7 +133,7 @@ impl DecoderCore {
             // record, so the first bad line returns the error with nothing yet
             // emitted. Emitting a prefix and *then* failing would let the
             // chain's Skip deserializer policy commit the source offset past the
-            // un-emitted tail — silently losing the records after the bad line.
+            // un-emitted tail, silently losing the records after the bad line.
             OnError::Fail => {
                 let mut decoded = Vec::new();
                 for line in raw.bytes.split(|&b| b == b'\n') {
@@ -232,7 +232,7 @@ impl DecoderCore {
     }
 }
 
-/// True when `bytes` is empty or only JSON whitespace — a tombstone that
+/// True when `bytes` is empty or only JSON whitespace, a tombstone that
 /// yields no records.
 fn is_blank(bytes: &[u8]) -> bool {
     bytes.iter().all(u8::is_ascii_whitespace)
@@ -246,8 +246,8 @@ pub struct JsonSerdeDeserializer<T> {
     _t: PhantomData<fn() -> T>,
 }
 
-// Manual `Clone`/`Debug` so the record type `T` need not be `Clone`/`Debug` —
-// the only state is the `DecoderCore`; `T` is a type tag (`fn() -> T`).
+// Manual `Clone`/`Debug` so the record type `T` need not be `Clone`/`Debug`.
+// The only state is the `DecoderCore`; `T` is a type tag (`fn() -> T`).
 impl<T> Clone for JsonSerdeDeserializer<T> {
     fn clone(&self) -> Self {
         JsonSerdeDeserializer {

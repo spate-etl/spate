@@ -1,7 +1,12 @@
 //! E2E scenario: the happy path. Kafka → Avro (stub registry) → chain →
 //! two-shard ClickHouse; exact delivery, committed offsets, live probes.
 //!
-//! `cargo test -p spate --test e2e_happy -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_happy -- --ignored
+//! ```
 
 #[path = "e2e_support/mod.rs"]
 mod support;

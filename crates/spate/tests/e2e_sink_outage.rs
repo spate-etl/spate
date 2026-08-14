@@ -2,7 +2,12 @@
 //! engages (observed via /metrics), and after recovery every record is
 //! delivered, at-least-once with bounded duplicates.
 //!
-//! `cargo test -p spate --test e2e_sink_outage -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_sink_outage -- --ignored
+//! ```
 
 // Scenario reports (row/duplicate counts) go to the test log by design.
 #![allow(clippy::print_stdout)]

@@ -19,7 +19,12 @@
 //! The assertion is the one an operator cares about: SIGTERM with the sink
 //! down still exits, under its own deadline, having abandoned loudly.
 //!
-//! `cargo test -p spate --test e2e_drain_outage -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_drain_outage -- --ignored
+//! ```
 
 // Scenario reports go to the test log by design.
 #![allow(clippy::print_stdout)]

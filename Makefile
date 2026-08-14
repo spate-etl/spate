@@ -66,14 +66,17 @@ loom: ## Loom concurrency models (slow)
 
 ##@ Matrix
 
-check-features: ## Every feature alone, and the feature-off combinations
+check-features: ## Every feature alone, the feature-off combinations, and every target on the default set
 	# `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs, which a
 	# locked build refuses. Do not add `--locked`; it fails.
 	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
-	# With every feature on, a crate that fails to compile without one still
-	# passes. These reach the combinations that build cannot.
+	# Stripping dev-dependencies drops test and bench targets, so the run above
+	# reaches no test target in any crate. These two build them, on the axes it
+	# covers for the library: features off, then the default set.
 	cargo check -p spate-coordination --no-default-features --tests --locked
-	cargo check -p spate --no-default-features --features s3 --locked
+	# Last, because `--no-dev-deps` restores each Cargo.toml only when it is
+	# finished and a locked build reads what is on disk.
+	cargo check --workspace --all-targets --locked
 
 check-examples: ## The examples still compile (subset of clippy)
 	cargo check -p spate --examples --all-features --locked

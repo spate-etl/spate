@@ -26,9 +26,9 @@ tracing = { workspace = true }
 all-features = true
 
 [dev-dependencies]
-criterion = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
+spate-bench = { workspace = true }
 spate-test = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
@@ -39,11 +39,15 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
 [[bench]]
-name = "decode"
+name = "decode_gungraun"
 harness = false
 
 [[bench]]
-name = "decode_gungraun"
+name = "decode_paths_wall"
+harness = false
+
+[[bench]]
+name = "wire_wall"
 harness = false
 
 [lints]

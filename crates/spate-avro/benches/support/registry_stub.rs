@@ -22,6 +22,11 @@
 //! a blocking socket is the smallest thing that answers the one request
 //! shape the fetcher makes.
 
+// Each bench target and the fixtures test compile this module separately and
+// use a different subset of it: a target that warms one id does not call the
+// helper that warms several.
+#![allow(dead_code, reason = "each bench target uses a different subset")]
+
 use spate_avro::AvroValueDeserializer;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::Deserializer;
@@ -45,7 +50,8 @@ const WARM_POLL: Duration = Duration::from_millis(2);
 /// id, not a silent fallback to an unwarmed cache.
 const WARM_ATTEMPTS: usize = 500;
 
-/// A registry that answers one schema id and 404s everything else.
+/// A registry that answers the schema ids it was given and 404s everything
+/// else.
 pub(crate) struct StubRegistry {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -53,26 +59,37 @@ pub(crate) struct StubRegistry {
 }
 
 impl StubRegistry {
-    /// Bind an ephemeral loopback port and serve `schema` under `id`.
-    pub(crate) fn start(id: u32, schema: &str) -> StubRegistry {
+    /// Bind an ephemeral loopback port and serve each `(id, schema)` pair.
+    ///
+    /// An id absent from `entries` gets the registry's 404, which is what
+    /// negatively caches it.
+    pub(crate) fn start(entries: &[(u32, &str)]) -> StubRegistry {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr = listener.local_addr().expect("the bound address");
         listener
             .set_nonblocking(true)
             .expect("the listener polls rather than blocking");
 
-        let body = serde_json::json!({ "schema": schema, "id": id }).to_string();
+        // The fetcher asks for `/schemas/ids/{id}?deleted=true`; matching on
+        // the id segment is what makes an unregistered id a 404 rather than a
+        // second copy of some other id's schema.
+        let routes: Vec<(String, String)> = entries
+            .iter()
+            .map(|(id, schema)| {
+                (
+                    format!("/schemas/ids/{id}"),
+                    serde_json::json!({ "schema": schema, "id": id }).to_string(),
+                )
+            })
+            .collect();
+
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        // The fetcher asks for `/schemas/ids/{id}?deleted=true`; matching on
-        // the id segment is what makes the poison id a 404 rather than a
-        // second copy of the schema.
-        let ready_segment = format!("/schemas/ids/{id}");
 
         let thread = std::thread::spawn(move || {
             loop {
                 match listener.accept() {
-                    Ok((stream, _)) => serve(stream, &ready_segment, &body),
+                    Ok((stream, _)) => serve(stream, &routes),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         if thread_stop.load(Ordering::Relaxed) {
                             return;
@@ -126,7 +143,7 @@ impl std::fmt::Debug for StubRegistry {
 /// Read one request and write one response. `Connection: close` on every
 /// reply, so a connection serves exactly one fetch and the accept loop stays
 /// the only place that waits.
-fn serve(mut stream: TcpStream, ready_segment: &str, body: &str) {
+fn serve(mut stream: TcpStream, routes: &[(String, String)]) {
     stream
         .set_nonblocking(false)
         .expect("an accepted stream blocks");
@@ -162,13 +179,12 @@ fn serve(mut stream: TcpStream, ready_segment: &str, body: &str) {
     // well as for 4211, and a case that silently stopped 404ing would measure
     // the decode it is named for the absence of.
     let id_segment = path.split('?').next().unwrap_or_default();
-    let (status, payload) = if id_segment == ready_segment {
-        ("200 OK", body.to_owned())
-    } else {
-        (
+    let (status, payload) = match routes.iter().find(|(segment, _)| segment == id_segment) {
+        Some((_, body)) => ("200 OK", body.clone()),
+        None => (
             "404 Not Found",
             r#"{"error_code":40403,"message":"Schema not found"}"#.to_owned(),
-        )
+        ),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\n\
@@ -224,4 +240,18 @@ pub(crate) fn warm(
         }
     }
     panic!("the stub registry never brought the schema to {want:?} — {WARM_ATTEMPTS} replays");
+}
+
+/// Warm one payload per id, so a corpus mixing those ids resolves every one of
+/// them out of the memo and the measured walk performs no fetch.
+pub(crate) fn warm_each(
+    deser: &mut AvroValueDeserializer,
+    rt: &tokio::runtime::Runtime,
+    ack: &AckRef,
+    sink: &mut crate::orders::Sink,
+    payloads: &[Vec<u8>],
+) {
+    for payload in payloads {
+        warm(deser, rt, ack, sink, payload, Warm::Ready);
+    }
 }

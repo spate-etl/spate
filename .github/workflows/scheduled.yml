@@ -542,11 +542,10 @@ jobs:
           restore-keys: criterion-baseline-
 
       - run: make bench-check
-      # One step each with the target named: a bare `-p X -- --save-baseline`
-      # reaches the lib's libtest harness too, which rejects it. Given one
-      # baseline critcmp prints a column of 1.00 ratios and exits 0, and a bench
-      # never run leaves no `current` and drops out of the comparison silently.
-      - run: cargo bench -p spate-avro --locked --bench decode -- --save-baseline current
+      # The target is named because a bare `-p X -- --save-baseline` reaches the
+      # lib's libtest harness too, which rejects it. Given one baseline critcmp
+      # prints a column of 1.00 ratios and exits 0, and a bench never run leaves
+      # no `current` and drops out of the comparison silently.
       - run: cargo bench -p spate-clickhouse --locked --bench encode -- --save-baseline current
 
       # Built from source: install-action has no checksummed prebuilt for it.

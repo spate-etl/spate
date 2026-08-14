@@ -221,7 +221,5 @@ happens to is dropped. Nothing interleaves them either.
 
 ### Criterion
 
-`crates/spate-avro/benches/decode.rs` and
-`crates/spate-clickhouse/benches/encode.rs` are criterion targets, outside both
-conventions above. `make bench-check` compiles them and the nightly job runs
-them.
+`crates/spate-clickhouse/benches/encode.rs` is a criterion target, outside both
+conventions above. `make bench-check` compiles it and the weekly job runs it.

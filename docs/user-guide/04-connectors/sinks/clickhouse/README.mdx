@@ -124,7 +124,7 @@ check; see [Schema validation](./schema-validation.mdx). The
 full type mapping is in the crate's `rowbinary` module docs.
 :::
 
-## Deduplication tokens — and the window warning
+## Deduplication tokens and the window warning
 
 Every sealed batch carries a deterministic `insert_deduplication_token`, so
 a retry of the same batch (including on another replica after a timeout) is

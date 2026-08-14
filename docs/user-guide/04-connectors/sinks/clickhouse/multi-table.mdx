@@ -88,7 +88,7 @@ Each branch is a full ClickHouse sink, so everything on the
   own durable-ack point. The split holds the source batch until *every* table it
   touched has acked (see [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-destinations-is-free)).
 - **Per-batch `insert_deduplication_token`** per table. The same
-  [window warning](README.mdx#deduplication-tokens--and-the-window-warning)
+  [window warning](README.mdx#deduplication-tokens-and-the-window-warning)
   applies: set `non_replicated_deduplication_window` on **every** target table,
   or retries duplicate silently.
 - **Replica rotation, circuit breaker, readiness probe** per table. `/readyz`
@@ -97,7 +97,7 @@ Each branch is a full ClickHouse sink, so everything on the
   their `component` label, so `spate_sink_records_total{component="payments"}`
   and `{component="refunds"}` are distinct.
 
-## Per-table part tuning — and the checkpoint-lag cost
+## Per-table part tuning and the checkpoint-lag cost
 
 Splitting in the pipeline buys per-table part control: each
 table's `batch.max_rows`/`max_bytes`/`linger` is sized for *its* volume. A hot

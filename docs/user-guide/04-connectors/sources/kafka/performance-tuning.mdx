@@ -214,7 +214,7 @@ partition queues the pipeline polls, so you cannot change it either way.
 Advice to disable both for throughput is written for the Java client, where
 `check.crcs` defaults to true. There is nothing to win.
 
-## Threads: size them for the chain, not the source
+## Sizing threads for the chain
 
 Partitions map onto pipeline threads as lanes
 ([Lanes](./README.mdx#lanes-partitions-on-pipeline-threads)), so raising

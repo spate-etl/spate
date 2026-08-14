@@ -71,7 +71,7 @@ body:
       label: Semver impact, as best you can tell
       options:
         - Additive — nothing existing changes
-        - Breaking — an existing signature or behaviour changes
+        - Breaking — an existing signature or behavior changes
         - Not sure
     validations:
       required: true

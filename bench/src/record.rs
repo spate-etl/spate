@@ -168,7 +168,7 @@ impl Record {
     ///
     /// # Errors
     ///
-    /// When the record does not serialise. No arithmetic here can produce that
+    /// When the record does not serialize. No arithmetic here can produce that
     /// today, since `serde_json` writes a non-finite float as `null` rather
     /// than failing, so the error is carried rather than unwrapped, and a `null`
     /// would fail on the *read* side instead.
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(parsed, original);
     }
 
-    /// The optional fields must vanish rather than serialise as `null`: a leg
+    /// The optional fields must vanish rather than serialize as `null`: a leg
     /// written by a checkout that had no notes has to parse identically to one
     /// written by a checkout that does.
     #[test]

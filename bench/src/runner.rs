@@ -90,7 +90,7 @@ impl Runner {
         period: Duration,
     ) -> Result<Self, String> {
         let fingerprint_json = serde_json::to_string(fingerprint)
-            .map_err(|e| format!("the build fingerprint does not serialise: {e}"))?;
+            .map_err(|e| format!("the build fingerprint does not serialize: {e}"))?;
         let runner = Self {
             binary: binary.to_owned(),
             dir: dir.to_owned(),

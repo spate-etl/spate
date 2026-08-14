@@ -4,7 +4,7 @@
 //! [`CoordinatorScript`] handle. The test scripts ownership events and commit
 //! outcomes, the source under test runs its real driver choreography, and the
 //! script observes every commit, failure report, and release. There is no
-//! store and no clock, and behaviour is deterministic.
+//! store and no clock, and behavior is deterministic.
 
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{

@@ -1,7 +1,7 @@
 # Path rules for the `crate:` and `area:` labels on a pull request.
 #
 # Every label named here must exist in `.github/labels.yml`. GitHub creates a
-# missing one on the fly, with a default colour and no description, so a name
+# missing one on the fly, with a default color and no description, so a name
 # that does not match the taxonomy lands as a stray label rather than an error.
 
 "crate: spate":
@@ -87,7 +87,7 @@
           - bench/**
           - crates/*/benches/**
 
-# The licence and advisory surface, all of it CODEOWNED.
+# The license and advisory surface, all of it CODEOWNED.
 "area: supply-chain":
   - changed-files:
       - any-glob-to-any-file:

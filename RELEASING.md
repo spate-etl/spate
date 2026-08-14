@@ -71,7 +71,7 @@ is what guarantees that.
 
 The `release` job is *skipped* on ordinary merges rather than allowed to run and
 no-op: it enters the `crates-io` environment and would otherwise write a
-deployment record for every commit reaching `main`. It recognises a release by
+deployment record for every commit reaching `main`. It recognizes a release by
 the commit subject, so `pr_name` is pinned in `release-plz.toml` and the
 repository squashes with the pull request title as the subject. To force it, the
 workflow takes a `workflow_dispatch`.

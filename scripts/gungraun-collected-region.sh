@@ -11,7 +11,7 @@
 #
 # A gungraun bench can report a plausible number while measuring nothing: the
 # callgrind toggle bounding the collected region flips collection rather than
-# forcing it on, so work the optimiser reshapes can fall outside the region and
+# forcing it on, so work the optimizer reshapes can fall outside the region and
 # glibc's free path is counted in its place. The bench builds, runs, exits 0,
 # reports a number in the millions, and renders a report row.
 #
@@ -249,7 +249,7 @@ check_dir() {
             echo "  the rest is the C runtime, so this case is measuring the allocator rather than the code it names."
             echo "  Profile: $where"
             echo "  The usual cause is the measured work being written inline in the #[library_benchmark]"
-            echo "  function, where the optimiser may reshape it out of the collected region. Move it into a"
+            echo "  function, where the optimizer may reshape it out of the collected region. Move it into a"
             echo "  named #[inline(never)] function the benchmark calls. See DEVELOPING.md."
             failed=1
         fi

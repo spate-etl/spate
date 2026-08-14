@@ -208,7 +208,7 @@ mod tests {
     /// The unit tests run under this crate's own `bench_main!`-free harness, so
     /// the counting allocator is *not* the global one here, so `installed()` is
     /// therefore asserted only for self-consistency with what the global
-    /// counters do. Its behaviour with the allocator in place is proved end to
+    /// counters do. Its behavior with the allocator in place is proved end to
     /// end by the self-test bench, whose records carry non-zero allocation
     /// metrics.
     #[test]

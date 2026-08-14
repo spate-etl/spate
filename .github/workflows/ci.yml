@@ -115,7 +115,7 @@ jobs:
       - run: make check-transclusions
 
   deny:
-    name: Licences and advisories
+    name: Licenses and advisories
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # The RustSec advisory database moves with no file here changing, so this
@@ -273,7 +273,7 @@ jobs:
     needs: [changes, lint, workflows]
     if: needs.changes.outputs.rust == 'true'
     timeout-minutes: 30
-    # `chain_alloc`'s bounds are calibrated against optimised code, so `--release`
+    # `chain_alloc`'s bounds are calibrated against optimized code, so `--release`
     # is a requirement; a debug build allocates differently and proves nothing.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

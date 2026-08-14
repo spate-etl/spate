@@ -115,7 +115,7 @@ jobs:
               '' \
               "Run: ${RUN_URL}" \
               '' \
-              'This is expected after a dependency bump and is not a licence' \
+              'This is expected after a dependency bump and is not a license' \
               'problem. `cargo deny check licenses` gates that on every pull' \
               'request and is green. Regenerate and commit:' \
               '' \
@@ -239,7 +239,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.nightly == 'true'
     timeout-minutes: 30
-    # The full build, with rustdoc and every dependency's licence text on top.
+    # The full build, with rustdoc and every dependency's license text on top.
     # This produces what ships.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,7 +284,7 @@ jobs:
           </html>
           EOF
 
-      - name: Build third-party licence texts
+      - name: Build third-party license texts
         run: |
           rm -rf website/static/licenses
           mkdir -p website/static/licenses

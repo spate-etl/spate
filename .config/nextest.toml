@@ -1,7 +1,7 @@
 # cargo-nextest configuration. Doctests are not part of it; `cargo test --doc`
 # is a separate gate.
 
-# nextest only *warns* on configuration keys it does not recognise, then runs
+# nextest only *warns* on configuration keys it does not recognize, then runs
 # with its own defaults. An older binary silently ignores `fail-fast = false`
 # below and stops at the first failure.
 [nextest-version]

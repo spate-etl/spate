@@ -71,5 +71,5 @@ jobs:
           case "$flag" in
             true) gh pr edit "$pr" --repo "$REPO" --add-label "$PERF_LABEL" ;;
             false) gh pr edit "$pr" --repo "$REPO" --remove-label "$PERF_LABEL" ;;
-            *) echo "::warning::unrecognised regression flag content; leaving labels alone" ;;
+            *) echo "::warning::unrecognized regression flag content; leaving labels alone" ;;
           esac

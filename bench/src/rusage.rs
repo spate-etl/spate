@@ -108,11 +108,11 @@ fn raw_usage() -> Option<libc::rusage> {
     // valid inhabitant of the type and this is a sound way to obtain one to
     // write into.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: `getrusage` takes a `who` selector and a pointer it initialises
+    // SAFETY: `getrusage` takes a `who` selector and a pointer it initializes
     // for a valid selector. `usage` is a live, correctly-aligned, unaliased
     // `rusage` for the whole call, and `RUSAGE_SELF` is valid. Soundness does
     // not rest on the return value: `mem::zeroed` above already left `usage`
-    // fully initialised, so reading it would be defined whatever `getrusage`
+    // fully initialized, so reading it would be defined whatever `getrusage`
     // did. The error branch discards it because a partially-written value is
     // not a measurement, not because reading it would be unsound.
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {

@@ -7,7 +7,7 @@ mechanics.
 
 `make help` lists every target, grouped. `make gates` is the pull request bar and
 covers formatting, clippy, the type check, the test suite, doctests, rustdoc,
-the feature matrix, licences and advisories, and `make ci-lint`, the
+the feature matrix, licenses and advisories, and `make ci-lint`, the
 repository-metadata checks that read files and need no toolchain.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
@@ -15,7 +15,7 @@ status of the last command in the pipeline and have masked failures here. No
 target contains a pipe.
 
 CI calls the same targets for lint, type check, doctests, the feature matrix,
-licences and every `ci-lint` member. Other jobs spell out invocations of their
+licenses and every `ci-lint` member. Other jobs spell out invocations of their
 own for a coverage run, a container image, Node or a pinned tool, so a green
 `make gates` locally does not mean CI has nothing left to say.
 
@@ -105,7 +105,7 @@ graph.
 Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's
 `tests/`, doc tests on public APIs. proptest for tracker and codec invariants,
 loom for the synchronisation primitives, rdkafka's `MockCluster` and the
-ClickHouse mocks for connector behaviour that does not need a container.
+ClickHouse mocks for connector behavior that does not need a container.
 
 Framework users test their pipelines with `spate-test`'s in-memory source and
 capture sink. Keep those first-class, and prefer them for reproductions. A test
@@ -150,7 +150,7 @@ benchmark function call it.** Getting this wrong produces a number rather than a
 error. Collection is bounded by a callgrind toggle on the module the
 `#[library_benchmark]` macro wraps the function in, and a toggle *flips*
 collection rather than forcing it on. Work written inline in that function can
-therefore be reshaped by the optimiser until it falls outside the collected
+therefore be reshaped by the optimizer until it falls outside the collected
 region, and whatever runs while collection happens to be on is counted instead.
 Here that was glibc tearing down the corpus the fixture built: one bench reported
 858,925 instructions, every one of them in `malloc_consolidate` and

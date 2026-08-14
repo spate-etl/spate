@@ -271,7 +271,7 @@ pub fn markdown(comparison: &Comparison) -> String {
 ///
 /// # Errors
 ///
-/// When the report does not serialise, which for this shape means a value that
+/// When the report does not serialize, which for this shape means a value that
 /// is not a finite number.
 pub fn json(comparison: &Comparison) -> Result<String, String> {
     let counts: Vec<usize> = comparison
@@ -300,7 +300,7 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
         allowed: comparison.allowed.clone(),
         // The waiver alone would leave a consumer to diff the two fingerprints,
         // which over-reports: `leg`, `git_describe`, `dirty` and `feature_args`
-        // are serialised and none of them is guarded.
+        // are serialized and none of them is guarded.
         divergences: comparison
             .divergences()
             .into_iter()
@@ -350,7 +350,7 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
         // no leg label. A case that lost a base-leg record would otherwise be
         // reported as the head leg running short.
         replicate_span(comparison),
-        // Labelled `head` because that is the leg they describe. The guard makes
+        // Labeled `head` because that is the leg they describe. The guard makes
         // them true of the base leg too, right up until an `--allow` waives the
         // field that stopped being true, or the run is an arm comparison, where
         // the feature set differs by construction and the divergence line below

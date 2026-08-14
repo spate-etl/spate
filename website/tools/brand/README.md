@@ -39,7 +39,7 @@ both.
 The wordmark is IBM Plex Sans, SemiBold at −0.022 em for `spate` and Regular at
 −0.012 em for a second word. Glyphs are shaped with HarfBuzz and baked to
 outlines, so no asset carries a font dependency and the repository never
-redistributes font software. The licence surface is unchanged.
+redistributes font software. The license surface is unchanged.
 
 `brandgen.py` pins the upstream file by SHA-256. A digest mismatch stops the
 run, since the wordmark would otherwise be re-cut from a different source.

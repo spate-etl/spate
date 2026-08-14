@@ -19,7 +19,7 @@ inputs:
   tools:
     description: >
       Comma-separated tools for taiki-e/install-action, e.g. "nextest,cargo-hack".
-      Pass a version where the tool's *behaviour* is what a gate rests on.
+      Pass a version where the tool's *behavior* is what a gate rests on.
     required: false
     default: ""
   shared-key:

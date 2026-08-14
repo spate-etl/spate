@@ -29,7 +29,7 @@ UPEM = 1000
 
 # The wordmark is set in IBM Plex Sans (SIL Open Font License 1.1). The font is
 # fetched on demand rather than vendored: the glyphs ship as baked outlines, so
-# the repository never redistributes font software and the licence surface is
+# the repository never redistributes font software and the license surface is
 # unchanged. Pinned by digest. A mismatch means the upstream file moved, and
 # the wordmark is re-cut deliberately.
 FONT_URL = (
@@ -104,7 +104,7 @@ def mark(node, edge, core, scale=1.0, dx=0.0, dy=0.0):
 
 def mark_by_ink(node, edge, core, ink_h, left, mid_y):
     """Place the mark so its INK is `ink_h` tall, its left ink edge at `left`,
-    and its vertical ink centre at `mid_y`."""
+    and its vertical ink center at `mid_y`."""
     s = ink_h / MARK_INK_H
     dx = left - MARK_INK[0] * s
     dy = mid_y - (MARK_INK[1] + MARK_INK_H / 2) * s
@@ -217,12 +217,12 @@ def lockup(size, node, edge, core, word_fill, sub_fill, sub=None):
     gap = cap * 0.34
     word_gap = size * 0.24
 
-    # Vertical: the mark's ink centre sits on the x-height band centre, which is
+    # Vertical: the mark's ink center sits on the x-height band center, which is
     # where a lowercase wordmark carries its visual mass.
     baseline = 0.0
     mark_mid = baseline - xh / 2
 
-    # Compose left to right in a temporary frame, then normalise to (0, 0).
+    # Compose left to right in a temporary frame, then normalize to (0, 0).
     body, mark_w = mark_by_ink(node, edge, core, mark_h, 0.0, mark_mid)
     parts = [body]
     x = mark_w + gap

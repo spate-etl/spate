@@ -93,7 +93,7 @@ body:
       label: The envelope
       description: >-
         CPU cores and memory available to the process, and whether it is
-        containerised with a limit. Also the shape of the work: partition
+        containerized with a limit. Also the shape of the work: partition
         count, sink shard count, in-flight budget, batch sizes.
       placeholder: |
         4 CPU / 4 GiB container

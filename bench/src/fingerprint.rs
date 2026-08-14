@@ -18,7 +18,7 @@
 //! are compared instead: one process builds both legs, so it is the same machine
 //! by construction, and that check exists for two legs that were *not* produced
 //! together, which a bare `compare` accepts by design. `host_label` comes from
-//! `SPATE_BENCH_HOST`, and two runs from differently-labelled machines do not
+//! `SPATE_BENCH_HOST`, and two runs from differently-labeled machines do not
 //! compare.
 //!
 //! `codegen` is the one that is not obvious. Both legs are built with `cargo
@@ -31,7 +31,7 @@
 //! plausible thing to want to measure, and it has to be acknowledged rather than
 //! absorbed into the result.
 //!
-//! `--allow <field>` waives one by name. An unrecognised name is rejected rather
+//! `--allow <field>` waives one by name. An unrecognized name is rejected rather
 //! than accepted as a waiver that does nothing, and the report says in its header
 //! which guards were waived and what the two legs disagreed about.
 //!
@@ -383,7 +383,7 @@ mod tests {
         assert!(local.host_triple.is_none());
         assert!(!local.dirty);
 
-        // Absent fields must not serialise at all; a `null` would compare
+        // Absent fields must not serialize at all; a `null` would compare
         // unequal to a driver leg that simply omitted them.
         let json = serde_json::to_string(&local).expect("serialises");
         assert!(!json.contains("rustc"), "{json}");

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Applies `.github/labels.yml` to the repository: creates a label that is
-# missing, updates the colour and description of one that exists, and never
+# missing, updates the color and description of one that exists, and never
 # deletes.
 #
 # Uses `gh` rather than a labeling action: the organisation restricts Actions to
@@ -46,7 +46,7 @@ fail() {
 [ -f "$definitions" ] || fail "$definitions not found"
 command -v gh >/dev/null || fail "gh is not installed"
 
-# One TAB-separated name/colour/description row per entry. The quoted, fixed
+# One TAB-separated name/color/description row per entry. The quoted, fixed
 # key order is the file's own convention.
 rows=$(awk '
     function value(line,   s) {
@@ -71,14 +71,14 @@ total=0
 while IFS=$'\t' read -r name color desc; do
     [ -n "$name" ] || continue
     total=$((total + 1))
-    [ -n "$color" ] || fail "'$name' has no colour in $definitions"
+    [ -n "$color" ] || fail "'$name' has no color in $definitions"
 
     if [ "$dry_run" -eq 1 ]; then
         printf 'would sync  %-28s #%s  %s\n' "$name" "$color" "$desc"
         continue
     fi
 
-    # `--force` updates colour and description when the label exists, repairing
+    # `--force` updates color and description when the label exists, repairing
     # one created elsewhere with a default grey and no description.
     if gh label create "$name" \
         --color "$color" \

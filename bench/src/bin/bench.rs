@@ -103,7 +103,7 @@
 //! gates anything. The report is written either way, since the reason nothing
 //! paired is the part of it worth reading.
 //!
-//! Three refusals are easier to recognise than to diagnose: two packages
+//! Three refusals are easier to recognize than to diagnose: two packages
 //! declaring a `_wall` target of the same name; a two-leg run whose legs share
 //! no case at all, which a `--filter` matching nothing looks like; and
 //! an `arms` in which every judged case declared the same subject on both arms,
@@ -208,7 +208,7 @@ fn cli() -> Cli {
         .default_value("table")
         .value_parser(["table", "markdown", "json"])
         .help("How to render the comparison");
-    // The values are the guard names themselves, so an unrecognised one is
+    // The values are the guard names themselves, so an unrecognized one is
     // rejected by clap rather than silently waiving nothing while the report
     // header announces a waived guard.
     let allow = Arg::new("allow")

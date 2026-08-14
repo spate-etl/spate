@@ -24,6 +24,8 @@ use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::record::{Flow, PartitionId, RawPayload, Record};
 use std::time::Duration;
 
+#[path = "../benches/support/batches.rs"]
+mod batches;
 #[path = "../benches/support/corpora.rs"]
 mod corpora;
 #[path = "../benches/support/orders.rs"]
@@ -205,6 +207,21 @@ fn the_corpora_are_pinned_across_revisions() {
             corpora::digest(&corpora::long_list_datums()),
             0x77ba_abca_3240_c9a5,
         ),
+        (
+            "matching_single_object",
+            corpora::digest(&corpora::matching_single_object()),
+            0x44c0_67e1_7827_c069,
+        ),
+        (
+            "confluent_mixed_orders",
+            corpora::digest(&corpora::confluent_mixed_orders()),
+            0x5c0d_7feb_cb20_77b3,
+        ),
+        (
+            "order_batches",
+            corpora::digest(&batches::order_batches()),
+            0x9db5_1177_0fd1_9e1f,
+        ),
     ] {
         // Collected rather than asserted one at a time: a change to a shared
         // derivation moves several corpora at once, and re-running the test
@@ -265,6 +282,85 @@ fn the_decoding_corpora_decode_in_full() {
         "a {}-node list no longer decodes; the datum path's depth guard is \
          the first thing to check",
         corpora::LIST_NODES
+    );
+}
+
+/// The batch corpus decodes on every path a case drives it through, including
+/// the borrowed one, which is the only target that reaches `build_datum`.
+#[test]
+fn the_batch_corpus_decodes_on_every_path() {
+    let rt = runtime();
+    let payloads = batches::order_batches();
+    let settings = raw_settings(batches::BATCH_SCHEMA, None);
+    let want = (
+        usize::try_from(batches::BATCHES).expect("batch count fits usize"),
+        0,
+    );
+
+    let deser = builder(&settings, &rt).build_value().unwrap();
+    assert_eq!(outcomes(deser, &payloads), want, "the value path");
+
+    let deser = builder(&settings, &rt)
+        .build_serde::<batches::OrderPlaced>()
+        .unwrap();
+    assert_eq!(outcomes(deser, &payloads), want, "the two-pass typed path");
+
+    let deser = builder(&settings, &rt)
+        .build_serde_datum::<batches::OrderPlaced>()
+        .unwrap();
+    assert_eq!(outcomes(deser, &payloads), want, "the single-pass path");
+
+    let deser = builder(&settings, &rt)
+        .build_datum::<batches::BatchRefFam>()
+        .unwrap();
+    assert_eq!(outcomes(deser, &payloads), want, "the borrowed path");
+}
+
+/// The flatten both bench arms drive drops the same lines whichever record it
+/// walks. The two are separate traversals — one positional over the decoded
+/// tree, one over the typed record — so a change to either alone would make
+/// the pair of cases measure different work under one name.
+#[test]
+fn both_flattens_emit_the_same_rows() {
+    let rt = runtime();
+    let payloads = batches::order_batches();
+    let settings = raw_settings(batches::BATCH_SCHEMA, None);
+    let schema = apache_avro::Schema::parse_str(batches::BATCH_SCHEMA).unwrap();
+
+    let mut from_value = 0u64;
+    let mut from_typed = 0u64;
+    for payload in &payloads {
+        let value = apache_avro::from_avro_datum(&schema, &mut payload.as_slice(), None).unwrap();
+        batches::flatten_value(&value, |_| from_value += 1);
+    }
+
+    let mut deser = builder(&settings, &rt)
+        .build_datum::<batches::BatchRefFam>()
+        .unwrap();
+    let (ack, _rx) = AckRef::test_pair();
+    struct Count(u64);
+    impl<'buf> EmitRecord<'buf, batches::OrderPlacedRef<'buf>> for Count {
+        fn emit(&mut self, rec: Record<batches::OrderPlacedRef<'buf>>) -> Flow {
+            batches::flatten_typed(&rec.payload, |_| self.0 += 1);
+            Flow::Continue
+        }
+    }
+    let mut sink = Count(0);
+    for payload in &payloads {
+        deser.deserialize(&raw(payload), &ack, &mut sink).unwrap();
+    }
+    from_typed += sink.0;
+
+    assert_eq!(
+        from_value, from_typed,
+        "the two flattens no longer drop the same lines"
+    );
+    assert!(
+        from_value > 0 && from_value < batches::LINES,
+        "the flatten emitted {from_value} of {} lines; it is meant to drop \
+         some and keep some, so a case over it measures a filter rather than \
+         a pass-through or an empty loop",
+        batches::LINES
     );
 }
 
@@ -498,7 +594,7 @@ fn the_confluent_corpus_carries_the_wire_header() {
 /// have, so it is exercised here, under plain `cargo test`, first.
 #[test]
 fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
-    let stub = StubRegistry::start(corpora::READY_ID, orders::SCHEMA);
+    let stub = StubRegistry::start(&[(corpora::READY_ID, orders::SCHEMA)]);
     let settings = AvroSettings {
         mode: AvroMode::Confluent,
         registry: Some(RegistrySection {

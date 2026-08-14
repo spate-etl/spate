@@ -2,7 +2,8 @@
 //! with the reader schemas it evolves into, the logical-type and recursive
 //! schemas, and the poison payloads.
 //!
-//! Included with `#[path]` by `benches/decode_gungraun.rs` and by
+//! Included with `#[path]` by `benches/decode_gungraun.rs`,
+//! `benches/decode_paths_wall.rs`, `benches/wire_wall.rs` and by
 //! `tests/bench_fixtures.rs`, which pins every corpus below. A bench target
 //! is its own crate, so two targets can only agree on a workload by
 //! compiling the same source.
@@ -56,6 +57,12 @@
 //! nondeterminism would mean giving up either the reader schema or a
 //! realistic map target, which is the whole of what those cases measure.
 
+// Each bench target compiles this module separately and uses a different
+// subset of it: a target that parses framings does not decode every corpus,
+// and the fixtures test reads items no bench drives. So an item dead in one
+// target is live in another, and the allow is module-wide.
+#![allow(dead_code, reason = "each bench target uses a different subset")]
+
 use apache_avro::types::Value;
 use apache_avro::{Decimal, Schema, Uuid, to_avro_datum};
 use std::collections::HashMap;
@@ -107,6 +114,23 @@ pub(crate) fn confluent_orders(id: u32) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The schema ids [`confluent_mixed_orders`] rotates through. All eight carry
+/// `orders::SCHEMA`, so the corpus differs from a single-id one in its headers
+/// and in nothing else.
+pub(crate) const MIXED_IDS: [u32; 8] = [4221, 4222, 4223, 4224, 4225, 4226, 4227, 4228];
+
+/// [`BATCH`] flat-order datums whose headers rotate through [`MIXED_IDS`].
+///
+/// Eight keys rather than one, so a case over it prices the map probe and the
+/// `Arc` clone against the key spread a topic with several subjects produces.
+pub(crate) fn confluent_mixed_orders() -> Vec<Vec<u8>> {
+    order_datums()
+        .iter()
+        .enumerate()
+        .map(|(i, datum)| confluent(MIXED_IDS[i % MIXED_IDS.len()], datum))
+        .collect()
+}
+
 /// A single-object framing whose fingerprint is deliberately not the
 /// configured schema's: magic `0xC3 0x01`, the fingerprint little-endian,
 /// then the datum. Every payload resolves to `SchemaUnavailable`, which is
@@ -117,12 +141,37 @@ pub(crate) const STALE_FINGERPRINT: u64 = 0xDEAD_BEEF_DEAD_BEEF;
 /// [`BATCH`] flat-order datums framed single-object under
 /// [`STALE_FINGERPRINT`].
 pub(crate) fn stale_single_object() -> Vec<Vec<u8>> {
+    single_object(STALE_FINGERPRINT)
+}
+
+/// The Rabin fingerprint of `orders::SCHEMA`, the value a producer writing
+/// that schema puts in the single-object header.
+pub(crate) fn order_fingerprint() -> u64 {
+    let schema = Schema::parse_str(crate::orders::SCHEMA).expect("order schema parses");
+    let fp = schema.fingerprint::<apache_avro::rabin::Rabin>();
+    let bytes: [u8; 8] = fp
+        .bytes
+        .as_slice()
+        .try_into()
+        .expect("Rabin is eight bytes");
+    u64::from_le_bytes(bytes)
+}
+
+/// [`BATCH`] flat-order datums framed single-object under the schema's own
+/// fingerprint, so every payload resolves and decodes.
+pub(crate) fn matching_single_object() -> Vec<Vec<u8>> {
+    single_object(order_fingerprint())
+}
+
+/// Frame the flat-order corpus single-object: magic `0xC3 0x01`, the
+/// fingerprint little-endian, then the datum.
+fn single_object(fingerprint: u64) -> Vec<Vec<u8>> {
     order_datums()
         .iter()
         .map(|datum| {
             let mut framed = Vec::with_capacity(10 + datum.len());
             framed.extend_from_slice(&[0xC3, 0x01]);
-            framed.extend_from_slice(&STALE_FINGERPRINT.to_le_bytes());
+            framed.extend_from_slice(&fingerprint.to_le_bytes());
             framed.extend_from_slice(datum);
             framed
         })
@@ -268,7 +317,6 @@ pub(crate) const EVENT_DEFAULTED: &str = r#"{"type":"record","name":"Event","fie
 /// `tests/bench_fixtures.rs` pins that, so the case can be added the day the
 /// dependency starts honoring it, which is also why this reader is `allow`ed
 /// rather than deleted: it is the input that pin needs.
-#[allow(dead_code, reason = "used only by the fixtures test's alias pin")]
 pub(crate) const EVENT_ALIASED: &str = r#"{"type":"record","name":"Event","fields":[
   {"name":"id","type":"int"},
   {"name":"label","type":"string","aliases":["name"]},
@@ -285,7 +333,6 @@ pub(crate) const EVENT_ALIASED: &str = r#"{"type":"record","name":"Event","field
 /// narrower wire values; the two renamed halves and the defaulted field carry
 /// `#[serde(default)]` because each is absent from four of the five readers.
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct Evolved {
     id: i64,
     #[serde(default)]
@@ -356,7 +403,6 @@ pub(crate) fn shapes_schema() -> String {
 /// compile this same source, so an `expect` would fire as unfulfilled in the
 /// one that does read it.
 #[derive(Debug)]
-#[allow(dead_code, reason = "read only by the fixtures test")]
 pub(crate) struct Blob(pub(crate) Vec<u8>);
 
 impl<'de> serde::Deserialize<'de> for Blob {
@@ -388,7 +434,6 @@ pub(crate) enum Colour {
 
 /// The logical-type decode target.
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct Shapes {
     pub(crate) colour: Colour,
     pub(crate) digest: Blob,
@@ -499,7 +544,6 @@ pub(crate) const LIST_NODES: usize = 32;
 
 /// The recursive decode target.
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct LongList {
     pub(crate) value: i64,
     pub(crate) next: Option<Box<LongList>>,
@@ -539,7 +583,6 @@ pub(crate) fn long_list_datums() -> Vec<Vec<u8>> {
 /// merge-base leg and the head leg run different builds.
 ///
 /// `allow` rather than `expect`, for the reason given on [`Blob`].
-#[allow(dead_code, reason = "called only by the fixtures test")]
 pub(crate) fn digest(corpus: &[Vec<u8>]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fold = |byte: u8| {

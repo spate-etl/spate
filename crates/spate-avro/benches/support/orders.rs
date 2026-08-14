@@ -1,4 +1,4 @@
-//! Decode fixtures shared by `benches/decode.rs` (wall time) and
+//! Decode fixtures shared by `benches/decode_paths_wall.rs` (wall time) and
 //! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record,
 //! an array-shaped one, and a truncated copy of the flat record for the
 //! error path.
@@ -8,8 +8,15 @@
 //! source. If the two ever encoded different datums, a wall-clock result and
 //! an instruction count would not be talking about the same bytes.
 //!
-//! The published comparison corpus is not here. It lives in `decode.rs`
-//! with the golden self-check that pins it to the benchmark repository.
+//! The corpus where one datum carries an array of lines is `batches.rs`.
+
+// Each bench target compiles this module separately and uses a different
+// subset of it: a target that parses framings does not decode every corpus,
+// and the fixtures test reads items no bench drives. So an item is
+// legitimately dead in one target while live in another, which is a
+// module-wide `allow` rather than per-item `expect`: an `expect` would itself
+// go unfulfilled in whichever target does use the item.
+#![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use apache_avro::{Schema, to_avro_datum};
 use spate_core::record::{Flow, Record};
@@ -33,7 +40,6 @@ pub(crate) const SCHEMA: &str = r#"{"type":"record","name":"Order","fields":[
   {"name":"note","type":"string"}]}"#;
 
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct Order {
     id: i64,
     user_id: i64,
@@ -121,14 +127,12 @@ pub(crate) const BATCH_SCHEMA: &str = r#"{"type":"record","name":"PlacedOrder","
 pub(crate) const BATCH_LINES: u64 = 50;
 
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct PlacedOrder {
     region: String,
     lines: Vec<OrderLine>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "deserialization target only")]
 pub(crate) struct OrderLine {
     sku: String,
     qty: i64,

@@ -3934,7 +3934,6 @@ version = "0.1.0"
 dependencies = [
  "apache-avro",
  "bytes",
- "criterion",
  "gungraun",
  "http-body-util",
  "humantime-serde",
@@ -3944,6 +3943,7 @@ dependencies = [
  "schema_registry_converter",
  "serde",
  "serde_json",
+ "spate-bench",
  "spate-core",
  "spate-test",
  "tempfile",

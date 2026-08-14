@@ -1,6 +1,6 @@
 # Forms only. Every report here has a first question someone would have to ask
-# anyway — which connector, which version, whether a rebalance was involved —
-# and a form asks it once instead of costing a round-trip.
+# anyway (which connector, which version, whether a rebalance was involved), and
+# a form asks it once instead of costing a round-trip.
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability

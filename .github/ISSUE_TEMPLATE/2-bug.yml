@@ -6,10 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        For anything touching delivery guarantees — records lost, duplicated, or
-        a watermark advancing past unacknowledged data — please use the
-        **delivery-correctness** form instead. It asks the questions that class
-        of bug needs.
+        Records lost, records duplicated, or a watermark advancing past
+        unacknowledged data belong on the **delivery-correctness** form
+        instead. It asks the questions that class of bug needs.
 
   - type: dropdown
     id: components
@@ -47,8 +46,7 @@ body:
     attributes:
       label: Cargo features
       description: >-
-        Which features are enabled. This matters more than it looks — most of
-        the crate is behind one.
+        Which features are enabled. Most of the crate sits behind one.
       placeholder: 'kafka, clickhouse, avro'
     validations:
       required: true
@@ -84,9 +82,8 @@ body:
       label: Reproduction
       description: >-
         The smallest thing that shows it. `spate-test`'s in-memory source and
-        capture sink will reproduce most engine behaviour with no
-        infrastructure at all, and a test written against them is the most
-        useful reproduction there is.
+        capture sink reproduce most engine behaviour with no infrastructure at
+        all, and a test written against them is what to aim for.
       render: rust
 
   - type: textarea
@@ -104,7 +101,7 @@ body:
       label: Configuration
       description: >-
         Relevant YAML. **Remove credentials, hostnames and anything else you
-        would not publish** — this is a public issue.
+        would not publish.** This is a public issue.
       render: yaml
 
   - type: textarea

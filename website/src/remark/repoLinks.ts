@@ -10,19 +10,14 @@
  * A path naming a directory resolves to `/tree/` instead of `/blob/`, so a
  * reference to a crate rather than a file lands on the crate.
  *
- * Why this exists: a reader of the site is not holding this repository, so a
- * bare path in prose describes a layout only a contributor can act on. Writing
- * the full URL by hand instead would put the host, the organization, the
- * repository, the ref and the path beyond the reach of any check. Only the path
- * is authored here, and only the path can be wrong — which is why this file can
- * verify it. See `docs/STYLE.md` § 7.
+ * A page authors the path alone, and this file verifies it off disk. The host,
+ * the organization, the repository and the ref come from `../repoUrl`. See
+ * `docs/STYLE.md` § 7.
  *
- * Every failure below throws, and there is no way to switch that off. A link
- * that resolves to nothing is what `onBrokenLinks: 'throw'` already refuses for
- * an internal page, and a pointer at a source file is no weaker a promise.
+ * Every failure below throws, and there is no way to switch that off.
  *
  * Registered alongside `./transclude.ts` in `beforeDefaultRemarkPlugins`, ahead
- * of the default plugin that resolves Markdown links — which would otherwise
+ * of the default plugin that resolves Markdown links, which would otherwise
  * meet a scheme it does not know. As with transclusion, a remark plugin has no
  * loader context and cannot call `addDependency`; the loader in
  * `../plugins/transcludeDepsLoader.cjs` registers link targets too, and
@@ -52,8 +47,8 @@ type VFileLike = {path?: string};
  * Both `link` and `definition` are matched: a reference-style link keeps its
  * destination on the definition, so visiting only `link` would let one through
  * unresolved. Hand-written rather than `unist-util-visit`, which is in
- * `node_modules` only because something else depends on it — see the note in
- * `./transclude.ts`. MDX JSX nodes carry `children` too, so a link inside a
+ * `node_modules` only because something else depends on it (see the note in
+ * `./transclude.ts`). MDX JSX nodes carry `children` too, so a link inside a
  * `<Tabs>` is reached.
  */
 function visitLinks(node: AnyNode, fn: (n: LinkNode) => void): void {
@@ -89,14 +84,12 @@ function resolveTarget(rel: string): 'blob' | 'tree' {
   if (rel.split('/').includes('..')) {
     throw new Error(`${SCHEME}${rel} must not contain a \`..\` segment.`);
   }
-  // A `#L42` suffix is the one addressing form this repository has ruled out:
-  // it repoints silently the next time anything above it moves, which is the
-  // rot the anchor comments in `./transclude.ts` exist to avoid. Rendering a
-  // region is how a page shows specific lines.
+  // A `#L42` suffix repoints silently the next time anything above it moves.
+  // Rendering a region is how a page shows specific lines.
   if (rel.includes('#')) {
     throw new Error(
       `${SCHEME}${rel} carries a fragment. A link addresses a file, not lines ` +
-        'within it — render the lines as a fence instead (docs/STYLE.md § 10).',
+        'within it. Render the lines as a fence instead (docs/STYLE.md § 10).',
     );
   }
   const abs = path.join(REPO_ROOT, rel);

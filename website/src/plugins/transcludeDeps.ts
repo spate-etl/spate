@@ -10,8 +10,8 @@ import type {Plugin} from '@docusaurus/types';
  *
  * The loader's basename deliberately differs from this file's. Docusaurus
  * resolves `./src/plugins/transcludeDeps` through jiti, whose extension order
- * is `.js`, `.mjs`, `.cjs`, `.ts` — so a sibling `transcludeDeps.cjs` wins the
- * extensionless import and Docusaurus tries to initialize the *loader* as a
+ * is `.js`, `.mjs`, `.cjs`, `.ts`. A sibling `transcludeDeps.cjs` would win the
+ * extensionless import, and Docusaurus would initialize the *loader* as a
  * plugin (`TypeError: this.getOptions is not a function`).
  */
 export default function transcludeDepsPlugin(context: {siteDir: string}): Plugin {
@@ -23,11 +23,11 @@ export default function transcludeDepsPlugin(context: {siteDir: string}): Plugin
       module: {
         rules: [
           {
-            // `enforce: 'pre'` is load-bearing. Without it, whether this loader
-            // sees the raw Markdown or the JSX the MDX loader produced depends
-            // on the order the two rules happen to land in — normal loaders run
-            // right to left across the concatenated match. A `pre` loader is
-            // always first, so the regex always sees fences.
+            // `enforce: 'pre'` decides what this loader sees. Without it,
+            // whether it gets the raw Markdown or the JSX the MDX loader
+            // produced depends on the order the two rules land in, since
+            // normal loaders run right to left across the concatenated match.
+            // A `pre` loader is always first, so the regex always sees fences.
             enforce: 'pre',
             test: /\.mdx?$/,
             include: [docsDir],

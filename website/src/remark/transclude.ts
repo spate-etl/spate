@@ -7,8 +7,7 @@
  *     ```rust file=crates/spate/examples/memory_pipeline.rs region=chain
  *     ```
  *
- * The source marks the region with mdBook's anchor comments, which are the
- * convention the Rust Book and every mdBook-based project already use:
+ * The source marks the region with mdBook's anchor comments:
  *
  *     // ANCHOR: chain
  *     // ANCHOR_END: chain
@@ -16,22 +15,18 @@
  * Markers are matched anywhere on a line and carry no comment syntax of their
  * own, so `# ANCHOR: x` in a YAML file beside an example works the same way.
  *
- * Why this exists: nothing compiles a fenced block in an `.mdx` file, so a
- * hand-written snippet survives every gate this repository has. Anything under
- * `crates/` is compiled by `cargo clippy --workspace --all-targets`, which
- * `make gates` runs. See `docs/STYLE.md` § 10.
+ * Nothing compiles a fenced block in an `.mdx` file, so a hand-written snippet
+ * survives every gate this repository has. Anything under `crates/` is compiled
+ * by `cargo clippy --workspace --all-targets`, which `make gates` runs. See
+ * `docs/STYLE.md` § 10.
  *
- * Every failure below throws, and there is no way to switch that off. A fence
- * that silently renders empty is the defect this mechanism exists to remove,
- * and `onBrokenLinks: 'throw'` already sets the standard for a pointer that
- * stops resolving.
+ * Every failure below throws, and there is no way to switch that off.
  *
- * One thing this file cannot do: a remark plugin runs inside the MDX loader's
- * `process()` call with no loader context, so it cannot call `addDependency`
- * to tell the bundler a page depends on a `.rs` file. Two other pieces cover
- * that, and neither lives here — `../plugins/transcludeDeps.cjs` registers the
- * real dependency, and `scripts/transclude.sh` re-checks both sides off disk
- * with no cache of any kind.
+ * A remark plugin runs inside the MDX loader's `process()` call with no loader
+ * context, so it cannot call `addDependency` to tell the bundler a page depends
+ * on a `.rs` file. `../plugins/transcludeDepsLoader.cjs` registers the
+ * dependency, and `scripts/transclude.sh` re-checks both sides off disk with no
+ * cache of any kind.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -118,10 +113,9 @@ function isMarker(line: string): boolean {
 /**
  * Index every marker in a file, and reject a malformed set.
  *
- * The whole file is validated rather than only the region a page asked for, for
- * two reasons: the error is then the same whichever page happens to compile
- * first, and it is the same set `scripts/transclude.sh` checks — so the build
- * and the gate cannot disagree about whether a file is well formed.
+ * The whole file is validated rather than only the region a page asked for, so
+ * the error is the same whichever page compiles first, over the same set
+ * `scripts/transclude.sh` checks.
  */
 function indexRegions(lines: string[], rel: string): {[name: string]: Region} {
   const starts: {[name: string]: number} = Object.create(null);
@@ -146,8 +140,8 @@ function indexRegions(lines: string[], rel: string): {[name: string]: Region} {
       if (name in starts) {
         throw new Error(
           `${rel}:${i + 1}: duplicate \`ANCHOR: ${name}\`; the first is at line ` +
-            `${starts[name] + 1}. A region name is unique within a file — two ` +
-            `disjoint stretches cannot share one.`,
+            `${starts[name] + 1}. A region name is unique within a file, so ` +
+            `two disjoint stretches cannot share one.`,
         );
       }
       starts[name] = i;
@@ -199,8 +193,7 @@ function readSource(abs: string, rel: string): SourceIndex {
  *
  * Dropping *every* marker line rather than only the extracted pair is mdBook's
  * rule, and it is what makes nesting work: a region containing another region's
- * markers renders without them. It also keeps scaffolding out of what a reader
- * pastes — the markers exist for the build, not for them.
+ * markers renders without them.
  */
 function render(lines: string[]): string {
   const kept = lines.filter((l) => !isMarker(l));
@@ -242,7 +235,7 @@ function resolveSource(rel: string): string {
     throw new Error(
       `file="${rel}" is outside the trees a page may quote from ` +
         `(${ALLOWED_PREFIXES.join(', ')}). Only compiled sources are ` +
-        `transcludable — see docs/STYLE.md § 10.`,
+        `transcludable. See docs/STYLE.md § 10.`,
     );
   }
   const abs = path.join(REPO_ROOT, rel);
@@ -360,14 +353,8 @@ export default function remarkTransclude() {
       // `file` and `region` are ours and mean nothing to @theme/CodeBlock,
       // which parses what is left (title, showLineNumbers, ...).
       //
-      // No title is synthesised from the path. The reader of a page is not
-      // holding this repository — someone who depends on the published crate
-      // has no `crates/spate/examples/` to look in — so the path describes a
-      // layout only a contributor can act on, and a contributor already reads
-      // it off the `file=` attribute in the page source. Where a snippet came
-      // from is worth saying once in prose, next to how to run it, rather than
-      // on every fence. An author who needs it on a specific fence writes
-      // `title="…"` and it survives untouched.
+      // No title is synthesised from the path. An author who wants one on a
+      // specific fence writes `title="…"`, and it survives untouched.
       node.meta = serializeMeta(
         pairs.filter(([k]) => k !== 'file' && k !== 'region'),
       );

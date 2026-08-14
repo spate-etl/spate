@@ -1,5 +1,5 @@
 <!--
-Thank you for this. Delete whichever sections do not apply — a typo fix does
+Thank you for this. Delete whichever sections do not apply. A typo fix does
 not need the invariants checklist.
 
 Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
@@ -12,12 +12,12 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 ## Invariants
 
 <!--
-Tick the ones this change touches. Ticking one is not a problem — it means
+Tick the ones this change touches. Ticking one is not a problem. It means
 the description above should say how the property still holds.
 
 The numbers are canonical and defined in docs/INVARIANTS.md, which states each
 property in full and is the only place that does. What follows is the short
-form — read that file before ticking a box you are unsure about.
+form. Read that file before ticking a box you are unsure about.
 -->
 
 - [ ] **INV-1 — delivery is at-least-once.** A source watermark is never
@@ -38,14 +38,14 @@ form — read that file before ticking a box you are unsure about.
       one sanctioned exception.
 - [ ] **INV-7 — record error policies are Skip or Fail only**, and both are
       surfaced through metrics rather than only logged.
-- [ ] **INV-8 — metrics handles are pre-registered at build time** — never
+- [ ] **INV-8 — metrics handles are pre-registered at build time.** Never
       resolved on the per-record path.
 - [ ] **INV-9 — every metric family lives under the `spate_` umbrella.**
 - [ ] **INV-10 — a gauge series has exactly one live owner per process.**
 
 ## Semver
 
-<!-- Delete all but one. Pre-1.0, a breaking change is fine; an unannounced one is not. -->
+<!-- Delete all but one. Pre-1.0, a breaking change is fine if it is announced. -->
 
 - [ ] Additive — nothing existing changes
 - [ ] Breaking — and the commit subject carries `!`
@@ -60,22 +60,22 @@ Tick by exit code, not by memory.
       validation silently does not run
 - [ ] Any ad-hoc cargo command run with `--locked`, as CI does
 - [ ] Dependency changes: covered by `make gates`. `THIRD-PARTY.md` is *not*
-      required to be current here — it is checked nightly and regenerated at
-      release — but `make attribution` is welcome if you are adding a dependency
+      required to be current here, since it is checked nightly and regenerated
+      at release. `make attribution` is welcome if you are adding a dependency
       rather than bumping one
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),
       scoped to the crate touched, and carry no AI attribution trailers
-- [ ] Crate-reaching `feat`, `fix`, `perf`, `revert`, `build` — or any `!`
+- [ ] Crate-reaching `feat`, `fix`, `perf`, `revert`, `build`, or any `!`
       whatever its scope: a fragment under `changelog.d/`, from
       `make changelog-new TYPE=… SLUG=…`. Scoping to a non-crate area is the
       exemption; leaving the scope off is not. A fix to a bug that was never
-      released takes a `Changelog: none` trailer instead. **The title is what
-      lands on `main`**, so it is the one that has to be right
+      released takes a `Changelog: none` trailer instead. **The fragment title
+      is what lands on `main`**
 
 ## Anything else
 
 <!--
 If you measured something, say what you measured it on, and on how quiet a
-machine. A figure only reaches the docs carrying how it was established — see
-docs/STYLE.md § 7 — because a number nobody can place is one nobody can check.
+machine. A figure only reaches the docs carrying how it was established (see
+docs/STYLE.md § 7).
 -->

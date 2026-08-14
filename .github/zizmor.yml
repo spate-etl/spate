@@ -1,19 +1,15 @@
-# zizmor flags `workflow_run` unconditionally (dangerous-triggers, High): the
-# workflow runs with repository credentials on behalf of an event a fork
-# authored, which is the textbook pwn-request setup when it also checks out or
-# executes pull-request code.
+# zizmor flags `workflow_run` unconditionally (dangerous-triggers, High).
 #
-# `perf-label.yml` is the privileged half of a split designed around exactly
-# that audit: it checks out nothing, executes nothing from the pull request,
-# reads one artifact bound to the triggering run by `run-id:` and parses it as
-# nothing but `true`/`false`, and the only write its token allows is one
-# label. The trigger is the point — the unprivileged half runs the untrusted
-# code with a read-only token, and this half must therefore be a separate
-# workflow.
+# `perf-label.yml` is the privileged half of such a split. It checks out
+# nothing, executes nothing from the pull request, reads one artifact bound to
+# the triggering run by `run-id:` and parses it as nothing but `true`/`false`,
+# and the only write its token allows is one label. The unprivileged half runs
+# the untrusted code with a read-only token, which is why the two are separate
+# workflows.
 #
-# The ignore is file- and rule-scoped on purpose. A new `workflow_run`
-# workflow does not inherit it: argue its posture in a comment like the one
-# in perf-label.yml and add it here, or find a design without the trigger.
+# The ignore is file- and rule-scoped. A new `workflow_run` workflow does not
+# inherit it: state its posture in a comment like the one in perf-label.yml and
+# add it here, or find a design without the trigger.
 rules:
   dangerous-triggers:
     ignore:

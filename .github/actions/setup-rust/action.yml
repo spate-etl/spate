@@ -1,19 +1,12 @@
 name: Set up Rust
 description: >
-  Toolchain, prebuilt cargo tools and a shared build cache — the preamble every
+  Toolchain, prebuilt cargo tools and a shared build cache, the preamble every
   Rust job in this repo needs. Callers must run actions/checkout first.
 
-# A composite action, deliberately, rather than a reusable workflow. A composite
-# action's steps run *inside the calling job*, so they share that job's target
-# directory and cost no extra runner and no extra billed minute. A reusable
-# workflow would be a separate job, and would also rename every status check to
-# "caller / job" — which silently breaks branch protection, because the required
-# check name no longer matches what was configured.
-#
-# The checkout deliberately stays with the caller. A `uses: ./...` action is
-# resolved from the workspace on disk, so the repository has to be checked out
-# before this file can be read at all — an action cannot check out the tree that
-# contains it.
+# Composite rather than a reusable workflow. Its steps run inside the calling
+# job and share that job's target directory. A reusable workflow would be a
+# separate job and would rename every status check to "caller / job", which
+# breaks branch protection.
 
 inputs:
   toolchain:
@@ -41,9 +34,9 @@ inputs:
     description: >
       Whether this job may write its cache entry. "auto" (the default) writes
       from `main` only. "never" makes the job a pure consumer, for an entry a
-      single dedicated job is meant to own — several jobs sharing one key race
+      single dedicated job is meant to own. Several jobs sharing one key race
       to write it the first time it is missing, and the fastest job wins, which
-      is reliably the one that built the least.
+      is the one that built the least.
     required: false
     default: auto
 
@@ -55,29 +48,16 @@ runs:
         toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
 
-    # Prebuilt binaries with a SHA-256 check, resolved from a manifest baked
-    # into the pinned action SHA. `cargo install` would compile each tool and
-    # its whole dependency tree from source, minutes per tool per job.
     - if: inputs.tools != ''
       uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
       with:
         tool: ${{ inputs.tools }}
 
-    # `save-if` restricted to main is about the 10 GB per-repo cache ceiling,
-    # not about time. Left at its default, every job on every PR writes its own
-    # entry; with N cache-writing jobs and M open PRs that is N×M entries
-    # against an LRU budget, which evicts the main baseline and leaves every PR
-    # building cold *while still paying the upload*. Writing only from main
-    # gives one warm baseline that every PR restores from — legal because a run
-    # may read its own branch, the default branch, and its PR base.
-    #
-    # `cache-save: never` narrows that further, to an entry whose contents are
-    # meant to come from one named job. rust-cache writes when the key was not
-    # an exact hit, so on the first run after a lockfile bump every job sharing
-    # the key writes concurrently and the first to finish is the one that
-    # persists — the job that compiled the least. An entry a matrix restores
-    # from has to be filled by the job that compiled the most, so the shards
-    # consume and never produce.
+    # `save-if` restricted to main holds one warm baseline against the 10 GB
+    # per-repo cache ceiling. Left at its default, every job on every pull
+    # request writes its own entry, and the LRU budget evicts that baseline. A
+    # run may read its own branch, the default branch, and its pull request
+    # base.
     - if: inputs.shared-key != ''
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:

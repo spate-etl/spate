@@ -7,9 +7,7 @@ import { themes as prismThemes } from 'prism-react-renderer';
 import transclude from './src/remark/transclude';
 import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
-// The site is deployed to Cloudflare Pages on a dedicated subdomain:
-// https://spate.kainth.dev/ (Direct Upload from CI — see the nightly
-// tier of scheduled.yml; pull requests build the site but never publish it).
+// The site is deployed to Cloudflare Pages at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
 import {
@@ -21,13 +19,10 @@ import {
 
 // Client-side redirects that keep old published URLs alive. Registered only in
 // CI (see the plugins array): plugin-client-redirects writes `<from>/index.html`
-// AFTER the build, and on a case-INSENSITIVE filesystem (macOS APFS, dev laptops)
-// a stub whose path differs from a real page only in case collapses onto that
-// page and clobbers it. The deploy runs on ubuntu-latest (case-sensitive) where
-// the stubs and real pages coexist, so the gate is on the whole set rather than
-// on individual entries — no entry in the set collides today, and one added
-// later cannot reintroduce the problem on a dev machine. Local builds drop the
-// stubs; they exist solely to preserve old links.
+// AFTER the build, and on a case-INSENSITIVE filesystem (macOS APFS, dev
+// laptops) a stub whose path differs from a real page only in case collapses
+// onto that page and clobbers it. The deploy runs on ubuntu-latest, where the
+// stubs and real pages coexist. Local builds drop the stubs.
 //
 // Entries:
 //   - connectors/* -> connectors/{sources,sinks,formats}/* (connectors were
@@ -40,10 +35,9 @@ import {
 //     architecture prose the Concepts section, which is where a reader
 //     following an old link is looking).
 //
-// A redirect whose `to` names a page that no longer exists FAILS the build.
-// Deleting a page therefore means deleting any redirect aimed at it — the
-// avro `fast-backend` entry went when that backend was removed. Note this is
-// only caught with `CI=true` (see where the plugin is registered below).
+// A redirect whose `to` names a page that no longer exists FAILS the build, so
+// deleting a page means deleting any redirect aimed at it. This is only caught
+// with `CI=true` (see where the plugin is registered below).
 const chConnector = '/docs/user-guide/connectors';
 const clientRedirects: PluginConfig = [
   '@docusaurus/plugin-client-redirects',
@@ -79,11 +73,8 @@ const config: Config = {
   projectName,
   trailingSlash: false,
 
-  // Broken internal links fail the build — a content-hygiene gate that keeps
-  // CI honest as docs change. Anchors are held to the same standard: a link
-  // into a specific heading is a promise that the heading exists, and a
-  // rename breaking it silently is exactly the drift the rest of these gates
-  // exist to stop.
+  // Broken internal links fail the build, and anchors are held to the same
+  // standard: a link into a heading is a promise that the heading exists.
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'throw',
 
@@ -96,11 +87,10 @@ const config: Config = {
     mermaid: true,
     hooks: {
       // `onBrokenLinks: 'throw'` above governs links Docusaurus has resolved
-      // into routes. A *Markdown* link — `[x](./other.md)` — that resolves to
-      // no file is a separate setting, and its default is only 'warn', so
-      // those were passing CI while rendered broken links failed it. Same
-      // standard for both. (The top-level `onBrokenMarkdownLinks` key this
-      // replaces is deprecated as of 3.9.)
+      // into routes. A Markdown link such as `[x](./other.md)` that resolves
+      // to no file is this separate setting, whose default is 'warn'. (The
+      // top-level `onBrokenMarkdownLinks` key this replaces is deprecated as
+      // of 3.9.)
       onBrokenMarkdownLinks: 'throw',
     },
   },
@@ -114,13 +104,11 @@ const config: Config = {
     faster: true,
     v4: {
       // Required by `faster`: its `ssgWorkerThreads` refuses to start without
-      // it, because rendering pages off the main thread cannot support the
-      // legacy post-build head attribute.
+      // it.
       //
       // Enabled individually rather than as `v4: true`. The other v4 flag,
-      // `useCssCascadeLayers`, changes CSS precedence, and this site carries
-      // custom styles — that one deserves its own change with its own visual
-      // check, not a free ride on a build-speed commit.
+      // `useCssCascadeLayers`, changes CSS precedence over this site's custom
+      // styles, and takes its own change with its own visual check.
       removeLegacyPostBuildHeadAttribute: true,
     },
   },
@@ -129,9 +117,8 @@ const config: Config = {
     // CI-only, as a standing precaution rather than for any entry currently
     // in the set (see clientRedirects above).
     process.env.CI === 'true' ? clientRedirects : false,
-    // Not conditional. What it registers is a cache-correctness fact — which
-    // sources a page's fences are rendered from — and a rebuild that is only
-    // correct in CI is the wrong half of the problem to solve.
+    // Not conditional. It registers which sources a page's fences are rendered
+    // from, and a warm-cache local rebuild needs that as much as CI does.
     transcludeDeps,
   ],
 
@@ -157,8 +144,9 @@ const config: Config = {
       'classic',
       {
         docs: {
-          // Read the existing repo docs/ tree in place — keeps docs/INVARIANTS.md,
-          // docs/METRICS.md, etc. at the paths AGENTS.md and the README rely on.
+          // Read the repo docs/ tree in place, keeping docs/INVARIANTS.md,
+          // docs/METRICS.md and the rest at the paths AGENTS.md and the README
+          // rely on.
           path: '../docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',

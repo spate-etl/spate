@@ -9,13 +9,11 @@ body:
         The framework's abstractions are deliberately small, and the useful
         form of this proposal is usually "here is what I could not express",
         not "here is the API I want". A connector often needs no framework
-        change at all — `Source`, `SourceLane`, `RowEncoder` and `ShardWriter`
-        are public precisely so a third party can implement one without
-        touching the engine.
+        change at all. `Source`, `SourceLane`, `RowEncoder` and `ShardWriter`
+        are public so a third party can implement one without touching the
+        engine.
 
-        A proposal that names the invariant it strains is far more likely to
-        land than one that does not, because that is the conversation either
-        way.
+        Name the invariant the proposal strains, if it strains one.
 
   - type: dropdown
     id: kind
@@ -34,7 +32,7 @@ body:
     attributes:
       label: Which components
       description: >-
-        Optional — leave it empty if the proposal is for something that does not
+        Optional. Leave it empty if the proposal is for something that does not
         exist yet.
       multiple: true
       options:
@@ -64,7 +62,7 @@ body:
     attributes:
       label: What the API might look like
       description: >-
-        Optional. A sketch is fine — it does not need to compile.
+        Optional. A sketch is fine. It does not need to compile.
       render: rust
 
   - type: dropdown
@@ -83,8 +81,8 @@ body:
     attributes:
       label: Does this touch any of these?
       description: >-
-        The engine's load-bearing invariants, numbered as they are in
-        `docs/INVARIANTS.md`. Ticking one is not a problem — it just means the
+        The engine's invariants, numbered as they are in
+        `docs/INVARIANTS.md`. Ticking one is not a problem. It means the
         proposal needs to say how the invariant still holds.
       options:
         - label: INV-1 — delivery semantics, or anything that could commit a watermark past unacknowledged data

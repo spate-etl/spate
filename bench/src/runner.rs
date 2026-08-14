@@ -11,13 +11,13 @@
 //!
 //! A call that has not returned after [`slow_period`] is reported on stderr, and
 //! reported again at every period after that. Nothing is killed: the driver names
-//! the child so an operator — or the log of a run bounded from outside — says
+//! the child so an operator, or the log of a run bounded from outside, says
 //! which leg and which case is still running, and stopping it stays the
 //! operator's decision.
 //!
 //! The build fingerprint travels *down* to the child through the environment so
 //! a record is self-describing wherever it is written, and is stamped back onto
-//! every record the driver collects — see [`Runner::measure`] for why the round
+//! every record the driver collects; see [`Runner::measure`] for why the round
 //! trip cannot be trusted across two checkouts.
 
 use std::path::{Path, PathBuf};
@@ -43,8 +43,8 @@ const PERIOD_MULTIPLE: u64 = 20;
 /// How long a protocol call runs before the driver reports it, and the interval
 /// between reports after that.
 ///
-/// Twenty times `target_ms` + `warmup_ms` — what a child was asked to spend
-/// inside its region and warming up for it — and never less than thirty
+/// Twenty times `target_ms` + `warmup_ms`, what a child was asked to spend
+/// inside its region and warming up for it, and never less than thirty
 /// seconds. The multiple is the headroom for everything the child does outside
 /// that: process start, and building the corpus, which nothing bounds.
 #[must_use]
@@ -161,10 +161,10 @@ impl Runner {
         // the same value round-tripped through the child. The round trip is not
         // lossless across checkouts: a base leg compiled from an older commit
         // deserialises the fingerprint with *its* struct definition, drops any
-        // field it does not know, and emits a record missing it — which the
+        // field it does not know, and emits a record missing it, which the
         // comparator then reads as the two legs disagreeing about a guarded
         // field. The driver knows what it built; the binary is only carrying
-        // the value for a run nobody drove.
+        // the value back.
         record.build = self.fingerprint.clone();
         Ok(record)
     }
@@ -194,7 +194,7 @@ impl Runner {
             .args(args)
             // In its own leg's tree. No case reads a file today, but the day
             // one does, both legs inheriting the driver's directory would read
-            // the *head* tree's fixture — and the corpus digests would agree,
+            // the *head* tree's fixture, and the corpus digests would agree,
             // so the report would be clean, tight and entirely wrong.
             .current_dir(&self.dir)
             .env(FINGERPRINT_ENV, &self.fingerprint_json)
@@ -224,7 +224,7 @@ impl Runner {
                 Err("interrupted; the run is unwinding".to_owned())
             }
             // The target spoke the protocol and refused the call. Its reason is
-            // already on the terminal — stderr is inherited — so the manifest
+            // already on the terminal, since stderr is inherited, so the manifest
             // advice below would only point somewhere the reader has no reason
             // to look, about a binary that has just demonstrated it parses these
             // arguments fine.
@@ -256,7 +256,7 @@ pub struct Measurement<'a> {
     /// The iteration count, calibrated once on the base leg and pinned for
     /// both.
     pub iters: u64,
-    /// The replicate index — the key the comparator pairs on.
+    /// The replicate index, the key the comparator pairs on.
     pub replicate: u32,
     /// Whether this is the discarded priming pass.
     pub priming: bool,
@@ -317,7 +317,7 @@ impl Drop for Watchdog {
 ///
 /// `elapsed` is the period times the number of them that have passed, so the
 /// figure is always a threshold the call has crossed rather than a measurement
-/// of it — a reader can tell the reporting interval from any single line.
+/// of it, so a reader can tell the reporting interval from any single line.
 fn slow_line(label: &str, elapsed: Duration) -> String {
     format!("SLOW [> {:.3}s] {label}", elapsed.as_secs_f64())
 }
@@ -342,8 +342,8 @@ fn target_name(binary: &Path) -> &str {
 /// target's own `main` is reached. So this covers a non-zero exit as well as
 /// unparseable output: both are "no record came back", and the manifest stanza
 /// is the one cause a message can do something about. The binary's own
-/// diagnostics have already reached the terminal — stderr is inherited — so
-/// this adds the part they cannot know.
+/// diagnostics have already reached the terminal, since stderr is inherited,
+/// so this adds the part they cannot know.
 fn hint(binary: &Path, args: &[String], why: &str) -> String {
     format!(
         "{} {} did not answer the runner protocol ({why}).\n\

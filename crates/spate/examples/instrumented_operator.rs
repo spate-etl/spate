@@ -1,27 +1,27 @@
 //! Counting what an operator *you wrote* is doing.
 //!
-//! The engine measures the stages it owns — records in, bytes out, flush
-//! durations — but it cannot see what your business logic means: how many of
-//! these records are refunds, how many line items an order carried. That is
-//! what [`ChainCtx::meter`] is for. It hands the chain factory a
+//! The engine measures the stages it owns (records in, bytes out, flush
+//! durations), but it cannot see what your business logic means: how many of
+//! these records are refunds, how many line items an order carried.
+//! [`ChainCtx::meter`] covers that. It hands the chain factory a
 //! [`Meter`](spate::metrics::Meter) already labeled with this pipeline and the
 //! component you name, so the series you mint from it join the framework's in
 //! a query instead of sitting in a namespace of their own.
 //!
 //! The shape to copy is **mint at build time, close the handle over the
 //! closure**. An operator takes a closure and hands it no per-record context,
-//! so a handle reaches the record path by being captured — and capturing an
-//! already-resolved handle is what keeps name and label lookup off that path
+//! so a handle reaches the record path by being captured. Capturing an
+//! already-resolved handle keeps name and label lookup off that path
 //! (INV-8). This example is that pattern end to end, and it finishes by
-//! reading the rendered Prometheus exposition, so it proves the series and
-//! their labels arrive rather than that a family registered:
+//! reading the rendered Prometheus exposition, so it shows the series and
+//! their labels arriving rather than a family registering:
 //!
 //! ```sh
 //! cargo run -p spate --example instrumented_operator
 //! ```
 //!
-//! For custom metrics *outside* a pipeline — the raw facade, a standalone
-//! `Meter`, a framework stage handle — see `custom_metrics.rs`.
+//! For custom metrics *outside* a pipeline (the raw facade, a standalone
+//! `Meter`, a framework stage handle), see `custom_metrics.rs`.
 //!
 //! [`ChainCtx::meter`]: spate::pipeline::ChainCtx::meter
 
@@ -40,14 +40,13 @@ use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source, wai
 use std::time::Duration;
 
 /// `pipeline.name` is the `pipeline` label on every series the `Meter` mints,
-/// which is what the exposition assertions at the end of `main` match on.
+/// and the exposition assertions at the end of `main` match on it.
 ///
-/// The exporter stays on — the assertions render through it — while
+/// The exporter stays on, since the assertions render through it, while
 /// `admin.listen: none` asks for no HTTP server, because nothing here scrapes
 /// one. A deployment names an address instead and Prometheus reads `/metrics`
-/// off it; the exposition is the same either way, which is what makes
-/// asserting on it here worth anything. Starting an exporter that no server
-/// publishes draws a warning at startup naming this exact pattern.
+/// off it; the exposition is the same either way. Starting an exporter that
+/// no server publishes draws a warning at startup naming this pattern.
 const CONFIG: &str = r#"
 pipeline: { name: storefront-orders, threads: 1 }
 admin: { listen: none }
@@ -64,7 +63,7 @@ struct Event<'a> {
     amount: f64,
 }
 
-/// Parsing is the operator's own business — nothing here is framework API.
+/// Parsing is the operator's own business; nothing here is framework API.
 /// Unparseable input yields `None`; the chain drops it below. The fields
 /// borrow from `record` and cost no allocation, so each stage that needs one
 /// calls this rather than carrying an owned event down the chain.
@@ -82,8 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
 
-    // `from_config` installed the exporter — before any handle can exist, which
-    // is the ordering that makes the handles below record into something. The
+    // `from_config` installed the exporter before any handle can exist, which
+    // is the ordering that lets the handles below record into something. The
     // handle is cheap to clone; keep one, because the builder is consumed by
     // assembly and the assertions at the end render from it.
     let exposition = pipeline.metrics().clone();
@@ -107,8 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // the component instance ("checkout") and its type ("inspect").
             // Those three become the standard labels on everything minted
             // below, so these series join the engine's own on a dashboard.
-            // Names land under the `spate_custom_` bucket — the namespace
-            // reserved for pipeline authors — and you pass the LOCAL name, so
+            // Names land under the `spate_custom_` bucket, the namespace
+            // reserved for pipeline authors, and you pass the LOCAL name, so
             // there is no prefix to typo and no way to collide with a
             // framework family.
             let meter = ctx.meter("checkout", "inspect");
@@ -118,8 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // record flows. Resolving a name or building a label set on the
             // per-record path is the thing not to do: it is a registry lookup
             // per record where this is a lookup per thread. What crosses into
-            // the closure is the resolved handle, which is `Arc`-backed — so
-            // when the runtime runs several pipeline threads, each thread mints
+            // the closure is the resolved handle, which is `Arc`-backed. When
+            // the runtime runs several pipeline threads, each thread mints
             // its own handle for the same series and their counts sum.
             //
             // Per-instance identity belongs in a label, not in the name:
@@ -129,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let refunds = meter.counter("refunds_total", &[("channel", "web".into())]);
             let line_items = meter.counter("line_items_total", &[]);
             // Not a `*_duration_seconds` name, so the exporter renders this one
-            // as a summary — quantiles plus `_sum`/`_count` — rather than with
+            // as a summary (quantiles plus `_sum`/`_count`) rather than with
             // the duration buckets it applies to that suffix.
             let order_value = meter.histogram("order_value_dollars", &[]);
 
@@ -197,8 +196,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_bytes(),
     );
 
-    // Bounded on purpose: an unbounded wait turns a broken pipeline into a hung
-    // process rather than a failing one.
+    // The wait is bounded. Without a deadline a broken pipeline hangs the
+    // process instead of failing it.
     wait_until(Duration::from_secs(10), "the offset to commit", || {
         handle.last_committed(p0) == Some(last + 1)
     });
@@ -218,9 +217,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── 4. Read the exposition, and assert the wiring ───────────────────────
-    // This is what a scrape of `/metrics` returns. Asserting on the rendered
-    // text — the full series, labels and value — is the assertion worth making:
-    // a test that only checks the family name passes just as happily against a
+    // This is what a scrape of `/metrics` returns. The assertions below match
+    // the rendered text: the full series, its labels and its value. A test
+    // that only checks the family name passes just as happily against a
     // handle nothing ever increments.
     let scraped = exposition.render();
     let labels = r#"pipeline="storefront-orders",component="checkout",component_type="inspect""#;
@@ -248,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

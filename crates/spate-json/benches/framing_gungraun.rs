@@ -4,7 +4,7 @@
 //! into newline-delimited records so a streaming source can hand the
 //! deserializer one document per payload. It is the source-side counterpart to
 //! the in-memory `ndjson` framing the decode bench measures, and a different
-//! shape of work — chunk-fed and stateful, where the deserializer's split runs
+//! shape of work: chunk-fed and stateful, where the deserializer's split runs
 //! over a payload already resident in RAM.
 //!
 //! The rig itself is `support/frame_rig.rs`, which `framing_wall.rs` also
@@ -30,18 +30,18 @@
 //!   more byte to scan per line.
 //! - `lf_blank_interleaved` — the baseline stream with a blank line after
 //!   every record. A blank line is skipped and consumes no record index, so
-//!   this is the cost of recognizing and discarding one — the case that says
+//!   this is the cost of recognizing and discarding one, the case that says
 //!   what a pretty-printed or double-spaced export costs.
 //! - `lf_wide_lines` — an eighth as many lines, eight times as wide, so the
 //!   byte total is the same. Read against the baseline it separates the
 //!   framer's per-byte cost from its per-record cost, which no other pair here
 //!   can do.
 //!
-//! The matrix is deliberately sparse, and the omissions are chunk-size
+//! The matrix is sparse, and the omissions are chunk-size
 //! combinations. The three chunk-size cases run one byte-identical stream, and
 //! every other case runs the same fetch-sized chunk over a stream that differs
-//! in exactly one property — the terminator, the blank lines, or the line
-//! width — while framing the same records. The two axes are independent: the
+//! in exactly one property (the terminator, the blank lines, or the line
+//! width) while framing the same records. The two axes are independent: the
 //! chunking decides how many `push` calls carry a given quantity of bytes, and
 //! what varies between streams decides what those bytes cost once inside.
 //! Pairing every chunk size with every stream would add cases that re-measure
@@ -94,9 +94,9 @@ fn crlf_fetch_chunks() -> Rig {
     standard(Eol::Crlf, 0, lines::FETCH_CHUNK_BYTES)
 }
 
-/// A blank line after every record — the densest interleaving there is, which
-/// is what makes the delta against `lf_fetch_chunks` a per-blank-line cost
-/// rather than a rounding error.
+/// A blank line after every record, the densest interleaving there is, which
+/// makes the delta against `lf_fetch_chunks` a per-blank-line cost rather than
+/// a rounding error.
 fn lf_blank_interleaved() -> Rig {
     standard(Eol::Lf, 1, lines::FETCH_CHUNK_BYTES)
 }
@@ -134,7 +134,7 @@ fn frame(rig: Rig) -> Rig {
 library_benchmark_group!(name = framing; benchmarks = frame);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the framing under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at. One allocation per

@@ -342,8 +342,8 @@ fn uuid_decodes_to_the_canonical_lowercase_form() {
 #[test]
 fn decimal_bytes_and_fixed_backing_are_identical() {
     // `from_value` emits `Decimal::to_vec()`, which sign-extends the value
-    // back to its original wire length — i.e. the bytes exactly as
-    // written, including a fixed-backed decimal's sign padding.
+    // back to its original wire length, i.e. the bytes as written,
+    // including a fixed-backed decimal's sign padding.
     const SCH: &str = r#"{"type":"record","name":"D","fields":[
         {"name":"db","type":{"type":"bytes","logicalType":"decimal","precision":10,"scale":2}},
         {"name":"df","type":{"type":"fixed","name":"F6","size":6,"logicalType":"decimal","precision":10,"scale":2}}]}"#;
@@ -384,7 +384,7 @@ fn maps_and_record_into_map_are_identical() {
     #[derive(Debug, serde::Deserialize, PartialEq)]
     struct M {
         m: HashMap<String, i64>,
-        // A record decoded into a map target — `#[serde(flatten)]` relies
+        // A record decoded into a map target; `#[serde(flatten)]` relies
         // on this acceptance.
         flat: HashMap<String, i64>,
     }
@@ -412,7 +412,7 @@ fn maps_and_record_into_map_are_identical() {
 fn multi_branch_union_maps_to_a_positional_rust_enum() {
     const SCH: &str = r#"{"type":"record","name":"W","fields":[
         {"name":"v","type":["long","string","boolean"]}]}"#;
-    // Variant order mirrors the union declaration — selection is
+    // Variant order mirrors the union declaration, and selection is
     // positional by wire index on both paths.
     #[derive(Debug, serde::Deserialize, PartialEq)]
     enum V {

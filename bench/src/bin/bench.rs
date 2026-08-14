@@ -9,8 +9,8 @@
 //! - `compare` reads two leg directories and renders. Run-agnostic: it does not
 //!   care how they were produced, which is what lets a report be re-rendered in
 //!   another format without measuring anything again.
-//! - `ab` is the one that does all of it — worktree the reference, build both
-//!   legs, interleave, compare.
+//! - `ab` does all of it: worktree the reference, build both legs,
+//!   interleave, compare.
 //! - `arms` is `ab` over the other axis: one tree, two feature sets, two build
 //!   directories, otherwise identical.
 //!
@@ -25,14 +25,14 @@
 //! `compare` will not pair them: a mean over ninety-seven iterations and a mean
 //! over a hundred and twelve are not the same estimate. Every such case is
 //! demoted, which with no case left leaves a zero-row table and exit 1. Two
-//! `run`s left at the default `--leg` do not get that far — both directories
+//! `run`s left at the default `--leg` do not get that far: both directories
 //! hold the `head` leg, which is refused outright. Nor does a pair of `run`s
 //! interleave, so whatever the machine did over the first leg's run lands on
 //! that leg alone.
 //!
 //! Both are why comparing two feature arms is `arms` rather than two `run`s and
-//! a `compare`. `run` is for producing a leg to keep — a baseline to compare
-//! something else against later — not for assembling half a comparison.
+//! a `compare`. `run` produces a leg to keep, a baseline to compare something
+//! else against later, rather than half a comparison.
 //!
 //! `list --cases` is the exception to "no build": the case list lives in the
 //! compiled target rather than in a manifest, which is what stops the list and
@@ -51,11 +51,11 @@
 //! | `--out` | under the bench cache | Where to write the leg or legs |
 //!
 //! `run` and `ab` take `--features` / `--all-features`, forwarded to cargo
-//! identically on both legs. `arms` takes them per arm instead —
-//! `--base-features` / `--head-features` and the two `--*-all-features` flags —
+//! identically on both legs. `arms` takes them per arm instead, through
+//! `--base-features` / `--head-features` and the two `--*-all-features` flags,
 //! because differing there is the whole of what it measures. An empty list is
-//! dropped rather than forwarded, so an arm with no features asked for is
-//! simply the default set.
+//! dropped rather than forwarded, so an arm with no features asked for is the
+//! default set.
 //!
 //! `--filter` and the feature flags also apply to `list --cases`: a filter is a
 //! filter on case ids, so it needs the case list to filter. `run` takes
@@ -64,16 +64,16 @@
 //! `arms` builds each arm into its own directory under the bench cache, keyed by
 //! the flags it was given and kept between runs. Neither arm uses the
 //! repository's `target/`: cargo holds one build per directory, so two arms
-//! sharing one would rebuild each other away — and using the warm one would
+//! sharing one would rebuild each other away, and using the warm one would
 //! charge the next ordinary `cargo build` for a rebuild it did not ask for.
 //!
-//! A child still running thirty seconds in — or twenty times
-//! `--target-ms` + `--warmup-ms`, whichever is longer — prints a `SLOW` line
+//! A child still running thirty seconds in, or twenty times
+//! `--target-ms` + `--warmup-ms`, whichever is longer, prints a `SLOW` line
 //! naming its leg, its target and the call, and prints it again at every period
 //! after that. Nothing is stopped: the line says which of a run's many children
 //! is the slow one, and Ctrl-C is what ends it.
 //!
-//! `compare`, `ab` and `arms` take `--format` — `table`, `markdown` or `json` —
+//! `compare`, `ab` and `arms` take `--format` (`table`, `markdown` or `json`)
 //! and `--allow`, whose values are the guarded field names plus `digest` and
 //! `build`, which waive the two per-case guards. On the arm axis the
 //! resolved feature set is the subject rather than a guard, so an `arms` run
@@ -84,7 +84,7 @@
 //! produces the shape a pull-request comment carries: a header naming both
 //! builds, the significant-changes table, then the informational rows and the
 //! full table in collapsed sections, then anything that could not be compared,
-//! then the decision rule — also collapsed, because a reader who wants it knows
+//! then the decision rule, also collapsed, because a reader who wants it knows
 //! to look and a reader who does not should see the table first. `--format json`
 //! carries every row with its interval and verdict, everything that could not be
 //! compared with the reason it could not, and any guarded field the two legs
@@ -106,7 +106,7 @@
 //!
 //! Three refusals are easier to recognise than to diagnose: two packages
 //! declaring a `_wall` target of the same name; a two-leg run whose legs share
-//! no case at all — which a `--filter` matching nothing looks exactly like; and
+//! no case at all, which a `--filter` matching nothing looks like; and
 //! an `arms` in which every judged case declared the same subject on both arms,
 //! which is usually a feature name spelled for the wrong package.
 
@@ -591,7 +591,7 @@ fn write_report(comparison: &Comparison, args: &ArgMatches) -> Result<(), Failur
         code: 1,
     })?;
 
-    // The report is written first, then the exit code decided — the reason
+    // The report is written first, then the exit code decided. The reason
     // nothing paired is in the report's *Not comparable* section, and a
     // non-zero exit that suppressed it would take the diagnosis with it.
     //

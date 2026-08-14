@@ -23,7 +23,7 @@ pub(crate) struct CompiledSchema {
     /// walk resolves `Schema::Ref` through, or the pre-rendered reason the
     /// schema cannot datum-decode. Gated per *path*, not per entry: a
     /// schema the datum path rejects (e.g. a `duration` logical type)
-    /// stays fully usable on the Value/serde paths — only the datum
+    /// stays fully usable on the Value/serde paths; only the datum
     /// deserializer surfaces the stored reason, per record. A datum-only
     /// failure therefore never negative-caches the id
     /// ([`Self::unusable_reason`] stays schema-based).
@@ -31,7 +31,7 @@ pub(crate) struct CompiledSchema {
 }
 
 impl CompiledSchema {
-    /// Compile a schema. `json` must be the schema's *original* JSON source —
+    /// Compile a schema. `json` must be the schema's *original* JSON source,
     /// never a canonical form, which strips logical types and defaults.
     ///
     /// apache-avro 0.21 *panics* rather than erroring on some malformed names
@@ -63,8 +63,8 @@ impl CompiledSchema {
     }
 
     /// `None` when the schema compiled (the entry is `Ready` material);
-    /// otherwise the reason — the negative-cache payload for an unusable
-    /// schema.
+    /// otherwise the reason, which is the negative-cache payload for an
+    /// unusable schema.
     pub(crate) fn unusable_reason(&self) -> Option<String> {
         match &self.schema {
             Ok(_) => None,
@@ -79,8 +79,8 @@ pub(crate) enum Lookup {
     /// Schema available.
     Ready(Arc<CompiledSchema>),
     /// The registry gave a *permanent* verdict about this id (unknown id,
-    /// unsupported schema, references, unparseable schema) — a poison
-    /// payload, not a transient state. Transient outages never land here.
+    /// unsupported schema, references, unparseable schema), which is a poison
+    /// payload rather than a transient state. Transient outages never land here.
     Failed(String),
     /// Not cached: a fetch needs to happen (or is in flight).
     Missing,
@@ -110,12 +110,12 @@ pub(crate) struct CacheSnapshot(Arc<HashMap<u32, Entry>>);
 ///
 /// Reads are the hot path. The map is held behind an `RwLock<Arc<..>>` in the
 /// arc-swap style: writers copy-on-write (clone the map, mutate, swap the
-/// `Arc` — writes are rare, only on a fetch completing), and readers clone the
+/// `Arc`; writes are rare, only on a fetch completing), and readers clone the
 /// `Arc` under one brief read lock. Hot-path callers go one step further and
 /// hold a [`CacheSnapshot`] memo (see [`SchemaCache::lookup`]) so a repeated,
-/// already-`Ready` id costs *zero* shared-lock acquisitions — the previous
-/// design took a read lock per payload, which ping-ponged the lock's cache
-/// line across pinned pipeline threads. Kept std-only on purpose (no
+/// already-`Ready` id costs *zero* shared-lock acquisitions. A read lock per
+/// payload would ping-pong the lock's cache line across pinned pipeline
+/// threads. Kept std-only on purpose (no
 /// `arc-swap` dependency): a plain `RwLock<Arc<HashMap>>` is enough because
 /// writes are rare and the memo removes reads from the shared path.
 #[derive(Debug)]
@@ -152,7 +152,7 @@ impl SchemaCache {
     ///
     /// A `Ready` schema is immutable and is never downgraded (see
     /// [`Self::insert_failed`]), so a memo hit on `Ready` is always valid and
-    /// needs no refresh — that is the case this optimization targets. On a
+    /// needs no refresh, which is the case this optimization targets. On a
     /// miss, or a `Failed`/expired memo answer, the memo is refreshed once (a
     /// single `Arc` clone under the read lock) and re-evaluated, so a
     /// since-published schema or an expired negative entry is always observed.
@@ -216,7 +216,7 @@ mod tests {
         r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#;
 
     /// apache-avro 0.21 *panics* rather than erroring on the dashed record
-    /// name — the case `compile` has to catch.
+    /// name, which is the case `compile` has to catch.
     const PARSER_PANICS_JSON: &str =
         r#"{"type":"record","name":"my-record","fields":[{"name":"a","type":"long"}]}"#;
 
@@ -264,8 +264,8 @@ mod tests {
     fn negative_entries_expire() {
         let cache = SchemaCache::new(Duration::ZERO);
         cache.insert_failed(9, "unknown id".into());
-        // TTL zero: expired immediately — treated as missing to allow a
-        // refetch.
+        // TTL zero: expired immediately, so it is treated as missing and a
+        // refetch is allowed.
         assert!(matches!(cache.get(9), Lookup::Missing));
 
         let cache = SchemaCache::new(Duration::from_secs(600));

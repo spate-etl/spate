@@ -2,7 +2,7 @@
 //! the *writer* [`Schema`] directly over the datum bytes.
 //!
 //! This is the decode backend behind [`crate::AvroDatumDeserializer`]. It
-//! never materialises `apache_avro::types::Value` — the schema decides which
+//! never materialises `apache_avro::types::Value`; the schema decides which
 //! visitor method fires for each wire position, reproducing the visitor
 //! calls `apache_avro::from_value` would make for the `Value` that
 //! `from_avro_datum` would have built. String and bytes contents are handed
@@ -24,11 +24,11 @@
 //!   `deserialize_string` accepts; `deserialize_map` refuses a union that
 //!   `deserialize_struct` unwraps). Here every method unwraps a union
 //!   branch, accepts the enum-symbol string, and feeds a string position
-//!   into a unit enum by variant name — a strict superset: anything the
-//!   two-pass path decodes, this decodes identically, and some target
+//!   into a unit enum by variant name, which is a strict superset: anything
+//!   the two-pass path decodes, this decodes identically, and some target
 //!   shapes it rejects also work.
 //! - **Enum symbols and record field names are transient** (`visit_str`),
-//!   never `'de`-borrowed — they live in the schema, not the payload. A
+//!   never `'de`-borrowed, because they live in the schema and not the payload. A
 //!   `&'de str` target works for string *contents* only.
 //! - **A Rust enum target over a record schema** is an error; `from_value`
 //!   has a legacy arm keying on a first field named `"type"`, which is not
@@ -40,8 +40,8 @@
 //!   invalid UTF-8 decodes here and errors in the two-pass path. A skipped
 //!   size-prefixed array/map block is trusted at its declared byte size,
 //!   where the decode paths (both of them) walk the items and ignore the
-//!   size — a corrupt payload whose size field lies about the block can
-//!   therefore skip differently than it decodes.
+//!   size, so a corrupt payload whose size field lies about the block can
+//!   skip differently than it decodes.
 //! - **Collections carry a per-datum item budget** of
 //!   `max(payload length, 65 536)` claimed items, charged as each block
 //!   opens. A legitimate item costs at least one wire byte except for
@@ -54,7 +54,7 @@
 //!   bytes-shaped target over a string position receives the raw bytes
 //!   without the UTF-8 validation `decode_internal` applies to every
 //!   string.
-//! - `is_human_readable` is hardcoded `false` — apache-avro's matching
+//! - `is_human_readable` is hardcoded `false`; apache-avro's matching
 //!   global (`set_serde_human_readable`) cannot be read from outside the
 //!   crate, and this workspace never sets it.
 //!
@@ -81,8 +81,8 @@ use std::fmt;
 
 /// Named types (record/enum/fixed) keyed by namespace (`""` for none),
 /// then by simple name, cloned out of the schema once at compile time so a
-/// `Schema::Ref` resolves with two borrowed-key lookups — no per-datum
-/// `ResolvedSchema` allocation, and no rendered-fullname `String` per
+/// `Schema::Ref` resolves with two borrowed-key lookups, with no per-datum
+/// `ResolvedSchema` allocation and no rendered-fullname `String` per
 /// occurrence.
 pub(crate) type Names = HashMap<String, HashMap<String, Schema>>;
 
@@ -126,7 +126,7 @@ impl de::Error for DatumError {
 }
 
 /// Bounds-checked reader over the datum slice. All primitives error on
-/// truncation — never a silent `Null` (see the module docs).
+/// truncation, never a silent `Null` (see the module docs).
 #[derive(Debug)]
 pub(crate) struct Cursor<'de> {
     buf: &'de [u8],
@@ -267,7 +267,7 @@ impl<'de> Cursor<'de> {
 /// Compile the datum-decode spec for a schema: the named-type index the
 /// walk needs, or the pre-rendered reason this schema cannot datum-decode.
 ///
-/// `Duration` and `BigDecimal` are rejected here — `from_value` cannot
+/// `Duration` and `BigDecimal` are rejected here, because `from_value` cannot
 /// deserialize either (no `deserialize_any` arm), so instead of a confusing
 /// per-record type error the schema is refused up front: a build error for
 /// fixed schemas, `SchemaUnavailable` per record for registry ids.
@@ -340,7 +340,7 @@ where
 /// The schema-driven deserializer for one wire position.
 ///
 /// `enclosing` is the namespace context threaded exactly as
-/// `decode_internal` threads `enclosing_namespace`, but borrowed — apache's
+/// `decode_internal` threads `enclosing_namespace`, but borrowed. Apache's
 /// `fully_qualified_name` clones two `String`s per record instance, which
 /// on an array of records is a per-row cost.
 pub(crate) struct DatumDeserializer<'a, 'de> {
@@ -359,7 +359,7 @@ impl fmt::Debug for DatumDeserializer<'_, '_> {
     }
 }
 
-/// Resolve a possible `Schema::Ref` to its named target (one hop — a
+/// Resolve a possible `Schema::Ref` to its named target (one hop, since a
 /// named type is never itself a `Ref`), yielding the node and the
 /// namespace context its body decodes under, as `decode_internal` does.
 fn resolve_schema<'x>(
@@ -377,9 +377,9 @@ fn resolve_schema<'x>(
     }
 }
 
-/// Resolve a `Ref`'s target the way `Name::fully_qualified_name` does —
-/// the ref's own namespace, else the enclosing one — with two borrowed-key
-/// lookups: no per-occurrence allocation.
+/// Resolve a `Ref`'s target the way `Name::fully_qualified_name` does, using
+/// the ref's own namespace and else the enclosing one, with two borrowed-key
+/// lookups and no per-occurrence allocation.
 fn lookup_named<'x>(
     names: &'x Names,
     name: &apache_avro::schema::Name,
@@ -459,7 +459,7 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
     /// Decode a uuid position, mirroring apache-avro's dual
     /// representation: a 16-byte payload is raw uuid bytes, anything else
     /// is parsed as text. Callers render the canonical hyphenated form
-    /// into a stack buffer — no heap `String` per field.
+    /// into a stack buffer, with no heap `String` per field.
     fn uuid_value(cur: &mut Cursor<'de>) -> Result<apache_avro::Uuid, DatumError> {
         let bytes = cur.len_prefixed()?;
         if bytes.len() == 16 {
@@ -474,7 +474,7 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
     }
 
     /// Decode a decimal position (bytes- or fixed-backed) to its wire
-    /// bytes, unchanged — `from_value` emits `Decimal::to_vec()`, which
+    /// bytes, unchanged. `from_value` emits `Decimal::to_vec()`, which
     /// sign-extends the value back to its original wire length, i.e. the
     /// bytes as written.
     fn decimal_bytes(cur: &mut Cursor<'de>, inner: &Schema) -> Result<&'de [u8], DatumError> {
@@ -532,7 +532,7 @@ fn skip_datum(
                 std::cmp::Ordering::Equal => break Ok(()),
                 std::cmp::Ordering::Less => {
                     // A negative count is followed by the block's byte
-                    // size — the wire format's fast-skip path.
+                    // size, the wire format's fast-skip path.
                     let size = cur.zag_i64()?;
                     let size = usize::try_from(size)
                         .map_err(|_| DatumError(format!("negative block size {size}")))?;
@@ -1399,8 +1399,8 @@ mod tests {
 
     fn decode<'de, T: Deserialize<'de>>(sch: &Schema, datum: &'de [u8]) -> Result<T, DatumError> {
         let names = compile_spec(sch).map_err(DatumError)?;
-        // The borrow of `names` must outlive the call, so leak per test —
-        // tests only.
+        // The borrow of `names` must outlive the call, so leak per test.
+        // Tests only.
         let names: &'static Names = Box::leak(Box::new(names));
         decode_datum(sch, names, datum)
     }
@@ -1704,7 +1704,7 @@ mod tests {
     #[test]
     fn named_ref_resolves_through_the_enclosing_namespace() {
         // `Point` is declared inside namespace `geo` and referenced by its
-        // short name from a sibling field — resolution must thread the
+        // short name from a sibling field, so resolution must thread the
         // enclosing namespace exactly as decode_internal does.
         const SCH: &str = r#"{"type":"record","name":"Pair","namespace":"geo","fields":[
             {"name":"a","type":{"type":"record","name":"Point","fields":[

@@ -1,7 +1,7 @@
 //! Zero-copy acceptance test for the datum deserializer's flagship shape: one
 //! Avro datum carrying a sensor batch (an array of events), decoded
 //! **borrowed** by `AvroDatumDeserializer`, exploded with `flat_map`, and
-//! encoded by a terminal sink stage — with zero-copy proven by pointer
+//! encoded by a terminal sink stage, with zero-copy shown by pointer
 //! provenance: every emitted event's `&str` must point *into the payload
 //! buffer* the source handed the chain.
 //!

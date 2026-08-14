@@ -1,10 +1,9 @@
 //! The storefront event model: what a generated record *is*.
 //!
 //! Three events over one entity. An order is placed, its payment is captured,
-//! and some of those payments are refunded — so a pipeline built on this
+//! and some of those payments are refunded, so a pipeline built on this
 //! stream has a join to make, a sum to check, and a late-arriving reference to
-//! handle, which is the whole reason a load generator ships a *dataset* rather
-//! than a shape.
+//! handle. That is why this generator ships a *dataset* rather than a shape.
 //!
 //! # Why the string fields are `Cow<'static, str>`
 //!
@@ -12,8 +11,8 @@
 //! producing an event copies no bytes. Consumption owns: an example decodes
 //! these types back out of JSON with `build_serde::<StorefrontEvent>()`, and
 //! `&'static str` has no `Deserialize` impl to decode *into*. `Cow` is the one
-//! spelling that serves both — `Cow::Borrowed` on the way out, `Cow::Owned` on
-//! the way back in, and `PartialEq` compares the strings either way, so a
+//! spelling that serves both, with `Cow::Borrowed` on the way out and
+//! `Cow::Owned` on the way back in. `PartialEq` compares the strings either way, so a
 //! round-trip test can assert equality against the value that was generated.
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,7 @@ use std::borrow::Cow;
 
 /// The Avro schema of a [`StorefrontEvent`], as JSON.
 ///
-/// A top-level union of the three record types — the idiomatic Avro spelling
+/// A top-level union of the three record types, the idiomatic Avro spelling
 /// of a sum type, and what `encoding: avro` writes a bare datum against. The
 /// JSON encoding tags the same three shapes with a `type` field instead;
 /// neither derives from the other, so this constant is what a downstream
@@ -131,8 +130,8 @@ pub struct OrderLine {
 pub struct PaymentCaptured {
     /// The order being paid for.
     pub order_id: u64,
-    /// Exactly the order's line total — a downstream sum over
-    /// [`OrderPlaced::lines`] must reproduce it.
+    /// The order's line total. A downstream sum over [`OrderPlaced::lines`]
+    /// must reproduce it.
     pub amount_cents: u64,
 }
 

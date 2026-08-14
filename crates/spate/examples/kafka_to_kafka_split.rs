@@ -3,8 +3,8 @@
 //!
 //! One `orders` stream carries region-prefixed records
 //! (`eu-west:1042:...`, `us-east:1043:...`); the chain routes each to its
-//! region's topic through a [`split`](spate::ops::ChainBuilder) terminal — one
-//! Kafka sink per destination topic, each a full sink with its own producer,
+//! region's topic through a [`split`](spate::ops::ChainBuilder) terminal, with
+//! one Kafka sink per destination topic, each a full sink with its own producer,
 //! batching, and `spate_sink_*` series. A region matching no branch follows the
 //! `unmatched` policy (`Skip`: dropped and counted on
 //! `spate_operator_records_dropped_total{reason="unrouted"}`).
@@ -17,7 +17,7 @@
 //! At-least-once, end to end: a source offset commits only once **every**
 //! destination that received a derived record has confirmed the delivery
 //! reports for it. Duplicates can appear on the output topics after a
-//! crash replay or a partially-delivered batch retry — never loss. The
+//! crash replay or a partially-delivered batch retry, but never loss. The
 //! sink forces `acks=all` + `enable.idempotence=true`; nothing here is
 //! exactly-once (see the delivery-guarantees guide).
 //!
@@ -25,7 +25,7 @@
 //!
 //! Source message keys do not survive deserialization (records carry only
 //! the key hash), so this example re-derives the produce key from the
-//! payload — [`KafkaBytesEncoder::with_key_fn`] extracts the order segment,
+//! payload. [`KafkaBytesEncoder::with_key_fn`] extracts the order segment,
 //! keeping an order's events in order within each output topic.
 //!
 //! # Run it
@@ -54,9 +54,9 @@ use spate::prelude::*;
 use std::path::Path;
 
 /// Produce key: the order segment of `region:order_id:rest` payloads (a plain
-/// `fn` item — the encoder seam takes these so borrowed families work too).
+/// `fn` item, which the encoder seam takes so borrowed families work too).
 ///
-/// The order id is what every storefront event shares, so keying on it is what
+/// The order id is the field every storefront event shares, so keying on it
 /// keeps one order's events on one partition of the destination topic.
 fn order_key(payload: &[u8]) -> Option<&[u8]> {
     let mut parts = payload.splitn(3, |b| *b == b':');

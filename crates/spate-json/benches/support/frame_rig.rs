@@ -8,7 +8,7 @@
 //! loop that reads them. `framing_gungraun.rs` counts instructions inside
 //! [`frame_stream`] and `framing_wall.rs` times the same function.
 //!
-//! What stays in each target is the case list — which stream, at which chunk
+//! What stays in each target is the case list: which stream, at which chunk
 //! size. That is the part the two tiers are entitled to differ on: the counted
 //! tier can afford a case the wall tier would spend a minute of a person's
 //! afternoon on.
@@ -33,9 +33,9 @@ pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
 pub(crate) struct Rig {
     pub(crate) chunks: Vec<Vec<u8>>,
     /// What the framer must emit, and how many bytes those records must carry.
-    /// Asserted rather than returned: a framer that silently stopped splitting
-    /// — or stopped stripping a `\r`, or started counting blank lines — would
-    /// otherwise read as a changed number rather than as a failure.
+    /// Asserted rather than returned: a framer that silently stopped
+    /// splitting, or stopped stripping a `\r`, or started counting blank
+    /// lines, would otherwise read as a changed number rather than a failure.
     pub(crate) expect_records: usize,
     pub(crate) expect_bytes: usize,
 }
@@ -43,13 +43,12 @@ pub(crate) struct Rig {
 /// The measured work: one stream through one framer, chunk by chunk, popping
 /// records as they complete.
 ///
-/// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
-/// fail anything — it silently empties the measurement. Callgrind toggles
-/// collection on the benchmark function's module, and a toggle flips
-/// collection rather than forcing it on, so a loop the optimizer reshapes
-/// across that boundary leaves the region holding whatever else was running —
-/// usually the allocator freeing the corpus. A named frame the optimizer may
-/// not erase is what keeps the loop inside the region.
+/// Removing `#[inline(never)]` fails nothing and silently empties the
+/// measurement. Callgrind toggles collection on the benchmark function's
+/// module, and a toggle flips collection rather than forcing it on, so a loop
+/// the optimizer reshapes across that boundary leaves the region holding
+/// whatever else was running, usually the allocator freeing the corpus. A
+/// named frame the optimizer may not erase keeps the loop inside the region.
 ///
 /// The wall tier does not need the attribute and is not harmed by it: it times
 /// a region it opens and closes itself. Keeping one function for both tiers is
@@ -69,7 +68,7 @@ pub(crate) struct Rig {
 ///
 /// Summing the record lengths is what keeps the loop alive: the framed bytes
 /// are otherwise unobserved and the optimizer is free to delete the calls this
-/// exists to count. The caller asserts both totals.
+/// function counts. The caller asserts both totals.
 #[inline(never)]
 pub(crate) fn frame_stream(rig: &Rig) -> (usize, usize) {
     let mut framer = NdjsonFramer::new(MAX_RECORD_BYTES);

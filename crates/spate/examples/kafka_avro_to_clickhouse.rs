@@ -1,21 +1,21 @@
 //! The flagship pipeline: Kafka → Avro → chain → sharded ClickHouse.
 //!
-//! This example is the assembly reference — a production binary in full.
+//! This example is the assembly reference, a production binary in full.
 //! [`Pipeline`] owns the process plumbing (telemetry, metrics exporter,
 //! the shared I/O runtime, shard queues, sink workers, probes); the code
-//! here is only what is genuinely this pipeline's: connector construction,
+//! here is only what belongs to this pipeline: connector construction,
 //! schema validation, and the operator chain. The YAML next to it
 //! (`kafka_avro_to_clickhouse.yaml`) carries all tuning; point `SPATE_CONFIG`
 //! elsewhere to reconfigure without recompiling.
 //!
 //! # What the builder desugars to
 //!
-//! Every step is a thin composition of public primitives — assemblies can
+//! Every step is a thin composition of public primitives, and an assembly can
 //! drop down to them at any point (see the `spate::pipeline::Pipeline`
 //! module docs for the full mapping):
 //!
 //! - `Pipeline::from_path` — `telemetry::init` → `metrics::install`
-//!   (exporter before any handle, so nothing records into the void) →
+//!   (the exporter is installed before any handle exists) →
 //!   the `spate-io` tokio runtime → `InflightBudget::new`.
 //! - `.sink(sink)` — `SinkBundle::into_parts` → `shard_queues` →
 //!   per-shard `SinkShardMetrics` → `SinkPool::spawn` → drain + probe
@@ -29,8 +29,8 @@
 //!
 //! Needs Kafka, a Confluent-compatible schema registry, and ClickHouse
 //! (set `KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `CLICKHOUSE_URL`), plus a
-//! target table — note the deduplication window, without which retry
-//! idempotency silently does nothing on plain MergeTree:
+//! target table. Without the deduplication window, retry idempotency
+//! silently does nothing on plain MergeTree:
 //!
 //! ```sql
 //! CREATE TABLE orders (
@@ -48,8 +48,8 @@
 //! ```
 //!
 //! SIGTERM drains gracefully: lanes stop, chains flush, sink batches
-//! complete (bounded by `checkpoint.drain_timeout`), offsets commit —
-//! at-least-once end to end. Probes: `curl localhost:9090/readyz`.
+//! complete (bounded by `checkpoint.drain_timeout`), and offsets commit.
+//! Delivery is at-least-once end to end. Probes: `curl localhost:9090/readyz`.
 
 // The `ANCHOR` comments below mark the regions the site renders. They are
 // stripped from what it shows, and they nest; see docs/STYLE.md § 10.
@@ -72,12 +72,12 @@ use spate::prelude::*;
 use std::path::Path;
 // ANCHOR_END: imports
 
-/// The two ends of the pipeline, and why they are two types. `Deserialize`
-/// reads [`OrderPlaced`] from Avro, so its fields match the writer schema —
-/// including the nested `lines` array. `Serialize` writes [`OrderRow`] as
-/// RowBinary, where **field order must match the `columns` list in the YAML**
-/// (RowBinary carries no names; order is the wire contract). The chain's
-/// `try_map` is what turns one into the other.
+/// The two ends of the pipeline. `Deserialize` reads [`OrderPlaced`] from
+/// Avro, so its fields match the writer schema, including the nested `lines`
+/// array. `Serialize` writes [`OrderRow`] as RowBinary, where **field order
+/// must match the `columns` list in the YAML** (RowBinary carries no names;
+/// order is the wire contract). The chain's `try_map` turns one into the
+/// other.
 // ANCHOR: record
 #[derive(Debug, Deserialize)]
 struct OrderPlaced {
@@ -88,13 +88,13 @@ struct OrderPlaced {
     lines: Vec<OrderLine>,
 }
 
-/// Only what the total needs: a target type declares the fields it reads, not
-/// the whole record, so the writer schema's `sku` needs no field here.
+/// A target type declares the fields it reads, not the whole record, so the
+/// writer schema's `sku` needs no field here.
 ///
-/// That is a convenience, not a saving. `build_serde` decodes the datum into
-/// an intermediate value and then reads the target out of it by name, so an
-/// undeclared field is still decoded before it is discarded.
-/// `build_serde_datum` is the path that skips it without materializing it.
+/// `build_serde` decodes the datum into an intermediate value and then reads
+/// the target out of it by name, so an undeclared field is still decoded
+/// before it is discarded. `build_serde_datum` skips it without
+/// materializing it.
 #[derive(Debug, Deserialize)]
 struct OrderLine {
     qty: u32,
@@ -116,9 +116,9 @@ struct OrderRow {
 
 // ANCHOR: assembly
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Constructor owns init: JSON logs (RUST_LOG overrides the filter; call
-    // `spate::telemetry::init` first to customize), the metrics exporter —
-    // installed before any handle can exist — and the shared I/O runtime.
+    // The constructor owns init: JSON logs (RUST_LOG overrides the filter;
+    // call `spate::telemetry::init` first to customize), the metrics exporter,
+    // installed before any handle can exist, and the shared I/O runtime.
     let config_path = std::env::var("SPATE_CONFIG")
         .unwrap_or_else(|_| "crates/spate/examples/kafka_avro_to_clickhouse.yaml".to_string());
     let pipeline = Pipeline::from_path(Path::new(&config_path))?;
@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Deserializer: Confluent-framed Avro ─────────────────────────────
     // Schemas come from the registry via an async fetcher on the I/O
-    // runtime; a cache miss never blocks a pipeline thread — the batch
+    // runtime; a cache miss never blocks a pipeline thread. The batch
     // retries once the schema lands.
     // ANCHOR: deserializer
     let deser_section = pipeline
@@ -156,10 +156,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: sink
 
     // Opt-in fail-fast schema validation (`validate_schema: names|full` in
-    // the YAML): checks the configured columns against every replica's
-    // live table NOW — before any thread spawns — and hands the encoder
-    // the expected schema so the row struct is checked against it on the
-    // first record. `off` (the default) returns None and issues no queries.
+    // the YAML) checks the configured columns against every replica's live
+    // table before any thread spawns, and hands the encoder the expected
+    // schema so the row struct is checked against it on the first record.
+    // `off` (the default) returns None and issues no queries.
     // ANCHOR: encoder
     let encoder = match pipeline.block_on(sink.validate_schema())? {
         Some(schema) => ClickHouseEncoder::<Owned<OrderRow>>::with_schema(schema),
@@ -177,16 +177,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sink(sink)?
         // ANCHOR: chain
         .chains(move |ctx| {
-            // The sink's chunking — per-sink `chunk:` in the YAML, or the
-            // default — bound before `with_metrics` moves `ctx.pipeline`.
+            // The sink's chunking, from per-sink `chunk:` in the YAML or the
+            // default, bound before `with_metrics` moves `ctx.pipeline`.
             let chunk_cfg = ctx.chunk();
             chain_owned::<OrderPlaced, _>(deserializer.clone())
                 .with_metrics(ctx.pipeline, "main")
                 // ANCHOR: validate
-                // Total an order's lines into its row, and reject one whose
-                // total cannot be stated: an order with no lines to total,
-                // and one whose total does not fit the column, are both
-                // malformed rather than zero.
+                // Total an order's lines into its row. An order with no lines,
+                // and one whose total does not fit the column, are malformed
+                // rather than zero, so both are rejected.
                 .try_map(
                     |order: OrderPlaced| {
                         if order.lines.is_empty() {

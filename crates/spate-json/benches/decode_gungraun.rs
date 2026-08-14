@@ -1,7 +1,7 @@
 //! Instruction counts for this crate's decode paths (gungraun).
 //!
 //! The sibling `benches/decode_wall.rs` carries the floor any JSON decoder is
-//! read against — cases calling the compiled parser directly. These measure
+//! read against, in cases calling the compiled parser directly. These measure
 //! **this crate**: the framing the deserializer applies to a payload, the
 //! record emission, and the per-record error isolation that comes with it. A
 //! regression in `JsonSerdeDeserializer` would not show up in the floor.
@@ -9,7 +9,7 @@
 //! The rig itself is `support/decode_rig.rs`, which both tiers compile, so the
 //! region counted here is the region the wall tier times.
 //!
-//! One shape — one payload through one deserializer — parameterized by the
+//! One shape, one payload through one deserializer, parameterized by the
 //! framing the payload carries, the target it decodes into, the shape of the
 //! document, and what the deserializer is asked to do when a record does not
 //! decode.
@@ -32,7 +32,7 @@
 //!
 //! The reference cases all decode valid input under the default `Skip`, so
 //! nothing in them reaches the error path at all. These do, over
-//! [`RECORDS`] records — the same corpus builder at forty times the size, so
+//! [`RECORDS`] records, the same corpus builder at forty times the size, so
 //! `ndjson_clean` is a scale-up of `ndjson_batch50` rather than a different
 //! workload:
 //!
@@ -41,15 +41,15 @@
 //!   [`BAD_EVERY`] broken, by truncation and by a type the record cannot hold.
 //!   The two reach the failure from opposite ends of the parser, and the pair
 //!   is what says whether that matters.
-//! - `ndjson_syntax_all` — every record broken: the poison storm, where the
+//! - `ndjson_syntax_all` — every record broken, the poison storm, where the
 //!   drop counter, the rate limiter's clock read and the discarded parse are
 //!   the whole cost and nothing is emitted.
 //! - `ndjson_fail_clean` — valid input under `Fail`. This framing decodes
 //!   every line into a holding buffer before emitting any of them, so that a
 //!   payload that fails part-way emits no prefix; against `ndjson_clean` this
 //!   is what that guarantee costs on input that never needed it.
-//! - `ndjson_fail_bad_last` — the same corpus with its last record broken:
-//!   everything decoded, nothing emitted, the buffer discarded.
+//! - `ndjson_fail_bad_last` — the same corpus with its last record broken, so
+//!   everything decodes, nothing is emitted and the buffer is discarded.
 //! - `array_clean` / `array_bad_last` — the same pair under the array framing,
 //!   broken the same way at the same position. Array error handling is atomic
 //!   inside `serde` rather than across a holding buffer, and the pair against
@@ -75,7 +75,7 @@
 //!
 //! `reject_duplicate_keys` parses each document a second time through a
 //! structural visitor that recurses over objects and arrays. It is off in
-//! every case above, which keeps them measuring the decode — and leaves the
+//! every case above, which keeps them measuring the decode and leaves the
 //! guard, a documented second parse, unmeasured. These three turn it on over
 //! corpora two shape cases already fix, so each guard count has a guard-off
 //! twin and the difference is the guard alone:
@@ -91,12 +91,12 @@
 //! delta on one of them is read as a regression. The guard's visitor collects
 //! the keys it has seen into a `HashSet`, whose default hasher is seeded per
 //! process from the operating system, so the same document hashes into a
-//! different number of probes — and, at four thousand keys, potentially a
-//! different rehash schedule — on every run.
+//! different number of probes on every run, and at four thousand keys
+//! potentially a different rehash schedule too.
 //!
 //! The spread is usually tiny and occasionally is not. Over three runs of one
-//! revision on two architectures — twelve guard-to-guard deltas — eleven were
-//! under a tenth of a per cent and the twelfth was **1.74%**: `dup_guard_wide`
+//! revision on two architectures, giving twelve guard-to-guard deltas, eleven
+//! were under a tenth of a per cent and the twelfth was **1.74%**: `dup_guard_wide`
 //! read 17,164,046 and then 17,463,060 with nothing between them but a new
 //! process. Every other case in this file repeated to the instruction across
 //! those same runs, which is what attributes the movement to the seed rather
@@ -115,8 +115,8 @@
 //! roll would emit up to five extra log events on one run and not the next.
 //! Nothing observed comes near it: the whole nineteen-case binary takes 36
 //! seconds on the runner and 15 on a development machine, which bounds any one
-//! case's process — valgrind startup, corpus construction, warm pass and
-//! measured region together — at a small multiple of a second. A poison row
+//! case's process (valgrind startup, corpus construction, warm pass and
+//! measured region together) at a small multiple of a second. A poison row
 //! that moved by a few hundred instructions between runs would be this, and
 //! would mean the runner had become several times slower rather than that the
 //! decode had changed.
@@ -365,7 +365,7 @@ library_benchmark_group!(
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the decode under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at.

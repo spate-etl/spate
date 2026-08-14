@@ -1,10 +1,10 @@
-//! The "hello world" pipeline — everything in memory, no external systems.
+//! The "hello world" pipeline, entirely in memory with no external systems.
 //!
-//! Demonstrates the full assembly every real pipeline follows:
+//! Demonstrates the assembly every pipeline follows:
 //! source → deserializer → operator chain → sharded sink → checkpointed
 //! commits, assembled with [`Pipeline`] and driven with backpressure and
-//! graceful shutdown — using `spate-test`'s in-memory source and capturing
-//! sink bundle, so it runs anywhere:
+//! graceful shutdown. The source and the capturing sink bundle come from
+//! `spate-test`, so it runs anywhere:
 //!
 //! ```sh
 //! cargo run -p spate --example memory_pipeline
@@ -51,11 +51,10 @@ sink: { capture: {} }
 // ANCHOR_END: config
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Demos want pretty logs: init telemetry BEFORE the builder and its
-    // JSON default becomes a no-op (first init wins). The builder owns the
-    // rest of process init: the metrics exporter (before any handle can
-    // exist) and the shared I/O runtime the sink workers run on — the same
-    // runtime real connectors share.
+    // Init telemetry BEFORE the builder, or the builder's JSON default wins
+    // (first init wins). The builder owns the rest of process init: the
+    // metrics exporter, installed before any handle can exist, and the shared
+    // I/O runtime that sink workers and real connectors both run on.
     // ANCHOR: init
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
@@ -85,9 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = pipeline
         .sink(sink)?
         .chains(|ctx| {
-            // Resolve the sink's chunking up front — the per-sink YAML `chunk:`
-            // block, or the 64 KiB default. Bind it before `with_metrics` moves
-            // `ctx.pipeline`, so the later `ctx.chunk()` doesn't borrow a moved ctx.
+            // Resolve the sink's chunking up front, from the per-sink YAML
+            // `chunk:` block or the 64 KiB default. Bind it before `with_metrics`
+            // moves `ctx.pipeline`, so the later `ctx.chunk()` doesn't borrow a
+            // moved ctx.
             let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
                 .with_metrics(ctx.pipeline, "main")
@@ -130,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last = handle.push(p0, Some(b"demo"), payload);
     }
 
-    // Bounded on purpose: an unbounded wait turns a broken pipeline into a
-    // hung process rather than a failing one.
+    // The deadline bounds the wait. Without it a broken pipeline hangs the
+    // process instead of failing it.
     let deadline = Instant::now() + Duration::from_secs(10);
     while handle.last_committed(p0) != Some(last + 1) {
         assert!(Instant::now() < deadline, "commit not observed in time");
@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

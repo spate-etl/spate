@@ -33,8 +33,8 @@
 //!
 //! An A/B run interleaves the legs, so replicate *k* of each ran adjacent in
 //! time and shared whatever the machine was doing at that moment. The
-//! statistic is therefore computed *per pair* — `d_k = (head_k − base_k) /
-//! base_k` — and averaged. Dividing the mean of one leg by the mean of the
+//! statistic is therefore computed *per pair*, as `d_k = (head_k − base_k) /
+//! base_k`, and averaged. Dividing the mean of one leg by the mean of the
 //! other throws that away: it is the same arithmetic on drift-free data and a
 //! strictly worse estimate on real data, where the whole reason for
 //! interleaving is that the machine drifts.
@@ -44,12 +44,12 @@
 //! The per-pair differences are not normal, there are ten of them, and their
 //! distribution is decided by the machine rather than by anything modellable.
 //! The percentile bootstrap asks the data what its own spread is, which needs
-//! no distributional assumption and no history — and there is no history here
+//! no distributional assumption and no history, and there is no history here
 //! by design.
 //!
 //! The resampling is seeded from the case and metric names, so re-rendering the
 //! same two legs produces the same interval to the last digit. A report whose
-//! numbers move when it is regenerated is a report nobody can quote. It draws
+//! numbers move when it is regenerated is a report no one can quote. It draws
 //! 10 000 resamples.
 //!
 //! # No multiplicity correction
@@ -156,7 +156,7 @@ impl Verdict {
     ///
     /// Snake case throughout, including where [`Verdict::label`] renders a
     /// space: a field a script matches on and a phrase a reader reads are two
-    /// strings with different rules. Stable for a report schema version — see
+    /// strings with different rules. Stable for a report schema version; see
     /// [`crate::render::REPORT_SCHEMA_VERSION`].
     #[must_use]
     pub const fn token(self) -> &'static str {
@@ -192,15 +192,15 @@ pub struct Analysis {
 
 /// Compares one metric's paired samples.
 ///
-/// `base` and `head` are already paired by replicate index — element *k* of
-/// each is replicate *k* — which is the caller's job, because only the caller
+/// `base` and `head` are already paired by replicate index, so element *k* of
+/// each is replicate *k*. Pairing is the caller's job, because only the caller
 /// knows which records went missing.
 ///
 /// # Errors
 ///
 /// When the samples are not the same length (the caller failed to pair them),
 /// when there are none, when one is not finite, or when a base value is zero
-/// while its partner is not — a change from nothing has no relative size, and
+/// while its partner is not. A change from nothing has no relative size, and
 /// reporting one as infinite would put a nonsense row at the top of the table.
 /// Zero on *both* legs is not an error: it is no change, and a non-allocating
 /// case reports it every replicate.
@@ -231,9 +231,9 @@ pub fn analyse(
             ));
         }
         deltas.push(match (*b, *h) {
-            // Zero on both legs is a real and common answer — a non-allocating
-            // case reports zero allocations every replicate — and it is *no
-            // change*, not an undefined ratio. Judged per pair rather than over
+            // Zero on both legs is a common answer, since a non-allocating
+            // case reports zero allocations every replicate, and it is *no
+            // change* rather than an undefined ratio. Judged per pair rather than over
             // the whole sample, because one non-zero replicate elsewhere must
             // not turn every zero pair into an error.
             (0.0, 0.0) => 0.0,
@@ -285,7 +285,7 @@ pub fn analyse(
 /// The bootstrap's seed for one (case, metric) pair.
 ///
 /// Derived from the names rather than from a clock, so the same two legs
-/// rendered twice give the same interval — and so two metrics of one case do
+/// rendered twice give the same interval, and so two metrics of one case do
 /// not share a resampling pattern.
 #[must_use]
 pub fn seed_for(case: &str, metric: &str) -> u64 {
@@ -309,7 +309,7 @@ fn bootstrap_ci(deltas: &[f64], seed: u64) -> (f64, f64) {
     if n == 1 {
         // One pair has no spread to resample: every resample is that pair, so
         // the interval is the point itself. Reported rather than special-cased
-        // away — `MIN_REPLICATES` is what stops it becoming a verdict.
+        // away; `MIN_REPLICATES` is what stops it becoming a verdict.
         return (deltas[0], deltas[0]);
     }
 
@@ -430,7 +430,7 @@ mod tests {
     }
 
     /// The report must be reproducible from the same two legs, or a number
-    /// nobody can quote twice ends up in a pull request comment.
+    /// no one can quote twice ends up in a pull request comment.
     #[test]
     fn the_bootstrap_is_bit_identical_across_runs() {
         let base = jittered(1000.0, 9);
@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// A non-allocating case reports zero allocations on both legs, every
-    /// replicate. That is no change — not an undefined ratio, and not a line of
+    /// replicate. That is no change, not an undefined ratio and not a line of
     /// noise in every report.
     #[test]
     fn zero_on_both_legs_is_no_change() {
@@ -484,7 +484,7 @@ mod tests {
     }
 
     /// The pair, not the sample, decides. One replicate that allocated must not
-    /// turn the seven that did not into an error — which is what a
+    /// turn the seven that did not into an error, which is what a
     /// whole-sample "all zero" test does, and it is reachable whenever a case
     /// allocates on some replicates only.
     #[test]

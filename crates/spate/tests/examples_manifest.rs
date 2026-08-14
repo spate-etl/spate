@@ -2,15 +2,14 @@
 //!
 //! An example is the one target shape cargo will drop on the floor without
 //! saying so. A `[[example]]` whose `required-features` names a feature the
-//! package does not declare is not an error — the target is skipped, and
+//! package does not declare is not an error: the target is skipped, and
 //! `cargo check --examples` reports success having built one fewer thing than
 //! the manifest asked for. A typo there removes an example from every job in
-//! this repository, permanently, with the build green. `--all-features` is the
-//! only reason that is survivable, which makes it load-bearing in a way
-//! nothing else states.
+//! this repository, permanently, with the build green. `--all-features` is
+//! what keeps that survivable.
 //!
-//! Three questions, none of which builds anything — `cargo metadata` reads
-//! manifests and resolves nothing:
+//! Three questions, none of which builds anything, since `cargo metadata`
+//! reads manifests and resolves nothing:
 //!
 //! 1. Is every example declared rather than auto-discovered?
 //! 2. Does every `required-features` entry name a feature that exists?
@@ -19,8 +18,8 @@
 //!
 //! `test = true` **is** the declaration that an example runs on the
 //! pull-request tier, so anything recording that a second time is a second
-//! place to forget it. The pair that can genuinely disagree is the stanza and
-//! the source: a runner nothing collects, or a collected target with nothing
+//! place to forget it. The pair that can disagree is the stanza and the
+//! source: a runner nothing collects, or a collected target with nothing
 //! in it. An example that needs servers declares neither and is driven by
 //! `tests/e2e_examples.rs`.
 
@@ -44,7 +43,7 @@ struct Package {
 struct Target {
     name: String,
     kind: Vec<String>,
-    /// Whether cargo collects this target as a test — `[[example]] test = true`.
+    /// Whether cargo collects this target as a test, from `[[example]] test = true`.
     test: bool,
     /// Note the hyphen: the JSON key is `required-features`, and reading it as
     /// `required_features` yields an empty list for every target, which would
@@ -87,8 +86,8 @@ fn examples(pkg: &Package) -> Vec<&Target> {
         .collect()
 }
 
-/// Guards every assertion below: a filter that matched nothing would make them
-/// all pass while testing nothing, which is how a check quietly stops checking.
+/// Guards every assertion below: a filter that matched nothing would make
+/// them all pass while testing nothing.
 #[test]
 fn the_examples_are_discovered() {
     let pkg = spate_package();
@@ -102,7 +101,7 @@ fn the_examples_are_discovered() {
 
 /// Every example file is declared, not auto-discovered. `autoexamples` is left
 /// at its default, so a file added under `examples/` without a `[[example]]`
-/// stanza becomes a target anyway — carrying no `required-features` and no
+/// stanza becomes a target anyway, carrying no `required-features` and no
 /// `test = true`, which is the one shape nothing else here reports. Counting
 /// rather than matching names is enough in both directions: a stanza naming a
 /// file that does not exist fails `cargo metadata` outright, so equal counts

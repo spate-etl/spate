@@ -30,15 +30,15 @@
 //! # What the driver decides, and why
 //!
 //! The iteration count is **not** chosen here. The driver calibrates it once,
-//! on the base leg, and pins it for both — a self-calibrating leg would make
+//! on the base leg, and pins it for both. A self-calibrating leg would make
 //! the resident-set and allocation totals incomparable between the legs, and
 //! would let a slowdown hide as fewer iterations rather than showing up as a
 //! longer one. `.iters(n)` pins it for a case that cannot be calibrated
 //! meaningfully; everything else takes the driver's number.
 //!
 //! The seed is the driver's too, and it seeds the *corpus only*. Replicates
-//! deliberately share it: a per-replicate corpus would inject variance into the
-//! very quantity the paired bootstrap exists to resolve.
+//! share it on purpose: a per-replicate corpus would inject variance into the
+//! quantity the paired bootstrap is there to resolve.
 //!
 //! # What comes out
 //!
@@ -53,7 +53,7 @@
 //! | `alloc_count_per_iter` | allocations | lower | when the counting allocator is installed |
 //!
 //! Only wall time is unconditional, and an absent metric is absent rather than
-//! zero — see [`crate::record`] for why that distinction is load-bearing.
+//! zero; see [`crate::record`] for what that distinction carries.
 //!
 //! A case using `iter_batched` reports no resident set at all. The harness holds
 //! one prebuilt input per iteration, so the process's high-water mark would be
@@ -99,7 +99,7 @@ const DEGENERATE_FACTOR: f64 = 2.0;
 /// How many reference passes the floor is taken as the minimum of.
 ///
 /// A stall during the reference loop inflates the floor and could refuse a
-/// legitimate case — and the refusal aborts the whole run, since a leg with a
+/// legitimate case, and the refusal aborts the whole run, since a leg with a
 /// missing replicate is not a leg. Taking the smallest of three passes makes
 /// that need three consecutive stalls.
 const DEGENERATE_PASSES: u32 = 3;
@@ -107,7 +107,7 @@ const DEGENERATE_PASSES: u32 = 3;
 /// How much longer the floor probe runs each time the clock cannot resolve it.
 ///
 /// Eight, so a count the clock misses by a little clears it in one step and one
-/// it misses by a lot still arrives in a handful — the whole search costs three
+/// it misses by a lot still arrives in a handful. The whole search costs three
 /// empty loops per step, and only on the path that would otherwise refuse the
 /// case outright.
 const DEGENERATE_PROBE_GROWTH: u64 = 8;
@@ -122,7 +122,7 @@ const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
 /// Nanoseconds per iteration of a loop that does nothing but keep its counter.
 ///
 /// The guard that catches a bench reporting a plausible number while measuring
-/// nothing — the same failure the instruction-count tier has
+/// nothing, the same failure the instruction-count tier has
 /// `scripts/gungraun-collected-region.sh` for.
 ///
 /// It is reachable by accident. `Bencher::iter` passes the routine's *return
@@ -139,7 +139,7 @@ const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
 ///
 /// # When the count is too small to time
 ///
-/// A case whose routine is expensive calibrates to very few iterations — one
+/// A case whose routine is expensive calibrates to very few iterations: one
 /// costing a millisecond and a half lands on about thirty at the default
 /// `--target-ms`. An empty loop of thirty iterations takes tens of nanoseconds,
 /// against a clock whose tick is also tens, so every pass can read zero and the
@@ -148,7 +148,7 @@ const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
 ///
 /// So the probe grows the loop, by [`DEGENERATE_PROBE_GROWTH`] a step up to
 /// [`DEGENERATE_PROBE_MAX`] iterations, until the clock resolves it, and divides
-/// by what it actually ran. A per-iteration cost is what the floor is either
+/// by what it ran. A per-iteration cost is what the floor is either
 /// way; the multiple only buys enough elapsed time to see it.
 ///
 /// The growth never applies to a count the clock already resolves, so no case
@@ -158,8 +158,8 @@ fn empty_loop_ns_per_iter(iters: u64) -> Option<f64> {
     loop {
         // Timed with the same stopwatch as the case, so the clock's own
         // overhead sits in both numerators and cancels. That is what lets the
-        // guard hold at a pinned `.iters(64)` as well as at ten million — the
-        // count a case is pinned to is exactly where an author is most likely
+        // guard hold at a pinned `.iters(64)` as well as at ten million. The
+        // count a case is pinned to is where an author is most likely
         // to be measuring something expensive, and where a threshold would have
         // switched the guard off.
         let mut floor: Option<f64> = None;
@@ -169,10 +169,10 @@ fn empty_loop_ns_per_iter(iters: u64) -> Option<f64> {
                 std::hint::black_box(i);
             }
             let elapsed = clock.elapsed_ns();
-            // A pass the clock read as zero is not a floor of zero — it is the
+            // A pass the clock read as zero is not a floor of zero. It is the
             // clock declining to resolve the loop, and taking it as a minimum
             // would set the floor to nothing and switch the guard off for the
-            // one case it exists to catch.
+            // one case it is there to catch.
             if elapsed > 0 {
                 let per_iter = elapsed as f64 / count as f64;
                 floor = Some(floor.map_or(per_iter, |best: f64| best.min(per_iter)));
@@ -181,8 +181,8 @@ fn empty_loop_ns_per_iter(iters: u64) -> Option<f64> {
         if floor.is_some() {
             return floor;
         }
-        // Every pass read zero. Grow, unless there is nowhere left to grow to —
-        // a clock that cannot resolve four million empty iterations is not a
+        // Every pass read zero. Grow, unless there is nowhere left to grow to.
+        // A clock that cannot resolve four million empty iterations is not a
         // clock this tier can measure against at all, and saying so is better
         // than returning a floor nothing established.
         if count >= DEGENERATE_PROBE_MAX {
@@ -325,8 +325,8 @@ impl<S: 'static> CaseBuilder<S> {
 
     /// Pins the iteration count, skipping calibration.
     ///
-    /// For a case whose cost per iteration is not the thing being measured — a
-    /// routine that builds internal state on the first call, or one whose
+    /// For a case whose cost per iteration is not the thing being measured:
+    /// a routine that builds internal state on the first call, or one whose
     /// memory grows with the count.
     #[must_use]
     pub fn iters(mut self, iters: u64) -> Self {
@@ -337,9 +337,8 @@ impl<S: 'static> CaseBuilder<S> {
     /// Marks the case as known-noisy, with the reason.
     ///
     /// An erratic case is measured and reported like any other, but it can
-    /// never reach the significant-changes table — its numbers are
-    /// informational. The reason is rendered beside it, so a reader is told why
-    /// rather than left to wonder.
+    /// never reach the significant-changes table; its numbers are
+    /// informational. The reason is rendered beside it.
     #[must_use]
     pub fn erratic(mut self, why: &str) -> Self {
         self.erratic = Some(why.to_owned());
@@ -512,7 +511,7 @@ impl Case {
         // The resident-set baseline is taken *before* the warm-up rather than
         // after it. `ru_maxrss` is monotonic, and the warm-up runs the same
         // routine, so a baseline taken afterwards would find the mark already
-        // set by the routine's own first pass and report nothing — measurably:
+        // set by the routine's own first pass and report nothing. Measured:
         // a 200 ms warm-up suppressed this metric entirely, and the default
         // 50 ms one let it survive only on allocator creep. What the gate is
         // for is excluding a case whose *corpus building* set the mark, and
@@ -655,7 +654,7 @@ impl Case {
         })
     }
 
-    /// Times one pass without producing metrics — the calibration probe.
+    /// Times one pass without producing metrics, the calibration probe.
     fn time_once(&self, prepared: &Prepared, iters: u64) -> Result<u64, String> {
         let mut bencher = Bencher::recording(iters);
         (prepared.exercise)(&mut bencher);
@@ -690,7 +689,7 @@ impl Case {
 /// A routine must call exactly one of [`Bencher::iter`] or
 /// [`Bencher::iter_batched`], exactly once. Two regions in one routine would
 /// mean two answers to a question with one slot in the record, and none would
-/// mean a record with no measurement in it — both are errors rather than
+/// mean a record with no measurement in it. Both are errors rather than
 /// silently-plausible numbers.
 #[derive(Debug)]
 pub struct Bencher {
@@ -749,8 +748,9 @@ impl Bencher {
     /// **Return the routine's result.** It is what is passed through
     /// [`std::hint::black_box`], so a routine written `|| { let _ = f(x); }`
     /// hands the black box `()` and leaves the optimiser free to delete the
-    /// call. That failure is caught — [`empty_loop_ns_per_iter`] refuses a case
-    /// whose per-iteration cost sits at an empty loop's — but the fix is here.
+    /// call. That failure is caught, since [`empty_loop_ns_per_iter`] refuses
+    /// a case whose per-iteration cost sits at an empty loop's, but the fix is
+    /// here.
     ///
     /// The result is dropped inside the region: a routine whose result is
     /// expensive to drop should return something cheap and keep the expensive
@@ -991,7 +991,7 @@ mod tests {
     /// deleted, and the case reports the cost of an empty loop as if it were a
     /// measurement.
     /// A routine whose body the optimiser deleted is indistinguishable from one
-    /// that never had a body, so the guard is asserted against the latter —
+    /// that never had a body, so the guard is asserted against the latter,
     /// which behaves the same way in every profile, where the deletion only
     /// happens in an optimised build.
     #[test]
@@ -1022,9 +1022,9 @@ mod tests {
             .done();
         assert!(real.find("real").expect("declared").measure(&opts).is_ok());
 
-        // The guard applies at every iteration count — there is no threshold
+        // The guard applies at every iteration count. There is no threshold
         // below which it stands aside, which matters because a pinned
-        // `.iters(n)` is exactly where an `iter_batched` case lives.
+        // `.iters(n)` is where an `iter_batched` case lives.
         let few = RunOptions {
             iters: 4096,
             ..opts
@@ -1040,8 +1040,8 @@ mod tests {
     }
 
     /// The floor is a measurement, so it has to say when it is not one. A pass
-    /// the clock read as zero must not become a floor of zero — that would
-    /// switch the guard off for the one case it exists to catch.
+    /// the clock read as zero must not become a floor of zero; that would
+    /// switch the guard off for the one case it is there to catch.
     #[test]
     fn the_reference_floor_reports_a_number_or_nothing() {
         let floor = super::empty_loop_ns_per_iter(1_000_000).expect("a million iterations resolve");
@@ -1052,7 +1052,7 @@ mod tests {
     ///
     /// An expensive routine calibrates to a few dozen iterations, and an empty
     /// loop of a few dozen is tens of nanoseconds against a clock that ticks in
-    /// tens — so every pass can read zero and the case is refused for a reason
+    /// tens, so every pass can read zero and the case is refused for a reason
     /// that is about the clock rather than about the case. It is intermittent,
     /// which is worse: `frame_lf_split_chunks` calibrates to about thirty and
     /// failed roughly one A/A run in five before the probe grew itself.
@@ -1070,16 +1070,16 @@ mod tests {
     }
 
     /// Once the loop is long enough to dominate the two clock reads around it,
-    /// the floor is a per-iteration cost — an empty iteration is a counter and
+    /// the floor is a per-iteration cost: an empty iteration is a counter and
     /// a `black_box`, which is nanoseconds rather than hundreds of them.
     ///
     /// Asserted only above a handful of iterations. Below that the stopwatch's
     /// own overhead lands on very few iterations and inflates the figure, which
-    /// is deliberate rather than a defect: the case's region is timed with the
+    /// is intended rather than a defect: the case's region is timed with the
     /// same stopwatch and carries the same overhead, so where it is large
     /// enough to matter it sits in both numerators and cancels. It is also why
-    /// the probe grows only when the clock resolves *nothing* — a count it does
-    /// resolve has to keep the floor it has always had.
+    /// the probe grows only when the clock resolves *nothing*; a count it does
+    /// resolve keeps the floor it already had.
     #[test]
     fn the_reference_floor_is_a_per_iteration_cost_once_the_loop_dominates() {
         for iters in [31, 64, 1024] {
@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     /// Ordering, not counts. A lazy implementation that built each input as it
-    /// ran it — the exact bug this case is named for — produces the same two
+    /// ran it, which is the bug this case is named for, produces the same two
     /// counts, so what is recorded is the *sequence*: every build must precede
     /// every run.
     #[test]

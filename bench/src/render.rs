@@ -1,6 +1,6 @@
 //! Writing a [`Comparison`] out: a terminal table, Markdown, or JSON.
 //!
-//! Three writers over one value. Nothing is recomputed here — a marker in the
+//! Three writers over one value. Nothing is recomputed here: a marker in the
 //! terminal and a row in the Markdown come from the same [`crate::stats`]
 //! verdict, so the two renderings of one run cannot disagree about what moved.
 //!
@@ -61,8 +61,8 @@ pub fn decision_rule() -> String {
 /// What the significant-changes table has to say, decided once.
 ///
 /// Both human formats render this rather than each deciding for itself, and the
-/// CLI reads it for its exit code. The distinction it carries — the rule was
-/// applied and nothing cleared it, versus the rule was never applied — is the
+/// CLI reads it for its exit code. The distinction it carries, between the
+/// rule being applied and clearing nothing and the rule never being applied, is the
 /// one a report gets wrong by stating the first when the second happened, so it
 /// is settled in one place and phrased in one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,7 +282,7 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
     let report = Report {
         schema: REPORT_SCHEMA_VERSION,
         // Both ends, because a run that paired ten for one case and three for
-        // another has not taken ten replicates — and a script reading one
+        // another has not taken ten replicates, and a script reading one
         // number would be told it had.
         replicates_min: counts.iter().copied().min().unwrap_or(0),
         replicates_max: counts.iter().copied().max().unwrap_or(0),
@@ -290,7 +290,7 @@ pub fn json(comparison: &Comparison) -> Result<String, String> {
         min_replicates: MIN_REPLICATES,
         // Keyed by the metric names a row carries, so a consumer holding a row
         // can look its floor up. `default` is the remaining key because
-        // `stats::floor_for` genuinely falls back for every other metric.
+        // `stats::floor_for` falls back for every other metric.
         floors: BTreeMap::from([
             ("default", DEFAULT_FLOOR),
             (PEAK_RSS_BYTES, RSS_FLOOR),
@@ -347,12 +347,12 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
         format!("base {} · {}", describe(base), base.dir.display()),
         format!("head {} · {}", describe(head), head.dir.display()),
         // The replicate span is the *paired* count over both legs, so it carries
-        // no leg label — a case that lost a base-leg record would otherwise be
+        // no leg label. A case that lost a base-leg record would otherwise be
         // reported as the head leg running short.
         replicate_span(comparison),
         // Labelled `head` because that is the leg they describe. The guard makes
         // them true of the base leg too, right up until an `--allow` waives the
-        // field that stopped being true — or the run is an arm comparison, where
+        // field that stopped being true, or the run is an arm comparison, where
         // the feature set differs by construction and the divergence line below
         // is what names the other arm's.
         format!(
@@ -405,8 +405,8 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
     // Two conditions, opposite to each other, so two lines rather than one
     // count: on the commit axis a case is dropped for declaring *different*
     // builds, on the arm axis for declaring the *same* one. Which is which comes
-    // from the `Cause` — a single line reading "did NOT match" over both would
-    // state the exact opposite of what happened to half of them.
+    // from the `Cause`. A single line reading "did NOT match" over both would
+    // state the opposite of what happened to half of them.
     for (waived, out, what) in [
         (
             count(Cause::BuildCompared),
@@ -452,7 +452,7 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
     lines
 }
 
-/// "10 replicate(s)", or "3-10 replicate(s)" when the cases do not agree — a
+/// "10 replicate(s)", or "3-10 replicate(s)" when the cases do not agree. A
 /// single number would report the luckiest case as if it were the run.
 fn replicate_span(comparison: &Comparison) -> String {
     let counts: Vec<usize> = comparison
@@ -807,8 +807,8 @@ mod tests {
         row
     }
 
-    /// The claim this branch exists to stop: a run too short to judge said
-    /// nothing cleared the rule, which is the opposite of what happened.
+    /// The claim this branch stops: a run too short to judge said nothing
+    /// cleared the rule, which is the opposite of what happened.
     #[test]
     fn a_run_too_short_to_judge_says_the_rule_was_never_applied() {
         let cmp = comparison(vec![unjudged_row("a"), unjudged_row("b")], Vec::new());
@@ -1177,7 +1177,7 @@ mod tests {
         }
 
         // And no key that is neither a metric nor the fallback: a stale one
-        // resolves for nobody.
+        // resolves to nothing.
         for key in floors.keys() {
             assert!(
                 key == "default"
@@ -1198,7 +1198,7 @@ mod tests {
 
     /// The key set a script pins against. A renamed or dropped field is a test
     /// failure here rather than a consumer discovering it, which is what
-    /// [`REPORT_SCHEMA_VERSION`](super::REPORT_SCHEMA_VERSION) exists to make
+    /// [`REPORT_SCHEMA_VERSION`](super::REPORT_SCHEMA_VERSION) makes
     /// deliberate.
     #[test]
     fn the_json_report_is_the_shape_a_script_pins_against() {
@@ -1358,8 +1358,8 @@ mod tests {
 
     /// The two declared-build conditions are opposite, so the header has to
     /// tell them apart. A single "did NOT match" count over both would state
-    /// the exact reverse of what happened to an arm run, in the line a reader
-    /// reads first — the failure the header's own guardrail comment names.
+    /// the reverse of what happened to an arm run, in the line a reader reads
+    /// first, which is the failure the header's own guardrail comment names.
     #[test]
     fn the_header_does_not_call_an_arm_agreement_a_mismatch() {
         let arm = comparison(

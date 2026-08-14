@@ -10,7 +10,7 @@
 //! framework one.
 //!
 //! Both halves drive `decode_run` from `support/decode_rig.rs`, which
-//! `decode_gungraun.rs` also drives — so a counted regression and a wall-clock
+//! `decode_gungraun.rs` also drives, so a counted regression and a wall-clock
 //! one are statements about one region rather than two that have drifted.
 //!
 //! ## The backend axis
@@ -20,13 +20,13 @@
 //! Two independent tripwires stop it. The harness guards `features`, which
 //! records what was passed to cargo; every case here also *declares*
 //! [`BACKEND_ID`], which records what actually compiled. Only the second
-//! catches a change that makes `simd` a default feature — the two legs would
+//! catches a change that makes `simd` a default feature; the two legs would
 //! then agree on `features` while decoding through different parsers.
 //!
 //! Declared rather than absorbed into the corpus, so the digest over the
 //! measured bytes keeps meaning what it says: the two arms decode the same
 //! payloads, and a run that had to waive the guard on those bytes to compare
-//! them could not tell that from a corpus that had genuinely diverged.
+//! them could not tell that from a corpus that had actually diverged.
 //!
 //! Comparing the backends is two builds of one commit rather than two commits,
 //! which is what `arms` is:
@@ -36,7 +36,7 @@
 //! ```
 //!
 //! It builds each arm into its own directory, calibrates one iteration count on
-//! the base arm and pins it for both, and interleaves them — the same discipline
+//! the base arm and pins it for both, and interleaves them, the same discipline
 //! `bench-ab` applies to two commits, which a comparison needs whatever the two
 //! legs differ in. No waiver is involved: on this axis the feature set is the
 //! subject rather than a guard, the corpus digests match because the two arms
@@ -51,13 +51,13 @@
 //!
 //! The three `decode_floor_serde_*` cases pair and should read flat. They call
 //! `serde_json` on both arms, so what an arm run prices for them is the two
-//! builds and not the two parsers — which makes them the control: a figure there
+//! builds and not the two parsers, which makes them the control: a figure there
 //! bounds how much of the framework cases' margin belongs to code layout rather
 //! than to the swap. Read them first, and treat a margin no larger than theirs
 //! as unresolved.
 //!
 //! A leg built with `--features simd` also carries that backend's own floors,
-//! so the library margin reads inside one leg without a second leg at all —
+//! so the library margin reads inside one leg without a second leg at all;
 //! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
 //! libraries over one corpus in one binary, and is the more direct answer when
 //! the question is about the parsers rather than about what this crate adds.
@@ -84,7 +84,7 @@
 //! Fourteen cases where `decode_gungraun.rs` declares nineteen. `single_typed`
 //! and `single_value` are dropped because one 265-byte document decodes in
 //! about 360 ns, and at that size a build's code layout moves the figure by
-//! more than the 5% floor — an A/A comparison of one commit against itself
+//! more than the 5% floor, and an A/A comparison of one commit against itself
 //! produced verdicts in both directions on it. The counted tier measures that
 //! shape deterministically, which is where it belongs. `ndjson_batch50` and
 //! `array_batch50` go with them: they are the same framings at a fortieth of
@@ -234,7 +234,7 @@ fn batch_fail_case(
 /// A case over one document of an arbitrary shape, decoded into a value,
 /// optionally through the duplicate-key guard.
 ///
-/// `items` is one document, where the batch family counts records — so
+/// `items` is one document, where the batch family counts records, so
 /// `records_per_s` here is documents per second and the two families are not
 /// comparable in that column. Wall time and the allocation totals are.
 fn shape_case(
@@ -363,7 +363,7 @@ fn suite() -> Suite {
     //
     // Neither is marked erratic, and the counted tier's caveat about them does
     // not transfer. There the guard's `HashSet` is built once and the case is
-    // one drive, so that construction's seed decides the count — a spread of
+    // one drive, so that construction's seed decides the count, a spread of
     // up to 1.74% between processes. `check_no_duplicate_keys` builds a fresh
     // set per object per document, and `RandomState::new()` reseeds on every
     // construction rather than once per process, so a region running hundreds
@@ -392,7 +392,7 @@ fn suite() -> Suite {
 /// What the pair still shares is the corpus, which is the comparison.
 ///
 /// The parsed value is returned rather than discarded, so it is dropped inside
-/// the region — which is parity with the crate's path, where the record
+/// the region, which is parity with the crate's path, where the record
 /// reaches a sink and is dropped there.
 fn serde_floor<T: 'static>(
     suite: Suite,
@@ -428,7 +428,7 @@ fn serde_value(bytes: &[u8]) -> Value {
 }
 
 /// The parser over a newline-delimited batch, split the way the crate's
-/// `Skip` path splits it — `is_blank` is all-ASCII-whitespace, not just empty.
+/// `Skip` path splits it: `is_blank` is all-ASCII-whitespace, not only empty.
 ///
 /// Counting rather than collecting is the parity choice: the crate's sink
 /// increments a counter and drops the record, so this does the same. The count
@@ -495,8 +495,8 @@ fn serde_floors(suite: Suite) -> Suite {
 ///
 /// The crate reaches the same pair through a `thread_local!`, where this holds
 /// it in a struct field. That leaves the floor a lazy-initialization check and
-/// a thread-local read per document lighter than the crate's path — a sliver
-/// of the measured margin that is the access, not the framework. Holding it in
+/// a thread-local read per document lighter than the crate's path, a sliver
+/// of the measured margin that is the access rather than the framework. Holding it in
 /// a real thread-local here would mean either a `const`-initialized one, which
 /// `simd_json::Buffers` is not, or reproducing the crate's lazy cell, at which
 /// point the floor stops being the library and starts being a copy of the

@@ -1,11 +1,11 @@
-//! A malformed record is skipped and counted, not fatal.
+//! A malformed record is skipped and counted rather than ending the run.
 //!
 //! Shows the JSON deserializer decoding **N records from one payload** (JSON
 //! Lines), with a malformed line skipped-and-counted
 //! (`spate_json_deser_records_dropped_total`) and a filtered record dropped,
 //! while the source offset only commits once every surviving record is durably
-//! written (at-least-once). Runs anywhere via `spate-test`'s in-memory pieces —
-//! no external systems:
+//! written (at-least-once). Runs anywhere via `spate-test`'s in-memory
+//! pieces, with no external systems:
 //!
 //! ```sh
 //! cargo run -p spate --features json --example json_skip_bad_records
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

@@ -9,7 +9,7 @@
 //! everywhere `cargo test` does.
 //!
 //! Reproducibility is the smaller half. Most of these cases rest on a claim
-//! about *what the corpus does* — that a poison corpus really fails, at the
+//! about *what the corpus does*: that a poison corpus really fails, at the
 //! rate and in the place the case is named for; that a stream frames the same
 //! records however it is chunked; that the duplicate-key document really has a
 //! duplicate and its twin really has not. Every one of those could drift into
@@ -40,7 +40,7 @@ use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 /// FNV-1a over a corpus.
 ///
 /// Written out rather than taken from `DefaultHasher`, whose output is
-/// explicitly not stable across releases — and a pin that could change under a
+/// explicitly not stable across releases. A pin that could change under a
 /// toolchain bump is not a pin.
 fn digest(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -55,9 +55,9 @@ fn digest(bytes: &[u8]) -> u64 {
 ///
 /// The length alone is not enough to pin any of these. A re-seeded filler, a
 /// changed value formula or a reordered field list can leave every length
-/// untouched while changing every byte the decoder reads — and the pin would
+/// untouched while changing every byte the decoder reads, and the pin would
 /// then pass over a corpus no recorded count was measured against. The digest
-/// is what closes that.
+/// closes that.
 fn pin(bytes: &[u8]) -> (usize, u64) {
     (bytes.len(), digest(bytes))
 }
@@ -100,7 +100,7 @@ fn settings(framing: JsonFraming, on_error: OnError, reject_duplicate_keys: bool
 }
 
 /// Feed `stream` through a fresh framer in `chunk`-sized pieces, popping as a
-/// source does, and return the record count and the framed byte total — the
+/// source does, and return the record count and the framed byte total, the
 /// pair `framing_gungraun.rs` asserts.
 fn frame(stream: &[u8], chunk: usize) -> (usize, usize) {
     let mut framer = NdjsonFramer::new(frame_rig::MAX_RECORD_BYTES);
@@ -145,12 +145,12 @@ fn the_corpora_are_reproducible() {
 ///
 /// A length-and-digest pin moves whenever any byte moves and cannot say what
 /// moved; this names the part of the shape that did, and fails on a `qty` that
-/// quietly became a float while the corpus happened to keep its size. It also
+/// silently became a float while the corpus happened to keep its size. It also
 /// catches an added, removed or renamed field, and a `#[serde(rename)]`.
 ///
 /// What it does **not** catch: `i64` becoming `u64`, or `String` becoming
 /// `Box<str>`. Those keep both the JSON kind and the encoded bytes, so neither
-/// this nor the digests below would notice — the guard there is the
+/// this nor the digests below would notice; the guard there is the
 /// do-not-change contract on the fixture itself.
 ///
 /// Keys come back sorted, because `serde_json::Value` is a map, so this pins
@@ -194,11 +194,11 @@ fn the_line_item_shape_is_the_measured_workload() {
 /// Every corpus, pinned by length and digest.
 ///
 /// Two calls in one process only prove the generators are pure. The property
-/// the benches need is stronger — that a corpus is the same *across
+/// the benches need is stronger: that a corpus is the same *across
 /// revisions*, since a merge-base leg and a head leg run different builds. A
 /// one-character edit to a value formula, a seed, or a record count would
 /// otherwise re-baseline every comparison with nothing to say it happened.
-/// These numbers are what makes that edit fail here instead. Changing one is a
+/// These numbers make that edit fail here instead. Changing one is a
 /// deliberate act: re-record it, and treat every count from before the change
 /// as measuring a different corpus.
 #[test]
@@ -331,11 +331,10 @@ fn the_corpora_are_pinned_across_revisions() {
 
 /// Each error-policy case emits exactly what its bench asserts.
 ///
-/// This is the load-bearing half. A corruption that stopped corrupting — a
-/// truncation the parser tolerated, a type the record could hold after all —
-/// would leave every one of these cases measuring the happy path under an
-/// error-path name, running clean and reporting a smaller number that reads
-/// like an improvement.
+/// A corruption that stopped corrupting, such as a truncation the parser
+/// tolerated or a type the record could hold after all, would leave every one
+/// of these cases measuring the happy path under an error-path name, running
+/// clean and reporting a smaller number that reads like an improvement.
 #[test]
 fn the_error_cases_emit_what_they_claim() {
     let skip_ndjson = settings(JsonFraming::Ndjson, OnError::Skip, false);
@@ -397,8 +396,8 @@ fn the_error_cases_emit_what_they_claim() {
 /// twice, and the pair would be paying for a comparison it could not make. The
 /// distinction is structural rather than textual: the truncated record is not
 /// JSON at all, so the parser stops without ever producing a value, while the
-/// mismatched one is perfectly good JSON that simply cannot become a
-/// [`LineItem`] — the parser does all of its work and `serde` rejects the
+/// mismatched one is well-formed JSON that cannot become a
+/// [`LineItem`], so the parser does all of its work and `serde` rejects the
 /// result. Asserted that way rather than on the message, which the two decode
 /// backends word differently and which the `simd` arm reaches from a different
 /// position in the input.
@@ -481,7 +480,7 @@ fn the_duplicate_key_corpus_is_the_only_one_the_guard_rejects() {
 /// Position is what the case rests on: an early duplicate is found before the
 /// guard has walked anything, and would leave `dup_guard_hit` reporting the
 /// cost of rejecting a document rather than of checking one. Read as the
-/// difference between the guard's two corpora — the duplicated document has
+/// difference between the guard's two corpora: the duplicated document has
 /// one fewer distinct key, and its first key is the repeated one.
 #[test]
 fn the_duplicate_is_the_last_key_in_the_object() {
@@ -579,15 +578,15 @@ fn the_shape_corpora_have_the_shapes_their_cases_name() {
 // ---------------------------------------------------------------------------
 
 /// Every stream the framing bench feeds frames the record count and the byte
-/// total that bench asserts — under every chunking, not merely the one its
-/// case happens to use.
+/// total that bench asserts, under every chunking rather than only the one
+/// its case happens to use.
 ///
-/// The bench asserts a pair per case. This is what makes that pair the *right*
+/// The bench asserts a pair per case, and this makes that pair the *right*
 /// pair: the framer's contract is that the framing is a pure function of the
 /// bytes, so a stream that framed differently at one chunk size than another
 /// would mean the bench's chunk-size axis was varying the output rather than
-/// only the work. The chunk sizes span every regime the cases run in — many
-/// lines per chunk, exactly one, several chunks per line — plus the whole
+/// only the work. The chunk sizes span every regime the cases run in (many
+/// lines per chunk, exactly one, several chunks per line) plus the whole
 /// stream in one push, which no case uses and which is the strongest form of
 /// the same statement.
 #[test]
@@ -620,10 +619,10 @@ fn every_stream_frames_its_declared_records_under_every_chunking() {
 /// Every framed line is a JSON document of exactly the declared width.
 ///
 /// The framer is not JSON-aware, so nothing in it would notice if the corpus
-/// stopped being JSON — but a framing bench fed something no JSON source would
+/// stopped being JSON, but a framing bench fed something no JSON source would
 /// carry is measuring a stream production does not have. The exact width is
-/// the other half: it is what makes "the chunk is smaller than a line" a
-/// statement about the framer rather than about the line generator.
+/// the other half: it makes "the chunk is smaller than a line" a statement
+/// about the framer rather than about the line generator.
 #[test]
 fn every_framed_line_is_a_json_document_of_the_declared_width() {
     for (records, width) in [
@@ -669,7 +668,7 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 /// The counted tier never needed this: gungraun drives a rig once and throws
 /// it away. The wall harness calls a routine hundreds of times against one
 /// piece of state, so a rig that drifts reports a case whose name has stopped
-/// describing what it measures — and reports it as a stable number, because
+/// describing what it measures, and reports it as a stable number, because
 /// the drift settles long before the measured region opens.
 ///
 /// What is asserted is the emitted count, which is what every case asserts and
@@ -678,7 +677,7 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 /// warning admits five events per window, so a poison rig's first drive emits
 /// log events its later ones suppress. That difference is bounded, converges
 /// inside the harness's warm-up, and is the steady state a running pipeline is
-/// in — `warm_rig`'s own documentation is where it is accounted for.
+/// in; `warm_rig`'s own documentation accounts for it.
 ///
 /// A distinct label pair per rig, because this is one process and
 /// identically-labeled counters would be summed together.
@@ -740,7 +739,7 @@ fn a_second_drive_emits_what_the_first_did() {
     }
 
     // The failing arm too: a rig whose call must return `Err` has to keep
-    // returning it, or the case quietly starts measuring the happy path.
+    // returning it, or the case silently starts measuring the happy path.
     let mut failing = decode_rig::batch_rig::<LineItem>(
         JsonFraming::Ndjson,
         OnError::Fail,
@@ -756,7 +755,7 @@ fn a_second_drive_emits_what_the_first_did() {
         );
     }
 
-    // Every shape the wall tier measures, guard off — these decode into a
+    // Every shape the wall tier measures, guard off. These decode into a
     // value rather than a struct, and `large_string` is the one whose backend
     // scratch is resized by its own payload.
     for (label, payload) in [
@@ -798,8 +797,8 @@ fn a_second_drive_emits_what_the_first_did() {
         );
     }
 
-    // Framing carries no state between drives at all — `frame_stream` builds
-    // its own framer — so the claim is the stronger one that every drive
+    // Framing carries no state between drives at all, because `frame_stream`
+    // builds its own framer, so the claim is the stronger one that every drive
     // returns the identical pair.
     let stream = lines::stream(lines::RECORDS, lines::LINE_BYTES, Eol::Lf, 0);
     let rig = frame_rig::Rig {
@@ -818,8 +817,7 @@ fn a_second_drive_emits_what_the_first_did() {
     }
 }
 
-/// The sink reset inside `decode_run` is load-bearing, and cannot quietly
-/// become a no-op.
+/// The sink reset inside `decode_run` must not become a no-op.
 ///
 /// The mirror of the test above: driving the deserializer directly, without
 /// going through `decode_run`, must accumulate. If this ever reports `RECORDS`

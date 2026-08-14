@@ -1,7 +1,7 @@
 //! E2E scenario: rebalance under load. A second consumer joins the group
 //! mid-stream and leaves again; the pipeline survives both rebalances with
 //! zero loss, and at no sampled instant do committed offsets exceed rows
-//! durably written — the at-least-once invariant, observed live.
+//! durably written, which is the at-least-once invariant observed live.
 //!
 //! `cargo test -p spate --test e2e_rebalance -- --ignored` (requires Docker).
 

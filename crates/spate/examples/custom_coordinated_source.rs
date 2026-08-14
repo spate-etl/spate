@@ -1,24 +1,24 @@
-//! Two pipeline instances divide one bounded job — no external
-//! infrastructure, no broker, no object store.
+//! Two pipeline instances divide one bounded job with no external
+//! infrastructure, no broker and no object store.
 //!
-//! This is the coordination seam end to end, deliberately **not**
-//! S3-shaped: a synthetic "ledger" of 1,000 numbered rows is planned into
+//! This is the coordination seam end to end on a synthetic shape rather than
+//! an object store: a "ledger" of 1,000 numbered rows is planned into
 //! 8 id-range splits (the kind a database source would emit), and two
 //! coordinated instances race to lease, read, and complete them. The
-//! moving parts, exactly as a real deployment wires them:
+//! moving parts, as a real deployment wires them:
 //!
-//! - a [`SplitPlanner`] that enumerates the work — run only by whichever
+//! - a [`SplitPlanner`] that enumerates the work, run only by whichever
 //!   instance holds the leadership lease;
 //! - a [`CoordinationDriver`] embedded in the source, translating
 //!   ownership events into the controller's assignment protocol;
-//! - a [`SplitCoordinator`] backend per instance — here over the shared
-//!   in-memory store; in production over NATS
+//! - a [`SplitCoordinator`] backend per instance, here over the shared
+//!   in-memory store and in production over NATS
 //!   (`NatsCoordinator`, feature `coordination-nats`).
 //!
 //! Progress carried in the store is checked before it is believed: every
 //! commit pins the descriptor it was produced against, and
-//! [`SplitSource::validate_resume`] re-reads that pin — and the watermark's
-//! place in the range — when a split reaches its next owner carrying
+//! [`SplitSource::validate_resume`] re-reads that pin, and the watermark's
+//! place in the range, when a split reaches its next owner carrying
 //! committed progress.
 //!
 //! Both instances exit `Completed` once every split is done, and the
@@ -31,7 +31,7 @@
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  extending
-// INDEX-GOAL:  write a coordination-aware source — planner, splits and driver
+// INDEX-GOAL:  write a coordination-aware source from planner to driver
 // INDEX-TECH:  the coordination seam
 // INDEX-NEEDS: nothing
 
@@ -54,9 +54,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// One value drives both the store's TTL and the coordinator's
-/// `lease_duration`: they must be built from the same constant (the
-/// coordinator fails fast on a mismatch — heartbeats pace from the
-/// config while expiry runs on the store's clock).
+/// `lease_duration`: they must be built from the same constant. The
+/// coordinator fails fast on a mismatch, because heartbeats pace from the
+/// config while expiry runs on the store's clock.
 const LEASE: Duration = Duration::from_secs(1);
 
 const ROWS: i64 = 1_000;
@@ -72,7 +72,7 @@ struct LedgerPlanner;
 
 impl SplitPlanner for LedgerPlanner {
     fn fingerprint(&self) -> String {
-        // Config-derived job identity — every instance must agree.
+        // Config-derived job identity. Every instance must agree on it.
         format!("ledger-demo:v1:rows={ROWS}")
     }
 
@@ -93,8 +93,8 @@ impl SplitPlanner for LedgerPlanner {
                 ))
             })
             .collect::<Result<_, CoordinationError>>()?;
-        // A bounded job: the enumeration is complete — AllComplete fires
-        // once every split is done. A discovery source would return
+        // A bounded job, so the enumeration is complete and AllComplete
+        // fires once every split is done. A discovery source would return
         // `Open` and grow the plan on later replan ticks.
         Ok(SplitPlan::new(splits, PlanFinality::Final))
     }
@@ -208,9 +208,9 @@ fn decode_range(descriptor: &[u8], split: &SplitId) -> Result<(i64, i64), Source
 // ANCHOR: split_source
 struct LedgerCtx {
     issuer: Option<AckIssuer>,
-    /// Per live split: (range length, the exact descriptor bytes the split
-    /// was opened against) — the length spots completion, and the
-    /// descriptor is echoed into every commit as the resume pin that
+    /// Per live split: (range length, the descriptor bytes the split was
+    /// opened against). The length spots completion, and the descriptor is
+    /// echoed into every commit as the resume pin that
     /// [`SplitSource::validate_resume`] re-checks under the next owner.
     ranges: BTreeMap<String, (i64, Vec<u8>)>,
 }
@@ -220,10 +220,10 @@ impl SplitSource for LedgerCtx {
 
     fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<LedgerLane, SourceError> {
         let (start, end) = decode_range(&opening.split.descriptor, &opening.split.id)?;
-        // Resume exactly at the committed watermark: rows before it were
-        // durably written by a previous tenancy (possibly ours). It is
-        // trustworthy without re-checking here — the driver already put it
-        // through `validate_resume` before staging this opening.
+        // Resume at the committed watermark: rows before it were durably
+        // written by a previous tenancy (possibly ours). No re-check is
+        // needed here, because the driver already put it through
+        // `validate_resume` before staging this opening.
         let resume = opening.resume.map_or(0, |p| p.watermark);
         self.ranges.insert(
             opening.split.id.as_str().to_string(),
@@ -289,9 +289,9 @@ impl SplitSource for LedgerCtx {
         watermark: i64,
     ) -> Result<SplitProgress, SourceError> {
         let (len, pin) = &self.ranges[split.as_str()];
-        // The watermark IS the position, so the state carries no offset —
-        // only the descriptor this progress was produced against, which is
-        // what makes the check above able to tell drift from a resume.
+        // The watermark is the position, so the state carries no offset. It
+        // carries only the descriptor this progress was produced against,
+        // and the check above compares that to tell drift from a resume.
         Ok(if watermark >= *len {
             SplitProgress::completed(watermark, pin.clone())
         } else {
@@ -374,15 +374,15 @@ impl Drop for LedgerSource {
 // ─── Assembly: two instances over one shared store ──────────────────────
 
 // Two pipelines in one process, which costs two things a real deployment
-// never pays. Each admin server binds an ephemeral port rather than the
-// default, and each pipeline carries the instance in its name — a gauge
-// series has exactly one live owner per process (INV-10), so two instances
-// under one name is the same series claimed twice. In production each
-// instance is its own process and they share a name; here the label has to
-// do what the process boundary would.
+// does not pay. Each admin server binds an ephemeral port rather than the
+// default, and each pipeline carries the instance in its name. A gauge
+// series has one live owner per process (INV-10), so two instances under one
+// name is the same series claimed twice. In production each instance is its
+// own process and they share a name; here the label does what the process
+// boundary would.
 //
-// The planner fingerprint is deliberately *not* instance-scoped: it is how
-// the two agree they are planning the same job.
+// The planner fingerprint is not instance-scoped: it is how the two agree
+// they are planning the same job.
 fn config_yaml(instance: &str) -> String {
     format!(
         r#"
@@ -407,8 +407,8 @@ fn run_instance(
         store,
         CoordinationConfig {
             // Demo-fast takeover; production floors are far higher (see
-            // the deployment guide). The store was built from the SAME
-            // constant — the coordinator rejects a store whose TTL
+            // the deployment guide). The store was built from the same
+            // constant, and the coordinator rejects a store whose TTL
             // diverges from lease_duration.
             lease_duration: LEASE,
             op_timeout: Duration::from_millis(250),
@@ -466,8 +466,8 @@ fn run_instance(
 /// checkpoint interval, so its only commit is the terminal one and a takeover
 /// almost always arrives carrying nothing. The plan is `Final` and its split
 /// ids are deterministic, so no descriptor moves under progress committed
-/// against it — the rejecting answer, which hands the split back and (classed
-/// `Fatal` here) ends the run, is unreachable from the live run.
+/// against it. The rejecting answer hands the split back and, classed
+/// `Fatal` here, ends the run; the live run never reaches it.
 fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = LedgerCtx {
         issuer: None,
@@ -477,16 +477,16 @@ fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
     let spec = SplitSpec::new(SplitId::new("rows-000250-000375")?, descriptor.clone());
     let len = 125;
 
-    // Accepted — what a takeover hands over: a split-local watermark inside
+    // Accepted. What a takeover hands over is a split-local watermark inside
     // the range, pinned to the descriptor it was read against. The band is
     // inclusive at both ends, so 0 and `len` are resume points too.
     ctx.validate_resume(&spec, &SplitProgress::new(0, descriptor.clone()))?;
     ctx.validate_resume(&spec, &SplitProgress::new(64, descriptor.clone()))?;
     ctx.validate_resume(&spec, &SplitProgress::new(len, descriptor.clone()))?;
 
-    // Rejected — the watermark is not a position in this split. A range
-    // that shrank under a resume point that already passed its new end, and
-    // a store value no encoding of ours produces.
+    // Rejected. The watermark is not a position in this split: a range that
+    // shrank under a resume point that already passed its new end, and a
+    // store value no encoding of ours produces.
     assert!(
         ctx.validate_resume(&spec, &SplitProgress::new(len + 1, descriptor.clone()))
             .is_err(),
@@ -498,7 +498,7 @@ fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
         "a negative watermark must be rejected"
     );
 
-    // Rejected — the pin disagrees with the descriptor: this id covers a
+    // Rejected. The pin disagrees with the descriptor: this id covers a
     // different 125 rows than the ones the watermark counted, and no
     // in-range check would have caught it.
     assert!(
@@ -561,7 +561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

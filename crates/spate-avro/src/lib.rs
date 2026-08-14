@@ -1,8 +1,8 @@
 //! Avro deserialization for the Spate framework.
 //!
-//! Decodes bare Avro datums as carried by Kafka messages — Confluent wire
-//! format (magic byte + schema id + datum), Avro single-object encoding,
-//! or raw datums with a fixed schema — three ways: single-pass into your
+//! Decodes bare Avro datums as carried by Kafka messages (Confluent wire
+//! format of magic byte + schema id + datum, Avro single-object encoding,
+//! or raw datums with a fixed schema) three ways: single-pass into your
 //! own serde types ([`AvroDatumDeserializer`], the throughput path, with
 //! optional zero-copy borrowed records), two-pass into serde types with
 //! Avro schema resolution ([`AvroSerdeDeserializer`]), or into
@@ -14,7 +14,7 @@
 //! runtime and cached per process. A payload whose schema is not cached
 //! yet reports "not ready": the operator chain holds the batch (the
 //! source is paused by backpressure if needed) and replays the payload
-//! once the fetch lands — records are never dropped or duplicated, and
+//! once the fetch lands. Records are never dropped or duplicated, and
 //! the CPU-pinned pipeline threads never perform I/O. Ids the registry
 //! cannot serve are negatively cached (with a TTL) and handled by the
 //! deserializer's `ErrorPolicy` like any other poison payload.

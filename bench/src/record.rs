@@ -1,7 +1,7 @@
 //! The versioned record a bench process emits, one per (case, replicate).
 //!
 //! One JSON object per line. A leg is a directory of `.jsonl` files and nothing
-//! else — no index, no manifest — because records self-describe: each carries
+//! else, with no index and no manifest, because records self-describe: each carries
 //! its own case identity, its own iteration count, its own corpus digest and
 //! its own build fingerprint. Two legs are compared by reading both directories
 //! and pairing what is in them.
@@ -15,7 +15,7 @@
 //! declared how much one iteration covers. A missing metric is
 //! left out of the map and explained in [`Record::notes`]. Writing a zero
 //! instead would compare as a real change of the whole quantity, which is the
-//! failure this rule exists to prevent.
+//! failure this rule prevents.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,7 +81,7 @@ pub struct Metric {
 }
 
 impl Metric {
-    /// A metric where more is better — throughput, records per second.
+    /// A metric where more is better, such as throughput or records per second.
     #[must_use]
     pub fn maximize(value: f64, unit: impl Into<String>) -> Self {
         Self {
@@ -91,7 +91,8 @@ impl Metric {
         }
     }
 
-    /// A metric where less is better — latency, bytes allocated, resident set.
+    /// A metric where less is better, such as latency, bytes allocated or
+    /// resident set.
     #[must_use]
     pub fn minimize(value: f64, unit: impl Into<String>) -> Self {
         Self {
@@ -115,9 +116,9 @@ pub struct Record {
     pub replicate: u32,
     /// Whether this is the discarded priming pass rather than a replicate.
     ///
-    /// Written to the leg directory like any other record — a priming pass that
-    /// vanished would be indistinguishable from one that never ran — and
-    /// excluded by the comparator.
+    /// Written to the leg directory like any other record, since a priming
+    /// pass that vanished would be indistinguishable from one that never ran,
+    /// and excluded by the comparator.
     pub priming: bool,
     /// Iterations of the case's routine inside the measured region.
     ///
@@ -140,7 +141,7 @@ pub struct Record {
     /// nothing states neither, and is compared on its corpus alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_digest: Option<String>,
-    /// The measured quantities. Absent is not zero — see the module docs.
+    /// The measured quantities. Absent is not zero; see the module docs.
     pub metrics: BTreeMap<String, Metric>,
     /// Why a metric is missing, or anything else about how the record was
     /// produced.
@@ -168,8 +169,8 @@ impl Record {
     /// # Errors
     ///
     /// When the record does not serialise. No arithmetic here can produce that
-    /// today — `serde_json` writes a non-finite float as `null` rather than
-    /// failing — so the error is carried rather than unwrapped, and a `null`
+    /// today, since `serde_json` writes a non-finite float as `null` rather
+    /// than failing, so the error is carried rather than unwrapped, and a `null`
     /// would fail on the *read* side instead.
     pub fn to_line(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)

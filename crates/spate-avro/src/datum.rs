@@ -1,6 +1,6 @@
 //! The single-pass datum deserializer: [`DecoderCore`]'s framing and
 //! schema resolution with the in-tree schema-driven decoder
-//! (`crate::de`) on top — one wire pass, no intermediate
+//! (`crate::de`) on top: one wire pass, with no intermediate
 //! [`crate::AvroValue`].
 
 use crate::de;
@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 ///
 /// This is the throughput path. The dynamically-typed
 /// [`crate::AvroValueDeserializer`] allocates a node per schema position
-/// per record — including a heap `String` per field name — and the typed
+/// per record, including a heap `String` per field name, and the typed
 /// [`crate::AvroSerdeDeserializer`] decodes that tree a second time. Here
 /// the writer schema drives serde directly over the datum bytes: no tree,
 /// no field-name allocations, and string/bytes contents borrow the payload
@@ -34,7 +34,7 @@ use std::marker::PhantomData;
 ///
 /// With a borrowed record family (`F::Rec<'buf>` containing `&'buf str` /
 /// `&'buf [u8]`), string and bytes fields point straight into the payload
-/// buffer — no per-record copies at all. Enum symbols and record field
+/// buffer, with no per-record copies at all. Enum symbols and record field
 /// names live in the schema, not the payload, so those cannot be borrowed
 /// (`String` targets work; `&str` targets for *string contents* work).
 ///
@@ -43,7 +43,7 @@ use std::marker::PhantomData;
 /// No reader schema: records decode in the writer schema's shape, and
 /// [`crate::AvroDeserializerBuilder::build_datum`] rejects a configured
 /// `reader_schema` at build time. Additive evolution still works through
-/// serde — `#[serde(default)]` covers fields newer readers expect and old
+/// serde: `#[serde(default)]` covers fields newer readers expect and old
 /// writers lack, `#[serde(alias)]` covers renames, and unknown fields are
 /// skipped structurally. If you need Avro's full resolution rules (field
 /// reordering by name, type promotions, defaults from the schema), use
@@ -58,8 +58,8 @@ use std::marker::PhantomData;
 /// path errors where apache-avro 0.21 silently yields `Null`), a per-datum
 /// budget of `max(payload length, 65 536)` claimed collection items (a
 /// hostile block count over zero-width items errors instead of walking),
-/// skipped-field contents (structurally validated only, not UTF-8-checked
-/// — and a skipped size-prefixed block is trusted at its declared byte
+/// skipped-field contents (structurally validated only, not UTF-8-checked,
+/// and a skipped size-prefixed block is trusted at its declared byte
 /// size, so a corrupt block whose size field lies can skip differently
 /// than it decodes), and schemas using the `duration` or `big-decimal`
 /// logical types, which are rejected up front (build error for fixed
@@ -80,7 +80,7 @@ impl<F: RecFamily> AvroDatumDeserializer<F> {
 }
 
 // Manual impls: the derived ones would demand bounds on `F` that a family
-// tag has no reason to satisfy — `PhantomData<fn() -> F>` holds no `F`,
+// tag has no reason to satisfy: `PhantomData<fn() -> F>` holds no `F`,
 // and every chain lane clones its deserializer.
 impl<F: RecFamily> Clone for AvroDatumDeserializer<F> {
     fn clone(&self) -> Self {

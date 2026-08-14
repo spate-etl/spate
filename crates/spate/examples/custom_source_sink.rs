@@ -1,16 +1,17 @@
-//! Writing a source and a sink from scratch — the connector-author tutorial.
+//! The connector-author tutorial for writing a source and a sink from scratch.
 //!
 //! A source is two pieces: a control plane ([`Source`]: assignment events,
 //! commits, pause/resume) and per-thread data-plane lanes ([`SourceLane`]:
 //! poll borrowed payload batches, one [`AckRef`] per batch). A sink is also
 //! two pieces: a CPU half ([`RowEncoder`]: record → wire bytes, runs on
 //! pipeline threads) and an I/O half ([`ShardWriter`]: sealed batch →
-//! endpoint, runs on sink workers). The framework owns everything between —
-//! batching, retries, replica rotation, acknowledgments, backpressure.
+//! endpoint, runs on sink workers). The framework owns everything between
+//! them, including batching, retries, replica rotation, acknowledgments and
+//! backpressure.
 //!
-//! Here: a generator source counting to a limit per partition, and a sink
-//! printing JSON lines to stdout — with a payload-aware [`RecordRouter`]
-//! deciding which shard each order line belongs to.
+//! Here a generator source counts to a limit per partition and a sink prints
+//! JSON lines to stdout, with a payload-aware [`RecordRouter`] deciding which
+//! shard each order line belongs to.
 //!
 //! ```sh
 //! cargo run -p spate --example custom_source_sink
@@ -43,15 +44,15 @@ use std::time::{Duration, Instant};
 const SHARDS: usize = 2;
 const CUSTOMERS: i64 = 4;
 /// Each source record is an upload carrying this many order lines, and
-/// consecutive orders belong to different customers — the fan-out below is
-/// what makes the routing tier matter.
+/// consecutive orders belong to different customers, so one upload's lines
+/// fan out across customers.
 const LINES_PER_BATCH: i64 = 2;
 
 // ─── The source ─────────────────────────────────────────────────────────
 
-/// One partition's data plane: yields ASCII numbers `0..limit` in batches.
-/// Payloads borrow the lane's buffer — zero copies out of the lane, exactly
-/// like a Kafka lane borrowing librdkafka's message memory.
+/// One partition's data plane, yielding ASCII numbers `0..limit` in batches.
+/// Payloads borrow the lane's buffer, so nothing is copied out of the lane,
+/// the same way a Kafka lane borrows librdkafka's message memory.
 struct CounterLane {
     id: LaneId,
     partition: PartitionId,
@@ -109,8 +110,8 @@ impl SourceLane for CounterLane {
         timeout: Duration,
     ) -> Result<Option<Self::Batch<'_>>, SourceError> {
         if self.next >= self.limit {
-            // Exhausted: block briefly like an idle consumer would — a lane
-            // must never busy-spin the pipeline thread.
+            // Exhausted. Block briefly, like an idle consumer would. A lane
+            // must not busy-spin the pipeline thread.
             std::thread::sleep(timeout);
             return Ok(None);
         }
@@ -136,9 +137,9 @@ impl SourceLane for CounterLane {
 }
 // ANCHOR_END: lane
 
-/// The control plane: hands out its lanes once, then idles. Commits are
-/// recorded where the demo (and your tests) can observe them — a real
-/// source would store them durably (Kafka: `store_offsets`).
+/// The control plane. It hands out its lanes once, then idles. Commits are
+/// recorded where the demo and your tests can observe them; a real source
+/// stores them durably (Kafka: `store_offsets`).
 // ANCHOR: control
 struct CounterSource {
     per_partition: i64,
@@ -188,10 +189,10 @@ impl Source for CounterSource {
 
 // ─── The router ─────────────────────────────────────────────────────────
 
-/// Routes on a field of the decoded record — the **record-aware** tier.
+/// Routes on a field of the decoded record, the **record-aware** tier.
 ///
 /// The chain below fans one upload out into several order lines, and every
-/// child of a `flat_map` carries its parent's `RecordMeta` — the shared
+/// child of a `flat_map` carries its parent's `RecordMeta`, the shared
 /// metadata that lets one parent ack resolve across all its children. A
 /// meta-only `ShardRouter` (the tier `KeyHashRouter` sits in) sees that
 /// metadata and nothing else, so it places every child of one upload on one
@@ -200,9 +201,9 @@ impl Source for CounterSource {
 /// The decision is **deterministic across retries**. Delivery is
 /// at-least-once, so a record can be replayed after a failure, and a router
 /// answering differently the second time writes the same order into two
-/// shards — the dedup token is per shard, so nothing downstream collapses
-/// them. Keep the hash below explicit rather than reaching for
-/// `DefaultHasher`, whose output is seeded and not stable across releases.
+/// shards. The dedup token is per shard, so nothing downstream collapses
+/// them. Keep the hash below explicit instead of using `DefaultHasher`,
+/// whose output is seeded and not stable across releases.
 // ANCHOR: router
 struct ByCustomer;
 
@@ -220,8 +221,8 @@ fn shard_of(customer_id: &[u8], num_shards: usize) -> usize {
 
 /// The `cust-N` prefix of an order line. Total by construction: a line
 /// without the separator hashes whole. A router has no per-record error
-/// policy — it must return a shard for every record and never panic, since
-/// a payload-dependent panic replays into a crash loop on restart.
+/// policy. It must return a shard for every record and must not panic,
+/// because a payload-dependent panic replays into a crash loop on restart.
 fn customer_field(line: &[u8]) -> &[u8] {
     match line.iter().position(|b| *b == b'|') {
         Some(sep) => &line[..sep],
@@ -229,8 +230,8 @@ fn customer_field(line: &[u8]) -> &[u8] {
     }
 }
 
-/// FNV-1a: a few instructions, no allocation, and the same answer in every
-/// process and every release — the properties routing needs.
+/// FNV-1a gives the same answer in every process and every release, in a few
+/// instructions and without allocating.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
@@ -269,7 +270,7 @@ impl RowEncoder<Owned<Vec<u8>>> for JsonLinesEncoder {
 
 /// I/O half: "write" a sealed batch by printing it, and record the rows it
 /// carried so `main` can assert on the placement. Returning `Ok` is the
-/// durable-ack point — a real writer returns only after its server
+/// durable-ack point; a real writer returns only after its server has
 /// confirmed (e.g. ClickHouse `end()`).
 // ANCHOR: writer
 struct StdoutWriter {
@@ -311,8 +312,8 @@ impl ShardWriter for StdoutWriter {
 }
 // ANCHOR_END: writer
 
-/// Read `(partition, customer, order)` back out of an encoded row — the
-/// assertions' stand-in for querying the destination. The partition
+/// Read `(partition, customer, order)` back out of an encoded row, standing
+/// in for querying the destination. The partition
 /// identifies which source record an order line came from: upload ids
 /// repeat across partitions, so an order id alone does not.
 fn parse_order_line(row: &str) -> Option<(u32, i64, i64)> {
@@ -356,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A hand-rolled sink needs no SinkBundle impl of its own: SinkParts is
     // the bundle. `SHARDS` shards, one "replica" each, named for their
-    // index — config order is the shard identity. The builder derives
+    // index; config order is the shard identity. The builder derives
     // labels, per-shard metrics, queues, and workers from it.
     // ANCHOR: bundle
     let pool_cfg = {
@@ -434,7 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = join.join().expect("pipeline thread")?;
     assert_eq!(report.exit_code(), 0, "the pipeline must drain clean");
 
-    // ─── What the router actually did ───────────────────────────────────
+    // ─── What the router did ────────────────────────────────────────────
     //
     // Commits are gated on durable writes, so every order line is in the
     // log by now; the writer never fails here, so nothing was retried and
@@ -443,7 +444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(written.len(), SHARDS, "every shard must have been written");
 
     let mut shard_of_customer: BTreeMap<i64, usize> = BTreeMap::new();
-    // Keyed by the source record the lines came from — `(partition,
+    // Keyed by the source record the lines came from, `(partition,
     // upload)`, never the upload id alone. Every partition counts from
     // zero, so an upload id names one record per partition, and a set
     // merged across partitions is split by any router that separates
@@ -459,7 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (partition, customer_id, order_id) =
                 parse_order_line(line).expect("every row is one encoded order line");
             rows += 1;
-            // Same customer, same shard, always — the determinism
+            // Same customer, same shard. That is the determinism
             // `ByCustomer` states as its contract.
             let seen = shard_of_customer.insert(customer_id, shard);
             assert!(
@@ -477,15 +478,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i64::from(partitions) * per_partition * LINES_PER_BATCH
     );
 
-    // The placement is the router's, not an accident of the shard count.
+    // Every placement matches what `shard_of` chose for that customer.
     for (customer_id, shard) in &shard_of_customer {
         let expected = shard_of(format!("cust-{customer_id}").as_bytes(), SHARDS);
         assert_eq!(*shard, expected, "cust-{customer_id} routed elsewhere");
     }
-    // And the payoff: one source record's order lines sit on different
-    // shards, which no meta-only router can produce — every child of a
-    // `flat_map` carries the same `RecordMeta`, so metadata alone cannot
-    // tell them apart.
+    // One source record's order lines sit on different shards. No meta-only
+    // router can produce that, because every child of a `flat_map` carries
+    // the same `RecordMeta`, so metadata alone cannot tell them apart.
     assert!(
         shards_of_upload.values().any(|shards| shards.len() > 1),
         "one upload's order lines never split across shards"
@@ -501,7 +501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

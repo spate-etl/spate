@@ -123,8 +123,8 @@ impl JsonDeserializerBuilder {
     ///   `framing` is a [`DoubleFraming`](JsonConfigError::DoubleFraming)
     ///   error.
     /// - [`WholePayload`](FramingContract::WholePayload): the deserializer owns
-    ///   framing — the configured `framing` (`single` / `ndjson` / `array`) is
-    ///   honored unchanged.
+    ///   framing, and the configured `framing` (`single` / `ndjson` / `array`)
+    ///   is honored unchanged.
     pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, JsonConfigError> {
         match contract {
             FramingContract::PerRecord if self.settings.framing != JsonFraming::Single => {

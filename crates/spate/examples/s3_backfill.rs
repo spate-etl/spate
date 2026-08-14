@@ -2,19 +2,19 @@
 //!
 //! Point the S3 source at a bucket prefix and it streams every object's
 //! NDJSON records through the pipeline and **terminates the pipeline
-//! itself** once the prefix is exhausted — no shutdown trigger. Solo (no
+//! itself** once the prefix is exhausted, with no shutdown trigger. Solo (no
 //! coordinator injected) the source keeps its progress in an in-process
-//! store, so a second run replays the whole prefix — at-least-once, safe
-//! but wasteful, and the startup WARN says so. Durable resume and
+//! store, so a second run replays the whole prefix. That is at-least-once,
+//! safe but wasteful, and the startup WARN says so. Durable resume and
 //! multi-instance sharing come from injecting a coordinator over a
-//! durable backend via `with_coordinator` — see the
+//! durable backend via `with_coordinator`; see the
 //! `s3_coordinated_backfill` example.
 //!
 //! Object storage here is a local directory (`file://`); against real S3
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
 //! through the `store` map. The S3 source is format-agnostic: we wire the
-//! format's framer into it in code — `spate-json`'s [`NdjsonFramer`] — so it
-//! hands each NDJSON line to the chain as one payload, and
+//! format's framer into it in code, here `spate-json`'s [`NdjsonFramer`], so
+//! it hands each NDJSON line to the chain as one payload, and
 //! `for_source_framing` then derives the JSON deserializer's `single`
 //! granularity from the source instead of it being hand-set.
 //!
@@ -26,7 +26,7 @@
 // INDEX-TIER:  bounded-jobs
 // INDEX-GOAL:  backfill historical records from object storage and stop when the prefix is done
 // INDEX-TECH:  object storage
-// INDEX-NEEDS: nothing — it stages a `file://` bucket
+// INDEX-NEEDS: nothing; it stages a `file://` bucket
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -70,7 +70,7 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // The S3 source is a transport; the format supplies the framer. Wire in
     // `spate-json`'s NDJSON framer (bounded at 64 MiB per record) so each line
     // becomes one payload. The `deserializer: { json: {} }` section carries
-    // only decode knobs — no `framing:` — and the framework derives the
+    // only decode knobs and no `framing:`, and the framework derives the
     // granularity from the source.
     // ANCHOR: source
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

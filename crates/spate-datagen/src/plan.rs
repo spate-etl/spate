@@ -3,8 +3,8 @@
 //!
 //! # The mechanism
 //!
-//! A lane draws an event type from a fixed categorical mix — 60% place, 35%
-//! capture, 5% refund — using its own PRNG, and never touches another lane's
+//! A lane draws an event type from a fixed categorical mix (60% place, 35%
+//! capture, 5% refund) using its own PRNG, and never touches another lane's
 //! state. Two structural properties carry referential integrity:
 //!
 //! - **Disjoint id slices.** Lane `i` of `p` mints `order_id = n × p + i`, so
@@ -12,7 +12,7 @@
 //! - **Per-lane rings.** A lane remembers the orders it has placed (with their
 //!   totals) and the ones it has captured. A capture draws from the first ring,
 //!   a refund from the second, and **an empty ring falls through to
-//!   `order_placed`** — so a reference is drawn from a set the same lane
+//!   `order_placed`**, so a reference is drawn from a set the same lane
 //!   populated earlier, or it is not drawn at all.
 //!
 //! Together those give a referencing event the same partition and a strictly
@@ -32,7 +32,7 @@
 //!
 //! The rings bound memory, not the backlog. The mix places faster than it
 //! captures, so orders placed and not yet paid accumulate at roughly a quarter
-//! of every event for as long as the lane runs — [`EventPlan::open_orders`]
+//! of every event for as long as the lane runs, and [`EventPlan::open_orders`]
 //! reports that count. A downstream check reconciles the orders that were
 //! captured against their lines; it cannot expect every order to be paid.
 
@@ -108,7 +108,7 @@ pub(crate) struct EventPlan {
     rng: SplitMix64,
     /// This lane's residue class in the order-id space.
     lane_index: u64,
-    /// The modulus of that space — the configured partition count.
+    /// The modulus of that space, the configured partition count.
     partitions: u64,
     /// How many orders this lane has minted, i.e. the next `n`.
     minted: u64,
@@ -150,7 +150,7 @@ impl EventPlan {
         }
     }
 
-    /// Orders this lane has placed and not yet captured — the `open_orders`
+    /// Orders this lane has placed and not yet captured, the `open_orders`
     /// gauge's per-lane contribution.
     ///
     /// Rises for as long as the lane runs. The mix places faster than it
@@ -181,7 +181,7 @@ impl EventPlan {
     ///
     /// Under [`Clock::Fixed`] this is `epoch_ms` plus one millisecond per
     /// event *this lane* has already produced, so a lane's timestamps are a
-    /// function of its position in its own stream and nothing else — no wall
+    /// function of its position in its own stream and nothing else: no wall
     /// clock, no interleaving, no dependence on how the runtime scheduled the
     /// threads. The sum saturates, so an `epoch_ms` within a stream's length
     /// of [`i64::MAX`] pins every timestamp there.
@@ -241,7 +241,7 @@ impl EventPlan {
     fn refund(&mut self) -> Option<StorefrontEvent> {
         let pending = self.captured.take(&mut self.rng)?;
         // The whole of what was captured, or its half, third or quarter
-        // rounded down — never more, which is the property a downstream
+        // rounded down, never more, which is the property a downstream
         // balance check depends on.
         let share = u64::from(self.rng.between(1, 4));
         let reason = REFUND_REASONS[self.rng.below(REFUND_REASONS.len() as u32) as usize];
@@ -393,7 +393,7 @@ mod tests {
         assert_ne!(run(&cfg, 0, 500), run(&cfg, 1, 500));
         assert_ne!(run(&cfg, 0, 500), run(&config(4, 43), 0, 500));
 
-        // Generated on another thread, which is where a lane actually runs.
+        // Generated on another thread, which is where a lane runs.
         let cloned = cfg.clone();
         let elsewhere = std::thread::spawn(move || run(&cloned, 3, 500))
             .join()
@@ -405,8 +405,8 @@ mod tests {
     /// same build* is what the test above shows; this is what holds the stream
     /// steady across builds, which is what the crate publishes.
     ///
-    /// Any change to the order or count of draws in `next` moves these — a
-    /// reordered struct literal is enough — so a payload change is a decision
+    /// Any change to the order or count of draws in `next` moves these, and
+    /// a reordered struct literal is enough, so a payload change is a decision
     /// taken here rather than a side effect noticed downstream.
     #[test]
     fn the_generated_stream_is_pinned_across_builds() {
@@ -458,8 +458,8 @@ mod tests {
     }
 
     /// The rings bound memory, not the backlog. `open_orders` answers for the
-    /// whole run, so it has to outgrow the ring that holds a window of it —
-    /// a gauge reading `RING_CAPACITY` forever would carry no information.
+    /// whole run, so it has to outgrow the ring that holds a window of it.
+    /// A gauge reading `RING_CAPACITY` forever would carry no information.
     #[test]
     fn open_orders_counts_the_whole_backlog_rather_than_the_ring() {
         let cfg = config(1, 5);
@@ -487,7 +487,7 @@ mod tests {
 
     /// The observed mix is the draw's. A fall-through can only add placements,
     /// but it needs an empty ring, and a lane's rings are empty only while it
-    /// warms up — so over a long run the shares sit on the drawn ones.
+    /// warms up, so over a long run the shares sit on the drawn ones.
     #[test]
     fn the_event_mix_follows_the_documented_shares() {
         const EVENTS: usize = 100_000;

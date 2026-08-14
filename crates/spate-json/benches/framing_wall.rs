@@ -3,14 +3,14 @@
 //! [`NdjsonFramer`] cuts a byte *stream* into newline-delimited records so a
 //! streaming source can hand the deserializer one document per payload. This
 //! is the wall-clock half of what `framing_gungraun.rs` counts, over the same
-//! streams through the same loop — both drive `frame_stream` from
+//! streams through the same loop; both drive `frame_stream` from
 //! `support/frame_rig.rs`, so a counted regression and a wall-clock one are
 //! statements about one region.
 //!
 //! Four cases, where the counted tier runs six. Wall time cannot resolve what
 //! separates the two that are left out. `lf_line_chunks` sits between
 //! `lf_fetch_chunks` and `lf_split_chunks` on one axis both of those already
-//! fix, and `lf_blank_interleaved` is one branch per line — a per-line term
+//! fix, and `lf_blank_interleaved` is one branch per line, a per-line term
 //! the counted tier prices exactly and a 5% wall-clock floor would not see:
 //!
 //! - `frame_lf_fetch_chunks` — many lines per chunk, which is what a
@@ -33,14 +33,14 @@
 //!
 //! No metrics recorder: the framer registers nothing, so this binary depends
 //! on none of the instrumentation `decode_wall.rs` installs. That is the
-//! one-target-per-subject rule of thumb rather than a hard requirement here —
+//! one-target-per-subject rule of thumb rather than a hard requirement here:
 //! the harness runs one process per case per replicate, so two subjects in one
 //! binary could not collide on a recorder anyway.
 //!
 //! Nothing pins an iteration count; see `decode_wall.rs` for why.
 //!
 //! Every case declares [`BACKEND_ID`] as `decode_wall.rs` does, so the two arms
-//! of this crate are told apart here too — see that target's backend-axis
+//! of this crate are told apart here too; see that target's backend-axis
 //! section. Comparing them is `make bench-arms HEAD_FEATURES=spate-json/simd
 //! FILTER=frame_`, though the framer does not decode and the two arms should
 //! measure the same.
@@ -63,7 +63,7 @@ use lines::Eol;
 
 /// The bytes a rig hands the framer, terminators included.
 ///
-/// Not the same quantity as `expect_bytes`, which is the framed *output* —
+/// Not the same quantity as `expect_bytes`, which is the framed *output* of
 /// records times width, with the terminators stripped. The framer scans the
 /// terminators, and the LF and CRLF streams differ by exactly the extra byte
 /// per line, so charging both against their output would hide half of that
@@ -100,11 +100,10 @@ fn wide() -> Rig {
 /// drive. `tests/bench_fixtures.rs` holds that as a property rather than
 /// leaving it to be inferred from this comment.
 ///
-/// The assertion is what keeps the case honest under a name. A framer that
-/// stopped splitting, stopped stripping a `\r`, or started counting blank
-/// lines would otherwise report a large improvement rather than a failure —
-/// and the returned pair is also what `black_box` holds, so the loop cannot be
-/// optimized away.
+/// The assertion is what holds the case to its name. A framer that stopped
+/// splitting, stopped stripping a `\r`, or started counting blank lines would
+/// otherwise report a large improvement rather than a failure. The returned
+/// pair is also what `black_box` holds, so the loop cannot be optimized away.
 fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
     suite
         .case(
@@ -114,7 +113,7 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
                 // The chunks are absorbed one at a time rather than
                 // concatenated: `absorb` folds each input's length in, so a
                 // stream re-cut at a different chunk size digests differently.
-                // That is wanted — the chunking is half of what the case is.
+                // That is wanted: the chunking is half of what the case is.
                 for chunk in &rig.chunks {
                     corpus.absorb("chunk", chunk);
                 }

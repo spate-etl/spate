@@ -8,7 +8,7 @@
 //! # Why it is not behind a feature
 //!
 //! Gating it would mean the wall numbers and the allocation numbers come from
-//! two different binaries — so a build that allocates more, and is therefore
+//! two different binaries, so a build that allocates more, and is therefore
 //! slower, reports the extra allocations from one build and the timing from
 //! another. It would also double the build cost of an A/B run, which is already
 //! two full compilations. The counter perturbs both legs identically, and the
@@ -18,7 +18,7 @@
 //! # How a `realloc` is charged
 //!
 //! A growing reallocation is counted as its *growth*, and a shrinking one is not
-//! counted at all. So a doubling push-loop does not report quadratic bytes —
+//! counted at all. So a doubling push-loop does not report quadratic bytes,
 //! but a build that grows a buffer by repeated appends instead of reserving it
 //! once reports roughly the same byte total as one that reserves.
 //! `alloc_count_per_iter` is what catches that one, which is the reason both
@@ -29,7 +29,7 @@
 //! A hand-written `fn main` that does not use [`crate::bench_main!`] gets no
 //! allocator, and a flag set by the macro would then be the only thing saying
 //! so. Watching the counter move across a real allocation asks the question
-//! that matters — *is this process's allocator the one that counts* — and
+//! that matters, *is this process's allocator the one that counts*, and
 //! cannot be answered wrongly by a macro that was never invoked. A case whose
 //! allocator is absent reports no allocation metrics and says why in a note;
 //! it never reports zero, which would compare as a real change.
@@ -51,7 +51,7 @@ pub struct Counting;
 // SAFETY: every method forwards to `System`, which is a valid `GlobalAlloc`,
 // with the same layout and pointer arguments it was given. The counters are
 // plain atomics and are touched only after a successful call, so they add no
-// requirement of their own — an allocator that counts is still the allocator it
+// requirement of their own; an allocator that counts is still the allocator it
 // wraps.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -74,7 +74,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` was allocated by this allocator — hence by `System` —
+        // SAFETY: `ptr` was allocated by this allocator, hence by `System`,
         // with `layout`, which is what `System::dealloc` requires.
         unsafe { System.dealloc(ptr, layout) };
     }
@@ -90,8 +90,8 @@ unsafe impl GlobalAlloc for Counting {
             // one allocation the program asked for; charging it the full new
             // size would make a doubling push-loop report quadratic bytes and
             // swamp every other figure in the case. And counting a shrink at
-            // all — which a `record(0)` still does, since the count is
-            // unconditional — would report a head that added a per-iteration
+            // all, which a `record(0)` still does since the count is
+            // unconditional, would report a head that added a per-iteration
             // `shrink_to_fit` as an allocation-count regression against a 1%
             // floor while it allocated nothing new.
             record(new_size - layout.size());
@@ -106,8 +106,8 @@ fn record(size: usize) {
     // makes a *snapshot* see another thread's additions has to come from
     // somewhere else, and does.
     //
-    // For a single-threaded case that somewhere is trivial — one thread both
-    // allocates and reads. For a case whose measured region spans several
+    // For a single-threaded case that somewhere is one thread doing both the
+    // allocating and the reading. For a case whose measured region spans several
     // threads, the region cannot close until those threads have reported
     // through whatever synchronisation the case uses to bound its own work,
     // and that release/acquire pair carries every allocation before it. A case
@@ -156,7 +156,7 @@ pub fn snapshot() -> Snapshot {
 
 /// Whether this process's global allocator is the counting one.
 ///
-/// Answered by allocating and watching the counter, not by a flag — see the
+/// Answered by allocating and watching the counter, not by a flag; see the
 /// module documentation. There is no false positive to worry about: if another
 /// thread's allocation is what moved the counter, the counting allocator is
 /// installed either way.
@@ -180,7 +180,7 @@ mod tests {
 
     /// The allocator itself, called directly. The unit tests run under a
     /// harness that does not install it, so the only way to exercise `Counting`
-    /// is to be its caller — and without this, the realloc rule below has no
+    /// is to be its caller, and without this the realloc rule below has no
     /// coverage anywhere.
     #[test]
     fn the_allocator_counts_what_it_hands_out() {
@@ -219,13 +219,13 @@ mod tests {
             );
         }
 
-        // Freeing is not counted either — these are totals handed out, not a
+        // Freeing is not counted either. These are totals handed out, not a
         // live figure.
         assert!(snapshot().count > before.count);
     }
 
     /// The unit tests run under this crate's own `bench_main!`-free harness, so
-    /// the counting allocator is *not* the global one here — `installed()` is
+    /// the counting allocator is *not* the global one here, so `installed()` is
     /// therefore asserted only for self-consistency with what the global
     /// counters do. Its behaviour with the allocator in place is proved end to
     /// end by the self-test bench, whose records carry non-zero allocation

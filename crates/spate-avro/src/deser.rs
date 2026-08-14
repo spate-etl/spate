@@ -139,7 +139,7 @@ impl DecoderCore {
 }
 
 /// Dynamically-typed deserializer: emits [`AvroValue`] records. Use when
-/// the schema is only known at runtime — pipelines that inspect or route
+/// the schema is only known at runtime, in pipelines that inspect or route
 /// on structure they cannot name at compile time. When the record type
 /// *is* known, [`crate::AvroDatumDeserializer`] decodes it in a single
 /// pass without materialising the [`AvroValue`] tree at all, and is the
@@ -174,13 +174,13 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 }
 
 /// Typed deserializer: decodes each datum into `T` via serde. The record
-/// type is plain Rust — no Avro types leak into the pipeline.
+/// type is plain Rust; no Avro types leak into the pipeline.
 ///
 /// # Performance
 ///
-/// This path decodes each record **twice** — once into an intermediate
-/// [`AvroValue`] via `from_avro_datum`, then again into `T` via
-/// `from_value` — roughly doubling the per-record allocations and CPU of
+/// This path decodes each record **twice**, once into an intermediate
+/// [`AvroValue`] via `from_avro_datum` and then again into `T` via
+/// `from_value`, roughly doubling the per-record allocations and CPU of
 /// the dynamically-typed path. Choose it when you need Avro's full
 /// schema-resolution rules (a configured `reader_schema`: field
 /// reordering, type promotions, defaults, aliases). When you don't,
@@ -201,7 +201,7 @@ impl<T> AvroSerdeDeserializer<T> {
 }
 
 // Manual impls: the derived ones would demand `T: Clone`/`T: Debug`, which
-// the record type has no reason to satisfy — `PhantomData<fn() -> T>` holds
+// the record type has no reason to satisfy: `PhantomData<fn() -> T>` holds
 // no `T`, and every chain lane clones its deserializer.
 impl<T> Clone for AvroSerdeDeserializer<T> {
     fn clone(&self) -> Self {
@@ -416,8 +416,8 @@ mod tests {
     fn an_uncompilable_schema_is_unavailable_per_record_not_a_panic() {
         // `CompiledSchema::compile` stores a parser rejection rather than
         // failing hard, so the entry can be negatively cached. Each record
-        // that lands on it must then surface `SchemaUnavailable` — Skip/Fail
-        // policy fodder — instead of unwinding the pipeline thread.
+        // that lands on it must then surface `SchemaUnavailable`, as Skip/Fail
+        // policy fodder, instead of unwinding the pipeline thread.
         let mut compiled = crate::cache::CompiledSchema::compile(0, WRITER_V1);
         compiled.schema = Err("schema 0 is not usable: nope".into());
         let core = DecoderCore {

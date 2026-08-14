@@ -4,8 +4,8 @@
 //! stage metrics, but those count at **payload** granularity. When `ndjson`
 //! (or `array`) decoding skips an individual bad record under `on_error: skip`,
 //! the framework sees the `deserialize` call return `Ok` with the good records
-//! emitted — the skipped record is invisible to it. [`JsonDeserMetrics`]
-//! surfaces exactly those per-record drops, mirroring the connector-owned
+//! emitted, so the skipped record is invisible to it. [`JsonDeserMetrics`]
+//! surfaces those per-record drops, mirroring the connector-owned
 //! convention used by `spate_kafka_source_*` / `spate_kafka_sink_*`.
 //!
 //! Handles are resolved once, at build time, from a

@@ -1,6 +1,6 @@
-//! Datum-decoding throughput across the three decode paths — the
+//! Datum-decoding throughput across the three decode paths (the
 //! dynamically-typed Value path, the two-pass serde-typed path, and the
-//! single-pass datum path (owned and borrowed) — on a realistic 15-field
+//! single-pass datum path, owned and borrowed) on a realistic 15-field
 //! record, a batch shape (one datum = an array of 50 lines, per-line
 //! throughput) tracking the flagship `flat_map` use case, the
 //! sensor-batch attribution corpus with its decode-plus-flatten arms, and
@@ -66,7 +66,7 @@ fn bench(c: &mut Criterion) {
         });
     });
     // The error path Skip and Fail both pay per bad record: decode until the
-    // truncation, build the `Err`. The assert keeps the fixture honest — if
+    // truncation, build the `Err`. The assert holds the fixture to that: if
     // it ever decodes cleanly, the bench panics instead of timing the happy
     // path.
     group.bench_function("value_malformed", |b| {
@@ -92,8 +92,8 @@ fn bench(c: &mut Criterion) {
 }
 
 /// The flagship batch shape: one datum = one placed order holding an array
-/// of 50 lines, throughput measured **per line** — the `flat_map` use
-/// case, regression-tracked inside the workspace.
+/// of 50 lines, throughput measured **per line**, tracking the `flat_map`
+/// use case inside the workspace.
 fn bench_batch(c: &mut Criterion) {
     use orders::{BATCH_LINES as LINES, BATCH_SCHEMA, PlacedOrder};
 
@@ -150,7 +150,7 @@ fn bench_batch(c: &mut Criterion) {
 //
 // Everything below reproduces the spate-benchmark corpus byte-for-byte so the
 // numbers here attribute the CPU that the published Kafka→Avro→ClickHouse
-// comparison actually spends. Three things are restated rather than imported
+// comparison spends. Three things are restated rather than imported
 // (the benchmark repo is a separate workspace pinning spate-avro from
 // crates.io): the schema, the field derivations, and the entrant's flatten.
 // `golden_self_check` proves the restated generator identical to the corpus,
@@ -504,8 +504,8 @@ mod comparison_flatten {
 
     /// The entrant's flatten over the borrowed typed record instead of the
     /// `AvroValue` tree: same filters, same `Row`, no positional
-    /// tree-walking — what the comparison entrant's `flat_map` becomes on
-    /// the single-pass path.
+    /// tree-walking. This is what the comparison entrant's `flat_map` becomes
+    /// on the single-pass path.
     pub(crate) fn flatten_typed<F: FnMut(Row)>(batch: &SensorBatchRef<'_>, mut emit: F) {
         let region = batch.region.unwrap_or("");
         for e in &batch.events {
@@ -581,7 +581,7 @@ mod comparison_flatten {
 /// flattened the way the comparison's Spate entrant does. Throughput is per
 /// **event**; divide the per-event time by 0.735 for per-output-row cost.
 fn bench_sensor_batch(c: &mut Criterion) {
-    /// Batches per iteration — one full period of the corpus derivations.
+    /// Batches per iteration, one full period of the corpus derivations.
     const PERIOD: u64 = 200;
     /// Events per iteration.
     const EVENTS: u64 = PERIOD * comparison_corpus::EVENTS_PER_BATCH as u64;
@@ -609,8 +609,8 @@ fn bench_sensor_batch(c: &mut Criterion) {
         tags: Vec<String>,
     }
 
-    /// Emits the decoded batch straight into the restated flatten — the
-    /// entrant's `flat_map` stage, minus the engine around it.
+    /// Emits the decoded batch straight into the restated flatten, which is
+    /// the entrant's `flat_map` stage minus the engine around it.
     struct FlattenSink(u64);
     impl EmitRecord<'_, spate_avro::AvroValue> for FlattenSink {
         fn emit(&mut self, rec: Record<spate_avro::AvroValue>) -> Flow {

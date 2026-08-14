@@ -1,6 +1,6 @@
 //! E2E scenario: sink outage. ClickHouse is paused mid-stream; backpressure
 //! engages (observed via /metrics), and after recovery every record is
-//! delivered — at-least-once with bounded duplicates.
+//! delivered, at-least-once with bounded duplicates.
 //!
 //! `cargo test -p spate --test e2e_sink_outage -- --ignored` (requires Docker).
 
@@ -30,8 +30,8 @@ fn sink_outage_backpressures_and_loses_nothing() {
     h.create_table(&params.table);
     // Two waves: the second is produced only after the sink is frozen, so
     // the outage is guaranteed unwritable inflow. Producing everything
-    // upfront raced the pipeline — a fast run drained all rows before the
-    // pause landed and an idle sink feels no outage.
+    // upfront raced the pipeline: a fast run drained all rows before the
+    // pause landed, and an idle sink feels no outage.
     let all = events(partitions, total);
     let (first_wave, second_wave) = all.split_at(15_000);
     h.produce(&params.topic, first_wave);

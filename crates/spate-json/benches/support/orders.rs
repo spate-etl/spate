@@ -11,7 +11,7 @@
 //! Corpora only. The rig that decodes them is `decode_rig.rs`.
 
 // Each bench target compiles this module separately and uses a different
-// subset of it — the counted tier measures a case the wall tier leaves out.
+// subset of it: the counted tier measures a case the wall tier leaves out.
 // So an item is legitimately dead in one target while live in the other,
 // which is a module-wide `allow` rather than per-item `expect`: an `expect`
 // would itself go unfulfilled in whichever target does use the item.
@@ -38,7 +38,7 @@ pub(crate) struct Order {
     pub(crate) coupon: Option<String>,
 }
 
-/// One line of an order — the many-small-records workload the framing cases
+/// One line of an order, the many-small-records workload the framing cases
 /// batch. Do not change the field *types* (string, int, string, int, bool,
 /// float, string array) or the record's encoded size: both are what the
 /// counted tier compares against, and `tests/bench_fixtures.rs` pins the
@@ -99,17 +99,17 @@ pub(crate) fn ndjson(lines: &[LineItem]) -> Vec<u8> {
     out
 }
 
-/// One flat record as a single JSON document — the `single` framing's payload.
+/// One flat record as a single JSON document, the `single` framing's payload.
 pub(crate) fn order_document() -> Vec<u8> {
     serde_json::to_vec(&sample_order()).expect("encode an order")
 }
 
-/// `n` lines as a top-level JSON array — the `array` framing's payload.
+/// `n` lines as a top-level JSON array, the `array` framing's payload.
 pub(crate) fn lines_array(n: u64) -> Vec<u8> {
     serde_json::to_vec(&sample_lines(n)).expect("encode an array")
 }
 
-/// `n` lines newline-delimited — the `ndjson` framing's payload.
+/// `n` lines newline-delimited, the `ndjson` framing's payload.
 pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
     ndjson(&sample_lines(n))
 }
@@ -117,8 +117,8 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Poison-pill corpora.
 //
-// The deserializer's whole error-isolation story — drop a record and keep
-// going, or fail the payload without emitting a prefix — runs only on input
+// The deserializer's error isolation (drop a record and keep going, or fail
+// the payload without emitting a prefix) runs only on input
 // that does not decode, and every corpus above is valid by construction. These
 // build the same records with a known fraction of them broken, in a known way,
 // at a known position.
@@ -138,8 +138,8 @@ pub(crate) const RECORDS: u64 = 2_000;
 
 /// One record in this many is broken in the partial-poison corpora.
 ///
-/// Ten per cent is a rate a real stream reaches — a schema drift on one
-/// producer of ten — and it is far enough from both ends that the count is
+/// Ten per cent is a rate a real stream reaches, such as a schema drift on
+/// one producer of ten, and it is far enough from both ends that the count is
 /// neither the clean path with a rounding error on top nor the all-poison case
 /// under another name.
 pub(crate) const BAD_EVERY: u64 = 10;
@@ -152,12 +152,12 @@ pub(crate) const BAD_EVERY: u64 = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Corruption {
     /// The document with its closing brace removed. Every field parses, and
-    /// then the input ends — a *syntax* error (`is_data` false), reached after
-    /// the parser has done the whole document's work.
+    /// then the input ends, giving a *syntax* error (`is_data` false) reached
+    /// after the parser has done the whole document's work.
     Syntax,
     /// A well-formed document whose `sku` is a number where [`LineItem`] wants
-    /// a string. The parse succeeds and the *mapping* fails — a data error,
-    /// and the one a schema drift produces rather than a truncated write.
+    /// a string. The parse succeeds and the *mapping* fails, giving a data
+    /// error, the one a schema drift produces rather than a truncated write.
     ///
     /// Where in the record it fails is part of the workload, and it is not the
     /// declaration order: this document is built with `json!`, whose map is a
@@ -224,8 +224,8 @@ pub(crate) fn good_lines(records: u64, bad_every: u64) -> u64 {
 /// Late on purpose. Under `on_error: fail` the ndjson path decodes every line
 /// into a holding buffer before emitting any of them, so a payload that fails
 /// on its last line is the one that pays for the whole decode and then throws
-/// all of it away — the atomic path's worst case, and the one that says what
-/// atomicity costs.
+/// all of it away. That is the atomic path's worst case, and the one that
+/// says what atomicity costs.
 pub(crate) fn lines_ndjson_bad_last(records: u64, how: Corruption) -> Vec<u8> {
     let mut out = Vec::new();
     for i in 0..records - 1 {
@@ -238,7 +238,7 @@ pub(crate) fn lines_ndjson_bad_last(records: u64, how: Corruption) -> Vec<u8> {
 }
 
 /// `records` lines as a top-level array with only the **last** element
-/// broken — the array framing's counterpart to
+/// broken, the array framing's counterpart to
 /// [`lines_ndjson_bad_last`], and broken the same way at the same position
 /// so the pair differs in framing and nothing else.
 ///

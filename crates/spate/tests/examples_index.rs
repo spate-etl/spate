@@ -2,8 +2,8 @@
 //!
 //! The root README links a reader straight at the examples directory, so what
 //! they meet there is either a map or an unannotated file listing. An example
-//! missing from that map is one nobody finds, and nothing else in this
-//! repository breaks when it happens.
+//! missing from that map goes unfound, and nothing else in this repository
+//! breaks when it happens.
 //!
 //! The index is rendered from four fields in each example's own header:
 //!
@@ -25,8 +25,8 @@
 //! files. Note the marker word itself is deliberately not spelled out here:
 //! `scripts/transclude.sh` scans every file under `crates/` for it, so writing
 //! it in prose declares a region with an empty name and fails the gate.
-//! `required-features` is deliberately **not** among them — it is in the
-//! manifest, and a field duplicating the manifest is one that disagrees with it.
+//! `required-features` is **not** among them. It is in the manifest, and a
+//! field duplicating the manifest is one that disagrees with it.
 //!
 //! To accept a change:
 //!
@@ -192,7 +192,7 @@ struct Target {
 }
 
 /// Every `// INDEX-<FIELD>:` value in one source, in file order. Only a `//`
-/// line counts — a `//!` line is module prose, and the module docs come first
+/// line counts. A `//!` line is module prose, and the module docs come first
 /// in the file, so letting them match would let a sentence win over the field.
 fn index_fields(src: &str, field: &str) -> Vec<String> {
     let needle = format!("INDEX-{field}:");
@@ -208,9 +208,9 @@ fn index_fields(src: &str, field: &str) -> Vec<String> {
 /// none.
 ///
 /// Panics when the field is declared twice, or when its value carries a `|`.
-/// Both render a plausible file — a stale copy above the live block wins
-/// silently, and a `|` splits the table row into extra cells — which the
-/// snapshot below would then accept for good.
+/// Both render a plausible file that the snapshot below would then accept for
+/// good. A stale copy above the live block wins silently, and a `|` splits
+/// the table row into extra cells.
 fn index_field(src: &str, field: &str, example: &str) -> Option<String> {
     let found = index_fields(src, field);
     assert!(

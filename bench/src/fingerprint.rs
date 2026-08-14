@@ -1,7 +1,7 @@
 //! What a record says about the build and the machine that produced it.
 //!
 //! Two records are only comparable if they came from the same toolchain, the
-//! same target and the same profile — and, on the commit axis, the same resolved
+//! same target and the same profile, and, on the commit axis, the same resolved
 //! feature set. The comparator refuses on a mismatch rather than rendering the
 //! difference, so these fields are the ones that decide whether a report exists
 //! at all. The feature set is the exception, and [`Axis`] below is why.
@@ -12,9 +12,9 @@
 //! `host_os`, `host_cpu`, `host_cores` and `host_label`.
 //!
 //! Six of the ten are checked as soon as both legs have been built, before a
-//! single replicate is measured — a table drawn across two builds describes the
+//! single replicate is measured. A table drawn across two builds describes the
 //! toolchain rather than the change, and finding that out after ten minutes of
-//! measuring helps nobody. The four `host_*` fields are checked when the records
+//! measuring helps no one. The four `host_*` fields are checked when the records
 //! are compared instead: one process builds both legs, so it is the same machine
 //! by construction, and that check exists for two legs that were *not* produced
 //! together, which a bare `compare` accepts by design. `host_label` comes from
@@ -23,7 +23,7 @@
 //!
 //! `codegen` is the one that is not obvious. Both legs are built with `cargo
 //! bench`, so the profile *name* agrees by construction; `codegen` is a digest
-//! over the settings behind it — every `[profile...]` table in the root
+//! over the settings behind it: every `[profile...]` table in the root
 //! manifest, every `.cargo/config.toml` from the leg's directory upward, and the
 //! rustflags environment. `$CARGO_HOME`'s own config is deliberately left out:
 //! cargo reads it for every invocation whatever the directory, so it applies to
@@ -37,8 +37,8 @@
 //!
 //! # The axis is not one of them
 //!
-//! [`Axis`] says what the two legs vary — a commit or a feature arm — and it is
-//! deliberately outside the waivable set. Waiving it would not relax a check;
+//! [`Axis`] says what the two legs vary, a commit or a feature arm, and it is
+//! outside the waivable set. Waiving it would not relax a check;
 //! it would apply the wrong one, since the declared-build guard requires
 //! agreement on one axis and disagreement on the other. Two legs that disagree
 //! about it are refused alongside a transposed pair and a duplicated leg, in
@@ -52,12 +52,12 @@
 //!
 //! The driver, not the bench binary. A bench target compiled by cargo cannot
 //! see its own toolchain version, its host triple, or which features cargo
-//! resolved for it — and it must never resolve a git ref, because a `run`
+//! resolved for it, and it must never resolve a git ref, because a `run`
 //! against a worktree would then report the ref rather than the checkout. The
 //! driver knows all of it per leg, serialises it once, and passes it down the
 //! environment as [`FINGERPRINT_ENV`].
 //!
-//! A binary run by hand — `cargo bench --bench chain_wall -- --run …` — finds
+//! A binary run by hand, as `cargo bench --bench chain_wall -- --run …`, finds
 //! the variable unset and stamps [`BuildFingerprint::local`], whose unknown
 //! fields are absent rather than guessed. Two such records compare fine with
 //! each other and are refused against a driver-produced leg, which is the
@@ -97,15 +97,15 @@ pub const FIELD_FEATURES: &str = "features";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Axis {
-    /// Two builds compared as trees rather than as feature sets — what `ab`
+    /// Two builds compared as trees rather than as feature sets, which `ab`
     /// produces, and what a lone `run` records. They must compile the same
     /// subject: a difference there is a feature that moved, not a change to
     /// measure. The trees may be the same one, as in an A/A.
     #[default]
     Commit,
     /// Two builds of one tree at different features. They must compile
-    /// *different* subjects — that is what is being compared, and agreement
-    /// means the feature never reached the code.
+    /// *different* subjects, since that is what is being compared, and
+    /// agreement means the feature never reached the code.
     Arm,
 }
 
@@ -121,13 +121,13 @@ impl std::fmt::Display for Axis {
 /// Provenance for one leg of a comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildFingerprint {
-    /// Runner protocol the binary speaks — [`crate::protocol::PROTOCOL_VERSION`].
+    /// Runner protocol the binary speaks, [`crate::protocol::PROTOCOL_VERSION`].
     pub protocol: u32,
     /// Which side of the comparison this is: `base`, `head`, or `local`.
     pub leg: String,
     /// What the two legs of this comparison vary.
     ///
-    /// The same on both legs by construction — two legs disagreeing about it
+    /// The same on both legs by construction; two legs disagreeing about it
     /// are not one comparison, which [`crate::compare`] refuses. Defaulted for
     /// a leg written before the field existed, and for a hand-run binary, both
     /// of which mean the ordinary [`Axis::Commit`].
@@ -139,7 +139,7 @@ pub struct BuildFingerprint {
     /// The `host:` line of `rustc -vV`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_triple: Option<String>,
-    /// Cargo profile the binary was built with — `bench` for anything the
+    /// Cargo profile the binary was built with, `bench` for anything the
     /// driver builds. The *name* only; `codegen` covers the settings behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -169,7 +169,7 @@ pub struct BuildFingerprint {
     pub git_describe: Option<String>,
     /// Whether the leg's checkout had uncommitted changes.
     ///
-    /// Normal on the head leg — that is the change being measured — and a
+    /// Normal on the head leg, where it is the change being measured, and a
     /// warning on the base leg, which the driver checks out clean.
     pub dirty: bool,
 }
@@ -239,7 +239,7 @@ impl BuildFingerprint {
     ///
     /// `leg` is deliberately absent: it differs by construction, and a guard
     /// that flagged it would fire on every comparison. `git_describe` and
-    /// `dirty` are absent for the opposite reason — they differ on every
+    /// `dirty` are absent for the opposite reason: they differ on every
     /// *useful* comparison, since the whole point is two different trees.
     #[must_use]
     pub fn guarded_fields(&self) -> BTreeMap<&'static str, String> {
@@ -290,9 +290,9 @@ impl Host {
         fields.insert("host_cpu", self.cpu.clone());
         fields.insert("host_cores", self.cores.to_string());
         // The label too. Two runners of one instance type agree on os, cpu and
-        // core count exactly — which is the shape a dedicated benchmark host
-        // takes — so without this the one field whose whole purpose is naming
-        // the machine would be the one field that could not tell two apart.
+        // core count exactly, which is the shape a dedicated benchmark host
+        // takes, so without this the one field whose purpose is naming the
+        // machine would be the one field that could not tell two apart.
         fields.insert("host_label", self.label.clone());
         fields
     }
@@ -383,7 +383,7 @@ mod tests {
         assert!(local.host_triple.is_none());
         assert!(!local.dirty);
 
-        // Absent fields must not serialise at all — a `null` would compare
+        // Absent fields must not serialise at all; a `null` would compare
         // unequal to a driver leg that simply omitted them.
         let json = serde_json::to_string(&local).expect("serialises");
         assert!(!json.contains("rustc"), "{json}");
@@ -441,8 +441,8 @@ mod tests {
 
         // And the default is the one that cannot mislead: an old leg read as an
         // arm would have its build guard inverted, where read as a commit the
-        // worst case is a genuine arm leg refused for disagreeing about the
-        // axis — loud, rather than judged by the wrong rule.
+        // worst case is a real arm leg refused for disagreeing about the
+        // axis, which is loud rather than judged by the wrong rule.
         assert_eq!(Axis::default(), Axis::Commit);
     }
 

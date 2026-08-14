@@ -2,8 +2,8 @@
 //!
 //! Small, fixed and `&'static` on purpose. A generated event references these
 //! by borrowing, so producing one allocates nothing, and a downstream join or
-//! `GROUP BY` in a demo has a bounded number of groups — which is what makes a
-//! generated stream legible in a dashboard rather than a wall of unique keys.
+//! `GROUP BY` in a demo has a bounded number of groups, so the stream reads
+//! as a dashboard rather than a wall of unique keys.
 
 /// The regions an order can be placed from.
 pub const REGIONS: &[&str] = &["eu-west", "eu-north", "us-east", "us-west", "apac"];
@@ -22,7 +22,7 @@ pub const CUSTOMERS: u32 = 1024;
 /// List price per catalog entry, in cents, positionally aligned with
 /// [`SKUS`]. A stable price per unit is what lets a payment's
 /// `amount_cents` be recomputed from its order's lines, so the two can be
-/// checked against each other downstream instead of merely counted.
+/// checked against each other downstream instead of only counted.
 pub(crate) const UNIT_CENTS: &[u32] = &[
     7_900, 12_900, 18_900, 24_900, 3_500, 4_900, 7_900, 11_900, 129_000, 189_000, 249_000, 399_000,
     5_900, 9_900, 14_900, 22_900, 6_900, 10_900, 15_900, 21_900, 8_900, 13_900, 19_900, 27_900,

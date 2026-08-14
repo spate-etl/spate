@@ -21,7 +21,7 @@
 //! This is the source-side counterpart to the deserializer's in-memory
 //! [`ndjson`](crate::JsonFraming::Ndjson) framing, which splits a whole payload
 //! already resident in RAM (a Kafka message). `NdjsonFramer` is bounded and
-//! chunk-fed instead, for byte streams that never fit in memory — a source that
+//! chunk-fed instead, for byte streams that never fit in memory. A source that
 //! frames one record per payload pairs with the deserializer's `single` mode
 //! (the [`PerRecord`](spate_core::framing::FramingContract::PerRecord) contract).
 
@@ -33,10 +33,10 @@ use std::io;
 /// [`RecordFramer`].
 ///
 /// The framer knows nothing about JSON beyond the newline convention NDJSON
-/// guarantees — a JSON document never contains an unescaped newline, so every
+/// guarantees: a JSON document never contains an unescaped newline, so every
 /// `\n` is an unambiguous record boundary.
 ///
-/// Framing rules (pinned — changing any of them changes record indexes, which
+/// Framing rules (pinned; changing any of them changes record indexes, which
 /// is a resume-compatibility break for sources that checkpoint by index):
 ///
 /// - Records are split on `\n`. Exactly one trailing `\r` is stripped (CRLF

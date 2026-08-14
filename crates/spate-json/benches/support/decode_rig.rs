@@ -9,7 +9,7 @@
 //! regression and a wall-clock one are statements about one region rather than
 //! about two hand-copied ones that have since drifted apart.
 //!
-//! What stays in each target is the case list — which corpus, under which
+//! What stays in each target is the case list: which corpus, under which
 //! settings, expecting how many records. That is the part the two tiers are
 //! entitled to differ on: the counted tier can afford a case the wall tier
 //! would spend a minute of a person's afternoon on.
@@ -19,7 +19,7 @@
 //! bytes and no corpus type crosses this boundary.
 
 // Each includer compiles this module separately and uses a different subset of
-// it — the wall tier has no use for `decode_once`, which exists for the four
+// it, and the wall tier has no use for `decode_once`, which serves the four
 // reference cases gungraun calls exactly once. So an item is legitimately dead
 // in one target while live in another, which is a module-wide `allow` rather
 // than per-item `expect`: an `expect` would itself go unfulfilled in whichever
@@ -38,9 +38,9 @@ use std::hint::black_box;
 ///
 /// Generic over the record type so one sink serves the typed and the
 /// dynamically-typed arms. `Flow::Continue` unconditionally: the deserializer
-/// discards what `emit` returns — backpressure is handled between payloads,
-/// not inside one — so a sink that blocked would change nothing except this
-/// file.
+/// discards what `emit` returns, since backpressure is handled between
+/// payloads and not inside one, so a sink that blocked would change nothing
+/// except this file.
 pub(crate) struct Sink(pub(crate) u64);
 
 impl<T> EmitRecord<'_, T> for Sink {
@@ -94,15 +94,14 @@ where
 /// The measured work for the cases added after the reference four: one
 /// payload through one deserializer, returning how many records it emitted.
 ///
-/// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
-/// fail anything — it silently empties the measurement. Callgrind toggles
-/// collection on the benchmark function's module, and a toggle flips
-/// collection rather than forcing it on, so work the optimizer reshapes across
-/// that boundary leaves the region holding whatever else was running — usually
-/// the allocator tearing down the corpus. `deserialize` is generic over the
-/// record family and monomorphises into this crate, which makes it an ordinary
-/// inlining candidate; a named frame the optimizer may not erase is what keeps
-/// the decode inside the region.
+/// Removing `#[inline(never)]` fails nothing and silently empties the
+/// measurement. Callgrind toggles collection on the benchmark function's
+/// module, and a toggle flips collection rather than forcing it on, so work
+/// the optimizer reshapes across that boundary leaves the region holding
+/// whatever else was running, usually the allocator tearing down the corpus.
+/// `deserialize` is generic over the record family and monomorphises into this
+/// crate, which makes it an ordinary inlining candidate; a named frame the
+/// optimizer may not erase keeps the decode inside the region.
 ///
 /// The wall tier does not need the attribute and is not harmed by it: it times
 /// a region it opens and closes itself. Keeping one function for both tiers is
@@ -116,8 +115,8 @@ where
 ///
 /// Returning the emitted count is what keeps the call alive: the records are
 /// otherwise unobserved, and without a use the optimizer is free to delete the
-/// decode this exists to count. The caller asserts it, so a fixture that
-/// silently stopped emitting — or started decoding cleanly — cannot pass as a
+/// decode this function counts. The caller asserts it, so a fixture that
+/// silently stopped emitting, or started decoding cleanly, cannot pass as a
 /// fast one.
 #[inline(never)]
 pub(crate) fn decode_run<F, D>(rig: &mut Rig<D>) -> u64
@@ -137,8 +136,8 @@ where
 ///
 /// Separate from [`decode_run`] rather than folded into it with a flag: the
 /// two differ in what they assert, and an `Ok` from an `on_error: fail`
-/// fixture is a fixture that stopped being broken — which would leave the case
-/// quietly measuring the happy path under an error-path name.
+/// fixture is a fixture that stopped being broken, which would leave the case
+/// silently measuring the happy path under an error-path name.
 #[inline(never)]
 pub(crate) fn decode_run_err<F, D>(rig: &mut Rig<D>) -> u64
 where
@@ -182,16 +181,16 @@ pub(crate) fn install_recorder() {
 /// A rig whose decode backend, allocator and log limiter are already in the
 /// state a running pipeline's would be in.
 ///
-/// The warm pass is the single most load-bearing line in this file for the
-/// `simd` arm. That backend keeps its mutable scratch buffer and the parser's
-/// own reusable buffers in a thread-local, allocated lazily on first use —
-/// which, because gungraun calls the benchmark function exactly once, would
-/// otherwise be allocated *inside* the collected region and charged to the
-/// case as if it were per-record cost. The heap counts say so directly:
+/// The warm pass carries the `simd` arm. That backend keeps its mutable
+/// scratch buffer and the parser's own reusable buffers in a thread-local,
+/// allocated lazily on first use. Because gungraun calls the benchmark
+/// function exactly once, they would otherwise be allocated *inside* the
+/// collected region and charged to the case as per-record cost. The heap
+/// counts say so directly:
 /// compiling this pass out takes `large_string` from 7 allocated blocks to 15
 /// and from 525 KB to 2.4 MB, and every other counted case gains between eight
 /// and twenty-one blocks of the same scratch. The counted tier's reference
-/// cases still carry that charge and are the control that makes it visible —
+/// cases still carry that charge and are the control that makes it visible:
 /// `simd` allocates 19 blocks against `serde_json`'s 8 on `single_typed`, and
 /// reads between 12% and 22% above it depending on the architecture, where the
 /// warmed cases differ by a single block. The block counts are a property of
@@ -200,12 +199,12 @@ pub(crate) fn install_recorder() {
 ///
 /// Warming with the case's own payload rather than a token document is what
 /// makes it complete: both the scratch copy and the parser's buffers are sized
-/// to the input, so a small warm-up would leave the measured pass growing them
-/// — a smaller version of the same defect.
+/// to the input, so a small warm-up would leave the measured pass growing
+/// them, a smaller version of the same defect.
 ///
 /// The wall harness runs its own unmeasured warm-up before every region, so
 /// the thread-local would come warm there whether or not this ran. Keeping the
-/// pass is what makes the two tiers warm identically — and the harness calls
+/// pass is what makes the two tiers warm identically, and the harness calls
 /// `setup` on the thread that later runs the routine, so the thread-local this
 /// touches is the one the measured pass reads.
 ///
@@ -213,11 +212,11 @@ pub(crate) fn install_recorder() {
 /// already served and been returned the case's working set, so the measured
 /// pass allocates against populated free lists rather than off the top of a
 /// heap nothing has used, which is the state a pipeline decoding its millionth
-/// payload is in. That is not automatically the cheaper of the two — for the
+/// payload is in. That is not automatically the cheaper of the two: for the
 /// allocation-heavy cases a virgin heap is measurably cheaper, because a bump
-/// off the top costs less than a bin lookup — which is the point: the
-/// alternative is not a neutral measurement, it is the *first* payload a
-/// process ever decodes, and no pipeline spends its life there.
+/// off the top costs less than a bin lookup. The alternative is not a neutral
+/// measurement; it is the *first* payload a process ever decodes, and no
+/// pipeline spends its life there.
 ///
 /// And the rate limiter behind the skip warning has already seen whatever
 /// poison the payload carries. It allows five events per window, so what the
@@ -228,7 +227,7 @@ pub(crate) fn install_recorder() {
 /// one spends one of the five and leaves the measured drop taking the mutex
 /// and emitting an event. Under the wall tier every case converges on the
 /// first of those within the warm-up, because a region running thousands of
-/// iterations exhausts any window in its first few — which is the steady state
+/// iterations exhausts any window in its first few. That is the steady state
 /// a pipeline is in, and is why a wall case and its counted twin can differ
 /// here without either being wrong.
 ///
@@ -263,9 +262,9 @@ where
         expect,
     };
     let raw = raw_payload(&rig.payload);
-    // The result is deliberately ignored: an `on_error: fail` fixture returns
-    // here the very error its case is about, and the warm pass is not where
-    // that is asserted.
+    // The result is ignored: an `on_error: fail` fixture returns here the
+    // error its case is about, and the warm pass is not where that is
+    // asserted.
     let _ = rig.deser.deserialize(&raw, &rig.ack, &mut rig.sink);
     rig.sink.0 = 0;
     rig

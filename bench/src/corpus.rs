@@ -4,7 +4,7 @@
 //! Every case builds its own input in `setup`, on both legs, from the same
 //! seed. That is a claim rather than a guarantee: a change to a generator, a
 //! `HashMap` iteration order leaking into the build, a corpus sized from
-//! something environmental — any of those makes the two legs different
+//! something environmental: any of those makes the two legs different
 //! workloads, and the timing difference that follows reads exactly like a
 //! performance change.
 //!
@@ -20,7 +20,7 @@
 //! the comparator requires it to match: two legs that read different bytes are
 //! not measuring one thing.
 //!
-//! [`declare`](Corpus::declare) takes what *compiled* — a `cfg`-selected
+//! [`declare`](Corpus::declare) takes what *compiled*: a `cfg`-selected
 //! constant naming the subject a feature arm swapped in. It feeds a separate
 //! digest, and the comparator's requirement inverts with the axis: two builds
 //! of one commit must declare the same subject, and two feature arms must
@@ -35,7 +35,7 @@ use twox_hash::XxHash64;
 /// A running digest over everything a case fed its measured region, and a
 /// second over what it declared about the build.
 ///
-/// Sensitive to the label, the length and the order of every absorbed input —
+/// Sensitive to the label, the length and the order of every absorbed input;
 /// see `digest_is_sensitive_to_label_length_and_order`.
 #[derive(Debug)]
 pub struct Corpus {
@@ -87,12 +87,12 @@ impl Corpus {
     /// For what a feature arm swapped in rather than for what the region read:
     /// a `cfg`-selected constant naming the compiled subject. It does not move
     /// [`digest`](Self::digest) and it is not counted in
-    /// [`inputs`](Self::inputs) or [`bytes`](Self::bytes) — those describe the
+    /// [`inputs`](Self::inputs) or [`bytes`](Self::bytes), which describe the
     /// workload, and the workload is what has to match across a feature arm.
     ///
     /// Declare a value the compiler chooses, never one passed in by hand: a
-    /// label the caller types agrees across two arms whatever was actually
-    /// built, which is the failure this exists to catch.
+    /// label the caller types agrees across two arms whatever was built, which
+    /// is the failure this catches.
     pub fn declare(&mut self, label: &str, bytes: &[u8]) {
         fold(
             self.build.get_or_insert_with(|| XxHash64::with_seed(0)),
@@ -138,9 +138,9 @@ impl Corpus {
 ///
 /// Lengths are written as explicit little-endian bytes rather than through
 /// `write_u64`, whose default implementation is native-endian. The two legs of
-/// a comparison always share a host, so this cannot change an answer today —
-/// but a digest that quietly depended on the byte order of the machine would be
-/// a surprise waiting for whoever compares across one.
+/// a comparison always share a host, so this cannot change an answer today,
+/// but a digest that silently depended on the byte order of the machine would
+/// be a surprise waiting for whoever compares across one.
 fn fold(hasher: &mut XxHash64, label: &str, bytes: &[u8]) {
     hasher.write(&(label.len() as u64).to_le_bytes());
     hasher.write(label.as_bytes());
@@ -161,8 +161,8 @@ mod tests {
     }
 
     /// The three ways a corpus can differ while a naive digest stays equal.
-    /// Each one has happened to somebody: a renamed input, a re-split buffer,
-    /// and two inputs swapped by a refactor.
+    /// Each one is a real edit: a renamed input, a re-split buffer, and two
+    /// inputs swapped by a refactor.
     #[test]
     fn digest_is_sensitive_to_label_length_and_order() {
         let base = digest_of(&[("keys", b"abc"), ("values", b"def")]);

@@ -2,7 +2,7 @@
 //!
 //! "At-least-once" is a claim about the moment the sink stops answering, so
 //! this example makes it fail four ways and asserts what the framework does
-//! about each — no infrastructure, using `spate-test`'s scripted sink:
+//! about each, with no infrastructure, using `spate-test`'s scripted sink:
 //!
 //! ```sh
 //! cargo run -p spate --example sink_failures
@@ -22,13 +22,13 @@
 //!    source thread never blocks on a channel send: a blocked thread stops
 //!    servicing the control plane, so a rebalance or a shutdown that arrives
 //!    during a sink outage would never be seen. Pausing keeps the poll loop
-//!    turning with nothing to hand downstream, which is why the outage shows
-//!    up as `handle.paused_lanes()` rather than as a wedged thread.
+//!    turning with nothing to hand downstream, and the outage shows up as
+//!    `handle.paused_lanes()` rather than as a wedged thread.
 //!
-//! Each scenario runs its own pipeline under its own `pipeline.name` — a
+//! Each scenario runs its own pipeline under its own `pipeline.name`. A
 //! fatal outcome ends a run, so they cannot share one, and a gauge series
-//! has exactly one live owner per process (INV-10), so they cannot share a
-//! name either.
+//! has one live owner per process (INV-10), so they cannot share a name
+//! either.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  operating
@@ -64,8 +64,8 @@ fn prompt_pool() -> SinkPoolConfig {
     cfg
 }
 
-/// The same assembly for every scenario — a byte passthrough straight into
-/// the capturing sink — so the only thing that differs between them is how
+/// The same assembly for every scenario, a byte passthrough straight into
+/// the capturing sink, so the only thing that differs between them is how
 /// the sink is scripted to fail.
 fn assemble(
     config: &str,
@@ -97,9 +97,9 @@ fn assemble(
 // ── 1. A retryable write ───────────────────────────────────────────────
 //
 // The class of error every replicated sink sees hourly: a restarting node, a
-// dropped connection, a 503. The pool re-sends the *sealed* batch — same
-// rows, same deduplication token, so the destination can recognize the
-// replay — on the next replica in rotation.
+// dropped connection, a 503. The pool re-sends the *sealed* batch on the
+// next replica in rotation, with the same rows and the same deduplication
+// token, so the destination can recognize the replay.
 fn retryable_write() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
 pipeline: { name: sink-failures-retryable, threads: 1, io_threads: 2 }
@@ -220,7 +220,7 @@ sink: { capture: {} }
 
     // One replica stops answering. The probe covers every replica of every
     // shard and returns the first error it meets, so one bad endpoint fails
-    // readiness for the whole sink — 503 on `/readyz`, and an orchestrator
+    // readiness for the whole sink, giving 503 on `/readyz`, and an orchestrator
     // keeps new traffic off this instance. The runtime re-probes on a timer
     // rather than per request (every 30s while connected, every 5s while
     // failing), so the served endpoint follows within that window.
@@ -230,10 +230,9 @@ sink: { capture: {} }
         "one unreachable replica fails readiness for the sink"
     );
 
-    // Meanwhile the data plane is untouched — readiness and the write path
-    // are separate questions, and only the probe was scripted to fail — so
-    // records keep committing through the outage. Not ready is not the same
-    // as not working.
+    // Meanwhile the data plane is untouched. Readiness and the write path
+    // are separate questions, and only the probe was scripted to fail, so
+    // records keep committing through the outage.
     let during = *handle.push_many(p, ORDERS).last().expect("three offsets");
     assert!(
         handle.wait_committed(p, during + 1, Duration::from_secs(30)),
@@ -257,10 +256,10 @@ sink: { capture: {} }
 //
 // A dropped table, a revoked credential, a schema the sink will never
 // accept: retrying is pointless, so the batch is abandoned. Its records were
-// never acknowledged, so the partition watermark cannot pass them — and a
+// never acknowledged, so the partition watermark cannot pass them. A
 // stalled watermark is permanent, because acknowledgments only ever fail,
-// never un-fail. `checkpoint.stalled_fail_after` is what converts that into
-// a `Failed` exit instead of a process that reads the source forever and
+// never un-fail. `checkpoint.stalled_fail_after` converts that into a
+// `Failed` exit instead of a process that reads the source forever and
 // commits nothing.
 fn fatal_write() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
@@ -297,10 +296,10 @@ sink: { capture: {} }
         .wait_exit(Duration::from_secs(30))
         .expect("the stall watchdog fails the pipeline")?;
 
-    // The watermark is exactly where it was before the fatal write — never
-    // advanced over the records the sink never acknowledged, which is the
-    // whole of at-least-once (INV-1). Those records replay after a restart
-    // because the source was never told they were done.
+    // The watermark is where it was before the fatal write, never advanced
+    // over the records the sink never acknowledged (INV-1). Those records
+    // replay after a restart because the source was never told they were
+    // done.
     assert_eq!(
         handle.last_committed(p),
         Some(committed_before),
@@ -321,8 +320,8 @@ sink: { capture: {} }
     assert!(failure.reason.contains("stalled"), "{}", failure.reason);
     assert_ne!(report.exit_code(), 0, "the process must exit non-zero");
 
-    // Recovered, not propagated: `main` still returns `Ok`, because a failed
-    // pipeline is this scenario's expected outcome.
+    // `main` still returns `Ok`: a failed pipeline is this scenario's
+    // expected outcome, so the failure is recovered here and not propagated.
     println!(
         "\n3. fatal: watermark held at {committed_before} (records {first_doomed}..={last_doomed} \
          unacknowledged), exit code {} — {}",
@@ -336,15 +335,16 @@ sink: { capture: {} }
 //
 // The sink answers, eventually. Bytes admitted but not yet acknowledged pile
 // up against `backpressure.max_inflight_bytes`, and past the high watermark
-// the source lanes are paused — see the module docs for why that is a pause
+// the source lanes are paused; see the module docs for why that is a pause
 // and not a blocking send.
 //
-// The budget below is deliberately smaller than a full chunk queue, so a
-// handful of records crosses the high watermark: one shard at the default
-// capacity of eight holds 8 × 256B of queued chunks against a 1KiB budget.
-// Size a real deployment the other way round — `shards × queue_capacity ×
-// chunk.target_bytes` under the low watermark — or a saturated pipeline sits
-// permanently above the high watermark and duty-cycles at `min_pause`.
+// The budget below is smaller than a full chunk queue, so a handful of
+// records crosses the high watermark: one shard at the default capacity of
+// eight holds 8 × 256B of queued chunks against a 1KiB budget. Size a real
+// deployment the other way round, with `shards × queue_capacity ×
+// chunk.target_bytes` under the low watermark. Otherwise a saturated
+// pipeline sits permanently above the high watermark and duty-cycles at
+// `min_pause`.
 fn slow_sink() -> Result<(), Box<dyn std::error::Error>> {
     const CONFIG: &str = r#"
 pipeline: { name: sink-failures-slow, threads: 1, io_threads: 2 }
@@ -374,7 +374,7 @@ sink: { capture: { chunk: { target_bytes: 256B } } }
     let last = *handle.push_many(p, &backlog).last().expect("offsets");
 
     // The lane the source is polling is paused, by the source's own `pause`
-    // call — the mock records it, a Kafka source would pause the partition.
+    // call. The mock records it; a Kafka source would pause the partition.
     wait_until(Duration::from_secs(30), "lanes paused under load", || {
         !handle.paused_lanes().is_empty()
     });
@@ -416,7 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

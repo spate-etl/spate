@@ -1,6 +1,6 @@
 //! The byte-slice → value decode seam.
 //!
-//! Every JSON document is decoded from an in-memory `&[u8]` slice — never
+//! Every JSON document is decoded from an in-memory `&[u8]` slice, never
 //! `from_reader`, which serde_json's own docs note is slower than reading to a
 //! slice first and cannot borrow. The default backend is `serde_json`; the
 //! opt-in `simd` Cargo feature swaps [`decode_one`] to `simd-json`, leaving the
@@ -9,7 +9,7 @@
 //! `simd-json` parses a *mutable* buffer in place (it unescapes strings into the
 //! buffer), so the borrowed payload is copied into a reused thread-local scratch
 //! first, and the parser's own scratch [`Buffers`] are likewise reused across
-//! calls — both are per-message allocations a production integration avoids, so
+//! calls. Both are per-message allocations a production integration avoids, so
 //! the backend is charged only the unavoidable memcpy (measured at ~1% of the
 //! decode on flat and nested records; `decode_gungraun.rs`'s `large_string`
 //! case is where a copy would show). The structural
@@ -17,14 +17,15 @@
 //! `serde_json`: an off-by-default fidelity pass, not the hot path, keeping the
 //! duplicate-key error classification identical across backends.
 //!
-//! Decode itself is **not** byte-for-byte identical across the two backends —
-//! `simd-json` is a different parser. It rejects integer literals outside the
+//! Decode itself is **not** byte-for-byte identical across the two backends,
+//! because `simd-json` is a different parser. It rejects integer literals outside the
 //! `i64`/`u64` range that `serde_json` accepts (coercing to `f64`), so under
 //! `simd` such a document surfaces as a `malformed` decode error where
 //! `serde_json` would succeed; it normalizes `-0` to `0`; and, being a distinct
 //! parser, it does not honor serde_json's `arbitrary_precision` / `raw_value` /
-//! `float_roundtrip` cargo features. This is inherent to swapping parsers, not a
-//! bug to reconcile here — see the JSON connector guide's Backends section.
+//! `float_roundtrip` cargo features. This is inherent to swapping parsers
+//! rather than a bug to reconcile here; see the JSON connector guide's
+//! Backends section.
 //!
 //! [`Buffers`]: https://docs.rs/simd-json
 
@@ -33,8 +34,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 /// Identifier of the compiled decode backend, surfaced for benchmark and
-/// telemetry labels so an arm is tagged from the *actually compiled* code
-/// rather than a hand-passed label. The default backend is `serde_json`; the
+/// telemetry labels so an arm is tagged from the compiled code rather than a
+/// hand-passed label. The default backend is `serde_json`; the
 /// opt-in `simd` Cargo feature overrides it.
 #[cfg(feature = "simd")]
 pub const BACKEND_ID: &str = "simd-json";
@@ -46,15 +47,15 @@ pub const BACKEND_ID: &str = "serde_json";
 ///
 /// The framing/error-policy layer in `deser.rs` must classify a failure
 /// (`is_data`, to label a metric `duplicate_key` vs `malformed`) and report it
-/// (`Display`), but must not name a concrete backend's error type — swapping
-/// the decode backend must not ripple into `deser.rs`. Each backend maps its
+/// (`Display`), but must not name a concrete backend's error type, so
+/// swapping the decode backend does not ripple into `deser.rs`. Each backend maps its
 /// native error into this on the way out of [`decode_one`] /
 /// [`check_no_duplicate_keys`].
 #[derive(Debug)]
 pub(crate) struct DecodeError {
-    /// True when the input was well-formed JSON but semantically rejected — a
-    /// *data* error (a type mismatch, or the injected duplicate-key
-    /// rejection) — as opposed to a syntax/EOF error. Drives the
+    /// True when the input was well-formed JSON but semantically rejected,
+    /// making it a *data* error (a type mismatch, or the injected
+    /// duplicate-key rejection) as opposed to a syntax/EOF error. Drives the
     /// `duplicate_key` vs `malformed` metric label.
     pub(crate) is_data: bool,
     msg: String,
@@ -77,7 +78,7 @@ impl From<serde_json::Error> for DecodeError {
 
 /// Decode one complete JSON document from `bytes` into `T` (serde_json backend).
 ///
-/// serde_json borrows the immutable payload slice directly — no copy.
+/// serde_json borrows the immutable payload slice directly, with no copy.
 #[cfg(not(feature = "simd"))]
 #[inline]
 pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
@@ -124,7 +125,7 @@ pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeE
 ///
 /// serde_json is silently last-value-wins on duplicate keys; this is the
 /// opt-in guard behind `reject_duplicate_keys`. It is a separate structural
-/// pass (a document is parsed twice when the guard is on — the documented
+/// pass (a document is parsed twice when the guard is on, the documented
 /// cost), independent of the decode backend, so it stays on `serde_json` even
 /// when the decode backend is a SIMD parser.
 pub(crate) fn check_no_duplicate_keys(bytes: &[u8]) -> Result<(), DecodeError> {
@@ -136,7 +137,7 @@ pub(crate) fn check_no_duplicate_keys(bytes: &[u8]) -> Result<(), DecodeError> {
 }
 
 /// A throwaway shape that accepts any JSON value but rejects an object with a
-/// repeated key at any depth. It stores nothing — it exists only for its
+/// repeated key at any depth. It stores nothing and is used only for its
 /// [`Visitor`] side effect.
 struct DupGuard;
 
@@ -181,7 +182,7 @@ impl<'de> Visitor<'de> for DupVisitor {
         Ok(DupGuard)
     }
 
-    // Scalars carry no keys — accept and ignore.
+    // Scalars carry no keys, so accept and ignore.
     fn visit_bool<E>(self, _v: bool) -> Result<Self::Value, E> {
         Ok(DupGuard)
     }

@@ -1,9 +1,9 @@
-//! Two pipeline instances sharing one S3 backfill — the coordinated
+//! Two pipeline instances sharing one S3 backfill, the coordinated
 //! deployment story end to end, runnable without any infrastructure.
 //!
 //! Both instances point their `S3Source` at the same prefix and inject a
-//! coordinator over one shared store ([`S3Source::with_coordinator`] —
-//! the assembly seam). The elected leader lists the prefix **once** and
+//! coordinator over one shared store, through the assembly seam
+//! [`S3Source::with_coordinator`]. The elected leader lists the prefix **once** and
 //! packs it into splits; both workers lease splits, read them straight
 //! from the split descriptors, and commit fenced per-split progress.
 //! Neither replica duplicates the backfill and each exits `Completed`
@@ -11,8 +11,8 @@
 //!
 //! The shared in-process [`MemoryStore`] stands in for the durable
 //! backend (e.g. `spate-coordination`'s NATS JetStream store) both
-//! instances would point at in production — swap the store constructor
-//! and this is the real multi-process deployment.
+//! instances would point at in production. Swap the store constructor and
+//! this is the real multi-process deployment.
 //!
 //! ```sh
 //! cargo run -p spate --features s3,json,coordination --example s3_coordinated_backfill
@@ -37,8 +37,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// Demo-fast takeover; production leases are far higher (see the
-/// deployment guide). The store must be built from the SAME constant —
-/// the coordinator rejects a store whose TTL diverges from its
+/// deployment guide). The store must be built from the same constant,
+/// because the coordinator rejects a store whose TTL diverges from its
 /// `lease_duration`.
 const LEASE: Duration = Duration::from_secs(1);
 
@@ -47,11 +47,11 @@ const RECORDS_PER_OBJECT: usize = 50;
 
 fn config_yaml(data: &std::path::Path, instance: &str) -> String {
     // `split_target_bytes` at its floor keeps the per-object cost at
-    // 64KiB, so 48 small objects pack into three splits — enough for the
+    // 64KiB, so 48 small objects pack into three splits, enough for the
     // two workers to share. Real deployments keep the 64 MiB default.
     //
     // The pipeline name carries the instance because both run in *this*
-    // process, and a gauge series has exactly one live owner per process
+    // process, and a gauge series has one live owner per process
     // (INV-10). Two instances under one name is the same series claimed
     // twice. In production each instance is its own process and they share
     // a name; here the label has to do what the process boundary would.
@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     /// The example is the test. `cargo run --example` still runs `main`;
     /// under `--test` the harness makes `main` an ordinary function and this
-    /// its only caller, so the assertions above stop being decorative.
+    /// its only caller.
     #[test]
     fn runs_to_completion() {
         super::main().expect("the example must run clean");

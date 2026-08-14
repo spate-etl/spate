@@ -1,16 +1,16 @@
-//! The `chunk:` sink sub-section — the wire form of [`ChunkConfig`].
+//! The `chunk:` sink sub-section, the wire form of [`ChunkConfig`].
 //!
 //! [`ChunkConfig`] lives in [`crate::ops`] as a plain runtime tuning struct
 //! read on the terminal stage's hot path. This module is its config-layer
-//! mirror: it keeps serde and the `bytesize` wire form off that runtime type's
-//! semver surface. (Unlike `BatchConfig` and friends in [`crate::sink::config`]
-//! — deliberately single dual-purpose wire-and-runtime types — the hot-path
-//! `ChunkConfig`/[`ErrorPolicy`] pair must not grow a serde surface, so the
-//! wire form is this separate mirror; the shared convention is only the
-//! `bytesize` field syntax.) The framework peels this block out of the
-//! connector body (see [`ComponentConfig`](super::ComponentConfig)) and
-//! resolves it into a [`ChunkConfig`] at assembly time, so connectors never
-//! see it and need no `chunk` field of their own.
+//! mirror, keeping serde and the `bytesize` wire form off that runtime type's
+//! semver surface. The hot-path `ChunkConfig`/[`ErrorPolicy`] pair must not
+//! grow a serde surface; the only convention it shares with
+//! [`crate::sink::config`] is the `bytesize` field syntax.
+//!
+//! The framework peels this block out of the connector body (see
+//! [`ComponentConfig`](super::ComponentConfig)) and resolves it into a
+//! [`ChunkConfig`] at assembly time, so connectors never see it and need no
+//! `chunk` field of their own.
 
 use super::ConfigError;
 use crate::error::ErrorPolicy;
@@ -19,15 +19,14 @@ use bytesize::ByteSize;
 use serde::{Deserialize, Deserializer};
 
 /// Accept `64KiB`-style sizes on the wire while keeping the field a plain
-/// `u64`. Duplicated from [`crate::sink::config`] rather than widening its API
-/// for a three-line helper.
+/// `u64`. Duplicated from [`crate::sink::config`].
 fn de_byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     ByteSize::deserialize(d).map(|b| b.as_u64())
 }
 
 /// The record-level encoder-failure policy as it appears on the wire
-/// (`skip` | `fail`). A tiny shim so [`ErrorPolicy`] — a `#[non_exhaustive]`
-/// runtime type — need not carry serde derives or wire tokens.
+/// (`skip` | `fail`). Keeps serde derives and wire tokens off the
+/// `#[non_exhaustive]` runtime type [`ErrorPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum EncodePolicyWire {
@@ -59,9 +58,9 @@ pub(crate) struct ChunkSection {
 
 impl Default for ChunkSection {
     fn default() -> Self {
-        // Delegate to the runtime default so 64 KiB / Skip live in exactly one
-        // place. NB `ErrorPolicy::default()` is `Fail`, but the chunk encode
-        // default is `Skip` — this must never become a field-wise derive.
+        // Delegate to the runtime default so 64 KiB / Skip live in one place.
+        // `ErrorPolicy::default()` is `Fail`, but the chunk encode default is
+        // `Skip`. This must not become a field-wise derive.
         let ChunkConfig {
             target_bytes,
             encode_policy,
@@ -110,8 +109,8 @@ mod tests {
 
     #[test]
     fn empty_block_is_the_runtime_default_including_skip() {
-        // Risk A: an omitted/empty `chunk:` must land on 64 KiB AND `Skip`,
-        // not `ErrorPolicy::default()` which is `Fail`.
+        // An omitted/empty `chunk:` must land on 64 KiB AND `Skip`, not
+        // `ErrorPolicy::default()` which is `Fail`.
         let cfg = parse("{}").unwrap().resolve().unwrap();
         assert_eq!(cfg.target_bytes, 64 * 1024);
         assert_eq!(cfg.encode_policy, ErrorPolicy::Skip);

@@ -81,7 +81,8 @@ fn source_and_sink_receive_role_scoped_meters() {
         .collect();
     assert_eq!(rows, vec![b"alpha".to_vec(), b"beta".to_vec()]);
 
-    // `install` is idempotent — reuse the pipeline's global handle to render.
+    // `install` is idempotent, so this reuses the pipeline's global handle to
+    // render.
     let rendered = install(&MetricsSettings {
         exporter: Exporter::Prometheus,
         ..MetricsSettings::default()

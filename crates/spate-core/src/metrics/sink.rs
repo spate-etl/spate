@@ -38,15 +38,10 @@ impl FlushReason {
 /// Outcome of one sink write attempt (the `outcome` label on
 /// `spate_sink_write_duration_seconds`).
 ///
-/// One family with a label rather than two names, which is the opposite of
-/// the call made for the two coordination latencies — the distinction is
-/// that those measure different things on different clocks with different
-/// denominators, so a shared family would assert a composition that does not
-/// exist. These two are the same measurement (time inside `write_batch`)
-/// over the same population (attempts), so the aggregate is well-defined; it
-/// is merely the wrong *diagnostic*, which a label documents and a split name
-/// would over-state. It also matches `outcome` on the three counter families
-/// that already use it.
+/// One family with a label rather than two names, matching `outcome` on the
+/// three counter families that already use it. Both outcomes are the same
+/// measurement (time inside `write_batch`) over the same population
+/// (attempts), so the aggregate is well-defined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum AttemptOutcome {
@@ -106,11 +101,11 @@ impl SinkShardMetrics {
     /// selects the time base for `spate_e2e_latency_seconds`; [the metrics
     /// reference] carries what each basis measures.
     ///
-    /// Call **after** [`install`](crate::metrics::install): handles bind to
+    /// Call **after** [`install`](crate::metrics::install). Handles bind to
     /// the recorder present at construction, and a handle built before the
     /// exporter exists silently records into the void.
     ///
-    /// Claims this shard's series — the labels plus `shard` — so that only one
+    /// Claims this shard's series (the labels plus `shard`) so that only one
     /// live handle set publishes them. The gauges here are edge-triggered
     /// (health flips on a breaker transition, backoff on a retry), so a second
     /// writer's reading would stand until the owner's next transition, which
@@ -157,8 +152,8 @@ impl SinkShardMetrics {
         e2e_basis: E2eBasis,
         claim: Option<SeriesClaim>,
     ) -> Self {
-        // Resolved before any handle is written: the initial publishes below
-        // are exactly the writes that would clobber a live owner's reading.
+        // Resolved before any handle is written. The initial publishes below
+        // are the writes that would clobber a live owner's reading.
         let owned = claim.is_some();
         let shard: SharedString = shard.to_string().into();
         let replicas = replicas
@@ -200,10 +195,10 @@ impl SinkShardMetrics {
         );
         shard_healthy.set(1.0);
         // Published as `0` from construction rather than left absent until the
-        // first retry: "this shard is not backing off" is true of a shard that
-        // has never written, so there is no measurement to wait for. (Contrast
-        // `spate_source_lag_records`, where absence carries information — see the
-        // "Absent, zero, and stale" section of `docs/METRICS.md`.)
+        // first retry. "This shard is not backing off" is true of a shard that
+        // has never written. (Contrast `spate_source_lag_records`, where
+        // absence carries information; see the "Absent, zero, and stale"
+        // section of `docs/METRICS.md`.)
         let retry_backoff = OwnedGauge::new(
             labels.gauge1(
                 names::SINK_RETRY_BACKOFF_SECONDS,
@@ -339,12 +334,12 @@ impl SinkShardMetrics {
     /// permit, every failed attempt, every retry-backoff sleep and
     /// all-replicas-quarantined probe wait, and the write that finally
     /// succeeded. It is the right input for a commit-lag budget and the wrong
-    /// one for "how fast is the sink" — [`write_attempt`](Self::write_attempt)
+    /// one for "how fast is the sink". [`write_attempt`](Self::write_attempt)
     /// answers that, and [`permit_waited`](Self::permit_waited) the queueing
     /// share.
     ///
     /// Only settled batches are observed. An abandoned one never reaches
-    /// here — whether it was aborted at the drain deadline, rejected with a
+    /// here, whether it was aborted at the drain deadline, rejected with a
     /// fatal class, exhausted `retry.max_attempts`, or died with a panicking
     /// write task. All four are counted by [`abandoned`](Self::abandoned),
     /// and the last three happen in steady state with no drain in sight.
@@ -366,28 +361,29 @@ impl SinkShardMetrics {
     /// Observe one write attempt: the time inside
     /// [`ShardWriter::write_batch`](crate::sink::ShardWriter::write_batch) and
     /// nothing else *of the framework's own*. Every attempt is observed,
-    /// retries included, so this is the sink system's round-trip distribution
-    /// — the signal `spate_sink_flush_duration_seconds` cannot give, because it
-    /// also carries the permit wait and the sleeps between attempts.
+    /// retries included, so this is the sink system's round-trip
+    /// distribution. `spate_sink_flush_duration_seconds` cannot give that
+    /// signal, because it also carries the permit wait and the sleeps between
+    /// attempts.
     ///
     /// "Nothing else" is bounded by the writer's own implementation: a
     /// connector that sleeps *inside* `write_batch` puts that sleep in here.
-    /// The Kafka sink does exactly this when the producer queue is full, and
-    /// the wall-clock also charges whatever the sink's I/O runtime was busy
-    /// with at each await point. What is excluded is the framework's
-    /// scheduling around the call — the permit wait, the retry backoff, and
-    /// the all-replicas-quarantined probe wait.
+    /// The Kafka sink does this when the producer queue is full, and the
+    /// wall-clock also charges whatever the sink's I/O runtime was busy with
+    /// at each await point. The framework's scheduling around the call is
+    /// excluded, namely the permit wait, the retry backoff, and the
+    /// all-replicas-quarantined probe wait.
     ///
     /// `outcome` splits the family: a batch rejected fatally in a millisecond
     /// and one that times out after thirty seconds are both attempts, and
     /// mixing them moves the distribution in opposite directions. The error's
     /// taxonomy class stays on [`errors`](Self::errors).
     ///
-    /// An attempt aborted at the drain deadline is never observed — the write
+    /// An attempt aborted at the drain deadline is never observed; the write
     /// task is dropped mid-call, and a histogram observation is a point event
     /// with nothing to strand (contrast
-    /// [`backing_off`](Self::backing_off), whose guard exists precisely to
-    /// survive that abort). Attempts that *completed* before the abort are
+    /// [`backing_off`](Self::backing_off), whose guard survives that abort).
+    /// Attempts that *completed* before the abort are
     /// observed as usual, so an abandoned batch can leave `error`
     /// observations here with no matching flush.
     #[inline]
@@ -400,15 +396,14 @@ impl SinkShardMetrics {
     }
 
     /// Observe how long a sealed batch waited for one of its shard's
-    /// `inflight.max_per_shard` slots before its first write attempt — the
-    /// queueing share of a flush, and the reading that tells a healthy-but-slow
-    /// dashboard apart from a saturated one.
+    /// `inflight.max_per_shard` slots before its first write attempt. This is
+    /// the queueing share of a flush, and the reading that tells a
+    /// healthy-but-slow dashboard apart from a saturated one.
     ///
     /// Observed for every sealed batch that starts a write, including the
-    /// healthy case where the permit is free and the observation is ~0: a
-    /// family that appeared only under contention would read as absent
-    /// precisely when an operator wants to confirm there is none. A batch the
-    /// drain deadline drops before it ever gets a permit is not observed
+    /// healthy case where the permit is free and the observation is ~0. A
+    /// batch the drain deadline drops before it ever gets a permit is not
+    /// observed
     /// (there is no wait that ended), and is counted by
     /// [`abandoned`](Self::abandoned).
     #[inline]
@@ -427,27 +422,26 @@ impl SinkShardMetrics {
     ///
     /// `spate_sink_retry_backoff_seconds` reads the **max** across the shard's
     /// backing-off batches (a shard writes up to `inflight.max_per_shard` of
-    /// them at once, each with its own backoff), and `0` once none is — so it
-    /// answers "how long is this shard currently sleeping between attempts",
-    /// which no combination of the other sink series can.
+    /// them at once, each with its own backoff), and `0` once none is backing
+    /// off. It answers "how long is this shard currently sleeping between
+    /// attempts".
     ///
-    /// The value is the step being served, not the time left in it: it does
+    /// The value is the step being served, not the time left in it. It does
     /// not count down while the sleep runs.
     ///
     /// Scope: the sleep between attempts *on an available replica*. A shard
-    /// whose every replica is quarantined also sleeps — waiting for the
-    /// earliest of a probe window and an in-flight probe reporting — and
-    /// reads `0` throughout, because no attempt is being backed off.
-    /// `spate_sink_shard_healthy == 0` is that state's signal: the write loop
-    /// waits only when no replica is circuit-closed, which is the definition
-    /// of that gauge. The implication runs one way — a shard with no
-    /// circuit-closed replica can still be handing out a half-open probe, and
-    /// so not be waiting at all — so shard health *covers* the wait rather
-    /// than coinciding with it. That is the safe direction: alerting on it
-    /// cannot miss a parked shard.
+    /// whose every replica is quarantined also sleeps, waiting for the
+    /// earliest of a probe window and an in-flight probe reporting, and reads
+    /// `0` throughout, because no attempt is being backed off.
+    /// `spate_sink_shard_healthy == 0` is that state's signal, since the write
+    /// loop waits only when no replica is circuit-closed. The implication runs
+    /// one way. A shard with no circuit-closed replica can still be handing
+    /// out a half-open probe, and so not be waiting at all, so shard health
+    /// *covers* the wait rather than coinciding with it. Alerting on it cannot
+    /// miss a parked shard.
     ///
     /// Clearing is tied to the guard's `Drop` rather than to a settle/abandon
-    /// call because the sleeping task can be *aborted* — the sink's drain
+    /// call because the sleeping task can be *aborted*; the sink's drain
     /// deadline cancels in-flight writes wherever they are parked. Dropping
     /// the task future drops the guard, so an abandoned batch cannot strand
     /// the gauge at a value the shard is no longer sleeping.
@@ -456,7 +450,7 @@ impl SinkShardMetrics {
     ///
     /// Debug builds only: `batch` must be unique among this shard's *live*
     /// guards. Two live guards sharing a key collapse to one entry, and the
-    /// first `Drop` withdraws both contributions — the gauge would then read
+    /// first `Drop` withdraws both contributions, so the gauge would read
     /// `0` while the other sleep is still running. In-tree the key is the
     /// batch sequence number, which is monotonic per shard.
     #[must_use]
@@ -477,10 +471,10 @@ impl SinkShardMetrics {
     /// Mutate the backing-off set and republish the max (`0` when empty).
     /// Called only from the retry path, never per record.
     fn publish_backoff(&self, mutate: impl FnOnce(&mut HashMap<u64, f64>)) {
-        // Poison-tolerant because this also runs from `BackoffGuard::drop`:
-        // a panicking `expect` there, reached while already unwinding, aborts
+        // Poison-tolerant because this also runs from `BackoffGuard::drop`.
+        // A panicking `expect` there, reached while already unwinding, aborts
         // the process. The critical section only inserts, removes and folds,
-        // so a poisoned map is not a corrupt one — recovering it publishes a
+        // so a poisoned map is not a corrupt one; recovering it publishes a
         // stale reading at worst.
         let mut steps = self
             .backoff_steps
@@ -488,15 +482,15 @@ impl SinkShardMetrics {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         mutate(&mut steps);
         let max = steps.values().copied().fold(0.0_f64, f64::max);
-        // Published *under* the lock, deliberately. Releasing it first lets
-        // two publishers' `set` calls land in the opposite order from the
-        // snapshots they computed, stranding the gauge at a value no batch is
-        // serving — until the next mutation, which is `retry.max` away under
-        // a patient policy and never once the shard recovers. Two write tasks
+        // Published *under* the lock. Releasing it first lets two publishers'
+        // `set` calls land in the opposite order from the snapshots they
+        // computed, stranding the gauge at a value no batch is serving. That
+        // lasts until the next mutation, which is `retry.max` away under a
+        // patient policy and never once the shard recovers. Two write tasks
         // per shard is the default (`inflight.max_per_shard: 2`) on a
-        // multi-threaded I/O runtime, so this is the ordinary case, not a
-        // corner one. `Gauge::set` is an atomic store that cannot re-enter
-        // this function, so holding the lock across it cannot deadlock.
+        // multi-threaded I/O runtime. `Gauge::set` is an atomic store that
+        // cannot re-enter this function, so holding the lock across it cannot
+        // deadlock.
         self.retry_backoff.set(max);
     }
 
@@ -538,7 +532,7 @@ impl SinkShardMetrics {
     }
 
     /// Record whether the shard has at least one circuit-closed replica.
-    /// Level-set and idempotent — the shard's breaker set republishes it on
+    /// Level-set and idempotent. The shard's breaker set republishes it on
     /// every write outcome, not only on a transition, so a reading that has
     /// gone stale corrects itself within one probe cycle.
     pub fn set_shard_healthy(&self, up: bool) {
@@ -552,7 +546,7 @@ impl SinkShardMetrics {
 
     /// Record that this shard's worker had to be force-aborted because it did
     /// not return by the drain deadline. A framework bug, not an operating
-    /// condition — see `SinkPool::drain`.
+    /// condition; see `SinkPool::drain`.
     pub fn drain_overrun(&self) {
         self.drain_overrun.increment(1);
     }
@@ -560,8 +554,8 @@ impl SinkShardMetrics {
 
 /// One batch's contribution to `spate_sink_retry_backoff_seconds`, held for the
 /// duration of a backoff sleep. Returned by
-/// [`SinkShardMetrics::backing_off`]; dropping it — including by the write
-/// task being aborted mid-sleep — withdraws this batch's step and republishes
+/// [`SinkShardMetrics::backing_off`]; dropping it (including by the write
+/// task being aborted mid-sleep) withdraws this batch's step and republishes
 /// the shard's max, `0` when it was the last one sleeping.
 #[derive(Debug)]
 pub struct BackoffGuard<'a> {

@@ -13,8 +13,8 @@
 //! cheap enough to carry the interior points of both sweeps; the
 //! instruction-count sibling in `benches/chain_gungraun.rs` takes only their
 //! endpoints. The last two cases are the microscopic floor the router sweep is
-//! read against — the hash and the modulo on their own, with no chain around
-//! them.
+//! read against, namely the hash and the modulo on their own, with no chain
+//! around them.
 //!
 //! The rigs live in `benches/support/chain_rig.rs`, shared with the counted
 //! tier and pinned by `tests/bench_fixtures.rs`.
@@ -24,18 +24,18 @@
 //! # Reading these numbers
 //!
 //! - **No wall-clock figure is comparable between `chain_borrowed` and
-//!   `chain_owned`.** The two arms fan out differently — the borrowed one's
+//!   `chain_owned`.** The two arms fan out differently. The borrowed one's
 //!   `flat_map` emits three sub-records per payload against the owned one's
-//!   one — so neither `records_per_s` nor `bytes_per_s` is like-for-like, and a
+//!   one, so neither `records_per_s` nor `bytes_per_s` is like-for-like, and a
 //!   ratio between them is not a quantity this rig measures. The shared input
-//!   denominator makes `bytes_per_s` read as though it were; it is not. What
-//!   the pair establishes is the **allocation** contrast — a fixed handful per
-//!   batch against one per record — which is what ADR-0013 records the
-//!   zero-copy seam on. Each arm is read against its own history across two
-//!   builds, which is all an A/B comparison ever claims.
+//!   denominator makes `bytes_per_s` read as though it were; it is not. The
+//!   pair establishes the **allocation** contrast, a fixed handful per batch
+//!   against one per record, which is the seam ADR-0013 records. Each arm is
+//!   read against its own history across two builds, which is all an A/B
+//!   comparison ever claims.
 //! - **The keyed arms declare payload bytes only**, not payload plus key.
 //!   Folding the keys in would give those arms a 21% larger numerator and
-//!   flatten routing in exactly the cases that exist to price it. The
+//!   flatten routing in the cases that price it. The
 //!   denominator is what the chain ingests as *payload*, held fixed across
 //!   every case here so the sweeps move against one constant.
 //! - **The state is a `RefCell`** because the harness hands a case's routine
@@ -45,14 +45,13 @@
 //! # What the measured region carries that production does not
 //!
 //! `Rig::drive` mints a fresh `AckRef::test_pair()` and sweeps every shard
-//! receiver inside the region — in production a source owns the first and a
+//! receiver inside the region. In production a source owns the first and a
 //! shard worker the second. Both legs pay it, so it sits in the baseline rather
 //! than in the difference, but it is why a shard-count case is read against its
 //! own single-shard sibling rather than in absolute terms.
 //!
 //! Nothing returns bytes to the `InflightBudget`, so it climbs across a
-//! calibrated run — further than it ever did under the retired weekly target,
-//! which drove far fewer iterations. It stays cost-neutral: the seal path's
+//! calibrated run. It stays cost-neutral. The seal path's
 //! `add` is one value-independent atomic on a bare `AtomicUsize` with no cap,
 //! and nothing in the rig reads `usage()`, so it cannot flip `push_batch` onto
 //! the park path. A rig that grew a component which *does* read it would need a
@@ -85,7 +84,7 @@ const BORROWED_ROWS: u64 = BATCH as u64 * 3;
 /// Shards the standalone routing case spreads over.
 ///
 /// Sixteen rather than one, so the modulo has something to divide and the
-/// result is a real spread — the keyed corpus hits all sixteen residues.
+/// result spreads; the keyed corpus hits all sixteen residues.
 const ROUTE_SHARDS: usize = 16;
 
 /// The default chunk target: above everything one batch encodes, so a chunk
@@ -98,9 +97,9 @@ fn default_target() -> usize {
 ///
 /// Both blobs are absorbed unconditionally. A keyless corpus contributes a
 /// zero-length `"keys"`, which still carries its label and length into the
-/// digest — so every case built on a rig absorbs the same shape, and a keyed
+/// digest, so every case built on a rig absorbs the same shape, and a keyed
 /// corpus can never digest equal to a keyless one. The two floor cases at the
-/// end of the file do not use this helper: they drive a corpus without a chain
+/// end of the file do not use this helper; they drive a corpus without a chain
 /// around it and absorb only the keys.
 fn absorb(corpus: &mut spate_bench::Corpus, rig: &Rig) {
     let built = rig.corpus();
@@ -139,8 +138,8 @@ fn suite() -> Suite {
     // --- the borrowed/owned contrast ---------------------------------------
     //
     // The headline pair. Same corpus, same shape, and one virtual call per
-    // batch either way; what separates them is a copy per record, which is the
-    // cost the zero-copy design exists to avoid.
+    // batch either way; what separates them is a copy per record, the cost the
+    // zero-copy design avoids.
     let suite = batch_case(suite, "chain_borrowed", borrowed_rig);
     let suite = suite
         .case(
@@ -164,7 +163,7 @@ fn suite() -> Suite {
     // Read `chain_keyed_one_shard` against `chain_borrowed`: same records, same
     // chunking, but every key hashed during deserialization and a real modulo
     // per record. The shard cases then hold routing fixed and vary only how
-    // many buffers, encoder clones and `AckSet`s the stage carries — and how
+    // many buffers, encoder clones and `AckSet`s the stage carries, and how
     // many chunks `flush` seals.
     let suite = batch_case(suite, "chain_keyed_one_shard", || {
         borrowed_rig_with(Routing::KeyHash, 1, default_target())
@@ -182,7 +181,7 @@ fn suite() -> Suite {
     // them inside `push`: each target divides the batch's encoding exactly, so
     // the buffer reaches it on a sub-record boundary and `flush` finds the
     // shard empty. Everything else matches `chain_borrowed`, so the difference
-    // is `seal_and_send` — `BytesMut::split`, the fresh `reserve`, the
+    // is `seal_and_send`, namely `BytesMut::split`, the fresh `reserve`, the
     // in-flight budget update, the `AckSet` hand-off, the next chunk's
     // `Instant::now` and the queue `try_send`.
     let suite = batch_case(suite, "chain_chunk_half_batch", || {
@@ -201,8 +200,8 @@ fn suite() -> Suite {
     // nothing else around them. Both fold the whole corpus into one iteration
     // rather than measuring a single call: a lone `stable_key_hash` is a few
     // nanoseconds, which the harness refuses as indistinguishable from an empty
-    // loop — and rightly, since a timer cannot resolve it. Folding is also what
-    // gives `black_box` a value to hold, so neither call can be optimized away.
+    // loop because a timer cannot resolve it. Folding is also what gives
+    // `black_box` a value to hold, so neither call can be optimized away.
     suite
         .case(
             "chain_stable_key_hash",
@@ -219,7 +218,7 @@ fn suite() -> Suite {
             },
         )
         .items(BATCH as u64)
-        // The keys are what this case ingests, so here they *are* the corpus —
+        // The keys are what this case ingests, so here they *are* the corpus,
         // unlike the chain cases above, where they sit beside the payload.
         .bytes(BATCH as u64 * 8)
         .done()
@@ -247,11 +246,11 @@ fn suite() -> Suite {
                 b.iter(|| {
                     // The shard count has to stay opaque. `KeyHashRouter::route`
                     // takes it modulo the record's hash, and a literal power of
-                    // two folds that division into a mask — roughly four times
+                    // two folds that division into a mask, roughly four times
                     // cheaper than the divide the terminal stage issues, where
                     // the count is `self.shards.len()` at run time. Without this
-                    // the case still runs and still reports a stable figure; it
-                    // is just not a floor the sweep above can be read against.
+                    // the case still runs and still reports a stable figure, but
+                    // it is not a floor the sweep above can be read against.
                     let shards = std::hint::black_box(ROUTE_SHARDS);
                     metas
                         .iter()

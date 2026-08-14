@@ -1,8 +1,7 @@
 //! Bounded per-shard chunk queues: the pipeline→sink handoff.
 //!
-//! Senders live on pipeline threads and only ever `try_send` (the
-//! backpressure invariant — never block a poll loop); receivers live in
-//! shard worker tasks on the I/O runtime.
+//! Senders live on pipeline threads and only ever `try_send`, so a poll loop
+//! never blocks; receivers live in shard worker tasks on the I/O runtime.
 
 use super::EncodedChunk;
 use crate::metrics::{ComponentLabels, MetricsError, QueueMetrics};
@@ -52,8 +51,8 @@ impl ShardQueues {
                 }
                 (Err(ChunkSendError(c)), true)
             }
-            // A closed queue is shutdown, not backpressure — don't count it, and
-            // don't sample a depth from a torn-down channel.
+            // A closed queue is shutdown rather than backpressure. Don't count
+            // it, and don't sample a depth from a torn-down channel.
             Err(mpsc::error::TrySendError::Closed(c)) => (Err(ChunkSendError(c)), false),
         };
         // Sample depth from the live channel, mirroring the `all_below` fill
@@ -70,9 +69,9 @@ impl ShardQueues {
     /// producer clone shares the same handles.
     ///
     /// Fails when another live handle set already owns one of these queue
-    /// edges — two pipelines with the same names in one process. The depth
-    /// gauge cannot be shared, so the caller refuses to build rather than
-    /// letting two writers alternate readings.
+    /// edges, meaning two pipelines with the same names in one process. The
+    /// depth gauge cannot be shared, so the caller refuses to build rather
+    /// than letting two writers alternate readings.
     pub(crate) fn attach_metrics(&mut self, labels: &ComponentLabels) -> Result<(), MetricsError> {
         let metrics = (0..self.senders.len())
             .map(|i| {
@@ -83,8 +82,8 @@ impl ShardQueues {
         Ok(())
     }
 
-    /// Whether every shard queue is below `ratio` of its capacity —
-    /// the resume condition the backpressure controller asks about.
+    /// Whether every shard queue is below `ratio` of its capacity, the resume
+    /// condition the backpressure controller asks about.
     #[must_use]
     pub fn all_below(&self, ratio: f64) -> bool {
         let threshold = (self.capacity as f64 * ratio) as usize;

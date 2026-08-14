@@ -5,12 +5,8 @@
 //! `benches/split_gungraun.rs` (instruction counts) and
 //! `tests/bench_fixtures.rs` (the corpus pins). A bench target is its own
 //! crate, so compiling one source is the only way several can agree on a
-//! workload — a wall-time result and an instruction count that measured
-//! different rigs would not be talking about the same code. It is a separate
-//! file rather than part of a target for the reason the connector crates'
-//! `benches/support/` modules are: a rig read as a fixture is easier to check
-//! for the properties a measurement depends on than one interleaved with the
-//! benchmark macros.
+//! workload; a wall-time result and an instruction count that measured
+//! different rigs would not be talking about the same code.
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
@@ -27,9 +23,9 @@ use std::sync::Arc;
 /// Payloads per driven batch.
 ///
 /// Larger than the operator-chain rig's batch because the split terminal is
-/// the *only* per-record stage here — there is no `filter` or `flat_map` in
-/// front of it — so the batch has to carry the record count on its own for
-/// the terminal's per-record cost to dominate the fixed cost of a
+/// the *only* per-record stage here (no `filter` or `flat_map` in front of
+/// it), so the batch has to carry the record count on its own for the
+/// terminal's per-record cost to dominate the fixed cost of a
 /// `push_batch`/`flush` pair. Every payload is distinct and built from its
 /// index; this is a corpus, not one payload replayed.
 pub(crate) const PAYLOADS: usize = 8192;
@@ -47,11 +43,12 @@ impl RecFamily for LogF {
     type Rec<'buf> = LogEvent<'buf>;
 }
 
-/// One destination branch's row. `TAG` makes each branch's record type — and
-/// so, through [`RecFamily`], the branch's own concrete `SinkHandoff` type —
-/// distinct, which is what the split's per-emit `Any` downcast has to
-/// discriminate between. A single row type shared by every branch would
-/// leave the downcast with nothing to tell apart and would not be a split.
+/// One destination branch's row. `TAG` makes each branch's record type
+/// distinct, and through [`RecFamily`] the branch's own concrete
+/// `SinkHandoff` type with it. The split's per-emit `Any` downcast
+/// discriminates between those types. A single row type shared by every
+/// branch would leave the downcast with nothing to tell apart and would not
+/// be a split.
 struct Row<'buf, const TAG: u8> {
     body: &'buf [u8],
 }
@@ -83,9 +80,9 @@ impl Deserializer<LogF> for BodyDeser {
     }
 }
 
-/// Length-prefixed row writer, one concrete encoder type per branch — which
-/// is what a split over several tables has, and what the branch's boxed
-/// encoder erases.
+/// Length-prefixed row writer, one concrete encoder type per branch, matching
+/// what a split over several tables has and what the branch's boxed encoder
+/// erases.
 #[derive(Clone)]
 struct TagEncoder<const TAG: u8>;
 
@@ -102,8 +99,8 @@ impl<const TAG: u8> RowEncoder<RowF<TAG>> for TagEncoder<TAG> {
 }
 
 /// Constant router. Every branch here owns one shard, so routing is held
-/// fixed: the axes this rig varies are the branch count and the match-hit
-/// ratio, and a shard sweep is what the operator-chain rig already carries.
+/// fixed. The axes this rig varies are the branch count and the match-hit
+/// ratio; the operator-chain rig carries the shard sweep.
 #[derive(Clone, Copy)]
 struct ToShardZero;
 
@@ -113,8 +110,8 @@ impl ShardRouter for ToShardZero {
     }
 }
 
-/// Shard-queue depth. Well above what one batch seals, so no case blocks:
-/// a blocked push parks records inside the terminal and returns a resume
+/// Shard-queue depth. Well above what one batch seals, so no case blocks.
+/// A blocked push parks records inside the terminal and returns a resume
 /// cursor, which would measure the park path instead of the dispatch path.
 const QUEUE_DEPTH: usize = 4096;
 
@@ -127,8 +124,8 @@ pub(crate) enum Tags {
     /// Round-robin over four branches; every record matches.
     FourBranches,
     /// Four branches, one payload in four carrying a tag no arm of the route
-    /// closure names, so it reaches the `unmatched` policy — and the other
-    /// three still spread evenly over all four branches.
+    /// closure names, so it reaches the `unmatched` policy. The other three
+    /// spread evenly over all four branches.
     FourBranchesQuarterUnrouted,
 }
 
@@ -144,12 +141,11 @@ const UNROUTED: u8 = b'-';
 /// reach no branch, and the twelve that do are spread three each over the
 /// four branches.
 ///
-/// A cycle rather than `i % 4 == 3`, which is the obvious construction and
-/// the wrong one: it would aim every unrouted payload at what would have been
-/// branch 3, leaving that branch empty for the whole batch, and the case
-/// would be three branches plus a drop rather than four branches at
-/// three-quarter hit rate. [`assert_hits_every_branch`] rejects that
-/// construction, and did.
+/// A cycle rather than `i % 4 == 3`. That construction would aim every
+/// unrouted payload at what would have been branch 3, leaving that branch
+/// empty for the whole batch, so the case would be three branches plus a drop
+/// rather than four branches at three-quarter hit rate.
+/// [`assert_hits_every_branch`] rejects it.
 const QUARTER_UNROUTED_CYCLE: [u8; 16] = [
     tag_byte(0),
     tag_byte(1),
@@ -181,8 +177,8 @@ impl Tags {
         }
     }
 
-    /// Records the batch routes to a branch — everything the corpus holds,
-    /// less whatever it aims at no branch.
+    /// Records the batch routes to a branch, meaning everything the corpus
+    /// holds less whatever it aims at no branch.
     fn routed(self) -> usize {
         match self {
             Tags::TwoBranches | Tags::FourBranches => PAYLOADS,
@@ -191,8 +187,8 @@ impl Tags {
     }
 }
 
-/// Payload bodies, pure functions of the index — no `rand`, no
-/// `DefaultHasher` — so every run encodes the same bytes and takes the same
+/// Payload bodies, pure functions of the index with no `rand` and no
+/// `DefaultHasher`, so every run encodes the same bytes and takes the same
 /// route arm. The tag is the leading byte and the rest is fixed-width, so
 /// every case's corpus holds the same number of bytes and only the
 /// distribution of arms differs.
@@ -277,16 +273,16 @@ pub(crate) struct Rig {
     rxs: Vec<tokio::sync::mpsc::Receiver<EncodedChunk>>,
     corpus: Vec<Vec<u8>>,
     /// Rows the batch must produce. Asserted rather than returned
-    /// unchecked, so a corpus that silently stopped reaching a branch could
-    /// not pass as a fast one — the match-hit ratio *is* one of the two axes
-    /// these cases separate.
+    /// unchecked, so a corpus that silently stopped reaching a branch cannot
+    /// pass as a fast one; the match-hit ratio is one of the two axes these
+    /// cases separate.
     pub(crate) expect_rows: usize,
 }
 
 impl Rig {
     /// The bytes this rig drives, for a caller that has to prove two builds
-    /// measured the same ones — the wall tier folds these into its corpus
-    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    /// measured the same ones. The wall tier folds these into its corpus
+    /// digest, which demotes a pair of legs whose corpora drifted.
     ///
     /// Bytes only. The branch count, the chunk target and [`QUEUE_DEPTH`] are
     /// not in the digest, so a change to one of those passes the check and is
@@ -300,17 +296,18 @@ impl Rig {
     /// every branch. Returns the row count so a caller can keep the work
     /// observable.
     ///
-    /// The drain sweeps every branch's receiver, which is rig scaffolding —
+    /// The drain sweeps every branch's receiver, which is rig scaffolding;
     /// in production a shard worker owns the other end. Each receiver costs
     /// its chunks plus one failing `try_recv` to end its loop, so the sweep
     /// grows with the branch count whether or not a branch is idle. That
     /// term is why the four-branch cases are read against each other and
     /// against the two-branch case, not in absolute terms.
     ///
-    /// Nothing here returns bytes to the [`InflightBudget`]: only a sink
+    /// Nothing here returns bytes to the [`InflightBudget`]. Only a sink
     /// worker or a parked chunk's drop does that, and this rig has neither,
-    /// so the budget climbs across drives. Cost-neutral — the seal path's
-    /// `add` is one value-independent atomic and nothing reads `usage()`.
+    /// so the budget climbs across drives. That is cost-neutral, because the
+    /// seal path's `add` is one value-independent atomic and nothing reads
+    /// `usage()`.
     pub(crate) fn drive(&mut self) -> usize {
         let (ack, _rx) = AckRef::test_pair();
         let mut batch = TestBatch {

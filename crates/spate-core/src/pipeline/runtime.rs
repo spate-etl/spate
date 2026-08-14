@@ -143,13 +143,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     }
 
     /// Use a caller-owned tokio runtime as the I/O runtime instead of
-    /// building one inside [`run`](Self::run) — for assemblies whose
+    /// building one inside [`run`](Self::run). For assemblies whose
     /// connectors needed a handle before the runtime existed (sink workers
     /// spawned at construction, schema-registry fetchers, async pre-flight
-    /// validation). `run` shuts it down on exit exactly as it does the
-    /// internally built one; connector tasks spawned on it earlier keep
-    /// running until then. Without this, assemblies end up running a
-    /// second runtime, doubling `pipeline.io_threads`.
+    /// validation). `run` shuts it down on exit as it does the internally
+    /// built one; connector tasks spawned on it earlier keep running until
+    /// then. Without this, assemblies end up running a second runtime,
+    /// doubling `pipeline.io_threads`.
     #[must_use]
     pub fn with_io_runtime(mut self, io: tokio::runtime::Runtime) -> Self {
         self.io = Some(io);
@@ -165,9 +165,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// Effective pipeline thread count: the config override, else
     /// `available_parallelism` minus the I/O reserve (I/O workers + the
     /// controller), at least 1. `available_parallelism` respects cgroup
-    /// CPU quotas, so Kubernetes limits size this correctly; pods without
-    /// limits see the node's cores — set `pipeline.threads` explicitly
-    /// there.
+    /// CPU quotas, so Kubernetes limits size this correctly. Pods without
+    /// limits see the node's cores; set `pipeline.threads` explicitly there.
     fn thread_count(&self) -> usize {
         self.config.pipeline.threads.unwrap_or_else(|| {
             let cores = std::thread::available_parallelism().map_or(2, usize::from);
@@ -210,15 +209,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         pipeline_metrics.set_threads(threads);
 
         // The controller's handle sets, resolved here rather than at the
-        // controller's own construction below: both claim series, and a
-        // duplicate must fail before any driver thread exists — past that
+        // controller's own construction below. Both claim series, and a
+        // duplicate must fail before any driver thread exists. Past that
         // point a bare `?` would leak the threads instead of stopping them.
         let checkpoint_metrics = CheckpointMetrics::try_new(
             &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
             self.config.metrics.per_partition_detail,
         )
         .map_err(|e| StartError::Metrics(e.to_string()))?;
-        // The owner of the source series: it publishes active lanes, and its
+        // The owner of the source series. It publishes active lanes, and its
         // clone goes to the source, which is the only thing that can measure
         // lag. The per-thread instances are shadows of this one.
         let controller_source_metrics = Arc::new(
@@ -260,7 +259,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // Sink readiness: probe at startup and periodically (tighter while
         // failing), driving the sinks-connected half of `/readyz`. No probe
-        // hook means nothing to check — report connected.
+        // hook means nothing to check, so report connected.
         match self.sink.probe.take() {
             Some(probe) => {
                 let health_probe = Arc::clone(&health);
@@ -354,11 +353,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     format!("driver-{i}"),
                     "driver",
                 )),
-                // Deliberately a shadow: every thread counts the records and
-                // polls it performed (those sum), but the source *gauges* —
-                // lag and active lanes — belong to the controller's instance
-                // below, which is the only one that sees the assignment and
-                // the only one the source itself is handed. A claiming
+                // A shadow. Every thread counts the records and polls it
+                // performed (those sum), but the source *gauges* (lag and
+                // active lanes) belong to the controller's instance below,
+                // which is the only one that sees the assignment and the
+                // only one the source itself is handed. A claiming
                 // constructor here would take the series hostage from it.
                 source_metrics: SourceMetrics::shadow(&ComponentLabels::new(
                     pipeline_name.clone(),
@@ -388,10 +387,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             }
         }
 
-        // The chain factory has served its purpose. Factories naturally
-        // capture ShardQueues clones (their terminals need them), and the
-        // sink only drains once every queue clone is gone — holding the
-        // factory through the drain would deadlock shutdown.
+        // Factories capture ShardQueues clones (their terminals need them),
+        // and the sink only drains once every queue clone is gone. Holding
+        // the factory through the drain would deadlock shutdown.
         drop(self.chains);
 
         // A cloned set of driver control senders kept by main, so it can stop
@@ -508,9 +506,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 Err(_) => {
                     // The controller thread ended without a Finished report
                     // (a timeout with a finished handle, or the signal
-                    // channel disconnected): it panicked. It never told the
-                    // drivers to stop and never set the shutdown flag, so an
-                    // untimed join here would wedge forever — stop them
+                    // channel disconnected), so it panicked. It never told
+                    // the drivers to stop and never set the shutdown flag, so
+                    // an untimed join here would wedge forever. Stop them
                     // ourselves, drain the sink, and fail the run.
                     stop_drivers(
                         &self.shutdown,
@@ -561,10 +559,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 /// controller-death path so an early failure or a controller panic never
 /// leaves running pinned pipeline threads behind (`run` is a library API).
 ///
-/// Joining is what actually bounds this — a driver observes the shutdown
-/// flag (abandoning any blocked batch) and the `Shutdown` control message
-/// (flushing within `grace`), then exits and drops its chain, closing the
-/// shard queues so the sink can drain afterwards.
+/// Joining bounds this. A driver observes the shutdown flag (abandoning any
+/// blocked batch) and the `Shutdown` control message (flushing within
+/// `grace`), then exits and drops its chain, closing the shard queues so the
+/// sink can drain afterwards.
 fn stop_drivers<L>(
     shutdown: &AtomicBool,
     control_txs: &[crossbeam_channel::Sender<ThreadControl<L>>],
@@ -586,7 +584,7 @@ fn stop_drivers<L>(
 }
 
 /// Install the exporter, degrading gracefully when a foreign recorder
-/// already owns the process: the pipeline keeps running against the
+/// already owns the process. The pipeline keeps running against the
 /// existing recorder with a detached (empty-rendering) handle for the
 /// admin server. Shared by the runtime and the pipeline builder.
 pub(crate) fn install_or_reuse(settings: &MetricsSettings) -> Result<MetricsHandle, StartError> {

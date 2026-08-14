@@ -3,13 +3,13 @@
 //! A [`PartitionTracker`] receives batch registrations in sequence order
 //! and resolutions in *any* order, and computes the committable watermark:
 //! the offset just past the contiguous prefix of delivered batches. A
-//! failed batch at the head of that prefix stalls the watermark permanently
-//! — the at-least-once invariant is that a source offset is never committed
+//! failed batch at the head of that prefix stalls the watermark permanently.
+//! The at-least-once invariant is that a source offset is never committed
 //! past unacknowledged or failed data.
 //!
-//! Purely synchronous and tokio-free; all methods are `&mut self`. The
-//! concurrency of the ack path lives entirely in
-//! [`AckRef`](super::AckRef)'s atomics and the checkpointer's channel.
+//! Synchronous and tokio-free; all methods are `&mut self`. The concurrency
+//! of the ack path lives in [`AckRef`](super::AckRef)'s atomics and the
+//! checkpointer's channel.
 
 use super::AckStatus;
 use std::collections::VecDeque;
@@ -21,9 +21,9 @@ use std::time::Instant;
 pub enum ResolveOutcome {
     /// The batch moved from pending to delivered or failed.
     Applied,
-    /// The batch was already resolved — duplicate resolution message.
+    /// The batch was already resolved (a duplicate resolution message).
     Duplicate,
-    /// The sequence number precedes the tracked window: the batch already
+    /// The sequence number precedes the tracked window; the batch already
     /// advanced through the watermark. Duplicate of a consumed resolution.
     AlreadyAdvanced,
     /// The sequence number is ahead of every registration seen so far. With
@@ -90,7 +90,7 @@ impl PartitionTracker {
     ///
     /// # Panics
     ///
-    /// Panics on a sequence gap — the driver issued batches out of order,
+    /// Panics on a sequence gap. The driver issued batches out of order,
     /// which would silently corrupt watermark accounting.
     pub fn register(&mut self, seq: u64, last_offset: i64) {
         assert_eq!(
@@ -134,8 +134,8 @@ impl PartitionTracker {
     /// offset (one past the last delivered batch), or `None` if the
     /// watermark did not move.
     ///
-    /// If the batch at the head has failed, the tracker stalls permanently:
-    /// everything delivered *before* the failure is still reported (commit
+    /// If the batch at the head has failed, the tracker stalls permanently.
+    /// Everything delivered *before* the failure is still reported (commit
     /// up to the failure is correct), but nothing past it ever will be.
     pub fn advance(&mut self) -> Option<i64> {
         let mut committable = None;
@@ -178,8 +178,8 @@ impl PartitionTracker {
         self.stalled_seq
     }
 
-    /// Batches issued but not yet advanced through the watermark. This is
-    /// the backpressure trigger: it bounds tracker memory and replay size.
+    /// Batches issued but not yet advanced through the watermark. Used as the
+    /// backpressure trigger, and it bounds tracker memory and replay size.
     #[must_use]
     pub fn pending(&self) -> usize {
         self.ring.len()
@@ -301,8 +301,8 @@ mod tests {
             ResolveOutcome::Unregistered
         );
 
-        // These two trip debug_assert in debug builds by design; validate
-        // the outcomes in release builds only.
+        // These two trip debug_assert in debug builds; validate the outcomes
+        // in release builds only.
         if cfg!(not(debug_assertions)) {
             assert_eq!(
                 t.resolve(0, AckStatus::Delivered),

@@ -12,10 +12,10 @@
 //!
 //! Communication: the controller sends [`ThreadControl`] messages to
 //! drivers (lane assignment, drain barriers); drivers send [`DriverEvent`]
-//! requests back (pause/resume — only the controller touches the
-//! [`Source`](crate::source::Source) — and fatal reports). All channels are
-//! unbounded crossbeam channels: control traffic is rare and must never
-//! block a poll loop.
+//! requests back (pause/resume and fatal reports). Only the controller
+//! touches the [`Source`](crate::source::Source). All channels are unbounded
+//! crossbeam channels; control traffic is rare and must never block a poll
+//! loop.
 //!
 //! Shutdown (also the full-revocation path):
 //! SIGTERM → controller stops event polling and sends `Shutdown` to every
@@ -45,7 +45,7 @@ use std::time::Instant;
 pub(crate) enum ThreadControl<L> {
     /// Take ownership of a newly assigned lane, with the pending-ceiling
     /// gate for its partition (`None` only if the partition is unknown to
-    /// the checkpointer, which is a controller bug — the lane then runs
+    /// the checkpointer, which is a controller bug; the lane then runs
     /// ungated rather than not at all).
     AddLane {
         lane: L,
@@ -62,20 +62,19 @@ pub(crate) enum ThreadControl<L> {
     /// the idle-flush lull
     /// ([`SourceEvent::CommitReady`](crate::source::SourceEvent::CommitReady)).
     ///
-    /// A lane that reached genuine end-of-input has no more data coming, so
-    /// its tail would otherwise sit in the chain until `idle_flush` elapses
-    /// — unacknowledged, and therefore blocking the completion of whatever
-    /// unit of work it belongs to. Best-effort and unsynchronized: the
-    /// controller does not wait, and a blocked chain simply retries on the
-    /// ordinary lull check.
+    /// A lane that reached end-of-input has no more data coming, so its tail
+    /// would otherwise sit in the chain until `idle_flush` elapses,
+    /// unacknowledged, blocking the completion of whatever unit of work it
+    /// belongs to. Best-effort and unsynchronized; the controller does not
+    /// wait, and a blocked chain retries on the ordinary lull check.
     FlushNow,
     /// Drop the listed lanes without flushing or synchronizing
     /// ([`SourceEvent::LanesRetired`](crate::source::SourceEvent::LanesRetired)):
     /// their input is fully delivered, acknowledged *and* committed, so
-    /// nothing of theirs can sit unflushed in the chain. Pure bookkeeping —
-    /// no barrier, no deadline, no `flush_until`. Forcing a flush here would
-    /// fragment sink batches and park the thread once per completed unit of
-    /// work; sources with anything in flight must use
+    /// nothing of theirs can sit unflushed in the chain. Pure bookkeeping,
+    /// with no barrier, no deadline, no `flush_until`. Forcing a flush here
+    /// would fragment sink batches and park the thread once per completed unit
+    /// of work; sources with anything in flight must use
     /// [`ThreadControl::StopLanes`] instead.
     DropLanes { lanes: Vec<LaneId> },
     /// Stop everything (shutdown): flush the chain, drop all lanes, arrive
@@ -97,16 +96,16 @@ pub(crate) enum DriverEvent {
     Fatal { thread: usize, error: FatalError },
 }
 
-/// What the sink reported when draining at shutdown — the sink layer's
-/// [`DrainReport`](crate::sink::DrainReport), re-exported so assemblies
-/// hand `SinkPool::drain`'s result straight through.
+/// What the sink reported when draining at shutdown. This is the sink
+/// layer's [`DrainReport`](crate::sink::DrainReport), re-exported so
+/// assemblies hand `SinkPool::drain`'s result straight through.
 pub use crate::sink::DrainReport;
 
 /// The sink half the runtime drives: the shared shard-queue handle plus a
 /// drain hook invoked once at shutdown with the remaining drain budget.
 ///
-/// Built by the sink layer (`SinkPool`) or by tests; the runtime is
-/// deliberately ignorant of worker internals.
+/// Built by the sink layer (`SinkPool`) or by tests; the runtime does not
+/// see worker internals.
 pub struct SinkRuntime {
     /// Sending side of the per-shard chunk queues, one entry per installed
     /// sink (the runtime only uses capacity introspection for the
@@ -132,8 +131,8 @@ impl std::fmt::Debug for SinkRuntime {
     }
 }
 
-/// Boxed sink drain hook — defined next to the sink layer that produces
-/// it, re-exported here where the runtime consumes it.
+/// Boxed sink drain hook, defined next to the sink layer that produces it
+/// and re-exported here where the runtime consumes it.
 pub use crate::sink::{SinkDrainFn, SinkProbeFn};
 
 /// Terminal state of a pipeline run.
@@ -185,7 +184,7 @@ pub struct ExitReport {
 }
 
 impl ExitReport {
-    /// Log the outcome — state, sink drain, final watermarks — at the level
+    /// Log the outcome (state, sink drain, final watermarks) at the level
     /// matching it (`info` for a clean exit, `error` for a failure).
     pub fn log(&self) {
         match &self.state {

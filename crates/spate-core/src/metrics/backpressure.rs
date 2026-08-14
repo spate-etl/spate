@@ -23,8 +23,7 @@ impl BackpressureMetrics {
     /// Claims the `spate_backpressure_*` series for these labels; if another
     /// live handle set already owns them this one logs and becomes a shadow,
     /// counting but publishing no gauge. Each pipeline thread's controller
-    /// gets its own `component` label, so they own separate series rather than
-    /// sharing one.
+    /// gets its own `component` label, so they own separate series.
     pub fn new(labels: &ComponentLabels) -> Self {
         Self::build(labels, SeriesClaim::claim_or_shadow(Self::key(labels)))
     }

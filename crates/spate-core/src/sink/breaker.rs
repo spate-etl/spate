@@ -4,15 +4,15 @@
 //! `Open` (rejecting until a deadline) → `HalfOpen` (a bounded number of
 //! probe writes) → `Closed` on probe success or back to `Open` on failure.
 //! The set is shared between the shard worker (replica selection) and its
-//! in-flight write tasks (outcome reporting) behind a mutex — a handful of
-//! uncontended lockings per batch, never on the record path.
+//! in-flight write tasks (outcome reporting) behind a mutex, taken a handful
+//! of uncontended times per batch and never on the record path.
 //!
-//! "Nothing is pickable" is two conditions, not one, and they end
-//! differently. An `Open` breaker is released by a *deadline* the caller can
-//! compute for itself ([`BreakerSet::next_probe_at`]). A set that is entirely
-//! `HalfOpen` with its probe budget spent has no deadline at all — only
-//! *leaving* `HalfOpen` frees a slot — and is released by an *event*: the
-//! in-flight probe reporting. [`BreakerSet::subscribe`] is that event.
+//! "Nothing is pickable" covers two conditions, and they end differently. An
+//! `Open` breaker is released by a *deadline* the caller can compute for
+//! itself ([`BreakerSet::next_probe_at`]). A set that is entirely `HalfOpen`
+//! with its probe budget spent has no deadline at all, because only *leaving*
+//! `HalfOpen` frees a slot; it is released by an *event*, the in-flight probe
+//! reporting. [`BreakerSet::subscribe`] is that event.
 
 use super::config::BreakerConfig;
 use crate::metrics::SinkShardMetrics;
@@ -63,28 +63,28 @@ pub(crate) struct BreakerSet {
     metrics: Arc<SinkShardMetrics>,
     /// Last *reported* shard health (≥1 replica circuit-closed), so the
     /// caller's log fires on transitions only. The gauge is written on every
-    /// outcome regardless — see [`BreakerSet::refresh_shard_health`].
+    /// outcome regardless; see [`BreakerSet::refresh_shard_health`].
     shard_healthy: bool,
     /// Bumped whenever a replica may have become pickable, releasing write
     /// tasks parked on a set that offered them nothing. See the module
     /// header for why a deadline cannot cover that state.
     ///
-    /// The sender lives here, under the mutex, for two reasons. It cannot be
-    /// forgotten at a call site: the methods that can make a replica usable
-    /// are the methods that publish. And as a field of the set every waiter
-    /// holds an `Arc` to, it outlives every receiver, so
-    /// [`watch::Receiver::changed`] can never enter the permanently-`Err`
-    /// state that the drain watch needs a liveness flag to guard against.
+    /// The sender lives here, under the mutex. The methods that can make a
+    /// replica usable are the methods that publish, so a call site cannot
+    /// forget it. As a field of the set every waiter holds an `Arc` to, it
+    /// outlives every receiver, so [`watch::Receiver::changed`] cannot enter
+    /// the permanently-`Err` state that the drain watch needs a liveness flag
+    /// to guard against.
     ///
-    /// Not a breach of the "no subscriber under this mutex" rule that
-    /// [`ShardHealthTransition`] exists for: that rule is about `tracing`,
-    /// which runs arbitrary user-installed code. `send_modify` runs a version
-    /// bump and waker wakes — the same class of side effect as the gauge
-    /// writes already made here.
+    /// The "no subscriber under this mutex" rule that
+    /// [`ShardHealthTransition`] serves is about `tracing`, which runs
+    /// arbitrary user-installed code. `send_modify` runs a version bump and
+    /// waker wakes, the same class of side effect as the gauge writes already
+    /// made here.
     wake_tx: watch::Sender<u64>,
-    /// Source of half-open episode numbers. Monotonic across the whole set —
-    /// it only has to distinguish one episode from another, never to be dense
-    /// per replica.
+    /// Source of half-open episode numbers. Monotonic across the whole set;
+    /// the numbers distinguish one episode from another and are not dense per
+    /// replica.
     next_episode: u64,
 }
 
@@ -96,20 +96,20 @@ impl BreakerSet {
     ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
         // `BreakerConfig::validate` rejects both of these at load, and every
-        // sink calls it. This is the programmatic path's share of the same
-        // rule: `BreakerConfig` is a public `Copy` struct, so `SinkParts` and
-        // `spate-test` can build one that never went through a loader.
+        // sink calls it. `BreakerConfig` is a public `Copy` struct, so
+        // `SinkParts` and `spate-test` can build one that never went through a
+        // loader; these clamps cover that path.
         //
-        // `half_open_probes: 0` taken literally is not "probe cautiously" but
-        // "never recover": the open→half-open promotion admits its first probe
-        // unconditionally, and once that slot is handed back the replica sits
-        // in `HalfOpen { 0 }`, which no budget of `0` can re-admit and no
-        // deadline covers, because half-open schedules nothing.
+        // `half_open_probes: 0` wedges the replica shut. The open→half-open
+        // promotion admits its first probe unconditionally, and once that slot
+        // is handed back the replica sits in `HalfOpen { 0 }`, which no budget
+        // of `0` can re-admit and no deadline covers, because half-open
+        // schedules nothing.
         cfg.half_open_probes = cfg.half_open_probes.max(1);
         // `on_failure` stamps `now + open_for`, and `Instant + Duration`
         // *panics* on overflow rather than saturating. The heartbeat's own
-        // clamp does not cover this — it bounds only how long a parked task
-        // waits, never what gets written into the state.
+        // clamp does not cover this; it bounds how long a parked task waits,
+        // not what gets written into the state.
         cfg.open_for = cfg.open_for.min(BreakerConfig::MAX_OPEN_FOR);
         for r in 0..replicas {
             metrics.set_replica_healthy(r, true);
@@ -135,13 +135,12 @@ impl BreakerSet {
     /// A receiver for the wake signal, whose cursor is the version of the
     /// state as of this call.
     ///
-    /// Meant to be taken **inside the same critical section** that found
-    /// nothing pickable. That is what makes a missed wake impossible rather
-    /// than merely unlikely: every publisher runs in a strictly later critical
-    /// section, so its bump is strictly later than this cursor, and the
-    /// waiter's `changed()` returns without suspending. A receiver held across
-    /// picks would push that guarantee out into wherever the caller chooses to
-    /// re-arm.
+    /// Take this **inside the same critical section** that found nothing
+    /// pickable; that is what rules out a missed wake. Every publisher runs in
+    /// a strictly later critical section, so its bump is strictly later than
+    /// this cursor, and the waiter's `changed()` returns without suspending. A
+    /// receiver held across picks pushes that guarantee out into wherever the
+    /// caller chooses to re-arm.
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.wake_tx.subscribe()
     }
@@ -149,18 +148,17 @@ impl BreakerSet {
     /// Release every parked write task so it re-picks against the state this
     /// outcome just produced.
     ///
-    /// A failure that leaves nothing pickable still publishes: a probe
-    /// failing turns `HalfOpen` into `Open { until }`, which is a *deadline*
-    /// where a moment ago there was none, and a waiter that computed its wake
-    /// from the old state has to recompute it.
+    /// A failure that leaves nothing pickable still publishes. A probe failing
+    /// turns `HalfOpen` into `Open { until }`, a *deadline* where a moment ago
+    /// there was none, and a waiter that computed its wake from the old state
+    /// has to recompute it.
     ///
-    /// Ordering, which is the whole point: a waiter takes its receiver from
-    /// [`subscribe`](Self::subscribe) inside the very critical section that
-    /// read the states, and this bump happens after the mutation inside
-    /// another. The two serialize on the mutex, so a waiter holding a cursor
-    /// from the pre-outcome state is necessarily behind this version and its
-    /// `changed()` returns without ever suspending. There is no interleaving
-    /// in which a waiter observes the old state and also misses the wake.
+    /// Ordering rests on the mutex. A waiter takes its receiver from
+    /// [`subscribe`](Self::subscribe) inside the critical section that read
+    /// the states, and this bump happens after the mutation inside another
+    /// one. The two serialize, so a waiter holding a cursor from the
+    /// pre-outcome state is behind this version and its `changed()` returns
+    /// without suspending.
     fn publish_wake(&self) {
         self.wake_tx.send_modify(|g| *g = g.wrapping_add(1));
     }
@@ -169,11 +167,10 @@ impl BreakerSet {
     /// unavailable ones (an open breaker past its deadline transitions to
     /// half-open and becomes usable as a probe).
     ///
-    /// `None` when nothing is pickable, which is **two** states, not one:
-    /// every replica open and still inside its deadline, or every replica
-    /// half-open with its probe budget spent. Only the first has an instant to
-    /// wait for — see [`next_probe_at`](Self::next_probe_at) and the module
-    /// header.
+    /// `None` when nothing is pickable, which covers **two** states: every
+    /// replica open and still inside its deadline, or every replica half-open
+    /// with its probe budget spent. Only the first has an instant to wait for;
+    /// see [`next_probe_at`](Self::next_probe_at) and the module header.
     pub(crate) fn next_replica(&mut self, now: Instant) -> Option<Pick> {
         let n = self.states.len();
         for step in 0..n {
@@ -222,31 +219,30 @@ impl BreakerSet {
     }
 
     /// Hand back a half-open probe slot whose attempt never reported an
-    /// outcome, and wake anyone parked waiting for one.
+    /// outcome, and wake any task parked waiting for one.
     ///
     /// `probes_in_flight` is otherwise cleared only by *leaving* `HalfOpen`,
     /// which is what [`on_success`](Self::on_success) and
     /// [`on_failure`](Self::on_failure) do. A write task that dies without
-    /// reporting — a writer panic, whose `JoinError` carries no replica — would
-    /// therefore consume a slot for good, and with the default
-    /// `half_open_probes: 1` that pins the replica in `HalfOpen` forever:
+    /// reporting (a writer panic, whose `JoinError` carries no replica) would
+    /// therefore consume a slot for good. With the default
+    /// `half_open_probes: 1` that pins the replica in `HalfOpen` forever;
     /// `next_replica` never offers it again and the shard is unwritable for
     /// the life of the process. No timer recovers that, because re-picking
     /// finds the same exhausted budget.
     ///
-    /// `HalfOpen { probes_in_flight: 0 }` is the correct resting state after
-    /// a release — the probe never happened, so the next caller should be
-    /// allowed to take it.
+    /// `HalfOpen { probes_in_flight: 0 }` is the resting state after a
+    /// release. The probe never happened, so the next caller may take it.
     ///
     /// `episode` is what makes this safe to call late. A replica can leave
     /// half-open and enter it again while a slot from the earlier run is still
     /// unaccounted for, and "is this replica half-open *now*" cannot tell the
-    /// two runs apart — crediting the later one would let it run
-    /// `half_open_probes + 1` concurrent probes against an endpoint the
-    /// breaker exists to shield. A release naming a run that has ended is
-    /// therefore dropped, and wakes nobody, because it changed nothing.
+    /// two runs apart. Crediting the later one would let it run
+    /// `half_open_probes + 1` concurrent probes against the endpoint the
+    /// breaker is shielding. A release naming a run that has ended is dropped
+    /// and wakes no waiter, because it changed nothing.
     ///
-    /// This bounds accounting, not overlap: two runs can still have probes in
+    /// This bounds accounting, not overlap. Two runs can still have probes in
     /// flight at once, because ending a run does not abort the writes it
     /// started. See the note on [`ProbeGuard`](super::worker).
     pub(crate) fn release_probe(&mut self, replica: usize, episode: u64) {
@@ -272,10 +268,10 @@ impl BreakerSet {
     /// Only `Open` folds in, because it is the only state with a *scheduled*
     /// transition. A set that is entirely `HalfOpen` with its probe budget
     /// spent returns `None` from here *and* from
-    /// [`next_replica`](Self::next_replica): nothing is pickable and no clock
-    /// will change that. What will is the in-flight probe reporting — see
-    /// [`subscribe`](Self::subscribe). So this is not, on its own, "how long
-    /// a shard should wait"; the worker takes the min of it and a bounded
+    /// [`next_replica`](Self::next_replica). Nothing is pickable and no clock
+    /// will change that; the in-flight probe reporting will, via
+    /// [`subscribe`](Self::subscribe). On its own this is not "how long a
+    /// shard should wait". The worker takes the min of it and a bounded
     /// heartbeat, and waits on the wake signal alongside both.
     pub(crate) fn next_probe_at(&self, now: Instant) -> Option<Instant> {
         self.states
@@ -331,7 +327,7 @@ impl BreakerSet {
             && !matches!(self.states[replica], State::Open { .. });
         self.states[replica] = next;
         self.publish_replica_health(replica);
-        // The counter stays edge-triggered: it counts transitions, not state.
+        // The counter is edge-triggered; it counts transitions, not state.
         if newly_open {
             self.metrics.breaker_opened(replica);
         }
@@ -341,32 +337,32 @@ impl BreakerSet {
 
     /// Republish one replica's health gauge from its current state.
     ///
-    /// Level-driven, not edge-triggered: writing only on a transition means a
-    /// reading that was wrong when it was written — clobbered by another
-    /// handle set, or lost across a restart of whatever scraped it — stands
-    /// until the *next* transition, which for a quarantined replica may never
-    /// come. Every write outcome refreshes it instead, so a stale reading
-    /// self-corrects within one probe cycle. `HalfOpen` reads `0`: a replica
-    /// being probed is not yet usable, which is the same rule shard health
-    /// uses.
+    /// Level-driven rather than edge-triggered. Writing only on a transition
+    /// leaves a reading that was wrong when it was written (clobbered by
+    /// another handle set, or lost across a restart of whatever scraped it)
+    /// standing until the *next* transition, which for a quarantined replica
+    /// may never come. Every write outcome refreshes it instead, so a stale
+    /// reading self-corrects within one probe cycle. `HalfOpen` reads `0`; a
+    /// replica being probed is not yet usable, and shard health uses the same
+    /// rule.
     fn publish_replica_health(&self, replica: usize) {
         let healthy = matches!(self.states[replica], State::Closed { .. });
         self.metrics.set_replica_healthy(replica, healthy);
     }
 
     /// Recompute shard health (≥1 replica circuit-closed), republish the
-    /// gauge, and report a transition for the caller to log — the log only on
-    /// an edge, the gauge every time. `next_replica`'s Open→HalfOpen promotion
-    /// neither adds nor removes a `Closed` state, so only the failure/success
-    /// paths can move this signal.
+    /// gauge, and report a transition for the caller to log. The log fires
+    /// only on an edge, the gauge every time. `next_replica`'s Open→HalfOpen
+    /// promotion neither adds nor removes a `Closed` state, so only the
+    /// failure/success paths can move this signal.
     ///
-    /// The gauge write is unconditional so that a reading that no longer
-    /// matches the breakers cannot persist: an edge-triggered writer that has
-    /// already published `0` never publishes `0` again, so a shard whose every
-    /// replica is quarantined — the state that most needs to be visible —
-    /// would keep serving whatever value it was left at. Rewriting it on each
-    /// outcome bounds that to one probe cycle. `Gauge::set` is an atomic
-    /// store; this runs per write attempt, never per record.
+    /// The gauge write is unconditional, so a reading that no longer matches
+    /// the breakers cannot persist. An edge-triggered writer that has already
+    /// published `0` never publishes `0` again, so a shard whose every replica
+    /// is quarantined would keep serving whatever value it was left at.
+    /// Rewriting it on each outcome bounds that to one probe cycle.
+    /// `Gauge::set` is an atomic store; this runs per write attempt, never per
+    /// record.
     fn refresh_shard_health(&mut self) -> Option<ShardHealthTransition> {
         let up = self
             .states
@@ -384,9 +380,9 @@ impl BreakerSet {
         })
     }
 
-    /// Just the replica index, for the many assertions that do not care
-    /// whether the pick consumed a probe slot. `Pick::probe` is asserted
-    /// directly where it is the point.
+    /// Just the replica index, for the assertions that do not care whether the
+    /// pick consumed a probe slot. Assertions on `Pick::probe` call
+    /// [`next_replica`](Self::next_replica) instead.
     #[cfg(test)]
     fn next_replica_idx(&mut self, now: Instant) -> Option<usize> {
         self.next_replica(now).map(|p| p.replica)
@@ -404,7 +400,7 @@ impl BreakerSet {
 }
 
 /// A shard-health edge reported by [`BreakerSet`], logged by the write task
-/// after the breaker lock is released — tracing subscribers must never run
+/// after the breaker lock is released. Tracing subscribers must never run
 /// under that mutex.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShardHealthTransition {
@@ -436,9 +432,10 @@ mod tests {
 
     /// A component name unique to each `set()` call. `SinkShardMetrics` owns
     /// its gauge series (one live owner per process); these tests run
-    /// concurrently under `cargo test`, and while most only read the cached
-    /// `shard_healthy()` bool — unaffected by shadowing — the level-drive test
-    /// below reads the rendered gauge, so it must own the series it inspects.
+    /// concurrently under `cargo test`, and while most read only the cached
+    /// `shard_healthy()` bool, which shadowing does not affect, the
+    /// level-drive test below reads the rendered gauge, so it must own the
+    /// series it inspects.
     fn breaker_component() -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         format!(
@@ -524,10 +521,10 @@ mod tests {
         assert_eq!(b.next_replica_idx(t2), Some(0), "closed again");
     }
 
-    /// The fact that forces the wait on a fully-quarantined shard to be
-    /// event-driven: once every replica is half-open with its probe budget
-    /// spent, *both* selectors return `None` and no clock will change that.
-    /// There is no deadline to sleep until, only an outcome to wait for.
+    /// Once every replica is half-open with its probe budget spent, *both*
+    /// selectors return `None` and no clock will change that. There is no
+    /// deadline to sleep until, only an outcome to wait for, so the wait on a
+    /// fully-quarantined shard is event-driven.
     #[tokio::test(start_paused = true)]
     async fn a_fully_probing_set_offers_neither_a_replica_nor_a_deadline() {
         let mut b = set(2, 1);
@@ -575,9 +572,9 @@ mod tests {
         );
     }
 
-    /// Without this, a write task that dies without reporting an outcome —
-    /// a writer panic — consumes the probe slot for good, and with the
-    /// default budget of one that pins the replica in half-open forever.
+    /// Without this, a write task that dies without reporting an outcome (a
+    /// writer panic) consumes the probe slot for good, and with the default
+    /// budget of one that pins the replica in half-open forever.
     #[tokio::test(start_paused = true)]
     async fn a_released_probe_slot_becomes_pickable_again() {
         let mut b = set(1, 1);
@@ -598,11 +595,11 @@ mod tests {
     /// A slot handed back after its half-open run has *ended* must not be
     /// credited to whatever run is current.
     ///
-    /// "Is this replica half-open now" cannot tell the two apart: a replica
+    /// "Is this replica half-open now" cannot tell the two apart. A replica
     /// can go half-open, re-open, and go half-open again while the first run's
     /// slot is still unaccounted for. Crediting the later run lets it write
-    /// `half_open_probes + 1` concurrent probes at an endpoint the breaker
-    /// exists to shield, which is the whole point of quarantining it.
+    /// `half_open_probes + 1` concurrent probes at the endpoint the breaker is
+    /// quarantining.
     #[tokio::test(start_paused = true)]
     async fn a_slot_released_from_an_ended_run_does_not_credit_the_current_one() {
         let mut b = set(1, 1);
@@ -631,7 +628,7 @@ mod tests {
         );
     }
 
-    /// The same rule for a replica that has left half-open altogether: the
+    /// The same rule for a replica that has left half-open altogether. The
     /// reported outcome already cleared the budget wholesale, so a late
     /// release must not resurrect a slot.
     #[tokio::test(start_paused = true)]
@@ -658,11 +655,11 @@ mod tests {
         assert_eq!(b.next_replica_idx(t2), None, "still exactly one probe");
     }
 
-    /// `half_open_probes: 0` is expressible — `BreakerConfig` has no validator
-    /// — and taken literally it means "never recover": the promotion admits
-    /// its first probe regardless, and once that slot is handed back the
-    /// replica rests in half-open with a budget nothing can satisfy and no
-    /// deadline to wait on, so the shard is unwritable for good.
+    /// `half_open_probes: 0` is expressible (`BreakerConfig` has no validator)
+    /// and taken literally it means "never recover". The promotion admits its
+    /// first probe regardless, and once that slot is handed back the replica
+    /// rests in half-open with a budget nothing can satisfy and no deadline to
+    /// wait on, so the shard is unwritable for good.
     #[tokio::test(start_paused = true)]
     async fn a_zero_probe_budget_cannot_wedge_a_replica_shut() {
         let labels = ComponentLabels::new("p", breaker_component(), "test");
@@ -695,8 +692,8 @@ mod tests {
     }
 
     /// `open_for` is unvalidated, and `Instant + Duration` panics on overflow
-    /// rather than saturating — so an absurd value would take the shard worker
-    /// down at the first failure, not merely probe slowly.
+    /// rather than saturating, so an absurd value takes the shard worker down
+    /// at the first failure.
     #[tokio::test(start_paused = true)]
     async fn an_absurd_open_for_does_not_panic_the_state_machine() {
         let labels = ComponentLabels::new("p", breaker_component(), "test");
@@ -751,7 +748,7 @@ mod tests {
         );
         assert!(!b.shard_healthy(), "the only replica is open");
 
-        // A half-open probe does not restore shard health by itself — the
+        // A half-open probe does not restore shard health by itself; the
         // probed replica is HalfOpen, not Closed.
         let t1 = t0 + Duration::from_secs(6);
         assert_eq!(b.next_replica_idx(t1), Some(0));
@@ -770,8 +767,8 @@ mod tests {
             Some(ShardHealthTransition::AllQuarantined)
         );
         assert!(!b.shard_healthy());
-        // Probe, fail, probe, fail: the shard must stay unhealthy throughout
-        // — no spurious "recovered" transition on each half-open cycle.
+        // Probe, fail, probe, fail: the shard must stay unhealthy throughout,
+        // with no spurious "recovered" transition on each half-open cycle.
         let t1 = t0 + Duration::from_secs(6);
         assert_eq!(b.next_replica_idx(t1), Some(0));
         assert!(!b.shard_healthy());
@@ -784,11 +781,11 @@ mod tests {
         assert!(!b.shard_healthy());
     }
 
-    /// The health gauges are level-driven: every write outcome republishes
+    /// The health gauges are level-driven. Every write outcome republishes
     /// them, not only the ones that flip the cached state. An edge-triggered
     /// writer that has already published `0` never publishes `0` again, so a
-    /// reading knocked off the truth — by another handle set, or lost across a
-    /// restart of whatever scraped it — would stand until the next transition,
+    /// reading knocked off the truth (by another handle set, or lost across a
+    /// restart of whatever scraped it) would stand until the next transition,
     /// which for a wedged shard may be never.
     ///
     /// The test clobbers both gauges to a healthy-looking `1` directly through
@@ -839,13 +836,13 @@ mod tests {
             assert_eq!(gauge(names::SINK_REPLICA_HEALTHY), Some(0.0));
 
             // A scrape target restarts, or a rogue writer intervenes: the
-            // gauges now read a healthy shard that is in fact fully down.
+            // gauges now read a healthy shard that is fully down.
             metrics.set_shard_healthy(true);
             metrics.set_replica_healthy(0, true);
             assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(1.0), "clobbered");
 
-            // One more failed outcome — not a transition, the shard was
-            // already down — must put the truth back.
+            // One more failed outcome (not a transition, the shard was already
+            // down) must put the truth back.
             assert_eq!(
                 b.on_failure(0, Instant::now()),
                 None,

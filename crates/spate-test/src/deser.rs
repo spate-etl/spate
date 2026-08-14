@@ -17,11 +17,11 @@ enum Mode {
 /// Modes:
 /// - [`passthrough`](Self::passthrough): one record per payload;
 /// - [`split_on`](Self::split_on): one record per delimiter-separated
-///   segment — exercises 1→N fan-out (`b"a,b"` → `["a", "b"]`; empty
+///   segment, exercising 1→N fan-out (`b"a,b"` → `["a", "b"]`; empty
 ///   segments are emitted, so `b"a,,b"` yields three records);
 /// - [`fail_on_prefix`](Self::fail_on_prefix): payloads starting with the
 ///   marker fail with [`DeserError::Malformed`], everything else passes
-///   through — exercises `Skip`/`Fail` error policies.
+///   through, exercising `Skip`/`Fail` error policies.
 ///
 /// Emission honors [`Flow::Blocked`]: the deserializer stops emitting for
 /// the current payload, as the seam contract requires.
@@ -97,7 +97,7 @@ impl Deserializer<Owned<Vec<u8>>> for TestDeserializer {
 
 /// An [`EmitRecord`] implementation that collects records into a `Vec`,
 /// optionally reporting [`Flow::Blocked`] once a capacity is reached
-/// (rejected records are counted, not stored) — for testing blocked-path
+/// (rejected records are counted, not stored), for testing blocked-path
 /// handling.
 #[derive(Debug, Default)]
 pub struct EmitCollector<T> {

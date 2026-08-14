@@ -161,15 +161,15 @@ impl ComponentLabels {
         )
     }
 
-    /// Build the metric key for a dynamic-arity family: the three standard
-    /// labels first (so every family joins cleanly against the framework's
-    /// series), then the caller's `extra` labels in order.
+    /// Build the metric key for a dynamic-arity family. The three standard
+    /// labels come first (so every family joins cleanly against the
+    /// framework's series), then the caller's `extra` labels in order.
     ///
     /// This mirrors what the `counter!`/`gauge!`/`histogram!` macros lower to
-    /// for runtime label values (`Key::from_parts` over a `Vec<Label>`); the
-    /// stage constructors above use the macro form because their labels are
-    /// fixed, while [`Meter`](super::Meter) needs a runtime-sized slice and a
-    /// name assembled from its namespace at build time.
+    /// for runtime label values (`Key::from_parts` over a `Vec<Label>`). The
+    /// stage constructors above use the macro form; [`Meter`](super::Meter)
+    /// needs a runtime-sized slice and a name assembled from its namespace at
+    /// build time.
     fn family_key(&self, name: SharedString, extra: &[(&'static str, SharedString)]) -> Key {
         validate_extra_labels(&name, extra);
         let mut labels = Vec::with_capacity(3 + extra.len());
@@ -220,15 +220,14 @@ impl ComponentLabels {
 
 /// A gauge that publishes only for the handle set that **owns** its series.
 ///
-/// Registration still happens for a shadow — the key is the same, so it is the
-/// same series and nothing extra renders — but every write is dropped, leaving
+/// Registration still happens for a shadow. The key is the same, so it is the
+/// same series and nothing extra renders, but every write is dropped, leaving
 /// the owner's reading intact. Ownership is decided once, at construction (see
-/// [`ownership`](super::ownership)); this is a plain bool test, not a lock.
+/// [`ownership`](super::ownership)); the check is a plain bool test, not a lock.
 ///
-/// Wrapping the handle rather than gating each setter is deliberate: a stage
-/// struct's initial publishes run in its constructor, and those are exactly
-/// the writes that clobber a live owner. Routing them through this type makes
-/// the suppression impossible to forget.
+/// The handle is wrapped rather than each setter gated. A stage struct's
+/// initial publishes run in its constructor, and those are the writes that
+/// clobber a live owner.
 #[derive(Clone, Debug)]
 pub(crate) struct OwnedGauge {
     gauge: Gauge,
@@ -258,17 +257,16 @@ impl OwnedGauge {
 /// Metadata attached to connector- and user-owned metric families. The
 /// framework's own stage metrics register through the `metrics` macros, which
 /// stamp `module_path!()` here; families registered through
-/// [`Meter`](super::Meter) inherit this module's path, which is adequate — the
-/// exporters this framework installs do not surface metadata.
+/// [`Meter`](super::Meter) inherit this module's path. The exporters this
+/// framework installs do not surface metadata.
 const FAMILY_METADATA: Metadata<'static> =
     Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
 
-/// Guard the caller's `extra` labels at build time (cold path): none may
-/// shadow a standard label key (they are attached automatically) or repeat
-/// another `extra` key. Panics — a construction-time wiring mistake, caught
-/// at startup before any data flows, like a bad sink topology. The name's
-/// namespace is validated up front by [`Meter`](super::Meter), so it needs no
-/// check here.
+/// Guard the caller's `extra` labels at build time (cold path). None may
+/// shadow a standard label key (those are attached automatically) or repeat
+/// another `extra` key. Panics on a violation, at startup before any data
+/// flows. The name's namespace is validated up front by
+/// [`Meter`](super::Meter), so it needs no check here.
 fn validate_extra_labels(name: &str, extra: &[(&'static str, SharedString)]) {
     for (i, (k, _)) in extra.iter().enumerate() {
         assert!(
@@ -283,18 +281,18 @@ fn validate_extra_labels(name: &str, extra: &[(&'static str, SharedString)]) {
     }
 }
 
-/// Why a `Meter` namespace token was rejected. Lets the panicking constructor
-/// path ([`validate_namespace`]) and the non-panicking runtime path
-/// (`Meter::for_component`) share one rule set while phrasing the outcome
-/// differently — a hard error for an explicit author call, a silent opt-out or
-/// a warning for a component default.
+/// Why a `Meter` namespace token was rejected. The panicking constructor path
+/// ([`validate_namespace`]) and the non-panicking runtime path
+/// (`Meter::for_component`) share one rule set and phrase the outcome
+/// differently. An explicit author call gets a hard error; a component default
+/// gets a silent opt-out or a warning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NamespaceRejection {
     /// Empty string.
     Empty,
-    /// Not a lowercase `[a-z][a-z0-9_]*` segment (so not a legal metric-name
-    /// segment) — e.g. it contains an uppercase letter or a hyphen, or leads
-    /// with a digit.
+    /// Not a lowercase `[a-z][a-z0-9_]*` segment, and so not a legal
+    /// metric-name segment. For example it contains an uppercase letter or a
+    /// hyphen, or leads with a digit.
     Malformed,
     /// A framework stage root (`source`, `sink`, …); a custom family here would
     /// collide with the taxonomy.
@@ -313,11 +311,11 @@ impl NamespaceRejection {
 }
 
 /// Classify a `Meter` namespace token (the `<ns>` in the `spate_<ns>_` prefix
-/// every one of its metrics gets): `Ok(())` if it is a usable, non-reserved
-/// segment, else why it was rejected. The single source of truth behind both
-/// the panicking [`validate_namespace`] and the non-panicking
-/// `Meter::for_component`; the reserved case is what makes custom names
-/// collision-proof against the framework taxonomy.
+/// every one of its metrics gets). Returns `Ok(())` if it is a usable,
+/// non-reserved segment, else why it was rejected. Both the panicking
+/// [`validate_namespace`] and the non-panicking `Meter::for_component` resolve
+/// through this function; rejecting a reserved root keeps custom names from
+/// colliding with the framework taxonomy.
 pub(crate) fn classify_namespace(namespace: &str) -> Result<(), NamespaceRejection> {
     if namespace.is_empty() {
         return Err(NamespaceRejection::Empty);
@@ -368,16 +366,15 @@ impl ErrorClass {
 }
 
 /// Dynamic per-partition gauge family, gated by `per_partition_detail`.
-/// Registration happens on the control plane (rebalance/commit paths), so a
-/// mutex is acceptable; the hot path never touches this.
+/// Registration happens on the control plane (rebalance/commit paths); the hot
+/// path never touches this.
 #[derive(Debug)]
 pub(crate) struct PartitionGauges {
     pub(crate) name: &'static str,
     pub(crate) labels: ComponentLabels,
     pub(crate) gauges: Mutex<HashMap<u32, Gauge>>,
-    /// Whether the owning handle set owns this series — see [`OwnedGauge`].
-    /// A shadow registers nothing here and publishes nothing: the owner is
-    /// the one member whose per-partition figures are real.
+    /// Whether the owning handle set owns this series (see [`OwnedGauge`]).
+    /// A shadow registers nothing here and publishes nothing.
     pub(crate) owned: bool,
 }
 
@@ -399,16 +396,14 @@ impl PartitionGauges {
     /// Zeroes and then drops the handles for partitions this component no
     /// longer owns.
     ///
-    /// The zeroing is the load-bearing half. The `metrics` facade has no
-    /// deletion and no idle timeout is configured (see `configured_builder`),
-    /// so dropping a handle is invisible to the exporter: the series keeps
-    /// rendering its last value for the life of the process. A reader that
-    /// aggregates across members would then count a partition twice — once
-    /// frozen here, once live on the member that now owns it. Setting `0`
-    /// first makes this component's contribution honest, because `0` is the
-    /// truth: it owns none of that partition.
+    /// The `metrics` facade has no deletion and no idle timeout is configured
+    /// (see `configured_builder`), so dropping a handle is invisible to the
+    /// exporter. The series keeps rendering its last value for the life of the
+    /// process. Without the zeroing, a reader that aggregates across members
+    /// counts a partition twice, once frozen here and once live on the member
+    /// that now owns it.
     ///
-    /// This is why absence and `0` mean different things for a per-partition
+    /// Absence and `0` therefore mean different things for a per-partition
     /// series. Absent is "never measured"; `0` here is "measured, not ours".
     pub(crate) fn retain(&self, keep: &[PartitionId]) {
         let mut gauges = self.gauges.lock().expect("partition gauge lock");

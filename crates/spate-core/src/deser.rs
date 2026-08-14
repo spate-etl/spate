@@ -1,10 +1,9 @@
 //! Deserialization contract: one borrowed payload in, 0..N records out,
 //! push-style.
 //!
-//! The [`RecFamily`] lifetime→type family is what lets a
-//! lifetime-parameterized record type cross generic and dyn boundaries
-//! (validated by the seam prototype — ADR-0013). Deserializers for
-//! borrowing record types implement `Deserializer<F>` for a family `F`
+//! The [`RecFamily`] lifetime→type family lets a lifetime-parameterized
+//! record type cross generic and dyn boundaries (ADR-0013). Deserializers
+//! for borrowing record types implement `Deserializer<F>` for a family `F`
 //! whose `Rec<'buf>` borrows the payload buffer; owned record types use
 //! the provided [`Owned`] family.
 
@@ -14,9 +13,9 @@ use crate::record::{Flow, RawPayload, Record};
 
 /// Maps a payload-buffer lifetime to the deserialized record type.
 ///
-/// The family tag itself is `'static` — it is a type-level function, never
-/// instantiated — which is what keeps chains nameable and `Send` while the
-/// records they process borrow ephemeral buffers.
+/// The family tag itself is `'static`, a type-level function that is never
+/// instantiated. Chains stay nameable and `Send` while the records they
+/// process borrow ephemeral buffers.
 pub trait RecFamily: 'static {
     /// The record type produced for payloads borrowing `'buf`.
     type Rec<'buf>: Send;

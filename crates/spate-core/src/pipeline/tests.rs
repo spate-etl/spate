@@ -206,14 +206,14 @@ fn revocation_drains_flushes_and_commits_in_order() {
             commit_after.is_some(),
             "revocation must commit acknowledged offsets"
         );
-        // No flush/commit *ordering* assertion here: the controller also
+        // No flush/commit *ordering* assertion here. The controller also
         // broadcasts FlushNow on every commit tick (20ms in tests), so the
-        // log interleaves periodic flushes and commits nondeterministically —
+        // log interleaves periodic flushes and commits nondeterministically,
         // and this chain resolves acks on consumption, so the equality below
         // cannot see whether revocation flushed before committing. That
         // ordering is pinned by `revocation_flushes_parked_acks_before_committing`,
         // whose chain parks acks until a flush. This test keeps the
-        // ack-on-consume half: everything consumed was committed — nothing
+        // ack-on-consume half: everything consumed was committed, and nothing
         // consumed was lost.
         assert_eq!(
             log.committed.get(&PartitionId(0)),
@@ -225,8 +225,8 @@ fn revocation_drains_flushes_and_commits_in_order() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
-/// Revocation must flush the chain *before* committing — the drain is what
-/// turns parked acknowledgments into committable watermarks. The chain here
+/// Revocation must flush the chain *before* committing. The drain turns
+/// parked acknowledgments into committable watermarks. The chain here
 /// parks every batch's ack until it is flushed, as a real terminal's partial
 /// chunk buffer does, and both periodic flush paths are out of reach (60s
 /// commit interval, 60s idle flush, sub-second test), so the only thing that
@@ -302,7 +302,7 @@ fn blocked_chain_pauses_then_resumes() {
 }
 
 /// A batch that can never unblock must not hold shutdown hostage until the
-/// barrier deadline: the driver's retry loop observes the shutdown flag,
+/// barrier deadline. The driver's retry loop observes the shutdown flag,
 /// abandons the batch (failing its acknowledgment so the data replays),
 /// and exits promptly.
 #[test]
@@ -324,7 +324,7 @@ fn shutdown_during_permanently_blocked_batch_exits_promptly_and_fails_the_batch(
         begun.elapsed() < Duration::from_secs(5),
         "shutdown must not wait for the barrier deadline"
     );
-    // The abandoned batch's offsets never became committable: nothing was
+    // The abandoned batch's offsets never became committable. Nothing was
     // consumed, so no watermark advanced and no commit happened.
     assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
     let log = h.shared.lock().unwrap();
@@ -351,7 +351,7 @@ fn fatal_chain_fails_pipeline_and_stalls_watermark() {
     assert_eq!(failure.component, "fake-chain");
     let log = h.shared.lock().unwrap();
     // Batch 1 delivered → committable to 10. The failed batch 2 stalls the
-    // watermark: 20 and 30 must never be committed.
+    // watermark. 20 and 30 must never be committed.
     let committed = log.committed.get(&PartitionId(0)).copied();
     assert!(
         committed == Some(10) || committed.is_none(),
@@ -407,11 +407,11 @@ fn permanent_watermark_stall_fails_pipeline_as_checkpoint() {
     assert!(failure.reason.contains("stalled"), "{}", failure.reason);
 }
 
-/// The regression #196 pins: `max_pending_batches` is a hard per-partition
-/// bound, enforced at the driver's poll boundary. With every ack withheld,
-/// exactly `limit` batches enter the chain and no more, however long the
-/// pipeline runs — the bound holds across commit ticks rather than being
-/// re-measured by them.
+/// `max_pending_batches` is a hard per-partition bound, enforced at the
+/// driver's poll boundary (the regression #196 pins). With every ack
+/// withheld, exactly `limit` batches enter the chain and no more, however
+/// long the pipeline runs. The bound holds across commit ticks rather than
+/// being re-measured by them.
 #[test]
 fn pending_batch_ceiling_is_a_hard_bound() {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
@@ -429,21 +429,21 @@ fn pending_batch_ceiling_is_a_hard_bound() {
         },
         batches_seen: 0,
     });
-    // Six batches whose acks are all withheld: the gate closes after the
+    // Six batches whose acks are all withheld. The gate closes after the
     // third and the remaining three never leave the lane.
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
     wait_for("the ceiling fills", Duration::from_secs(5), || {
         held.lock().unwrap().len() == 3
     });
-    // Many commit ticks later (20ms interval), the count has not moved:
-    // the bound holds instead of overshooting on the next tick's slack.
+    // Many commit ticks later (20ms interval), the count has not moved.
+    // The bound holds instead of overshooting on the next tick's slack.
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(
         held.lock().unwrap().len(),
         3,
         "pending exceeded max_pending_batches"
     );
-    // The bound is the driver's, not a controller pause: the source was
+    // The bound is the driver's, not a controller pause. The source was
     // never asked to pause for checkpoint pressure.
     assert!(
         h.shared.lock().unwrap().pauses.is_empty(),
@@ -467,7 +467,7 @@ fn pending_batch_ceiling_is_a_hard_bound() {
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the
-/// gate pins that partition at the ceiling: the replay a restart faces is
+/// gate pins that partition at the ceiling. The replay a restart faces is
 /// bounded by `max_pending_batches`, not by fetch rate x
 /// `stalled_fail_after`.
 #[test]
@@ -496,9 +496,9 @@ fn a_stalled_partition_plateaus_at_the_ceiling() {
     let _ = h.join.join().unwrap();
 }
 
-/// The ceiling is per partition: a lane added while a sibling partition
-/// sits at its ceiling runs immediately, gated only by its own count —
-/// which is what `checkpoint.max_pending_batches` documents.
+/// The ceiling is per partition. A lane added while a sibling partition
+/// sits at its ceiling runs immediately, gated only by its own count, as
+/// `checkpoint.max_pending_batches` documents.
 #[test]
 fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
@@ -524,7 +524,7 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     );
 
     // A fresh lane on a fresh partition joins while partition 0 is gated.
-    // Its batch flows immediately: the newcomer's gate counts only its own
+    // Its batch flows immediately; the newcomer's gate counts only its own
     // partition's pending.
     h.script
         .lock()
@@ -587,9 +587,9 @@ fn shutdown_flushes_chain_before_exit() {
     assert_eq!(report.final_watermarks, vec![(PartitionId(0), 5)]);
 }
 
-/// A bounded source reporting `Drained` completes the pipeline on its own —
-/// no external shutdown trigger — through the ordinary drain choreography:
-/// chain flush, sink drain, final synchronous commit.
+/// A bounded source reporting `Drained` completes the pipeline on its own,
+/// with no external shutdown trigger, through the ordinary drain
+/// choreography: chain flush, sink drain, final synchronous commit.
 #[test]
 fn drained_source_completes_pipeline_without_external_trigger() {
     let h = start(|shared, log| FakeChain {
@@ -616,7 +616,7 @@ fn drained_source_completes_pipeline_without_external_trigger() {
     );
 }
 
-/// An empty bounded source (nothing to assign — e.g. an empty backfill
+/// An empty bounded source (nothing to assign, e.g. an empty backfill
 /// listing) still completes cleanly via `Drained`.
 #[test]
 fn drained_before_any_data_completes_with_empty_watermarks() {
@@ -676,7 +676,7 @@ fn drained_with_unacknowledged_batches_fails_instead_of_completing() {
 /// `Completed` after `Drained` must also mean the final watermark commit
 /// persisted. When the checkpoint store is down for the whole run (every
 /// commit and the final flush fail retryably), all batches acknowledge
-/// fine — but nothing was durably committed, and there is no next tick to
+/// fine, but nothing was durably committed, and there is no next tick to
 /// retry into. The backstop must fail the run instead of reporting a
 /// completion whose checkpoint holds stale offsets.
 #[test]
@@ -739,8 +739,8 @@ fn source_error_classification() {
 /// If the controller thread panics (here, a source whose `poll_events`
 /// panics), it never runs the drain choreography, never tells the drivers to
 /// stop, and never sets the shutdown flag. `run()` must detect the dead
-/// controller, stop the drivers itself, and return `Failed` — not wedge on
-/// an untimed driver join.
+/// controller, stop the drivers itself, and return `Failed` rather than
+/// wedging on an untimed driver join.
 #[test]
 fn controller_panic_stops_drivers_and_fails_instead_of_hanging() {
     let h = start(|shared, log| FakeChain {
@@ -776,9 +776,9 @@ fn controller_panic_stops_drivers_and_fails_instead_of_hanging() {
     assert_eq!(failure.component, "controller");
 }
 
-/// A caller-owned I/O runtime (`with_io_runtime`) must be the runtime
-/// `run()` actually uses — tasks land on its worker threads — and must be
-/// shut down by `run()` on exit exactly like an internally built one.
+/// A caller-owned I/O runtime (`with_io_runtime`) must be the runtime `run()`
+/// uses (tasks land on its worker threads) and must be shut down by `run()`
+/// on exit like an internally built one.
 #[test]
 fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
     let io = tokio::runtime::Builder::new_multi_thread()
@@ -862,7 +862,7 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
 
 /// A fallible startup step after the driver threads are spawned (here, the
 /// admin bind, forced to fail by occupying its port) must stop the drivers
-/// and return the error promptly — never leak the running pinned threads.
+/// and return the error promptly, never leaking the running pinned threads.
 #[test]
 fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe port");
@@ -888,8 +888,8 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     let Err(err @ StartError::AdminBind { .. }) = result else {
         panic!("expected StartError::AdminBind, got {result:?}");
     };
-    // The address is the whole diagnosis: a bare I/O error leaves the reader
-    // guessing which of a config's addresses the kernel refused.
+    // A bare I/O error leaves the reader guessing which of a config's
+    // addresses the kernel refused.
     assert!(
         err.to_string().contains(&addr.to_string()),
         "the error must name the address it could not take: {err}"
@@ -897,13 +897,9 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     drop(occupied);
 }
 
-/// `admin.listen: none` runs and drains with no admin server. The shutdown
-/// path is what this covers: with no listener there is no stop channel to
-/// signal, and the run has to reach its drain and its controller join anyway.
-///
-/// That no socket is opened is structural — the bind sits inside the `Some`
-/// arm — and proving it from inside the process would take socket enumeration
-/// this suite has no business doing.
+/// `admin.listen: none` runs and drains with no admin server. With no
+/// listener there is no stop channel to signal, and the run has to reach its
+/// drain and its controller join anyway.
 #[test]
 fn no_admin_listener_still_drains_and_completes() {
     let mut cfg = test_config(1);
@@ -923,29 +919,28 @@ fn no_admin_listener_still_drains_and_completes() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
-/// The controller's `SourceMetrics` — not one of the per-thread instances —
+/// The controller's `SourceMetrics`, not one of the per-thread instances,
 /// must own the source series.
 ///
 /// A pipeline builds one handle set per driver thread plus the controller's,
 /// all on identical labels, because every thread counts the records it polled.
-/// Only the controller's can publish the gauges: it is the one holding the
-/// assignment, and the one whose clone reaches the source, which is the only
-/// thing that can measure lag. If a driver's instance claimed the series
-/// first, the controller's would be a shadow and `spate_source_lag_records`
-/// would go silent again — the exact failure this project has already shipped
-/// once, invisibly, for fourteen days.
+/// Only the controller's can publish the gauges. It holds the assignment, and
+/// its clone reaches the source, which is the only thing that can measure lag.
+/// If a driver's instance claimed the series first, the controller's would be
+/// a shadow and `spate_source_lag_records` would go silent again, as it did
+/// for fourteen days.
 ///
 /// `FakeSource` publishes `FAKE_SOURCE_LAG` for partition 0 at `open`, through
 /// whatever handle set it was given. A per-partition gauge registers on its
-/// first published value, so a shadowed controller leaves the series *absent*
-/// — flip `SourceMetrics::shadow` to `try_new` in `runtime.rs` and this test
+/// first published value, so a shadowed controller leaves the series *absent*.
+/// Flip `SourceMetrics::shadow` to `try_new` in `runtime.rs` and this test
 /// fails on a missing series, not on a wrong number.
 #[test]
 fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
     let mut cfg = test_config(4); // four drivers → four shadows, one owner
     cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
     let pipeline_name = cfg.pipeline.name.clone();
-    // Installed before the pipeline builds: handles bind to the recorder
+    // Installed before the pipeline builds. Handles bind to the recorder
     // present at construction. Idempotent, so the runtime's own install
     // reuses this one and renders through this handle.
     let handle = crate::metrics::install(&crate::metrics::MetricsSettings {

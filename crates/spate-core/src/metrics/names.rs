@@ -1,4 +1,4 @@
-//! Metric and label name constants — the single source of truth for the
+//! Metric and label name constants, the single source of truth for the
 //! taxonomy documented in [the metrics reference].
 //!
 //! Every framework metric is registered through these constants; nothing
@@ -50,7 +50,7 @@ pub const SOURCE_RECORDS_TOTAL: &str = "spate_source_records_total";
 pub const SOURCE_BYTES_TOTAL: &str = "spate_source_bytes_total";
 /// Time spent inside `poll` per call.
 pub const SOURCE_POLL_DURATION_SECONDS: &str = "spate_source_poll_duration_seconds";
-/// Consumer lag, always labeled by [`L_PARTITION`] — there is no aggregate
+/// Consumer lag, always labeled by [`L_PARTITION`]. There is no aggregate
 /// series; aggregate with `sum`/`max` in the query layer. A partition whose
 /// lag has never been measured is absent rather than `0`.
 pub const SOURCE_LAG_RECORDS: &str = "spate_source_lag_records";
@@ -69,7 +69,7 @@ pub const DESER_RECORDS_DROPPED_TOTAL: &str = "spate_deser_records_dropped_total
 /// Deserialization time per source batch.
 pub const DESER_BATCH_DURATION_SECONDS: &str = "spate_deser_batch_duration_seconds";
 /// Counter: payload replays awaiting an upstream dependency (e.g. a schema
-/// fetch) — `DeserError::NotReady` occurrences. Not an error and not
+/// fetch), counting `DeserError::NotReady` occurrences. Not an error and not
 /// backpressure.
 pub const DESER_NOT_READY_TOTAL: &str = "spate_deser_not_ready_total";
 
@@ -121,38 +121,38 @@ pub const SINK_BATCH_BYTES: &str = "spate_sink_batch_bytes";
 pub const SINK_FLUSHES_TOTAL: &str = "spate_sink_flushes_total";
 /// Seal-to-settle time of one durably written batch, by [`L_SHARD`]: the
 /// in-flight permit wait, every attempt, every backoff sleep and probe wait,
-/// and the write that finally succeeded. The commit-lag input, **not** a
-/// measure of how fast the sink is — that is
-/// [`SINK_WRITE_DURATION_SECONDS`], and the queueing component is
-/// [`SINK_PERMIT_WAIT_DURATION_SECONDS`]. Only settled batches are observed;
-/// an abandoned one — at the drain deadline or, with no drain in sight, on a
-/// fatal class, exhausted attempts or a panicking write task — is counted by
+/// and the write that finally succeeded. This is the commit-lag input,
+/// **not** a measure of how fast the sink is; for that use
+/// [`SINK_WRITE_DURATION_SECONDS`], and for the queueing component
+/// [`SINK_PERMIT_WAIT_DURATION_SECONDS`]. Only settled batches are observed.
+/// An abandoned batch (at the drain deadline or, with no drain in sight, on a
+/// fatal class, exhausted attempts or a panicking write task) is counted by
 /// [`SINK_ABANDONED_BATCHES_TOTAL`].
 pub const SINK_FLUSH_DURATION_SECONDS: &str = "spate_sink_flush_duration_seconds";
-/// One write attempt, by [`L_SHARD`] and [`L_OUTCOME`] (`ok`, `error`) — the
-/// sink system's round-trip, with the framework's own scheduling around the
-/// call (the permit wait, the retry backoff, the probe wait) left out.
-/// A connector that sleeps *inside* its write puts that sleep in here.
+/// One write attempt, by [`L_SHARD`] and [`L_OUTCOME`] (`ok`, `error`). This
+/// is the sink system's round-trip, with the framework's own scheduling
+/// around the call (the permit wait, the retry backoff, the probe wait) left
+/// out. A connector that sleeps *inside* its write puts that sleep in here.
 /// Labeled by outcome because a fast fatal reject and a slow timeout are
 /// both attempts; the error *class* stays on [`SINK_ERRORS_TOTAL`].
 pub const SINK_WRITE_DURATION_SECONDS: &str = "spate_sink_write_duration_seconds";
 /// Time a sealed batch waited for one of its shard's `inflight.max_per_shard`
-/// slots before its first write attempt, by [`L_SHARD`] — the queueing
-/// component of [`SINK_FLUSH_DURATION_SECONDS`]. Observed for every sealed
-/// batch that starts a write, the healthy near-zero case included; a batch
-/// the drain deadline drops before it ever gets a permit is not.
+/// slots before its first write attempt, by [`L_SHARD`]. This is the
+/// queueing component of [`SINK_FLUSH_DURATION_SECONDS`]. Observed for every
+/// sealed batch that starts a write, the healthy near-zero case included; a
+/// batch the drain deadline drops before it ever gets a permit is not.
 pub const SINK_PERMIT_WAIT_DURATION_SECONDS: &str = "spate_sink_permit_wait_duration_seconds";
 /// Flush attempts beyond the first, by [`L_SHARD`].
 pub const SINK_RETRIES_TOTAL: &str = "spate_sink_retries_total";
 /// Current retry backoff step of the shard's longest-sleeping in-flight
 /// batch, by [`L_SHARD`]; `0` when no write is backing off. The step being
-/// served, not the time left in it — it does not count down.
+/// served, not the time left in it; the value does not count down.
 pub const SINK_RETRY_BACKOFF_SECONDS: &str = "spate_sink_retry_backoff_seconds";
 /// Write errors, by [`L_SHARD`] and [`L_ERROR_TYPE`].
 pub const SINK_ERRORS_TOTAL: &str = "spate_sink_errors_total";
 /// Sealed batches not yet settled, by [`L_SHARD`]: those being written plus
 /// any sealed batch still queueing for an `inflight.max_per_shard` slot. It
-/// can therefore read above the cap while a batch waits — compare it to the
+/// can therefore read above the cap while a batch waits; compare it to the
 /// cap for saturation, not for equality.
 pub const SINK_INFLIGHT_BATCHES: &str = "spate_sink_inflight_batches";
 /// 1 = circuit closed, 0 = open, by [`L_SHARD`] and [`L_REPLICA`].
@@ -164,16 +164,16 @@ pub const SINK_BREAKER_OPENS_TOTAL: &str = "spate_sink_breaker_opens_total";
 /// shard-level [`SINK_ERRORS_TOTAL`] gives the class breakdown).
 pub const SINK_REPLICA_ERRORS_TOTAL: &str = "spate_sink_replica_errors_total";
 /// 1 = the shard has at least one circuit-closed replica, 0 = none is
-/// circuit-closed (every replica quarantined or half-open probing) — intake
-/// stalls and the shard back-pressures the source while recovery probes
-/// continue, by [`L_SHARD`]. The whole-shard escalation of
+/// circuit-closed (every replica quarantined or half-open probing), by
+/// [`L_SHARD`]. At 0, intake stalls and the shard back-pressures the source
+/// while recovery probes continue. The whole-shard escalation of
 /// [`SINK_REPLICA_HEALTHY`].
 pub const SINK_SHARD_HEALTHY: &str = "spate_sink_shard_healthy";
 /// Batches abandoned at the drain deadline (replayed after restart).
 pub const SINK_ABANDONED_BATCHES_TOTAL: &str = "spate_sink_abandoned_batches_total";
 /// Shard workers force-aborted for failing to return by the drain deadline,
-/// by [`L_SHARD`]. Non-zero is a framework bug, not an operating condition:
-/// the drain still completed and the data still replays, but that shard's
+/// by [`L_SHARD`]. Non-zero is a framework bug, not an operating condition.
+/// The drain still completed and the data still replays, but that shard's
 /// contribution to the drain report was lost with it.
 pub const SINK_DRAIN_OVERRUN_TOTAL: &str = "spate_sink_drain_overrun_total";
 
@@ -186,7 +186,7 @@ pub const CHECKPOINT_PENDING_BATCHES: &str = "spate_checkpoint_pending_batches";
 pub const CHECKPOINT_COMMITS_TOTAL: &str = "spate_checkpoint_commits_total";
 /// Commit round-trip time.
 pub const CHECKPOINT_COMMIT_DURATION_SECONDS: &str = "spate_checkpoint_commit_duration_seconds";
-/// Age of the oldest unacknowledged batch — the primary "stuck pipeline"
+/// Age of the oldest unacknowledged batch. The primary "stuck pipeline"
 /// alert signal.
 pub const CHECKPOINT_WATERMARK_AGE_SECONDS: &str = "spate_checkpoint_watermark_age_seconds";
 
@@ -213,24 +213,23 @@ pub const COORDINATION_SPLIT_LOSSES_TOTAL: &str = "spate_coordination_split_loss
 /// Voluntary split releases (graceful shutdown or scale-down).
 pub const COORDINATION_RELEASES_TOTAL: &str = "spate_coordination_releases_total";
 /// Split revocations, by [`L_OUTCOME`] (`requested`, `drained`, `forced`,
-/// `cancelled`) — the leader moving a split away from a live owner. All
+/// `cancelled`), the leader moving a split away from a live owner. All
 /// four count on the releasing worker; `drained` is the replay-free
 /// outcome, and `cancelled` is the leader taking the move back.
 pub const COORDINATION_REVOCATIONS_TOTAL: &str = "spate_coordination_revocations_total";
 /// Cooperative drain time on the **releasing** worker: revocation
 /// requested to the release landing. Only drains that end a revocation
-/// cooperatively are observed — a forced release is a `forced` revocation,
+/// cooperatively are observed. A forced release is a `forced` revocation,
 /// not a drain, and a drain whose revocation was `cancelled` is no longer
-/// ending a revocation at all when it lands.
+/// ending a revocation when it lands.
 pub const COORDINATION_DRAIN_DURATION_SECONDS: &str = "spate_coordination_drain_duration_seconds";
 /// Assignment convergence on the **gaining** worker: a split appearing in
 /// this worker's assignment to this worker holding its lease.
 pub const COORDINATION_ASSIGNMENT_LATENCY_SECONDS: &str =
     "spate_coordination_assignment_latency_seconds";
-/// Splits this worker is currently draining away under revocation —
+/// Splits this worker is currently draining away under revocation,
 /// including a drain whose revocation was cancelled and which is still
-/// winding down, so this is the drain count rather than the revocation
-/// count.
+/// winding down. This is the drain count rather than the revocation count.
 pub const COORDINATION_SPLITS_DRAINING: &str = "spate_coordination_splits_draining";
 /// Splits written into the plan by this worker while leader (seeded
 /// create-if-absent; replayed ids that already exist are not counted).
@@ -352,10 +351,9 @@ pub const HISTOGRAMS: &[&str] = &[
 
 // Namespace policy for connector- and user-owned families (see
 // `docs/METRICS.md` and the `Meter` docs). Every framework metric lives under
-// the `spate_` umbrella so an operator greps one root for the whole pipeline's
-// telemetry; a custom family registered through `Meter` must join that
-// umbrella but must not land under a reserved stage root, so it can never
-// collide with a current or future framework metric.
+// the `spate_` umbrella so an operator greps one root for the whole
+// pipeline's telemetry. A custom family registered through `Meter` must join
+// that umbrella and must not land under a reserved stage root.
 
 /// The umbrella prefix on every framework metric, required of every
 /// `Meter`-registered custom family too.
@@ -363,7 +361,7 @@ pub const PREFIX: &str = "spate_";
 
 /// The `spate_<root>_` segments the framework's own stage taxonomy owns. A
 /// `Meter` rejects any custom name whose first segment after `PREFIX` is one
-/// of these. Keep in sync with the stage sections above — the
+/// of these. Keep in sync with the stage sections above; the
 /// `every_framework_name_is_under_a_reserved_root` test enforces it.
 pub const RESERVED_ROOTS: &[&str] = &[
     "source",
@@ -379,9 +377,9 @@ pub const RESERVED_ROOTS: &[&str] = &[
 ];
 
 /// The default namespace for pipeline-author custom metrics (`Meter::new` /
-/// `ChainCtx::meter`) → `spate_custom_*`. Well-formed and not a reserved root, so
-/// a `Meter` may use it — but the runtime's `Meter::for_component` will *not*
-/// scope a built-in component here: a component must declare its own
+/// `ChainCtx::meter`) → `spate_custom_*`. Well-formed and not a reserved
+/// root, so a `Meter` may use it. The runtime's `Meter::for_component` will
+/// *not* scope a built-in component here; a component must declare its own
 /// `component_type`, keeping author `spate_custom_*` families and component
 /// families in separate buckets.
 pub const CUSTOM_NAMESPACE: &str = "custom";
@@ -442,9 +440,9 @@ mod tests {
     }
 
     /// Every framework metric must fall under one of `RESERVED_ROOTS`, so the
-    /// `Meter` reserved-root guard actually protects the whole taxonomy. If a
-    /// new stage adds an `spate_<root>_*` family with a fresh root, add that root
-    /// to `RESERVED_ROOTS`.
+    /// `Meter` reserved-root guard protects the whole taxonomy. If a new stage
+    /// adds an `spate_<root>_*` family with a fresh root, add that root to
+    /// `RESERVED_ROOTS`.
     #[test]
     fn every_framework_name_is_under_a_reserved_root() {
         for name in COUNTERS.iter().chain(GAUGES).chain(HISTOGRAMS) {

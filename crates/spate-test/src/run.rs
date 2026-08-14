@@ -1,5 +1,5 @@
 //! Blocking test-wait helpers: bounded pipeline-exit waits and a generic
-//! condition poll, so whole-pipeline tests don't hand-roll
+//! condition poll. Whole-pipeline tests use these in place of hand-rolled
 //! `deadline + thread::sleep` busy-loops.
 
 use spate_core::pipeline::{ExitReport, StartError};
@@ -7,8 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// A pipeline running on its own OS thread, with its exit result delivered
-/// over a channel so tests can wait with a bounded [`recv_timeout`] instead of
-/// polling [`JoinHandle::is_finished`].
+/// over a channel so tests can wait with a bounded [`recv_timeout`].
 ///
 /// [`recv_timeout`]: crossbeam_channel::Receiver::recv_timeout
 #[derive(Debug)]
@@ -47,9 +46,8 @@ impl PipelineRun {
 }
 
 /// How often [`wait_until`] re-checks its predicate. Small enough that the
-/// cadence is not itself the latency a test measures — at the old 250ms every
-/// wait paid up to a quarter second of pure sleep, and the suites use dozens of
-/// them — but coarse enough not to spin a core.
+/// cadence is not itself the latency a test measures, coarse enough not to spin
+/// a core.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Poll `check` until it returns `true` or `timeout` elapses; panics with `what`

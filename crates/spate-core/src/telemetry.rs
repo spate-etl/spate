@@ -6,7 +6,7 @@
 //! Choose a level by what the event means to an operator:
 //!
 //! - **`WARN`** — the pipeline is degraded, or has lost work it expected to
-//!   keep, and somebody may need to act. Not a routine event the framework
+//!   keep, and an operator may need to act. Not a routine event the framework
 //!   itself causes, however unusual that event looks from inside the one
 //!   component that observes it.
 //! - **`INFO`** — a lifecycle milestone worth a place in a post-mortem
@@ -15,10 +15,9 @@
 //! - **`DEBUG`** — the bookkeeping underneath them: per-split, per-retry,
 //!   per-connection.
 //!
-//! A deployment runs at `INFO`. Two things sit outside the split: a
-//! dependency's own output arrives through its bridge at whatever level
-//! that dependency chose, and a per-record event cannot be bounded by a
-//! level at all — see below.
+//! A deployment runs at `INFO`. A dependency's own output arrives through
+//! its bridge at whatever level that dependency chose, and a per-record
+//! event cannot be bounded by a level at all (see below).
 //!
 //! # Rate limiting on the hot path
 //!
@@ -57,7 +56,7 @@ fn nanos_since_base(now: Instant) -> u64 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogFormat {
-    /// One JSON object per line with flattened event fields — the shape
+    /// One JSON object per line with flattened event fields, the shape
     /// Kubernetes log pipelines expect. Default.
     #[default]
     Json,
@@ -70,7 +69,7 @@ pub enum LogFormat {
 /// The filter comes from `RUST_LOG` when set, else `default_filter`
 /// (e.g. `"info,spate_core=debug"`). Idempotent: returns `true` if this call
 /// installed the subscriber, `false` if one (ours or foreign) was already
-/// installed — never panics, so libraries and tests can call it freely.
+/// installed. Never panics, so libraries and tests can call it freely.
 pub fn init(format: LogFormat, default_filter: &str) -> bool {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
@@ -115,15 +114,15 @@ struct RateLimitState {
 /// window.
 ///
 /// `const`-constructible for use in `static`s. Under a poison storm every
-/// pinned pipeline thread hits the *same* limiter once per failing record, so
-/// the exact-accounting mutex is genuinely contended — exactly the case the
-/// limiter exists for. To keep steady-state suppression off the shared lock,
-/// a relaxed-atomic fast path short-circuits while the window stays
-/// saturated: a single relaxed load of `saturated` plus a deadline compare,
-/// no mutex. The mutex path remains the source of truth for allow decisions
-/// and window rolls; suppressed events counted on the fast path are folded
-/// back in at the next roll, so the carried `suppressed` count is exact in
-/// practice (best-effort under concurrent rolls).
+/// pinned pipeline thread hits the *same* limiter once per failing record,
+/// so the exact-accounting mutex is contended. To keep steady-state
+/// suppression off the shared lock, a relaxed-atomic fast path
+/// short-circuits while the window stays saturated: a single relaxed load
+/// of `saturated` plus a deadline compare, no mutex. The mutex path remains
+/// the source of truth for allow decisions and window rolls; suppressed
+/// events counted on the fast path are folded back in at the next roll, so
+/// the carried `suppressed` count is exact in practice (best-effort under
+/// concurrent rolls).
 #[derive(Debug)]
 pub struct RateLimit {
     capacity: u32,
@@ -166,7 +165,7 @@ impl RateLimit {
     /// Decide for an event at `now` (injectable for tests).
     pub fn check_at(&self, now: Instant) -> Decision {
         // Fast path: while the window stays saturated, suppress with a single
-        // relaxed load and a deadline compare — no mutex. Once the deadline
+        // relaxed load and a deadline compare, no mutex. Once the deadline
         // passes the compare fails and we fall through to roll the window.
         if self.saturated.load(Ordering::Relaxed)
             && nanos_since_base(now) < self.window_end_nanos.load(Ordering::Relaxed)

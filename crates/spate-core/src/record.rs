@@ -5,9 +5,9 @@
 //! clone of the source batch's acknowledgment handle
 //! ([`AckRef`](crate::checkpoint::AckRef)). Records are born inside a chain's
 //! `push_batch` call (deserialization) and die inside the same call
-//! (serialized into shard frames, filtered out, or failed) — they are never
-//! stored across the chain boundary, which is what makes borrowed payloads
-//! sound (ADR-0013).
+//! (serialized into shard frames, filtered out, or failed). They are never
+//! stored across the chain boundary, so borrowed payloads are sound
+//! (ADR-0013).
 
 use crate::checkpoint::AckRef;
 
@@ -17,7 +17,7 @@ pub enum Flow {
     /// Keep pushing.
     Continue,
     /// Downstream is full: stop pushing and resume from the current cursor
-    /// once capacity frees. Never block — see the backpressure invariant.
+    /// once capacity frees. Never block. See the backpressure invariant.
     Blocked,
 }
 
@@ -25,8 +25,8 @@ pub enum Flow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PartitionId(pub u32);
 
-/// Per-record metadata. `Copy`, no drop glue — moves through operators for
-/// free and never touches the heap.
+/// Per-record metadata. `Copy`, no drop glue, so it moves through operators
+/// for free and never touches the heap.
 #[derive(Clone, Copy, Debug)]
 pub struct RecordMeta {
     /// Source partition this record was read from.
@@ -96,7 +96,7 @@ impl RawPayload<'_> {
 }
 
 /// Stable, seedless 64-bit hash for shard routing (FNV-1a). Not for
-/// adversarial input — routing only. Stability across processes, versions,
+/// adversarial input; routing only. Stability across processes, versions,
 /// and platforms is a contract: changing this function reshuffles shards.
 #[inline]
 #[must_use]

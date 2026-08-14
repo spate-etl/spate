@@ -1,7 +1,7 @@
 //! Operator chain: statically composed push stages behind one type-erasure
 //! boundary per batch.
 //!
-//! Stages compose via [`Collector`] (monomorphized — a whole chain compiles
+//! Stages compose via [`Collector`] (monomorphized, so a whole chain compiles
 //! to one loop); the only virtual call on the data path is
 //! [`RunnableChain::push_batch`], once per poll batch. Records are born
 //! (deserialized) and die (encoded into shard frames, filtered, or skipped)
@@ -30,14 +30,14 @@ use crate::source::PayloadBatch;
 
 /// Why a batch could not complete yet. Both cases are retried with the
 /// resume cursor, but only [`BlockReason::Capacity`] engages the driver's
-/// backpressure controller — a not-ready wait is an upstream dependency
+/// backpressure controller. A not-ready wait is an upstream dependency
 /// (e.g. a schema fetch), not sink pressure, and pausing the source for it
 /// would misreport the pipeline's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BlockReason {
     /// The terminal stage could not accept more output (a shard queue is
-    /// full): genuine backpressure.
+    /// full). This is sink backpressure.
     Capacity,
     /// A deserializer reported
     /// [`DeserError::NotReady`](crate::error::DeserError::NotReady): the
@@ -58,7 +58,7 @@ pub enum PushOutcome {
     /// are fully processed; the driver later re-pushes the same batch with
     /// `from = resume_at`. Any partially-emitted payload's already-emitted
     /// records are parked inside the terminal stage and drain first on
-    /// resume — operators never re-run for them.
+    /// resume; operators never re-run for them.
     Blocked {
         /// Index of the first payload not yet fully processed.
         resume_at: usize,
@@ -71,8 +71,8 @@ pub enum PushOutcome {
     Fatal(FatalError),
 }
 
-/// THE SEAM — the one erasure boundary between a pipeline thread's driver
-/// loop and a typed chain. The methods are generic over the buffer lifetime
+/// The one erasure boundary between a pipeline thread's driver loop and a
+/// typed chain. The methods are generic over the buffer lifetime
 /// only, so `Box<dyn RunnableChain>` is legal.
 pub trait RunnableChain: Send {
     /// Push payloads `from..` of `batch` through the chain.
@@ -85,8 +85,8 @@ pub trait RunnableChain: Send {
 
     /// Discard any per-batch replay/resume state after the driver failed the
     /// current batch's acknowledgment (a shutdown-time abandonment of a
-    /// batch blocked mid-push). Terminal parked chunks — which carry their
-    /// own acks — are unaffected; only the chain's own mid-batch cursor and
+    /// batch blocked mid-push). Terminal parked chunks (which carry their
+    /// own acks) are unaffected; only the chain's own mid-batch cursor and
     /// any stashed not-ready payload are cleared, so the next `push_batch` of
     /// a fresh batch starts clean instead of tripping the resume-cursor
     /// asserts or replaying the stale payload under the new batch's ack.
@@ -97,7 +97,7 @@ pub trait RunnableChain: Send {
 
 /// Push-model stage: receives one record, forwards 0..N downstream.
 ///
-/// Composed statically — `Map<F, Filter<P, Term>>` monomorphizes into a
+/// Composed statically; `Map<F, Filter<P, Term>>` monomorphizes into a
 /// single inlined loop body.
 pub trait Collector<T> {
     /// Push one record. [`Flow::Blocked`] propagates up to the boundary.

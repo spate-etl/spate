@@ -1,7 +1,7 @@
 //! The fluent, type-safe chain builder.
 //!
 //! Stages are recorded as lightweight *parts* and assembled into the
-//! statically composed collector stack when the chain is built — the same
+//! statically composed collector stack when the chain is built. The same
 //! parts can assemble any number of identical chains (one per pipeline
 //! thread) through [`ChainFactory`].
 //!
@@ -9,7 +9,7 @@
 //!
 //! For owned families ([`Owned<T>`](crate::deser::Owned)) the builder
 //! offers [`ChainBuilder::map`] / [`ChainBuilder::try_map`] with plain
-//! closure bounds — bare closures infer. For **borrowing** families a
+//! closure bounds; bare closures infer. For **borrowing** families a
 //! `rustc` limitation (E0582: a higher-ranked lifetime may not appear only
 //! in associated-type positions) rules out `FnMut`-with-projection-output
 //! bounds at the definition site; use [`ChainBuilder::map_rec`] /
@@ -95,8 +95,8 @@ impl<G, In, Out, Err> TryMapFn<In, Out, Err> for G where G: FnMut(In) -> Result<
 
 /// Assembles recorded parts into the concrete collector stack, given the
 /// terminal stage. Takes `&self` so one set of parts can assemble many
-/// identical chains — stage closures must be `Clone` (plain closures and
-/// closures over `Clone`/`Arc` state are).
+/// identical chains. Stage closures must therefore be `Clone` (plain closures
+/// and closures over `Clone`/`Arc` state are).
 pub trait Assemble<Term> {
     /// The assembled collector stack.
     type Out;
@@ -483,13 +483,13 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
         }
     }
 
-    /// Terminate the chain into a sink: records are routed by `router` —
-    /// any meta-only [`ShardRouter`](crate::sink::ShardRouter) (bridged
-    /// automatically, [`KeyHashRouter`](crate::sink::KeyHashRouter) being
-    /// the default choice) or a record-aware
-    /// [`RecordRouter`](crate::sink::RecordRouter) — encoded by `encoder`
-    /// on the pipeline thread, and handed to the sink workers through
-    /// `queues`.
+    /// Terminate the chain into a sink. Records are routed by `router`,
+    /// encoded by `encoder` on the pipeline thread, and handed to the sink
+    /// workers through `queues`. `router` may be any meta-only
+    /// [`ShardRouter`](crate::sink::ShardRouter) (bridged automatically,
+    /// [`KeyHashRouter`](crate::sink::KeyHashRouter) being the default
+    /// choice) or a record-aware
+    /// [`RecordRouter`](crate::sink::RecordRouter).
     #[must_use]
     pub fn sink<E, R>(
         self,
@@ -511,15 +511,16 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
         }
     }
 
-    /// Terminate the chain into a **split sink**: route each record to exactly
-    /// one of several typed sink branches (each its own table/schema/encoder),
-    /// declared with [`SplitBuilder::add`] and dispatched by the closure passed
-    /// to [`SplitBuilder::route`]. Each branch's chunking comes from its own
-    /// [`SinkCtx`](crate::ops::SinkCtx) (resolved from that sink's per-name YAML
-    /// `chunk:` block, or `SinkOptions::with_chunk`, or the default), so a split
-    /// tunes each destination independently. `unmatched` is the policy for a
-    /// record that reaches no branch — [`ErrorPolicy::Fail`] (the operator
-    /// default) stops the pipeline, [`ErrorPolicy::Skip`] drops it and counts
+    /// Terminate the chain into a **split sink**. Each record is routed to
+    /// exactly one of several typed sink branches (each its own
+    /// table/schema/encoder), declared with [`SplitBuilder::add`] and
+    /// dispatched by the closure passed to [`SplitBuilder::route`]. Each
+    /// branch's chunking comes from its own [`SinkCtx`](crate::ops::SinkCtx)
+    /// (resolved from that sink's per-name YAML `chunk:` block, or
+    /// `SinkOptions::with_chunk`, or the default), so a split tunes each
+    /// destination independently. `unmatched` is the policy for a record that
+    /// reaches no branch. [`ErrorPolicy::Fail`] (the operator default) stops
+    /// the pipeline; [`ErrorPolicy::Skip`] drops it and counts
     /// `spate_operator_records_dropped_total{reason="unrouted"}`.
     #[must_use]
     pub fn split(self, unmatched: ErrorPolicy) -> SplitBuilder<DF, CurF, D, P> {
@@ -604,8 +605,8 @@ impl<DF: RecFamily, T: Send + 'static, D, P> ChainBuilder<DF, Owned<T>, D, P> {
     }
 }
 
-/// A fully specified chain, ready to build — or to stamp out one instance
-/// per pipeline thread via [`SinkedChain::build_factory`].
+/// A fully specified chain, ready to build, or to stamp out one instance per
+/// pipeline thread via [`SinkedChain::build_factory`].
 #[derive(Clone, Debug)]
 pub struct SinkedChain<DF: RecFamily, CurF: RecFamily, D, P, E, R> {
     builder: ChainBuilder<DF, CurF, D, P>,
@@ -628,7 +629,7 @@ where
     R: RecordRouter<CurF> + Send + 'static,
 {
     /// Build one chain instance. Consumes the specification; the deserializer
-    /// and router need no `Clone`, but the encoder does — the terminal stage
+    /// and router need no `Clone`, but the encoder does. The terminal stage
     /// mints one encoder per shard (columnar encoders hold per-block state
     /// that cannot be shared), and every in-tree encoder is `Clone`.
     #[must_use]
@@ -673,7 +674,7 @@ where
     }
 }
 
-/// Stamps out identical chains — one per pipeline thread. `Send + Sync`
+/// Stamps out identical chains, one per pipeline thread. `Send + Sync`
 /// when the deserializer, stage closures, encoder, and router are.
 #[derive(Clone, Debug)]
 pub struct ChainFactory<DF: RecFamily, CurF: RecFamily, D, P, E, R> {
@@ -793,9 +794,9 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
     }
 }
 
-/// A split-terminated chain, ready to [`build`](Self::build). Not `Clone` —
-/// the branches are built once; stamp identical per-thread chains by
-/// re-running the `chains` factory closure (as the pipeline builder does).
+/// A split-terminated chain, ready to [`build`](Self::build). Not `Clone`; the
+/// branches are built once. Stamp identical per-thread chains by re-running
+/// the `chains` factory closure (as the pipeline builder does).
 pub struct RoutedSplit<DF: RecFamily, CurF: RecFamily, D, P, G> {
     builder: ChainBuilder<DF, CurF, D, P>,
     unmatched: ErrorPolicy,

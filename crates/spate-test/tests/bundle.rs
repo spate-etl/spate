@@ -1,6 +1,6 @@
-//! A whole assembly through the `Pipeline` builder over this crate's
-//! mocks: memory source in, capturing sink bundle out — the first-class
-//! path framework users take to test their own pipelines.
+//! A whole assembly through the `Pipeline` builder over this crate's mocks:
+//! memory source in, capturing sink bundle out. Framework users take this
+//! path to test their own pipelines.
 
 use spate_core::config::PipelineConfig;
 use spate_core::ops::chain_owned;

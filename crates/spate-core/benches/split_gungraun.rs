@@ -1,8 +1,8 @@
 //! Instruction counts for the multi-sink split terminal (gungraun).
 //!
-//! One shape — one poll batch of 8,192 payloads deserialized straight into a
+//! One shape (one poll batch of 8,192 payloads deserialized straight into a
 //! [`split`](spate_core::ops::ChainBuilder::split) terminal and dispatched to
-//! typed branches, drained to encoded chunks — parameterized by the two
+//! typed branches, drained to encoded chunks), parameterized by the two
 //! things a split varies that a single-sink chain cannot express at all.
 //! `benches/chain_gungraun.rs` measures the framework's *other* terminal, one
 //! table with one encoder; this one measures the terminal that fans a
@@ -19,30 +19,30 @@
 //! - **The match-hit ratio.** `four_branches_quarter_unrouted` is
 //!   `four_branches` with every fourth payload carrying a tag no arm of the
 //!   route closure names. Those records reach no branch, so the terminal
-//!   takes its `unmatched` arm instead of a dispatch: read against
+//!   takes its `unmatched` arm instead of a dispatch. Read against
 //!   `four_branches`, whose corpus size, payload width and branch count it
 //!   shares exactly, the difference is what a dispatch costs over a
 //!   drop-and-count.
 //!
 //! The `unmatched` policy is [`Skip`](spate_core::error::ErrorPolicy::Skip)
 //! rather than `Fail` because `Fail` latches a fatal on the first unrouted
-//! record and short-circuits the rest of the batch — a case built that way
-//! would measure the short-circuit, not the policy.
+//! record and short-circuits the rest of the batch; a case built that way
+//! would measure the short-circuit rather than the policy.
 //!
 //! Deliberately absent is the unrouted ratio at two branches, and any sweep
 //! of shards or chunk target inside a branch. The `unmatched` arm is reached
 //! on `emitted == 0` and never touches a branch, so it cannot be a function
 //! of how many branches exist; and a branch *is* a `SinkHandoff`, whose shard
 //! and chunk axes `benches/chain_gungraun.rs` already sweeps against the same
-//! code. Three cases, not twelve: callgrind runs the workload under
-//! emulation.
+//! code. Three cases rather than twelve, because callgrind runs the workload
+//! under emulation.
 //!
 //! DHAT runs alongside callgrind in the same invocation, so every case also
-//! reports deterministic heap counts — which for a split is worth its own
-//! look, since each branch reserves and hands off a chunk buffer of its own.
+//! reports deterministic heap counts. Each branch reserves and hands off a
+//! chunk buffer of its own.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
-//! exists on every developer machine: run it with `make bench-gungraun`.
+//! exists on every developer machine. Run it with `make bench-gungraun`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so
@@ -67,26 +67,25 @@ fn warmed(mut rig: Rig) -> Rig {
 
 /// One batch through the split terminal.
 ///
-/// It lives outside the benchmark function and is `#[inline(never)]`, and
-/// both halves of that are load-bearing rather than stylistic. Collection is
-/// bounded by a callgrind toggle on the module the benchmark macro wraps the
-/// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimizer leaves in an unstable shape inside that module can
-/// end up outside the collected region entirely, and a bench that measures
-/// nothing still reports a plausible number. The batch reaches the chain
-/// through the boxed `RunnableChain` seam, which is a frame the toggle cannot
-/// lose; this call is given the same treatment so the drain sweep around it
-/// is inside a frame of its own too.
+/// It lives outside the benchmark function and is `#[inline(never)]`.
+/// Collection is bounded by a callgrind toggle on the module the benchmark
+/// macro wraps the function in, and a toggle *flips* collection rather than
+/// forcing it on, so work the optimizer leaves in an unstable shape inside
+/// that module can end up outside the collected region entirely, and a bench
+/// that measures nothing still reports a plausible number. The batch reaches
+/// the chain through the boxed `RunnableChain` seam, which is a frame the
+/// toggle cannot lose; this call is given the same treatment so the drain
+/// sweep around it is inside a frame of its own too.
 #[inline(never)]
 fn drive(rig: &mut Rig) -> usize {
     rig.drive()
 }
 
 // The corpus is built and the chain assembled in the `#[bench]` argument
-// expression, which gungraun evaluates outside the collected region — so the
-// measured work is the terminal's, not the fixture builder's.
+// expression, which gungraun evaluates outside the collected region, so the
+// measured work is the terminal's rather than the fixture builder's.
 //
-// Each case returns its rig rather than dropping it: a value moved into the
+// Each case returns its rig rather than dropping it. A value moved into the
 // benchmark function is dropped inside the collected region, which would
 // charge the count for tearing down four chains' worth of queues. A `///`
 // comment here is a `#[doc]` attribute, which `#[library_benchmark]` rejects.
@@ -109,11 +108,12 @@ fn dispatch_batch(mut rig: Rig) -> Rig {
 
 library_benchmark_group!(name = split; benchmarks = dispatch_batch);
 
-// DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
-// and without it. `--num-callers=500` (the maximum) keeps allocation stacks
-// deep enough that heap blocks attribute to the terminal under measurement
-// rather than to whichever frame the default depth of 4 happens to cut at.
+// DHAT is scoped as an extra tool rather than a callgrind argument, so the
+// callgrind invocation, and every `Ir` baseline with it, is bit-identical
+// with and without it. `--num-callers=500` (the maximum) keeps allocation
+// stacks deep enough that heap blocks attribute to the terminal under
+// measurement rather than to whichever frame the default depth of 4 happens
+// to cut at.
 main!(
     config = LibraryBenchmarkConfig::default().tool(Dhat::with_args(["--num-callers=500"])),
     library_benchmark_groups = split

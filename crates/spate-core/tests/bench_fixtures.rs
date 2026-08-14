@@ -3,21 +3,21 @@
 //!
 //! Two tiers rest on these rigs. An instruction count only means something if
 //! both legs of a comparison ran on byte-identical input, and the wall-clock
-//! tier's corpus digest only demotes a mismatched pair *after* the fact — so
-//! "the corpus is a pure function of its parameters" is a property worth a test
-//! rather than an assumption. The benches themselves cannot carry it: the
-//! counted tier needs Linux, valgrind and a matching runner and only runs when
-//! a pull request selects it, and the wall tier runs on demand and never in CI.
-//! This runs everywhere `cargo test` does.
+//! tier's corpus digest only demotes a mismatched pair *after* the fact, so
+//! "the corpus is a pure function of its parameters" is tested here rather
+//! than assumed. The benches themselves cannot carry it. The counted tier
+//! needs Linux, valgrind and a matching runner and only runs when a pull
+//! request selects it, and the wall tier runs on demand and never in CI. This
+//! runs everywhere `cargo test` does.
 //!
 //! Reproducibility is the smaller half. Most of these cases rest on a claim
-//! about *what the corpus does* — that the routing axis changes only the keys;
-//! that a chunk target lands on a record boundary; that a keyed corpus really
-//! spreads and a keyless one really does not; that a quarter-unrouted corpus is
-//! a match-rate case rather than a three-branch one. Every one of those could
-//! drift into its opposite while the benches went on running, reporting a
-//! plausible number for the wrong path, and several are what a declared
-//! `.items()` counter means. That is what is checked here.
+//! about *what the corpus does*. The routing axis changes only the keys; a
+//! chunk target lands on a record boundary; a keyed corpus spreads and a
+//! keyless one does not; a quarter-unrouted corpus is a match-rate case rather
+//! than a three-branch one. Every one of those could drift into its opposite
+//! while the benches went on running, reporting a plausible number for the
+//! wrong path, and several are what a declared `.items()` counter means. Those
+//! claims are what this file checks.
 
 use spate_core::ops::ChunkConfig;
 use spate_core::record::{PartitionId, RawPayload, stable_key_hash};
@@ -40,9 +40,9 @@ use split_rig::{PAYLOADS, Tags};
 
 /// FNV-1a over a corpus.
 ///
-/// Written out rather than taken from `DefaultHasher`, whose output is
-/// explicitly not stable across releases — and a pin that could change under a
-/// toolchain bump is not a pin.
+/// Written out rather than taken from `DefaultHasher`, whose output is not
+/// stable across releases. A pin that could change under a toolchain bump is
+/// not a pin.
 fn digest(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for &byte in bytes {
@@ -56,14 +56,13 @@ fn digest(bytes: &[u8]) -> u64 {
 ///
 /// The length alone is not enough to pin any of these. A changed index format,
 /// a different filler or a reordered field list can leave the total untouched
-/// while changing every byte a decoder reads — and the pin would then pass over
-/// a corpus no recorded measurement was taken against. The digest is what
-/// closes that.
+/// while changing every byte a decoder reads. The pin would then pass over a
+/// corpus no recorded measurement was taken against. The digest closes that.
 fn pin(bytes: &[u8]) -> (usize, u64) {
     (bytes.len(), digest(bytes))
 }
 
-/// The chain rig's payloads as one blob, in the order the batch yields them —
+/// The chain rig's payloads as one blob, in the order the batch yields them,
 /// which is also the order `chain_wall.rs` absorbs them into the harness's
 /// corpus digest.
 fn chain_payloads(routing: Routing) -> Vec<u8> {
@@ -83,9 +82,9 @@ fn split_payloads(tags: Tags) -> Vec<u8> {
 /// The checkpoint rig's schedule of poll batches, as the wall tier absorbs it.
 ///
 /// Read off a built rig rather than from a generator of its own, so what is
-/// pinned here is what a drive actually issues. The tick width is passed
-/// because the builder takes it, not because the schedule depends on it —
-/// which is itself one of the claims below.
+/// pinned here is what a drive issues. The tick width is passed because the
+/// builder takes it, not because the schedule depends on it, which is itself
+/// one of the claims below.
 fn ack_schedule(per_tick: usize, order: Order) -> Vec<u8> {
     ack_traffic::rig(per_tick, order).corpus()
 }
@@ -98,9 +97,9 @@ fn poll_script(profile: Profile) -> Vec<u8> {
 /// Transitions each profile's script produces, as `backpressure_gungraun.rs`
 /// declares them.
 ///
-/// Restated here rather than imported because the rig deliberately takes the
-/// expectation from its caller: one that derived it from its own model of the
-/// state machine would agree with itself however the machine changed.
+/// Restated here rather than imported because the rig takes the expectation
+/// from its caller. One that derived it from its own model of the state
+/// machine would agree with itself however the machine changed.
 fn expected_transitions(profile: Profile) -> usize {
     match profile {
         Profile::Quiet => 0,
@@ -150,12 +149,12 @@ fn the_corpora_are_reproducible() {
 /// Every corpus, pinned by length and digest.
 ///
 /// Two calls in one process only prove the generators are pure. The property
-/// both tiers need is stronger — that a corpus is the same *across revisions*,
+/// both tiers need is stronger, that a corpus is the same *across revisions*,
 /// since a merge-base leg and a head leg run different builds. A one-character
 /// edit to the payload format, the key width or the record count would
 /// otherwise re-baseline every comparison with nothing to say it happened.
-/// These numbers are what makes that edit fail here instead. Changing one is a
-/// deliberate act: re-record it, and treat every measurement from before the
+/// These numbers make that edit fail here instead. Changing one is a
+/// deliberate act. Re-record it, and treat every measurement from before the
 /// change as describing a different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
@@ -211,7 +210,7 @@ fn the_corpora_are_pinned_across_revisions() {
 }
 
 /// The control-plane corpora's pins, named rather than written inline because
-/// the length of each is also asserted from its own constants below — the
+/// the length of each is also asserted from its own constants below. The
 /// digest says the bytes did not move, and the arithmetic beside it says why
 /// that length is the right one.
 const ACK_SCHEDULE_PIN: (usize, u64) = (98_304, 0xb805_bf3f_d145_a605);
@@ -223,9 +222,9 @@ const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xe3fb_64f3_9e0d_2545);
 ///
 /// The digests above would catch a changed corpus but say nothing about
 /// *why* the length is what it is. A schedule is one entry per batch, and a
-/// script one step per poll iteration, so these two products are what tie the
-/// pinned lengths to `BATCHES` and `ITERATIONS` — the same counts the wall
-/// cases declare as `.items()`. A corpus that grew while its `.items()` stayed
+/// script one step per poll iteration, so these two products tie the pinned
+/// lengths to `BATCHES` and `ITERATIONS`, the same counts the wall cases
+/// declare as `.items()`. A corpus that grew while its `.items()` stayed
 /// put would report a throughput per record that no longer had that many
 /// records behind it.
 #[test]
@@ -247,11 +246,11 @@ fn each_corpus_is_the_length_its_constants_imply() {
 /// Neither the tick width nor the driver changes which batches are issued.
 ///
 /// The wall tier reads this as a license to compare `ack_wide_*` against
-/// `ack_narrow_*` and against the threaded cases: the corpus digest that
+/// `ack_narrow_*` and against the threaded cases. The corpus digest that
 /// travels in every record is the same for all of them, so what separates
 /// those cases is how the batches are grouped and who issues them, not which
 /// batches there are. A generator that started keying on either would demote
-/// the pairs to *Not comparable* — but only after a full A/B run, and only if
+/// the pairs to *Not comparable*, but only after a full A/B run, and only if
 /// the two legs happened to differ.
 #[test]
 fn the_ack_schedule_is_independent_of_tick_width_and_driver() {
@@ -277,10 +276,10 @@ fn the_ack_schedule_is_independent_of_tick_width_and_driver() {
 
 /// The routing axis changes the keys and nothing else.
 ///
-/// This is what makes `chain_keyed_one_shard` readable against
-/// `chain_borrowed` at all: same bytes through the same chain, with one added
-/// cost. A payload shape that differed between the two would leave that pair
-/// comparing two workloads and attributing the difference to routing.
+/// `chain_keyed_one_shard` is read against `chain_borrowed` as the same bytes
+/// through the same chain, with one added cost. A payload shape that differed
+/// between the two would leave that pair comparing two workloads and
+/// attributing the difference to routing.
 #[test]
 fn the_routing_axis_changes_only_the_keys() {
     assert_eq!(
@@ -294,7 +293,7 @@ fn the_routing_axis_changes_only_the_keys() {
 ///
 /// A length pin sees the total and not the split. `BORROWED_BATCH_BYTES` is
 /// derived per payload, `chain_wall.rs`'s byte denominator is `BATCH * 39`, and
-/// the split cases' is `PAYLOADS * 28` — all three are statements about an
+/// the split cases' is `PAYLOADS * 28`. All three are statements about an
 /// element, so all three are checked as one.
 #[test]
 fn every_element_is_the_declared_width() {
@@ -323,9 +322,9 @@ fn every_element_is_the_declared_width() {
 
 /// All three split corpora carry the same number of bytes.
 ///
-/// That equality is what makes `bytes_per_s` the comparable figure across the
-/// three cases: the same quantity of input, with only the distribution of route
-/// arms changed. Constants nudged apart would leave the three silently
+/// That equality makes `bytes_per_s` the comparable figure across the three
+/// cases, the same quantity of input with only the distribution of route arms
+/// changed. Constants nudged apart would leave the three silently
 /// comparing different-sized corpora and attributing the difference to the
 /// branch count.
 #[test]
@@ -343,9 +342,9 @@ fn the_split_corpora_are_the_same_quantity_of_bytes() {
 /// owned one.
 ///
 /// Those are `flat_map`'s fan-out and its absence. If `split3` stopped emitting
-/// three sub-records — a payload that lost a separator, a filter that started
-/// rejecting — every `records_per_s` on the borrowed arms would be wrong by
-/// the same factor, and nothing in the bench would notice: the case would still
+/// three sub-records (a payload that lost a separator, a filter that started
+/// rejecting), every `records_per_s` on the borrowed arms would be wrong by the
+/// same factor, and nothing in the bench would notice. The case would still
 /// run, still produce a number, and still compare cleanly against itself.
 #[test]
 fn the_chain_emits_the_row_counts_the_counters_declare() {
@@ -353,7 +352,7 @@ fn the_chain_emits_the_row_counts_the_counters_declare() {
     assert_eq!(chain_rig::owned_rig().drive(), 512, "owned rows");
 }
 
-/// The split rig's `expect_rows` is what a driven batch actually produces, for
+/// The split rig's `expect_rows` is the row count a driven batch produces, for
 /// every tag distribution.
 ///
 /// `split_wall.rs` reads `expect_rows` for its `.items_of()` counter rather
@@ -384,18 +383,18 @@ fn the_split_rigs_produce_the_rows_they_expect() {
 /// Every control-plane rig performs the same work on its hundredth drive as
 /// on its first.
 ///
-/// The counted tier never needed this: gungraun drives a rig once and throws
+/// The counted tier never needed this. gungraun drives a rig once and throws
 /// it away. The wall harness calls a routine thousands of times against one
 /// state, so a rig that drifts reports a case whose name stops describing what
-/// it measures — and reports it as a clean, stable, entirely wrong number.
+/// it measures, and reports it as a clean, stable, wrong number.
 ///
 /// The backpressure rig drifts unless [`poll_traffic::Rig::reset`] is called,
-/// which is what that method exists for and what this pins. Its script holds
+/// which is what that method does and what this pins. Its script holds
 /// *relative* budget movements baked against a trajectory starting at zero, so
-/// a second drive applies them to whatever the first left behind: `Quiet`
+/// a second drive applies them to whatever the first left behind. `Quiet`
 /// climbs out of its band, and `Congested` reports its one transition once and
 /// zero thereafter because the controller is still paused. Both failures are
-/// silent — `assert_in_band` runs in the builder, and the drive returns a
+/// silent. `assert_in_band` runs in the builder, and the drive returns a
 /// number either way.
 #[test]
 fn a_second_drive_is_the_same_work_as_the_first() {
@@ -422,7 +421,7 @@ fn a_second_drive_is_the_same_work_as_the_first() {
             // Zero after a reset, and the same non-zero level at the end of
             // every drive. The transition count alone cannot carry this for
             // `Quiet`, whose expectation is zero and whose drive would satisfy
-            // it by doing nothing at all.
+            // it by doing nothing.
             assert_eq!(rig.usage(), 0, "poll budget after reset {drive}");
             assert_eq!(rig.drive(), expect, "poll drive {drive}");
             settled.push(rig.usage());
@@ -438,12 +437,12 @@ fn a_second_drive_is_the_same_work_as_the_first() {
     }
 }
 
-/// Skipping the reset really does break the backpressure rig.
+/// Skipping the reset breaks the backpressure rig.
 ///
-/// The test above would pass just as happily if `reset` were a no-op and the
-/// script had quietly become idempotent on its own — leaving a method the wall
-/// target calls every iteration with nothing to say for itself. This is the
-/// other half: the drift is real, so the reset is load-bearing.
+/// The test above would also pass if `reset` were a no-op and the script had
+/// quietly become idempotent on its own, leaving a method the wall target
+/// calls every iteration with nothing to say for itself. This is the other
+/// half. The drift is there, and the reset removes it.
 #[test]
 fn the_backpressure_rig_drifts_without_a_reset() {
     let mut congested = poll_traffic::rig(Profile::Congested, 1);
@@ -458,10 +457,10 @@ fn the_backpressure_rig_drifts_without_a_reset() {
 
     // The quiet script nets 2,031,616 bytes upward per drive, so the fourth
     // drive opens above the high watermark and pauses on its first iteration.
-    // It reports nothing on the drives after that — once paused it stays
-    // paused, because a resume needs the usage back under the *low* watermark
-    // — which is why this looks for a transition anywhere in the run rather
-    // than on the last drive.
+    // It reports nothing on the drives after that; once paused it stays
+    // paused, because a resume needs the usage back under the *low* watermark.
+    // This looks for a transition anywhere in the run rather than on the last
+    // drive.
     let mut quiet = poll_traffic::rig(Profile::Quiet, 0);
     let counts: Vec<usize> = (0..6).map(|_| quiet.drive()).collect();
     assert_eq!(
@@ -485,10 +484,9 @@ fn the_backpressure_rig_drifts_without_a_reset() {
 ///
 /// This is the claim the whole thread axis rests on. `AckIssuer` numbers
 /// sequences per issuer and `PartitionTracker::register` panics on a gap, so a
-/// partition issued from two threads inside one epoch is a crash — and a
-/// partition issued from *none* is a watermark that never arrives, which is
-/// silent. The watermark count catches the second; running at all catches the
-/// first.
+/// partition issued from two threads inside one epoch is a crash. A partition
+/// issued from *none* is a watermark that never arrives, which is silent. The
+/// watermark count catches the second; running at all catches the first.
 #[test]
 fn the_threaded_driver_agrees_with_the_single_threaded_one() {
     let mut plain = ack_traffic::rig(256, Order::Issued);
@@ -516,10 +514,9 @@ fn the_threaded_driver_agrees_with_the_single_threaded_one() {
 
 /// Only thread counts that divide the partitions are accepted.
 ///
-/// The rejection matters more than the acceptance. Three threads over four
-/// partitions would leave one thread owning two and the others one apiece,
-/// which still runs — and reports a contention figure for a workload that is
-/// unbalanced by construction rather than by the code.
+/// Three threads over four partitions would leave one thread owning two and
+/// the others one apiece, which still runs and reports a contention figure for
+/// a workload that is unbalanced by construction rather than by the code.
 #[test]
 fn a_thread_count_must_divide_the_partitions() {
     let Err(panic) = std::panic::catch_unwind(|| ack_traffic::threaded(256, Order::Issued, 3))
@@ -531,7 +528,7 @@ fn a_thread_count_must_divide_the_partitions() {
         .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied())
         .unwrap_or_default();
-    // Which panic, not merely that one happened. Raising `PARTITIONS` to six
+    // Check which panic, not only that one happened. Raising `PARTITIONS` to six
     // would make three threads legal, and a test that only counted panics
     // would go on passing while proving nothing about divisibility.
     assert!(
@@ -547,7 +544,7 @@ fn a_thread_count_must_divide_the_partitions() {
 /// driver, so nothing else reaches the branch where `threaded` narrows the
 /// scramble window by the thread count. Without this, replacing that
 /// `per_tick / threads` with `per_tick` leaves every test green while the
-/// walk stops being a permutation — some batches resolving twice and others
+/// walk stops being a permutation. Some batches resolve twice and others
 /// never, which is a panic on a worker thread rather than a wrong number.
 #[test]
 fn the_scramble_window_is_a_workers_share_of_a_tick() {
@@ -570,7 +567,7 @@ fn the_scramble_window_is_a_workers_share_of_a_tick() {
 
 /// Every chunk target a case names divides the batch's encoding exactly.
 ///
-/// Building the rig is the check: `assert_encodes_to` and
+/// Building the rig is the check. `assert_encodes_to` and
 /// `assert_seals_on_a_record_boundary` run inside the builder, so a payload
 /// shape that drifted from the arithmetic fails here rather than leaving
 /// `chain_chunk_sixteenth_batch` sealing some other number of chunks than its
@@ -588,7 +585,7 @@ fn every_chunk_target_seals_on_a_record_boundary() {
         assert_eq!(rig.drive(), 1536, "chunk target 1/{divisor}");
     }
     // The default target is above the whole batch, so its single chunk seals at
-    // `flush` — the baseline the three above are read against.
+    // `flush`, the baseline the three above are read against.
     assert!(
         ChunkConfig::default().target_bytes > BORROWED_BATCH_BYTES,
         "the default chunk target no longer clears a whole batch, so the \
@@ -597,16 +594,16 @@ fn every_chunk_target_seals_on_a_record_boundary() {
 }
 
 /// The keyed corpus spreads over every shard count a case names, and the
-/// keyless one does not spread at all.
+/// keyless one does not spread.
 ///
-/// Both halves matter. The first is what stops a shard-count case measuring an
-/// idle `Vec` of buffers — it is `assert_spreads`, run by building the rig. The
-/// second is what makes `Routing::Fixed` a *controlled* baseline rather than an
-/// accidental one: `KeyHashRouter` falls back to a hash of the source partition
-/// for a keyless record, every payload here comes from partition 0, so the real
-/// router over a keyless corpus places everything on shard 0 exactly as the
-/// constant stub does. If that ever stopped holding, the keyless cases would
-/// quietly become multi-shard ones.
+/// The first half stops a shard-count case measuring an idle `Vec` of buffers;
+/// it is `assert_spreads`, run by building the rig. The second makes
+/// `Routing::Fixed` a *controlled* baseline rather than an accidental one.
+/// `KeyHashRouter` falls back to a hash of the source partition for a keyless
+/// record, every payload here comes from partition 0, so the real router over a
+/// keyless corpus places everything on shard 0 exactly as the constant stub
+/// does. If that ever stopped holding, the keyless cases would quietly become
+/// multi-shard ones.
 #[test]
 fn the_keyed_corpus_spreads_and_the_keyless_one_does_not() {
     for shards in [1, 4, 16] {
@@ -633,8 +630,8 @@ fn the_keyed_corpus_spreads_and_the_keyless_one_does_not() {
 ///
 /// `chain_route_key_hash` folds a modulo over one `RecordMeta` per key. If the
 /// keys collided, that case would be one residue computed 512 times and the
-/// spread the router case exists to exercise would not be there — while the
-/// number it reported stayed perfectly stable.
+/// spread the router case exercises would not be there, while the number it
+/// reported stayed stable.
 #[test]
 fn the_keys_hash_to_distinct_values() {
     let corpus = chain_rig::corpus(Routing::KeyHash);
@@ -653,10 +650,10 @@ fn the_keys_hash_to_distinct_values() {
 
 /// Each split corpus distributes its tags the way its case name claims.
 ///
-/// Strictly stronger than the rig's own `assert_hits_every_branch`, which only
-/// proves a branch is non-empty. The failure this catches is the one
-/// `QUARTER_UNROUTED_CYCLE`'s comment records having been caught once already:
-/// aiming every unrouted payload at what would have been branch 3 leaves that
+/// Stronger than the rig's own `assert_hits_every_branch`, which only proves a
+/// branch is non-empty. The failure this catches is the one
+/// `QUARTER_UNROUTED_CYCLE`'s comment records having been caught once already.
+/// Aiming every unrouted payload at what would have been branch 3 leaves that
 /// branch empty for the whole batch, and the case becomes three branches plus a
 /// drop rather than four branches at a three-quarter hit rate. Non-emptiness
 /// cannot tell those apart; the counts can.

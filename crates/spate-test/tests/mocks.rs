@@ -1,5 +1,5 @@
-//! Contract tests for the spate-test mocks, driven exactly the way a
-//! pipeline runtime (or a framework user's test) drives them.
+//! Contract tests for the spate-test mocks, driven the way a pipeline
+//! runtime (or a framework user's test) drives them.
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::deser::Deserializer;
@@ -125,7 +125,7 @@ fn ack_round_trip_advances_checkpointer_watermark() {
     let mut lanes = assigned_lanes(&mut source, &handle, &[(L0, P0)]);
     handle.push_many(P0, [&b"1"[..], b"2", b"3", b"4"]);
 
-    // Two batches; drop them out of order — the watermark stays contiguous.
+    // Two batches; drop them out of order. The watermark stays contiguous.
     let batch1 = lanes[0].poll(2, Duration::ZERO).unwrap().unwrap();
     let ack1 = batch1.ack().clone();
     drop(batch1);

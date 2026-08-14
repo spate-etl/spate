@@ -11,7 +11,7 @@
 //! The properties the engine is arranged around are published as
 //! [Invariants], the decisions behind them as [Decisions], and the metric
 //! taxonomy as [Metrics]. Module documentation below cites the first two by
-//! identifier alone — `INV-2`, `ADR-0013`.
+//! identifier alone (`INV-2`, `ADR-0013`).
 //!
 //! [Invariants]: https://spate.kainth.dev/docs/INVARIANTS
 //! [Decisions]: https://spate.kainth.dev/docs/adr/
@@ -24,7 +24,7 @@ pub mod admin;
 /// Re-export of the [`bytes`] crate: [`RowEncoder`](sink::RowEncoder)
 /// signatures take [`bytes::BytesMut`], so connector authors can use this
 /// re-export instead of declaring their own `bytes` dependency (declaring
-/// one is also fine — versions are compatible per the workspace pin).
+/// one is also fine; versions are compatible per the workspace pin).
 pub use bytes;
 
 pub mod backpressure;

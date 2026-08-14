@@ -1,10 +1,9 @@
 //! The controller thread: owns the [`Source`] control plane and the
 //! [`Checkpointer`].
 //!
-//! Everything that touches `&mut Source` happens here — pause/resume
-//! requests from drivers, commits, and rebalance choreography — so the
-//! source implementation never needs internal locking for the control
-//! plane.
+//! Everything that touches `&mut Source` happens here (pause/resume requests
+//! from drivers, commits, and rebalance choreography), so the source
+//! implementation never needs internal locking for the control plane.
 
 use super::{DriverEvent, ExitState, FatalErrorReport, ThreadControl};
 use crate::admin::HealthState;
@@ -19,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Poll cadence while fast-commit partitions are being chased
-/// ([`SourceEvent::CommitReady`]): tight enough that a finishing split's
+/// ([`SourceEvent::CommitReady`]). Tight enough that a finishing split's
 /// final ack commits within ~a millisecond of resolving, bounded to one
 /// commit interval by the chase deadline.
 const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
@@ -123,13 +122,13 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     let mut last_commit = Instant::now();
     // Fast-commit mode (`SourceEvent::CommitReady`): partitions whose final
     // acks are being chased with a tightened cadence, each with its OWN
-    // deadline bounding its chase to one commit interval. Per-partition is
-    // load-bearing: a single shared deadline is re-armed by every new hint,
-    // so on a job where units of work finish continuously a permanently
-    // stalled partition would never age out and the controller would stay
-    // pinned at `FAST_COMMIT_POLL` indefinitely.
+    // deadline bounding its chase to one commit interval. A single shared
+    // deadline would be re-armed by every new hint, so on a job where units
+    // of work finish continuously a permanently stalled partition would never
+    // age out and the controller would stay pinned at `FAST_COMMIT_POLL`
+    // indefinitely.
     let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
-    // Set when the source reports `SourceEvent::Drained`: the loop exits into
+    // Set when the source reports `SourceEvent::Drained`. The loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
     // to mean "everything acknowledged and committed" (see the backstop after
     // the final commit below).
@@ -144,25 +143,25 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             break;
         }
 
-        // Harvest acknowledgments every pass, not only on the commit
-        // tick: watermark advances retire batches from the drivers'
-        // pending-ceiling gates, so harvesting at control cadence is what
-        // reopens a gated lane in ~one `event_poll_timeout` instead of a
-        // full commit interval. The commit itself stays on the tick.
+        // Harvest acknowledgments every pass, not only on the commit tick.
+        // Watermark advances retire batches from the drivers'
+        // pending-ceiling gates, so harvesting at control cadence reopens a
+        // gated lane in ~one `event_poll_timeout` instead of a full commit
+        // interval. The commit itself stays on the tick.
         harvest(&mut checkpointer, &mut state);
 
         // The commit tick.
         if last_commit.elapsed() >= commit_interval {
             last_commit = Instant::now();
             // Seal partial chain buffers before harvesting acknowledgments.
-            // A below-target chunk — a low-volume split branch under
-            // sustained load — otherwise holds its records' acks, and with
-            // them the partition watermark, until it happens to fill:
-            // `idle_flush` needs an empty poll that a loaded pipeline never
-            // produces. Best-effort like the CommitReady chase below; sealed
-            // chunks settle through the sink and commit on a later tick, so
-            // watermark staleness is bounded by ~two commit intervals plus
-            // the sink linger instead of growing without bound.
+            // A below-target chunk (a low-volume split branch under sustained
+            // load) otherwise holds its records' acks, and with them the
+            // partition watermark, until it happens to fill. `idle_flush`
+            // needs an empty poll that a loaded pipeline never produces.
+            // Best-effort like the CommitReady chase below; sealed chunks
+            // settle through the sink and commit on a later tick, so watermark
+            // staleness is bounded by ~two commit intervals plus the sink
+            // linger instead of growing without bound.
             for tx in &control_txs {
                 let _ = tx.send(ThreadControl::FlushNow);
             }
@@ -175,11 +174,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 None,
             );
 
-            // A watermark stalled behind a failed batch is permanent —
-            // acks only ever fail, never un-fail. If one has been stalled
-            // past the limit, a sink leg is permanently broken (fatal write
-            // error, dropped table); fail the pipeline so it restarts and
-            // replays rather than running on committing nothing.
+            // A watermark stalled behind a failed batch is permanent; acks
+            // only ever fail, never un-fail. If one has been stalled past the
+            // limit, a sink leg is permanently broken (fatal write error,
+            // dropped table); fail the pipeline so it restarts and replays
+            // rather than running on committing nothing.
             for (partition, since) in checkpointer.stalled_partitions() {
                 let age = since.elapsed();
                 if age > stalled_fail_after {
@@ -256,10 +255,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             }
             Ok(SourceEvent::CommitReady { partitions }) => {
                 // Chasing the commit is useless while the records are still
-                // buffered in the chain: flush the owning threads first so
-                // the acks being chased can actually resolve. Without this
-                // the tail sits until `idle_flush` elapses, and the unit of
-                // work costs a full lull to complete.
+                // buffered in the chain. Flush the owning threads first so
+                // the acks being chased can resolve. Without this the tail
+                // sits until `idle_flush` elapses, and the unit of work costs
+                // a full lull to complete.
                 let mut threads: BTreeSet<usize> = BTreeSet::new();
                 for p in &partitions {
                     threads.extend(
@@ -297,12 +296,12 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             }
         }
 
-        // Chase fast-commit partitions: commit just them, standing down
-        // once each is fully resolved and flushed — or at the deadline, so
-        // a stalled batch falls back to the periodic tick instead of
-        // spinning here.
+        // Chase fast-commit partitions: commit just them, standing down once
+        // each is fully resolved and flushed, or at the deadline, so a
+        // stalled batch falls back to the periodic tick instead of spinning
+        // here.
         if !fast_commit.is_empty() && state.failure.is_none() {
-            // Age out partitions past their own window first: a batch that
+            // Age out partitions past their own window first. A batch that
             // never resolves falls back to the periodic tick instead of
             // holding the tightened cadence open.
             let now = Instant::now();
@@ -317,21 +316,21 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     &health,
                     Some(&chasing),
                 );
-                // Stand down when the unit of work is actually done — its
-                // lane left the assignment — not merely because its acks
-                // look quiet for an instant. A momentary lull between the
-                // flush and the sink's acknowledgment would otherwise end
-                // the chase early and leave the final watermark to the
-                // periodic tick, costing a full commit interval.
+                // Stand down when the unit of work is done, meaning its lane
+                // left the assignment, not because its acks look quiet for an
+                // instant. A momentary lull between the flush and the sink's
+                // acknowledgment would otherwise end the chase early and
+                // leave the final watermark to the periodic tick, costing a
+                // full commit interval.
                 fast_commit.retain(|&p, _| state.assignment.values().any(|&(part, _)| part == p));
             }
         }
     }
 
     // ---- Drain sequence (shutdown or failure; see graceful-shutdown.mdx) ----
-    // Failure-initiated drains must set the process shutdown flag too:
-    // drivers wedged in the blocked-batch retry loop only observe that flag,
-    // and main joins them without a timeout — without this store, a chain
+    // Failure-initiated drains must set the process shutdown flag too.
+    // Drivers wedged in the blocked-batch retry loop only observe that flag,
+    // and main joins them without a timeout, so without this store a chain
     // failure elsewhere leaves a blocked driver spinning forever.
     shutdown.store(true, Ordering::Relaxed);
     pipeline_metrics.set_state(if state.failure.is_some() {
@@ -384,7 +383,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     };
 
     // Drained-exit backstop: a bounded source's `Completed` is read as "the
-    // job finished — every record durably committed", so both an
+    // job finished, every record durably committed", so both an
     // unacknowledged tail (a sink that wedged during the drain and had
     // batches abandoned at the deadline) and a final commit that did not
     // persist (there is no next tick to retry a retryable failure into)
@@ -460,8 +459,8 @@ fn is_fatal(e: &SourceError) -> bool {
 }
 
 /// The pending-ceiling gate for one partition's lanes. `None` (with a
-/// warning) if the checkpointer does not track the partition — a controller
-/// bug; the lane then runs ungated rather than not at all.
+/// warning) if the checkpointer does not track the partition, a controller
+/// bug. The lane then runs ungated rather than not at all.
 fn pending_gate(
     checkpointer: &Checkpointer,
     partition: PartitionId,
@@ -521,8 +520,8 @@ fn handle_driver_event<S: Source>(event: DriverEvent, source: &mut S, state: &mu
 /// Drain registrations and acknowledgments into the trackers and fold the
 /// watermarks that advanced into `state.pending_commit` (merged by max, so
 /// a retried commit never regresses). Advancing also retires batches from
-/// the drivers' pending-ceiling gates, which is why the controller calls
-/// this every loop pass rather than only on the commit tick.
+/// the drivers' pending-ceiling gates, so the controller calls this every
+/// loop pass rather than only on the commit tick.
 fn harvest(checkpointer: &mut Checkpointer, state: &mut State) {
     let stats = checkpointer.drain();
     if stats.stale_epoch > 0 || stats.unknown > 0 {
@@ -602,9 +601,9 @@ fn commit_cycle<S: Source>(
 /// Apply a new assignment. Assignments must describe the FULL new lane set
 /// under eager-rebalance semantics (all previous lanes revoked first); if a
 /// source hands us an assignment while lanes are still live, they are
-/// drained and revoked here first — `Checkpointer::begin_epoch` replaces
-/// all trackers, so committing anything in flight beforehand is what keeps
-/// at-least-once intact.
+/// drained and revoked here first. `Checkpointer::begin_epoch` replaces all
+/// trackers, so committing anything in flight beforehand keeps at-least-once
+/// intact.
 #[expect(
     clippy::too_many_arguments,
     reason = "controller state is deliberately spread across owners"
@@ -680,9 +679,9 @@ fn handle_assign<S: Source>(
 }
 
 /// Merge additional lanes into the *current* assignment epoch
-/// ([`SourceEvent::LanesAdded`]): existing lanes and their in-flight acks
+/// ([`SourceEvent::LanesAdded`]). Existing lanes and their in-flight acks
 /// are untouched. The checkpointer's epoch is extended with the new
-/// partitions before any new lane reaches a pipeline thread — the same
+/// partitions before any new lane reaches a pipeline thread, the same
 /// ordering contract as a full assignment.
 fn handle_added<S: Source>(
     lanes: Vec<S::Lane>,
@@ -714,7 +713,7 @@ fn handle_added<S: Source>(
             .unwrap_or(0);
         // Added lanes join the current epoch, so their gates carry it; the
         // per-partition ceiling makes a newcomer's pressure independent of
-        // its siblings' — no controller-side re-pause is needed.
+        // its siblings', so no controller-side re-pause is needed.
         let gate = pending_gate(checkpointer, partition, state.epoch);
         for lane in group {
             let id = lane.id();
@@ -760,18 +759,17 @@ fn handle_revoke<S: Source>(
     source_metrics.set_lanes_active(state.assignment.len());
 }
 
-/// Remove finished lanes ([`SourceEvent::LanesRetired`]): their work is
+/// Remove finished lanes ([`SourceEvent::LanesRetired`]). Their work is
 /// fully delivered, acknowledged, and committed, so there is no drain
-/// barrier to wait on and nothing to commit — and, critically, nothing to
-/// flush. The owning threads get a [`ThreadControl::DropLanes`], which they
-/// service by dropping the lanes and carrying straight on polling.
+/// barrier to wait on, nothing to commit, and nothing to flush. The owning
+/// threads get a [`ThreadControl::DropLanes`], which they service by
+/// dropping the lanes and carrying straight on polling.
 ///
-/// This is a hot path: a bounded backfill retires one lane per completed
-/// unit of work (a coordinated split), so anything synchronous here is paid
+/// A hot path. A bounded backfill retires one lane per completed unit of
+/// work (a coordinated split), so anything synchronous here is paid
 /// O(splits) times. Routing it through `StopLanes` instead would run a full
-/// `flush_until` per completed split — fragmenting sink batches and parking
-/// the owning thread on a blocked chain — which is exactly the cost this
-/// event exists to avoid.
+/// `flush_until` per completed split, fragmenting sink batches and parking
+/// the owning thread on a blocked chain.
 fn handle_retired<S: Source>(
     lanes: Vec<LaneId>,
     checkpointer: &mut Checkpointer,
@@ -837,7 +835,7 @@ fn revoke_lanes<S: Source>(
         match state.assignment.get(lane) {
             Some(&(_, thread)) => by_thread.entry(thread).or_default().push(*lane),
             None => {
-                // Unknown lane: nobody would arrive for it; do so on its
+                // Unknown lane: no thread would arrive for it; arrive on its
                 // behalf so the barrier cannot hang.
                 tracing::warn!(lane = lane.0, "revocation for an unassigned lane");
                 barrier.arrive();

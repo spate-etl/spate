@@ -16,9 +16,9 @@ struct Inner {
 /// the lanes being stopped); each thread calls [`DrainBarrier::arrive`]
 /// exactly once after it has stopped the lanes and flushed its in-flight
 /// records; the controller's [`DrainBarrier::wait`] returns `true` once all
-/// parties arrived, or `false` on timeout (drain deadline exceeded — the
+/// parties arrived, or `false` when the drain deadline elapsed. On timeout the
 /// caller proceeds and unflushed data replays after restart; at-least-once
-/// holds either way).
+/// holds either way.
 #[derive(Clone, Debug)]
 pub struct DrainBarrier {
     inner: Arc<Inner>,
@@ -39,7 +39,7 @@ impl DrainBarrier {
     }
 
     /// Record this party's drain as complete. Idempotence is the caller's
-    /// responsibility: call exactly once per party.
+    /// responsibility. Call exactly once per party.
     pub fn arrive(&self) {
         let prev = self.inner.remaining.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "more arrivals than barrier parties");

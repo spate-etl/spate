@@ -1,5 +1,5 @@
 //! The terminal stage: route, encode, chunk, and hand off to the sink
-//! queues — all on the pipeline thread.
+//! queues, all on the pipeline thread.
 //!
 //! Pressure discipline (matches [`StageLifecycle`]'s contract): `push`
 //! never rejects a record. When a sealed chunk cannot be sent it is parked
@@ -33,12 +33,12 @@ pub struct ChunkConfig {
     /// lull, so while the pipeline is unblocked a partial buffer holds its
     /// acknowledgments for at most ~one checkpoint interval. (A driver
     /// wedged retrying a blocked batch defers the flush until the sink
-    /// drains — but nothing commits during that time anyway.)
+    /// drains, though nothing commits during that time anyway.)
     pub target_bytes: usize,
     /// Policy for record-level encoder failures. `Skip` drops the record
     /// (metrics-counted); `Fail` stops the pipeline. An encoder error of
-    /// [`ErrorClass::Fatal`] stops the pipeline regardless of this policy
-    /// — fatal means the component is broken, not the record.
+    /// [`ErrorClass::Fatal`] stops the pipeline regardless of this policy;
+    /// fatal means the component is broken, not the record.
     pub encode_policy: ErrorPolicy,
 }
 
@@ -54,7 +54,7 @@ impl Default for ChunkConfig {
 /// Per-shard accumulation state, including this shard's own encoder
 /// instance. A columnar encoder (ClickHouse Native) buffers its rows
 /// internally until the chunk is finalized, so each shard must own its
-/// encoder — a single shared encoder would interleave rows from different
+/// encoder. A single shared encoder would interleave rows from different
 /// shards into one block. Row formats clone a trivial unit and are
 /// unaffected.
 #[derive(Debug)]
@@ -74,7 +74,7 @@ static ENCODE_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
 
 /// The chain's terminal stage. Owns one accumulation buffer per shard,
 /// seals [`EncodedChunk`]s at [`ChunkConfig::target_bytes`], and hands
-/// them to the sink workers through the bounded [`ShardQueues`] — a
+/// them to the sink workers through the bounded [`ShardQueues`], with a
 /// `try_send` that never blocks the pipeline thread.
 #[derive(Debug)]
 pub struct SinkHandoff<F: RecFamily, E, R> {
@@ -104,18 +104,16 @@ where
         meter: OpMeterSlot,
         component: Arc<str>,
     ) -> Self {
-        // Defense-in-depth on the cold per-thread build path. The friendly,
-        // field-named rejection now lives at load time (`chunk.target_bytes` in
-        // the YAML/`SinkOptions` paths — `config::chunk::ChunkSection::resolve`
-        // and `Pipeline::add_sink_with`); this only catches a direct
-        // construction bug, where a zero would break `BytesMut::with_capacity`
-        // and the seal check below.
+        // Defense-in-depth on the cold per-thread build path. The
+        // field-named rejection lives at load time (`chunk.target_bytes` in
+        // the YAML/`SinkOptions` paths, via
+        // `config::chunk::ChunkSection::resolve` and
+        // `Pipeline::add_sink_with`); this catches a direct construction bug,
+        // where a zero would break `BytesMut::with_capacity` and the seal
+        // check below.
         assert!(cfg.target_bytes > 0, "chunk target must be non-zero");
         let shards = (0..queues.num_shards())
             .map(|_| ShardBuf {
-                // Each shard clones the template encoder: a columnar encoder
-                // carries per-block state that must not be shared across
-                // shards, and a row encoder clones a trivial unit.
                 encoder: encoder.clone(),
                 // Pre-size so the first chunk fills a target-sized buffer
                 // instead of regrowing (realloc + memcpy) from zero.
@@ -142,9 +140,9 @@ where
     }
 
     /// Seal shard `idx`'s buffer into a chunk and try to send it. The
-    /// in-flight budget grows at seal time — a parked chunk is in-flight
-    /// memory too; the sink worker releases the bytes after the batch is
-    /// written or abandoned.
+    /// in-flight budget grows at seal time, because a parked chunk is
+    /// in-flight memory too; the sink worker releases the bytes after the
+    /// batch is written or abandoned.
     fn seal_and_send(&mut self, idx: usize) {
         let shard = &mut self.shards[idx];
         if shard.rows == 0 {
@@ -154,7 +152,7 @@ where
         // block into `buf` as one complete frame before sealing (a no-op for
         // row formats, which already wrote every row in `encode`). A finalize
         // failure means a broken encoder, not a bad record: record it fatal
-        // and ship nothing — the shard's captured acks fail on teardown, so
+        // and ship nothing. The shard's captured acks fail on teardown, so
         // the rows replay.
         if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
             self.fatal.0 = Some(FatalError {
@@ -205,9 +203,8 @@ where
 /// Teardown safety: un-sent output (parked chunks after a drain deadline,
 /// partial shard buffers) holds its acknowledgments in fail-on-drop
 /// [`AckSet`]s, so tearing the handoff down stalls those watermarks and the
-/// records replay after restart — at-least-once over completeness, always.
-/// This `Drop` only reconciles the in-flight byte budget for parked chunks
-/// (their bytes were added at seal time).
+/// records replay after restart. This `Drop` reconciles only the in-flight
+/// byte budget for parked chunks (their bytes were added at seal time).
 impl<F: RecFamily, E, R> Drop for SinkHandoff<F, E, R> {
     fn drop(&mut self) {
         for (_, chunk) in self.parked.drain(..) {
@@ -255,8 +252,8 @@ where
                 // so the frame stays well-formed.
                 shard.buf.truncate(before);
                 // A Fatal-class error means the component is broken, not
-                // the record ("processing must stop"): it overrides the
-                // record-level policy — skipping it once per record would
+                // the record ("processing must stop"), so it overrides the
+                // record-level policy. Skipping it once per record would
                 // silently drop everything.
                 let fatal_class = matches!(
                     e,

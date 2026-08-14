@@ -2,16 +2,16 @@
 //! whole `PipelineRuntime` rather than at `SinkPool` level.
 //!
 //! The unit tests in `spate-core` cover `SinkPool::drain` in isolation, and the
-//! `spate` facade covers the real thing against a paused ClickHouse — but that
+//! `spate` facade covers the real thing against a paused ClickHouse, but that
 //! suite is Docker-gated and does not run on a pull request. This is the
 //! docker-free gate for the same regression, and it exercises the leg the
 //! `SinkPool` tests cannot: `PipelineRuntime::run`'s
 //! `io.block_on(drain(budget))`, where a wedged drain wedges the process.
 //!
-//! The sink here is not hung, merely *down*: every write fails retryably and
+//! The sink here is not hung but *down*: every write fails retryably and
 //! `retry.max_attempts` defaults to 0 (unbounded), so each write task retries
 //! for the length of the outage and never releases its in-flight permit. That
-//! is the routine reachability of #83 — no exotic client behavior needed.
+//! is the routine reachability of #83, with no exotic client behavior needed.
 
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
@@ -72,8 +72,8 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
                 // One chunk per row. At the default 64KiB the driver hands
                 // the whole push over as a single chunk, the worker seals
                 // exactly one batch, and the in-flight window is never
-                // contended — the test would then pass on the unfixed worker
-                // too, which it must not.
+                // contended, so the test would pass on the unfixed worker
+                // too.
                 .with_chunk(ChunkConfig {
                     target_bytes: 1,
                     ..ChunkConfig::default()
@@ -105,8 +105,8 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
         handle.push(p, None, &[i]);
     }
 
-    // Wait for the sink to actually be retrying, so the in-flight window is
-    // provably saturated before shutdown rather than by assumption.
+    // Wait for the sink to be retrying, so the in-flight window is provably
+    // saturated before shutdown rather than by assumption.
     spate_test::wait_until(
         Duration::from_secs(10),
         "the failing sink to start writing",
@@ -129,7 +129,7 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
         "exit took {exited_in:?} against a 2s drain_timeout"
     );
     // Abandoning is the correct outcome, and asserting it proves the deadline
-    // sweep actually ran rather than the sink having quietly healed.
+    // sweep ran rather than the sink having quietly healed.
     let drain = report.sink_drain.expect("a sink drain report");
     assert!(
         drain.abandoned > 0,

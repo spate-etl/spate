@@ -1,11 +1,10 @@
 //! Scripted coordination for testing coordinated sources.
 //!
-//! [`scripted_coordinator`] pairs a [`SplitCoordinator`] implementation
-//! with a [`CoordinatorScript`] handle (the `tower-test` philosophy used
-//! throughout this crate): the test scripts ownership events and commit
-//! outcomes, the source under test runs its real driver choreography, and
-//! the script observes every commit, failure report, and release — no
-//! store, no clock, fully deterministic.
+//! [`scripted_coordinator`] pairs a [`SplitCoordinator`] implementation with a
+//! [`CoordinatorScript`] handle. The test scripts ownership events and commit
+//! outcomes, the source under test runs its real driver choreography, and the
+//! script observes every commit, failure report, and release. There is no
+//! store and no clock, and behaviour is deterministic.
 
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
@@ -37,7 +36,7 @@ pub struct ScriptedCoordinator {
 /// Scripting and observation handle for a [`ScriptedCoordinator`].
 ///
 /// Events queued between two `poll` calls are delivered as **one batch**,
-/// matching the trait contract ("all pending events at once") — queue a
+/// matching the trait contract ("all pending events at once"). Queue a
 /// [`lose`](CoordinatorScript::lose) and a [`gain`](CoordinatorScript::gain)
 /// back to back to exercise same-batch interleavings.
 #[derive(Clone, Debug)]
@@ -155,10 +154,10 @@ impl CoordinatorScript {
         self.lock().started
     }
 
-    /// Take the planner captured at `start`: run it directly to inspect
-    /// its plan, then feed the resulting splits back through
-    /// [`gain`](CoordinatorScript::gain) — this is how a source tests its
-    /// planner and its driver choreography together.
+    /// Take the planner captured at `start`. Run it directly to inspect its
+    /// plan, then feed the resulting splits back through
+    /// [`gain`](CoordinatorScript::gain) to test a source's planner and its
+    /// driver choreography together.
     #[must_use]
     pub fn take_planner(&self) -> Option<Box<dyn SplitPlanner>> {
         self.lock().planner.take()
@@ -193,9 +192,8 @@ impl SplitCoordinator for ScriptedCoordinator {
     }
 
     fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
-        // Deterministic and non-blocking: queued events are one batch;
-        // an empty queue returns immediately rather than waiting out the
-        // timeout, so test loops never stall.
+        // Deterministic and non-blocking. Queued events are one batch, and an
+        // empty queue returns immediately rather than waiting out the timeout.
         Ok(std::mem::take(
             &mut self
                 .state

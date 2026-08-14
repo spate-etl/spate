@@ -1,71 +1,53 @@
 //! Instruction counts for the checkpoint tracker and the acknowledgment
 //! path around it (gungraun).
 //!
-//! One shape — 8,192 source poll batches issued, resolved and committed
-//! through [`AckIssuer::issue`](spate_core::checkpoint::AckIssuer::issue),
+//! One shape, parameterized by the two things a commit interval varies.
+//! 8,192 source poll batches are issued, resolved and committed through
+//! [`AckIssuer::issue`](spate_core::checkpoint::AckIssuer::issue),
 //! `AckRef`'s drop,
 //! [`Checkpointer::drain`](spate_core::checkpoint::Checkpointer::drain) and
-//! [`take_watermarks`](spate_core::checkpoint::Checkpointer::take_watermarks)
-//! — parameterized by the two things a commit interval varies.
+//! [`take_watermarks`](spate_core::checkpoint::Checkpointer::take_watermarks).
 //!
-//! This is the at-least-once core, and it is the one part of the framework
-//! whose per-call cost has never been counted: it is loom-tested for the
-//! races on its atomics and property-tested against a reference model for the
-//! watermark it computes, and neither instrument says anything about what the
-//! data structure costs. It is countable at all *because* it is synchronous
-//! and tokio-free — there is no executor between the call and the work — so
-//! the count here is a direct consequence of that invariant rather than an
-//! approximation of a scheduled path.
+//! The tracker is synchronous and tokio-free, with no executor between the
+//! call and the work, so an instruction count measures the data structure
+//! directly.
 //!
 //! - **Batches per commit tick.** `wide_ticks` commits 256 batches per tick
-//!   and `narrow_ticks` 16, over the same 8,192 batches — so `narrow_ticks`
+//!   and `narrow_ticks` 16, over the same 8,192 batches, so `narrow_ticks`
 //!   pays the fixed per-tick cost sixteen times as often for identical
-//!   per-batch work. Read as a pair, they separate the per-batch term — two
-//!   unbounded sends and two receives, since a batch is registered when it is
-//!   issued and resolved again when its last handle drops, plus a partition
-//!   lookup and a ring-slot write for each — from the per-tick term
-//!   (`drain`'s two-pass setup, and `take_watermarks` allocating a vector,
-//!   sweeping every tracker and sorting the result) that a pipeline pays on
-//!   its commit interval whether or not anything moved.
+//!   per-batch work. Read as a pair, they separate the per-batch term from
+//!   the per-tick term. The per-batch term is two unbounded sends and two
+//!   receives, since a batch is registered when it is issued and resolved
+//!   again when its last handle drops, plus a partition lookup and a
+//!   ring-slot write for each. The per-tick term is `drain`'s two-pass setup
+//!   and `take_watermarks` allocating a vector, sweeping every tracker and
+//!   sorting the result, which a pipeline pays on its commit interval whether
+//!   or not anything moved.
 //! - **Resolution order.** `scrambled_wide_ticks` is `wide_ticks` with each
-//!   tick's batches resolved in `(step * 37) % 256` instead of issue order —
-//!   the permutation shape the `watermark_is_monotonic` unit test already
-//!   uses, reused rather than invented, and the shape a sharded sink actually
-//!   produces when branches complete their flushes in whatever order they
-//!   finish. The pair separates a cost the tracker has from one it does not.
-//!   Its own frames are *bit-identical* across the two: a resolution is an
-//!   indexed slot write — `seq - head_seq` into the ring — rather than a
-//!   search, so nothing in `resolve`, `apply`, `advance` or the channel walk
-//!   depends on the order arrivals come in. What does differ is the
-//!   allocator: a batch's shared state is freed exactly when its last handle
-//!   drops, so resolving out of order frees out of allocation order, and
-//!   glibc pays more to coalesce. The pair is therefore two readings at once
-//!   — the price out-of-order resolution really carries, and the fact that
-//!   none of it is ours. A change that made resolution scan for its slot
-//!   would move the first number and not the second, and nothing else in the
-//!   suite would notice.
+//!   tick's batches resolved in `(step * 37) % 256` instead of issue order.
+//!   That is the permutation shape the `watermark_is_monotonic` unit test
+//!   uses, and the shape a sharded sink produces when branches complete their
+//!   flushes in whatever order they finish. The pair separates a cost the
+//!   tracker has from one it does not. Its own frames are *bit-identical*
+//!   across the two, because a resolution is an indexed slot write
+//!   (`seq - head_seq` into the ring) rather than a search, so nothing in
+//!   `resolve`, `apply`, `advance` or the channel walk depends on the order
+//!   arrivals come in. The allocator does differ. A batch's shared state is
+//!   freed when its last handle drops, so resolving out of order frees out of
+//!   allocation order, and glibc pays more to coalesce. A change that made
+//!   resolution scan for its slot would move the first number and not the
+//!   second, and nothing else in the suite would notice.
 //!
-//! Deliberately absent are a scramble at the narrow tick size, and a sweep of
-//! the partition count. The two axes are independent by construction — the
-//! order a tick's resolutions arrive in cannot change how many ticks there
-//! are — so the third corner only re-measures a slope the first three fix;
-//! and the partition count enters only as a `HashMap` key, which would put a
-//! case under the standard library's hashing rather than under this crate's
-//! tracker. Three cases, not nine: callgrind runs the workload under
-//! emulation.
-//!
-//! Both `HashMap`s on the path — the issuer's per-partition sequence counters
-//! and the checkpointer's trackers — are seeded per process, so these counts
-//! are not bit-identical run to run the way an allocation-free case is: the
+//! Both `HashMap`s on the path (the issuer's per-partition sequence counters
+//! and the checkpointer's trackers) are seeded per process, so these counts
+//! are not bit-identical run to run the way an allocation-free case is. The
 //! seed decides what order `take_watermarks` finds the trackers in, and so
 //! how much work the sort behind it does. Four partitions is few enough that
-//! the effect stays small, and it is a drift of a few hundred instructions
-//! rather than a proportional one. What a real change looks like is all three
-//! cases moving together in proportion to the batches they carry, not one
-//! case drifting on its own.
+//! the effect stays small, a drift of a few hundred instructions rather than
+//! a proportional one. A change to the code moves all three cases together in
+//! proportion to the batches they carry, not one case drifting on its own.
 //!
-//! Needs valgrind and a same-version `gungraun-runner`, neither of which
-//! exists on every developer machine: run it with `make bench-gungraun`.
+//! Run with `make bench-gungraun`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so
@@ -80,7 +62,7 @@ mod ack_traffic;
 
 use ack_traffic::{Order, Rig, rig};
 
-/// Batches one commit tick covers in the wide cases: a commit interval long
+/// Batches one commit tick covers in the wide cases, a commit interval long
 /// enough that the tick's own cost is amortised over the batches it carries.
 const WIDE: usize = 256;
 
@@ -90,16 +72,15 @@ const NARROW: usize = 16;
 
 /// The whole corpus of batches, a commit tick at a time.
 ///
-/// It lives outside the benchmark function and is `#[inline(never)]`, and
-/// both halves of that are load-bearing rather than stylistic. Collection is
-/// bounded by a callgrind toggle on the module the benchmark macro wraps the
-/// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimizer leaves in an unstable shape inside that module can
-/// end up outside the collected region entirely, and a bench that measures
-/// nothing still reports a plausible number. Everything this drive calls is
-/// a plain synchronous function in `spate_core`, with no erasure boundary of
-/// its own to anchor the region, which makes the named frame the only thing
-/// holding it.
+/// It lives outside the benchmark function and is `#[inline(never)]`.
+/// Collection is bounded by a callgrind toggle on the module the benchmark
+/// macro wraps the function in, and a toggle *flips* collection rather than
+/// forcing it on, so work the optimizer leaves in an unstable shape inside
+/// that module can end up outside the collected region entirely, and a bench
+/// that measures nothing still reports a plausible number. Everything this
+/// drive calls is a plain synchronous function in `spate_core`, with no
+/// erasure boundary of its own to anchor the region, which leaves the named
+/// frame as the only thing holding it.
 #[inline(never)]
 fn drive(rig: &mut Rig) -> usize {
     rig.drive()
@@ -107,17 +88,15 @@ fn drive(rig: &mut Rig) -> usize {
 
 // The checkpointer, its issuer and the epoch are built in the `#[bench]`
 // argument expression, which gungraun evaluates outside the collected region.
-// There is no warm-up drive, and the rig is therefore measured in the state a
-// fresh epoch starts in — which is the state the runtime creates it in, and
-// the one an instruction count is most legible against. A second drive would
-// cost the same: every batch a tick issues resolves inside it, so the rings
-// are empty either way, and `head_seq` advancing changes no branch, since
-// `resolve` indexes by `seq - head_seq` and `advance` reports `last_offset + 1`
-// without comparing it to anything. `tests/bench_fixtures.rs` is where that
-// equivalence is asserted; the wall tier depends on it, this target only
-// prefers the fresh state.
+// There is no warm-up drive, so the rig is measured in the state a fresh epoch
+// starts in, the state the runtime creates it in. A second drive would cost the
+// same. Every batch a tick issues resolves inside it, so the rings are empty
+// either way, and `head_seq` advancing changes no branch, since `resolve`
+// indexes by `seq - head_seq` and `advance` reports `last_offset + 1` without
+// comparing it to anything. `tests/bench_fixtures.rs` asserts that equivalence;
+// the wall tier depends on it, this target only prefers the fresh state.
 //
-// Each case returns its rig rather than dropping it: a value moved into the
+// Each case returns its rig rather than dropping it. A value moved into the
 // benchmark function is dropped inside the collected region, and tearing down
 // two unbounded channels and four trackers is not what this measures. A `///`
 // comment here is a `#[doc]` attribute, which `#[library_benchmark]` rejects.
@@ -144,18 +123,18 @@ fn commit_batches(mut rig: Rig) -> Rig {
 
 library_benchmark_group!(name = checkpoint; benchmarks = commit_batches);
 
-// DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
-// and without it. `--num-callers=500` (the maximum) keeps allocation stacks
+// DHAT is scoped as an extra tool rather than a callgrind argument. The
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with and
+// without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough that heap blocks attribute to the acknowledgment path under
 // measurement rather than to whichever frame the default depth of 4 happens
 // to cut at.
 //
 // The block count is not one per batch. A batch's shared `AckState` is one
 // allocation, and the two unbounded channels allocate a block per run of
-// messages rather than per message — but `take_watermarks` builds a fresh
-// vector on every commit tick, so the count carries a per-tick term as well
-// as a per-batch one. That term is visible in the cases themselves:
+// messages rather than per message. `take_watermarks` builds a fresh vector on
+// every commit tick, so the count carries a per-tick term as well as a
+// per-batch one. That term is visible in the cases themselves.
 // `narrow_ticks` runs sixteen times as many ticks over the same batches, and
 // its block count exceeds `wide_ticks`'s by close to the difference in ticks.
 // A change that started allocating per record rather than per batch would

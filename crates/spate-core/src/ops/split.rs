@@ -5,20 +5,21 @@
 //! terminal fans a heterogeneously-typed stream out across many. The user
 //! writes a single `match` (classify + extract in the same arm) and dispatches
 //! with [`SplitEmitter::emit`]; a record that reaches no branch follows the
-//! configured [`ErrorPolicy`] (`Fail` — the default — stops the pipeline;
+//! configured [`ErrorPolicy`] (`Fail`, the default, stops the pipeline;
 //! `Skip` drops it and counts `spate_operator_records_dropped_total{reason="unrouted"}`).
 //!
 //! # How the typed dispatch stays cheap and object-safe
 //!
-//! Each branch is a [`SinkHandoff<F, BoxedEncoder<F>, BoxedRouter<F>>`](super::handoff::SinkHandoff)
-//! — its encoder and router are erased so the branch's concrete type depends
+//! Each branch is a [`SinkHandoff<F, BoxedEncoder<F>, BoxedRouter<F>>`](super::handoff::SinkHandoff).
+//! Its encoder and router are erased, so the branch's concrete type depends
 //! only on the destination family `F`. A [`Sink<F>`] handle (a plain index plus
 //! `F`) therefore names the exact concrete type, so [`SplitEmitter::emit`]
 //! recovers it with one `Any` downcast, then routes and encodes through the
-//! branch's boxed router/encoder — one virtual call each per record over the
-//! single-sink path's concrete types — straight into that branch's per-shard
-//! buffer.
-//! The at-least-once machinery is inherited unchanged: each branch clones the
+//! branch's boxed router/encoder straight into that branch's per-shard buffer.
+//! That costs one virtual call each per record over the single-sink path's
+//! concrete types.
+//!
+//! The at-least-once machinery is inherited unchanged. Each branch clones the
 //! poll batch's [`AckRef`](crate::checkpoint::AckRef) into its own fail-on-drop
 //! `AckSet`, so the source watermark holds until *every* branch that received a
 //! derived record has durably written, and any branch's failure stalls it.
@@ -40,8 +41,9 @@ use std::time::Duration;
 
 /// The per-sink handles a split branch needs, resolved by name from the
 /// chain factory's [`ChainCtx`](crate::pipeline::ChainCtx) via
-/// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink). Bundling the name in
-/// keeps [`SplitBuilder::add`](super::ChainBuilder) from repeating it.
+/// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink). The bundle carries
+/// the sink's name, so [`SplitBuilder::add`](super::ChainBuilder) does not
+/// repeat it.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SinkCtx {
@@ -57,7 +59,7 @@ pub struct SinkCtx {
 impl SinkCtx {
     /// Bundle a named sink's queues and the shared in-flight budget. Chunking
     /// starts at [`ChunkConfig::default`]; override it with
-    /// [`with_chunk`](Self::with_chunk). (Builder pipelines never call this —
+    /// [`with_chunk`](Self::with_chunk). (Builder pipelines do not call this;
     /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink) hands out a fully
     /// resolved `SinkCtx`.)
     #[must_use]
@@ -70,7 +72,7 @@ impl SinkCtx {
         }
     }
 
-    /// Set this branch's terminal-stage chunking — the manual-assembly
+    /// Set this branch's terminal-stage chunking, the manual-assembly
     /// counterpart to the per-sink YAML `chunk:` block.
     #[must_use]
     pub fn with_chunk(mut self, chunk: ChunkConfig) -> Self {
@@ -79,9 +81,9 @@ impl SinkCtx {
     }
 }
 
-/// A typed, `Copy` handle to one split branch — a branch index plus the
-/// destination family, so [`SplitEmitter::emit`] both type-checks the row and
-/// recovers the branch with zero per-call lookup. Minted by
+/// A typed, `Copy` handle to one split branch, carrying a branch index plus
+/// the destination family, so [`SplitEmitter::emit`] both type-checks the row
+/// and recovers the branch with zero per-call lookup. Minted by
 /// [`SplitBuilder::add`](super::ChainBuilder).
 pub struct Sink<F: RecFamily> {
     idx: usize,
@@ -137,7 +139,7 @@ impl<F: RecFamily> Clone for BoxedEncoder<F> {
         // Dispatch through the trait object to the *concrete* encoder's
         // `clone_box`. `self.clone_box()` would re-select the blanket impl
         // (which also covers `Box<dyn EncoderClone>`) and recurse into this
-        // very `clone` — infinitely. `(**self)` pins it to the vtable.
+        // `clone` infinitely. `(**self)` pins it to the vtable.
         (**self).clone_box()
     }
 }
@@ -265,9 +267,9 @@ impl SplitEmitter<'_> {
     ///
     /// # Panics
     ///
-    /// Panics if `handle` does not name a branch of this split — a handle
-    /// minted by a different split's builder, or one whose record family
-    /// does not match the branch at its index.
+    /// Panics if `handle` does not name a branch of this split. That covers a
+    /// handle minted by a different split's builder, and one whose record
+    /// family does not match the branch at its index.
     #[inline]
     pub fn emit<'buf, F: RecFamily + 'static>(&mut self, handle: Sink<F>, row: F::Rec<'buf>) {
         let branch = self
@@ -349,7 +351,7 @@ where
     fn push(&mut self, rec: Record<SrcF::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
         // A latched fatal short-circuits the rest of the batch, just like
-        // `SinkHandoff` — the chain drains it via `take_fatal`.
+        // `SinkHandoff`. The chain drains it via `take_fatal`.
         if self.fatal.0.is_some() {
             return Flow::Continue;
         }
@@ -367,10 +369,10 @@ where
         let (emitted, flow) = (em.emitted, em.flow);
         if emitted == 0 {
             match self.unmatched {
-                // Drop-and-count: the record's ack share releases as success
-                // when `ack` drops here, exactly like a `filter` drop.
+                // The record's ack share releases as success when `ack` drops
+                // here, exactly like a `filter` drop.
                 ErrorPolicy::Skip => self.meter.0.unrouted(),
-                // Stop the pipeline: the driver fails the batch's ack.
+                // The driver fails the batch's ack, stopping the pipeline.
                 _ => {
                     self.fatal.0 = Some(FatalError {
                         component: self.component.to_string(),
@@ -406,8 +408,8 @@ impl<SrcF: RecFamily, G> StageLifecycle for SplitTerminal<SrcF, G> {
     }
 
     fn relieve(&mut self) -> Flow {
-        // Relieve every branch (make progress on all), block if any is backed
-        // up — a branch that stays blocked keeps the chain from new payloads.
+        // Make progress on every branch. One branch that stays blocked keeps
+        // the chain from taking new payloads.
         let mut flow = Flow::Continue;
         for branch in &mut self.branches {
             if branch.relieve() == Flow::Blocked {

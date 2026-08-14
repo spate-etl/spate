@@ -2,11 +2,11 @@
 //! time), `benches/chain_gungraun.rs` (instruction counts) and
 //! `tests/bench_fixtures.rs` (the corpus pins).
 //!
-//! Included with `#[path]` rather than imported: a bench target is its own
-//! crate, so several can only agree on a workload by compiling the same
-//! source. If they ever measured different rigs, a wall-time result and an
-//! instruction count would not be talking about the same code — and the test
-//! would be pinning bytes neither of them ran.
+//! Included with `#[path]` rather than imported, because a bench target is its
+//! own crate and several can only agree on a workload by compiling the same
+//! source. If they measured different rigs, a wall-time result and an
+//! instruction count would not describe the same code, and the test would be
+//! pinning bytes neither of them ran.
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
@@ -109,8 +109,7 @@ impl ShardRouter for ToZero {
     }
 }
 
-/// Which router a rig builds, and — inseparably — whether its corpus carries
-/// message keys.
+/// Which router a rig builds, and whether its corpus carries message keys.
 ///
 /// These are one choice rather than two axes. [`KeyHashRouter`] falls back to
 /// a hash of the source partition for a keyless record, and every payload
@@ -124,9 +123,9 @@ pub(crate) enum Routing {
     /// 0. What the single-shard baselines hold fixed.
     Fixed,
     /// The production [`KeyHashRouter`] over keyed payloads. Two costs land
-    /// together, which is how the production path pays them: `RawPayload::meta`
-    /// hashes each key (FNV-1a over the key bytes) during deserialization, and
-    /// the router takes that hash modulo the shard count per record.
+    /// together, as they do on the production path. `RawPayload::meta` hashes
+    /// each key (FNV-1a over the key bytes) during deserialization, and the
+    /// router takes that hash modulo the shard count per record.
     KeyHash,
 }
 
@@ -179,12 +178,12 @@ pub(crate) const BATCH: usize = 512;
 
 /// Encoded bytes one borrowed batch produces: `split3` cuts each 39-byte
 /// payload at its two separators into three sub-records, and `SubEncoder`
-/// writes a 4-byte length prefix plus the slice for each — [`PAYLOAD_BYTES`]
+/// writes a 4-byte length prefix plus the slice for each, [`PAYLOAD_BYTES`]
 /// per payload.
 ///
 /// A target strictly above this never trips the seal check, so the batch's
 /// single chunk seals at `flush`. A target that divides it seals that many
-/// chunks entirely inside `push` — see [`assert_seals_on_a_record_boundary`].
+/// chunks entirely inside `push` (see [`assert_seals_on_a_record_boundary`]).
 ///
 /// A chunk case divides this, so a payload shape that drifted from the
 /// arithmetic would silently change how many chunks a case seals.
@@ -194,10 +193,10 @@ pub(crate) const BORROWED_BATCH_BYTES: usize = BATCH * PAYLOAD_BYTES;
 /// Encoded bytes one payload contributes: `39 - 2 + 3 * 4`.
 const PAYLOAD_BYTES: usize = 49;
 
-/// Pure functions of the index — no `rand`, no `DefaultHasher` — so every
-/// run of every bench target encodes the same bytes and routes the same way.
+/// Pure functions of the index (no `rand`, no `DefaultHasher`), so every run
+/// of every bench target encodes the same bytes and routes the same way.
 ///
-/// Reachable on its own, not only through a rig: the wall tier's routing and
+/// Reachable on its own as well as through a rig. The wall tier's routing and
 /// hashing cases measure the corpus without a chain around it, and
 /// `tests/bench_fixtures.rs` pins its bytes.
 pub(crate) fn corpus(routing: Routing) -> Corpus {
@@ -232,13 +231,13 @@ pub(crate) struct Rig {
 
 impl Rig {
     /// The bytes this rig drives, for a caller that has to prove two builds
-    /// measured the same ones — the wall tier folds these into its corpus
-    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    /// measured the same ones. The wall tier folds these into its corpus
+    /// digest, and a pair of legs whose corpora drifted is demoted.
     ///
-    /// Bytes only. The rig's other parameters — the shard count, the chunk
-    /// target, the queue depth — are not in the digest, so a change to one of
+    /// Bytes only. The rig's other parameters (the shard count, the chunk
+    /// target, the queue depth) are not in the digest, so a change to one of
     /// those passes the check and is charged to the diff as a performance
-    /// difference. `tests/bench_fixtures.rs` is what pins them instead.
+    /// difference. `tests/bench_fixtures.rs` pins them instead.
     pub(crate) fn corpus(&self) -> &Corpus {
         &self.corpus
     }
@@ -246,19 +245,19 @@ impl Rig {
     /// One full batch through the chain, drained to encoded chunks. Returns
     /// the row count so a caller can keep the work observable.
     ///
-    /// The drain sweeps every shard receiver, which is rig scaffolding — in
+    /// The drain sweeps every shard receiver, which is rig scaffolding; in
     /// production a shard worker owns the other end. Each receiver costs its
     /// chunks plus one failing `try_recv` to end its loop, so the sweep grows
     /// with the shard count whether or not a shard is idle. That term is why a
     /// shard-count case is read against its own single-shard sibling rather
     /// than in absolute terms.
     ///
-    /// Nothing here returns bytes to the [`InflightBudget`]: only a sink
+    /// Nothing here returns bytes to the [`InflightBudget`]. Only a sink
     /// worker or a parked chunk's drop does that, and this rig has neither, so
-    /// the budget climbs across drives. Cost-neutral today — the seal path's
-    /// `add` is one value-independent atomic and nothing reads `usage()` — but
-    /// a rig that grew a component which *does* read it would need a real
-    /// consumer instead.
+    /// the budget climbs across drives. That is cost-neutral while the seal
+    /// path's `add` is one value-independent atomic and nothing reads
+    /// `usage()`; a rig that grew a component which *does* read it would need
+    /// a real consumer instead.
     pub(crate) fn drive(&mut self) -> usize {
         let (ack, _rx) = AckRef::test_pair();
         let mut batch = TestBatch {
@@ -286,10 +285,10 @@ impl Rig {
 ///
 /// The seal check is `buf.len() >= target` *after* each sub-record, so a
 /// target that divides [`PAYLOAD_BYTES`]' running total is reached at exactly
-/// equality and seals there. A target that does not — say a third of the batch
-/// — is first *overshot* mid-payload, which makes the chunks unequal and
-/// leaves a remainder for `flush`. Both are legitimate workloads, but only the
-/// first is the one the `chunk_*` case names describe.
+/// equality and seals there. A target that does not (say a third of the batch)
+/// is first *overshot* mid-payload, which makes the chunks unequal and leaves
+/// a remainder for `flush`. Both are legitimate workloads, but only the first
+/// is the one the `chunk_*` case names describe.
 fn assert_seals_on_a_record_boundary(target_bytes: usize) {
     if target_bytes >= BORROWED_BATCH_BYTES {
         return; // Never trips the check: the batch's one chunk seals at flush.
@@ -307,8 +306,8 @@ fn assert_seals_on_a_record_boundary(target_bytes: usize) {
     );
 }
 
-/// [`BORROWED_BATCH_BYTES`] must be what the borrowed chain actually encodes,
-/// or a chunk case seals a different number of times than its name claims.
+/// [`BORROWED_BATCH_BYTES`] must be what the borrowed chain encodes, or a
+/// chunk case seals a different number of times than its name claims.
 fn assert_encodes_to(corpus: &Corpus) {
     let encoded: usize = corpus
         .payloads
@@ -330,10 +329,10 @@ fn assert_encodes_to(corpus: &Corpus) {
 /// measures an idle `Vec` of buffers rather than routing.
 ///
 /// Checked here, in the rig builder, which every caller runs outside its
-/// measured region: gungraun evaluates a `#[bench]` argument expression before
+/// measured region; gungraun evaluates a `#[bench]` argument expression before
 /// it starts collecting, and the wall harness builds the rig in a case's
-/// `setup`. A corpus that stopped spreading — a different key shape, a wider
-/// shard count — therefore fails loudly instead of quietly reporting a number
+/// `setup`. A corpus that stopped spreading (a different key shape, a wider
+/// shard count) therefore fails loudly instead of quietly reporting a number
 /// for work that is not happening.
 fn assert_spreads(corpus: &Corpus, shards: usize) {
     let mut hit = vec![false; shards];
@@ -361,8 +360,8 @@ pub(crate) fn borrowed_rig() -> Rig {
 }
 
 /// The borrowed rig with the three parameters the production terminal stage
-/// actually varies: which router runs per record, how many shard buffers it
-/// routes between, and the frame size a chunk seals at.
+/// varies: which router runs per record, how many shard buffers it routes
+/// between, and the frame size a chunk seals at.
 pub(crate) fn borrowed_rig_with(routing: Routing, shards: usize, target_bytes: usize) -> Rig {
     let corpus = corpus(routing);
     assert_encodes_to(&corpus);

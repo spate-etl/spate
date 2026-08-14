@@ -3,9 +3,9 @@
 //! [`MemorySource`] implements [`Source`]; the paired [`SourceHandle`]
 //! scripts the control plane (assignments, revocations, pushed payloads)
 //! and observes everything the source is asked to do (commits, pauses,
-//! flushes). The mock is deliberately strict: misuse that would indicate a
-//! runtime bug — pausing an unassigned lane, revoking an unknown lane,
-//! duplicate lane ids — panics with a clear message.
+//! flushes). The mock is strict about misuse. Pausing an unassigned lane,
+//! revoking an unknown lane, or a duplicate lane id panics with a clear
+//! message.
 
 use spate_core::checkpoint::AckIssuer;
 use spate_core::error::{ErrorClass, SourceError};
@@ -55,11 +55,11 @@ struct Shared {
 #[derive(Debug, Default)]
 struct SharedSync {
     state: Mutex<Shared>,
-    /// Notified on push and resume — wakes waiting lane polls.
+    /// Notified on push and resume; wakes waiting lane polls.
     data_cv: Condvar,
-    /// Notified on assign/revoke — wakes a waiting `poll_events`.
+    /// Notified on assign/revoke; wakes a waiting `poll_events`.
     event_cv: Condvar,
-    /// Notified on commit — wakes a waiting `wait_committed`.
+    /// Notified on commit; wakes a waiting `wait_committed`.
     commit_cv: Condvar,
 }
 
@@ -98,7 +98,7 @@ impl SourceHandle {
     ///
     /// Panics on duplicate lane ids (within the call or against currently
     /// active lanes) or on a partition that is already served by an active
-    /// lane — both would be runtime bugs in a real deployment.
+    /// lane.
     pub fn assign_lanes(&self, lanes: &[(LaneId, PartitionId)]) {
         let mut st = self.shared.lock();
         for &(lane, partition) in lanes {
@@ -149,7 +149,7 @@ impl SourceHandle {
 
     /// Queue one payload on `partition` with `timestamp_ms` equal to the
     /// assigned offset. Returns that offset. Pushing to a partition that
-    /// has no active lane yet is allowed — payloads wait.
+    /// has no active lane yet is allowed; the payloads wait.
     pub fn push(&self, partition: PartitionId, key: Option<&[u8]>, payload: &[u8]) -> i64 {
         self.push_at(partition, key, payload, None)
     }
@@ -211,7 +211,7 @@ impl SourceHandle {
     /// Block until `partition`'s most recent committed offset reaches at least
     /// `offset`, or `timeout` elapses; returns whether the target was met.
     ///
-    /// The blocking counterpart to [`last_committed`](Self::last_committed):
+    /// The blocking counterpart to [`last_committed`](Self::last_committed),
     /// waking on each [`Source::commit`] rather than polling. Pass the
     /// one-past-last watermark (e.g. `last_offset + 1`) to wait for every
     /// pushed record to be durably committed.
@@ -304,8 +304,8 @@ impl Source for MemorySource {
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        // Exercise the connector-metrics seam: a family under the source's
-        // `spate_memory_source_*` namespace, resolved once at open.
+        // Exercise the connector-metrics seam with a family under the
+        // source's `spate_memory_source_*` namespace, resolved once at open.
         if let Some(meter) = &ctx.meter {
             meter.counter("opens_total", &[]).increment(1);
         }

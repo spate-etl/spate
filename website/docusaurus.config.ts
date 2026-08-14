@@ -32,8 +32,7 @@ import {
 //     it documents; see docs/STYLE.md § the framework/connector boundary).
 //   - DESIGN -> user-guide/concepts (the design document was dissolved: its
 //     rationale became docs/adr/, its invariants docs/INVARIANTS.md, and its
-//     architecture prose the Concepts section, which is where a reader
-//     following an old link is looking).
+//     architecture prose the Concepts section).
 //
 // A redirect whose `to` names a page that no longer exists FAILS the build, so
 // deleting a page means deleting any redirect aimed at it. This is only caught
@@ -97,10 +96,7 @@ const config: Config = {
 
   future: {
     // Rspack bundler + SWC/Lightning CSS in place of webpack + Babel + Terser.
-    // Stable as of 3.10 and the default in v4; upstream measures 3-4x on cold
-    // builds and, with the Rspack persistent cache preserved between runs,
-    // 6-7x on rebuilds. The site build is on the critical path of every docs
-    // pull request, so this is the largest single saving available here.
+    // Stable as of 3.10 and the default in v4.
     faster: true,
     v4: {
       // Required by `faster`: its `ssgWorkerThreads` refuses to start without
@@ -154,7 +150,7 @@ const config: Config = {
           showLastUpdateTime: true,
           // Keep the Docusaurus defaults (they exclude `_*` MDX partials such as
           // 04-connectors/_securing-kafka.mdx from becoming pages) and add the
-          // doc-standards file, which is a contributor reference, not a site page.
+          // doc-standards file, a contributor reference rather than a site page.
           exclude: [
             '**/_*.{js,jsx,ts,tsx,md,mdx}',
             '**/_*/**',

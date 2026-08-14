@@ -8,9 +8,6 @@
 #   ci.yml, both legs               --run
 #
 # Discovery is by naming convention: `crates/<pkg>/benches/<name>_gungraun.rs`.
-# The base leg runs the *merge base's* copy of this script against the merge
-# base's tree, so a merge base predating a bench contributes no baseline for it
-# rather than failing.
 #
 # Usage:
 #   ./scripts/gungraun-benches.sh                   # print `pkg bench` lines
@@ -47,8 +44,7 @@ fail() {
     exit 1
 }
 
-# The compiled feature arm, parsed before the subcommand. Empty means default
-# features, expressed as no `--features` flag rather than `--features default`.
+# The compiled feature arm, parsed before the subcommand.
 features=""
 if [[ "${1:-}" == "--features" ]]; then
     # `$#` rather than `-z "$2"`: the empty string is a legitimate value and
@@ -79,9 +75,7 @@ discover() {
 }
 
 # Every `*_gungraun.rs` must carry a `[[bench]]` stanza naming it with
-# `harness = false`. Without it cargo auto-discovers the file under the default
-# libtest harness, which reports `0 measured` and exit 0: green while measuring
-# nothing.
+# `harness = false`.
 declares_target() {
     local manifest=$1 bench=$2
     # Key ordering inside a block is free, so the verdict can only be reached
@@ -121,8 +115,7 @@ make_stub_cargo() {
 }
 
 # The base leg branches on `--run`'s exit status to decide whether it has a
-# usable baseline, so the trichotomy is a contract. A stub `cargo` on PATH
-# exercises every branch without valgrind or a real bench.
+# usable baseline, so the trichotomy is a contract.
 assert_run_exit() {
     local cargo_exit=$1 want=$2 desc=$3
     shift 3
@@ -171,8 +164,7 @@ assert_no_line() {
 self_test() {
     local pkg bench manifest checked=0 sample log rc
 
-    # First, because everything below asserts something about discovered
-    # benches: an empty tree would surface as an exit-code mismatch.
+    # First: everything below asserts something about discovered benches.
     [[ -n "$(discover)" ]] || fail \
         "discovered no gungraun benches at all. The naming convention or the
     glob has changed, and both CI legs are measuring nothing."
@@ -185,8 +177,8 @@ self_test() {
 
     # --- the feature axis reaches cargo ------------------------------------
     #
-    # A sample package taken from discovery rather than named, for the same
-    # reason ci-changes.sh derives its samples.
+    # A sample package taken from discovery rather than named, so a rename
+    # leaves the assertions below running against a real package.
     sample=$(discover)
     sample=${sample%%$'\n'*}
     sample=${sample%% *}
@@ -201,8 +193,7 @@ self_test() {
     assert_every_line "$log" "--features simd" "--run with a feature arm"
     : >"$log"
 
-    # `--check` is what the cache-warming job builds each arm with, so a
-    # feature it failed to forward would warm the wrong graph.
+    # A feature `--check` failed to forward would warm the wrong graph.
     capture_argv "simd" "$log" --check "$sample"
     assert_every_line "$log" "--no-run" "--check"
     assert_every_line "$log" "--features simd" "--check with a feature arm"
@@ -291,8 +282,6 @@ run() {
     local wanted=("$@") pkg bench failed=0 ran=0
     while read -r pkg bench; do
         selected_pkg "$pkg" ${wanted[@]+"${wanted[@]}"} || continue
-        # Traced in a subshell so the log shows the real cargo invocation
-        # without the surrounding bookkeeping.
         # `</dev/null`: this loop reads `discover` on stdin, so a child that read
         # stdin would swallow the remaining benches, the run would report success
         # having measured a subset, and the base leg would save that as a

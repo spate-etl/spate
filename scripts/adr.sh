@@ -7,8 +7,7 @@
 # template and this section's documentation.
 #
 # --check holds the mechanical half only: numbers unique, statuses from the
-# permitted set, placeholders filled in, every record present in the index. An
-# accepted ADR is immutable, so it never reads a record's prose for meaning.
+# permitted set, placeholders filled in, every record present in the index.
 #
 # Usage:
 #   ./scripts/adr.sh --check         # the gate
@@ -25,19 +24,15 @@ adrs=docs/adr
 template="$adrs/_template.md"
 index="$adrs/README.mdx"
 
-# No `proposed` and no `rejected`: a record is written once the call has been
-# made, and a rejected alternative belongs in `Considered options`.
 STATUSES="accepted superseded deprecated"
 
-# The marker the template leaves behind. A record still carrying one was copied
-# and not written.
+# The marker the template leaves behind.
 PLACEHOLDER=REPLACE-ME
 
 # Is this record still carrying an unfilled placeholder?
 #
-# Inline code spans are stripped first: a record may legitimately *name* the
-# marker rather than carry one, as ADR-0001's `Confirmation` section does.
-# Placeholders in the template are always bare words.
+# Inline code spans are stripped first: a record may name the marker rather than
+# carry one. Placeholders in the template are always bare words.
 has_placeholder() {
     # shellcheck disable=SC2016  # the backticks are markdown, not substitution
     sed -e 's/`[^`]*`//g' "$1" | grep -qF "$PLACEHOLDER"
@@ -49,8 +44,7 @@ fail() {
 }
 
 # The four-digit number at the head of a record's filename, or nothing if the
-# name is not a record. A function rather than a glob so the self-test can
-# assert that the template and the index are not mistaken for records.
+# name is not a record.
 #
 # Exactly `docs/adr/NNNN-slug.md`: anything looser and `README.mdx` or an editor
 # backup starts counting as a decision.
@@ -84,8 +78,7 @@ adr_status() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-test. Runs inline on every invocation as well as under --self-test: a
-# few dozen pattern matches, and one fewer target to remember.
+# Self-test. Runs inline on every invocation as well as under --self-test.
 # ---------------------------------------------------------------------------
 self_test() {
     local failures=0 got probe dir
@@ -168,8 +161,6 @@ cmd_check() {
         count=$((count + 1))
         number=$(adr_number "$file")
 
-        # Numbers are never reused. Two files claiming one number breaks
-        # citation: `ADR-0007` would name two decisions.
         if [ "$number" = "$previous" ]; then
             echo "adr.sh: two records claim number $number. Numbers are never reused" >&2
             problems=$((problems + 1))
@@ -190,24 +181,19 @@ cmd_check() {
             esac
         fi
 
-        # A record still carrying the template's marker was copied and not
-        # written. Checking for it lets the template use a visible placeholder
-        # rather than an HTML comment, which renders as an empty section.
         if has_placeholder "$file"; then
             echo "adr.sh: $file still contains $PLACEHOLDER. It was copied but not written" >&2
             problems=$((problems + 1))
         fi
 
-        # The index is hand-maintained, so it is the thing that drifts. Matching
-        # on the filename catches a record listed under the wrong link too.
+        # Matching on the filename catches a record listed under the wrong
+        # link too.
         if ! grep -qF "($(basename "$file"))" "$index"; then
             echo "adr.sh: $file is not linked from $index" >&2
             problems=$((problems + 1))
         fi
     done < <(adr_files)
 
-    # Zero, not a count. The failure guarded against is the glob going blind,
-    # which looks like nothing at all rather than one fewer.
     if [ "$count" -lt 1 ]; then
         fail "no records found in $adrs/. The filename pattern and the tree have diverged,
   so this gate is now checking nothing and reporting success."
@@ -229,8 +215,7 @@ cmd_new() {
   lowercase, hyphenated. 'leader-computed-assignment', not 'coordination-stuff'."
 
     # `LC_ALL=C grep`, not a `case` glob: a bracket range in a glob is collated
-    # and means different things on different machines. Same note in
-    # changelog.sh.
+    # and means different things on different machines.
     if ! printf '%s' "$slug" | LC_ALL=C grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
         fail "'$slug' should be lowercase letters, digits and hyphens, starting and ending
   with one of the first two. It becomes a filename."

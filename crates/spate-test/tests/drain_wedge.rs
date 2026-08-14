@@ -1,10 +1,9 @@
 //! Shutdown must terminate while the sink is down (#83), asserted through a
 //! whole `PipelineRuntime` rather than at `SinkPool` level.
 //!
-//! The unit tests in `spate-core` cover `SinkPool::drain` in isolation, and the
-//! `spate` facade covers the real thing against a paused ClickHouse, but that
-//! suite is Docker-gated and does not run on a pull request. This is the
-//! docker-free gate for the same regression, and it exercises the leg the
+//! The unit tests in `spate-core` cover `SinkPool::drain` in isolation and the
+//! `spate` facade covers the real thing against a paused ClickHouse. This is
+//! the docker-free gate for the same regression, and it exercises the leg the
 //! `SinkPool` tests cannot: `PipelineRuntime::run`'s
 //! `io.block_on(drain(budget))`, where a wedged drain wedges the process.
 //!

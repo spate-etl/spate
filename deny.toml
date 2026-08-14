@@ -5,9 +5,9 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-    # A proc-macro, so compile time only. It reaches the shipped tree as
-    # clickhouse -> polonius-the-crab -> higher-kinded-types -> paste, so it
-    # appears in THIRD-PARTY.md. Re-check when clickhouse drops it.
+    # Reaches the shipped tree as clickhouse -> polonius-the-crab ->
+    # higher-kinded-types -> paste, so it appears in THIRD-PARTY.md. Re-check
+    # when clickhouse drops it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro under clickhouse; compile-time only, no runtime or network surface; no upgrade path" },
 ]
 
@@ -28,12 +28,10 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# A `*` on a *registry* dependency is still refused. This exempts non-registry
-# dependencies: dev kind for a crate we publish, any kind for one we do not.
-# It is needed because `spate-bench = { path = "bench" }` is versionless (cargo
-# strips a versionless path dev-dependency at package time) and cargo-deny reads
-# a missing version as a wildcard on any edge. A versionless path dependency
-# under `[dependencies]` of a published crate is still refused.
+# Exempts non-registry dependencies, which `spate-bench = { path = "bench" }`
+# needs: it is versionless and cargo-deny reads a missing version as a wildcard.
+# A `*` on a registry dependency, and a versionless path dependency under
+# `[dependencies]` of a published crate, are still refused.
 allow-wildcard-paths = true
 
 [sources]

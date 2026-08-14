@@ -30,9 +30,8 @@ mod support;
 use std::time::{Duration, Instant};
 use support::*;
 
-/// Nextest's `docker` profile never terminates a test, so a regression here
-/// would hang the suite rather than fail it. The shutdown wait is bounded in
-/// the test itself for that reason.
+/// The shutdown wait is bounded in the test itself, so a regression fails
+/// rather than hangs.
 const EXIT_BOUND: Duration = Duration::from_secs(60);
 
 #[test]

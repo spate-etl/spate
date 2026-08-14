@@ -467,8 +467,7 @@ mod tests {
     #[test]
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract (see the module docs): a
-        // regressing upstream total (impossible with one producer per
-        // sink) would flat-line, not dip.
+        // regressing upstream total would flat-line, not dip.
         let rendered = render(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             m.update(&Statistics {

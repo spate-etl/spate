@@ -158,7 +158,7 @@ impl<S: CoordinationStore> Task<S> {
             None => None,
         };
         let Some(mut planner) = self.planner.take() else {
-            return Ok(None); // a concurrent run is impossible; defensive
+            return Ok(None);
         };
         let started = Instant::now();
         let handle = tokio::task::spawn_blocking(move || {

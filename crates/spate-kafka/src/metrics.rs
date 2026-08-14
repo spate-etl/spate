@@ -738,8 +738,7 @@ mod tests {
     #[test]
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract: a regressing upstream total
-        // (impossible with one consumer per open) would flat-line, not
-        // dip. See the module docs.
+        // would flat-line, not dip. See the module docs.
         let rendered = render(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let high = Statistics {

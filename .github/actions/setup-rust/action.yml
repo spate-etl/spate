@@ -3,10 +3,9 @@ description: >
   Toolchain, prebuilt cargo tools and a shared build cache, the preamble every
   Rust job in this repo needs. Callers must run actions/checkout first.
 
-# Composite rather than a reusable workflow. Its steps run inside the calling
-# job and share that job's target directory. A reusable workflow would be a
-# separate job and would rename every status check to "caller / job", which
-# breaks branch protection.
+# Composite rather than a reusable workflow: a reusable workflow is a separate
+# job, and it renames every status check to "caller / job", breaking branch
+# protection.
 
 inputs:
   toolchain:
@@ -35,8 +34,8 @@ inputs:
       Whether this job may write its cache entry. "auto" (the default) writes
       from `main` only. "never" makes the job a pure consumer, for an entry a
       single dedicated job is meant to own. Several jobs sharing one key race
-      to write it the first time it is missing, and the fastest job wins, which
-      is the one that built the least.
+      to write it the first time it is missing, and the fastest job wins,
+      having built the least.
     required: false
     default: auto
 

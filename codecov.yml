@@ -1,23 +1,9 @@
-# Codecov configuration.
+# Codecov configuration. Two flags, uploaded by two different jobs:
 #
-# Two flags, uploaded by two different jobs and meaning different things:
-#
-#   unit            — every PR, from ci.yml's `test` job, which is also the
-#                     job that runs the suite. This is what the status checks
-#                     below gate on, so the PR signal is fast and always means
-#                     the same thing.
-#   with-containers — the weekly tier of scheduled.yml. Merges the docker-free
-#                     run with the `#[ignore]`d testcontainers suites.
-#
-# The container suites were measured before being left off the PR path
-# rather than assumed either way: docker-free the workspace is already at
-# 87.6% line coverage, with spate-s3 at 92.2% and spate-kafka at 91.5%. Merging
-# the container runs in moved the total by single digits and cost ~an hour
-# of serial docker per PR.
-#
-# Weekly rather than per-push because producing it means a second, fully
-# instrumented run of a suite CI has already run — and the number moves by
-# single digits. `carryforward: true` below is what makes that cadence work.
+#   unit            — the docker-free suite, from ci.yml, on every pull request.
+#                     The status checks below gate on this one alone.
+#   with-containers — the docker-free run merged with the `#[ignore]`d
+#                     testcontainers suites, from scheduled.yml's weekly tier.
 
 coverage:
   precision: 1
@@ -25,27 +11,19 @@ coverage:
   range: "70...90"
 
   status:
-    # Coverage of the lines this PR adds or changes. This is the number we
-    # actually care about — a project-wide percentage moves too slowly to
-    # say anything about a single change.
-    #
     # Both statuses are scoped to the `unit` flag. Without that they would
-    # aggregate `with-containers` too, which is carried forward from main on
-    # a PR that never ran it — so the gate would silently include coverage
-    # the PR did not produce.
+    # aggregate `with-containers` too, carried forward from main on a pull
+    # request that never ran it, so the gate would silently include coverage
+    # the pull request did not produce.
     patch:
       default:
         target: 80%
         threshold: 0%
         flags: [unit]
-        # Informational while the target is calibrated: it posts the check
-        # and annotates the diff, but does not block the merge. The repo
-        # sits at ~87.6% docker-free, so 80% should be comfortable — the
-        # crate to watch is spate-clickhouse at 77.6%. Flip to `false` once a
-        # few real PRs confirm it behaves.
+        # Informational while the target is calibrated. Flip to `false` once
+        # a few real pull requests confirm it behaves.
         informational: true
 
-    # Whole-repo coverage: only complain if a PR makes it meaningfully worse.
     project:
       default:
         target: auto
@@ -53,8 +31,6 @@ coverage:
         flags: [unit]
         informational: true
 
-# Line-level annotations in the diff view, plus one comment per PR that is
-# updated in place rather than re-posted.
 comment:
   layout: "condensed_header, diff, flags, components, condensed_files"
   behavior: default
@@ -65,29 +41,21 @@ github_checks:
 
 flags:
   unit:
-    # Never carried forward: on a PR this flag must reflect what that PR's
-    # run actually produced, not the last value seen on main.
+    # On a pull request this flag reflects what that run produced, rather than
+    # the last value seen on main.
     carryforward: false
   with-containers:
-    # Uploaded weekly, so a PR has none of its own and most pushes to main do
-    # not either. Carried forward so the flag keeps its last known value
-    # instead of reading as a regression to zero — which is exactly what makes
-    # a weekly cadence viable. It gates nothing; see the flag scoping on the
-    # statuses above.
+    # Uploaded weekly, so most runs have none of their own. Carried forward so
+    # the flag keeps its last known value instead of reading as a regression to
+    # zero.
     carryforward: true
 
 ignore:
   - "**/tests/**"
   - "crates/spate-test/**" # the mock/test-harness crate shipped for users
   - "examples/**"
-  # The wall-clock benchmark harness. Unpublished, run by hand, and largely
-  # subprocess orchestration that a unit test cannot reach — the same reason
-  # `examples/` is here. Its own logic (statistics, pairing, the record schema)
-  # is unit-tested; counting the driver against the patch target would move the
-  # repository's figure without saying anything about the framework.
-  - "bench/**"
+  - "bench/**" # the wall-clock harness: unpublished, run by hand
 
-# Per-crate visibility, so a regression is attributable rather than diffuse.
 component_management:
   individual_components:
     - component_id: core

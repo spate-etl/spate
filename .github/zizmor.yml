@@ -4,8 +4,7 @@
 # nothing, executes nothing from the pull request, reads one artifact bound to
 # the triggering run by `run-id:` and parses it as nothing but `true`/`false`,
 # and the only write its token allows is one label. The unprivileged half runs
-# the untrusted code with a read-only token, which is why the two are separate
-# workflows.
+# the untrusted code with a read-only token.
 #
 # The ignore is file- and rule-scoped. A new `workflow_run` workflow does not
 # inherit it: state its posture in a comment like the one in perf-label.yml and

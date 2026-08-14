@@ -4,8 +4,7 @@
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
 //! property worth a test rather than an assumption. The benches themselves
-//! cannot carry it: they need Linux, valgrind and a matching runner, and they
-//! only run when a pull request selects the counter stage. This runs
+//! cannot carry it: they need Linux, valgrind and a matching runner. This runs
 //! everywhere `cargo test` does.
 //!
 //! Reproducibility is the smaller half. Most of these cases rest on a claim

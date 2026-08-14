@@ -38,13 +38,6 @@ CONTAINER_PKGS="spate spate-kafka spate-clickhouse spate-s3 spate-coordination"
 # its change possibly break? Derived from the path dependencies in each
 # crates/*/Cargo.toml; `--self-test` checks it against `cargo metadata`.
 #
-#   spate-core         is depended on by every crate
-#   spate-test         is a dev-dependency of avro, json, kafka, clickhouse,
-#                      s3, spate. NOT coordination, which uses its own
-#                      `testing` feature
-#   spate-coordination is depended on by s3 and the facade
-#   the connectors     are optional dependencies of the facade only
-#
 # This answers "can it break", not "does it exercise": a change confined to
 # `crates/spate-s3` still boots Kafka and ClickHouse via `-p spate`.
 container_suites_for() {
@@ -169,7 +162,6 @@ bench_shards_json() {
 
 # ---------------------------------------------------------------------------
 # Self-test: assert the tables above still match the real dependency graph.
-# Runs in the `deny` job, which already has a toolchain.
 #
 # Both the crate list and the container-package set are derived, never named
 # here: hard-coding either side leaves the guard green while a new crate's
@@ -333,10 +325,8 @@ for crate in sorted(names):
         diff <(echo "$expected") <(echo "$actual") || true
         exit 1
     fi
-    # Bench selection is derived from discovery, so "everything selected has a
-    # bench" is true by construction and worth nothing as an assertion. What is
-    # checked is the shape of the three rules, each stated in prose here and in
-    # DEVELOPING.md.
+    # What is checked is the shape of the three rules, each stated in prose
+    # here and in DEVELOPING.md.
     discover_bench_pkgs
     discovered=$(all_bench_pkgs)
     all_pkgs=$(all_bench_pkgs | tr '\n' ' ')
@@ -726,8 +716,7 @@ else
         scripts/* | bench/*) ;;
         # CI definitions decide what every other job does.
         .github/workflows/* | .github/actions/*) ;;
-        # The rest of `.github/` cannot reach a Rust build or the site. It is
-        # still audited: zizmor scans all of `.github/` and carries no filter.
+        # The rest of `.github/` cannot reach a Rust build or the site.
         .github/*)
             continue
             ;;
@@ -808,10 +797,7 @@ fi
 # diff is `Cargo.toml` and `Cargo.lock`, rewritten on every push to `main`.
 #
 # Its source tree is byte-identical to the `main` commit that just ran the
-# container suites on push. What version strings can break is covered without a
-# container: an inconsistent `=` internal pin or a stale lock file fails the
-# lint, test, MSRV and each-feature tiers, all of which run `--locked`, and the
-# public-API diff is `semver_check` in release-plz.toml.
+# container suites on push.
 if [[ "${PR_AUTHOR:-}" == "spate-release[bot]" && "${EVENT_NAME:-}" == "pull_request" ]]; then
     echo "note: release pull request; container suites deferred to push-to-main."
     suites=""

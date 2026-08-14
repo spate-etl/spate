@@ -31,7 +31,7 @@ spate-avro = { version = "=0.1.0", path = "crates/spate-avro" }
 spate-json = { version = "=0.1.0", path = "crates/spate-json" }
 spate-kafka = { version = "=0.1.0", path = "crates/spate-kafka" }
 spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
-# default-features = false so a memory-only embedding never links async-nats.
+# Defaults off keeps async-nats out of a memory-only embedding.
 spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
 spate-datagen = { version = "=0.1.0", path = "crates/spate-datagen" }
 spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
@@ -85,7 +85,7 @@ clickhouse = "0.15"
 apache-avro = "0.21"
 object_store = "0.14"
 # The `server_2_11` default feature gates the limit-marker KV config the lease
-# buckets depend on; the paired server floor is asserted at startup.
+# buckets depend on.
 async-nats = "0.49"
 url = "2.5"
 futures-util = { version = "0.3.31", default-features = false }
@@ -111,9 +111,7 @@ clap = { version = "4.6", default-features = false, features = [
     "suggestions",
 ] }
 # `getrusage`, for the harness's peak resident set and CPU time in one call.
-# The patch floor tracks the graph, not our needs: the nightly
-# `-Z direct-minimal-versions` job pins direct requirements to their literal
-# floor. Raise this only when that job says to.
+# Raise the patch floor only when the `-Z direct-minimal-versions` job says to.
 libc = "0.2.183"
 gungraun = "0.19.4"
 

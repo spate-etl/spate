@@ -1,8 +1,7 @@
 # Editing rules: no `@` prefix on a gate, so the log shows the real invocation
-# (`help` is the exception). No pipes, which would report the last command's
-# exit status and mask a failure. `--locked` wherever a dependency graph is
-# resolved. Two commands do not take it: `cargo fmt`, which resolves nothing,
-# and `cargo hack --no-dev-deps`, which rewrites each manifest as it runs.
+# (`help` is the exception). No pipes; a pipeline reports the last command's
+# exit status and masks a failure. `--locked` wherever a dependency graph is
+# resolved.
 
 .DEFAULT_GOAL := help
 
@@ -65,12 +64,11 @@ loom: ## Loom concurrency models (slow)
 ##@ Matrix
 
 check-features: ## Every feature alone, and the feature-off combinations
-	# The one `--locked` omission in this file. `cargo hack --no-dev-deps`
-	# rewrites each Cargo.toml as it runs, which a locked build refuses. Do not
-	# add the flag; it fails.
+	# `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs, which a
+	# locked build refuses. Do not add `--locked`; it fails.
 	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
-	# Combinations an --all-features build cannot reach: with every feature on, a
-	# crate that fails to compile without one still passes.
+	# With every feature on, a crate that fails to compile without one still
+	# passes. These reach the combinations that build cannot.
 	cargo check -p spate-coordination --no-default-features --tests --locked
 	cargo check -p spate --no-default-features --features s3 --locked
 
@@ -89,13 +87,10 @@ bench-gungraun: ## Instruction-count benches (needs Linux, valgrind, gungraun-ru
 bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind needed)
 	./scripts/gungraun-benches.sh --check
 
-# The wall-clock tier: no target here is a gate and no result is stored.
-# `bench/README.md` and the crate's own docs are the account.
+# The wall-clock tier. `bench/README.md` is the account.
 #
 # Plain variables, not `$(or ...)`, so a command-line `REF=` still wins and a
-# value containing a comma is not read as more arguments. Both legs are written
-# under the bench cache (`$TMPDIR/spate-bench`, or `SPATE_BENCH_CACHE`), outside
-# the repository where cargo and git would find them.
+# value containing a comma is not read as more arguments.
 REF ?= main
 REPS ?= 10
 FILTER ?=
@@ -152,9 +147,8 @@ check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 check-collected-region: ## The degenerate-region guard still recognises both shapes
 	./scripts/gungraun-collected-region.sh --self-test
 
-# The site build resolves every `file=`/`region=` fence and throws on a miss,
-# but behind a persistent bundler cache, so "the site built" is a weaker
-# statement than it looks. This resolves them straight off disk.
+# The site build resolves every `file=`/`region=` fence behind a persistent
+# bundler cache, so a green build can miss one. This resolves them off disk.
 check-transclusions: ## Every transcluded region a docs page names exists
 	./scripts/transclude.sh --check
 
@@ -170,8 +164,7 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
-# The examples answer to `crates/spate/tests/examples_{manifest,index}.rs`,
-# which the `test` target already runs. Accept an index change with:
+# Accept an examples-index change (the `test` target checks it):
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 

@@ -5,10 +5,9 @@
 //! both legs of a comparison ran on byte-identical input, and the wall-clock
 //! tier's corpus digest only demotes a mismatched pair *after* the fact, so
 //! "the corpus is a pure function of its parameters" is tested here rather
-//! than assumed. The benches themselves cannot carry it. The counted tier
-//! needs Linux, valgrind and a matching runner and only runs when a pull
-//! request selects it, and the wall tier runs on demand and never in CI. This
-//! runs everywhere `cargo test` does.
+//! than assumed. The benches themselves cannot carry it: the counted tier
+//! needs Linux, valgrind and a matching runner. This runs everywhere
+//! `cargo test` does.
 //!
 //! Reproducibility is the smaller half. Most of these cases rest on a claim
 //! about *what the corpus does*. The routing axis changes only the keys; a

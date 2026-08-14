@@ -25,8 +25,7 @@ pub(crate) fn check_tls_feature(
     rdkafka: &BTreeMap<String, String>,
     scope: &str,
 ) -> Result<(), ConfigError> {
-    // The feature compiles the SSL/SASL transport into librdkafka; with it on,
-    // every security property is valid and handled by librdkafka directly.
+    // The feature compiles the SSL/SASL transport into librdkafka.
     if cfg!(feature = "tls") {
         return Ok(());
     }

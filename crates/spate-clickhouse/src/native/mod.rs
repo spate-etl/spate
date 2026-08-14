@@ -200,7 +200,6 @@ impl NativeSchema {
     fn fresh_columns(&self) -> Vec<ColumnWriter> {
         self.columns()
             .iter()
-            // build() succeeded at construction, so it cannot fail here.
             .map(|(_, ty, _)| {
                 ColumnWriter::build(ty).expect("column type validated at construction")
             })
@@ -386,8 +385,7 @@ where
         if self.poisoned {
             // A prior row failed mid-encode; the columns are unequal length.
             // Refuse rather than emit a corrupt block; the stage treats this
-            // as fatal and the buffered rows fail (replay). Defensive: encode
-            // already returned fatal, which should stop the pipeline first.
+            // as fatal and the buffered rows fail (replay).
             return Err(SinkError::Client {
                 class: ErrorClass::Fatal,
                 reason: "native block abandoned after a failed row".into(),

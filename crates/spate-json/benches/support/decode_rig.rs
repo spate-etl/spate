@@ -3,8 +3,7 @@
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
 //! crate, so two targets can only agree on what they measure by compiling the
-//! same source. The corpora already work that way (`orders.rs`, `shapes.rs`);
-//! this is the other half. `decode_gungraun.rs` counts instructions inside
+//! same source. `decode_gungraun.rs` counts instructions inside
 //! [`decode_run`] and `decode_wall.rs` times the same function, so a counted
 //! regression and a wall-clock one are statements about one region rather than
 //! about two hand-copied ones that have since drifted apart.
@@ -214,9 +213,7 @@ pub(crate) fn install_recorder() {
 /// heap nothing has used, which is the state a pipeline decoding its millionth
 /// payload is in. That is not automatically the cheaper of the two: for the
 /// allocation-heavy cases a virgin heap is measurably cheaper, because a bump
-/// off the top costs less than a bin lookup. The alternative is not a neutral
-/// measurement; it is the *first* payload a process ever decodes, and no
-/// pipeline spends its life there.
+/// off the top costs less than a bin lookup.
 ///
 /// And the rate limiter behind the skip warning has already seen whatever
 /// poison the payload carries. It allows five events per window, so what the

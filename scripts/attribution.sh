@@ -3,16 +3,12 @@
 # Regenerates THIRD-PARTY.md, the committed dependency attribution inventory.
 # CI runs this and fails on any diff, so the file cannot drift from Cargo.lock.
 #
-# A bare `cargo about generate` emits one row per licence *text*, and a crate
-# shipping several files that scan as the same licence has its text picked by
-# directory-read order, so row order is not reproducible across machines. The
-# elected licence id never changes. That made the gate alternate red/green on
-# unrelated commits (#87).
-#
-# Two passes make the output a property of its content alone: the crate table is
-# sorted by (licence id, crate, version) with duplicate rows collapsed, and the
-# summary counts are recomputed from those rows, because cargo-about counts rows
-# rather than crates.
+# `cargo about generate` emits one row per licence *text*, in an order that
+# follows directory-read order and so varies between machines. Two passes here
+# make the output a property of its content alone: the crate table is sorted by
+# (licence id, crate, version) with duplicate rows collapsed, and the summary
+# counts are recomputed from those rows, because cargo-about counts rows rather
+# than crates.
 #
 # Usage: ./scripts/attribution.sh [output-file]
 set -euo pipefail

@@ -1,8 +1,7 @@
 name: Labels
 
 # Applies `.github/labels.yml`. A pull request touching it gets a dry run, so a
-# bad entry fails before merge rather than leaving a label quietly missing. A
-# script, since the organisation allows only allowlisted actions and `gh` ships.
+# bad entry fails before merge rather than leaving a label quietly missing.
 on:
   push:
     branches: [main]

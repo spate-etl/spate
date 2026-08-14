@@ -53,9 +53,9 @@ IR_THRESHOLD_PCT=5
 BLOCKS_THRESHOLD_ABS=1
 PEAK_THRESHOLD_PCT=5
 
-# The write side of the perf-label.yml contract, executable, and the only place
-# it runs on a pull request: the flag file must be the bare `true` or `false`
-# the label workflow's `case` accepts, and threshold crossings must mark rows.
+# The write side of the perf-label.yml contract, executable: the flag file must
+# be the bare `true` or `false` the label workflow's `case` accepts, and
+# threshold crossings must mark rows.
 # The fixtures pin schema v6, so bumping SCHEMA_VERSION fails at the version
 # gate until they are rebuilt.
 #
@@ -235,8 +235,7 @@ jq_defs='
     def callgrind:
         [.profiles[] | select(.tool == "Callgrind")][0]
         | if . == null then null else .summaries.total.summary.Callgrind end;
-    # null when the summary carries no DHAT profile: the heap table is absent,
-    # so the report stays correct against summaries measured before DHAT.
+    # null when the summary carries no DHAT profile: the heap table is absent.
     def dhat:
         [.profiles[] | select(.tool == "DHAT")][0]
         | if . == null then null else .summaries.total.summary.Dhat end;

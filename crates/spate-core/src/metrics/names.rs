@@ -361,8 +361,7 @@ pub const PREFIX: &str = "spate_";
 
 /// The `spate_<root>_` segments the framework's own stage taxonomy owns. A
 /// `Meter` rejects any custom name whose first segment after `PREFIX` is one
-/// of these. Keep in sync with the stage sections above; the
-/// `every_framework_name_is_under_a_reserved_root` test enforces it.
+/// of these.
 pub const RESERVED_ROOTS: &[&str] = &[
     "source",
     "deser",

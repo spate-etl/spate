@@ -66,16 +66,58 @@ A comment says what the code does and what a caller may rely on. Why it is this
 way and not the alternative belongs in the commit message, where it is dated and
 attached to the diff.
 
+Apply that sentence by sentence, not just per comment. If deleting a sentence
+changes nothing a reader would do differently, it goes. A guardrail needs the
+trap and what happens when you hit it, not the reasoning that produced the
+design.
+
 - **A module header names what the module provides** and its role in the crate.
   Not the dependency it replaces, not the failure that motivated it.
 - **State a property as a contract, not as a verdict.** "The same seed yields the
   same stream on any build" is something a caller can use; "a pinned generator
   cannot drift" is the closing line of a decision.
-- **Constraints on use stay**: not cryptographic, not cancel-safe, panics on X.
+- **Constraints on use stay in rustdoc**: not cryptographic, not cancel-safe,
+  panics on X. A reader on docs.rs has no source to infer from, so the test of
+  what is inferable is far narrower there. The rule is scoped to that surface. A
+  manifest has no callers.
 - **Guardrails stay.** A comment explaining why a line must not be "simplified"
-  prevents the next edit.
+  prevents the next edit. So does one naming a way something can pass while
+  doing nothing.
+- **Never explain what a competent practitioner in that ecosystem already
+  knows**, and never restate the line beside it.
+- **A file documents its own concerns.** A workflow does not explain a Makefile
+  target's scheduling, and a script does not explain a job graph. A comment
+  about another file's behaviour sits where nobody updates it.
+- **If a gate enforces it, do not comment it.** The comment rots on its own; the
+  gate does not.
+- **Do not explain why something cannot happen.** It gives the reader nothing to
+  act on.
+- **State a fact once.** Copies drift.
 - **Present tense.** No "now", "previously", "used to". If it changed, the
   comment describes what is.
+
+### How much
+
+The bar moves by surface, and the field is wider than a single number suggests:
+
+| Surface | Target | Measured elsewhere |
+|---|---|---|
+| Inline `//` | under 10% of file lines | tokio 9-12%, hyper 5.6%, ripgrep 1.9% |
+| Rustdoc `///` | whatever the public API needs | `core::sync::atomic` is 54% doc and exemplary |
+| Manifests, `Makefile`, workflows, scripts | minimal | ClickHouse ships a 6,215-line workflow with three comment lines |
+
+A file that is mostly `// SAFETY:` blocks, or mostly public API documentation, is
+not a file with a comment problem.
+
+### Register
+
+The same prose rules hold in comments, commit messages and `docs/`. The em-dash
+used as a dramatic pause, the antithesis frame that asserts importance
+("load-bearing rather than cosmetic"), the evaluative tail (", which is the whole
+point"), the colon reveal, and intensifiers that add nothing all read as
+machine-written, and they cost the reader's trust in claims they cannot check in
+five minutes. Replacing one with another is not a fix: a dash rewritten as a
+colon is the same beat in different punctuation.
 
 ## Documentation
 

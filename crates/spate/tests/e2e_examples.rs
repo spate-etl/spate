@@ -22,7 +22,7 @@
 //!   imply one on a signal-initiated shutdown; see `Example::terminate`.
 //!
 //! These are `#[ignore]`d and excluded from `[profile.docker]`'s default
-//! filter, because they report nightly rather than per pull request:
+//! filter:
 //!
 //! ```sh
 //! cargo nextest run --profile docker -p spate --all-features --locked \

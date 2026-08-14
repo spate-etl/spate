@@ -4,9 +4,8 @@
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
 //! property worth a test rather than an assumption. The benches themselves
-//! cannot carry it: they need Linux, valgrind and a matching runner, and they
-//! only run when a pull request selects the bench stage. This runs everywhere
-//! `cargo test` does.
+//! cannot carry it: they need Linux, valgrind and a matching runner. This runs
+//! everywhere `cargo test` does.
 
 use spate_core::coordination::SplitId;
 use spate_json::NdjsonFramer;
@@ -374,10 +373,8 @@ fn the_mid_offset_entry_lands_inside_a_record() {
 /// partial line *as a record*, and a reader that discarded through the first
 /// delimiter would emit one fewer.
 ///
-/// Asserting it only inside the bench is not enough. The bench runs when a
-/// maintainer applies `ci: bench` or on a push to `main`, so a pull request
-/// changing the partial-line rule can pass `cargo test` and merge, with the
-/// assertion first firing after the fact. Here it gates every pull request.
+/// Asserted here as well as inside the bench, which does not run under
+/// `cargo test`.
 #[test]
 fn entering_mid_record_still_counts_the_leading_partial_line() {
     let body = ndjson::whole_body();

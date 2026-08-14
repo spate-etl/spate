@@ -17,10 +17,8 @@ default = ["nats"]
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats"]
 # Test-only injection seam: `clock::TestClock` for the `tests/` binaries, and
-# `bench_seams` for the instruction-count benches. Off by default and never
-# enabled by the `spate` facade, so a `TestClock` can never be wired into a real
-# pipeline, where it would stop the control loop dead. Not part of the semver
-# surface.
+# `bench_seams` for the instruction-count benches. Off by default, not enabled
+# by the `spate` facade, and outside the semver surface.
 testing = []
 
 [dependencies]
@@ -28,8 +26,8 @@ async-nats = { workspace = true, optional = true }
 base64 = { workspace = true }
 spate-core = { workspace = true }
 foldhash = { workspace = true }
-# `alloc` is required for the feature-off build: BoxStream and StreamExt::boxed
-# vanish without it once async-nats, which unified it in, is disabled.
+# `alloc` is required for the feature-off build: async-nats unifies it in, and
+# without it BoxStream and StreamExt::boxed vanish.
 futures-util = { workspace = true, features = ["alloc"] }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
@@ -40,8 +38,6 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-# Self dev-dependency so the external `tests/` binaries see the `testing`
-# feature's `TestClock` while consumers never do.
 spate-coordination = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }

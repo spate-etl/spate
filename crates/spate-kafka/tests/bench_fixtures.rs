@@ -4,9 +4,8 @@
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
 //! property worth a test rather than an assumption. The bench itself cannot
-//! carry it: it needs Linux, valgrind and a matching runner, and it only runs
-//! when a pull request selects the bench stage. This runs everywhere
-//! `cargo test` does.
+//! carry it: it needs Linux, valgrind and a matching runner. This runs
+//! everywhere `cargo test` does.
 //!
 //! The guard-trip case needs more than a stable corpus. It rests on a claim
 //! about *why* it fails: the header bytes are what push a record past the

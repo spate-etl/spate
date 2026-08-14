@@ -28,10 +28,8 @@
 //! lines, on the same partition, at a later offset. That is a property
 //! of the whole dataset, not of any field in it. A field-wise schema can say
 //! "a `u64` here"; it cannot say "this `u64`, drawn from the ids the same lane
-//! minted earlier and not yet drawn". Every generator that has tried to
-//! express referential consistency field-wise has become a small programming
-//! language, which is a different product from this one. A named dataset gets
-//! the property for free and stays forty lines of configuration.
+//! minted earlier and not yet drawn". A named dataset gets the property for
+//! free and stays forty lines of configuration.
 //!
 //! Datasets are enumerated by [`Dataset`]; the storefront model lives in
 //! [`storefront`].

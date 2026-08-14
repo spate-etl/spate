@@ -21,10 +21,8 @@
 //! steps, for `SIGINT`, `SIGTERM` and `SIGHUP` alike. The interrupt reaches
 //! the child processes too, so the loop notices quickly and unwinds through
 //! the same `Drop`. A second interrupt exits immediately, on the principle
-//! that pressing it twice means it. That one *does* leave the checkout
-//! behind, which is why
-//! [`Worktree::add`] says how to remove a leftover rather than only refusing
-//! one.
+//! that pressing it twice means it. That one *does* leave the checkout behind;
+//! [`Worktree::add`] says how to remove a leftover.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

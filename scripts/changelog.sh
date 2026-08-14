@@ -4,8 +4,7 @@
 # assembles them into CHANGELOG.md at release. `changelog.d/README.md` states
 # the format and the policy.
 #
-# The conventions follow towncrier; `towncrier check` can only ask "was any
-# fragment added", where the question here is whether one was *required*.
+# The conventions follow towncrier.
 #
 # Usage:
 #   ./scripts/changelog.sh --check              # the gate (reads env, see below)
@@ -41,8 +40,8 @@ repo_url=https://github.com/spate-etl/spate
 TYPES="added changed deprecated removed fixed security"
 
 # The scopes that do not reach a crate. Typed out rather than derived from the
-# `area:` labels in .github/labels.yml, which also contains `supply-chain`.
-# A `fix(supply-chain):` closing an advisory is a release note.
+# `area:` labels in .github/labels.yml: that list also carries `supply-chain`,
+# and a `fix(supply-chain):` closing an advisory is a release note.
 #
 # `bench` covers the unpublished `spate-bench` harness and the `benches/`
 # targets inside published crates: neither reaches a published crate's surface.
@@ -68,8 +67,8 @@ cleanup() {
 trap cleanup EXIT
 
 # The crate scopes are derived, never typed: a tenth crate must not become
-# exempt by being left out of a list. Only `crates/*` is read, and reading the
-# directory needs no toolchain: the job that runs this has none.
+# exempt by being left out of a list. Only `crates/*` is read, so no toolchain
+# is needed.
 crate_scopes() {
     local dir
     for dir in crates/*/; do
@@ -95,9 +94,7 @@ needs_entry() {
     scopes="${BASH_REMATCH[3]}"
     bang="${BASH_REMATCH[4]}"
 
-    # `!` decides on its own, before either axis. Reading the scope first
-    # exempted `c6a7a5c docs(workspace)!:`, which carried a BREAKING CHANGE to
-    # `breaker.open_for`, and 0.2.0 shipped without the entry.
+    # `!` decides on its own, before either axis.
     [ -n "$bang" ] && return 0
 
     # --- scope axis: can this reach something somebody depends on? ---
@@ -127,8 +124,7 @@ needs_entry() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-test. Runs inline on every invocation as well as under --self-test: a
-# few dozen pattern matches, and one fewer target to remember.
+# Self-test. Runs inline on every invocation as well as under --self-test.
 # ---------------------------------------------------------------------------
 self_test() {
     local failures=0 subject want got crate scope n=0 sample extracted probe
@@ -174,7 +170,7 @@ chore: release v0.2.0|exempt
 refactor(spate-core)!: rename a public trait|need
 perf(spate-kafka)!: change the batch shape|need
 feat(spate-s3)!: fence the split leases|need
-# `docs(workspace)!:` is real history — c6a7a5c — and it carried a BREAKING
+# `docs(workspace)!:` is real history (c6a7a5c) and it carried a BREAKING
 # CHANGE to `breaker.open_for` inside a documentation scope. Reading the scope
 # first exempted it and 0.2.0 shipped without the entry.
 docs(workspace)!: migrate CLAUDE.md to AGENTS.md|need
@@ -214,9 +210,8 @@ TABLE
             failures=$((failures + 1))
         fi
     done < <(crate_scopes)
-    # Zero, not a count. A hard-coded floor would fail `--check` for everybody
-    # the day a crate is retired, and the failure guarded against is the
-    # extractor going blind, which looks like nothing at all, not one fewer.
+    # Zero, not a count: a hard-coded floor would fail `--check` for everybody
+    # the day a crate is retired.
     if [ "$n" -lt 1 ]; then
         echo "changelog.sh: no crate scopes derived from crates/, so the extractor has gone" >&2
         echo "  blind, and every scope is now unrecognised rather than checked." >&2
@@ -278,8 +273,7 @@ TABLE
 }
 
 # The type embedded in a fragment filename, or nothing if the name is not a
-# fragment. A function rather than a glob so the self-test can assert that
-# README.md is not mistaken for one.
+# fragment.
 #
 # One level exactly: `--build` globs one level, so accepting a nested path
 # would let `--check` pass on a fragment the release cannot see.
@@ -301,8 +295,8 @@ fragment_type() {
     esac
 }
 
-# A fragment has to say something. An empty or whitespace-only file satisfied
-# the gate and shipped as an empty bullet.
+# A fragment has to say something. An empty or whitespace-only file would
+# satisfy the gate and ship as an empty bullet.
 fragment_has_prose() {
     [ -s "$1" ] || return 1
     grep -qE '[^[:space:]]' "$1"
@@ -343,10 +337,10 @@ cmd_check() {
 
     case "${EVENT_NAME:-}" in
     pull_request)
-        # Against the *merge base*, not `base.sha`; ci-changes.sh carries the
-        # same note. A missing merge base is a hard failure here where
-        # ci-changes.sh falls open: "demand a fragment" is not something the
-        # contributor can act on. It means the checkout lost `fetch-depth: 0`.
+        # Against the *merge base*, not `base.sha`. A missing merge base is a
+        # hard failure here, where ci-changes.sh falls open: "demand a fragment"
+        # is not something the contributor can act on. It means the checkout
+        # lost `fetch-depth: 0`.
         if ! base=$(git merge-base "${BASE_SHA:-}" "${HEAD_SHA:-}" 2>/dev/null) || [ -z "$base" ]; then
             fail "no merge base for ${BASE_SHA:-?}..${HEAD_SHA:-?}. Does the checkout still set fetch-depth: 0?"
         fi
@@ -367,10 +361,9 @@ cmd_check() {
         done
         ;;
     *)
-        # push, merge_group, schedule, workflow_dispatch. On `push` the
-        # requirement was proven on the pull request and `main` cannot be
-        # rewritten, so a failure here cannot be acted on. Structure only, and
-        # it still reports, so ci-gate sees a real success.
+        # push, merge_group, schedule, workflow_dispatch. The requirement was
+        # proven on the pull request, so this is structure only and still
+        # reports success.
         ;;
     esac
 
@@ -418,15 +411,9 @@ cmd_check() {
         [ -n "$subject" ] && printf '%s\tcommit %s\t%s\n' "$subject" "$sha" "$sha" >>"$subjects_file"
     done < <(git log --no-merges --format='%s%x09%h' "$base..${head:-HEAD}" 2>/dev/null || true)
 
-    # Collected quietly and reported only if it matters: classifying straight
-    # to stderr would put an alarming list in front of a contributor whose
-    # change satisfies the gate on the next line.
-    #
     # A trailer excuses the message it is written on. In the pull request
     # **body** that is the whole pull request, because the body is what the
-    # squash commit carries; on a **commit** it is that commit's subject only,
-    # after one carrying a feature *and* a never-released fix shipped the
-    # feature with no note.
+    # squash commit carries; on a **commit** it is that commit's subject only.
     if has_changelog_none body; then
         echo "changelog.sh: the pull request body carries a 'Changelog: none' trailer, which"
         echo "  is what the squash commit will carry. Taken at its word for this pull request."
@@ -470,9 +457,8 @@ cmd_check() {
     done < <(git diff --no-ext-diff --no-textconv --name-only --diff-filter=A \
         "$base" "${head:-HEAD}" -- "$fragments/" 2>/dev/null || true)
 
-    # Locally, a fragment written but not yet committed counts: `make gates`
-    # runs this, and a gate that tells you to create the file you just created
-    # is one people learn to ignore. In CI the worktree is a clean checkout.
+    # Locally, a fragment written but not yet committed counts. In CI the
+    # worktree is a clean checkout.
     if [ -z "${head:-}" ]; then
         while IFS= read -r line; do
             [ -n "$line" ] || continue
@@ -588,7 +574,7 @@ cmd_build() {
   so a release that removed it has to put it back, empty, before the next one."
 
     # Running the same version twice would insert a second section and rewrite
-    # the links to match it. A published version can never be replaced.
+    # the links to match it.
     grep -qF "## [$version]" "$changelog" &&
         fail "$changelog already has a '## [$version]' section. Pick the next version,
   or if the previous attempt failed part-way, undo it before running this again."
@@ -739,8 +725,8 @@ cmd_build() {
         }
     ' "$changelog" >"$scratch/changelog.new"
 
-    # Everything that can fail happens before anything is written back. With
-    # the removals after the rewrite, an uncommitted fragment aborted the loop
+    # Everything that can fail happens before anything is written back: with
+    # the removals after the rewrite, an uncommitted fragment aborts the loop
     # under `set -e` with the changelog rewritten and fragments half-staged.
     for type in $TYPES; do
         for file in "$fragments"/*."$type".md; do

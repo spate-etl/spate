@@ -26,20 +26,14 @@ use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
-// NOTE: `PartitionQueue` is not re-exported at `rdkafka::consumer`; the
-// `base_consumer` module path is the public location in 0.39.
 use std::time::Duration;
 
 /// One assigned partition's pollable queue.
 pub struct KafkaLane {
     id: LaneId,
     partition: PartitionId,
-    // Declared before `queue`: messages are destroyed before the queue on
-    // lane drop.
-    //
-    // INVARIANT: `held` is cleared and refilled only inside
-    // `poll(&mut self)`; every reference derived from it is tied to a
-    // borrow of the lane, so no payload can outlive the messages backing it.
+    // Declared before `queue`: the messages are destroyed while the consumer
+    // behind the queue is still alive.
     held: Vec<BorrowedMessage<'static>>,
     queue: PartitionQueue<SourceContext>,
     issuer: AckIssuer,
@@ -104,16 +98,13 @@ impl SourceLane for KafkaLane {
         max_records: usize,
         timeout: Duration,
     ) -> Result<Option<Self::Batch<'_>>, SourceError> {
-        // Exclusive access proves the previous batch (and every payload
-        // borrowed from it) is gone; the messages can be destroyed.
         self.held.clear();
 
         // First message: block up to `timeout` (idle lanes must not spin).
         match self.queue.poll(timeout) {
             None => return Ok(None),
             Some(Err(e)) => {
-                // A lane only exists after its partition was assigned, so
-                // any permanent condition here is post-startup.
+                // Post-startup: a lane exists only once its partition is assigned.
                 return Err(SourceError::Client {
                     class: crate::error::classify_poll_error(&e, true),
                     reason: format!("partition {} poll: {e}", self.partition.0),
@@ -125,7 +116,6 @@ impl SourceLane for KafkaLane {
                 self.held.push(unsafe { erase_lifetime(msg) });
             }
         }
-        // Batch what is already buffered, without waiting.
         while self.held.len() < max_records {
             match self.queue.poll(Duration::ZERO) {
                 Some(Ok(msg)) => {
@@ -133,8 +123,7 @@ impl SourceLane for KafkaLane {
                     self.held.push(unsafe { erase_lifetime(msg) });
                 }
                 Some(Err(e)) => {
-                    // Deliver what we have; the error will resurface on the
-                    // next poll if it persists.
+                    // Deliver what we have; a persisting error resurfaces on the next poll.
                     tracing::debug!(partition = self.partition.0, error = %e,
                         "queue error while batching; delivering partial batch");
                     break;
@@ -172,8 +161,6 @@ impl<'a> PayloadBatch<'a> for KafkaBatch<'a> {
         let msg = self.msgs.get(self.idx)?;
         self.idx += 1;
         Some(RawPayload {
-            // A Kafka tombstone (null payload) surfaces as an empty slice;
-            // deserializers treat empty input as a tombstone/skip.
             bytes: msg.payload().unwrap_or(&[]),
             key: msg.key(),
             partition: self.partition,

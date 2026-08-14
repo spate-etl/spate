@@ -12,9 +12,7 @@
 //!
 //! Use this when you need to drop below one builder step, for example
 //! embedding the runtime in a host process, exotic sink wiring, or reading
-//! what you are running. Prefer the builder otherwise: every ordering rule
-//! commented below is one the builder makes structurally impossible to
-//! break, and manual assembly hands all of them back.
+//! what you are running. Prefer the builder otherwise.
 //!
 //! [`Pipeline::from_config`]: spate::pipeline::Pipeline::from_config
 

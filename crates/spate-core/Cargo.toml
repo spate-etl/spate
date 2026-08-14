@@ -39,8 +39,8 @@ spate-bench = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 
-# A normal (not dev) target dependency: the library swaps to loom atomics under
-# `--cfg loom`, which a dev-dependency cannot provide. Absent from normal builds.
+# The library swaps to loom atomics under `--cfg loom`; a dev-dependency does
+# not reach the library build.
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 

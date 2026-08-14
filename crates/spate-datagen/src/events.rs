@@ -3,7 +3,7 @@
 //! Three events over one entity. An order is placed, its payment is captured,
 //! and some of those payments are refunded, so a pipeline built on this
 //! stream has a join to make, a sum to check, and a late-arriving reference to
-//! handle. That is why this generator ships a *dataset* rather than a shape.
+//! handle.
 //!
 //! # Why the string fields are `Cow<'static, str>`
 //!

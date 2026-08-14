@@ -60,9 +60,8 @@ impl Corpus {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            // Seed 0: the digest is compared against another run of this same
-            // code, never published or looked up, so there is nothing a seed
-            // would buy.
+            // Seed 0: the digest is only ever compared against another run of
+            // this same code.
             hasher: XxHash64::with_seed(0),
             inputs: 0,
             bytes: 0,

@@ -39,9 +39,7 @@ pub(super) fn interpolate(input: &str) -> Result<String, ConfigError> {
     interpolate_with(input, |name| std::env::var(name).ok())
 }
 
-/// Interpolate with an explicit lookup function. This keeps tests
-/// deterministic; mutating the process environment is unsafe and racy under
-/// a parallel test runner.
+/// Interpolate with an explicit lookup function.
 pub(super) fn interpolate_with<F>(input: &str, lookup: F) -> Result<String, ConfigError>
 where
     F: Fn(&str) -> Option<String>,

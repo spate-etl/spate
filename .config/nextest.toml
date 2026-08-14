@@ -1,85 +1,44 @@
-# cargo-nextest configuration.
-#
-# nextest runs one process per test, concurrently, where `cargo test` runs one
-# test binary at a time. That matters here for two reasons: the workspace's
-# in-process test time is spread over ~40 binaries whose sum dominates the max,
-# and on macOS every freshly linked binary pays a one-off Gatekeeper/XProtect
-# scan on its first exec. Both costs fan out across cores instead of summing.
-#
-# nextest does NOT run doctests — `cargo test --doc` stays a separate gate.
+# cargo-nextest configuration. Doctests are not part of it; `cargo test --doc`
+# is a separate gate.
 
 # nextest only *warns* on configuration keys it does not recognise, then runs
-# with its own defaults. An older binary would therefore silently ignore
-# `fail-fast = false` below (its default is `true`) and stop at the first
-# failure, which reads as a broken config rather than an old tool. The floor is
-# the release documenting the structured `fail-fast` form; `recommended` is the
-# version this file was validated against.
+# with its own defaults. An older binary silently ignores `fail-fast = false`
+# below and stops at the first failure.
 [nextest-version]
 required = "0.9.89"
 recommended = "0.9.140"
 
 [profile.default]
-# Surface every failure in one run: chasing them one-per-run is the thing that
-# makes a slow suite feel slower than it is.
 fail-fast = false
 
-# The docker-backed suites are `#[ignore]`d and excluded here; nothing left
-# should take this long. A test that does is a bug, not a slow machine. Run the
-# ignored suites under `--profile docker`, which lifts this.
+# The docker-backed suites are `#[ignore]`d and run under `--profile docker`,
+# which lifts this.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Docker/testcontainers runs:
 #   cargo nextest run --profile docker --run-ignored all
 #
-# These pull and boot real containers (SeaweedFS, NATS, Redpanda, ClickHouse),
-# so their wall time is dominated by infrastructure, not by the test. Under
-# `default` they inherit a 120s hard kill, which a cold image pull can exceed
-# on a fresh machine — SIGKILL at 120s reports TIMEOUT, indistinguishable from
-# a genuine hang, and can orphan the container. Warn late, never terminate: CI
-# already bounds these with `timeout-minutes`.
+# These boot real containers (SeaweedFS, NATS, Redpanda, ClickHouse). Warn late
+# and do not terminate: a cold image pull exceeds any period worth setting, and
+# a SIGKILL reports TIMEOUT, indistinguishable from a genuine hang, leaving the
+# container orphaned.
 [profile.docker]
-# The example container tier is opt-in, not part of this profile's default set.
-# `scripts/ci-changes.sh` selects `-p spate` for any `crates/spate/**` change, so
-# without this line `e2e_examples` would join ci.yml's per-pull-request container
-# job — where it does not belong: it spawns the shipped example binaries and
-# drives each through a full drain, which is minutes of wall time whose failures
-# are about the examples rather than about the change under review. It reports
-# nightly instead, from scheduled.yml, which selects it back with an explicit
-# `-E 'binary(e2e_examples)' --ignore-default-filter`.
+# The example container tier is opt-in. `scheduled.yml` selects it back with an
+# explicit `-E 'binary(e2e_examples)' --ignore-default-filter`.
 default-filter = 'not binary(e2e_examples)'
 slow-timeout = { period = "120s" }
-# One retry, for a failure that measurement puts outside the code under test.
-#
-# Timing every boot in this suite on runner hardware separates the two things
-# the old error conflated. A ClickHouse server becoming ready is well behaved —
-# a median near a second and no sample past six, over 720 boots. Starting the
-# container is not: warm, it has a median under a fifth of a second and never
-# passed one second across 1434 boots, but the first boot of a job costs ten to
-# sixteen, and the failure that started all this took more than sixty. That
-# distribution belongs to the docker daemon. No fixture change reaches it.
-#
-# What makes this retry honest is the pair of things a retried run now leaves
-# behind, neither of which existed when it was first written. The container job
-# publishes its JUnit report, so a retried test is a flaky annotation rather
-# than a silently green run — the previous comment here claimed that and it was
-# false, because the job had no permission to create the check. And the fixtures
-# report the container's exit code and log tail when their own gate expires, so
-# a repeat is attributable instead of merely re-run.
-#
-# If retries start showing up in that annotation with a *cause* attached, this
-# line is the thing to delete, not defend.
+# One retry, for container-start latency that belongs to the docker daemon
+# rather than to the code under test. A retried test surfaces as a flaky
+# annotation through the JUnit report below, so a repeat is visible rather than
+# silently green. Delete this line once a retry arrives with a cause attached.
 retries = 1
 
 [profile.ci]
-# `fail-fast` is inherited from `[profile.default]`; restating it here would
-# only be a second place to forget to change it.
 slow-timeout = { period = "60s", terminate-after = 4 }
-# Flaky-on-CI is a defect we want reported, not retried into green — but a
-# single retry keeps one scheduler stall from blocking an unrelated PR. Retried
-# tests are reported as flaky in the summary AND in the JUnit report, which CI
-# uploads and surfaces as a check annotation. Without that upload the retry
-# would hide the flake completely: the run simply goes green and the only trace
-# is scrolled-past log text.
+# One retry keeps a scheduler stall from blocking an unrelated pull request.
+# Retried tests are reported as flaky in the summary and in the JUnit report,
+# which CI uploads as a check annotation; without that upload a retry goes green
+# leaving only scrolled-past log text.
 retries = 1
 failure-output = "immediate-final"
 status-level = "retry"
@@ -87,6 +46,5 @@ status-level = "retry"
 [profile.ci.junit]
 path = "junit.xml"
 
-# Docker runs on CI report through the same JUnit pipeline as the fast suite.
 [profile.docker.junit]
 path = "junit.xml"

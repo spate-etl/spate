@@ -1,20 +1,40 @@
-//! Holds the examples to their declarations.
+//! Holds the examples and the integration tests to their declarations.
 //!
-//! An example is the one target shape cargo will drop on the floor without
-//! saying so. A `[[example]]` whose `required-features` names a feature the
-//! package does not declare is not an error: the target is skipped, and
+//! `autoexamples` and `autotests` are both left at their default, so a file
+//! nothing declares is collected anyway, carrying no `required-features`. What
+//! that costs differs by kind.
+//!
+//! An example is the target shape cargo will drop on the floor without saying
+//! so. A `[[example]]` whose `required-features` names a feature the package
+//! does not declare is not an error: the target is skipped, and
 //! `cargo check --examples` reports success having built one fewer thing than
 //! the manifest asked for. A typo there removes an example from every job in
-//! this repository, permanently, with the build green. `--all-features` is
-//! what keeps that survivable.
+//! this repository, permanently, with the build green.
 //!
-//! Three questions, none of which builds anything, since `cargo metadata`
-//! reads manifests and resolves nothing:
+//! A test divides the other way. A declared target with unmet features errors
+//! when it is named, so `cargo test -p spate --test e2e_happy` says what is
+//! wrong; what no unnamed run does is build it, which is how a typo retires a
+//! suite quietly. An *undeclared* test file is the reverse: every run builds
+//! it, including under feature sets its imports do not exist in, and there it
+//! fails to compile and takes the package's test run with it.
+//!
+//! `--all-features` is what keeps both survivable, and is why every gate here
+//! passes it.
+//!
+//! The questions, none of which builds anything, since `cargo metadata` reads
+//! manifests and resolves nothing:
 //!
 //! 1. Is every example declared rather than auto-discovered?
-//! 2. Does every `required-features` entry name a feature that exists?
+//! 2. Does every `required-features` entry, on either kind, name a feature that
+//!    exists?
 //! 3. Do an example's runner block and its `test = true` agree, in both
 //!    directions?
+//! 4. Does a test including the shared end-to-end harness declare `full`, and
+//!    does one declaring `full` include it?
+//!
+//! Question 1 has no counterpart for tests. Counting `[[test]]` stanzas against
+//! test targets would demand a stanza for the two that need no features, which
+//! declare nothing on purpose; question 4 asks what that count was proxying for.
 //!
 //! `test = true` **is** the declaration that an example runs on the
 //! pull-request tier, so anything recording that a second time is a second
@@ -86,6 +106,19 @@ fn examples(pkg: &Package) -> Vec<&Target> {
         .collect()
 }
 
+/// Filter on `kind`, not on `test`: the library target reports `test = true`
+/// as well, and an integration test reports it unconditionally, so the flag
+/// separates nothing here.
+fn tests(pkg: &Package) -> Vec<&Target> {
+    pkg.targets
+        .iter()
+        .filter(|t| t.kind.iter().any(|k| k == "test"))
+        .collect()
+}
+
+/// The attribute a scenario includes the shared harness with.
+const HARNESS: &str = r#"#[path = "e2e_support/mod.rs"]"#;
+
 /// Guards every assertion below: a filter that matched nothing would make
 /// them all pass while testing nothing.
 #[test]
@@ -123,7 +156,8 @@ fn every_example_file_has_a_stanza() {
 }
 
 /// The assertion this file exists for. `cargo check --examples --all-features`
-/// exits 0 with a typo here.
+/// exits 0 with a typo here, and so does every test job, which selects no
+/// target by name.
 #[test]
 fn every_required_feature_is_declared() {
     let pkg = spate_package();
@@ -134,7 +168,7 @@ fn every_required_feature_is_declared() {
     );
 
     let mut bad = Vec::new();
-    for target in examples(&pkg) {
+    for target in examples(&pkg).into_iter().chain(tests(&pkg)) {
         for feature in &target.required_features {
             if !declared.contains(feature.as_str()) {
                 bad.push(format!("{}: requires `{feature}`", target.name));
@@ -143,7 +177,7 @@ fn every_required_feature_is_declared() {
     }
     assert!(
         bad.is_empty(),
-        "these examples require features spate does not declare, so cargo skips \
+        "these targets require features spate does not declare, so cargo skips \
          them silently and no build ever fails:\n  {}",
         bad.join("\n  ")
     );
@@ -181,6 +215,86 @@ fn a_runner_and_test_true_agree() {
         "an example's runner and its `test = true` disagree:\n  {}\n\n\
          An example that needs servers carries neither, and is driven by \
          tests/e2e_examples.rs instead.",
+        bad.join("\n  ")
+    );
+}
+
+/// Guards the two assertions below, as `the_examples_are_discovered` guards
+/// the ones above. A floor rather than a count, so adding a suite needs no
+/// edit here; retiring one does.
+#[test]
+fn the_tests_are_discovered() {
+    let pkg = spate_package();
+    let found = tests(&pkg).len();
+    assert!(
+        found >= 7,
+        "only {found} test target(s) in cargo metadata; the filter has stopped \
+         matching, so the assertions keyed on it are vacuous"
+    );
+}
+
+/// A scenario that includes the shared harness declares `full`, and one that
+/// declares `full` includes it.
+///
+/// `tests/e2e_support/mod.rs` imports `spate::avro`, `spate::clickhouse` and
+/// `spate::kafka`, so a target reaching it compiles under `full` and nothing
+/// less. Deriving the requirement from the include rather than from the file
+/// name keeps a rename from defeating it.
+#[test]
+fn the_harness_and_full_agree() {
+    let pkg = spate_package();
+
+    // This file names the attribute it searches for, so it matches itself.
+    // `file!()` tracks the path through a rename where a written-out constant
+    // would go stale; the counts below are what refuse a silent miss, since a
+    // needle that stops matching would otherwise disarm the rule rather than
+    // fail it.
+    let mut skipped = 0;
+    let mut includes = 0;
+    let mut bad = Vec::new();
+
+    for target in tests(&pkg) {
+        if target.src_path.ends_with(file!()) {
+            skipped += 1;
+            continue;
+        }
+        let src = std::fs::read_to_string(&target.src_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", target.src_path.display()));
+        let uses_harness = src.contains(HARNESS);
+        let requires_full = target.required_features.iter().any(|f| f == "full");
+        if uses_harness {
+            includes += 1;
+        }
+
+        match (uses_harness, requires_full) {
+            (true, false) => bad.push(format!(
+                "{}: includes the harness, but its stanza does not require `full`",
+                target.name
+            )),
+            (false, true) => bad.push(format!(
+                "{}: requires `full`, but includes nothing that needs it",
+                target.name
+            )),
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        skipped, 1,
+        "this file excludes itself by `file!()` and matched {skipped} target(s); \
+         at 0 it fails on its own source, above 1 it is excluding a scenario"
+    );
+    assert!(
+        includes >= 6,
+        "only {includes} test target(s) include the harness; the attribute this \
+         file searches for has changed shape, so the check below is vacuous"
+    );
+    assert!(
+        bad.is_empty(),
+        "a scenario and its stanza disagree:\n  {}\n\n\
+         An undeclared file is built under every feature set and compiles under \
+         `full` alone. A test needing `full` without the harness is a case this \
+         rule does not cover, and the rule is what changes.",
         bad.join("\n  ")
     );
 }

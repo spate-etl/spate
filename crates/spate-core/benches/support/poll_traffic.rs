@@ -220,6 +220,15 @@ impl Rig {
         out
     }
 
+    /// In-flight bytes the budget currently holds.
+    ///
+    /// The one piece of this rig's state a test can see. Without it the claim
+    /// that [`Rig::reset`] restores a profile whose expected transition count
+    /// is zero cannot be checked. A drive that did nothing also reports zero.
+    pub(crate) fn usage(&self) -> usize {
+        self.budget.usage()
+    }
+
     /// Returns the rig to the state [`rig`] built it in, so a second drive is
     /// the same work as the first.
     ///
@@ -243,15 +252,6 @@ impl Rig {
     /// The whole thing is one saturating subtraction, one `Cell` write and
     /// one struct write against [`ITERATIONS`] iterations of work, and both
     /// legs of a comparison pay it identically.
-    /// In-flight bytes the budget currently holds.
-    ///
-    /// The one piece of this rig's state a test can see. Without it the claim
-    /// that [`Rig::reset`] restores a profile whose expected transition count
-    /// is zero cannot be checked. A drive that did nothing also reports zero.
-    pub(crate) fn usage(&self) -> usize {
-        self.budget.usage()
-    }
-
     pub(crate) fn reset(&mut self) {
         self.budget.sub(usize::MAX);
         self.clock.reset();

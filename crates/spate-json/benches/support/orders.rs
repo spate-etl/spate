@@ -118,10 +118,9 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 // Poison-pill corpora.
 //
 // The deserializer's error isolation (drop a record and keep going, or fail
-// the payload without emitting a prefix) runs only on input
-// that does not decode, and every corpus above is valid by construction. These
-// build the same records with a known fraction of them broken, in a known way,
-// at a known position.
+// the payload without emitting a prefix) runs only on input that does not
+// decode. These build the same records with a known fraction of them broken,
+// in a known way, at a known position.
 // ---------------------------------------------------------------------------
 
 /// Records in the error-policy corpora.

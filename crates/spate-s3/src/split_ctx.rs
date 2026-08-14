@@ -316,8 +316,6 @@ impl SplitSource for SplitCtx {
 
     fn open_split(&mut self, opening: SplitOpening<'_>) -> Result<S3Lane, SourceError> {
         let split = opening.split.id.clone();
-        // The spec was validated when planned, but decode defensively: a
-        // corrupt store record must fail loudly, not panic.
         let descriptor = SplitDescriptor::decode(&opening.split.descriptor).map_err(|e| {
             SourceError::Client {
                 class: ErrorClass::Fatal,
@@ -326,10 +324,8 @@ impl SplitSource for SplitCtx {
         })?;
         let objects: Arc<Vec<ObjectEntry>> = Arc::new(descriptor.to_entries());
 
-        // Store-supplied data: a negative watermark must fail before
-        // `Position::decode` (its debug_assert guards internal arithmetic,
-        // not hostile records). `validate_resume` already rejects this
-        // shape, but the driver seam does not force that ordering.
+        // Store-supplied data: reject a negative watermark before
+        // `Position::decode`, whose debug_assert fires on one.
         if let Some(p) = opening.resume
             && p.watermark < 0
         {
@@ -346,9 +342,7 @@ impl SplitSource for SplitCtx {
         let resume_watermark = opening.resume.map_or(0, |p| p.watermark);
         let start_ordinal = resume.map_or(0, |p| p.ordinal);
         // Pin the resume object to the content its committed records were
-        // minted against: the carried pin, else the descriptor's ETag
-        // (identical content, since the descriptor is immutable and in the
-        // split's identity).
+        // minted against: the carried pin, else the descriptor's ETag.
         let resume_etag = match opening.resume {
             Some(p) => ProgressState::decode(&p.state)
                 .map_err(|reason| SourceError::Client {
@@ -368,9 +362,8 @@ impl SplitSource for SplitCtx {
         let pause = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(LANE_HANDOFF_CHUNKS);
-        // Detached deliberately: the fetcher exits when the lane (its
-        // receiver) drops, or when `stop` is set for a cooperative revocation;
-        // `close_split` must never abort it mid-drain.
+        // Detached: the fetcher exits when the lane drops its receiver, or when
+        // `stop` is set. Aborting it from `close_split` cuts a drain short.
         drop(self.handle.spawn(run_fetcher(FetcherParams {
             split: split.clone(),
             store: Arc::clone(&self.store),
@@ -444,8 +437,7 @@ impl SplitSource for SplitCtx {
         let state = ProgressState::decode(&progress.state).map_err(refuse)?;
 
         // Store-supplied data: reject a negative watermark before
-        // `Position::decode`, whose debug_assert guards internal
-        // arithmetic, not hostile records.
+        // `Position::decode`, whose debug_assert fires on one.
         if progress.watermark < 0 {
             return Err(refuse(format!(
                 "watermark {} is negative — no position in any descriptor",
@@ -480,10 +472,9 @@ impl SplitSource for SplitCtx {
                  {listed} — progress and descriptor were minted against different content"
             )));
         }
-        // A mid-object watermark replays the object and discards the
-        // committed record count, which is only sound against provably
-        // identical content. Without any pin (neither carried nor in the
-        // descriptor), a same-key overwrite could silently skip records.
+        // A mid-object watermark replays the object and discards the committed
+        // record count. With no pin anywhere, a same-key overwrite silently
+        // skips records.
         if pos.record > 0 && state.etag.is_none() && entry.etag.is_none() {
             return Err(refuse(format!(
                 "the watermark is mid-object (\"{}\", {} records committed) but neither \
@@ -505,17 +496,10 @@ impl SplitSource for SplitCtx {
                 reason: format!("commit for unheld split {split} — driver/context wiring bug"),
             });
         };
-        // Tripwire: a committed watermark always decodes *inside* the
-        // split's descriptor. Even one past the last emittable record stays
-        // in its object: the emit guard caps indices at MAX_RECORD_INDEX,
-        // so the watermark's `+ 1` lands on the reserved end-of-object
-        // index and never carries into the next ordinal (see offset.rs,
-        // `watermark_after_last_emittable_record_stays_in_its_object`).
-        // The single legal at-or-past-`members` shape is the empty
-        // descriptor's zero watermark (empty splits complete via sweep and
-        // never reach here, but the boundary shape stays legal for safety).
-        // Anything else is offset-accounting corruption; fail loudly now
-        // instead of persisting a position validate_resume would reject.
+        // Tripwire: a committed watermark decodes inside the split's
+        // descriptor, the empty descriptor's zero watermark aside. Anything
+        // else is offset-accounting corruption, and fails here rather than
+        // persisting a position `validate_resume` rejects.
         let pos = Position::decode(watermark);
         let members = state.objects.len();
         let legal_empty = members == 0 && watermark == 0;
@@ -531,18 +515,11 @@ impl SplitSource for SplitCtx {
         }
         state.last_committed = Some(watermark);
         let payload = ProgressState::at(&state.objects, watermark).encode();
-        // Complete iff the lane has decided end-of-input at exactly this
-        // acked watermark: fully framed (T known) and fully acked (W == T).
-        //
-        // The `!revocation` guard is correctness-critical. A handing-off split is
-        // being given away, not finished, and its final tick commit lands on
-        // the *cut* watermark, which once the stopped fetcher's tail drains
-        // equals `tracker.terminal()`. Without this guard that cut would be
-        // committed `completed: true` and the store would mark a half-read
-        // split terminally complete, so the peer would never resume it.
-        // `drain_ready` commits the same cut with `completed: false`, and the
-        // sweep is disabled for revocation splits, so completion can only ever
-        // come from the split's next owner.
+        // Complete iff the lane decided end-of-input at exactly this acked
+        // watermark: fully framed (T known) and fully acked (W == T).
+        // Dropping the `!revocation` guard commits a handing-off split's cut
+        // watermark as `completed: true`, marking a half-read split terminally
+        // complete in the store.
         Ok(
             if state.tracker.terminal() == Some(watermark) && !state.revocation {
                 SplitProgress::completed(watermark, payload)
@@ -553,20 +530,13 @@ impl SplitSource for SplitCtx {
     }
 
     fn begin_revoke(&mut self, split: &SplitId) -> bool {
-        // Decline unless we hold this split live. An unknown, already-closed,
-        // or completed split is not in the table (`close_split` removes it,
-        // and the driver retires and `close_split`s a tenancy before it
-        // completes), and the driver relies on this `false` to never
-        // transition an unopened tenancy into `Draining`. Declining is
-        // always safe: the requesting peer falls back to a replaying steal.
+        // Decline unless this split is held live; the requesting peer falls
+        // back to a replaying steal.
         let Some(state) = self.splits.get_mut(split) else {
             return false;
         };
-        // Order matters: mark the split handing off *before* releasing the
-        // fetcher. `revocation` guards the controller-thread commit/sweep logic
-        // that runs on this same thread, so it must hold the instant intake
-        // starts winding down; `stop` then lets the fetcher (its own task)
-        // return at the next object boundary.
+        // Set `revocation` before releasing the fetcher with `stop`: it guards
+        // the commit and sweep logic running on this thread.
         state.revocation = true;
         state.stop.store(true, Ordering::Relaxed);
         true
@@ -576,21 +546,17 @@ impl SplitSource for SplitCtx {
         let Some(state) = self.splits.get(split) else {
             return Ok(None);
         };
-        // A handing-off split is given away with `completed: false` through
-        // `drain_ready` and finished by its next owner, never completed by
-        // this sweep. Defense in depth: the driver does not sweep
-        // `Draining` tenancies, but this guard must not depend on that.
+        // A handing-off split is given away through `drain_ready` and finished
+        // by its next owner, never completed by this sweep.
         if state.revocation {
             return Ok(None);
         }
         let Some(terminal) = state.tracker.terminal() else {
             return Ok(None); // still reading
         };
-        // Two shapes only a sweep can complete: the final ack landed on an
-        // earlier tick, before the lane observed end-of-input (that commit
-        // carried `completed: false` and no further watermark will ever
-        // arrive); or the tenancy emitted nothing at all (an empty split,
-        // or a resume exactly at end-of-input).
+        // Two shapes only a sweep completes: the final ack landed on an earlier
+        // tick, before the lane observed end-of-input; or the tenancy emitted
+        // nothing (an empty split, or a resume exactly at end-of-input).
         let acked_all = state.last_committed == Some(terminal)
             || (state.last_committed.is_none() && state.resume_watermark == terminal);
         if !acked_all {
@@ -604,37 +570,29 @@ impl SplitSource for SplitCtx {
         let Some(state) = self.splits.get(split) else {
             return Ok(None);
         };
-        // The cut is the lane's terminal watermark: one past the last record
-        // this instance emitted, recorded once the stopped fetcher closed its
-        // channel at an object boundary and the lane's buffer drained. `None`
+        // The cut is the lane's terminal watermark, known once the stopped
+        // fetcher closed its channel and the lane's buffer drained. `None`
         // while the lane is still draining; retry on the next poll.
         let Some(cut) = state.tracker.terminal() else {
             return Ok(None);
         };
-        // Hand over only once every emitted record is acked *and* folded into a
-        // commit-ready watermark, so the resume point covers everything this
-        // instance produced (a replay-free transfer). This mirrors `sweep`'s
-        // acked-all test exactly: the last committed watermark reached the cut,
-        // or the tenancy emitted nothing and resumed exactly at the cut.
+        // Hand over only once every emitted record is acked and folded into a
+        // commit-ready watermark: the resume point then covers everything this
+        // instance emitted, and the transfer replays nothing.
         let acked_all = state.last_committed == Some(cut)
             || (state.last_committed.is_none() && state.resume_watermark == cut);
         if !acked_all {
             return Ok(None); // tail still in flight to the sink
         }
         let payload = ProgressState::at(&state.objects, cut).encode();
-        // Never `completed`: a revocation gives the split away, it does not finish
-        // it. The next owner opens at `cut`, emits nothing, and its own sweep
-        // completes the split, one extra hop with zero replay. (Building the
-        // progress state exactly as `sweep`/`encode_commit` do keeps the
-        // encoding identical for the peer's `validate_resume`.)
+        // Never `completed`: the next owner opens at `cut`, emits nothing, and
+        // its own sweep completes the split.
         Ok(Some(SplitProgress::new(cut, payload)))
     }
 
     fn close_split(&mut self, split: &SplitId) {
-        // End of the tenancy (the driver retires it first, so no commit
-        // or sweep can arrive afterwards): drop the split's state and
-        // settle the gauge. Never blocks and never aborts the fetcher —
-        // it exits on its own when the (dropped) lane closes the channel.
+        // Drop the split's state and settle the gauge, without blocking. The
+        // fetcher exits on its own when the dropped lane closes the channel.
         if let Some(state) = self.splits.remove(split)
             && let Some(m) = &self.metrics
         {
@@ -645,8 +603,6 @@ impl SplitSource for SplitCtx {
     }
 
     fn take_finishing(&mut self) -> Vec<SplitId> {
-        // Cheap edge-detect: one atomic load per held split (≤ the
-        // coordinator's working-set bound), on the controller thread.
         self.splits
             .iter_mut()
             .filter_map(|(id, state)| {
@@ -670,7 +626,7 @@ mod tests {
         assert_eq!(t.terminal(), None);
         t.set_terminal(42);
         assert_eq!(t.terminal(), Some(42));
-        t.set_terminal(42); // idempotent re-set of the same value is fine
+        t.set_terminal(42);
         assert_eq!(t.terminal(), Some(42));
     }
 
@@ -715,13 +671,6 @@ mod tests {
     }
 
     // ------------------------------------------- resume validation matrix --
-    // Ported from the manifest era's `resume_validation_catches_each_drift
-    // _kind`: carried progress must still mean what it meant when written.
-    // Two historical rows have no coordinated analog by design: the rolling
-    // keys_hash "compensating drift" check (descriptors are immutable and
-    // their keys+etags are in the split id, covered by the digest
-    // sensitivity tests), and cross-listing drift (workers never list; a
-    // drifted store surfaces at fetch time as If-Match poison).
 
     fn test_ctx() -> (SplitCtx, tokio::runtime::Runtime) {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -838,8 +787,7 @@ mod tests {
         let (mut ctx, _rt) = test_ctx();
         let spec = spec_of(&[("a", Some("e-a")), ("b", Some("e-b"))]);
         let id = spec.id.clone();
-        // Seed the held-split state directly (SplitOpening is
-        // framework-constructed); only the descriptor length matters here.
+        // Seed the held-split state directly; only the descriptor length matters.
         let descriptor = SplitDescriptor::decode(&spec.descriptor).unwrap();
         ctx.splits.insert(
             id.clone(),
@@ -880,9 +828,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        // ordinal == members is unreachable as a real watermark (no carry
-        // out of a member's record field) and validate_resume rejects it:
-        // corruption, must fail loudly.
+        // ordinal == members is corruption, and must fail loudly.
         let err = ctx
             .encode_commit(
                 &id,
@@ -921,8 +867,7 @@ mod tests {
         assert!(err.to_string().contains("accounting"), "{err}");
 
         // The empty-descriptor boundary: watermark 0 against zero members
-        // stays legal (empty splits complete via sweep; the shape must not
-        // trip the tripwire if one ever lands here).
+        // stays legal and must not trip the tripwire.
         let empty_id = crate::split::split_id_for([("empty-placeholder", None)]).unwrap();
         ctx.splits.insert(
             empty_id.clone(),

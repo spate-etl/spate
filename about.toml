@@ -1,43 +1,15 @@
 # cargo-about: generates the dependency attribution artifacts.
 #
-#   ./scripts/attribution.sh                  # THIRD-PARTY.md, checked nightly
+#   ./scripts/attribution.sh                  # THIRD-PARTY.md
 #   cargo about generate --workspace --all-features --locked --fail \
-#     -o website/static/licenses/index.html about/html.hbs   # docs site, CI-built
+#     -o website/static/licenses/index.html about/html.hbs   # docs site
 #
-# The committed inventory goes through the script rather than cargo-about
-# directly, because its row order has to be canonicalised — see the
-# clarifications at the bottom of this file for what goes wrong otherwise.
-#
-# This file and `deny.toml` answer different questions and deliberately differ.
-# `deny.toml` **gates**: it fails the build on a licence we will not accept.
-# This file **attributes**: it decides which terms we comply with and reproduces
-# the text. Three divergences from `deny.toml`'s `allow` list are intentional:
-#
-# 1. `accepted` below is PRIORITY-ORDERED, where deny.toml's `allow` is a set.
-#    For a dual-licensed `MIT OR Apache-2.0` dependency the first satisfiable
-#    entry wins, so ordering is a compliance choice, not cosmetics.
-#
-#    MIT is first even though Spate itself is now Apache-2.0. That looks
-#    inconsistent and is not: our outbound licence does not constrain which
-#    branch of a dependency's `OR` we elect, and electing MIT avoids inheriting
-#    Apache-2.0 section 4(d) NOTICE-propagation obligations from several hundred
-#    crates. Most of the Rust ecosystem is `MIT OR Apache-2.0`, so this keeps the
-#    generated attribution to one short licence text for the bulk of the tree.
-#
-# 2. Dev-dependencies are ignored here. They are never distributed, so they need
-#    no attribution — while deny.toml deliberately *does* scan them.
-#
-#    (An earlier revision of this note cited deny.toml's RUSTSEC ignore for
-#    `paste` as the example, calling it a `clickhouse` dev-dep. It is not: the
-#    whole chain is in the shipped tree, which is why `paste` appears in
-#    THIRD-PARTY.md at all. See the corrected note in deny.toml.)
-#
-# 3. The per-crate entries at the bottom are not licence carve-outs — there are
-#    none to make. Every crate in the graph resolves to a licence on the accepted
-#    list, and `deny.toml` carries no `exceptions` block. They pin *which file* a
-#    licence text is read from, and change no licence id.
+# Generate the committed inventory through the script; it canonicalises the row
+# order cargo-about leaves machine-dependent.
 
-# Priority-ordered — see note 1 above.
+# Priority-ordered, where deny.toml's `allow` is a set: for a dual-licensed
+# `MIT OR Apache-2.0` crate the first satisfiable entry is the one we comply
+# with.
 accepted = [
     "MIT",
     "Apache-2.0",
@@ -54,10 +26,8 @@ accepted = [
     "Unlicense",
 ]
 
-# The platforms Spate is built and shipped for. Crates reachable only through
-# `cfg()` predicates that match no target here (Windows, wasm, redox) are left
-# out, so the attribution reflects what a real deployment links rather than the
-# union of every platform cargo knows about.
+# The platforms Spate is built and shipped for. A crate reachable only through
+# a `cfg()` predicate matching no target here is left out of the attribution.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -65,54 +35,36 @@ targets = [
     "aarch64-apple-darwin",
 ]
 
-# Never distributed — see note 2 above. Build-dependencies are deliberately NOT
-# ignored: a build script can contribute generated code to the shipped artifact.
+# Build-dependencies stay attributed: a build script can contribute generated
+# code to the shipped artifact.
 ignore-dev-dependencies = true
 
-# Skips any workspace member carrying `publish = false`. Our own crates are
-# Apache-2.0 and are already covered by the repository's LICENSE.
 private = { ignore = true }
 
-# Built-in clarifications for two crates that are well known for packaging their
-# licences in a form no machine reader can resolve. Both are in our graph (ring
-# and rustls, plus aws-lc-rs/webpki-roots alongside them).
 workarounds = ["ring", "rustls"]
 
-# Per-crate clarifications. Both crates below ship more than one file that scans
-# as the *same* licence at confidence 1.0, and cargo-about keeps exactly one
-# file per licence id: it sorts the scanned files on (expression, confidence)
-# and takes the first. Equal confidence makes that a total tie, and the sort is
-# stable, so the winner is whichever file the directory walk yielded first —
-# readdir order. That is fixed on one machine and varies across them, which is
-# what made THIRD-PARTY.md alternate between machines (#87): the
-# elected id never moved, but the crate hopped between licence-*text* groups
-# and its row moved with it. Naming the files removes the tie.
+# Per-crate clarifications, naming which file a licence text is read from. Both
+# crates below ship several files scanning as the same licence id at equal
+# confidence, and the scan's tie-break is readdir order, so an unclarified crate
+# moves between licence-text groups from machine to machine (#87).
 #
 # Three things to know before editing an entry:
 #
 # - Checksums are of the whole file (`shasum -a 256`). Regenerate them when a
 #   clarified crate is bumped: a stale checksum is only a warning, the
-#   clarification is dropped and the scan silently takes over again. That is why
-#   `scripts/attribution.sh` canonicalises the generated rows — the gate must
-#   not depend on this list being exhaustive or current.
+#   clarification is dropped and the scan silently takes over again.
 # - `license` here *replaces* the crate's declared expression rather than being
-#   checked against it, and nothing warns if the two drift. Both match the
-#   crate's own Cargo.toml today; re-check on a version bump. `deny.toml` does
-#   not read this file, so a drift affects attribution only, not the gate on
-#   which licences we accept.
-# - Listing several files for one licence id publishes all of their texts: the
-#   clarification path does not condense to one file per id the way the scan
-#   does. The site reproduces each, and `attribution.sh` collapses the duplicate
-#   rows that would otherwise appear in THIRD-PARTY.md.
+#   checked against it, and nothing warns if the two drift. Re-check on a
+#   version bump.
+# - Listing several files for one licence id publishes all of their texts. The
+#   site reproduces each, and `attribution.sh` collapses the duplicate rows that
+#   would otherwise appear in THIRD-PARTY.md.
 #
-# These two are the only crates in the graph whose *elected* licence has a tie;
-# every crate carrying two or more licence files was scanned to establish that.
-# Nothing re-checks it when a dependency is added — see #88.
+# Nothing re-checks the tie when a dependency is added; see #88.
 
 # bnum vendors modified code from num-bigint and rand and ships their notices
-# under `licenses/` alongside its own — see its COPYRIGHT. All three are listed
-# so all three are reproduced; left to the scan, exactly one wins, and the row
-# order showed it was not reliably bnum's own.
+# under `licenses/` alongside its own (see its COPYRIGHT). All three are listed
+# so all three are reproduced.
 [bnum.clarify]
 license = "MIT OR Apache-2.0"
 
@@ -136,11 +88,9 @@ path = "LICENSE-APACHE"
 checksum = "eb1cfebd2a5760e95f672ba77e5e43f047ada1641173a70990a822c6f0c4b873"
 license = "Apache-2.0"
 
-# `LICENSE` and `LICENSE-MIT.md` are the same notice — they differ by one blank
-# line, and both carry all four copyright holders — so which one wins is
-# immaterial to what is published, and this entry exists purely to stop the row
-# moving. Only one is listed, since reproducing the same text twice would say
-# nothing.
+# `LICENSE` and `LICENSE-MIT.md` are the same notice, differing by one blank
+# line and both carrying all four copyright holders, so naming either publishes
+# the same text.
 [miniz_oxide.clarify]
 license = "MIT OR Zlib OR Apache-2.0"
 

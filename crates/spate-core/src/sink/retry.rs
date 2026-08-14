@@ -28,19 +28,12 @@ impl Backoff {
     pub(crate) fn new(cfg: RetryConfig, seed: u64) -> Self {
         Backoff {
             cfg,
-            // An `initial` above `max` would return a first delay above the
-            // ceiling. `validate` rejects that policy, but `RetryConfig` is
-            // public; clamping keeps "never exceeds `max`" unconditional.
+            // Keeps the ceiling unconditional for an `initial` above `max`.
             current: cfg.initial.min(cfg.max),
-            // The seed is a batch sequence number, so consecutive batches
-            // arrive one apart. XOR-ing a constant does not disperse that;
-            // one xorshift round barely moves the high bits `next_rand`
-            // samples, which lands every batch's *first* retry inside the
-            // same thousandth of the jitter window, in lockstep on the
-            // attempt where a replica failure has just synchronized every
-            // in-flight batch. Mix the seed first. (XOR also does not
-            // eliminate xorshift's absorbing zero state, it relocates it;
-            // reject it explicitly.)
+            // Seeds are consecutive batch sequence numbers. XOR-ing the seed
+            // into the state instead of mixing it leaves every batch's first
+            // retry inside the same thousandth of the jitter window, and
+            // relocates xorshift's absorbing zero state rather than removing it.
             rng: match splitmix64(seed) {
                 0 => 0x9E37_79B9_7F4A_7C15,
                 mixed => mixed,
@@ -72,15 +65,10 @@ impl Backoff {
     pub(crate) fn next_delay(&mut self) -> Duration {
         let base = self.current;
         let cap = self.cfg.max;
-        // Grow in `f64` seconds and clamp *before* rebuilding the `Duration`.
-        // `Duration::mul_f64` is `from_secs_f64(secs * rhs)`, which panics on
-        // an overflowing, non-finite, or negative result, and a large `max`
-        // times a large `multiplier` does overflow `Duration::MAX`.
-        //
-        // A multiplier below `1.0` shrinks the delay towards zero; `0.0`,
-        // `-0.0` and subnormals get there in a single step. Anything outside
-        // the growing range jumps straight to the ceiling, including NaN, for
-        // which the comparison is false.
+        // Grow in `f64` seconds and clamp *before* rebuilding the `Duration`:
+        // `Duration::mul_f64` panics on an overflowing, non-finite or negative
+        // result. A multiplier outside the growing range jumps straight to the
+        // ceiling, NaN included, for which the comparison is false.
         let grown = if self.cfg.multiplier >= 1.0 {
             (base.as_secs_f64() * self.cfg.multiplier).min(cap.as_secs_f64())
         } else {
@@ -90,12 +78,10 @@ impl Backoff {
         // the trailing `min` absorbs.
         self.current = Duration::try_from_secs_f64(grown).unwrap_or(cap).min(cap);
 
-        // Bound the *fraction*, not the factor computed from it. Clamping the
+        // Bound the *fraction*, not the factor computed from it: clamping the
         // factor lets an out-of-range `jitter` land on exactly `0.0` and erase
-        // the delay outright. With `jitter` in `[0.0, 1.0]` and `unit` in
-        // `[0.0, 1.0)` the factor stays in `(0.0, 1.0]`; jitter shortens,
-        // never erases, and never lengthens. The explicit finite check is
-        // because `f64::clamp` propagates NaN instead of clamping it.
+        // the delay outright. `f64::clamp` propagates NaN instead of clamping
+        // it, hence the explicit finite check.
         let jitter = if self.cfg.jitter.is_finite() {
             self.cfg.jitter.clamp(0.0, 1.0)
         } else {
@@ -104,17 +90,12 @@ impl Backoff {
         if jitter <= 0.0 {
             return base;
         }
-        // Subtract up to `jitter` of the delay: full delay down to
-        // (1 - jitter) * delay.
         let unit = (self.next_rand() >> 11) as f64 / (1u64 << 53) as f64;
         let jittered = base.as_secs_f64() * (1.0 - jitter * unit);
-        // Same saturating conversion as the growth step. Round-tripping a
-        // near-`Duration::MAX` base through `f64` rounds *up*, past
-        // `Duration::MAX`, even at a factor of exactly 1.0. Jitter only
-        // shortens, so `base` is both the fallback and the ceiling. The floor
-        // keeps a sub-nanosecond product, which a small `base` and a jitter
-        // near `1.0` reach and `validate` allows, from rounding down into a
-        // zero-delay sleep.
+        // Round-tripping a near-`Duration::MAX` base through `f64` rounds *up*
+        // past `Duration::MAX`, even at a factor of exactly 1.0, so `base` is
+        // both the fallback and the ceiling. The floor keeps a sub-nanosecond
+        // product, which `validate` admits, from rounding down to a zero delay.
         let floor = base.min(Duration::from_nanos(1));
         Duration::try_from_secs_f64(jittered)
             .unwrap_or(base)
@@ -170,9 +151,8 @@ mod tests {
 
     #[test]
     fn extreme_max_and_multiplier_do_not_overflow() {
-        // `retry: { initial: 1s, max: 10000years, multiplier: 100000000 }`
-        // passes both sink validators; without the clamp, growing past `max`
-        // overflows `Duration` and panics the write task.
+        // A policy both sink validators accept; without the clamp, growth past
+        // `max` overflows `Duration` and panics the write task.
         let cfg = RetryConfig {
             initial: Duration::from_secs(1),
             max: Duration::from_secs(315_576_000_000),
@@ -205,14 +185,9 @@ mod tests {
 
     #[test]
     fn a_pathological_multiplier_lands_on_the_ceiling() {
-        // Not reachable through YAML (the sink validators reject these), but
-        // `RetryConfig` is public, so `Backoff` must stay total. Growth
-        // saturates at `max` rather than panicking or collapsing to a
-        // zero-delay hot-retry loop. `0.0`, `-0.0` and subnormals are the
-        // collapsing cases; they pin the delay at 0ns forever, and `-0.0`
-        // reaches that through `try_from_secs_f64(-0.0) == Ok(0ns)` rather
-        // than a failed conversion. A finite sub-`1.0` multiplier shrinks
-        // towards zero more slowly, so it saturates too.
+        // `0.0`, `-0.0` and subnormals are the collapsing cases, pinning the
+        // delay at 0ns forever; `-0.0` reaches that through
+        // `try_from_secs_f64(-0.0) == Ok(0ns)`, not a failed conversion.
         for multiplier in [
             f64::NAN,
             f64::INFINITY,
@@ -256,11 +231,10 @@ mod tests {
 
     #[test]
     fn jitter_never_erases_the_delay() {
-        // Clamping the *factor* to `[0.0, 1.0]` lets a `jitter` above 1.0
-        // land on exactly 0.0, turning roughly 40% of sleeps into zero-delay
-        // retries. The third case needs no invalid input at all:
-        // `initial == max == 1ns` with `jitter: 1.0` passes `validate`, and
-        // over half its delays round down to zero.
+        // Clamping the *factor* to `[0.0, 1.0]` lets a `jitter` above 1.0 land
+        // on exactly 0.0, turning roughly 40% of sleeps into zero-delay
+        // retries. The last case needs no invalid input: `initial == max == 1ns`
+        // with `jitter: 1.0` passes `validate` and rounds most delays to zero.
         for (initial, max, jitter) in [
             (Duration::from_millis(100), Duration::from_secs(10), 1.5),
             (Duration::from_millis(100), Duration::from_secs(10), 1e300),
@@ -291,9 +265,7 @@ mod tests {
 
     #[test]
     fn an_initial_above_the_ceiling_starts_at_the_ceiling() {
-        // `validate` rejects this, but `RetryConfig` is public and the
-        // "never exceeds `max`" contract is unconditional. Without the clamp
-        // the first delay is `initial`, ten times the ceiling.
+        // Without the clamp the first delay is `initial`, ten times the ceiling.
         let cfg = RetryConfig {
             initial: Duration::from_secs(10),
             max: Duration::from_secs(1),
@@ -309,14 +281,10 @@ mod tests {
 
     #[test]
     fn sequential_seeds_spread_the_first_retry() {
-        // Batches seed from a per-worker sequence number, so consecutive
-        // batches differ by one, and every shard worker starts at zero. With
-        // the seed only XOR-ed into the state, one xorshift round leaves the
-        // first draw of a million sequential seeds inside [0.8597, 0.8598];
-        // every batch's first retry lands on the same 82.804118ms, in
-        // lockstep, right when a replica failure has synchronized them all.
-        // Spread across the window is the property; "not exactly equal" does
-        // not catch this.
+        // With the seed only XOR-ed into the state, the first draw of a million
+        // sequential seeds falls inside [0.8597, 0.8598]: every batch's first
+        // retry lands on the same 82.804118ms, in lockstep. Spread across the
+        // window is the property; "not exactly equal" does not catch it.
         let cfg = cfg(0.2);
         let (full, window) = (0.1_f64, 0.02_f64); // 100ms delay, 20% jittered away
         let mut deciles = [0usize; 10];

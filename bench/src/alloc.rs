@@ -10,8 +10,7 @@
 //! Gating it would mean the wall numbers and the allocation numbers come from
 //! two different binaries, so a build that allocates more, and is therefore
 //! slower, reports the extra allocations from one build and the timing from
-//! another. It would also double the build cost of an A/B run, which is already
-//! two full compilations. The counter perturbs both legs identically, and the
+//! another. The counter perturbs both legs identically, and the
 //! comparison is between legs, so the cost is inside the baseline rather than
 //! in the difference.
 //!
@@ -86,14 +85,7 @@ unsafe impl GlobalAlloc for Counting {
         let out = unsafe { System.realloc(ptr, layout, new_size) };
         if !out.is_null() && new_size > layout.size() {
             // Counted as the *growth* only, and not counted at all when the
-            // block shrank or stayed the same. A realloc that grows a `Vec` is
-            // one allocation the program asked for; charging it the full new
-            // size would make a doubling push-loop report quadratic bytes and
-            // swamp every other figure in the case. And counting a shrink at
-            // all, which a `record(0)` still does since the count is
-            // unconditional, would report a head that added a per-iteration
-            // `shrink_to_fit` as an allocation-count regression against a 1%
-            // floor while it allocated nothing new.
+            // block shrank or stayed the same.
             record(new_size - layout.size());
         }
         out
@@ -101,22 +93,11 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 fn record(size: usize) {
-    // Relaxed on both. What is needed here is only that the additions do not
-    // get lost, which `fetch_add` gives at any ordering; the ordering that
-    // makes a *snapshot* see another thread's additions has to come from
-    // somewhere else, and does.
-    //
-    // For a single-threaded case that somewhere is one thread doing both the
-    // allocating and the reading. For a case whose measured region spans several
-    // threads, the region cannot close until those threads have reported
-    // through whatever synchronisation the case uses to bound its own work,
-    // and that release/acquire pair carries every allocation before it. A case
-    // that let a thread keep allocating past the end of its region would have
-    // no defined allocation total to report at any ordering, so this is a
-    // property such a case must have regardless.
-    // `crates/spate-core/benches/support/ack_traffic.rs` is the worked example:
-    // its workers allocate inside the region and are joined only when the rig
-    // drops, long after the snapshot, and its gate is what closes the gap.
+    // Relaxed on both: the additions cannot be lost at any ordering. A
+    // *snapshot* sees another thread's additions only through the case's own
+    // synchronisation, which any case with a defined total already has; its
+    // measured region cannot close until the threads it spans have reported.
+    // `crates/spate-core/benches/support/ack_traffic.rs` is the worked example.
     BYTES.fetch_add(size as u64, Ordering::Relaxed);
     COUNT.fetch_add(1, Ordering::Relaxed);
 }

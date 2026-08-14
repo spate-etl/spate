@@ -187,9 +187,8 @@ pub(crate) struct Task<S: CoordinationStore> {
     pub(crate) plan_rev_seen: u64,
     leader_observed: Option<(LeaderVal, Revision)>,
 
-    // Incremental status tallies over `splits`. Every progress mutation
-    // flows through `upsert_progress`, so the per-event path never
-    // rescans the whole map.
+    // Incremental status tallies over `splits`, maintained by
+    // `upsert_progress`.
     completed_count: u64,
     quarantined_count: u64,
     runnable_count: u64,
@@ -337,11 +336,8 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     // The heavyweight handlers below are `Box::pin`ned at their await
-    // sites: each select arm would otherwise embed its own copy of the
-    // handler's whole future (step alone reaches through claims into the
-    // store client), and the resulting mega-machine has overflowed a
-    // debug-build worker stack over the real NATS client. These run at
-    // control-plane cadence; the allocation is noise.
+    // sites. Inlining them into the select arms builds a future large
+    // enough to overflow a debug-build worker stack over a real store.
     async fn run_inner(&mut self) -> Result<(), CoordinationError> {
         Box::pin(self.startup()).await?;
 
@@ -349,9 +345,6 @@ impl<S: CoordinationStore> Task<S> {
         let mut state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?;
         Box::pin(self.step()).await?;
 
-        // The planner runs on the blocking pool and is joined by a select
-        // arm below. A plan taking longer than the lease must not stop
-        // renewals, watch processing, or command service.
         let mut planning: Option<PlanRun> = None;
 
         let mut heartbeat = self.clock.now() + self.next_heartbeat();
@@ -365,13 +358,11 @@ impl<S: CoordinationStore> Task<S> {
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(command) = command else {
-                        // Handle dropped: stop quietly; unreleased leases
-                        // expire and peers take over.
+                        // Handle dropped: unreleased leases expire and peers take over.
                         return Ok(());
                     };
                     Box::pin(self.handle_command(command)).await?;
-                    // Serve queued commands before anything else. The
-                    // control thread is waiting on replies.
+                    // The control thread is waiting on these replies.
                     while let Ok(command) = self.commands.try_recv() {
                         Box::pin(self.handle_command(command)).await?;
                     }
@@ -611,10 +602,8 @@ impl<S: CoordinationStore> Task<S> {
         {
             CasOutcome::Won(_) => Ok(()),
             CasOutcome::Lost => {
-                // A presence key already exists under our id: a not-yet-
-                // expired predecessor (fine, take it over) or a live twin
-                // (caught by lease fencing + nonce checks the moment it
-                // matters; presence alone cannot distinguish them).
+                // A presence key under our id: a predecessor not yet
+                // expired, or a live twin that lease fencing catches.
                 let entry = self
                     .store
                     .get(Keyspace::Ephemeral, &key)
@@ -731,8 +720,7 @@ impl<S: CoordinationStore> Task<S> {
             let leader: LeaderVal = records::parse_val(&entry.key, &entry.value)?;
             if self.leadership.is_some() && leader.nonce != self.nonce {
                 // Deposed: someone else won the key after our lease
-                // lapsed. Demote quietly; the generation fence rejects
-                // any in-flight plan write of ours.
+                // lapsed. The generation fence rejects our plan writes.
                 tracing::warn!(new_leader = %leader.owner, "leadership lost");
                 self.leadership = None;
                 self.metrics(|m| m.set_leader(false));
@@ -748,9 +736,8 @@ impl<S: CoordinationStore> Task<S> {
             {
                 self.assign_dirty = true; // membership grew
             }
-            // An unreadable presence value costs balance, never safety, so
-            // it is warned about and the member keeps the leader's own
-            // budget rather than being dropped from the fleet.
+            // An unreadable presence value costs balance, never safety:
+            // the member keeps the leader's own budget.
             match records::parse_val::<WorkerVal>(&entry.key, &entry.value) {
                 Ok(worker) if worker.max_in_flight > 0 => {
                     if self
@@ -769,10 +756,8 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         if let Some(id) = records::parse_split_key(&entry.key) {
-            // Puts and deletes for one key are ordered only through their
-            // revisions: a put at or below what the view already holds is
-            // a stale echo (delayed broadcast, reconcile overlap) and must
-            // not be applied, least of all to fence ourselves with it.
+            // A put at or below the revision the view already holds is a
+            // stale echo and must not be applied.
             if let Some(state) = self.splits.get(id)
                 && state
                     .lease
@@ -816,9 +801,6 @@ impl<S: CoordinationStore> Task<S> {
                     }
                     state.lease = Some((lease, entry.revision));
                 }
-                // The record has not arrived yet (snapshot ordering):
-                // buffer the lease so the split cannot be misread as
-                // unleased (and falsely expired) when the record lands.
                 None => {
                     self.pending_leases
                         .insert(id.to_string(), (lease, entry.revision));
@@ -846,7 +828,6 @@ impl<S: CoordinationStore> Task<S> {
             if let Some(rev) = self.leadership
                 && newer_than(rev)
             {
-                // Our own leadership lease expired under us.
                 tracing::warn!("leadership lease expired");
                 self.leadership = None;
                 self.metrics(|m| m.set_leader(false));
@@ -859,11 +840,8 @@ impl<S: CoordinationStore> Task<S> {
                 self.member_caps.remove(instance);
                 self.assign_dirty = true;
                 // Start this instance's grace window. Every worker tracks
-                // it, not just the leader: leadership can move between the
-                // departure and the next publish, and a successor that
-                // learned nothing of the departure reassigns the work
-                // immediately. `reserved_splits` clears the entry the
-                // moment the instance reappears.
+                // it: leadership can move between the departure and the
+                // next publish.
                 if instance != self.instance {
                     let now = self.clock.now();
                     self.departed.entry(instance.to_string()).or_insert(now);
@@ -876,15 +854,12 @@ impl<S: CoordinationStore> Task<S> {
                 if !newer_than(owned.lease_rev) {
                     return; // stale echo of a delete our claim already replaced
                 }
-                // Our lease expired while we believed we held the split:
-                // heartbeats have been failing for a full TTL.
+                // Heartbeats have been failing for a full TTL.
                 self.drop_owned(id, SplitLossReason::Starved);
             }
-            // No revocation bookkeeping here. A peer's lease deletes also
-            // happen for fails, completions, departures, and expiry, so a
-            // revocation is never inferred from lease traffic. The
-            // leader's `assign.{instance}` record is the only thing that
-            // starts or ends one.
+            // No revocation bookkeeping here. Lease deletes also happen
+            // for fails, completions, departures, and expiry; the
+            // leader's `assign.{instance}` record starts and ends one.
             if let Some(state) = self.splits.get_mut(id)
                 && state.lease.as_ref().is_none_or(|(_, rev)| newer_than(*rev))
             {
@@ -914,18 +889,13 @@ impl<S: CoordinationStore> Task<S> {
         match event {
             WatchEvent::Put(entry) => self.apply_state_put(&entry),
             WatchEvent::Delete { key, .. } => {
-                // The protocol deletes exactly two durable keys: the leader
-                // drops assignment records for instances that have left,
-                // and an instance clears the startup probe key it wrote.
-                // Anything else vanishing is external interference, and the
-                // reconcile pass treats missing records the same way.
+                // The protocol deletes two durable keys: assignment
+                // records for departed instances, and startup probe keys.
                 if let Some(instance) = records::parse_assign_key(&key) {
                     self.assignments.remove(instance);
                     if instance == self.instance {
-                        // Our own assignment was withdrawn. An absent
-                        // record means "nothing has been decided", never
-                        // "release everything", so keep holding what we
-                        // hold and wait to be told again.
+                        // An absent record means "nothing has been
+                        // decided", never "release everything".
                         self.assignment_seen = false;
                         self.assigned.clear();
                         self.awaiting.clear();
@@ -954,10 +924,8 @@ impl<S: CoordinationStore> Task<S> {
             {
                 return Ok(());
             }
-            // An unreadable assignment is not worth killing the fleet
-            // over: it carries no ownership, so ignoring it costs balance
-            // and nothing else. A worker of another schema wrote it, and
-            // the right outcome is that this one keeps what it holds.
+            // An unreadable assignment carries no ownership: ignoring it
+            // costs balance and this worker keeps what it holds.
             let val: AssignmentVal = match records::parse_val(&entry.key, &entry.value) {
                 Ok(val) => val,
                 Err(e) => {
@@ -978,7 +946,6 @@ impl<S: CoordinationStore> Task<S> {
                 && let Some((current, _)) = &self.plan
                 && plan.generation > current.generation
             {
-                // A successor bumped the generation: we are deposed.
                 tracing::warn!(
                     generation = plan.generation,
                     "deposed by a newer plan generation"
@@ -1008,8 +975,7 @@ impl<S: CoordinationStore> Task<S> {
             Some(state) => {
                 if state.spec.is_none() {
                     state.spec = Some(record);
-                    // A split becomes assignable only once its spec is
-                    // observed: its weight is the balance input.
+                    // A split becomes assignable once its spec is observed.
                     self.assign_dirty = true;
                 }
             }
@@ -1036,22 +1002,17 @@ impl<S: CoordinationStore> Task<S> {
                     return Ok(()); // stale, or our own echoed write
                 }
                 if state.progress.owner != record.owner {
-                    // `current_owner` falls back to this when no lease is
-                    // live, so an owner-clear moves the sticky pass.
+                    // An owner-clear moves the sticky pass.
                     self.assign_dirty = true;
                 }
                 (Some(state.progress.status), Some(state.progress.epoch))
             }
             None => (None, None),
         };
-        // A foreign `owner` on a split we are awaiting is the *normal*
-        // mid-revocation state. The previous owner is draining it, and
-        // waiting that out is what `awaiting` times. This must
-        // NOT clear the timer on seeing a foreign owner; the timer is
-        // retired only when we claim the split (success) or the leader
-        // stops assigning it to us (`apply_assignment`'s retain, or the
-        // assignment-withdrawn delete). Clearing it here read every
-        // assignment latency as ~0.
+        // A foreign `owner` on a split we are awaiting is the normal
+        // mid-revocation state, and the wait is what `awaiting` times.
+        // Clearing the timer here reads every assignment latency as ~0;
+        // it is retired on a claim, or when the leader stops assigning.
         if let Some(current_epoch) = current_epoch
             && self.owned.contains_key(id)
             && record.epoch > current_epoch
@@ -1080,8 +1041,7 @@ impl<S: CoordinationStore> Task<S> {
             }
         }
         // A runnable split whose next takeover would hit the cap needs a
-        // quarantine decision. That decision runs even when this worker
-        // sits at its working-set target.
+        // quarantine decision, even at this worker's working-set target.
         if record.status == SplitStatus::Runnable && record.attempts + 1 >= self.config.max_attempts
         {
             self.quarantine_scan = true;
@@ -1095,9 +1055,7 @@ impl<S: CoordinationStore> Task<S> {
                 state.progress_rev = rev;
             }
             None => {
-                // A lease or spec observed before its progress record
-                // (snapshot ordering) attaches now. A held split must
-                // never look unleased.
+                // A lease or spec observed before its progress record attaches now.
                 let lease = self.pending_leases.remove(id);
                 let spec = self.pending_specs.remove(id);
                 self.splits.insert(
@@ -1158,14 +1116,10 @@ impl<S: CoordinationStore> Task<S> {
         }
         match self.store.list(Keyspace::Durable, "").await {
             Ok(entries) => {
-                // Assignment records are the one durable key this protocol
-                // deletes, so they are the one durable key a listing has to
-                // be authoritative about. Watch snapshots drop their delete
-                // markers (`try_rewatch` ignores deletes), so without this
-                // a missed deletion leaves a cached revision that every
-                // later publish CASes against forever: the update loses,
-                // the create is never attempted, and that instance never
-                // receives another assignment.
+                // Assignment records are the one durable key this
+                // protocol deletes, and watch snapshots drop delete
+                // markers. A missed deletion leaves a cached revision
+                // whose instance never receives another assignment.
                 let live: std::collections::BTreeSet<&str> =
                     entries.iter().map(|e| e.key.as_str()).collect();
                 let gone: Vec<String> = self
@@ -1178,9 +1132,7 @@ impl<S: CoordinationStore> Task<S> {
                     self.assignments.remove(&instance);
                     self.assign_dirty = true;
                     if instance == self.instance {
-                        // Same rule as the watch delete: an absent record
-                        // means "nothing has been decided", never "release
-                        // everything".
+                        // An absent record means "nothing has been decided".
                         self.assignment_seen = false;
                         self.assigned.clear();
                         self.awaiting.clear();
@@ -1194,8 +1146,7 @@ impl<S: CoordinationStore> Task<S> {
                 tracing::warn!(error = %e, "durable reconcile listing failed; next tick retries");
             }
         }
-        // A departed instance's grace window is time-based, so the leader
-        // has to re-decide when one elapses even if no event arrived.
+        // A departed instance's grace window elapses on time, not on an event.
         self.assign_dirty = true;
         self.metrics(|m| m.reconcile(started.elapsed()));
         Ok(())
@@ -1206,10 +1157,6 @@ impl<S: CoordinationStore> Task<S> {
     // terminal.
 
     async fn step(&mut self) -> Result<(), CoordinationError> {
-        // Every worker tracks departures (leadership can move between a
-        // departure and the next publish), so every worker must expire that
-        // bookkeeping too. Pruning only on the leader path leaked one
-        // entry per historical peer on any worker never elected.
         self.prune_departed();
         self.observe_membership();
         if self.terminal_reported {
@@ -1217,8 +1164,7 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         if self.parting {
-            // Leaving the fleet: observe only. No claims, no revocations,
-            // no leadership; the released work belongs to the others.
+            // Leaving the fleet: observe only. The released work belongs to the others.
             self.check_terminal().await?;
             self.update_gauges();
             return Ok(());
@@ -1226,9 +1172,8 @@ impl<S: CoordinationStore> Task<S> {
         if self.leader_observed.is_none() && self.leadership.is_none() {
             self.try_elect().await?;
         }
-        // Decide before reconciling: publishing first means this worker
-        // acts on its own fresh assignment in the same step rather than
-        // waiting a round to see its own write come back.
+        // Decide before reconciling: this worker acts on its own fresh
+        // assignment in the same step.
         if self.leadership.is_some() {
             self.publish_assignments().await?;
         }
@@ -1248,9 +1193,7 @@ impl<S: CoordinationStore> Task<S> {
     /// logs nothing, and one that starts into a running fleet says so once
     /// rather than once per peer.
     fn observe_membership(&mut self) {
-        // Both sides are sorted, so comparing the iterators decides the
-        // common case (nothing moved) without building a set. This runs
-        // on every step, which is every watch event.
+        // This runs on every step, which is every watch event.
         let peers = || self.presence.keys().filter(|i| **i != self.instance);
         if let Some(reported) = &self.reported_members
             && peers().eq(reported.iter())
@@ -1260,8 +1203,6 @@ impl<S: CoordinationStore> Task<S> {
         let members: BTreeSet<String> = peers().cloned().collect();
         let live = protocol::live_workers(&self.presence, &self.instance);
         match &self.reported_members {
-            // First look. A worker that finds peers says so once; one that
-            // finds none is alone, and has nothing to describe.
             None => {
                 if !members.is_empty() {
                     let found = members
@@ -1319,11 +1260,8 @@ impl<S: CoordinationStore> Task<S> {
     async fn reconcile_assignment(&mut self) -> Result<(), CoordinationError> {
         let quarantine_scan = std::mem::take(&mut self.quarantine_scan);
         let cap = self.config.max_in_flight as usize;
-        // Scanning every split is the expensive half of a step, and `step`
-        // runs on every watch event. At the lane budget there is no claim to
-        // make, so the only reason to scan is a pending quarantine
-        // decision, which `quarantine_scan` records. The revoke pass below
-        // is over `owned` and stays unconditional.
+        // Scanning every split is the expensive half of a step. At the
+        // lane budget the only reason to scan is a quarantine decision.
         if self.owned.len() < cap || quarantine_scan {
             let candidates = protocol::claim_candidates(
                 &self.splits,
@@ -1333,12 +1271,8 @@ impl<S: CoordinationStore> Task<S> {
             );
             for (id, action) in candidates {
                 match action {
-                    // Parking an out-of-attempts split is never gated on the
-                    // lane budget: a fleet of full workers must still reach
-                    // the `Stalled` verdict.
                     ClaimAction::Quarantine(kind) => self.try_quarantine(&id, kind).await?,
                     ClaimAction::Claim(kind) => {
-                        // The assignment is the only thing that picks work.
                         // A claimable split that was not assigned to us
                         // belongs to another worker, or to the queue.
                         if !self.assigned.contains(&id) || self.owned.len() >= cap {
@@ -1349,31 +1283,14 @@ impl<S: CoordinationStore> Task<S> {
                 }
             }
         }
-        // The leader can take a revocation back. `desired_assignment` is
-        // sticky on the current owner and a draining split still holds its
-        // lease, so a peer leaving, or any other input reverting, re-names
-        // the split for the worker that is giving it up. Forcing it out at
-        // the drain deadline then costs a re-claim and one commit interval
-        // of replay to satisfy a move no longer wanted. That deadline
-        // bounds a slow drain pinning a *rebalance* open, and there is no
-        // longer a rebalance to pin, so a drain slower than the deadline
-        // finishes cleanly instead.
-        //
-        // This ends the revocation, not the drain, so the entry stays,
-        // flagged and re-anchored on a slower bound. A source that already
-        // stopped intake keeps draining (`SplitSource` has no seam to
-        // resume it) and its hand-back settles the entry silently,
-        // re-claimed as `Released`/`Reassigned`, replaying nothing. A drain
-        // that never finishes still has to be bounded: nothing else can end
-        // one, and a stranded split reads nothing for the life of the
-        // process. `service_revocations` keeps that watch.
-        //
-        // `!cancelled` counts one `Cancelled` per revocation rather than
-        // one per step. `owned` leaves the orphan sweep in
-        // `service_revocations` to settle a split that left by a terminal
-        // commit or a `fail`. And `assigned` is empty during a leader gap,
-        // so an absent assignment record still means "nothing has been
-        // decided".
+        // The leader can take a revocation back: `desired_assignment` is
+        // sticky on the current owner, and a draining split still holds
+        // its lease. This ends the revocation, not the drain, so the
+        // entry stays, flagged and re-anchored on a slower bound. A
+        // source that already stopped intake keeps draining
+        // (`SplitSource` has no seam to resume it), and a drain that
+        // never finishes strands the split; `service_revocations` bounds
+        // it.
         let restored: Vec<String> = self
             .revoking
             .iter()
@@ -1387,10 +1304,8 @@ impl<S: CoordinationStore> Task<S> {
             tracing::debug!(split = %id, "revocation cancelled: the leader assigned it back");
             if let Some(entry) = self.revoking.get_mut(&id) {
                 entry.cancelled = true;
-                // Re-anchor. The absolute clock stops here and the silence
-                // clock starts: the drain is measured from now on by
-                // whether it is still committing, and it has not been
-                // asked to prove that until this moment.
+                // Re-anchor: the absolute clock stops here and the
+                // silence clock starts.
                 entry.last_progress = now;
             }
             self.metrics(|m| m.revocation(RevocationOutcome::Cancelled));
@@ -1399,9 +1314,7 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         // A cancelled entry is a drain, not a revocation, so the leader
-        // dropping the split again is a new revocation and must
-        // re-request. `is_none_or` rather than `!contains_key` stops the
-        // surviving watchdog entry from swallowing it.
+        // dropping the split again must re-request.
         let stale: Vec<String> = self
             .owned
             .keys()
@@ -1446,11 +1359,9 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         let reserved = self.reserved_splits();
-        // The tie-break seed is the job fingerprint, NOT this worker's:
-        // `self.seed` mixes in a per-run nonce (it also keys heartbeat
-        // jitter, where per-worker uniqueness is the point), and a
-        // leader-specific seed would make every failover re-break every tie
-        // and churn the fleet for no gain.
+        // The tie-break seed is the job fingerprint, NOT `self.seed`,
+        // which mixes in a per-run nonce: a leader-specific seed makes
+        // every failover re-break every tie and churn the fleet.
         let desired = protocol::desired_assignment(
             &members,
             &self.splits,
@@ -1459,31 +1370,15 @@ impl<S: CoordinationStore> Task<S> {
             self.config.max_in_flight,
             self.fp,
         );
-        // Where the last published assignment put each split, read before
-        // the writes consume `desired`.
+        // Where the last published assignment put each split, read
+        // before the writes consume `desired`. This is the leader's own
+        // record of what it decided; ownership cannot answer it, since a
+        // graceful release clears `owner` before dropping presence.
         //
-        // This is the leader's own record of what it decided, not a reading
-        // of who holds what, and `moved` below means exactly that: splits
-        // being assigned somewhere other than where this map puts them.
-        // Ownership cannot answer the question. A graceful release clears
-        // every `owner` before dropping the presence key, so the largest
-        // rebalance there is (a departing worker's whole share re-homed at
-        // once) is invisible to it, while a split mid-drain still reads as
-        // owned by the instance giving it up long after the decision to
-        // move it. The cost is that a record for an instance that never
-        // took the split, or that belongs to an earlier run of the job,
-        // still counts as somewhere the split was assigned.
-        //
-        // Two passes, in this order. A departed instance's record outlives
-        // it (the sweep below spares it for the whole grace window) and is
-        // the only remaining evidence of where its splits were assigned.
-        // Dropping those records reads a departure as work handed out for
-        // the first time. Letting them win is worse: once a survivor has
-        // been given the split, both records name it, and a stale copy
-        // whose instance sorts later re-reports the move on every publish
-        // until the sweep. So all records seed the map and live members
-        // overwrite, leaving the most recently published record for any
-        // split two of them claim.
+        // Two passes, in this order: a departed instance's record
+        // outlives it and is the only evidence of where its splits were
+        // assigned, while a live member's record has to win when both
+        // name the same split.
         let mut previous: BTreeMap<&str, &str> = BTreeMap::new();
         for pass in [false, true] {
             for (instance, (val, _)) in &self.assignments {
@@ -1495,15 +1390,10 @@ impl<S: CoordinationStore> Task<S> {
                 }
             }
         }
-        // A split named for the first time is work being handed out, not a
-        // move.
-        //
-        // This counts what was *published*, not what landed. A write that
-        // fails below leaves its instance's record naming splits another
-        // instance has already been given, and the same move is counted
-        // again on each publish until a later one rewrites it. The rewrite
-        // comes from the reconcile tick, which marks the assignment dirty
-        // unconditionally, not from the failed write itself.
+        // A split named for the first time is work being handed out, not
+        // a move. This counts what was *published*, not what landed, so a
+        // write that fails below has its move counted again on each
+        // publish until a later one rewrites its record.
         let moved = desired
             .iter()
             .flat_map(|(instance, splits)| {
@@ -1536,20 +1426,16 @@ impl<S: CoordinationStore> Task<S> {
                 None => self.store.create(Keyspace::Durable, &key, bytes).await,
             };
             match outcome {
-                // Adopt our own write rather than just recording it. The
-                // leader is a worker too, and its own watch echo arrives at
-                // the revision it just stored, which the stale-echo guard
-                // drops. Waiting for the echo would leave the leader the
-                // one instance that never learns its own assignment.
+                // Adopt our own write rather than just recording it: the
+                // watch echo arrives at the revision just stored, which
+                // the stale-echo guard drops.
                 Ok(CasOutcome::Won(rev)) => {
                     published += 1;
                     self.apply_assignment(&instance, val, rev);
                 }
-                // Someone else wrote it, or the key is gone and our cached
-                // revision is a ghost that a CAS-update cannot recover
-                // from on its own. Drop the entry: the next attempt
-                // creates, and a concurrent leader's write comes back on
-                // the watch.
+                // Someone else wrote it, or the key is gone and the
+                // cached revision is a ghost. Drop the entry: the next
+                // attempt creates.
                 Ok(CasOutcome::Lost) => {
                     self.assignments.remove(&instance);
                     self.assign_dirty = true;
@@ -1560,14 +1446,10 @@ impl<S: CoordinationStore> Task<S> {
             }
         }
         if published > 0 {
-            // One line per rebalance, on the instance that decided it: the
-            // fleet changed, or splits changed hands. Both arms are needed.
-            // A member joining a fleet whose lanes are full receives only
-            // unheld splits, so it moves nothing while still being the
-            // rebalance an operator is watching for; a grace window
-            // expiring moves splits with the fleet the same size. Neither
-            // arm admits a split completing, which rewrites its owner's
-            // assignment on every completion in the job.
+            // One line per rebalance. Both arms are needed: a member
+            // joining a fleet whose lanes are full moves nothing, and a
+            // grace window expiring moves splits with the fleet the same
+            // size. Neither admits a split completing.
             if members != self.announced_members || moved > 0 {
                 tracing::info!(
                     members = members.len(),
@@ -1578,9 +1460,7 @@ impl<S: CoordinationStore> Task<S> {
             }
             self.announced_members = members;
         }
-        // Assignments for instances that are gone are dead weight; drop
-        // them once their grace window has passed, so the keyspace tracks
-        // the fleet rather than its history.
+        // Drop assignments for instances gone past their grace window.
         let stale: Vec<String> = self
             .assignments
             .keys()
@@ -1667,14 +1547,9 @@ impl<S: CoordinationStore> Task<S> {
             }
             self.assign_generation = val.generation;
             let now: BTreeSet<String> = val.splits.iter().cloned().collect();
-            // Start the acquisition clock for newly-named splits, and stop
-            // it for anything no longer expected. Not for one already held:
-            // there is no acquisition to wait for, and the timer would
-            // otherwise sit unconsumed until the split next changed hands.
-            // The reachable case is a revocation the leader takes back,
-            // where the split is re-named for the worker that never let
-            // go. Timing that as "work sat undone" reports a drain's
-            // length as a fleet handover.
+            // Start the acquisition clock for newly-named splits, and
+            // stop it for anything no longer expected. Not for one
+            // already held: that reports a drain as a fleet handover.
             for id in now.difference(&self.assigned) {
                 if self.owned.contains_key(id) {
                     continue;
@@ -1698,10 +1573,8 @@ impl<S: CoordinationStore> Task<S> {
         let now = self.clock.now();
         match self.revoking.get_mut(id) {
             // Re-revoking a drain this worker had cancelled. The drain
-            // never stopped, so its clock must not restart: `started` still
-            // anchors the deadline, and a drain that has already outlived
-            // one is forced on the spot with a rebalance waiting on it
-            // again.
+            // never stopped, so `started` still anchors the deadline and
+            // one already past it is forced on the spot.
             Some(entry) => entry.cancelled = false,
             None => {
                 self.revoking.insert(
@@ -1712,20 +1585,14 @@ impl<S: CoordinationStore> Task<S> {
                         cancelled: false,
                     },
                 );
-                // Only a drain that is starting says so. The arm above is a
-                // revocation restarting over a drain that never stopped,
-                // and announcing it would put two starts against one
-                // finish.
+                // Only a drain that is starting says so; the arm above
+                // would put two starts against one finish.
                 tracing::debug!(split = %id, "drain started");
             }
         }
-        // The denominator of the revocation lifecycle, counted exactly once
-        // per revocation: the only caller filters out entries that are
-        // still live revocations. Every revocation counted here later
-        // terminates in exactly one `Drained`, `Forced`, or `Cancelled`, so
-        // `requested - drained - forced - cancelled` is the revocations
-        // still in flight. That is *not* `splits_draining`, which counts
-        // the drains; a cancelled revocation leaves one behind.
+        // The denominator of the revocation lifecycle, counted once per
+        // revocation: `requested - drained - forced - cancelled` is the
+        // revocations in flight, which is *not* `splits_draining`.
         self.metrics(|m| m.revocation(RevocationOutcome::Requested));
         self.emit(CoordinationEvent::RevokeRequested { split });
     }
@@ -1760,11 +1627,9 @@ impl<S: CoordinationStore> Task<S> {
     /// forcing it costs one lane teardown and a bounded replay, and gets a
     /// reading split back.
     async fn service_revocations(&mut self) -> Result<(), CoordinationError> {
-        // An entry whose split left `owned` by a route that did not settle
-        // it (a terminal commit, or an explicit `fail`) is still a
-        // revocation that ended. Count it, or `requested - drained -
-        // forced - cancelled` stops being the in-flight revocation count
-        // the metric docs promise it is.
+        // An entry whose split left `owned` by a route that did not
+        // settle it (a terminal commit, or an explicit `fail`) is still a
+        // revocation that ended. Count it, or the in-flight count drifts.
         let orphans: Vec<String> = self
             .revoking
             .keys()
@@ -1828,15 +1693,10 @@ impl<S: CoordinationStore> Task<S> {
         if entry.cancelled {
             return;
         }
-        // Same clock that stamped `started` and that `service_revocations`
-        // compares against: reading it with real `.elapsed()` would mix two
-        // timelines and saturate to zero whenever the clock runs ahead of
-        // wall time.
         let drained_for = self.clock.now().duration_since(entry.started);
         self.metrics(|m| {
             m.revocation(outcome);
-            // Only a cooperative drain is timed: a forced release measures
-            // `drain_deadline`, not how long draining takes.
+            // A forced release measures `drain_deadline`, not draining.
             if outcome == RevocationOutcome::Drained {
                 m.drain_duration(drained_for);
             }
@@ -1881,15 +1741,11 @@ impl<S: CoordinationStore> Task<S> {
     /// The two-key claim: lease first (create, or CAS-update for a fast
     /// reclaim), then the progress-record CAS that transfers ownership.
     async fn try_claim(&mut self, id: &str, mut kind: ClaimKind) -> Result<(), CoordinationError> {
-        // A cooperative release is two writes on two watch streams (the
-        // durable owner-clear, then the ephemeral lease delete), and a
+        // A cooperative release is two writes on two watch streams, and a
         // fast claimant can see the lease vanish before the owner-clear
         // arrives, misreading a completed revocation as a death takeover
-        // and burning a delivery attempt on it. Every cooperative
-        // revocation runs this race. One durable read settles it: an
-        // already-cleared owner means Released. The guard is unscoped
-        // because the only caller already requires the split to be
-        // assigned to us.
+        // and burning a delivery attempt. One durable read settles it:
+        // an already-cleared owner means Released.
         if kind == ClaimKind::Expired {
             let key = records::split_key_str(id);
             if let Ok(Some(entry)) = self.store.get(Keyspace::Durable, &key).await
@@ -1897,9 +1753,7 @@ impl<S: CoordinationStore> Task<S> {
             {
                 // Honor the downgrade only from a read at least as fresh
                 // as the view: a lagging replica's stale owner-`None`
-                // (from before the current owner claimed) must not turn a
-                // genuine expiry takeover attempt-free, or a poison split
-                // could cycle past its quarantine cap.
+                // lets a poison split cycle past its quarantine cap.
                 let fresh = self
                     .splits
                     .get(id)
@@ -1946,23 +1800,17 @@ impl<S: CoordinationStore> Task<S> {
         let reason = match kind {
             ClaimKind::Create => AcquireReason::Create,
             // A split whose previous owner cleared the owner field left
-            // cleanly (a drained revocation or a shutdown hand-back), so
-            // the resume point covers everything that owner emitted and
-            // this claim replays nothing. There is no second arm keyed on
-            // `assigned`: the only caller already requires it, so such an
-            // arm is unreachable and its metric would read zero forever.
-            // (Expired never reaches here; the guard above downgraded it.)
+            // cleanly, so this claim replays nothing. Expired never
+            // reaches here; the guard above downgraded it.
             ClaimKind::Released => AcquireReason::Reassigned,
             ClaimKind::Reclaim => AcquireReason::Reclaimed,
             ClaimKind::Expired => AcquireReason::Expired,
         };
         self.record_claim(id, kind, reason, next_epoch, lease_rev, started)
             .await?;
-        // Assignment-to-acquisition: how long this worker waited for work
-        // it had already been told to take. Observed on the write that
-        // transferred ownership, so a split that never arrives is never
-        // counted. A rising median means slow handovers are *succeeding*,
-        // not that they got slower.
+        // Assignment-to-acquisition. Observed on the write that
+        // transferred ownership, so a rising median means slow handovers
+        // are *succeeding*, not that they got slower.
         if self.owned.contains_key(id)
             && let Some(since) = self.awaiting.remove(id)
         {
@@ -1991,8 +1839,7 @@ impl<S: CoordinationStore> Task<S> {
                 return Ok(());
             };
             let Some(spec_record) = &state.spec else {
-                // Cannot hand the source a split without its descriptor;
-                // the spec put is in flight (leader writes it first).
+                // The spec put is in flight; the source needs the descriptor.
                 self.release_lease_key(id, lease_rev).await;
                 return Ok(());
             };
@@ -2087,8 +1934,7 @@ impl<S: CoordinationStore> Task<S> {
                 // upsert emits the Quarantined event and counts the metric
                 // on the status transition.
                 self.upsert_progress(id, record, rev)?;
-                // A stale lease key from the dead owner (Reclaim kind) is
-                // best-effort cleared so listings stay tidy.
+                // Clear the dead owner's stale lease key so listings stay tidy.
                 if kind == ClaimKind::Reclaim
                     && let Some(state) = self.splits.get(id)
                     && let Some((_, lease_rev)) = state.lease
@@ -2104,13 +1950,10 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => {
                 tracing::warn!(split = %id, error = %e, "quarantine write failed; next tick retries");
                 self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
-                // Re-arm the scan, or "next tick retries" is a lie:
-                // `reconcile_assignment` takes the flag before deciding
-                // whether to scan at all, so a worker already at its lane
-                // budget would never re-derive this candidate. The split
-                // would sit `Runnable` at the attempts cap forever,
-                // counting toward neither tally, and the bounded job would
-                // hang instead of stalling.
+                // Re-arm the scan: `reconcile_assignment` takes the flag
+                // before deciding whether to scan, so a worker at its
+                // lane budget never re-derives this candidate and the
+                // bounded job hangs instead of stalling.
                 self.quarantine_scan = true;
                 Ok(())
             }
@@ -2175,9 +2018,8 @@ impl<S: CoordinationStore> Task<S> {
         if self.owned.remove(id).is_none() {
             return;
         }
-        // A split fenced or starved out from under us mid-drain ends that
-        // revocation the expensive way: whatever was uncommitted replays
-        // under whoever took it.
+        // A split fenced or starved mid-drain ends that revocation the
+        // expensive way: whatever was uncommitted replays.
         self.settle_revocation(id, RevocationOutcome::Forced);
         self.metrics(|m| m.lost(reason));
         if let Ok(split) = SplitId::new(id.to_string()) {
@@ -2199,13 +2041,11 @@ impl<S: CoordinationStore> Task<S> {
             self.renew_split(&id).await?;
         }
         // Starvation self-fence: any owned split without a successful
-        // write for a full lease is dropped before peers must fight our
-        // zombie for it. Reads `clock`, the same source that stamps
-        // `last_ok_write`, so a scheduler stall cannot fence a lease that
-        // is healthy in protocol time. A test therefore only fences what it
+        // write for a full lease is dropped. Reads `clock`, the source
+        // that stamps `last_ok_write`, so a test fences only what it
         // advances the clock past, and must step by no more than a
-        // renew-interval while the worker is alive, or it expires the lease
-        // and the renewal that would have saved it at the same instant.
+        // renew-interval while the worker is alive, or it expires the
+        // lease and the renewal that would have saved it at once.
         let now = self.clock.now();
         let starved: Vec<String> = self
             .owned
@@ -2223,9 +2063,8 @@ impl<S: CoordinationStore> Task<S> {
     async fn renew_presence(&mut self) {
         let key = records::worker_key(&self.instance);
         let val = records::encode_val(&self.worker_val());
-        // Presence renewal is contention-free in steady state: read the
-        // current revision and CAS. Failures are tolerated. Presence only
-        // tunes fair-share; correctness never depends on it.
+        // Failures are tolerated: presence tunes fair-share, and
+        // correctness does not depend on it.
         match self.store.get(Keyspace::Ephemeral, &key).await {
             Ok(Some(entry)) => {
                 let _ = self
@@ -2278,12 +2117,9 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         };
         // Cadence gate: skip if we renewed within the last interval. Read
-        // from `clock`, the same source that stamps `last_ok_write` and that
-        // `fence_starved_splits` compares against. A gate on real time while
-        // expiry ran on the clock could starve a renewal the clock says is
-        // due, or fire one it says is not. Under a frozen test clock nothing
-        // renews until the test advances; advancing is what drives the
-        // cadence, and `TestClock::advance_stepped` gives a live worker its
+        // from `clock`, the same source that stamps `last_ok_write`.
+        // Under a frozen test clock nothing renews until the test
+        // advances; `TestClock::advance_stepped` gives a live worker its
         // renewal inside every step.
         if self.clock.now().duration_since(owned.last_ok_write) < self.config.renew_interval() {
             return Ok(());
@@ -2325,11 +2161,9 @@ impl<S: CoordinationStore> Task<S> {
                     Ok(Some(entry)) => {
                         let lease: LeaseVal = records::parse_val(&key, &entry.value)?;
                         if lease.owner == self.instance && lease.nonce == self.nonce {
-                            // Maybe-landed: a previous renewal reported an
-                            // error but wrote. The lease is still ours, so
-                            // adopt its revision instead of dropping a
-                            // split we hold (that drop costs a delivery
-                            // attempt on the reclaim).
+                            // Maybe-landed: a previous renewal reported
+                            // an error but wrote. Adopt its revision;
+                            // dropping costs a delivery attempt.
                             if let Some(owned) = self.owned.get_mut(id) {
                                 owned.lease_rev = entry.revision;
                                 owned.last_ok_write = self.clock.now();
@@ -2352,13 +2186,11 @@ impl<S: CoordinationStore> Task<S> {
                         Ok(())
                     }
                     Ok(None) => {
-                        // The lease expired under us.
                         self.drop_owned(id, SplitLossReason::Starved);
                         Ok(())
                     }
                     Err(_) => {
-                        // Cannot tell; the next beat (or the starvation
-                        // self-fence) decides.
+                        // Cannot tell; the next beat decides.
                         Ok(())
                     }
                 }
@@ -2411,20 +2243,10 @@ impl<S: CoordinationStore> Task<S> {
                 Ok(())
             }
             Command::DeclineRevoke { split, reply } => {
-                // The source cannot stop this split at a safe boundary. A
-                // leader's revocation is a decision, so the split goes
-                // back regardless, by the replaying route rather than the
-                // clean one. Forcing here instead of waiting out
-                // `drain_deadline` costs a rebalance nothing: the source
-                // has already said the answer will not change.
                 let id = split.as_str().to_string();
-                // A decline says the source never stopped intake, so there
-                // is no drain. That distinction tells the two live cases
-                // apart. A live revocation is forced (the split is wanted
-                // elsewhere). Under a cancelled one the leader wants the
-                // split here and it never stopped being read, so the entry
-                // is dropped rather than forced, taking the drain watchdog
-                // with it. There is no drain to watch.
+                // A decline says the source never stopped intake, so
+                // there is no drain. A live revocation is forced; under a
+                // cancelled one the entry is dropped, watchdog and all.
                 let cancelled = self.revoking.get(&id).is_some_and(|r| r.cancelled);
                 let result = if cancelled {
                     self.revoking.remove(&id);
@@ -2488,11 +2310,8 @@ impl<S: CoordinationStore> Task<S> {
             Ok(CasOutcome::Won(rev)) => {
                 self.metrics(|m| m.write(WriteOutcome::Ok, started.elapsed()));
                 // A landed commit is the only liveness signal a draining
-                // split gives the task, and the one a cancelled
-                // revocation's watchdog is armed against. The driver
-                // commits a `Draining` tenancy exactly as its tail acks its
-                // way to the sink, so a drain that is moving keeps this
-                // stamped and a wedged one never does.
+                // split gives the task, and what a cancelled revocation's
+                // watchdog is armed against.
                 let now = self.clock.now();
                 if let Some(entry) = self.revoking.get_mut(id) {
                     entry.last_progress = now;
@@ -2505,8 +2324,7 @@ impl<S: CoordinationStore> Task<S> {
             }
             Ok(CasOutcome::Lost) => {
                 self.metrics(|m| m.write(WriteOutcome::Conflict, started.elapsed()));
-                // Maybe-landed hazard: if the winning write is OUR OWN
-                // (a previous timed-out attempt that landed),
+                // Maybe-landed hazard: if the winning write is OUR OWN,
                 // adopt it instead of reporting a false fence.
                 if let Ok(Some(entry)) = self.store.get(Keyspace::Durable, &key).await {
                     let fresh = SplitProgressRecord::parse(&key, &entry.value, self.fp)?;
@@ -2541,8 +2359,7 @@ impl<S: CoordinationStore> Task<S> {
         let lease_rev = self.owned.get(id).map(|o| o.lease_rev);
         self.owned.remove(id);
         // A split that finishes mid-revocation ends it: its tail is
-        // committed and nothing replays. That is the cooperative outcome
-        // even though no peer took the split over.
+        // committed and nothing replays.
         self.settle_revocation(id, RevocationOutcome::Drained);
         if let Some(lease_rev) = lease_rev {
             self.release_lease_key(id, lease_rev).await;
@@ -2586,8 +2403,7 @@ impl<S: CoordinationStore> Task<S> {
                 // metric. Remove from `owned` before folding the write so
                 // the epoch bump cannot read as a peer's fence.
                 self.owned.remove(id);
-                // A failure mid-revocation ends it without a clean drain:
-                // the split goes back with an uncommitted tail to replay.
+                // A failure mid-revocation leaves an uncommitted tail to replay.
                 self.settle_revocation(id, RevocationOutcome::Forced);
                 self.upsert_progress(id, record, rev)?;
                 self.release_lease_key(id, lease_rev).await;
@@ -2627,15 +2443,11 @@ impl<S: CoordinationStore> Task<S> {
         if !departure {
             return Ok(());
         }
-        // Releasing the last held split is how a worker leaves the fleet
-        // (shutdown, scale-down). Make the departure real: stop claiming
-        // (or the releaser instantly re-claims its own hand-backs), hand
-        // leadership back, and drop the presence key so the remaining
-        // workers' fair share widens now instead of after the TTL. The
-        // gate is on what was ASKED, not on what the store acknowledged —
-        // a release whose last split was concurrently fenced away (or whose
-        // write failed) is still a departure, and a departing worker that
-        // keeps claiming strands splits when the process exits.
+        // Releasing the last held split is how a worker leaves the fleet.
+        // Stop claiming (or the releaser re-claims its own hand-backs),
+        // hand leadership back, drop the presence key. The gate is on
+        // what was ASKED, not on what the store acknowledged: a departing
+        // worker that keeps claiming strands splits when the process exits.
         if self.owned.is_empty() && !splits.is_empty() {
             self.parting = true;
             self.demote().await;
@@ -2678,16 +2490,13 @@ impl<S: CoordinationStore> Task<S> {
                 self.upsert_progress(id, record, rev)?;
                 self.release_lease_key(id, lease_rev).await;
                 // The cooperative outcome: the tail is committed and the
-                // owner cleared, so the next owner replays nothing. A
-                // departure that happens to release a draining split still
-                // drained it.
+                // owner cleared, so the next owner replays nothing.
                 self.settle_revocation(id, RevocationOutcome::Drained);
                 Ok(ReleaseOutcome::Released)
             }
             Ok(CasOutcome::Lost) => {
-                // Fenced: the split is someone else's problem now, which is
-                // exactly what a release wanted. `drop_owned` settles the
-                // revocation and reports the loss.
+                // Fenced: the split is someone else's problem now, which
+                // is what a release wanted. `drop_owned` settles it.
                 self.drop_owned(id, SplitLossReason::Fenced);
                 Ok(ReleaseOutcome::Fenced)
             }
@@ -2737,19 +2546,16 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         let planned = plan.planned;
-        // Cheap gate: only pay for the listing once this worker's own view
-        // both covers what the plan promised and looks terminal. `planned`
-        // is a lower bound (see above), so this is `<`, not `!=`; an
-        // undercounting plan record must not freeze the verdict forever.
+        // Cheap gate: pay for the listing only once this worker's view
+        // covers what the plan promised and looks terminal. `planned` is
+        // a lower bound, so this is `<`, not `!=`.
         let local = self.splits.len() as u64;
         if local < planned || self.completed_count + self.quarantined_count != local {
             return Ok(());
         }
 
-        // Authoritative recount. Applying the entries is idempotent, since
-        // `upsert_progress` drops anything at or behind a revision it has
-        // already folded, so this doubles as the catch-up for a view that
-        // was missing records.
+        // Authoritative recount. Applying the entries is idempotent, so
+        // this doubles as catch-up for a view missing records.
         let entries = match self
             .store
             .list(Keyspace::Durable, records::SPLIT_PREFIX)
@@ -2757,8 +2563,7 @@ impl<S: CoordinationStore> Task<S> {
         {
             Ok(entries) => entries,
             Err(e) => {
-                // Refusing to judge is the safe direction: the job keeps
-                // running and re-judges on a later tick.
+                // Refusing to judge is the safe direction.
                 tracing::warn!(error = %e, "terminal listing failed; deferring the verdict");
                 return Ok(());
             }
@@ -2769,8 +2574,7 @@ impl<S: CoordinationStore> Task<S> {
 
         let total = self.splits.len() as u64;
         if total != entries.len() as u64 {
-            // The listing and the folded view disagree on cardinality —
-            // records outside `split.` prefixing, or a concurrent seed.
+            // The listing and the folded view disagree on cardinality.
             // Judge nothing this tick.
             return Ok(());
         }

@@ -26,15 +26,13 @@
 set -euo pipefail
 
 # The share of a case's collected instructions that must land in the binary
-# under measurement: a floor on composition, not on a count. The measured
-# spread it sits below is in DEVELOPING.md.
+# under measurement. The measured spread it sits below is in DEVELOPING.md.
 MIN_APPLICATION_PCT=10
 
 # The second signal. A lost region can also leave almost nothing: a handful of
-# instructions belonging to the toggled wrapper. That is application code, so
-# the composition rule has nothing to object to. A sibling bench went from
-# 3,500,338 Ir to 22 and still rendered a report row. The floor is 1,000
-# against a smallest real case of 6,656.
+# instructions belonging to the toggled wrapper. That is application code, and
+# the composition rule passes it. The floor is 1,000 against a smallest real
+# case of 6,656.
 MIN_COLLECTED_IR=1000
 
 cd "$(dirname "$0")/.."
@@ -722,8 +720,6 @@ $out"
         "the degenerate fixture is rejected by a script that implements no rule at all,
     so it is not evidence that this one works"
 
-    # A check whose premise the host cannot meet has not run, and a reader of a
-    # green log is entitled to know which were exercised.
     if [[ -z "$comma_locale" ]]; then
         echo "gungraun-collected-region.sh --self-test: SKIPPED the comma-decimal locale case.
     No such locale is installed here, so LC_NUMERIC cannot be made to bite. The verdict is an

@@ -44,7 +44,6 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-test/**
 
-# `docs/` is the prose tree; `website/` is the Docusaurus app that renders it.
 "area: docs":
   - changed-files:
       - any-glob-to-any-file:
@@ -98,8 +97,7 @@
           - THIRD-PARTY.md
 
 # The root manifest and lockfile, cross-crate plumbing belonging to no single
-# crate. Cargo.lock sits here rather than under supply-chain, since it moves on
-# every dependency bump.
+# crate.
 "area: workspace":
   - changed-files:
       - any-glob-to-any-file:

@@ -10,9 +10,6 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    # A cargo bump leaves THIRD-PARTY.md stale, and Dependabot does not
-    # regenerate it. The inventory is checked nightly and regenerated at
-    # release, so a bump merges without it.
     open-pull-requests-limit: 4
     labels: ["dependencies", "area: workspace"]
     commit-message:
@@ -26,10 +23,8 @@ updates:
       semver-minor-days: 14
       semver-major-days: 14
 
-    # No `versioning-strategy`, so this takes Cargo's default of
-    # `increase-if-necessary`. Cargo.toml is edited only when the new version
-    # falls outside the existing requirement, so a manifest edit in a bump is
-    # the signal that a dependency moved outside its declared range.
+    # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
+    # signals a dependency moved outside its declared requirement.
     groups:
       # One pull request for everything semver-compatible. Majors stay out of
       # the group so each arrives on its own.

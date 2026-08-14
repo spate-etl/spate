@@ -512,8 +512,7 @@ mod tests {
         assert!(record.metrics.contains_key(crate::record::WALL_NS_PER_ITER));
     }
 
-    /// No arguments is what `cargo bench` does. It must not fail, or every
-    /// wall-clock target breaks `make bench-check` for the whole workspace.
+    /// No arguments is what `cargo bench` does.
     #[test]
     fn no_arguments_prints_nothing_to_stdout_and_succeeds() {
         assert_eq!(call(&[]), Ok(None));

@@ -114,8 +114,7 @@ fn wait_until(what: &str, capture: &Capture, mut check: impl FnMut(&Capture) -> 
 fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     let capture = Capture::new();
     // `info` is the level a deployment runs at and the level the coordinated
-    // examples set, so it is the level this asserts about. Anything the
-    // protocol logs below it is out of scope here by construction.
+    // examples set, so it is the level this asserts about.
     tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_max_level(tracing::Level::INFO)

@@ -25,17 +25,13 @@ use crate::schema::typeparse::ChType;
 use bytes::{BufMut, BytesMut};
 use std::collections::HashMap;
 
-// `map` interns per row, so it uses foldhash rather than std's SipHash. Two
-// constraints keep that safe:
+// `map` interns per row, so it uses foldhash rather than std's SipHash.
 //   1. Wire bytes are hasher-independent. Dictionary order is first-seen
 //      append order into `dict`, so the encoded block is byte-identical
 //      regardless of hash function.
-//   2. HashDoS exposure is bounded. The dict is per-block and reset each block
-//      (entries ≤ rows per block), and foldhash's RandomState seeds per
-//      instance, so the worst case is a bounded per-block probe cost rather
-//      than unbounded amplification. SipHash is therefore not required here.
-//      A hand-rolled FxHash fails on collision quality (trailing-digit
-//      keys), which foldhash's avalanche fixes.
+//   2. The dict is per-block and reset each block (entries ≤ rows per block),
+//      and foldhash's RandomState seeds per instance, so HashDoS exposure is a
+//      bounded per-block probe cost.
 type DictMap = HashMap<Vec<u8>, u64, foldhash::fast::RandomState>;
 
 pub(crate) struct LowCard {

@@ -12,8 +12,7 @@
 //! same, and none of those hold across time; two builds measured minutes apart
 //! need none of it.
 //!
-//! Wall time gates nothing. No pull request passes or fails on a number from
-//! this tier, and no job runs it. The instruction-count tier counts rather than
+//! Wall time gates nothing. The instruction-count tier counts rather than
 //! times, which is what makes it comparable across the shared machines CI uses.
 //!
 //! # The two halves
@@ -30,8 +29,7 @@
 //! The split has to hold. A crate's bench target must not drag clap, git
 //! worktrees and the comparator into `cargo bench --no-run`, so no bench target
 //! ever enables `driver`. A workspace-wide `--all-features` build does enable
-//! it, which is why the CLI is still linted and compile-checked on every pull
-//! request.
+//! it.
 //!
 //! # The smallest complete target
 //!
@@ -77,11 +75,7 @@
 //! The package needs a dev-dependency on this crate and a `[[bench]]` stanza
 //! with `harness = false`. The dev-dependency is versionless, so cargo strips it
 //! when the crate is packaged and an unpublished harness never appears in what a
-//! consumer resolves. `harness = false` is required: without it cargo runs the
-//! target under libtest, which rejects the runner protocol's arguments before
-//! the target's own `main` is reached. The driver detects that and says so, but
-//! only once both legs have been built, so `make ci-lint` checks the manifest
-//! first and names the file.
+//! consumer resolves.
 //!
 //! The name passed to [`suite`] must be the package cargo compiles the target
 //! in. The target refuses to start otherwise, rather than emitting records that
@@ -196,9 +190,7 @@
 //! itself on one otherwise-idle
 //! machine, the largest difference any metric showed was 0.34%, against the 5%
 //! floor that applies to the timing metrics; the allocation metrics, judged at
-//! 1%, showed none. Source-path remapping would not settle it on its own
-//! while the legs also build into different target directories, which the linker
-//! records separately. A case whose difference tracks its paths rather than its
+//! 1%, showed none. A case whose difference tracks its paths rather than its
 //! code is the thing that would make this worth revisiting.
 
 pub mod alloc;

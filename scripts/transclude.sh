@@ -63,8 +63,7 @@ meta_value() { # info, key
 
 # Is this line a fence delimiter? Echoes the run of markers if so.
 #
-# Only column-zero fences are recognised: an indented one inside a list item
-# would need the list's indentation tracked to be read correctly.
+# Only column-zero fences are recognised.
 fence_marker() { # line
     case "$1" in
     '```'*) printf '```' ;;
@@ -293,8 +292,7 @@ check_page() { # file
 # the reader's.
 #
 # Scaffolds are excluded by name: `crates/spate-NAME/src/config.rs` in a
-# `_template` file is a shape, not a path that resolves. Other `_`-prefixed
-# files are not excluded; an MDX partial renders into the pages importing it.
+# `_template` file is a shape, not a path that resolves.
 pages_into() { # destination
     if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) \
         ! -name '_template.*' -print0 >"$1"; then
@@ -339,7 +337,7 @@ run_check() {
     collect >"$used"
 
     # Every marker set under crates/ is well formed, whether a page uses it or
-    # not. A malformed set is a defect wherever it sits.
+    # not.
     marked_sources_into "$sources" || return 1
     while IFS= read -r file; do
         [ -n "$file" ] || continue

@@ -682,10 +682,9 @@ mod tests {
                     });
                 }
 
-                // Divergences are recorded rather than asserted in place. A
-                // panic here would leave the sleepers parked on the barrier
-                // and `scope` would join them forever, turning a failure into
-                // a 120s nextest TIMEOUT.
+                // Divergences are recorded rather than asserted in place: a
+                // panic here would leave the sleepers parked on the barrier and
+                // `scope` would join them forever.
                 let backoff = || gauge_value(&handle.render(), names::SINK_RETRY_BACKOFF_SECONDS);
                 let mut first_bad = None;
                 let mut record = |round, phase, want: f64, got: f64| {

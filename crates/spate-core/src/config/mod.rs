@@ -7,8 +7,7 @@
 //! (`deny_unknown_fields` at every level). The `source`, `deserializer`,
 //! and `sink` sections are single-key mappings selecting a component type;
 //! their bodies are opaque [`ComponentConfig`]s handed to the component's
-//! factory, which deserializes its own typed config. This keeps connectors
-//! fully decoupled from the framework schema.
+//! factory, which deserializes its own typed config.
 //!
 //! ```yaml
 //! pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -723,12 +722,7 @@ sinks:
     fn full_design_doc_example_parses() {
         // The connector bodies below mirror the module-doc example and use the
         // real connector field names. spate-core has no dependency on the
-        // connector crates, so this test can only parse the framework layer;
-        // the connector body shapes are verified by hand against
-        // crates/spate-kafka/src/config.rs (brokers/topic/group_id),
-        // crates/spate-avro/src/config.rs (registry.url), and
-        // crates/spate-clickhouse/src/config.rs (table/columns/shards), and
-        // stay consistent with crates/spate/examples/kafka_avro_to_clickhouse.yaml.
+        // connector crates, so this test only parses the framework layer.
         let yaml = r#"
 pipeline: { name: orders, threads: 4, io_threads: 2 }
 checkpoint: { interval: 5s, max_pending_batches: 1024 }

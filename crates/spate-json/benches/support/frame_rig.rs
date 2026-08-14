@@ -4,8 +4,7 @@
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
 //! crate, so two targets can only agree on what they measure by compiling the
-//! same source. `lines.rs` already works that way for the streams; this is the
-//! loop that reads them. `framing_gungraun.rs` counts instructions inside
+//! same source. `framing_gungraun.rs` counts instructions inside
 //! [`frame_stream`] and `framing_wall.rs` times the same function.
 //!
 //! What stays in each target is the case list: which stream, at which chunk

@@ -337,11 +337,9 @@ fn target_name(binary: &Path) -> &str {
 /// The error any binary that did not answer the protocol earns, naming the
 /// likeliest cause.
 ///
-/// A `*_wall.rs` without `harness = false` compiles fine and is run by cargo
-/// under libtest, which rejects `--list-cases` and exits 101 before the
-/// target's own `main` is reached. So this covers a non-zero exit as well as
-/// unparseable output: both are "no record came back", and the manifest stanza
-/// is the one cause a message can do something about. The binary's own
+/// This covers a non-zero exit as well as unparseable output: both are "no
+/// record came back", and the manifest stanza is the one cause a message can do
+/// something about. The binary's own
 /// diagnostics have already reached the terminal, since stderr is inherited,
 /// so this adds the part they cannot know.
 fn hint(binary: &Path, args: &[String], why: &str) -> String {

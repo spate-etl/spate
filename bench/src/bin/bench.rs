@@ -30,9 +30,8 @@
 //! interleave, so whatever the machine did over the first leg's run lands on
 //! that leg alone.
 //!
-//! Both are why comparing two feature arms is `arms` rather than two `run`s and
-//! a `compare`. `run` produces a leg to keep, a baseline to compare something
-//! else against later, rather than half a comparison.
+//! `run` produces a leg to keep, a baseline to compare something else against
+//! later, rather than half a comparison.
 //!
 //! `list --cases` is the exception to "no build": the case list lives in the
 //! compiled target rather than in a manifest, which is what stops the list and

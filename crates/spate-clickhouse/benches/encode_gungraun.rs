@@ -29,10 +29,7 @@
 //! tuples and the `[u8; N]` lowering the 256-bit and address types use), and
 //! the `Int8`/`Int16` leaves the enums serialize through. What RowBinary does
 //! not have is a *per-column-type* writer; it is driven by the row struct,
-//! so the exotic corpus adds arms rather than a structure. Counting a fourth
-//! encoder case for those arms would match the wall-time sibling case for
-//! case, which this tier does not do; the sibling carries `rowbinary_exotic`
-//! and the scheduled comparison runs it.
+//! so the exotic corpus adds arms rather than a structure.
 //!
 //! The measured region is a whole chunk, not one row. A ClickHouse insert is a
 //! block: per-row work is only meaningful amortised over one, and the Native

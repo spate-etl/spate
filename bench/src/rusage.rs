@@ -61,13 +61,10 @@ pub fn peak_rss_bytes() -> Option<u64> {
     let usage = raw_usage()?;
     let raw = u64::try_from(usage.ru_maxrss).ok()?;
 
-    // Enumerated rather than split on one platform with a catch-all, because a
-    // catch-all here is the 1024× error this function prevents, deferred to
-    // whichever platform was not thought of. `ru_maxrss` is bytes on every
-    // Darwin kernel, kibibytes on Linux, and *pages* on Solaris and illumos,
-    // where a `* 1024` fallback would under-report by 4-8× while compiling
-    // perfectly. An unknown platform reports nothing, which the record schema
-    // already handles, rather than an unchecked number.
+    // Enumerated rather than split with a catch-all: `ru_maxrss` is bytes on
+    // every Darwin kernel, kibibytes on Linux, and *pages* on Solaris and
+    // illumos, where a `* 1024` fallback under-reports by 4-8× while compiling
+    // perfectly. An unknown platform reports nothing.
     #[cfg(target_vendor = "apple")]
     {
         Some(raw)
@@ -168,12 +165,10 @@ impl PeakWatch {
 mod tests {
     use super::{PeakWatch, cpu_ns, peak_rss_bytes};
 
-    /// One test rather than several, because they would interfere. `make test`
-    /// runs nextest, which gives each test its own process, but a bare
-    /// `cargo test -p spate-bench --lib` does not, and there the quantity under
-    /// test is process-wide and monotonic, so a sibling that allocated more
-    /// would decide this one's answer. Everything the module claims is asserted
-    /// against a single ballast allocation, in order, for that reason.
+    /// One test rather than several, because they would interfere: the quantity
+    /// under test is process-wide and monotonic, so a sibling that allocated
+    /// more would decide this one's answer. Everything the module claims is
+    /// asserted against a single ballast allocation, in order.
     #[test]
     fn the_peak_is_a_rising_high_water_mark_in_bytes() {
         let before = peak_rss_bytes().expect("the kernel tracks a peak for every process");
@@ -193,13 +188,10 @@ mod tests {
         let peak = peak_rss_bytes().expect("readable");
         let grew = peak.saturating_sub(before);
 
-        // The unit, pinned in BOTH directions, which a plausible-range check
-        // on the absolute value cannot do. A test binary's own resident set is
-        // a few megabytes, so reading kilobytes as bytes (or the reverse) still
-        // lands inside any range wide enough to hold both platforms. Measuring
-        // the *growth* against a known allocation does not have that problem:
-        // 256 MiB touched must move the mark by roughly 256 MiB, and either
-        // 1024× error lands three orders of magnitude away.
+        // The unit, pinned in BOTH directions, which a plausible-range check on
+        // the absolute value cannot do. Measuring the *growth* against a known
+        // allocation can: 256 MiB touched must move the mark by roughly
+        // 256 MiB, and either 1024× error lands three orders of magnitude away.
         assert!(
             grew >= (BALLAST as u64) / 2,
             "touching {BALLAST} bytes moved the peak by only {grew} — the unit is \
@@ -224,12 +216,9 @@ mod tests {
             "the peak fell after a free, so this is a reading and not a high-water mark"
         );
 
-        // A watch started now, after the ballast has already set the mark,
-        // sees no rise and reports nothing. That is what keeps a case's
+        // A watch started now, after the ballast has already set the mark, sees
+        // no rise and reports nothing. That is what keeps a case's
         // corpus-building cost from being emitted as if it were a measurement.
-        // Asserted here rather than in a test of its own: the quantity is
-        // process-wide and monotonic, so two tests allocating against it would
-        // decide each other's answers depending on which ran first.
         let after_the_fact = PeakWatch::start();
         assert!(
             after_the_fact.peak_rss_bytes().is_none(),

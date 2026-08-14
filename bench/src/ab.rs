@@ -6,9 +6,7 @@
 //! were built with, and both are worth measuring. [`ab`] takes
 //! the first, checking the reference out into a worktree; [`arms`] takes the
 //! second, building one tree twice into two directories. Everything after "both
-//! legs exist" is [`two_legs`], shared rather than restated, so the properties
-//! below hold on both axes because there is one implementation of them, not
-//! because two were kept in agreement.
+//! legs exist" is [`two_legs`], so the properties below hold on both axes.
 //!
 //! # The order things happen in, and why
 //!

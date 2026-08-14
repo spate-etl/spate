@@ -13,10 +13,10 @@
 #   ci:        opt a pull request into a suite its paths would not select.
 #   needs:     what is blocking the issue, not what it is about.
 #
-# There is no `type:` namespace. GitHub's native issue types carry that axis and
-# the forms set them, so a bug arrives typed rather than labelled.
-# `delivery-correctness` and `performance` are classes of bug with their own
-# triage priority, so they stay as labels below.
+# GitHub's native issue types carry the type axis and the forms set them, so a
+# bug arrives typed rather than labelled. `delivery-correctness` and
+# `performance` are classes of bug with their own triage priority, so they stay
+# as labels below.
 #
 
 - name: "crate: spate"
@@ -128,8 +128,8 @@
 #
 # Triggers, not descriptions. `scripts/ci-changes.sh` selects the expensive
 # suites from the changed paths and fails closed; these labels turn a suite
-# **on** for a pull request whose paths would not have selected it. They only
-# ever add work, and nothing here switches off a suite the classifier chose.
+# **on** for a pull request whose paths would not have selected it. Each adds
+# work; none switches a suite off.
 
 - name: "ci: docker"
   color: "fbca04"

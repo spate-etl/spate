@@ -123,10 +123,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     // Fast-commit mode (`SourceEvent::CommitReady`): partitions whose final
     // acks are being chased with a tightened cadence, each with its OWN
     // deadline bounding its chase to one commit interval. A single shared
-    // deadline would be re-armed by every new hint, so on a job where units
-    // of work finish continuously a permanently stalled partition would never
-    // age out and the controller would stay pinned at `FAST_COMMIT_POLL`
-    // indefinitely.
+    // deadline is re-armed by every new hint, pinning the controller at
+    // `FAST_COMMIT_POLL` while any partition stays stalled.
     let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
     // Set when the source reports `SourceEvent::Drained`. The loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
@@ -144,24 +142,20 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         }
 
         // Harvest acknowledgments every pass, not only on the commit tick.
-        // Watermark advances retire batches from the drivers'
-        // pending-ceiling gates, so harvesting at control cadence reopens a
-        // gated lane in ~one `event_poll_timeout` instead of a full commit
-        // interval. The commit itself stays on the tick.
+        // Watermark advances retire batches from the drivers' pending-ceiling
+        // gates, so harvesting at control cadence reopens a gated lane in ~one
+        // `event_poll_timeout`. The commit itself stays on the tick.
         harvest(&mut checkpointer, &mut state);
 
         // The commit tick.
         if last_commit.elapsed() >= commit_interval {
             last_commit = Instant::now();
-            // Seal partial chain buffers before harvesting acknowledgments.
-            // A below-target chunk (a low-volume split branch under sustained
+            // Seal partial chain buffers before harvesting acknowledgments. A
+            // below-target chunk (a low-volume split branch under sustained
             // load) otherwise holds its records' acks, and with them the
-            // partition watermark, until it happens to fill. `idle_flush`
-            // needs an empty poll that a loaded pipeline never produces.
-            // Best-effort like the CommitReady chase below; sealed chunks
-            // settle through the sink and commit on a later tick, so watermark
-            // staleness is bounded by ~two commit intervals plus the sink
-            // linger instead of growing without bound.
+            // partition watermark, until it happens to fill; `idle_flush` needs
+            // an empty poll that a loaded pipeline never produces. Best-effort:
+            // sealed chunks settle through the sink and commit on a later tick.
             for tx in &control_txs {
                 let _ = tx.send(ThreadControl::FlushNow);
             }
@@ -177,8 +171,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             // A watermark stalled behind a failed batch is permanent; acks
             // only ever fail, never un-fail. If one has been stalled past the
             // limit, a sink leg is permanently broken (fatal write error,
-            // dropped table); fail the pipeline so it restarts and replays
-            // rather than running on committing nothing.
+            // dropped table); fail the pipeline so it restarts and replays.
             for (partition, since) in checkpointer.stalled_partitions() {
                 let age = since.elapsed();
                 if age > stalled_fail_after {

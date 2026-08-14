@@ -4,8 +4,7 @@
 //! verifies that the cluster topology and the `Distributed` table's DDL
 //! agree with the sink config, covering shard count, per-shard weights, and
 //! the sharding expression. Placement/DDL drift does not error at query time:
-//! under `optimize_skip_unused_shards=1` it silently returns wrong
-//! results, which is why this fails startup instead.
+//! under `optimize_skip_unused_shards=1` it silently returns wrong results.
 //!
 //! What is verified: shard count, weights, the sharding expression, and
 //! the DDL's cluster argument. What is documented-only: that config shard
@@ -171,8 +170,7 @@ impl DistributedCheck {
         }
 
         // Advisory only: exact-hostname hits under the wrong shard_num
-        // suggest cross-wiring; absence of a match proves nothing (HTTP
-        // URLs vs native host:port), so this can never be a hard check.
+        // suggest cross-wiring.
         for (i, hosts) in self.replica_hosts.iter().enumerate() {
             for host in hosts {
                 let expected_num = (i + 1) as u32;

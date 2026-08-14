@@ -100,20 +100,17 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     let mut last_data = Instant::now();
     let mut flushed_since_data = false;
     let mut pause_started: Option<Instant> = None;
-    // Consecutive empty lane polls; resets on data (or on lane-set change,
-    // where a stale count could only cause one early blocking poll).
+    // Consecutive empty lane polls; resets on data or a lane-set change.
     let mut empty_polls: usize = 0;
     // A control message received while parked with no lanes (see the
     // lane-less wait below); handled by the drain at the top of the loop.
     let mut parked: Option<ThreadControl<L>> = None;
-    // The pending-ceiling gate per owned partition: `issued` is exact (the
-    // ack sequence is contiguous per partition and this thread is the only
-    // issuer), `advanced` is the controller's retirement counter. A lane is
-    // skipped while `issued - advanced` is at the ceiling, which is what
-    // makes `checkpoint.max_pending_batches` a bound instead of a request.
+    // The pending-ceiling gate per owned partition: `issued` counts the
+    // batches this thread registered, `advanced` is the controller's
+    // retirement counter. A lane is skipped while the difference is at
+    // `checkpoint.max_pending_batches`.
     let mut gates: HashMap<PartitionId, GateState> = HashMap::new();
-    // Consecutive gated lanes; a full pass of gated lanes parks on the
-    // control channel instead of spinning.
+    // Consecutive gated lanes; a full gated pass parks on the control channel.
     let mut gated_streak = 0usize;
 
     loop {
@@ -165,21 +162,16 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                             params.thread,
                         );
                     }
-                    // One arrival per stopped lane. The source sized the
-                    // barrier by lane count and cannot know how lanes were
-                    // distributed across threads.
+                    // One arrival per stopped lane; the source sized the
+                    // barrier by lane count.
                     for _ in 0..stopped {
                         barrier.arrive();
                     }
                 }
                 ThreadControl::FlushNow => {
-                    // The controller broadcasts on every commit tick (sealing
-                    // below-target chunks whose held acks would otherwise pin
-                    // partition watermarks under sustained load), and the
-                    // CommitReady chase targets threads whose lane hit
-                    // end-of-input. Either way, push the tail out now so the
-                    // acks it is waiting on can resolve, instead of holding
-                    // them for a full `idle_flush` lull.
+                    // Push the tail out now so the acks it holds can resolve
+                    // instead of waiting out a full `idle_flush` lull. Held
+                    // acks pin partition watermarks under sustained load.
                     match chain.flush() {
                         PushOutcome::Done => flushed_since_data = true,
                         PushOutcome::Blocked { .. } => bp.on_send_rejected(),
@@ -192,10 +184,9 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     }
                 }
                 ThreadControl::DropLanes { lanes: drop } => {
-                    // Committed-and-complete lanes are dropped, and polling
-                    // continues. There is no flush. Their records are already
-                    // sink-durable, and flushing here would emit a partial
-                    // chunk and stall this thread once per completed unit.
+                    // Committed-and-complete lanes are dropped without a flush;
+                    // their records are already sink-durable, and flushing here
+                    // emits a partial chunk once per completed unit.
                     lanes.retain(|l| !drop.contains(&l.id()));
                     prune_gates(&mut gates, &lanes);
                 }
@@ -210,9 +201,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     );
                     lanes.clear();
                     // Dropping the chain closes this thread's shard-queue
-                    // senders; the terminal stage fails the acks of any
-                    // records it still parks (its documented Drop
-                    // contract), so nothing unwritten can be committed.
+                    // senders; the terminal stage fails the acks of any records
+                    // it still parks (its documented Drop contract).
                     drop(chain);
                     barrier.arrive();
                     return DriverExit::Completed;
@@ -234,12 +224,9 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 
         // 3. Poll one lane (round-robin), or idle.
         if lanes.is_empty() {
-            // Wait on the control channel, not the clock. A thread with no
-            // lanes is waiting only for a control message, and sleeping out
-            // the full poll timeout delays every one of them by up to that
-            // long, including `Shutdown` at the end of a job and `AddLane`
-            // every time a coordinated source hands this thread its next unit
-            // of work.
+            // Wait on the control channel, not the clock. Sleeping out the full
+            // poll timeout delays every control message by up to that long,
+            // including `Shutdown` and the `AddLane` handing over the next unit.
             park_on_control(&control, &mut parked, params.poll_timeout);
             idle_flush(
                 chain.as_mut(),
@@ -256,34 +243,29 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         let lane_idx = next_lane;
         next_lane += 1;
 
-        // Head-of-line guard: while any lane in the rotation is producing,
-        // poll with a zero timeout so one empty lane (a fetcher cold start,
-        // a starved partition queue) never parks the thread while sibling
-        // lanes hold ready data. Only after a full empty pass does the next
-        // poll block for the real timeout. Idle CPU is unchanged, and data
-        // does not wait behind an empty sibling.
+        // Head-of-line guard: while any lane in the rotation is producing, poll
+        // with a zero timeout so one empty lane (a fetcher cold start, a
+        // starved partition queue) never parks the thread while sibling lanes
+        // hold ready data. Only a full empty pass blocks for the real timeout.
         let lane_timeout = if empty_polls >= lanes.len() {
             params.poll_timeout
         } else {
             Duration::ZERO
         };
 
-        // Pending-ceiling gate: skip a lane whose partition has the full
-        // ceiling of batches registered and not yet advanced past. The
-        // check happens before the poll and a poll issues one batch, so
-        // pending never exceeds the ceiling. When every lane is gated,
-        // park on the control channel. The controller's next harvest
-        // retires batches and reopens the gates, and meanwhile control
-        // messages (FlushNow above all) keep being serviced.
+        // Pending-ceiling gate: skip a lane whose partition has the full ceiling
+        // of batches registered and not yet advanced past. The check precedes
+        // the poll and a poll issues one batch, so pending stays at or under the
+        // ceiling. A fully gated pass parks on the control channel, where the
+        // controller's next harvest reopens the gates.
         let partition = lanes[lane_idx].partition();
         let at_ceiling = match gates.get_mut(&partition) {
             Some(g) => {
                 let pending = g.issued.saturating_sub(g.advanced.get());
                 let at = pending >= params.max_pending_batches as u64;
-                // Edge-triggered: one line when the gate closes, so a
-                // partition riding the ceiling reads as a state change plus
-                // a plateaued `spate_checkpoint_pending_batches`, not a log
-                // stream. Reopening is relief, not an action item.
+                // Edge-triggered: one line when the gate closes, so a partition
+                // riding the ceiling reads as a state change rather than a log
+                // stream.
                 if at && !g.gated {
                     g.gated = true;
                     crate::rate_limited_warn!(
@@ -322,9 +304,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         gated_streak = 0;
 
         let owned_ids: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
-        // The poll result borrows the lane's buffers, so the lanes cannot
-        // move into the parking loop until this block ends; the fatal is
-        // latched here and acted on after.
+        // The poll result borrows the lane's buffers, so the fatal is latched
+        // here and acted on once this block ends.
         let fatal_reported = {
             let poll_started = Instant::now();
             let polled = lanes[lane_idx].poll(params.max_records, lane_timeout);
@@ -338,9 +319,9 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     flushed_since_data = false;
                     if let Some(g) = gates.get_mut(&partition) {
                         let id = batch.ack().batch_id();
-                        // A batch stamped with another epoch is stale by
-                        // construction. Its registration is discarded, so
-                        // nothing would ever retire it from the gate.
+                        // A batch stamped with another epoch has its
+                        // registration discarded; nothing retires it from the
+                        // gate.
                         if id.epoch == g.epoch {
                             g.issued = g.issued.max(id.seq + 1);
                         }
@@ -393,8 +374,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                 }
                 Err(e) => {
                     // Counts toward the empty pass: a lane looping on a
-                    // retryable error must degrade to the blocking cadence,
-                    // not spin hot on zero-timeout polls.
+                    // retryable error degrades to the blocking cadence rather
+                    // than spinning on zero-timeout polls.
                     empty_polls = empty_polls.saturating_add(1);
                     crate::rate_limited_warn!(
                         POLL_ERROR_WARN,
@@ -407,10 +388,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             fatal_reported
         };
         if fatal_reported {
-            // Dropping the chain closes this thread's shard-queue senders
-            // and fails any parked acks (the terminal's Drop contract), so
-            // nothing unwritten can commit while we wait out the
-            // controller's drain choreography.
+            // Dropping the chain closes this thread's shard-queue senders and
+            // fails any parked acks (the terminal's Drop contract).
             drop(chain);
             return park_until_shutdown(&control, lanes, &health, params.thread);
         }
@@ -550,26 +529,23 @@ fn drive_batch(
             Ok(PushOutcome::Blocked { resume_at, reason }) => {
                 debug_assert!(resume_at >= from, "resume cursor must not go backwards");
                 from = resume_at;
-                // A batch that can never unblock must not hold shutdown
-                // hostage until the barrier deadline. Abandon it, failing its
-                // acknowledgment so the data replays after restart, and hand
-                // control back so the Shutdown message is processed.
+                // Abandon a batch that cannot unblock rather than hold shutdown
+                // to the barrier deadline; failing its acknowledgment replays
+                // the data after restart.
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::warn!(
                         thread = params.thread,
                         "shutdown during a blocked batch; abandoning it for replay"
                     );
                     ack.fail();
-                    // Discard the chain's mid-batch cursor / not-ready stash;
-                    // otherwise the Shutdown-triggered flush (or any stray
-                    // poll before the Shutdown message arrives) trips the
-                    // resume asserts or replays the stale payload.
+                    // Discard the chain's mid-batch cursor and not-ready stash;
+                    // otherwise the Shutdown-triggered flush trips the resume
+                    // asserts or replays the stale payload.
                     chain.abandon_batch();
                     return Ok(());
                 }
                 // Only sink pressure engages the backpressure controller; a
-                // not-ready wait (schema fetch in flight) is counted by the
-                // chain and retried.
+                // not-ready wait is counted by the chain and retried.
                 if reason == BlockReason::Capacity {
                     bp.on_send_rejected();
                     let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
@@ -681,9 +657,8 @@ fn idle_flush(
     match chain.flush() {
         PushOutcome::Done => *flushed_since_data = true,
         PushOutcome::Blocked { .. } => {
-            // Full queues while idle: note the rejection; the main-loop
-            // tick raises the pause request and the flush retries on the
-            // next lull check.
+            // Full queues while idle: note the rejection; the main-loop tick
+            // raises the pause request and the flush retries next lull.
             bp.on_send_rejected();
         }
         PushOutcome::Fatal(error) => {

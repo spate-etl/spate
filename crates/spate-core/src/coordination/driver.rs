@@ -362,10 +362,8 @@ impl CoordinationDriver {
 
         // Staged work can be consumed without producing an event (a batch of
         // gains, every one of which was retired before it could open), and
-        // then the drain has to look again. Loop rather than recurse: the
-        // fall-through below runs a second `coordinator.poll()`, so recursion
-        // depth would track how many such batches a backend produces back to
-        // back, with nothing structural bounding it.
+        // then the drain has to look again. Loop rather than recurse: nothing
+        // bounds how many such batches a backend produces back to back.
         let mut park = timeout;
         loop {
             // 1. Losses first: stop lost lanes before anything else runs.
@@ -375,26 +373,21 @@ impl CoordinationDriver {
                 return Ok(SourceEvent::LanesRevoked { lanes, barrier });
             }
 
-            // 1b. Completed tenancies leave barrier-less: their terminal
-            // progress is in the store and nothing is in flight behind them.
+            // 1b. Completed tenancies leave barrier-less.
             if !self.pending_retired.is_empty() {
                 let lanes = std::mem::take(&mut self.pending_retired);
                 return Ok(SourceEvent::LanesRetired { lanes });
             }
 
-            // Reaching here means every queued revocation has been delivered
-            // and the controller has drained + committed those lanes (its
-            // revoke choreography is synchronous), so retired tenancies have
-            // absorbed every late watermark they can ever see. Prune only
-            // those: `Live` tenancies are owned, and `Draining` ones are
-            // still draining toward their final commit and must survive to
-            // be advanced.
+            // Every queued revocation has been delivered and the controller
+            // has drained and committed those lanes, so retired tenancies
+            // have absorbed every late watermark they can see. Prune only
+            // those; `Draining` tenancies must survive to be advanced.
             self.tenancies
                 .retain(|_, t| t.state != TenancyState::Retired);
 
             // 2. Staged gains: additive lanes for the newly-gained splits
-            // only. Existing lanes are untouched; a routine gain must never
-            // drain flowing lanes.
+            // only; existing lanes are untouched.
             if !self.pending_open.is_empty() {
                 let lanes = self.open_pending(source)?;
                 if !lanes.is_empty() {
@@ -425,9 +418,8 @@ impl CoordinationDriver {
                 return Ok(SourceEvent::Drained);
             }
 
-            // 3b. Re-offer poison reports the backend refused. A refused
-            // report leaves a split held here with no tenancy behind it, so
-            // this is the only thing that can hand it back.
+            // 3b. Re-offer poison reports the backend refused; a refused
+            // report leaves a split held here with no tenancy behind it.
             for (split, reason) in std::mem::take(&mut self.pending_poison) {
                 if !self.report_poison(&split, &reason) {
                     self.pending_poison.push((split, reason));
@@ -463,10 +455,7 @@ impl CoordinationDriver {
             // 5. Completion sweep over live, uncommitted-terminal tenancies.
             self.sweep(source)?;
 
-            // 5b. Advance in-flight cooperative revocations: chase each
-            // draining split's tail and, once acked and committed, release
-            // it barrier-less to the requesting peer (or, if fenced
-            // mid-drain, abort it through the loss path).
+            // 5b. Advance in-flight cooperative revocations.
             self.advance_drains(source)?;
 
             if !self.pending_lost.is_empty()
@@ -496,12 +485,9 @@ impl CoordinationDriver {
             }
         }
 
-        // 6. Nothing to report: park here, not inside the backend. Both
-        // producers signal the same waker (the backend when it has events,
-        // a lane the moment it decides end-of-input or reports poison), so
-        // a completion surfaces in microseconds instead of waiting out the
-        // remainder of this timeout. The sender half lives on `self`, so
-        // the channel can never disconnect and this can never spin.
+        // 6. Nothing to report: park here, not inside the backend. Both the
+        // backend and any lane deciding end-of-input or reporting poison
+        // signal this waker, ending the park before the timeout runs out.
         if !park.is_zero() {
             let _ = self.wait.recv_timeout(park);
         }
@@ -630,11 +616,9 @@ impl CoordinationDriver {
                 if let Some(progress) = progress.as_ref()
                     && let Err(e) = source.validate_resume(&split, progress)
                 {
-                    // Report before the rejection leaves. No tenancy was
+                    // Report before the rejection leaves: no tenancy was
                     // recorded, so nothing else here releases the split and
-                    // the backend keeps renewing its lease. Dropping the
-                    // rejection on the floor holds a split this instance
-                    // never reads and never hands back.
+                    // the backend keeps renewing its lease.
                     self.report_rejected_gain(&split.id, &e);
                     return Err(e);
                 }
@@ -657,24 +641,16 @@ impl CoordinationDriver {
                 self.pending_open.push(partition);
             }
             CoordinationEvent::RevokeRequested { split } => {
-                // The leader wants this split back. Accept only a split we
-                // hold live with an OPEN lane, un-fenced and not yet
-                // completed, and only if the source can stop its intake at a
-                // safe boundary. A tenancy gained but not yet opened has no
-                // intake to stop and no drain to finish, so accepting it
-                // would strand it in `Draining` forever. A refusal is
-                // declined back to the backend so it forces the release now
-                // instead of waiting out its drain deadline; the split
-                // leaves either way.
+                // The leader wants this split back. Accept only a split held
+                // live with an OPEN lane, un-fenced and not yet completed,
+                // and only if the source can stop its intake at a safe
+                // boundary: a tenancy gained but not yet opened has no drain
+                // to finish and would sit in `Draining` forever. A refusal is
+                // declined back to the backend, which forces the release; the
+                // split leaves either way.
                 //
-                // A repeat request for a tenancy already draining is
-                // satisfied by the drain in flight, so it is accepted
+                // A repeat request for a tenancy already draining is accepted
                 // silently, with no second `begin_revoke` and no decline.
-                // Declining would tell the backend to force a handoff that is
-                // progressing fine, costing the replay the cooperative path
-                // avoids. Re-emission is reachable because the backend
-                // cancels a revocation the leader takes back, so the leader
-                // can drop a split, restore it, and drop it again.
                 if let Some(&partition) = self.by_split.get(&split)
                     && self
                         .tenancies
@@ -723,10 +699,6 @@ impl CoordinationDriver {
                 }
             }
             CoordinationEvent::AllComplete => {
-                // A worker can watch a whole bounded job complete without
-                // ever holding a split: the job finished before this
-                // instance's first rebalance window (short bounded job), or
-                // the fleet has more replicas than splits. Normal either way.
                 if self.next_partition == 0 {
                     tracing::info!(
                         "coordinated job completed without this instance holding any split — \
@@ -764,9 +736,6 @@ impl CoordinationDriver {
         let split = tenancy.split.id.clone();
         if let Some(lane) = tenancy.lane.take() {
             if tenancy.completed || tenancy.handed_off {
-                // Fully delivered, acked, and committed, or drained and
-                // handed off with its final commit durable. Nothing can be
-                // in flight, so the lane leaves without a drain barrier.
                 self.pending_retired.push(lane);
             } else {
                 self.pending_lost.push(lane);
@@ -911,8 +880,6 @@ impl CoordinationDriver {
                 Ok(CommitDisposition::Fenced)
             }
             Err(e) if e.kind == CoordinationErrorKind::Retryable => {
-                // Previous durable state stays authoritative; the caller
-                // recommits the merged progress on the next tick.
                 tracing::warn!(split = %split, error = %e, "commit deferred; will retry");
                 Ok(CommitDisposition::Deferred)
             }
@@ -929,11 +896,9 @@ impl CoordinationDriver {
         progress: SplitProgress,
     ) -> Result<(), SourceError> {
         // A handing-off split's drain cut can look terminal to the source
-        // (every record it emitted is acked), but committing it
-        // `completed: true` would mark a half-read split permanently done
-        // and its next owner would never resume it. That is silent data
-        // loss, so the guard runs here for every source rather than being
-        // left to each one.
+        // (every record it emitted is acked). Committing it `completed: true`
+        // marks a half-read split permanently done, and its next owner never
+        // resumes it: silent data loss.
         let progress = if progress.completed
             && self
                 .tenancies
@@ -983,8 +948,7 @@ impl CoordinationDriver {
         split: &SplitId,
         progress: SplitProgress,
     ) -> Result<(), SourceError> {
-        // Same central guard as `commit_progress`: the handover progress is
-        // never terminal, whatever the source's `drain_ready` claims.
+        // Same guard as `commit_progress`: handover progress is never terminal.
         let progress = if progress.completed {
             tracing::error!(
                 split = %split,
@@ -997,10 +961,6 @@ impl CoordinationDriver {
         };
         match self.try_commit(source, partition, split, &progress)? {
             CommitDisposition::Durable => {
-                // The tail is durable and the resume point now covers every
-                // record this instance emitted. Mark it handed off (so the
-                // lane retires barrier-less) and hand the split back so its
-                // next owner claims replay-free.
                 let tenancy = self
                     .tenancies
                     .get_mut(&partition)
@@ -1022,14 +982,10 @@ impl CoordinationDriver {
                 }
                 self.retire(source, partition, false);
             }
-            // Fenced mid-drain (a peer took this tenancy): already retired
-            // through the loss path inside `try_commit`. Its bounded tail
-            // replays under the new owner.
+            // Fenced mid-drain: already retired through the loss path.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
-                // Store lagged: stay `Draining` and re-attempt the final
-                // commit next poll. The cached progress advances the resume
-                // point (the watermark is acked, sink-durable).
+                // Store lagged: stay `Draining` and re-attempt next poll.
                 let tenancy = self
                     .tenancies
                     .get_mut(&partition)
@@ -1487,11 +1443,9 @@ mod tests {
 
     #[test]
     fn a_failed_open_undoes_the_whole_batch_instead_of_stranding_lanes() {
-        // `open_split` failing part way through must not abandon the lanes
-        // already built: they never reach the runtime, yet their tenancies
-        // would keep a lane id, be skipped by the `lane.is_some()` guard on
-        // every later attempt, and hold their leases, heartbeated and
-        // unreadable, making a stalled job rather than a failed one.
+        // Lanes already built when a later `open_split` fails never reach the
+        // runtime, yet their tenancies keep a lane id and hold their leases,
+        // heartbeated and unreadable: a stalled job rather than a failed one.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
@@ -1903,9 +1857,8 @@ mod tests {
         d.poll_events(&mut s, Duration::ZERO).unwrap_err();
         assert_eq!(script.fails().len(), 1);
 
-        // A refused report leaves the split held here with no tenancy
-        // behind it, so it is re-offered until the backend takes it, and
-        // then stops.
+        // A refused report leaves the split held here, so it is re-offered
+        // until the backend takes it, and then stops.
         poll(&mut d, &mut s);
         assert_eq!(script.fails().len(), 2);
         poll(&mut d, &mut s);
@@ -1925,8 +1878,7 @@ mod tests {
         };
         script.push(vec![gained("a", 1, Some(7)), gained("b", 1, Some(3))]);
 
-        // The controller reads the class of the one error it is handed, so
-        // surfacing the retryable rejection would run past a stop `b`'s
+        // Surfacing the retryable rejection would run past a stop `b`'s
         // source asked for. Both splits are still handed back.
         let err = d.poll_events(&mut s, Duration::ZERO).unwrap_err();
         assert!(is_fatal(&err), "{err}");
@@ -2008,8 +1960,6 @@ mod tests {
         };
         assert_eq!(lanes, vec![LaneId(0)], "only a's lane leaves");
 
-        // Exactly the handed-off split, released once, through the revocation
-        // path (never the plain-release path).
         assert_eq!(
             script.released_drained(),
             vec![SplitId::new("a").unwrap()],
@@ -2053,9 +2003,6 @@ mod tests {
             split: SplitId::new("a").unwrap(),
         }]);
 
-        // A fenced final commit aborts through the loss path: a *revoke*
-        // (with a drain barrier), never a barrier-less retire, and no
-        // release.
         let event = poll(&mut d, &mut s);
         let SourceEvent::LanesRevoked { lanes, barrier } = event else {
             panic!("a fenced drain must abort into a revoke, got {event:?}");
@@ -2181,10 +2128,9 @@ mod tests {
 
     #[test]
     fn a_source_that_declines_feeds_the_decline_back() {
-        // `a_source_that_cannot_stop_intake_declines_the_revoke` proves the
-        // tenancy stays live; this one proves the refusal is fed BACK to the
-        // backend, which forces the release immediately instead of waiting
-        // out its drain deadline.
+        // Distinct from `a_source_that_cannot_stop_intake_declines_the_revoke`:
+        // this one proves the refusal reaches the backend, which then forces
+        // the release.
         let script = Script::default();
         let mut d = driver(&script);
         // Default `accept_revoke` is empty, so `begin_revoke` declines.
@@ -2216,12 +2162,10 @@ mod tests {
 
     #[test]
     fn a_repeated_revoke_request_mid_drain_is_not_declined() {
-        // `RevokeRequested` is documented idempotent, and re-emission is
-        // reachable: the backend cancels a revocation the leader takes back,
-        // so a leader can drop a split, restore it, and drop it again.
-        // Answering the second request with a decline would tell the backend
-        // to force a handoff that is draining fine, costing the replay the
-        // cooperative path avoids.
+        // Re-emission is reachable: the backend cancels a revocation the
+        // leader takes back, so a leader can drop a split, restore it, and
+        // drop it again. A decline would force a handoff that is draining
+        // fine, costing the replay the cooperative path avoids.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
@@ -2268,11 +2212,10 @@ mod tests {
 
     #[test]
     fn an_unopened_tenancy_declines_without_asking_the_source() {
-        // A gain and a revocation request for the same split arrive in one event
-        // batch: the tenancy exists but its lane has not opened yet. Accepting
-        // it would strand it in `Draining` forever (no intake to stop, no
-        // drain to finish), so the driver declines WITHOUT consulting the
-        // source, and the split still opens normally afterwards.
+        // A gain and a revocation request for the same split arrive in one
+        // event batch: the tenancy exists but its lane has not opened yet.
+        // The driver declines without consulting the source, and the split
+        // still opens normally afterwards.
         let script = Script::default();
         let mut d = driver(&script);
         // Even a source that WOULD accept must not be consulted before the
@@ -2317,11 +2260,8 @@ mod tests {
 
     #[test]
     fn a_completed_progress_during_a_drain_is_never_terminal() {
-        // A handing-off split's drain cut can look terminal to the source
-        // (every record it emitted is acked), but committing it
-        // `completed: true` would mark a half-read split permanently done and
-        // its next owner would never resume it. The central guard must strip
-        // the flag while still landing the commit (the watermark is acked).
+        // The central guard must strip a `completed` flag reported during a
+        // drain while still landing the commit (the watermark is acked).
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {

@@ -11,9 +11,9 @@
 //!
 //! A wall-clock target is `crates/<pkg>/benches/<name>_wall.rs`. The suffix is
 //! what keeps three tiers of benchmark from colliding: `*_gungraun.rs` belongs
-//! to the instruction-count tier and its discovery script globs for exactly
-//! that, the weekly criterion targets carry neither suffix, and this one globs
-//! for `_wall`. A target that forgets `harness = false` is invisible to this
+//! to the instruction-count tier, the weekly criterion targets carry neither
+//! suffix, and this one globs for `_wall`. A target that forgets
+//! `harness = false` is invisible to this
 //! module, since `cargo metadata` reports no harness setting, and is refused later,
 //! at the runner protocol's handshake, with an error naming the stanza to add.
 //! Both legs are built by the time it arrives.
@@ -396,8 +396,7 @@ fn cargo_home() -> Option<PathBuf> {
 
 /// Every `[profile...]` table in a manifest, concatenated in file order.
 ///
-/// A line scan rather than a TOML parse: the alternative is a dependency whose
-/// job would be to read four tables, and a table header in this repository is
+/// A line scan rather than a TOML parse; a table header in this repository is
 /// always a `[` in the first column.
 fn profile_tables(manifest: &str) -> String {
     let mut out = String::new();

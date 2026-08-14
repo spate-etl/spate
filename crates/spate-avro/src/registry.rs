@@ -116,14 +116,10 @@ pub(crate) fn spawn_fetcher(
                 // Drain finished fetches first so slots free promptly.
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     let Ok((id, outcome)) = joined else {
-                        // A fetch task panicked. The known panic source,
-                        // apache-avro's `Schema::parse_str`, is caught inside
-                        // `fetch_one` and negative-cached, so reaching here
-                        // means an unexpected panic elsewhere in the task. The
-                        // `JoinError` does not carry our schema id, so that id
-                        // stays in `in_flight` and won't refetch; this
-                        // last-resort path is no worse than the pre-existing
-                        // fetcher-death behavior.
+                        // The known panic source, apache-avro's
+                        // `Schema::parse_str`, is caught in `fetch_one`. A
+                        // `JoinError` carries no schema id, so that id stays in
+                        // `in_flight` and is never refetched.
                         tracing::error!("registry fetch task panicked");
                         continue;
                     };
@@ -154,17 +150,15 @@ pub(crate) fn spawn_fetcher(
                         // All deserializers dropped: the pipeline is draining.
                         break;
                     };
-                    // Dedup: the id may be requested by several pipeline
-                    // threads before the first fetch lands, or already
-                    // resolved / negatively cached.
+                    // Dedup: several pipeline threads may request the id before
+                    // the first fetch lands, or it may already be cached.
                     if in_flight.contains(&id) {
                         continue;
                     }
                     if !matches!(task_cache.get(id), Lookup::Missing) {
                         continue;
                     }
-                    // Honor per-id backoff so replays after a transient
-                    // failure don't hammer the registry.
+                    // Honor per-id backoff after a transient failure.
                     if backoff.get(&id).is_some_and(|b| Instant::now() < b.next_allowed) {
                         continue;
                     }
@@ -201,10 +195,8 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
                 return FetchOutcome::Resolved;
             }
             // `CompiledSchema::compile` catches apache-avro 0.21's parse
-            // *panics* on malformed names (like `"my-record"`), so a schema
-            // the parser rejects negative-caches as an ordinary failure, a
-            // poison payload for every pipeline. Either way the id resolves;
-            // a bad schema can never stall it at NotReady forever.
+            // *panics* on malformed names (like `"my-record"`), so a schema the
+            // parser rejects negative-caches as an ordinary failure.
             let compiled = CompiledSchema::compile(id, &registered.schema);
             match compiled.unusable_reason() {
                 None => {
@@ -218,19 +210,16 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
             FetchOutcome::Resolved
         }
         Err(e) if is_permanent(&e) => {
-            // An unknown id (registry 404). Negative-cache it so we
-            // don't hammer the registry for an id that will never resolve;
-            // the deserializer applies its ErrorPolicy to the poison payload.
+            // An unknown id (registry 404). Negative-cache it; the deserializer
+            // applies its ErrorPolicy to the poison payload.
             tracing::warn!(schema_id = id, error = %e, "registry reports schema id unknown");
             cache.insert_failed(id, format!("registry fetch for schema {id} failed: {e}"));
             FetchOutcome::Resolved
         }
         Err(e) => {
-            // Transient outage (5xx other than 404, 429, timeout, refused or
-            // black-holed connection, retriable error). Leave the id absent:
-            // poisoning it here would drop (and ack) decodable records for the
-            // whole negative TTL. The next replay refetches, subject to
-            // per-id backoff.
+            // Transient outage. Leave the id absent: poisoning it here would
+            // drop (and ack) decodable records for the whole negative TTL. The
+            // next replay refetches, subject to per-id backoff.
             tracing::warn!(schema_id = id, error = %e, "registry fetch failed transiently; will retry");
             FetchOutcome::Transient
         }
@@ -259,10 +248,9 @@ pub(crate) async fn prewarm(cfg: &RegistryConfig, subjects: &[String], cache: &S
         let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
         match schema_registry::get_schema_by_subject(&settings, &strategy).await {
             Ok(registered) if registered.references.is_empty() => {
-                // Per-backend compile with the parse-panic guard inside
-                // (see `fetch_one`), so one poison schema cannot kill this
-                // detached task mid-list and silently skip every remaining
-                // subject's pre-warm.
+                // Per-backend compile with the parse-panic guard inside (see
+                // `fetch_one`), so one poison schema cannot kill this detached
+                // task mid-list and skip the remaining pre-warm.
                 let compiled = CompiledSchema::compile(registered.id, &registered.schema);
                 match compiled.unusable_reason() {
                     None => {

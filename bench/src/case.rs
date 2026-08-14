@@ -122,8 +122,7 @@ const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
 /// Nanoseconds per iteration of a loop that does nothing but keep its counter.
 ///
 /// The guard that catches a bench reporting a plausible number while measuring
-/// nothing, the same failure the instruction-count tier has
-/// `scripts/gungraun-collected-region.sh` for.
+/// nothing.
 ///
 /// It is reachable by accident. `Bencher::iter` passes the routine's *return
 /// value* to `black_box`, so a routine written `|| { let _ = decode(&input); }`

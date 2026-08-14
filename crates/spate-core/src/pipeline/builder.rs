@@ -168,8 +168,7 @@ pub struct ChainCtx {
     chunk: ChunkConfig,
     /// This thread's clone of every installed sink's queues and resolved
     /// chunking, keyed by the name passed to [`Pipeline::add_sink`]. Resolved
-    /// through [`sink`](Self::sink); private so the drop-ordering contract (the
-    /// clones die with the driver) stays enforced by construction.
+    /// through [`sink`](Self::sink). The clones die with the driver.
     named: Vec<(String, ShardQueues, ChunkConfig)>,
 }
 

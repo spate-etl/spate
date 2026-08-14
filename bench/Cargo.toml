@@ -35,9 +35,8 @@ workspace = true
 name = "bench"
 required-features = ["driver"]
 
-# `harness = false` is what the runner protocol needs: under libtest, cargo's
-# own harness rejects `--run` before this crate sees it. Named `_wall` like
-# every crate-side target, keeping it out of the `*_gungraun` discovery glob.
+# Named `_wall` like every crate-side target, outside the `*_gungraun`
+# discovery glob.
 [[bench]]
 name = "selftest_wall"
 harness = false

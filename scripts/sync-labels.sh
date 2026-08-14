@@ -4,10 +4,6 @@
 # missing, updates the colour and description of one that exists, and never
 # deletes.
 #
-# Deleting is not implemented: it would remove GitHub's stock labels that open
-# issues still carry, and deleting a label destroys the record that anything was
-# filed under it. Retiring one is a manual step.
-#
 # Uses `gh` rather than a labeling action: the organisation restricts Actions to
 # an allowlist, and a refused one reports `startup_failure` without naming it.
 #
@@ -16,8 +12,7 @@
 #
 # Environment:
 #   GH_TOKEN  a token with `issues: write` on the repository
-#   DRY_RUN   `true` is the same as passing --dry-run, so a caller can select
-#             the mode without building an argument list that is sometimes empty
+#   DRY_RUN   `true` is the same as passing --dry-run
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

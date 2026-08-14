@@ -18,9 +18,9 @@ const FEATURES: Feature[] = [
     body: (
       <>
         A source offset commits only after every record derived from it is
-        durably written or intentionally dropped — held across rebalances,
-        graceful shutdown, and crashes. The watermark stalls rather than ever
-        advancing past unacknowledged data.
+        durably written or intentionally dropped, and that holds across
+        rebalances, graceful shutdown, and crashes. The watermark stalls rather
+        than advancing past unacknowledged data.
       </>
     ),
   },
@@ -38,9 +38,9 @@ const FEATURES: Feature[] = [
     title: 'No hidden costs on the hot path',
     body: (
       <>
-        Operator chains are fully monomorphized — one virtual call per batch,
-        not per record — and every metric handle is pre-registered at build
-        time. Measured at <b>~9&nbsp;ns/record with zero per-record
+        Operator chains are fully monomorphized, costing one virtual call per
+        batch rather than per record, and every metric handle is pre-registered
+        at build time. Measured at <b>~9&nbsp;ns/record with zero per-record
         allocations</b>.
       </>
     ),
@@ -49,7 +49,7 @@ const FEATURES: Feature[] = [
     title: 'Batteries-included connectors',
     body: (
       <>
-        Kafka in, Avro decoding, sharded and replicated ClickHouse out — each a
+        Kafka in, Avro decoding, sharded and replicated ClickHouse out, each a
         small, stable trait you can swap for your own. First-class Prometheus
         metrics, <code>/healthz</code>/<code>/readyz</code> probes, and
         drain-on-SIGTERM come standard.

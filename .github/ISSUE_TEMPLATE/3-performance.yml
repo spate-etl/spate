@@ -7,18 +7,16 @@ body:
   - type: markdown
     attributes:
       value: |
-        Worth knowing before you spend time on this: the most common cause is
-        not the framework. Sink egress concurrency, partition count, and the
-        chunk-sealing cadence each bound throughput independently, and a
-        pipeline can sit at a fraction of one core while none of them is the
-        framework's doing. The connector tuning pages walk through which is
-        which.
+        The most common cause is not the framework. Sink egress concurrency,
+        partition count, and the chunk-sealing cadence each bound throughput
+        independently, and a pipeline can sit at a fraction of one core while
+        none of them is the framework's doing. The connector tuning pages walk
+        through which is which.
 
         **Numbers are re-measured before they are acted on**, on reference
-        hardware under the published protocol — a number from a busy laptop is
+        hardware under the published protocol. A number from a busy laptop is
         not comparable to one from a quiet host, and run-to-run spread on
-        throughput is wider than people expect. That is not distrust; it is the
-        only way two numbers mean the same thing. The methodology lives in the
+        throughput is wide. The methodology lives in the
         [benchmark repository](https://github.com/spate-etl/benchmark).
 
   - type: dropdown
@@ -38,8 +36,8 @@ body:
     attributes:
       label: Version
       description: >-
-        For a regression, both versions — the one that was fast and the one
-        that is not.
+        For a regression, both the version that was fast and the version that
+        is not.
       placeholder: "0.1.0 (was fine on 0.1.0-rc)"
     validations:
       required: true
@@ -49,9 +47,9 @@ body:
     attributes:
       label: Which components
       description: >-
-        The preamble above is not a deflection — most of what looks like
-        framework overhead is one of these bounding the pipeline on its own.
-        Saying which are in the path is what makes the numbers readable.
+        Most of what looks like framework overhead is one of these bounding
+        the pipeline on its own. Saying which are in the path is what makes
+        the numbers readable.
       multiple: true
       options:
         - Engine (spate-core)
@@ -72,9 +70,9 @@ body:
     attributes:
       label: Rust version and platform
       description: >-
-        `rustc --version` and your OS/architecture. Both matter here more than
-        they do elsewhere: a throughput number is not comparable across
-        architectures, and the reference hardware is named in the methodology.
+        `rustc --version` and your OS/architecture. A throughput number is not
+        comparable across architectures, and the reference hardware is named
+        in the methodology.
       placeholder: "rustc 1.97.0, Linux x86_64"
     validations:
       required: true
@@ -85,7 +83,7 @@ body:
       label: The numbers
       description: >-
         What you measured, and what you expected. Rows or records per second,
-        or a latency percentile — please say which.
+        or a latency percentile. Please say which.
     validations:
       required: true
 
@@ -108,10 +106,9 @@ body:
     attributes:
       label: What is saturated
       description: >-
-        Optional but decisive. Is the process CPU-bound? Is it throttled? Are
-        the sink queues full or empty? `spate_queue_*`, `spate_backpressure_*`
-        and `spate_sink_*` answer this directly, and the answer usually names
-        the bottleneck outright.
+        Optional. Is the process CPU-bound? Is it throttled? Are the sink
+        queues full or empty? `spate_queue_*`, `spate_backpressure_*` and
+        `spate_sink_*` answer this directly.
 
   - type: textarea
     id: config
@@ -119,5 +116,5 @@ body:
       label: Configuration
       description: >-
         Your YAML. **Remove credentials, hostnames and anything else you would
-        not publish** — this is a public issue.
+        not publish.** This is a public issue.
       render: yaml

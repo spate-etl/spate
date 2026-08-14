@@ -1,5 +1,5 @@
 name: Records were lost, duplicated, or committed early
-description: A delivery-guarantee failure — the one class of bug this project most wants to hear about.
+description: A delivery-guarantee failure, the class of bug this project most wants to hear about.
 title: "[delivery] "
 type: Bug
 labels: ["delivery-correctness"]
@@ -7,17 +7,16 @@ body:
   - type: markdown
     attributes:
       value: |
-        At-least-once is the promise the whole design is arranged around: a
-        source watermark is never committed past unacknowledged data, including
-        across rebalances and shutdown. **If that broke, everything else is
-        secondary.**
+        At-least-once is the guarantee the engine is arranged around: a source
+        watermark is never committed past unacknowledged data, including across
+        rebalances and shutdown.
 
         Two things worth checking first, because they are the common answers
         and neither is a bug:
 
         - **Duplicates after a crash are expected.** Crash replay re-batches
           with new boundaries, so rows can land twice. Sinks need to tolerate
-          that — see the delivery-semantics guide.
+          that (see the delivery-semantics guide).
         - **Records dropped by `ErrorPolicy::Skip` are counted, not silent.**
           Check `spate_*_dropped_total{reason}` before concluding they vanished.
 
@@ -50,9 +49,8 @@ body:
     attributes:
       label: Cargo features
       description: >-
-        Which features are enabled. This matters more than it looks — most of
-        the crate is behind one, and which ones are on decides which code paths
-        were even compiled in.
+        Which features are enabled. Most of the crate sits behind one, and
+        which are on decides which code paths were compiled in.
       placeholder: 'kafka, clickhouse, avro'
     validations:
       required: true
@@ -91,8 +89,8 @@ body:
     attributes:
       label: Was any of this happening at the time?
       description: >-
-        These are the boundaries where the guarantee is hardest to hold, so
-        knowing which one applies narrows it enormously.
+        These are the boundaries where the guarantee is hardest to hold.
+        Knowing which one applies narrows the search.
       options:
         - label: A consumer-group rebalance, or an instance joining or leaving
         - label: A graceful shutdown (SIGTERM, drain)
@@ -109,7 +107,7 @@ body:
         The counts that do not reconcile, and how you measured them. Source
         offsets against rows landed is the usual shape. If you have the
         `spate_source_*`, `spate_sink_*` and `spate_checkpoint_*` series across
-        the window, they are the single most useful thing here.
+        the window, include them.
     validations:
       required: true
 
@@ -119,9 +117,8 @@ body:
       label: A sample record
       description: >-
         One record in the shape the pipeline was carrying, with anything
-        sensitive replaced. Framing and field types decide a surprising amount
-        of the decode path, and a real example settles in one line what a
-        description takes several rounds to pin down.
+        sensitive replaced. Framing and field types decide which decode path
+        runs.
       placeholder: '{"id": 1, "ts": "2026-07-31T09:00:00Z", "payload": "..."}'
 
   - type: textarea
@@ -130,7 +127,7 @@ body:
       label: Pipeline configuration
       description: >-
         Your YAML. **Remove credentials, hostnames and anything else you would
-        not publish** — this is a public issue.
+        not publish.** This is a public issue.
       render: yaml
     validations:
       required: true

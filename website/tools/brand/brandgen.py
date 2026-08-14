@@ -2,8 +2,8 @@
 """Generate the Spate brand assets.
 
 Text is shaped with HarfBuzz and baked to outlines, so the emitted SVGs carry no
-font dependency. All layout is driven by measured ink bounds — never by the
-nominal canvas — so the mark, the rule and the tagline share one optical left
+font dependency. All layout is driven by measured ink bounds rather than the
+nominal canvas, so the mark, the rule and the tagline share one optical left
 edge and the lockup never clips an ascender or descender.
 """
 import hashlib
@@ -30,8 +30,8 @@ UPEM = 1000
 # The wordmark is set in IBM Plex Sans (SIL Open Font License 1.1). The font is
 # fetched on demand rather than vendored: the glyphs ship as baked outlines, so
 # the repository never redistributes font software and the licence surface is
-# unchanged. Pinned by digest — a mismatch means the upstream file moved, and
-# the wordmark must be re-cut deliberately, not silently.
+# unchanged. Pinned by digest. A mismatch means the upstream file moved, and
+# the wordmark is re-cut deliberately.
 FONT_URL = (
     "https://github.com/google/fonts/raw/main/ofl/ibmplexsans/"
     "IBMPlexSans%5Bwdth,wght%5D.ttf"
@@ -76,9 +76,9 @@ SUB_WEIGHT, SUB_TRACK = 400, -0.012
 
 # ---------------------------------------------------------------- the mark
 
-# Candidate A — confluence: 3 sources, 1 core, 1 sink, on a 32-unit canvas.
+# The confluence mark: 3 sources, 1 core, 1 sink, on a 32-unit canvas.
 # The ink occupies only part of that canvas; every layout below aligns to INK,
-# not to the canvas, so these bounds are load-bearing.
+# not to the canvas.
 #   left   6 - 2.4 = 3.6      right  26 + 2.9 = 28.9
 #   top    7.5 - 2.4 = 5.1    bottom 24.5 + 2.4 = 26.9
 MARK_INK = (3.6, 5.1, 28.9, 26.9)
@@ -187,7 +187,7 @@ class Run:
         )
 
     def at_ink_left(self, x, baseline, fill):
-        """Emit with the run's left INK edge at `x` — optical alignment."""
+        """Emit with the run's left INK edge at `x`, for optical alignment."""
         return self.at(x - self.ink_left, baseline, fill)
 
 
@@ -271,7 +271,7 @@ def gen_marks():
         STATIC,
     )
 
-    # Avatar: full-bleed square, no corner radius — GitHub rounds it itself.
+    # Avatar: full-bleed square with no corner radius, since GitHub rounds it.
     # Ink fills 62% of the width, which keeps it clear of that rounding.
     S = 512
     ink_w = S * 0.62

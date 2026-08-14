@@ -4,13 +4,12 @@
 # uploaded to GitHub by hand.
 #
 # Everything here is derived. Do not hand-edit anything under
-# `website/static/img/brand/`, `logo.svg`, `logo-dark.svg` or `favicon.svg` —
-# change `brandgen.py` and re-run this.
+# `website/static/img/brand/`, `logo.svg`, `logo-dark.svg` or `favicon.svg`.
+# Change `brandgen.py` and re-run this.
 #
 # Prerequisites: python3, and resvg + oxipng for the raster step
-# (`brew install resvg oxipng`). Without them the SVGs are still written and the
-# script reports which PNGs it could not refresh, rather than exiting green on a
-# partial result.
+# (`brew install resvg oxipng`). Without them the SVGs are still written, the
+# script reports which PNGs it could not refresh, and it exits non-zero.
 
 set -euo pipefail
 
@@ -37,7 +36,7 @@ command -v oxipng >/dev/null 2>&1 || missing+=(oxipng)
 if (( ${#missing[@]} )); then
     echo
     echo "SVG sources written, but the PNGs were NOT refreshed."
-    echo "missing: ${missing[*]}  —  brew install ${missing[*]}"
+    echo "missing: ${missing[*]}  (brew install ${missing[*]})"
     exit 1
 fi
 

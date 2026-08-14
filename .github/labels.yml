@@ -5,10 +5,7 @@
 #
 # ---------------------------------------------------------------------------
 #
-# The namespaces are deliberately few. A taxonomy that grows one label at a time,
-# with no source of truth to read first, ends up with namespaces that overlap —
-# the same concept reachable under two prefixes, and no answer to which one a
-# triager should reach for. Five is enough to sort every issue this repo has had.
+# The namespaces:
 #
 #   crate:     which crate. Reuses the commit scopes verbatim.
 #   area:      the non-crate surfaces.
@@ -16,10 +13,10 @@
 #   ci:        opt a pull request into a suite its paths would not select.
 #   needs:     what is blocking the issue, not what it is about.
 #
-# There is no `type:` namespace: GitHub's native issue types carry that axis and
+# There is no `type:` namespace. GitHub's native issue types carry that axis and
 # the forms set them, so a bug arrives typed rather than labelled.
-# `delivery-correctness` and `performance` are not types but classes of bug with
-# their own triage priority, which is why they stay as labels below.
+# `delivery-correctness` and `performance` are classes of bug with their own
+# triage priority, so they stay as labels below.
 #
 
 - name: "crate: spate"
@@ -28,7 +25,7 @@
 
 - name: "crate: spate-core"
   color: "0052cc"
-  description: "The engine — operators, checkpointing, backpressure, runtime"
+  description: "The engine, its operators, checkpointing, backpressure and runtime"
 
 - name: "crate: spate-kafka"
   color: "0052cc"
@@ -64,9 +61,7 @@
 
 # ------------------------------------------------------------------- area ----
 #
-# Everything that is not a crate. `workspace` covers the root manifest and the
-# lockfile; `supply-chain` covers the licence and advisory surface, which is
-# CODEOWNED and worth seeing separately from the rest of CI.
+# Everything that is not a crate.
 
 - name: "area: docs"
   color: "5319e7"
@@ -98,9 +93,8 @@
 
 # --------------------------------------------------------------- platform ----
 #
-# Only worth applying when the platform is the point rather than incidental.
-# e.g., a measurement question that only appears on one host architecture —
-# instruction-set width is decided by the runner image, not by the code.
+# Only worth applying when the platform is the point rather than incidental,
+# such as a measurement question that appears on one host architecture only.
 
 - name: "platform: macos"
   color: "006b75"
@@ -133,11 +127,9 @@
 # --------------------------------------------------------------------- ci ----
 #
 # Triggers, not descriptions. `scripts/ci-changes.sh` selects the expensive
-# suites from the changed paths and deliberately fails closed; these labels let
-# a maintainer turn a suite **on** for a pull request whose paths would not have
-# selected it. They can only ever add work. Nothing here can switch off a suite
-# the path classifier chose, because that would turn a fail-closed design into a
-# fail-open one with a checkbox.
+# suites from the changed paths and fails closed; these labels turn a suite
+# **on** for a pull request whose paths would not have selected it. They only
+# ever add work, and nothing here switches off a suite the classifier chose.
 
 - name: "ci: docker"
   color: "fbca04"
@@ -153,9 +145,8 @@
 
 # ------------------------------------------------------------------ needs ----
 #
-# What the issue is waiting on. Distinct from what it is about — an issue keeps
-# its `crate:` label for life, and sheds a `needs:` one as soon as it is
-# answered.
+# What the issue is waiting on, not what it is about. An issue keeps its
+# `crate:` label for life and sheds a `needs:` one once it is answered.
 
 - name: "needs: repro"
   color: "e99695"
@@ -171,17 +162,14 @@
 
 # ------------------------------------------------------------ unnamespaced ----
 #
-# Three of these predate the taxonomy and stay bare deliberately.
-#
-# `delivery-correctness` and `performance` are not issue *types* — the native
-# type for both is Bug. They are classes of bug that carry a triage priority.
+# `delivery-correctness` and `performance` carry the native issue type Bug.
 #
 # `dependencies` is the one label `dependabot.yml` requires.
 #
 # `affects-performance` is machine-managed: `perf-label.yml` adds it when a
 # pull request's counter deltas cross the advisory thresholds and removes it
-# when they stop. Triagers reach for `performance`; nobody applies this one by
-# hand, and hand-applying it only lasts until the next benched push.
+# when they stop. Applying it by hand lasts until the next benched push, and
+# triagers reach for `performance`.
 
 - name: "delivery-correctness"
   color: "b60205"

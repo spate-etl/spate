@@ -12,8 +12,8 @@
 //!
 //! Semantics match [`crate::serde::chrono`]: out-of-range values fail as
 //! record-level errors, each module has an `option` submodule, and the
-//! attribute is load-bearing — the `time` crate's default serde impls
-//! write forms no date/time column reads correctly.
+//! attribute is required: the `time` crate's default serde impls write
+//! forms no date/time column reads correctly.
 
 use ::time::{Date, OffsetDateTime};
 use serde::de::Error as _;

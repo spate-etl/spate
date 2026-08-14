@@ -1,4 +1,4 @@
-//! A SeaweedFS S3 gateway in a container — the real-S3-API fixture shared
+//! A SeaweedFS S3 gateway in a container, the real-S3-API fixture shared
 //! by the Docker-gated suites. (SeaweedFS, not MinIO: MinIO is no longer
 //! open source.)
 
@@ -21,9 +21,9 @@ pub(crate) struct Gateway {
     _container: Container<GenericImage>,
     pub(crate) port: u16,
     pub(crate) bucket: String,
-    /// One runtime and client for all seeding/assertion I/O — some
-    /// helpers are polled in `wait_until` loops, so per-call construction
-    /// would build a runtime per iteration.
+    /// One runtime and client for all seeding/assertion I/O. Some helpers
+    /// are polled in `wait_until` loops, so per-call construction would
+    /// build a runtime per iteration.
     pub(crate) rt: tokio::runtime::Runtime,
     pub(crate) client: Arc<dyn ObjectStore>,
 }

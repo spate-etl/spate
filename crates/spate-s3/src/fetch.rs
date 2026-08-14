@@ -1,15 +1,15 @@
 //! The async edge: the shared listing helper and one fetcher task per
 //! gained split, reading its member objects' bytes to the pipeline thread.
 //!
-//! Runs on the pipeline's I/O runtime. Every channel send `await`s — a
-//! fetcher never blocks a runtime worker, so sink workers sharing the
+//! Runs on the pipeline's I/O runtime. Every channel send `await`s, so a
+//! fetcher never blocks a runtime worker and sink workers sharing the
 //! runtime keep running while lanes are back-pressured.
 //!
 //! Each ETag-pinned object is read as a sequence of **bounded ranged GETs,
-//! each drained fully into memory before any chunk is forwarded**. Releasing
-//! the connection between windows is deliberate: a back-pressured lane then
-//! parks on buffered bytes, never an idle S3 body that the client's request
-//! timeout (or an intermediary) would reset mid-stream. See [`stream_object`].
+//! each drained fully into memory before any chunk is forwarded**. The
+//! connection is released between windows, so a back-pressured lane parks on
+//! buffered bytes, never an idle S3 body that the client's request timeout
+//! (or an intermediary) would reset mid-stream. See [`stream_object`].
 //!
 //! # Determinism
 //!
@@ -17,18 +17,18 @@
 //! ordering, so [`list_all`] collects the listing and sorts it by key
 //! before the planner packs it. A fetcher never lists: it reads its
 //! split's member objects in descriptor order, so every (ordinal, record
-//! index) offset is minted against the immutable descriptor — identical
+//! index) offset is minted against the immutable descriptor, identical
 //! under every owner of the split.
 //!
 //! # Retries
 //!
 //! Transient GET failures are retried inside the fetcher with capped
 //! exponential backoff, resuming from the last delivered byte with a
-//! ranged GET **conditioned on the object's ETag** — a splice of two
+//! ranged GET **conditioned on the object's ETag**, so a splice of two
 //! different object versions is impossible. Persistent failure (attempt
 //! budget exhausted) and the object-level non-retryable classes (missing
-//! key, failed precondition) **poison the split** — it is handed back for
-//! a peer to retry, and quarantined at the attempt cap — while
+//! key, failed precondition) **poison the split**, which is handed back for
+//! a peer to retry and quarantined at the attempt cap, while
 //! credentials/configuration failures stay fatal for the pipeline. An
 //! object whose store returns no ETag cannot be resumed mid-stream safely
 //! and poisons the split on a mid-object break instead.
@@ -55,7 +55,7 @@ pub(crate) struct ObjectEntry {
     pub(crate) size: u64,
     /// ETag from the listing, if the store reports one.
     pub(crate) etag: Option<String>,
-    /// Last-modified time (ms since epoch) — the records' event time.
+    /// Last-modified time (ms since epoch), used as the records' event time.
     pub(crate) last_modified_ms: i64,
 }
 
@@ -79,9 +79,9 @@ pub(crate) enum ChunkMsg {
     LaneFailed(SplitFailure),
 }
 
-/// How a split read failed — the classification that decides whether one
-/// object condemns the split (poison, handled by the coordinator) or the
-/// whole pipeline (fatal).
+/// How a split read failed. The classification decides whether one object
+/// condemns the split (poison, handled by the coordinator) or the whole
+/// pipeline (fatal).
 #[derive(Debug)]
 pub(crate) enum SplitFailure {
     /// Object-level failure: a member was deleted after planning, was
@@ -104,7 +104,7 @@ impl std::fmt::Display for SplitFailure {
 }
 
 /// Collect and sort the full listing under `prefix`. Memory is
-/// O(number of keys), held for the duration of one plan run — which for an
+/// O(number of keys), held for the duration of one plan run, which for an
 /// open plan is every replan tick, not startup alone.
 pub(crate) async fn list_all(
     store: &Arc<dyn ObjectStore>,
@@ -141,18 +141,18 @@ pub(crate) struct FetcherParams {
     /// Upper bound on one bounded ranged GET (the per-lane read-ahead window,
     /// the source's `prefetch_bytes`). Each window is drained fully into memory
     /// before any chunk is forwarded, so the S3 connection is released before a
-    /// back-pressured hand-off — see [`stream_object`].
+    /// back-pressured hand-off; see [`stream_object`].
     pub(crate) range_bytes: usize,
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
     /// Cooperative-revocation stop (set by `SplitCtx::begin_revoke`): checked
-    /// only at object boundaries — including the *between-objects* pause
-    /// wait; the mid-object pause waits deliberately ignore it — **never
-    /// mid-object**. On stop the fetcher returns, dropping `tx` at a boundary —
-    /// a channel close indistinguishable from a natural end of slice, so the
-    /// lane takes its clean end-of-input path and never the mid-object Fatal
-    /// path (see [`run_fetcher`]).
+    /// only at object boundaries, **never mid-object**. The
+    /// *between-objects* pause wait checks it; the mid-object pause waits
+    /// ignore it. On stop the fetcher returns, dropping `tx` at a boundary.
+    /// That channel close is indistinguishable from a natural end of slice,
+    /// so the lane takes its clean end-of-input path and never the
+    /// mid-object Fatal path (see [`run_fetcher`]).
     pub(crate) stop: Arc<AtomicBool>,
     /// First backoff step (doubles per attempt, capped; tests shrink it).
     pub(crate) retry_base: Duration,
@@ -160,8 +160,8 @@ pub(crate) struct FetcherParams {
     pub(crate) retries: Option<spate_core::metrics::Counter>,
 }
 
-/// How many attempts one object GET — and, in the planner, one prefix
-/// listing — gets before escalating. Failing fast (a poisoned split, a
+/// How many attempts one object GET, and in the planner one prefix
+/// listing, gets before escalating. Failing fast (a poisoned split, a
 /// fatal plan) beats a backfill wedged invisibly in an endless retry
 /// loop.
 pub(crate) const MAX_ATTEMPTS: u32 = 8;
@@ -254,10 +254,10 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
 /// `stop` is passed `Some` only by the **between-objects** caller: a
 /// cooperative revocation that lands while the fetcher is back-pressured must be
 /// noticed promptly, and returning here is safe because no object is open. The
-/// mid-object callers pass `None` — a stop must never end the wait between an
+/// mid-object callers pass `None`. A stop must never end the wait between an
 /// `ObjectStart` and its `ObjectEnd` (that would close the channel with the
-/// lane's object still open, tripping its Fatal path); mid-object they simply
-/// wait for unpause and let the boundary check act.
+/// lane's object still open, tripping its Fatal path); mid-object they wait
+/// for unpause and let the boundary check act.
 async fn pause_gate(
     pause: &AtomicBool,
     stop: Option<&AtomicBool>,
@@ -284,8 +284,8 @@ async fn pause_gate(
 /// When the object's content is pinned by an ETag (S3 always supplies one, as
 /// does `object_store`'s `LocalFileSystem`) the read is a sequence of **bounded
 /// ranged GETs, each drained fully into memory before any chunk is forwarded**
-/// ([`stream_object_ranged`]) — so a lane parked on backpressure only ever
-/// holds buffered bytes, never an idle GET body that S3 (or an intermediary)
+/// ([`stream_object_ranged`]), so a lane parked on backpressure only holds
+/// buffered bytes, never an idle GET body that S3 (or an intermediary)
 /// could reset or time out mid-stream. Without an ETag a resumed ranged read
 /// could splice two object versions, so such stores keep a single continuous
 /// stream ([`stream_object_streaming`]).
@@ -338,11 +338,11 @@ async fn stream_object(
 }
 
 /// Pinned read path: walk the object in `range_bytes` windows, each a
-/// short-lived ranged GET **fully buffered before the hand-off**. Releasing the
-/// connection the moment a window is read is the whole point: a paused or
-/// back-pressured lane then holds only `range_bytes` of buffered read-ahead,
+/// short-lived ranged GET **fully buffered before the hand-off**. The
+/// connection is released the moment a window is read, so a paused or
+/// back-pressured lane holds only `range_bytes` of buffered read-ahead and
 /// never an idle body left un-polled past the client's request timeout. The
-/// ETag pin keeps the multi-GET read splice-safe — an overwrite between windows
+/// ETag pin keeps the multi-GET read splice-safe: an overwrite between windows
 /// trips the `if_match` precondition instead of blending versions.
 #[expect(
     clippy::too_many_arguments,
@@ -375,8 +375,8 @@ async fn stream_object_ranged(
             ..Default::default()
         };
         // One bounded request, drained fully into memory at network speed. The
-        // connection is released here — *before* the possibly-long hand-off
-        // below — so backpressure never leaves an idle S3 body open.
+        // connection is released here, *before* the possibly-long hand-off
+        // below, so backpressure never leaves an idle S3 body open.
         let buffered = match store.get_opts(&path, options).await {
             Ok(result) => match result.bytes().await {
                 Ok(bytes) => bytes,
@@ -445,9 +445,9 @@ async fn stream_object_ranged(
 /// Unpinned read path (store reports no ETag): a single continuous stream. A
 /// resumed ranged GET across a failure could splice two object versions when
 /// the content is not pinned, so a mid-object break is fatal rather than
-/// resumed. This holds the body open across the hand-off — acceptable only
-/// because it is the fallback for stores that cannot be safely range-resumed;
-/// S3 and `LocalFileSystem` always report an ETag and take the ranged path.
+/// resumed. This holds the body open across the hand-off, and is the
+/// fallback for stores that cannot be safely range-resumed; S3 and
+/// `LocalFileSystem` always report an ETag and take the ranged path.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal read loop, mirrors stream_object_ranged"
@@ -518,7 +518,7 @@ async fn stream_object_streaming(
                         // pipeline-fatal even mid-stream. Everything else
                         // stays object-level: without an ETag a resumed read
                         // could splice two object versions, so a mid-object
-                        // break cannot be retried by this owner — poison.
+                        // break cannot be retried by this owner. Poison.
                         if crate::error::is_pipeline_fatal(&e) {
                             return Err(SplitFailure::Fatal(SourceError::Client {
                                 class: ErrorClass::Fatal,
@@ -561,10 +561,10 @@ async fn stream_object_streaming(
 /// non-retryable classes and exhausted budgets.
 ///
 /// Escalation splits by scope: credentials/config failures are pipeline
-/// [`Fatal`](SplitFailure::Fatal); everything else — a deleted or
-/// overwritten object (`NotFound`, a failed `if_match` precondition), or a
-/// read that keeps failing past the attempt budget — is object-level
-/// [`Poison`](SplitFailure::Poison), handled by handing the split back.
+/// [`Fatal`](SplitFailure::Fatal). Everything else is object-level
+/// [`Poison`](SplitFailure::Poison), handled by handing the split back: a
+/// deleted or overwritten object (`NotFound`, a failed `if_match`
+/// precondition), or a read that keeps failing past the attempt budget.
 async fn retry_or_fail(
     split: &SplitId,
     entry: &ObjectEntry,
@@ -670,8 +670,8 @@ mod tests {
         gets: AtomicU32,
         ranges: std::sync::Mutex<Vec<RangeKind>>,
         /// Payload streams drained to completion (a cut or abandoned body
-        /// never counts) — the observable that separates "window fully
-        /// buffered before hand-off" from "connection held open".
+        /// never counts). This is the observable that separates "window
+        /// fully buffered before hand-off" from "connection held open".
         bodies_drained: Arc<AtomicU32>,
     }
 
@@ -1158,10 +1158,10 @@ mod tests {
     #[tokio::test]
     async fn a_backpressured_lane_buffers_one_window_and_fetches_no_further() {
         // 16-byte object, 8-byte windows → two windows. With a capacity-1
-        // channel nobody drains, the fetcher must read the FIRST window in full
-        // — proving the connection is released before the hand-off — then block
-        // on the send, never starting the second window. That bounds peak
-        // per-lane memory to one window under backpressure.
+        // channel that nothing drains, the fetcher must read the FIRST window
+        // in full, proving the connection is released before the hand-off,
+        // then block on the send, never starting the second window. That
+        // bounds peak per-lane memory to one window under backpressure.
         let flaky = Arc::new(FlakyStore::new(
             seeded(&[("p/a", b"0123456789abcdef")]).await,
         ));
@@ -1273,7 +1273,7 @@ mod tests {
         // Stop set before the fetcher starts: the boundary check at the top
         // of the loop fires before any `ObjectStart`, so `tx` is dropped with
         // no object open. The lane reads a closed channel and takes its clean
-        // end-of-input path — a revocation at a boundary is indistinguishable
+        // end-of-input path; a revocation at a boundary is indistinguishable
         // from a natural end of slice.
         let store: Arc<dyn ObjectStore> =
             Arc::new(seeded(&[("p/a", b"aaaa"), ("p/b", b"bbbb")]).await);
@@ -1378,8 +1378,8 @@ mod tests {
             retries: None,
         };
         let task = tokio::spawn(run_fetcher(params));
-        // Take the first object's start and one data chunk — now mid-object —
-        // then pause and stop the fetcher.
+        // Take the first object's start and one data chunk, leaving the
+        // fetcher mid-object, then pause and stop it.
         let m0 = rx.recv().await.unwrap();
         assert!(matches!(m0, ChunkMsg::ObjectStart { ordinal: 0, .. }));
         let m1 = rx.recv().await.unwrap();

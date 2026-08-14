@@ -39,7 +39,7 @@ fn real_broker_full_lifecycle() {
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 
-    // Auto-created topic has a single partition — sufficient for the
+    // Auto-created topic has a single partition, which is enough for the
     // lifecycle; the multi-partition rebalance path is covered by the
     // MockCluster suite.
     let producer: BaseProducer = ClientConfig::new()
@@ -126,7 +126,7 @@ fn real_broker_full_lifecycle() {
 /// watermark must be committed for the partition being revoked so the work is
 /// not replayed after the partition moves. This exercises the full path a
 /// real broker allows (a pre-rebalance commit at the valid generation, and
-/// librdkafka's commit of stored offsets when `unassign` removes them) — the
+/// librdkafka's commit of stored offsets when `unassign` removes them). The
 /// in-process MockCluster rejects offset commits while the group is joining,
 /// so this case can only be verified against a real broker.
 #[test]
@@ -158,7 +158,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment and drain all 50 records, producing a watermark at
-    // offset 50 — but do not commit yet (the inter-tick window).
+    // offset 50, but do not commit yet (the inter-tick window).
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut lanes = loop {
         assert!(Instant::now() < deadline, "no assignment");

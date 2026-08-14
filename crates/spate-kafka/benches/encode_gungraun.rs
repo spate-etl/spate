@@ -1,14 +1,14 @@
 //! Instruction counts for the record-to-message encode path (gungraun).
 //!
-//! One shape — drive a run of records through
-//! [`KafkaEncoder`](spate_kafka::sink::KafkaEncoder), exactly as the sink's
-//! terminal stage does between seals — parameterized by the message encoder
-//! underneath it and by the shape of the message that comes out.
+//! One shape, driving a run of records through
+//! [`KafkaEncoder`](spate_kafka::sink::KafkaEncoder) as the sink's terminal
+//! stage does between seals, parameterized by the message encoder underneath
+//! it and by the shape of the message that comes out.
 //!
 //! This is the pipeline-thread half of the sink: the message encoder fills
 //! the reusable accumulator, the adapter sums the guarded size, and the
 //! connector's internal frame writer appends one length-delimited entry. The
-//! frame writer is private and stays private — it is measured because
+//! frame writer is private and stays private; it is measured because
 //! `KafkaEncoder::encode` calls it, not because anything was widened to reach
 //! it.
 //!
@@ -19,7 +19,7 @@
 //! `write_batch`, which is the shape this instrument cannot enter. A
 //! regression there moves sink CPU without moving any number below.
 //!
-//! The cases cover the axes that decide the cost — which encoder fills the
+//! The cases cover the axes that decide the cost: which encoder fills the
 //! accumulator, which parts of a message it fills, and whether the size guard
 //! lets the result through:
 //!
@@ -47,13 +47,13 @@
 //!   fraction of a JSON sink's per-record cost the connector's own accumulator
 //!   and framing are.
 //!
-//! The matrix is deliberately sparse. The key axis is exercised once, on the
+//! The matrix is sparse. The key axis is exercised once, on the
 //! passthrough encoder, where it stands out against a small denominator
 //! instead of disappearing into serialization; the guard axis is exercised
 //! once, on the header case, because header bytes are what make this guard
 //! differ from librdkafka's key-plus-payload check. Callgrind runs under
 //! emulation, and a case that only re-measures a combination two others
-//! already fix costs real time on every pull request.
+//! already fix costs time on every pull request.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
 //! exists on every developer machine: run it with `make bench-gungraun`.
@@ -89,8 +89,8 @@ struct Rig<T: Send + 'static, M> {
 /// The measured work: a run of records through one encoder, returning how many
 /// were accepted.
 ///
-/// `#[inline(never)]` is load-bearing, not stylistic, and removing it does not
-/// fail anything — it silently empties the measurement. Callgrind toggles
+/// Removing `#[inline(never)]` fails nothing and silently empties the
+/// measurement. Callgrind toggles
 /// collection on the benchmark function, and `KafkaEncoder::encode` is generic
 /// over both the record family and the message encoder, so it monomorphises
 /// into *this* crate and is an ordinary inlining candidate. Without a frame
@@ -102,8 +102,8 @@ struct Rig<T: Send + 'static, M> {
 ///
 /// Counting the accepted records is what keeps the loop alive: every case's
 /// output is otherwise unobserved, and without a use the optimizer is free to
-/// delete the call this exists to count. The caller asserts the count, so a
-/// case that silently stopped encoding — or started failing — cannot pass as a
+/// delete the call being counted. The caller asserts the count, so a
+/// case that silently stopped encoding, or started failing, cannot pass as a
 /// fast one.
 #[inline(never)]
 fn encode_run<T, M>(rig: &mut Rig<T, M>) -> usize
@@ -125,8 +125,8 @@ where
 ///
 /// One `AckRef` cloned across the corpus rather than one per record: at this
 /// record count a pair each would be ten thousand live channels built in
-/// setup. Nothing on this path touches an acknowledgment — the encoder never
-/// resolves one — so the only traffic is the single message the last handle
+/// setup. Nothing on this path touches an acknowledgment, since the encoder
+/// never resolves one, so the only traffic is the single message the last handle
 /// sends as it drops, and leaking the receiver keeps the channel connected so
 /// that send is delivered rather than discarded. Either way it costs the
 /// measurement nothing: the rig is returned rather than dropped, so the drop
@@ -243,7 +243,7 @@ library_benchmark_group!(
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the encode under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at. The passthrough

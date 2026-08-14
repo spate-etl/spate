@@ -1,6 +1,6 @@
 //! The monotonic time source behind the coordination control loop.
 //!
-//! Production uses [`SystemClock`] — real wall time. Tests inject
+//! Production uses [`SystemClock`], which reads real wall time. Tests inject
 //! `TestClock`, which only moves when the test moves it, so every
 //! time-driven transition is deterministic regardless of CI scheduler
 //! jitter: the coordinator forces a multi-thread runtime, so
@@ -9,21 +9,21 @@
 //!
 //! The clock owns both halves of "when": reading the current instant
 //! ([`Clock::now`]) *and* waiting for one ([`Clock::sleep_until`]). Every
-//! deadline that drives a *protocol state transition* is drawn from it —
-//! lease expiry and the starvation self-fence, the heartbeat/reconcile/
-//! replan cadence, the `rebalance_delay` grace window, the drain deadline,
-//! and the renewal cadence gate — so a frozen clock cannot freeze half the
-//! protocol and let the other half race.
+//! deadline that drives a *protocol state transition* is drawn from it,
+//! covering lease expiry and the starvation self-fence, the
+//! heartbeat/reconcile/replan cadence, the `rebalance_delay` grace window,
+//! the drain deadline, and the renewal cadence gate. A frozen clock
+//! therefore cannot freeze half the protocol and let the other half race.
 //!
-//! Deliberately *not* on the clock, because each bounds real I/O rather
-//! than protocol time: `op_timeout` (`store::metered`), the command reply
-//! budget (`coordinator`), the startup and re-watch retry backoffs
-//! (`task`), and `MemoryStore`'s sweeper cadence — the sweeper's *cadence*
-//! is real, but what it expires is judged against the clock. So a frozen
-//! clock stops the protocol; it does not stop the crate from using real
-//! time where real time is the thing being bounded. Commands are served on
-//! a clock-independent select arm, which is what lets a test drive a
-//! coordinator whose clock is not moving.
+//! *Not* on the clock, because each bounds real I/O rather than protocol
+//! time: `op_timeout` (`store::metered`), the command reply budget
+//! (`coordinator`), the startup and re-watch retry backoffs (`task`), and
+//! `MemoryStore`'s sweeper cadence. The sweeper's *cadence* is real, but
+//! what it expires is judged against the clock. A frozen clock stops the
+//! protocol; it does not stop the crate from using real time where real
+//! time is the thing being bounded. Commands are served on a
+//! clock-independent select arm, so a test can drive a coordinator whose
+//! clock is not moving.
 //!
 //! # Advancing a frozen clock
 //!
@@ -31,14 +31,14 @@
 //! by depends on whether the worker under test can still renew:
 //!
 //! - **Advance to expire.** Jumping past a whole lease is deterministic
-//!   *only* when the target cannot renew anyway — a crashed runtime, a
-//!   kill-switch store, an injected fault. Nothing is racing the jump.
+//!   *only* when the target cannot renew anyway (a crashed runtime, a
+//!   kill-switch store, an injected fault). Nothing is racing the jump.
 //! - **Advance to settle.** For "hold steady and assert nothing changes"
 //!   windows the worker is alive and must win its renewals, so step in
 //!   increments no larger than `renew_interval` and let the task run
-//!   between them. `TestClock::advance_stepped` does exactly that; a
-//!   single large jump here would make a lease expiry and the renewal that
-//!   prevents it come due at the same instant, which is a real race.
+//!   between them. `TestClock::advance_stepped` does that; a single large
+//!   jump here makes a lease expiry and the renewal that prevents it come
+//!   due at the same instant, which races.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -54,12 +54,12 @@ use tokio::time::Instant;
 /// `&mut self`.
 ///
 /// One is drawn per timer arm per `select!` entry, so the rate is the
-/// control loop's wakeup rate — not a fixed cadence. A commit wakes the
+/// control loop's wakeup rate rather than a fixed cadence. A commit wakes the
 /// loop (`Command::Commit` is sent unconditionally), and the pipeline
 /// controller tightens to `FAST_COMMIT_POLL` while chasing a fast-commit
 /// partition, so the loop can iterate in the low milliseconds. Still off
 /// the per-record path, and every such iteration already `Box::pin`s its
-/// handler — the same trade, at the same rate.
+/// handler.
 pub type Sleep = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// A monotonic clock. Returns [`tokio::time::Instant`] so the value slots
@@ -74,12 +74,12 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Resolve once this clock reaches `deadline`.
     ///
     /// Returns immediately if `deadline` is already past. On a frozen
-    /// clock this parks until the test advances past `deadline` — it must
-    /// never fall back to real time, or the freeze would leak.
+    /// clock this parks until the test advances past `deadline`. It must
+    /// never fall back to real time, or the freeze leaks.
     fn sleep_until(&self, deadline: Instant) -> Sleep;
 }
 
-/// Real wall time — the production clock.
+/// The production clock, reading real wall time.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClock;
 
@@ -98,8 +98,8 @@ impl Clock for SystemClock {
 ///
 /// Behind the `testing` feature and `#[doc(hidden)]`: it has to be `pub`
 /// for this crate's `tests/` binaries, which are external crates and
-/// cannot see `#[cfg(test)]` items, but it must not reach a consumer — a
-/// `TestClock` wired into production would stop the control loop dead.
+/// cannot see `#[cfg(test)]` items, but it must not reach a consumer. A
+/// `TestClock` wired into production stops the control loop dead.
 /// Off by default and never enabled by the `spate` facade, the same shape as
 /// `spate-s3`'s `testing` feature.
 #[cfg(any(test, feature = "testing"))]
@@ -129,7 +129,7 @@ impl TestClock {
     /// Move the clock forward, waking everything parked on a deadline this
     /// jump passes.
     ///
-    /// Safe as one jump only when nothing is racing it — see the [module
+    /// Safe as one jump only when nothing is racing it; see the [module
     /// docs](self). Prefer [`advance_stepped`](TestClock::advance_stepped)
     /// for a live worker.
     pub fn advance(&self, by: Duration) {
@@ -141,9 +141,9 @@ impl TestClock {
     /// after each one.
     ///
     /// This is the shape a live worker needs: it gets a chance to renew
-    /// inside every step, so its lease never expires merely because the
-    /// test moved time faster than the protocol could react. `between` is
-    /// where the test drives its coordinators (or just yields).
+    /// inside every step, so its lease does not expire because the test
+    /// moved time faster than the protocol could react. `between` is
+    /// where the test drives its coordinators (or yields).
     pub fn advance_stepped(&self, total: Duration, step: Duration, mut between: impl FnMut()) {
         assert!(!step.is_zero(), "advance_stepped needs a non-zero step");
         let mut moved = Duration::ZERO;

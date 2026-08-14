@@ -31,9 +31,9 @@ struct Server {
     admin: clickhouse::Client,
 }
 
-/// How long `docker start` itself gets. Readiness is not in here — the
+/// How long `docker start` itself gets. Readiness is not in here; the
 /// fixtures wait for that themselves, in [`wait_for_queries`], so that a
-/// server which never comes up can be reported rather than merely timed out.
+/// server which never comes up can be reported rather than timed out.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a started node gets to answer an authenticated query.
@@ -41,8 +41,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// A node answers in about a second, so this is already two orders of
 /// magnitude of headroom, and raising it buys nothing a passing test wants:
 /// it only decides how long a *broken* fixture burns before it reports. The
-/// old 60s budget was not the problem — arriving at the end of it with no
-/// information was.
+/// budget itself is not the problem; arriving at the end of it with no
+/// information is.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How much of a failed node's stderr the panic carries.
@@ -52,9 +52,9 @@ const LOG_TAIL: usize = 40;
 /// started, without waiting on any condition.
 ///
 /// The stock condition is an *unauthenticated* `GET /` returning 200, which
-/// answers before the entrypoint has necessarily applied `CLICKHOUSE_PASSWORD`
-/// — and it is awaited inside `.start()`, which drops the container handle on
-/// failure. Waiting ourselves buys both the stronger condition and, on
+/// answers before the entrypoint has necessarily applied
+/// `CLICKHOUSE_PASSWORD`, and it is awaited inside `.start()`, which drops
+/// the container handle on failure. Waiting ourselves buys both the stronger condition and, on
 /// timeout, the container's logs.
 fn started_only(req: impl Into<ContainerRequest<ClickHouse>>) -> ContainerRequest<ClickHouse> {
     req.into()
@@ -66,14 +66,14 @@ fn started_only(req: impl Into<ContainerRequest<ClickHouse>>) -> ContainerReques
 ///
 /// The `clickhouse` client sets no request timeout, so an attempt against a
 /// half-open socket can hang indefinitely. A poll loop that only checks its
-/// deadline *between* attempts therefore has no deadline at all — one hung
+/// deadline *between* attempts therefore has no deadline at all: one hung
 /// attempt outlasts any budget. Every probe below is wrapped in this.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Block until `admin` can run a query, or panic saying why it never could.
 ///
-/// A ClickHouse server that dies on startup and one that is merely slow
-/// present identically — as a wait that never finishes — so the panic carries
+/// A ClickHouse server that dies on startup and one that is only slow
+/// present identically, as a wait that never finishes, so the panic carries
 /// the container's liveness, exit code and stderr. Without those a failure
 /// here is unactionable, and the only recourse is to re-run it.
 async fn wait_for_queries(
@@ -226,7 +226,7 @@ validate_schema: {mode}
 }
 
 /// Encode `rows` through a (possibly schema-checked) encoder into one
-/// sealed batch — the same CPU path a pipeline thread runs.
+/// sealed batch, the same CPU path a pipeline thread runs.
 fn encode_batch<T, E>(
     encoder: &mut E,
     rows: Vec<T>,

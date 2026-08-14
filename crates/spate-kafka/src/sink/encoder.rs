@@ -4,7 +4,7 @@
 //! Two seams, one adapter: a [`MessageEncoder`] produces one Kafka message
 //! (key, headers, payload) per record into a reusable [`KafkaMessage`]
 //! accumulator, and [`KafkaEncoder`] adapts any `MessageEncoder` to the
-//! framework's [`RowEncoder`] contract — enforcing the `max_message_bytes`
+//! framework's [`RowEncoder`] contract, enforcing the `max_message_bytes`
 //! guard and writing the connector's internal frame format. Ship-with
 //! implementations: [`KafkaBytesEncoder`] (payload passthrough) and
 //! [`KafkaJsonEncoder`] (serde_json).
@@ -18,12 +18,12 @@ use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
 use std::marker::PhantomData;
 
-/// librdkafka's `message.max.bytes` default (1,000,000 bytes — not 1 MiB),
+/// librdkafka's `message.max.bytes` default (1,000,000 bytes, not 1 MiB),
 /// the default basis for the encode-time size guard.
 pub(crate) const DEFAULT_MAX_MESSAGE_BYTES: usize = 1_000_000;
 
 /// One Kafka message under assembly: the accumulator a [`MessageEncoder`]
-/// fills per record. Reused across records — internal buffers are cleared,
+/// fills per record. Reused across records: internal buffers are cleared,
 /// not freed, so steady-state encoding does not allocate.
 ///
 /// A message starts keyless with an empty payload. Setting no payload
@@ -92,7 +92,7 @@ impl KafkaMessage {
         self.payload.clear();
     }
 
-    /// The size the guard checks: key + payload + header bytes — a
+    /// The size the guard checks: key + payload + header bytes, a
     /// conservative upper bound on the record's contribution to the broker's
     /// `message.max.bytes` limit, which counts headers (unlike librdkafka's
     /// client-side key+payload check). Counting headers here keeps an
@@ -130,7 +130,7 @@ impl KafkaMessage {
 
 /// The record→message seam of the Kafka sink: produce exactly one message
 /// into `msg` per record. Runs on pinned pipeline threads inside
-/// [`KafkaEncoder`] — no I/O, no blocking.
+/// [`KafkaEncoder`]. No I/O, no blocking.
 ///
 /// Errors are record-level unless the encoder itself is broken: return
 /// [`ErrorClass::RecordLevel`] for a record that cannot be represented
@@ -156,7 +156,7 @@ pub trait MessageEncoder<F: RecFamily>: Send + Clone + 'static {
 ///
 /// Oversized records fail with [`ErrorClass::RecordLevel`], honoring the
 /// sink stage's error policy (default Skip: drop, count, continue). Keep
-/// the limit aligned with the topic/broker `message.max.bytes` — a record
+/// the limit aligned with the topic/broker `message.max.bytes`; a record
 /// passing this guard but exceeding the broker's limit fails the whole
 /// batch fatally at the writer instead.
 ///
@@ -245,7 +245,7 @@ impl<F: RecFamily, M: MessageEncoder<F>> RowEncoder<F> for KafkaEncoder<F, M> {
 pub type BytesKeyFn = for<'r> fn(&'r [u8]) -> Option<&'r [u8]>;
 
 /// Payload passthrough for owned byte records (`Owned<Vec<u8>>`): the
-/// record's bytes become the message payload verbatim — the natural fit
+/// record's bytes become the message payload verbatim, the natural fit
 /// for Kafka→Kafka pipelines over [`BytesPassthrough`] deserialization.
 /// Keyless by default; [`with_key_fn`](Self::with_key_fn) derives a key
 /// from the payload.
@@ -295,9 +295,9 @@ impl MessageEncoder<Owned<Vec<u8>>> for KafkaBytesEncoder {
 }
 
 /// Key extractor for [`KafkaJsonEncoder`]: derives an optional message key
-/// from the record payload. A plain `fn` item — borrowing families hit the
-/// same closure-inference limit as `map_rec` (ADR-0004), and `fn` items are
-/// naturally higher-ranked.
+/// from the record payload. A plain `fn` item, because borrowing families
+/// hit the same closure-inference limit as `map_rec` (ADR-0004) and `fn`
+/// items are naturally higher-ranked.
 pub type KeyFn<F> = for<'r, 'buf> fn(&'r <F as RecFamily>::Rec<'buf>) -> Option<&'r [u8]>;
 
 /// JSON encoder: serializes each record's payload with `serde_json` as the
@@ -470,7 +470,7 @@ mod tests {
             Some(payload)
         }
         // 5-byte payload alone passes an 8-byte limit; key + payload (10)
-        // does not — the guard sums key + payload (+ headers, none here).
+        // does not; the guard sums key + payload (+ headers, none here).
         let mut keyless = KafkaEncoder::with_max_message_bytes(KafkaBytesEncoder::new(), 8);
         keyless
             .encode(&record(vec![0u8; 5]), &mut BytesMut::new())
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn size_guard_counts_header_bytes() {
         // A record whose key + payload fits but whose headers push it over the
-        // limit must fail record-level here — otherwise the oversized message
+        // limit must fail record-level here; otherwise the oversized message
         // escapes to the writer and fails the whole batch fatally at the
         // broker (which counts headers).
         #[derive(Clone)]

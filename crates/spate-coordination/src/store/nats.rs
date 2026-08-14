@@ -7,15 +7,15 @@
 //! - `spate_coordination_{job}_lease` — ephemeral: bucket-level
 //!   `max_age = lease_ttl` with limit markers (server >= 2.11). NATS KV
 //!   cannot re-arm a per-key TTL on update, but `max_age` applies per
-//!   *message* — so every CAS rewrite restarts the key's clock (that IS
+//!   *message*, so every CAS rewrite restarts the key's clock (that IS
 //!   the heartbeat), an untouched key expires, and the expiry surfaces to
 //!   watchers as a marker (`Operation::Purge`; graceful deletes surface
 //!   as `Operation::Delete`). The `nats_spike` integration test pins all
 //!   of these observations against a real server.
 //!
 //! Construction is synchronous and lazy: the connection and bucket
-//! provisioning happen on the first store operation — which is the
-//! coordinator's startup probe, so connect failures ride the startup
+//! provisioning happen on the first store operation, the coordinator's
+//! startup probe, so connect failures ride the startup
 //! retry budget and startup-time misconfiguration is Fatal with an
 //! actionable message. No `async-nats` type appears in any public
 //! signature (0.x policy: single pinned minor, internal only).
@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The NATS server floor: per-message TTLs and limit markers shipped in
-/// 2.11, and marker precision is one second — leases below 2s would be
+/// 2.11, and marker precision is one second, so leases below 2s are
 /// dominated by server-side granularity.
 const MIN_SERVER: (u64, u64) = (2, 11);
 const MIN_LEASE: Duration = Duration::from_secs(2);
@@ -94,7 +94,7 @@ pub enum NatsCredentials {
 /// TLS material for the NATS connection. Presence of this section
 /// requires TLS on every server.
 ///
-/// Construct with [`NatsTls::default`] and set fields — the struct is
+/// Construct with [`NatsTls::default`] and set fields. The struct is
 /// `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -111,7 +111,7 @@ pub struct NatsTls {
 
 /// Connection and job configuration for the NATS backend.
 ///
-/// Construct with [`NatsConfig::new`] and set the optional fields — the
+/// Construct with [`NatsConfig::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without
 /// breaking callers.
 ///
@@ -339,7 +339,7 @@ fn server_at_least(version: &str, (want_major, want_minor): (u64, u64)) -> bool 
 }
 
 /// Create the bucket or adopt an existing one, verifying that the config
-/// that matters (max_age — it IS the lease TTL) matches.
+/// that matters (max_age, which IS the lease TTL) matches.
 async fn ensure_bucket(
     jetstream: &async_nats::jetstream::Context,
     config: kv::Config,
@@ -467,9 +467,9 @@ impl CoordinationStore for NatsStore {
         };
         // An empty bucket has no entry to carry `seen_current`, so the
         // snapshot boundary must be synthesized immediately. Emptiness
-        // comes from `keys()` — the one API that answers exactly "are
-        // there live keys" (bucket status counts messages, markers
-        // included, and is not that answer).
+        // comes from `keys()`, the one API that answers "are there live
+        // keys" (bucket status counts messages, markers included, and is
+        // not that answer).
         let empty = {
             let mut keys = store
                 .keys()
@@ -517,7 +517,7 @@ impl CoordinationStore for NatsStore {
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
         // `keys()` is the authoritative live-key view (markers excluded);
-        // point-read each one. The listing backs the reconcile pass — a
+        // point-read each one. The listing backs the reconcile pass. A
         // key it omits is treated as DEAD by the protocol, so this must
         // never underreport. N+1 round trips are fine at reconcile
         // cadence over a working set of keys.

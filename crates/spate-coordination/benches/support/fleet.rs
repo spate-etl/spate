@@ -8,19 +8,19 @@
 //! justify.
 //!
 //! The pool sizes are all far above what this crate's property tests explore
-//! (fewer than 14 splits, fewer than 5 members), and deliberately so. Neither
-//! function's cost is per byte — both scale with the number of splits and the
-//! number of members, and a plan of a few splits counts almost nothing but
-//! loop entry. A backfill of an object store runs to single-digit thousands
-//! of splits, which is where [`SCAN_SPLITS`] and [`ASSIGN_SPLITS`] sit.
-//! [`JOIN_SPLITS`] is smaller for a reason stated on it: the pass it exists
-//! to measure is quadratic in the pool, so a realistic pool would put it two
-//! orders of magnitude past what a bench should count.
+//! (fewer than 14 splits, fewer than 5 members). Neither function's cost is
+//! per byte; both scale with the number of splits and the number of members,
+//! and a plan of a few splits counts almost nothing but loop entry. A
+//! backfill of an object store runs to single-digit thousands of splits,
+//! which is where [`SCAN_SPLITS`] and [`ASSIGN_SPLITS`] sit.
+//! [`JOIN_SPLITS`] is smaller: the pass it measures is quadratic in the
+//! pool, so a realistic pool would put it two orders of magnitude past what
+//! a bench should count.
 //!
 //! `reserved` is empty in every case. It is non-empty only inside a
 //! departure's grace window, and the tick that matters for balance is the one
-//! *after* the window elapses: while work is withheld the leader is
-//! deliberately not moving it.
+//! *after* the window elapses: while work is withheld the leader is not
+//! moving it.
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
@@ -44,12 +44,10 @@ pub(crate) const ASSIGN_SPLITS: usize = 1_200;
 /// is **quadratic** in the pool: it accepts one move per full
 /// `O(members^2 x splits-per-member)` scan, and the number of moves it has to
 /// accept is itself proportional to the pool. At `ASSIGN_SPLITS` these
-/// profiles count in the hundreds of millions of instructions — an order of
-/// magnitude past what the rest of this tier costs, and a bench nobody waits
-/// for rather than a more sensitive one. The two profiles that use this share
-/// it exactly, so the pair stays readable against each other; neither is
-/// comparable with the two that use [`ASSIGN_SPLITS`], and nothing asks them
-/// to be.
+/// profiles count in the hundreds of millions of instructions, an order of
+/// magnitude past what the rest of this tier costs. The two profiles that
+/// use this share it exactly, so the pair stays readable against each other;
+/// neither is comparable with the two that use [`ASSIGN_SPLITS`].
 pub(crate) const JOIN_SPLITS: usize = 180;
 
 /// Splits the claim-scan corpora carry. Larger than [`ASSIGN_SPLITS`] because
@@ -57,12 +55,12 @@ pub(crate) const JOIN_SPLITS: usize = 180;
 /// a wider pool to count anything.
 pub(crate) const SCAN_SPLITS: usize = 10_000;
 
-/// Every member's advertised lane budget. Well above `ASSIGN_SPLITS /
-/// MEMBERS` on purpose: a cap that binds turns the balance decision into a
-/// truncation and stops measuring the part that scales, so no profile here
-/// exercises that path and none claims to. It is far above the shipped
-/// `max_in_flight` default for the same reason — what a real worker
-/// materialises at once is not what makes this decision expensive.
+/// Every member's advertised lane budget, well above `ASSIGN_SPLITS /
+/// MEMBERS`. A cap that binds turns the balance decision into a truncation
+/// and stops measuring the part that scales, so no profile here exercises
+/// that path. It sits far above the shipped `max_in_flight` default for the
+/// same reason: what a worker materialises at once is not what makes this
+/// decision expensive.
 pub(crate) const LANE_CAP: u32 = 512;
 
 /// Delivery attempts before a takeover parks the split instead.
@@ -74,7 +72,7 @@ pub(crate) const MAX_ATTEMPTS: u32 = 4;
 /// it: the reconcile only scans when it is **below** the budget or has a
 /// quarantine decision pending, so a worker holding exactly its budget is the
 /// one state the walk does not happen in. What matters for the count is that
-/// the set is bounded by the budget rather than by the pool — production
+/// the set is bounded by the budget rather than by the pool. Production
 /// tests membership against the in-flight map, so a set the size of the pool
 /// would measure a lookup the worker never does.
 pub(crate) const OWNED: usize = 64;
@@ -104,8 +102,8 @@ impl Lcg {
     /// A value in `[low, high]`, inclusive.
     ///
     /// Scaled off the **high** bits, not reduced modulo the span. A
-    /// power-of-two-modulus LCG's low bits have short periods — bit 0
-    /// alternates on every step — so `next() % n` for a small `n` correlates
+    /// power-of-two-modulus LCG's low bits have short periods (bit 0
+    /// alternates on every step), so `next() % n` for a small `n` correlates
     /// with the draw index. Two draws per item is enough for that to bite:
     /// every second draw lands on the same parity, which is how a
     /// one-in-ten selector here came out selecting nothing at all. The wide
@@ -154,7 +152,7 @@ pub(crate) fn caps(n: usize) -> BTreeMap<String, u32> {
 ///
 /// The digest matters more than the length. Ids are the keys of the map both
 /// functions walk, the sort key the claim scan orders on, and the tie-break
-/// preimage the improving pass hashes — and a sequential `split-0001` scheme
+/// preimage the improving pass hashes. A sequential `split-0001` scheme
 /// would share a long prefix between neighbors, so every comparison would
 /// run to the last byte in one corpus and diverge on the first in production.
 /// These diverge early, as a digest does.
@@ -173,8 +171,8 @@ fn split_id(i: usize) -> String {
 /// How the corpus draws split weights.
 #[derive(Clone, Copy)]
 pub(crate) enum Weights {
-    /// Packed splits either side of a 32 MiB target — the ordinary listing,
-    /// and the denominator the skewed profile is read against.
+    /// Packed splits either side of a 32 MiB target. This is the ordinary
+    /// listing, and the denominator the skewed profile is read against.
     Packed,
     /// One split in twenty is a single multi-gigabyte object, which an object
     /// at or above the packing target becomes. This is the profile the
@@ -223,10 +221,10 @@ pub(crate) fn fresh(n: usize, weights: Weights) -> Vec<ObservedSplit> {
 /// Split `i` goes to member `i % MEMBERS` and its weight is drawn per
 /// *round* of `MEMBERS` splits, so every member holds one split of each
 /// round's weight and therefore the identical multiset. Equal loads make this
-/// a fixpoint unconditionally — the improving pass admits a move only when
-/// `load(from) > load(to) + weight`, which no pair satisfies at equality —
-/// without the corpus having to be computed by the balance decision it is
-/// used to measure. A corpus derived from that function's own output would
+/// a fixpoint unconditionally, without the corpus having to be computed by
+/// the balance decision it is used to measure: the improving pass admits a
+/// move only when `load(from) > load(to) + weight`, which no pair satisfies
+/// at equality. A corpus derived from that function's own output would
 /// move whenever the function did, and the delta between two revisions would
 /// be the difference between two different inputs.
 ///
@@ -286,8 +284,8 @@ pub(crate) fn leased(n: usize) -> Vec<ObservedSplit> {
 /// out of delivery attempts.
 ///
 /// The profile that makes the sort do work. `unclaimed` hands the sort an
-/// input already in kind-and-id order — every candidate is a `Create`, and
-/// the map is walked in id order — so its comparisons all settle on the id.
+/// input already in kind-and-id order (every candidate is a `Create`, and
+/// the map is walked in id order), so its comparisons all settle on the id.
 /// Here the kinds are interleaved through the id order, so the sort has to
 /// move most of what it is given.
 pub(crate) fn recovering(n: usize) -> Vec<ObservedSplit> {
@@ -356,7 +354,7 @@ pub(crate) fn recovering(n: usize) -> Vec<ObservedSplit> {
 /// quarantined]`.
 ///
 /// Two calls in one process only prove the generator is pure. The property
-/// the benches need is stronger — that the corpus is the same *across
+/// the benches need is stronger: the corpus must be the same *across
 /// revisions*, since a merge-base leg and a head leg run different builds.
 /// This census is the cheapest witness: any edit to a seed, a roll boundary,
 /// a count or [`OWNED`] moves it, and moving it silently would re-baseline

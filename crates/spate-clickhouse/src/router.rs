@@ -4,14 +4,14 @@
 //!
 //! Inserting directly into shard-local tables is this sink's whole design;
 //! [`DistributedRouter`] is what lets SELECTs through a `Distributed` table
-//! still prune shards (`optimize_skip_unused_shards=1`): it reproduces the
-//! engine's placement — `xxHash64(key) % sum(weights)`, remainder mapped to
-//! consecutive half-open weight intervals in **config order** (weights
+//! still prune shards (`optimize_skip_unused_shards=1`). It reproduces the
+//! engine's placement of `xxHash64(key) % sum(weights)`, with the remainder
+//! mapped to consecutive half-open weight intervals in **config order** (weights
 //! `[9, 10]` → shard 0 owns `[0, 9)`, shard 1 owns `[9, 19)`).
 //!
 //! **Ordering contract (documented, not verifiable by the framework):**
-//! `shards[i]` in the sink config must be the cluster's `shard_num = i + 1`
-//! — the same order as the `remote_servers` entry the Distributed DDL
+//! `shards[i]` in the sink config must be the cluster's `shard_num = i + 1`,
+//! the same order as the `remote_servers` entry the Distributed DDL
 //! names. Weights must match the cluster's `<weight>`s. The opt-in
 //! `distributed_check` config block verifies counts, weights, and the
 //! sharding expression at startup; the ordering itself is on the operator.
@@ -25,12 +25,12 @@ use std::sync::Arc;
 use twox_hash::XxHash64;
 
 /// The sharding key extracted from one record. Borrows where possible;
-/// integer variants carry the value and are hashed from a stack array — no
-/// per-record allocation anywhere.
+/// integer variants carry the value and are hashed from a stack array, so
+/// nothing here allocates per record.
 ///
 /// Integer widths matter: ClickHouse hashes a column at its **declared
 /// width** as little-endian bytes, so a `UInt32` column key must use
-/// [`ShardKey::U32`] — widening it to `U64` hashes 8 bytes instead of 4 and
+/// [`ShardKey::U32`]; widening it to `U64` hashes 8 bytes instead of 4 and
 /// silently breaks parity. Parity also requires a non-`Nullable` key
 /// column: ClickHouse hashes the `Nullable` wrapper differently.
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +41,7 @@ pub enum ShardKey<'a> {
     /// Raw bytes (`FixedString`, pre-encoded keys): hashed as-is.
     Bytes(&'a [u8]),
     /// A `UInt64` column: hashed as 8 little-endian bytes. For `Int64`
-    /// pass `v as u64` — bit-identical little-endian bytes.
+    /// pass `v as u64`, which gives bit-identical little-endian bytes.
     U64(u64),
     /// A `UInt32`/`DateTime` column: hashed as 4 little-endian bytes. For
     /// `Int32` pass `v as u32`.
@@ -50,7 +50,7 @@ pub enum ShardKey<'a> {
 
 /// Pure per-record key extractor for family `F`. A plain `fn` pointer: the
 /// higher-ranked signature over the `Rec<'buf>` GAT defeats closure
-/// inference, so write a named fn — fn items and non-capturing closures
+/// inference, so write a named fn; fn items and non-capturing closures
 /// coerce to this type:
 ///
 /// ```ignore
@@ -61,12 +61,12 @@ pub enum ShardKey<'a> {
 ///
 /// The extractor must be **total**: return a key for every record the
 /// terminal stage can see, and never panic. Routing has no Skip/Fail
-/// error policy (unlike encoding) — a panicking extractor fails the
+/// error policy (unlike encoding), so a panicking extractor fails the
 /// in-flight batch and stops the pipeline, and because restart replays
 /// the same record, a payload-dependent panic (say, slicing an empty
 /// field) is a deterministic crash loop until a code fix ships. For a
 /// malformed or absent key, return a deterministic fallback **in the same
-/// variant as the key** — `ShardKey::U64(0)` for the extractor above. A
+/// variant as the key**, such as `ShardKey::U64(0)` for the extractor above. A
 /// fallback of another variant hashes a different domain, so those records
 /// land where the server would not put them.
 pub type KeyExtractor<F> = for<'a, 'buf> fn(&'a <F as RecFamily>::Rec<'buf>) -> ShardKey<'a>;
@@ -79,12 +79,12 @@ pub type KeyExtractor<F> = for<'a, 'buf> fn(&'a <F as RecFamily>::Rec<'buf>) -> 
 /// so weights come from the validated config and cannot disagree with the
 /// endpoint topology; [`DistributedRouter::new`] is the programmatic
 /// escape hatch. Cloning is free (a fn pointer and a shared weights
-/// table) — the terminal stage clones one router per pipeline thread.
+/// table); the terminal stage clones one router per pipeline thread.
 pub struct DistributedRouter<F: RecFamily> {
     extract: KeyExtractor<F>,
     /// Exclusive prefix-sum interval ends; `ends[last]` = total weight.
     ends: Arc<[u64]>,
-    /// All-weights-1 fast path (`hash % N`) — the default config.
+    /// All-weights-1 fast path (`hash % N`), the default config.
     uniform: bool,
 }
 
@@ -158,9 +158,8 @@ impl<F: RecFamily> DistributedRouter<F> {
 impl<F: RecFamily> RecordRouter<F> for DistributedRouter<F> {
     #[inline]
     fn route_record<'buf>(&self, rec: &Record<F::Rec<'buf>>, num_shards: usize) -> usize {
-        // Silent misrouting is precisely the failure this router exists to
-        // kill; constructing via `ClickHouseSink::router` makes this
-        // unreachable.
+        // Silent misrouting is the failure this router prevents;
+        // constructing via `ClickHouseSink::router` makes this unreachable.
         assert_eq!(
             num_shards,
             self.ends.len(),
@@ -234,8 +233,8 @@ mod tests {
 
     #[test]
     fn weight_intervals_match_the_distributed_nine_ten_example() {
-        // The ClickHouse docs' example: weights 9 and 10 — remainders
-        // [0, 9) belong to the first shard, [9, 19) to the second.
+        // The ClickHouse docs' example: weights 9 and 10, with remainders
+        // [0, 9) belonging to the first shard and [9, 19) to the second.
         let router = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[9, 10]).unwrap();
         for r in 0..9u64 {
             assert_eq!(router.shard_for_hash(r), 0, "remainder {r}");
@@ -270,9 +269,9 @@ mod tests {
     #[test]
     fn u64_and_u32_keys_hash_their_little_endian_bytes() {
         // The absolute values are `SELECT hex(xxHash64(toUInt64(42)))` /
-        // `toUInt32(42)` from a live ClickHouse 26.3 server — pinning the
-        // little-endian fixed-width byte interpretation, not just internal
-        // consistency.
+        // `toUInt32(42)` from a live ClickHouse 26.3 server, pinning the
+        // little-endian fixed-width byte interpretation rather than internal
+        // consistency alone.
         assert_eq!(
             DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
             0xB556_806F_B6D1_4353,

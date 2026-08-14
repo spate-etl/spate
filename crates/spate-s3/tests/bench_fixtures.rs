@@ -35,7 +35,7 @@ fn the_listing_corpora_are_reproducible() {
 }
 
 /// Two calls in one process only prove the generator is pure. The property
-/// the benches need is stronger — that the corpus is the same *across
+/// the benches need is stronger: the corpus must be the same *across
 /// revisions*, since a merge-base leg and a head leg run different builds. A
 /// pinned split count is the cheapest witness: any edit to a seed, a size
 /// range, a key format or a count moves it, and moving it silently would
@@ -58,10 +58,10 @@ fn the_corpora_are_pinned_across_revisions() {
     }
 }
 
-/// `mixed_tail` exists to drive the open-bin deque to `PACKING_LOOKBACK`, and
-/// that property is invisible in a split count — the profile it replaced
-/// produced the same 407 splits while leaving the deque holding one bin, so
-/// it measured nothing `uniform_small` did not.
+/// `mixed_tail` drives the open-bin deque to `PACKING_LOOKBACK`, and that
+/// property is invisible in a split count. The profile it replaced produced
+/// the same 407 splits while leaving the deque holding one bin, so it
+/// measured nothing `uniform_small` did not.
 ///
 /// The deque is private, so this asserts the shape that fills it: the large
 /// objects must stay *below* the target. One at or above it closes its bin on
@@ -118,8 +118,8 @@ fn every_planned_split_has_a_distinct_id() {
 
 /// The profiles have to stay *different* from each other, or the parameter is
 /// decorative. `big_objects` in particular must keep landing one object per
-/// split — that is the behavior a byte-range subdivision change alters, and
-/// the reason the profile exists.
+/// split, the behavior a byte-range subdivision change alters and the reason
+/// the profile is here.
 #[test]
 fn the_profiles_pack_differently() {
     let uniform = listing::uniform_small();
@@ -140,7 +140,7 @@ fn the_profiles_pack_differently() {
     );
 }
 
-/// `deep_keys` exists to move key length and nothing else. If it drifted into
+/// `deep_keys` moves key length and nothing else. If it drifted into
 /// varying the sizes or the ETags too, its count would no longer attribute to
 /// key length, and the profile would be measuring an unlabeled mixture.
 #[test]
@@ -161,7 +161,7 @@ fn the_deep_key_profile_varies_only_the_key() {
     }
 }
 
-/// The deep keys have to actually be deep, and have to stay inside what an
+/// The deep keys have to be deep, and have to stay inside what an
 /// object store will accept: a profile whose keys quietly shrank would report
 /// a smaller count that read as an improvement in the code under measurement.
 #[test]
@@ -193,8 +193,8 @@ fn the_deep_keys_sit_just_under_the_key_limit() {
 /// The descriptor corpora group members by a plain chunking because `pack` is
 /// crate-private. This is what keeps that from being a guess: the real
 /// planner packs a listing of uniformly small objects into exactly
-/// `objects / MEMBERS_PER_SPLIT` splits, so a change to the open-cost floor —
-/// the thing that caps members per split — fails here rather than leaving the
+/// `objects / MEMBERS_PER_SPLIT` splits, so a change to the open-cost floor,
+/// the thing that caps members per split, fails here rather than leaving the
 /// descriptor fixture describing a shape the planner no longer produces.
 #[test]
 fn the_chunked_grouping_matches_the_real_packer() {
@@ -227,10 +227,10 @@ fn the_descriptor_corpora_are_reproducible() {
 /// leg and the head leg run different builds. Document count and total
 /// encoded length pin that between them: any edit to a member count, a field
 /// width or the document shape moves one or both. An edit that changed only
-/// the *values*, holding every width, would slip past — and that is the
-/// deliberate limit of the pin rather than a hole in it, because what these
-/// benches spend is a function of the bytes' length and layout, not of which
-/// hex digits are in them.
+/// the *values*, holding every width, would slip past. That is the limit of
+/// the pin rather than a hole in it, because what these benches spend is a
+/// function of the bytes' length and layout, not of which hex digits are in
+/// them.
 #[test]
 fn the_descriptor_corpora_are_pinned_across_revisions() {
     for (name, plan, documents, bytes) in [
@@ -300,11 +300,11 @@ fn every_codec_frames_the_whole_body() {
     }
 }
 
-/// The multi-part cases exist to charge per-stream decoder work, and a
-/// fixture that encoded one stream would measure exactly what the `_whole`
-/// cases already do while looking like a distinct profile. Their claim is
-/// structural — every part carries its codec's own start-of-stream magic —
-/// so it is asserted structurally rather than inferred from a byte count.
+/// The multi-part cases charge per-stream decoder work, and a fixture that
+/// encoded one stream would measure what the `_whole` cases already do while
+/// looking like a distinct profile. Their claim is structural (every part
+/// carries its codec's own start-of-stream magic), so it is asserted
+/// structurally rather than inferred from a byte count.
 #[test]
 fn the_multi_part_objects_are_really_multi_part() {
     /// gzip member header: the two-byte magic, then the deflate method.
@@ -355,7 +355,7 @@ fn a_multi_part_object_frames_every_record() {
 }
 
 /// The mid-object entry point must land *inside* a record, or the bench case
-/// is silently measuring an aligned read and the contract it exists to pin is
+/// is silently measuring an aligned read and the contract it pins is
 /// untested.
 #[test]
 fn the_mid_offset_entry_lands_inside_a_record() {
@@ -370,12 +370,12 @@ fn the_mid_offset_entry_lands_inside_a_record() {
 }
 
 /// The mid-object entry's record count is the contract the framing bench
-/// exists to pin: entering part-way through a record, the framer emits the
-/// leading partial line *as a record*, and a reader that discarded through
-/// the first delimiter would emit one fewer.
+/// pins: entering part-way through a record, the framer emits the leading
+/// partial line *as a record*, and a reader that discarded through the first
+/// delimiter would emit one fewer.
 ///
 /// Asserting it only inside the bench is not enough. The bench runs when a
-/// maintainer applies `ci: bench` or on a push to `main` — so a pull request
+/// maintainer applies `ci: bench` or on a push to `main`, so a pull request
 /// changing the partial-line rule can pass `cargo test` and merge, with the
 /// assertion first firing after the fact. Here it gates every pull request.
 #[test]

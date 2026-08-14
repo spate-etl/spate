@@ -1,25 +1,25 @@
 //! Instruction counts for the row encoders (gungraun).
 //!
-//! One shape — encode a block of rows and finish the chunk, exactly as the
-//! sink's terminal stage does — parameterized by wire format and row schema.
+//! One shape, encoding a block of rows and finishing the chunk as the sink's
+//! terminal stage does, parameterized by wire format and row schema.
 //!
-//! The two formats are the choice a deployment actually makes.
+//! The two formats are the choice a deployment makes.
 //! [`Native`](spate_clickhouse::NativeEncoder) buffers column-wise and emits a
 //! block; RowBinary serializes each row in place. Their relative cost is
 //! published on the ClickHouse format page from a wall-clock measurement; this
 //! is the counted number underneath it.
 //!
 //! The schemas exercise different halves of the encoder. `events` is wide
-//! and string-heavy — LowCardinality dictionaries, a Nullable null-map, an
-//! Array with its offsets, a Decimal — while `metrics` is narrow and almost
+//! and string-heavy (LowCardinality dictionaries, a Nullable null-map, an
+//! Array with its offsets, a Decimal) while `metrics` is narrow and almost
 //! entirely fixed-width. A change that speeds up dictionary handling and slows
 //! down fixed-width columns moves the two in opposite directions, which either
 //! schema alone would hide.
 //!
 //! `exotic` is the third, and Native-only. It holds the column types neither
-//! of the others reaches — `Map`, `Tuple`, `FixedString`, the fixed-width
+//! of the others reaches: `Map`, `Tuple`, `FixedString`, the fixed-width
 //! blobs (`UUID`, `IPv6`, `Int256`, `UInt256`), `Enum8`/`Enum16` and
-//! `LowCardinality(Nullable(String))` — each of which has its own
+//! `LowCardinality(Nullable(String))`, each of which has its own
 //! [`ColumnWriter`](spate_clickhouse::native) arm, several of them bypassing
 //! the column serializer for a raw byte sink.
 //!
@@ -28,15 +28,15 @@
 //! it that no other corpus does: `serialize_map`, `serialize_tuple` (both
 //! tuples and the `[u8; N]` lowering the 256-bit and address types use), and
 //! the `Int8`/`Int16` leaves the enums serialize through. What RowBinary does
-//! not have is a *per-column-type* writer — it is driven by the row struct,
+//! not have is a *per-column-type* writer; it is driven by the row struct,
 //! so the exotic corpus adds arms rather than a structure. Counting a fourth
-//! encoder case for those arms would have matched the wall-time sibling case
-//! for case, which is the thing this tier deliberately does not do; the
-//! sibling carries `rowbinary_exotic` and the scheduled comparison runs it.
+//! encoder case for those arms would match the wall-time sibling case for
+//! case, which this tier does not do; the sibling carries `rowbinary_exotic`
+//! and the scheduled comparison runs it.
 //!
 //! The measured region is a whole chunk, not one row. A ClickHouse insert is a
 //! block: per-row work is only meaningful amortised over one, and the Native
-//! encoder's `finish_chunk` — which reserves once and lays out every column —
+//! encoder's `finish_chunk`, which reserves once and lays out every column,
 //! is where a large part of its cost lives.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
@@ -65,8 +65,8 @@ use rows::{EventRow, ExoticRow, MetricRow, ROWS};
 /// A record carrying one row. The ack receiver is leaked rather than dropped
 /// so that resolving a batch cannot enqueue on a live channel and make the
 /// count depend on how many records a case built. Nothing here resolves a
-/// batch anyway — the encoders never touch the ack — and both the rows and the
-/// receiver are built in setup, outside the collected region.
+/// batch anyway, since the encoders never touch the ack, and both the rows
+/// and the receiver are built in setup, outside the collected region.
 fn record<T>(payload: T) -> Record<T> {
     let (ack, rx) = AckRef::test_pair();
     std::mem::forget(rx);
@@ -208,7 +208,7 @@ library_benchmark_group!(
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the encode under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at.

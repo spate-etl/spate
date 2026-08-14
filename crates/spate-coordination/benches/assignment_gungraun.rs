@@ -1,9 +1,9 @@
 //! Instruction counts for the leader's balance decision (gungraun).
 //!
-//! One shape — compute the desired assignment for a fleet from an observed
-//! store state — parameterized by the state the fleet is in, because what
-//! changes the decision's cost is which of its three passes has work to do,
-//! not which function is called:
+//! One shape, computing the desired assignment for a fleet from an observed
+//! store state, parameterized by the state the fleet is in. What changes the
+//! decision's cost is which of its three passes has work to do, not which
+//! function is called:
 //!
 //! - `settled_fleet` — every split held by a live member, loads equal. The
 //!   sticky pass places everything, the fill pass finds nothing, and the
@@ -18,7 +18,7 @@
 //! - `joined_member` — a settled fleet decided over one member more than it
 //!   has splits placed on, which is what scaling a deployment up looks like.
 //!   The sticky pass keeps every split where it is and the newcomer starts
-//!   empty, so nothing but the improving pass can balance it — and that pass
+//!   empty, so nothing but the improving pass can balance it, and that pass
 //!   accepts **one move per full `O(members^2 x splits-per-member)` scan**.
 //!   This is the only profile whose count is a function of how many moves the
 //!   pass accepts rather than of the pool alone, and so **the profile a
@@ -27,7 +27,7 @@
 //!   single multi-gigabyte object, which is what an object at or above the
 //!   packing target becomes. Read against `joined_member`, whose pool size,
 //!   member count and lane budgets it shares exactly, so the difference is
-//!   the weight distribution — and it is not a small one. Balance is on
+//!   the weight distribution, which is not a small one. Balance is on
 //!   weight, so the newcomer reaches its share here by taking a couple of
 //!   multi-gigabyte splits while every incumbent keeps dozens of small ones;
 //!   the pass reaches that arrangement through a different, larger number of
@@ -39,7 +39,7 @@
 //! read against each other, never against the pair above them.
 //!
 //! The three passes are one case rather than three because that is how the
-//! leader runs them and because they share state — the fill pass places what
+//! leader runs them and because they share state. The fill pass places what
 //! the sticky pass left, and the improving pass runs to fixpoint over the
 //! result of both. Attribution between them comes from the callgrind profile
 //! the run writes either way.
@@ -103,7 +103,7 @@ fn unowned_pool() -> Rig {
 
 /// The settled fleet with one more member than it has splits placed on. The
 /// sticky pass keeps every split where it is and the newcomer starts empty,
-/// so only the improving pass can balance it — one split per full scan.
+/// so only the improving pass can balance it, one split per full scan.
 fn joined_member() -> Rig {
     rig(
         fleet::settled(fleet::JOIN_SPLITS, fleet::Weights::Packed),
@@ -120,14 +120,13 @@ fn skewed_joined_member() -> Rig {
 
 /// The assignment's total size.
 ///
-/// It lives outside the benchmark function and is `#[inline(never)]`, and
-/// both halves of that are load-bearing rather than stylistic. Collection is
-/// bounded by a callgrind toggle on the module the benchmark macro wraps the
-/// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimizer leaves in an unstable shape inside that module can
-/// end up outside the collected region entirely, and a bench that measures
-/// nothing still reports a plausible number. The decision itself is a
-/// cross-crate call into `bench_seams`, which is a frame the toggle cannot
+/// It lives outside the benchmark function and is `#[inline(never)]`.
+/// Collection is bounded by a callgrind toggle on the module the benchmark
+/// macro wraps the function in, and a toggle *flips* collection rather than
+/// forcing it on, so work the optimizer leaves in an unstable shape inside
+/// that module can end up outside the collected region entirely, and a bench
+/// that measures nothing still reports a plausible number. The decision
+/// itself is a cross-crate call into `bench_seams`, a frame the toggle cannot
 /// lose; this loop is the only work written here, so it gets the same
 /// treatment.
 #[inline(never)]
@@ -140,7 +139,7 @@ fn assigned(assignment: &BTreeMap<String, Vec<String>>) -> usize {
 }
 
 // The corpus is built and snapshotted in the `#[bench]` argument expression,
-// which gungraun evaluates outside the collected region, and moved in — so
+// which gungraun evaluates outside the collected region, and moved in, so
 // the measured work is the leader's, not the fixture builder's. Building the
 // observed state is not part of the unit either way: a worker's split map is
 // maintained by the store watch and lives across ticks.
@@ -176,7 +175,7 @@ fn plan(rig: Rig) -> (Rig, BTreeMap<String, Vec<String>>) {
 library_benchmark_group!(name = assignment; benchmarks = plan);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the decision under measurement rather than to
 // whichever frame valgrind's default depth would otherwise cut at.

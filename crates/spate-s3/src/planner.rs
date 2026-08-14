@@ -6,7 +6,7 @@
 //! it with [`pack`](crate::split::pack); deterministic split ids make the
 //! re-submission of already-planned work a store-side create-if-absent
 //! no-op, so replanning a growing prefix costs one LIST and nothing else.
-//! Workers never list — they read member objects straight from the split
+//! Workers never list; they read member objects straight from the split
 //! descriptors the planner wrote.
 
 use crate::config::Compression;
@@ -30,7 +30,7 @@ use tokio::runtime::Handle;
 const MAX_DESCRIPTOR_BYTES: usize = 400 * 1024;
 
 /// Job identity presented by every worker. Derived from configuration
-/// only — never from the listing — so all correctly-configured workers are
+/// only, never from the listing, so all correctly-configured workers are
 /// byte-equal and a misconfigured one is rejected at startup instead of
 /// interpreting the shared split table differently. The descriptor and
 /// packing versions are included because either changes what planned

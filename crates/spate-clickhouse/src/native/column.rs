@@ -100,7 +100,7 @@ pub(crate) enum ColumnWriter {
         cum: u64,
         inner: Box<ColumnWriter>,
     },
-    /// `Map(K, V)` — byte-identical to `Array(Tuple(K, V))`: cumulative
+    /// `Map(K, V)`, byte-identical to `Array(Tuple(K, V))`: cumulative
     /// offsets (as LE wire bytes) then the (separate) key and value streams.
     Map {
         offsets: BytesMut,
@@ -264,7 +264,7 @@ impl ColumnWriter {
         }
     }
 
-    /// Append one default-valued entry — the placeholder a `Nullable` dense
+    /// Append one default-valued entry, the placeholder a `Nullable` dense
     /// stream writes at a NULL, recursively.
     pub(crate) fn push_default(&mut self) {
         match self {
@@ -287,7 +287,7 @@ impl ColumnWriter {
 
     /// Emit the column's serialization-state prefix (recursing inner-first),
     /// then reset for the next block. For a versioned inner (LowCardinality)
-    /// this precedes the wrapper's own data — the ordering the spec requires.
+    /// this precedes the wrapper's own data, the ordering the spec requires.
     pub(crate) fn write_prefix(&self, out: &mut BytesMut) {
         match self {
             ColumnWriter::Scalar { .. }

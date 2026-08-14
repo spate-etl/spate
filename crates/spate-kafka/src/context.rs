@@ -2,13 +2,13 @@
 //!
 //! The framework needs rebalances to complete only after the pipeline has
 //! drained and committed, but librdkafka runs the rebalance callback inside
-//! `poll()` on the controller thread — the same thread that must orchestrate
+//! `poll()` on the controller thread, the same thread that must orchestrate
 //! the drain. The escape hatch is librdkafka's deferred-acknowledgment
 //! protocol: for the **assignment and revocation events** the callback may
 //! return without calling `assign`/`unassign`; the rebalance then stays in
 //! progress until the application calls them later.
 //! [`SourceContext::rebalance`] records those two as intents, and
-//! [`KafkaSource::poll_events`](crate::KafkaSource) performs the actual
+//! [`KafkaSource::poll_events`](crate::KafkaSource) performs the
 //! assign/pause/split (assignments) or barrier-drain/commit/unassign
 //! (revocations) choreography from the controller thread.
 //!
@@ -16,8 +16,8 @@
 //! requires `assign(NULL)` in response, and an unacknowledged error leaves
 //! the member mid-rebalance for the life of the process. The callback
 //! therefore completes that one inline (`unassign`) and records the error
-//! intent for `poll_events` to surface — the one sanctioned exception, on
-//! the normal-operation path, to "the callback never acknowledges".
+//! intent for `poll_events` to surface, the one sanctioned exception on
+//! the normal-operation path to "the callback never acknowledges".
 
 use rdkafka::TopicPartitionList;
 use rdkafka::client::ClientContext;
@@ -66,7 +66,7 @@ pub(crate) struct SourceContext {
     /// callback completes the protocol inline (`assign`/`unassign`) instead
     /// of deferring: consumer close triggers a final revoke *inside*
     /// `BaseConsumer::drop`'s close-poll loop, where no `poll_events` call
-    /// will ever run to complete a deferred intent — deferring there
+    /// will ever run to complete a deferred intent; deferring there
     /// deadlocks the drop forever.
     pub(crate) closing: AtomicBool,
 }
@@ -99,8 +99,8 @@ impl ConsumerContext for SourceContext {
     /// events are recorded and returned WITHOUT acknowledgment (no
     /// `assign`/`unassign`), deferring completion to the controller-side
     /// choreography described in the module docs. The arbitrary-error event
-    /// is completed inline with `unassign` — it has no deferred form (see
-    /// the module docs) — and only its code is recorded.
+    /// is completed inline with `unassign`, since it has no deferred form
+    /// (see the module docs), and only its code is recorded.
     fn rebalance(
         &self,
         base_consumer: &BaseConsumer<Self>,
@@ -127,8 +127,8 @@ impl ConsumerContext for SourceContext {
                 // An arbitrary rebalance failure. librdkafka's contract
                 // (`rd_kafka_conf_set_rebalance_cb`) requires the
                 // application to call `rd_kafka_assign(rk, NULL)` here to
-                // synchronize state; deferring it — unlike assign/revoke,
-                // which stay legally in progress until completed — leaves
+                // synchronize state. Unlike assign/revoke, which stay
+                // legally in progress until completed, deferring it leaves
                 // the member wedged mid-rebalance forever: no rejoin, no
                 // fresh assignment, until the process restarts.
                 if let Err(e) = base_consumer.unassign() {
@@ -160,8 +160,8 @@ mod tests {
     /// The contract this pins (librdkafka `rd_kafka_conf_set_rebalance_cb`):
     /// a rebalance event that is neither assign nor revoke must be answered
     /// with `assign(NULL)` to synchronize state. A handler that only records
-    /// the error leaves the member mid-rebalance forever — no rejoin until
-    /// the process restarts.
+    /// the error leaves the member mid-rebalance forever, with no rejoin
+    /// until the process restarts.
     #[test]
     fn an_arbitrary_rebalance_error_unassigns_and_queues_the_code() {
         let consumer = consumer();

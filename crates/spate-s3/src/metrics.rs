@@ -27,7 +27,7 @@ pub(crate) struct S3Metrics {
     pub(crate) bytes_decoded: Counter,
     /// Object GET attempts beyond the first (transient failures).
     pub(crate) get_retries: Counter,
-    /// Objects that poisoned their split, by bounded reason — one
+    /// Objects that poisoned their split, by bounded reason, with one
     /// pre-registered handle per [`PoisonKind`].
     objects_failed_not_found: Counter,
     objects_failed_etag_drift: Counter,

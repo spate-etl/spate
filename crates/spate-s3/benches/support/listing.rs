@@ -20,7 +20,7 @@ pub(crate) const TARGET_BYTES: u64 = 256 * 1024 * 1024;
 /// The open-cost floor `pack` applies: every object costs at least
 /// `target / OPEN_COST_DIVISOR`, so a split holds at most ~16 members however
 /// small they are. The divisor is `pub(crate)` and cannot be imported from a
-/// bench, so it is restated here — `the_profiles_pack_differently` fails if
+/// bench, so it is restated here; `the_profiles_pack_differently` fails if
 /// the two ever disagree.
 const FLOOR: u64 = TARGET_BYTES / 16;
 
@@ -59,12 +59,11 @@ impl Lcg {
 /// A listing key shaped like a real partitioned prefix, so the digested
 /// preimage is a realistic length rather than a two-character stub.
 ///
-/// Monotone in `index`, and that is load-bearing rather than cosmetic: the
-/// source sorts the listing by key before packing, so a key whose leading
-/// components cycle (a day-of-month, say) would sort into an order unrelated
-/// to generation — scattering the runs a profile is built around, and giving
-/// `split_id_for`'s per-bin sort a different amount of work than production
-/// ever asks of it. The partition components therefore advance with the
+/// Monotone in `index`. The source sorts the listing by key before packing,
+/// so a key whose leading components cycle (a day-of-month, say) would sort
+/// into an order unrelated to generation, scattering the runs a profile is
+/// built around and giving `split_id_for`'s per-bin sort a different amount
+/// of work than production ever asks of it. The partition components therefore advance with the
 /// index instead of cycling.
 fn key(index: usize) -> String {
     let (day, hour) = partition(index);
@@ -87,8 +86,8 @@ fn partition(index: usize) -> (usize, usize) {
 ///
 /// An object store caps a key at 1024 bytes; this sits just under it, which
 /// is the adversarial end of the range rather than a typical layout. Both
-/// terms that scale with key length — the digest, which hashes every key
-/// byte, and the descriptor JSON, which carries every key verbatim — are
+/// terms that scale with key length (the digest, which hashes every key
+/// byte, and the descriptor JSON, which carries every key verbatim) are
 /// therefore measured at their worst plausible input.
 pub(crate) const DEEP_KEY_BYTES: usize = 1_000;
 
@@ -131,8 +130,8 @@ fn deep_key(index: usize, filler: &str) -> String {
     format!("year=2026/month=08/day={day:02}/hour={hour:02}/{filler}/part-{index:08}.ndjson")
 }
 
-/// A quoted 32-character hexadecimal ETag — the shape an S3-compatible store
-/// actually reports for a single-part upload, quotes included, which is what
+/// A quoted 32-character hexadecimal ETag, the shape an S3-compatible store
+/// reports for a single-part upload, quotes included, which is what
 /// the rest of this crate's fixtures use. Length matters: the whole string is
 /// digested per member.
 ///
@@ -182,11 +181,11 @@ pub(crate) fn uniform_small() -> Vec<(String, u64, String)> {
 ///
 /// The count, the seed and the size draw are shared with `uniform_small`, so
 /// this corpus is that one's first tenth with every key ~18 times longer and
-/// nothing else changed — which is what lets key length be read off the pair
+/// nothing else changed, which is what lets key length be read off the pair
 /// rather than inferred. The comparison is per object: 1,000 objects here
 /// against a tenth of `uniform_small`'s 10,000, both packing 16 to a bin.
 ///
-/// A tenth rather than all 10,000 because key length is not free — a
+/// A tenth rather than all 10,000 because key length is not free: a
 /// [`DEEP_KEY_BYTES`] key puts around eighteen times the bytes through
 /// SHA-256 and into the descriptor JSON as an ordinary 54-byte one, and at
 /// 10,000 objects the case would leave the instruction budget rather than
@@ -201,10 +200,10 @@ pub(crate) fn deep_keys() -> Vec<(String, u64, String)> {
     )
 }
 
-/// Objects at or above the split target. Today each closes a bin on its own
-/// the moment it is placed, so packing is one bin per object and the digest
-/// count equals the listing length — which is the whole reason a very large
-/// object bounds worst-case split duration. Subdividing by byte range turns
+/// Objects at or above the split target. Each closes a bin on its own the
+/// moment it is placed, so packing is one bin per object and the digest count
+/// equals the listing length, which is why a very large object bounds
+/// worst-case split duration. Subdividing by byte range turns
 /// each of these into several members, moving both the input cardinality and
 /// the open-bin scan, so this is the profile a subdivision change shows up in.
 pub(crate) fn big_objects() -> Vec<(String, u64, String)> {
@@ -218,7 +217,7 @@ pub(crate) fn big_objects() -> Vec<(String, u64, String)> {
 /// This is the profile that exercises the open-bin deque. An object at or
 /// above the target closes its bin the instant it is placed, so a corpus of
 /// tiny-plus-huge leaves the deque holding one bin and the linear
-/// `open.iter().position(...)` scan never runs — measured, that shape is
+/// `open.iter().position(...)` scan never runs; measured, that shape is
 /// indistinguishable from `uniform_small` (deque 1, mean scan 0.94). Sizing
 /// the large objects *just below* the target instead leaves each bin open but
 /// nearly full, so the deque fills to `PACKING_LOOKBACK` and the scan walks

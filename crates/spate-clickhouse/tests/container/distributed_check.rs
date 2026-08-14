@@ -4,7 +4,7 @@
 // Distributed-parity feature rests on:
 //
 //   1. that `DistributedRouter::hash_key` reproduces the server's own
-//      `xxHash64(...)` bit-for-bit (the placement oracle — if this drifts,
+//      `xxHash64(...)` bit-for-bit (the placement oracle; if this drifts,
 //      every parity claim is void), and
 //   2. that `validate_distributed()` reads a real `Distributed` table's DDL
 //      out of `system.tables` and agrees (or, on drift, disagrees with a
@@ -13,7 +13,7 @@
 // The stock 26.3 image ships a handful of single-shard clusters in its
 // default `remote_servers` (e.g. `default` / `test_shard_localhost`); the
 // guard tests build their `Distributed` table over whichever one is present,
-// so a single container is enough — no cluster wiring required.
+// so a single container is enough, with no cluster wiring required.
 
 use super::*;
 use spate_clickhouse::config::ClickHouseSinkConfig;
@@ -29,7 +29,7 @@ const PW: &str = "distributed-secret";
 /// A single-shard cluster from the server's default `remote_servers`,
 /// preferring `default` when the image defines it. The DDL guard only reads
 /// `system.clusters`/`system.tables`, so the shard never has to be
-/// reachable — any single-shard cluster is a valid fixture.
+/// reachable; any single-shard cluster is a valid fixture.
 async fn single_shard_cluster(admin: &clickhouse::Client) -> String {
     admin
         .query(
@@ -73,7 +73,7 @@ distributed_check:
 async fn server_hash_parity_holds_for_string_and_u64_keys() {
     let srv = bare_server("26.3", PW).await;
 
-    // `hex()` renders the 64-bit hash as 16 uppercase hex digits — exactly
+    // `hex()` renders the 64-bit hash as 16 uppercase hex digits, which is
     // what `{:016X}` produces from our computed hash, so the two sides are
     // compared as strings without any endianness ambiguity.
     let (empty, abc, u64_42, u32_42) = srv
@@ -111,9 +111,9 @@ async fn server_hash_parity_holds_for_string_and_u64_keys() {
 }
 
 /// The guard accepts a `Distributed` table whose sharding expression is
-/// exactly `xxHash64(name)` — the shipped identifier-key form. This proves
+/// exactly `xxHash64(name)`, the shipped identifier-key form. This proves
 /// the `engine_full` parser and the normalized comparison line up with what
-/// ClickHouse actually stores in `system.tables`.
+/// ClickHouse stores in `system.tables`.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn distributed_check_passes_against_a_real_distributed_table() {
@@ -125,8 +125,8 @@ async fn distributed_check_passes_against_a_real_distributed_table() {
         .execute()
         .await
         .expect("create local table");
-    // A real `Distributed` table — the guard reads its stored `engine_full`,
-    // it is never inserted into. `currentDatabase()` resolves to the admin
+    // A real `Distributed` table. The guard reads its stored `engine_full`,
+    // and it is never inserted into. `currentDatabase()` resolves to the admin
     // session's database at DDL time.
     srv.admin
         .query(&format!(
@@ -144,11 +144,11 @@ async fn distributed_check_passes_against_a_real_distributed_table() {
 }
 
 /// The guard rejects a `Distributed` table whose sharding expression drifted
-/// from the sink's — here `cityHash64(name)` against an expected
-/// `xxHash64(name)` — and the `Mismatch` prints BOTH expressions so an
+/// from the sink's, here `cityHash64(name)` against an expected
+/// `xxHash64(name)`, and the `Mismatch` prints BOTH expressions so an
 /// operator diagnoses it in one read. This is the failure the feature
-/// exists to catch: a pruned SELECT over a drifted table returns wrong
-/// results silently, never an error.
+/// catches: a pruned SELECT over a drifted table returns wrong results
+/// silently, never an error.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn drifted_sharding_expression_fails_against_a_real_table() {

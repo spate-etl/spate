@@ -1,14 +1,14 @@
 //! Serde serializers that route a `T: Serialize` row into the columnar
 //! [`ColumnWriter`]s.
 //!
-//! - [`RowDispatchSer`] — the top-level serializer: field *i* of the row
-//!   struct goes to column *i*.
-//! - [`ColumnSerializer`] — one value into one column, dispatching on the
+//! - [`RowDispatchSer`]: the top-level serializer, where field *i* of the
+//!   row struct goes to column *i*.
+//! - [`ColumnSerializer`]: one value into one column, dispatching on the
 //!   **writer variant** (not the value) and writing the same leaf bytes
 //!   RowBinary would.
-//! - [`Compound`] — the composite sub-serializer (Array elements, Tuple
+//! - [`Compound`]: the composite sub-serializer (Array elements, Tuple
 //!   fields, Map entries).
-//! - [`ByteSink`] — accumulates a value's raw little-endian bytes for the
+//! - [`ByteSink`]: accumulates a value's raw little-endian bytes for the
 //!   fixed-width blob columns (`UUID`, `IPv6`, `Int256`, `UInt256`,
 //!   `FixedString`).
 

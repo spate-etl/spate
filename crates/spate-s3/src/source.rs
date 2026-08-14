@@ -8,15 +8,15 @@
 //! first `poll_events` joins the job via `driver.start` (leader-only
 //! listing + packing happen in the planner), and every later call drains
 //! poison reports into `driver.fail` and then delegates to
-//! `driver.poll_events` — split gains materialize lanes through the
-//! sibling [`SplitCtx`], losses retire them, `AllComplete` drains the
+//! `driver.poll_events`. Split gains materialize lanes through the
+//! sibling [`SplitCtx`], losses retire them, and `AllComplete` drains the
 //! pipeline. `commit` routes acked watermarks into per-split fenced
 //! progress commits; the coordination store is the source's **only**
 //! progress store.
 //!
 //! No coordination backend appears in this crate's public API or in its
-//! cargo features: which store a deployment uses (NATS today, others
-//! tomorrow) is assembly wiring, kept out of every connector on purpose.
+//! cargo features: which store a deployment uses is assembly wiring, kept
+//! out of every connector.
 //! The one backend it does link is `spate-coordination`'s in-process
 //! `MemoryStore`, unconditionally, as the solo fallback below.
 
@@ -69,7 +69,7 @@ pub struct S3Source {
     handle: tokio::runtime::Handle,
     /// The per-object record framer, supplied by the chosen format via
     /// [`with_framer`](S3Source::with_framer). Required before the pipeline
-    /// opens the source — `spate-s3` is a transport and owns no framing itself.
+    /// opens the source; `spate-s3` is a transport and owns no framing itself.
     framer: Option<crate::framer::FramerFactory>,
     /// A coordinator injected via [`with_coordinator`](S3Source::with_coordinator),
     /// overriding the config-driven store construction.
@@ -89,7 +89,7 @@ impl std::fmt::Debug for S3Source {
 }
 
 impl S3Source {
-    /// A source over `config`, doing its network I/O on `io` — pass the
+    /// A source over `config`, doing its network I/O on `io`. Pass the
     /// pipeline's I/O runtime handle
     /// ([`Pipeline::io_handle`](spate_core::pipeline::Pipeline::io_handle)).
     ///
@@ -122,8 +122,8 @@ impl S3Source {
 
     /// Set the record framer that cuts each object's byte stream into records.
     /// `spate-s3` is a transport and owns no framing, so this is **required**:
-    /// supply the framer for the objects' format — e.g. `spate-json`'s
-    /// `NdjsonFramer` for NDJSON — before the pipeline opens the source.
+    /// supply the framer for the objects' format (e.g. `spate-json`'s
+    /// `NdjsonFramer` for NDJSON) before the pipeline opens the source.
     ///
     /// `factory` builds a fresh
     /// [`RecordFramer`](spate_core::framing::RecordFramer) per object (framers are
@@ -140,7 +140,7 @@ impl S3Source {
         self
     }
 
-    /// Hand the source its coordinator — **the** multi-instance seam.
+    /// Hand the source its coordinator, the multi-instance seam.
     /// Build any [`SplitCoordinator`] at assembly time (e.g.
     /// `StoreCoordinator` over the NATS store from `spate-coordination`,
     /// with your own tuning) and inject it here; run more replicas of the
@@ -148,8 +148,8 @@ impl S3Source {
     /// backfill. Must be called before the pipeline opens the source.
     ///
     /// Without it the source runs **solo** over an in-process store:
-    /// correct and self-terminating, but progress is ephemeral — a
-    /// restart replays the whole prefix (a startup WARN says so).
+    /// correct and self-terminating, but progress is ephemeral. A restart
+    /// replays the whole prefix (a startup WARN says so).
     #[must_use]
     pub fn with_coordinator(mut self, coordinator: Box<dyn SplitCoordinator>) -> S3Source {
         self.coordinator = Some(coordinator);
@@ -293,8 +293,8 @@ impl Source for S3Source {
             planner,
         } = open.as_mut();
         if let Some(planner) = planner.take() {
-            // Join the job; the empty ready signal — splits arrive as
-            // later assignments while claims race.
+            // Join the job; the ready signal is empty, and splits arrive
+            // as later assignments while claims race.
             return driver.start(Box::new(planner));
         }
         // Object-level failures first: hand each poisoned split back (a
@@ -352,7 +352,7 @@ impl Drop for S3Source {
 
 /// The fallback when no coordinator was injected: a solo, in-process
 /// coordinator with default tuning. Correct and self-terminating, but its
-/// store dies with the process — hence the WARN.
+/// store dies with the process, hence the WARN.
 fn solo_coordinator(
     handle: tokio::runtime::Handle,
     metrics: Option<CoordinationMetrics>,
@@ -388,15 +388,15 @@ fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String
 /// `options`.
 ///
 /// For S3, credentials and region are seeded from the standard AWS
-/// environment via [`AmazonS3Builder::from_env`] — the same mechanism the AWS
-/// SDK uses — so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
+/// environment via [`AmazonS3Builder::from_env`], the same mechanism the AWS
+/// SDK uses, so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
 /// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
 /// The explicit `options` are overlaid on top and win over the environment;
 /// the bucket comes from the URL. `object_store::parse_url_opts` (which every
-/// other scheme still uses) deliberately does *not* read the environment, so
+/// other scheme still uses) does *not* read the environment, so
 /// the S3 scheme is special-cased here.
 ///
-/// We must not simply pass `std::env::vars()` through `parse_url_opts`:
+/// This must not pass `std::env::vars()` through `parse_url_opts`:
 /// `AmazonS3ConfigKey` parses *unprefixed* keys (`region`, `token`,
 /// `endpoint`, ...), so an unrelated environment variable could hijack the
 /// client. `from_env` guards on the `AWS_` prefix; we rely on that.
@@ -416,7 +416,7 @@ fn build_store(
     }
     // Harden the HTTP client (idle-connection recycling, explicit timeouts)
     // before overlaying the operator's `store` options, so the passthrough
-    // still wins — see `harden_client_defaults`.
+    // still wins; see `harden_client_defaults`.
     let builder = harden_client_defaults(AmazonS3Builder::from_env().with_url(url.as_str()));
     let store = apply_options(builder, options).build()?;
     Ok((Box::new(store), path))
@@ -424,13 +424,15 @@ fn build_store(
 
 /// Conservative HTTP-client defaults for the S3 backend, applied *before* the
 /// operator's `store` passthrough so the passthrough still overrides them (and
-/// so unrelated client options seeded from the environment — `allow_http`, a
-/// proxy — are left untouched, unlike a wholesale `with_client_options`).
+/// so unrelated client options seeded from the environment, such as
+/// `allow_http` or a proxy, are left untouched, unlike a wholesale
+/// `with_client_options`).
 ///
-/// `pool_idle_timeout` is the load-bearing one: object_store leaves it unset, so
-/// a lane can pull a connection the server (or an intermediary) has already
-/// half-closed and fail its next request with an incomplete-message body error
-/// — the churn a back-pressured backfill provokes. Recycling idle connections
+/// `pool_idle_timeout` matters most: object_store leaves it unset, so a lane
+/// can pull a connection the server (or an intermediary) has already
+/// half-closed and fail its next request with an incomplete-message body
+/// error, which is the churn a back-pressured backfill provokes. Recycling
+/// idle connections
 /// after 30s avoids that. `read_timeout` bounds an otherwise-unbounded stalled
 /// body read; `connect_timeout` pins object_store's own 5s default explicitly.
 /// The overall request `timeout` keeps object_store's 30s default: bounded
@@ -509,7 +511,7 @@ mod tests {
             &map(&[
                 ("aws_container_credentials_full_uri", URI),
                 ("aws_container_authorization_token_file", TOKEN),
-                // Not an object_store key — must be ignored, not panic.
+                // Not an object_store key; must be ignored, not panic.
                 ("not_a_real_key", "whatever"),
             ]),
         );
@@ -526,7 +528,7 @@ mod tests {
     }
 
     /// The S3 listing prefix must be byte-identical to what `parse_url_opts`
-    /// produces — planned descriptors and their offsets depend on it.
+    /// produces; planned descriptors and their offsets depend on it.
     #[test]
     fn build_store_s3_prefix_matches_parse_url_opts() {
         let url = Url::parse("s3://bucket/exports/2026/").unwrap();

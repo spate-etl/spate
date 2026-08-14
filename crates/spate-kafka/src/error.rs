@@ -8,7 +8,7 @@
 //! is retried forever while the health probe stays green and the pipeline
 //! silently delivers nothing. This module maps clearly-permanent rdkafka
 //! error codes to [`ErrorClass::Fatal`] so the driver fails fast, while
-//! keeping genuinely transient codes (transport hiccups, leader elections,
+//! keeping transient codes (transport hiccups, leader elections,
 //! coordinator churn) retryable.
 
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -44,8 +44,8 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
         // A partition that vanished after we already owned it: the topic was
         // deleted. Before startup this is just metadata catching up.
         C::UnknownTopicOrPartition if after_startup => ErrorClass::Fatal,
-        // Everything else — transport, leader elections, coordinator churn,
-        // offset-reset conditions handled elsewhere — is transient.
+        // Everything else (transport, leader elections, coordinator churn,
+        // offset-reset conditions handled elsewhere) is transient.
         _ => ErrorClass::Retryable,
     }
 }
@@ -95,7 +95,7 @@ mod tests {
         }
     }
 
-    /// Genuinely transient conditions keep retrying.
+    /// Transient conditions keep retrying.
     #[test]
     fn transient_codes_classify_retryable() {
         for code in [

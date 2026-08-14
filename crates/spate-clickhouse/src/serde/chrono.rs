@@ -12,12 +12,12 @@
 //!
 //! Out-of-range values (a date before 1970 in a `Date` column, a
 //! timestamp outside `u32` in a `DateTime`, ...) fail serialization with
-//! a record-level error — never a panic. Each module has an `option`
+//! a record-level error, never a panic. Each module has an `option`
 //! submodule for `Nullable(...)` columns.
 //!
-//! ⚠ Like the other modules here, the attribute is load-bearing:
-//! chrono's default serde impls write string forms, which encode
-//! *successfully* into bytes no date/time column can read correctly.
+//! ⚠ Like the other modules here, the attribute is required. Chrono's
+//! default serde impls write string forms, which encode *successfully*
+//! into bytes no date/time column can read correctly.
 
 use ::chrono::{DateTime, Utc};
 use serde::de::Error as _;

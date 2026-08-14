@@ -10,8 +10,8 @@
 //!
 //! Statistics note: per-broker series register lazily on the producer's
 //! poll thread, which cannot see a test-local recorder
-//! (`metrics::with_local_recorder` is thread-local) — the statistics test
-//! therefore asserts fixed families only; per-broker translation is
+//! (`metrics::with_local_recorder` is thread-local), so the statistics test
+//! asserts fixed families only; per-broker translation is
 //! covered by the unit tests in `src/sink/metrics.rs`.
 
 use bytes::BytesMut;
@@ -196,7 +196,7 @@ async fn write_batch_round_trips_keys_headers_payloads() {
 ///
 /// Metric gauge series have a single live owner per process and the pipeline
 /// name is part of every key, so two pipelines called `kafka-sink-test` alive
-/// at once — which is what `cargo test` does with the tests in this file —
+/// at once, which is what `cargo test` does with the tests in this file,
 /// are a collision the builder refuses. In production these would be separate
 /// processes.
 fn pipeline_config() -> String {
@@ -298,9 +298,9 @@ fn pipeline_commits_only_after_delivery_reports() {
 
 /// Shutdown with data still in flight: the pipeline must exit cleanly
 /// within its deadline (no producer-teardown hang), and the watermark must
-/// never run past what was actually delivered — the at-least-once boundary
-/// the drain machinery guarantees (undelivered records replay after a
-/// restart; they are never silently committed).
+/// never run past what was delivered, the at-least-once boundary the drain
+/// machinery guarantees (undelivered records replay after a restart; they
+/// are never silently committed).
 #[test]
 fn shutdown_with_inflight_data_commits_only_delivered() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -427,7 +427,7 @@ fn statistics_populate_kafka_sink_fixed_families() {
     });
 
     // The poll thread publishes into the handles resolved above once per
-    // interval; totals may legitimately be zero — presence is the assert.
+    // interval; totals may legitimately be zero, so presence is the assert.
     wait_until(Duration::from_secs(10), "fixed families rendered", || {
         prom.run_upkeep();
         let rendered = prom.render();

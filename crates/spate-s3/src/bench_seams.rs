@@ -1,21 +1,16 @@
 //! Measurable entry points into work this crate does not otherwise expose.
 //!
-//! Benches in this workspace drive their crate's public API, and a new crate
-//! is expected to. Two do not: this module, and `spate-coordination`'s. The
-//! reason is the same for both, and it is not that the internals are more
-//! interesting than the surface.
+//! Benches in this workspace drive their crate's public API. Two do not: this
+//! module, and `spate-coordination`'s.
 //!
 //! This crate's public entry point is [`S3Source`](crate::S3Source), which is
-//! asynchronous and driven by object-store I/O. Those are exactly the two
-//! properties that stop an instruction count being deterministic: under a
-//! runtime the number becomes a function of how the scheduler interleaved
-//! polls, which is not a property of the code under review. Packing, split
-//! identity and record framing are pure, synchronous and on the per-object
-//! path — countable — but reaching them means reaching past the async
-//! surface. So the seam exists because the public API is unmeasurable *by
-//! that instrument*, not because finer detail is wanted.
+//! asynchronous and driven by object-store I/O. Both properties stop an
+//! instruction count being deterministic: under a runtime the number becomes
+//! a function of how the scheduler interleaved polls. Packing, split identity
+//! and record framing are pure, synchronous, on the per-object path and so
+//! countable, but reaching them means reaching past the async surface.
 //!
-//! Consequences of that reasoning, which a future seam has to honor:
+//! The rules a future seam has to honor:
 //!
 //! - It is behind the off-by-default `testing` feature and `#[doc(hidden)]`,
 //!   so it is not part of this crate's semver surface and no consumer of the
@@ -25,10 +20,9 @@
 //!   to change; only the shape of the work is fixed. `MakeFramer` is an alias
 //!   over `std` and `spate-core` types, which a caller must be able to name to
 //!   supply a framer at all.
-//! - Each function is one whole unit of the work a stage does — a plan, an
-//!   object run — not one internal call. Attribution below that level comes
-//!   from the callgrind profile the bench already writes, not from a finer
-//!   seam.
+//! - Each function is one whole unit of the work a stage does (a plan, an
+//!   object run) rather than one internal call. Attribution below that level
+//!   comes from the callgrind profile the bench already writes.
 
 use crate::config::Compression;
 use crate::fetch::ObjectEntry;
@@ -44,7 +38,7 @@ use std::sync::Arc;
 pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 
 /// Pack a listing into splits, mint each split's id, and encode each
-/// descriptor — the whole of what the leader's planner does with a listing,
+/// descriptor: the whole of what the leader's planner does with a listing,
 /// once per plan.
 ///
 /// `objects` is `(key, size_bytes, etag)` **sorted by key**, which is the
@@ -57,9 +51,8 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 /// pass per split and a change to any of them moves the others: the id
 /// digests the member keys and ETags, and the descriptor serializes the same
 /// members immediately afterwards. Splitting them would measure the parts
-/// while missing the per-split loop that carries all three — and the
-/// serialization is the term most likely to dominate, so a seam that skipped
-/// it would answer a different question than the planner asks.
+/// while missing the per-split loop that carries all three, and the
+/// serialization is the term most likely to dominate.
 ///
 /// # Panics
 ///
@@ -100,14 +93,14 @@ pub fn plan_listing(objects: Vec<(String, u64, String)>, target_bytes: u64) -> V
 /// many records they produced in total.
 ///
 /// Mirrors the lane, which builds a single `ObjectFramer` and cycles
-/// `begin_object`/`finish_object` over the members of its split — so a run of
+/// `begin_object`/`finish_object` over the members of its split, so a run of
 /// several objects here measures the per-object codec resolution and state
-/// reset that a multi-member split really pays, not the cost of constructing
-/// a framer per object. One object is a one-element slice.
+/// reset a multi-member split pays, not the cost of constructing a framer
+/// per object. One object is a one-element slice.
 ///
 /// Each object is `(key, chunks)`: the key because the codec is resolved from
 /// it per object, and the chunks already split the way a fetcher would
-/// deliver them — and already compressed, if `compression` says so, since
+/// deliver them, already compressed if `compression` says so, since
 /// compressing here would count the compressor rather than the decompressor.
 ///
 /// Entering an object part-way through needs no parameter: the framer's
@@ -116,7 +109,7 @@ pub fn plan_listing(objects: Vec<(String, u64, String)>, target_bytes: u64) -> V
 ///
 /// # Errors
 ///
-/// Whatever the decompressor or the framer reports — a truncated stream, a
+/// Whatever the decompressor or the framer reports: a truncated stream, a
 /// corrupt frame, or a record over the framer's cap.
 pub fn frame_objects(
     compression: Compression,
@@ -132,7 +125,7 @@ pub fn frame_objects(
             // Drained per chunk, because the lane drains at the top of every
             // poll-loop iteration rather than at end of object. The push and
             // pop counts are the same either way, so instruction counts do
-            // not care — but the queue is unbounded, so draining only at the
+            // not change. The queue is unbounded, so draining only at the
             // end would hold a whole object's records live at once and report
             // a DHAT peak the source never reaches. DHAT is attached to this
             // bench, so that shape is part of what it publishes.

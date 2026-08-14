@@ -8,7 +8,7 @@
 // timezone/precision handling.
 //
 // Comparison strategy: row id=1 goes through OUR encoder (full schema
-// validation on), row id=2 through a plain SQL INSERT of literals — the
+// validation on), row id=2 through a plain SQL INSERT of literals, where the
 // server's own parser is the ground truth. Then every column must satisfy
 // toString(row 1) == toString(row 2), which sidesteps both client-side
 // decode limits and hand-computed server formatting.

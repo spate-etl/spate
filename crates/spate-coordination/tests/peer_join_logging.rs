@@ -4,8 +4,8 @@
 //! that probe writes and deletes a key in the durable keyspace every peer is
 //! already watching. The routine case and the alarming case are both a
 //! durable delete, so this asserts on the output an operator running at
-//! `info` actually sees: a fleet growing says so, and nothing says a record
-//! went missing under the coordinator.
+//! `info` sees: a fleet growing says so, and nothing says a record went
+//! missing under the coordinator.
 //!
 //! One test in its own binary, because the capture below is a process-wide
 //! global subscriber and `cargo test` shares one process across a binary.
@@ -139,15 +139,14 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // republishes on every completion in the job. None of those is a
     // rebalance, and announcing them would put a line per split on a large
     // backfill. Held here while the fleet is one worker, which is the only
-    // shape where a completion demonstrably *cannot* move anything: with
-    // two members a shrinking pool rebalances for real, and the silence
-    // would prove nothing.
+    // shape where a completion *cannot* move anything: with two members a
+    // shrinking pool rebalances, and the silence would prove nothing.
     let announced_alone = announcements(&capture);
     for id in ["s0", "s1"] {
         let done = SplitProgress::completed(support::DRAINED_WATERMARK, vec![]);
         a.commit(&support::split_id(id), &done).expect("commit");
         // A completion is not a loss, so nothing retracts it from the
-        // worker's own view — the suite drops it by hand, as its siblings do.
+        // worker's own view; the suite drops it by hand, as its siblings do.
         held_a.splits.remove(id);
     }
     // Long enough for several reconcile ticks, so the leader has observed
@@ -200,13 +199,12 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     wait_for_line(&capture, "joined a fleet already running");
 
     let lines = capture.lines();
-    // Deliberately neither an exact count nor a claim about every line.
-    // This runs on the real clock, so a scheduler stall long enough to
-    // lapse a presence key produces an extra leave/join pair — for either
-    // worker, since each renews its own. That is a flake, not a defect, and
-    // an assertion over all the lines would fail on it while reporting
-    // something untrue. That worker-b's arrival is announced is the
-    // property.
+    // Neither an exact count nor a claim about every line. This runs on the
+    // real clock, so a scheduler stall long enough to lapse a presence key
+    // produces an extra leave/join pair, for either worker, since each
+    // renews its own. An assertion over all the lines would fail on that
+    // while reporting something untrue. The property is that worker-b's
+    // arrival is announced.
     let joins: Vec<&String> = lines.iter().filter(|l| l.contains("peer joined")).collect();
     assert!(
         joins.iter().any(|l| l.contains("worker-b")),
@@ -244,7 +242,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // The other half of a fleet changing size, and the harder one to count.
     // A graceful departure clears the owner of every split it held before
     // dropping its presence key, so nothing is reserved and the survivor is
-    // handed the whole share at once — the largest rebalance there is. The
+    // handed the whole share at once, the largest rebalance there is. The
     // departing instance is no longer a member, so its assignment record is
     // the only remaining evidence of where those splits were assigned; a
     // count that reads live members only reports the biggest move in the
@@ -253,8 +251,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // Drop the coordinator, as the other suites do. `parting` is read by
     // the control step and not by the heartbeat, so a departed worker still
     // in scope re-creates its own presence key at its next beat, rejoins
-    // the fleet it just left, and is assigned work its step will never
-    // claim.
+    // the fleet it left, and is assigned work its step will never claim.
     let before_departure = announcements(&capture);
     let leaving: Vec<_> = held_b
         .splits

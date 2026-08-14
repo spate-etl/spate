@@ -4,7 +4,7 @@
 //!
 //! The split *terminal* and the full-pipeline at-least-once-across-tables
 //! contract (a watermark held until every table wrote, worst-status merge) are
-//! covered where they live — `spate-core`'s `ops` tests and `spate-test`'s
+//! covered where they live, in `spate-core`'s `ops` tests and `spate-test`'s
 //! `tests/split.rs`. Here we prove the connector half: N sinks to N tables,
 //! independent and correctly isolated.
 
@@ -46,7 +46,7 @@ async fn sinks_write_to_independent_tables() {
     let sink_a = sink_for_table(&srv.url, "orders_a");
     let sink_b = sink_for_table(&srv.url, "orders_b");
 
-    // Route even ids to table a, odd ids to table b — the shape a split
+    // Route even ids to table a, odd ids to table b, the shape a split
     // terminal produces, exercised straight against the two sinks' writers.
     let (evens, odds): (Vec<Order>, Vec<Order>) =
         orders(0..200).into_iter().partition(|o| o.id % 2 == 0);
@@ -84,8 +84,8 @@ async fn a_failed_table_write_is_isolated_from_the_others() {
     let srv = server().await;
     make_table(&srv.admin, "orders_a").await;
     let healthy = sink_for_table(&srv.url, "orders_a");
-    // A second sink pointed at an unreachable endpoint — a table whose shard is
-    // down. In a full pipeline this failing write stalls the source watermark
+    // A second sink pointed at an unreachable endpoint, a table whose shard
+    // is down. In a full pipeline this failing write stalls the source watermark
     // (worst-status merge; see spate-test's split tests); here we prove the
     // failure is isolated to that sink and does not corrupt the healthy table.
     let dead = sink_for_table("http://127.0.0.1:1", "orders_b");

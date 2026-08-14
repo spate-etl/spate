@@ -19,7 +19,7 @@ async fn schema_validation_startup_scenarios() {
     let sink = sink_with(&srv.url, "orders", &["id", "name", "amount"], "full", "");
     assert!(sink.validate_schema().await.expect("passes").is_some());
 
-    // Off mode: no schema, no failure — today's behavior.
+    // Off mode: no schema, no failure.
     let sink = sink_with(&srv.url, "orders", &["id", "name", "amount"], "off", "");
     assert!(sink.validate_schema().await.expect("off").is_none());
 
@@ -96,8 +96,9 @@ async fn schema_validation_first_record_scenarios() {
         other => panic!("unexpected error shape: {other:?}"),
     };
 
-    // Config order differing from TABLE order is fine — the INSERT column
-    // list maps by name — as long as the struct follows the CONFIG order.
+    // Config order differing from TABLE order is fine, since the INSERT
+    // column list maps by name, as long as the struct follows the CONFIG
+    // order.
     // Prove it lands in the right columns on a real server.
     #[derive(Clone, Serialize)]
     struct Reordered {

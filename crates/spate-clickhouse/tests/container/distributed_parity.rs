@@ -8,28 +8,28 @@
 //
 // Three independent proofs, each on its own fresh cluster. The same two
 // nodes host TWO named clusters in one remote_servers config: `parity`
-// (equal weights) and `parity_weighted` (weights 9/10) — weights are
+// (equal weights) and `parity_weighted` (weights 9/10). Weights are
 // per-cluster config, so no extra containers are needed for the weighted
 // proof.
 //
-//   A. Placement parity — a REAL pipeline (memory source -> flat_map explode
+//   A. Placement parity. A REAL pipeline (memory source -> flat_map explode
 //      -> ClickHouse sink with `sink.router::<_>(sku_key)`) writes rows
 //      DIRECTLY into each node's shard-local `lines_local`. The SAME logical
 //      rows are then inserted through a `Distributed` table (`lines_twin_dist`,
 //      `insert_distributed_sync = 1`), letting ClickHouse place them into
 //      `lines_twin`. Per node, `lines_local` must equal `lines_twin`
-//      bit-for-bit — proof our router reproduces the engine's placement, and
+//      bit-for-bit, proving our router reproduces the engine's placement and
 //      that every sku lives on exactly one shard.
 //
-//   B. Shard pruning — a `SELECT ... WHERE sku = <literal owned by shard 0>`
+//   B. Shard pruning. A `SELECT ... WHERE sku = <literal owned by shard 0>`
 //      through the `Distributed` table with `optimize_skip_unused_shards = 1`
 //      (+ `force_optimize_skip_unused_shards = 2` as a guardrail) must query
 //      only the owning shard. Proven via the REMOTE node's `system.query_log`
 //      (zero subqueries under the initiator's `initial_query_id`), with a
-//      pruning-off negative control that DOES reach the remote shard — so the
-//      detection method is shown to actually detect.
+//      pruning-off negative control that DOES reach the remote shard, so the
+//      detection method is shown to detect.
 //
-//   C. WEIGHTED placement parity — proof A's comparison over cluster
+//   C. WEIGHTED placement parity: proof A's comparison over cluster
 //      `parity_weighted` (weights 9/10). The unit tests pin the router's
 //      interval mapping against ClickHouse's *documented* semantics; this is
 //      the only place the live engine itself is the oracle for a non-uniform
@@ -42,7 +42,7 @@
 // replica so inter-node subqueries and distributed inserts authenticate.
 //
 // Container names/network carry a per-run nonce so concurrent runs never
-// collide on a docker name — nextest gives each test its own process, and a
+// collide on a docker name. Nextest gives each test its own process, and a
 // leftover container from an aborted run outlives both; the cluster XML is
 // generated with the same nonced hostnames so peer resolution still works.
 // The in-cluster hostnames are therefore `spate-ch0-<nonce>` /
@@ -75,7 +75,7 @@ struct SkuBatch {
     lines: Vec<(String, i64)>,
 }
 
-/// One exploded order line — the sink's RowBinary shape and the read-back
+/// One exploded order line, in the sink's RowBinary shape and the read-back
 /// shape, in the `columns: [sku, unit, qty]` order. `Serialize` drives
 /// the sink encoder; `Row + Deserialize` drives the comparison read-back;
 /// `Ord` sorts the ground-truth for equality.
@@ -96,7 +96,7 @@ struct LineRow {
     qty: i64,
 }
 
-/// Sharding key: the `sku` column — one sku always lands on one shard,
+/// Sharding key: the `sku` column, so one sku always lands on one shard,
 /// matching a `Distributed` DDL of `xxHash64(sku)`. A fn item, not a
 /// closure (the extractor is higher-ranked over the payload lifetime).
 fn sku_key(row: &LineRow) -> ShardKey<'_> {
@@ -104,11 +104,11 @@ fn sku_key(row: &LineRow) -> ShardKey<'_> {
 }
 
 /// The `flat_map` explode: one SKU's batch fans out into one row per line,
-/// each re-keyed by its own `sku` — the record-aware routing that
+/// each re-keyed by its own `sku`, the record-aware routing that
 /// meta-only routing cannot express.
 fn explode(batch: SkuBatch, em: &mut Emitter<'_, Owned<LineRow>>) {
     for (unit, qty) in batch.lines {
-        // Small data + a generously-sized queue: never actually blocks, so
+        // Small data + a generously-sized queue: it never blocks, so
         // (mirroring the spate-avro flat_map template) the Flow is ignored.
         let _ = em.emit(LineRow {
             sku: batch.sku.clone(),
@@ -163,7 +163,7 @@ fn make_data(num_skus: usize, lines_per: usize) -> (Vec<String>, Vec<LineRow>) {
     for s in 0..num_skus {
         let sku = format!("SKU-{s:02}");
         // The payload's text lines: the SKU header, then one `unit=qty` per
-        // row — so this is `lines_per + 1` long, not `lines_per`.
+        // row, so this is `lines_per + 1` long, not `lines_per`.
         let mut payload_lines = vec![sku.clone()];
         for e in 0..lines_per {
             let unit = format!("pack-{e}");
@@ -220,7 +220,7 @@ fn unique(tag: &str) -> String {
 }
 
 /// `remote_servers` XML defining TWO clusters over the same two nodes:
-/// `parity` (equal weights) and `parity_weighted` (weights 9/10) — two
+/// `parity` (equal weights) and `parity_weighted` (weights 9/10), two
 /// single-replica shards each, native port 9000, addressed by container
 /// hostname. Each replica embeds the `default` credentials so node 0
 /// authenticates to node 1 for distributed inserts and subqueries.
@@ -305,7 +305,7 @@ async fn two_node_cluster(pw: &str) -> Cluster {
     let xml = cluster_xml(pw, &h0, &h1);
 
     // Node 0 also creates the shared network; node 1 joins it. Node 0 boots
-    // fine though h1 is not up yet — cluster hosts resolve lazily, only when
+    // fine though h1 is not up yet; cluster hosts resolve lazily, only when
     // a distributed query runs (after both are up and the cache is dropped).
     let node0 = start_node(pw, &net, &h0, &xml).await;
     let node1 = start_node(pw, &net, &h1, &xml).await;
@@ -472,7 +472,8 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
         .build();
 
     // Per-shard metric handles. With no exporter installed they record into
-    // the void — these tests assert on ClickHouse contents, not /metrics.
+    // the void, since these tests assert on ClickHouse contents, not
+    // /metrics.
     let labels = ComponentLabels::new("parity", "clickhouse", "clickhouse");
     let metrics: Vec<SinkShardMetrics> = (0..num_shards)
         .map(|s| SinkShardMetrics::new(&labels, s as u32, &[format!("ch-{s}-0")], E2eBasis::Ingest))
@@ -558,7 +559,7 @@ async fn flush_logs(c: &Cluster) {
 }
 
 /// How many remote (non-initial) subqueries `node` executed under
-/// `initial_query_id` — the robust cross-node evidence that a shard was
+/// `initial_query_id`, the robust cross-node evidence that a shard was
 /// contacted (or not).
 async fn remote_subqueries(admin: &clickhouse::Client, initial_query_id: &str) -> u64 {
     admin
@@ -575,7 +576,7 @@ async fn remote_subqueries(admin: &clickhouse::Client, initial_query_id: &str) -
 // ---- Proof A: placement parity ----------------------------------------------
 
 /// The sink's direct-to-shard placement equals ClickHouse's own `Distributed`
-/// placement, bit-for-bit and per shard — so a `Distributed` table can prune
+/// placement, bit-for-bit and per shard, so a `Distributed` table can prune
 /// SELECTs over rows this sink wrote directly to the locals.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -586,7 +587,7 @@ async fn distributed_insert_and_sink_place_rows_identically() {
 
     let (payloads, rows) = make_data(12, 3);
 
-    // The data must actually exercise both shards, or parity proves nothing.
+    // The data must exercise both shards, or parity proves nothing.
     let on_shard0 = rows.iter().filter(|r| shard_of(&r.sku) == 0).count();
     let on_shard1 = rows.len() - on_shard0;
     assert!(
@@ -642,7 +643,7 @@ async fn distributed_insert_and_sink_place_rows_identically() {
         );
     }
 
-    // And every sku lives on exactly one shard — the one our router chose.
+    // And every sku lives on exactly one shard, the one our router chose.
     for s in 0..12 {
         let sku = format!("SKU-{s:02}");
         let c0 = count_where_sku(&c.node0.admin, "lines_local", &sku).await;
@@ -664,7 +665,7 @@ async fn distributed_insert_and_sink_place_rows_identically() {
 // ---- Proof B: shard pruning -------------------------------------------------
 
 /// A SELECT on the sharding key with `optimize_skip_unused_shards = 1`
-/// queries only the owning shard — proven on the REMOTE node's query_log —
+/// queries only the owning shard, proven on the REMOTE node's query_log,
 /// with a pruning-off negative control that does reach it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -687,7 +688,7 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     }
     insert.end().await.expect("finish insert");
 
-    // A sku OWNED BY SHARD 0 — local to the initiator (node 0), so a
+    // A sku OWNED BY SHARD 0, local to the initiator (node 0), so a
     // pruned query must never touch node 1.
     let owned_by_shard0 = (0..12)
         .map(|s| format!("SKU-{s:02}"))
@@ -727,8 +728,8 @@ async fn select_on_sharding_key_queries_exactly_one_shard() {
     );
 
     // Negative control: pruning off. The initiator contacts BOTH shards, so
-    // the remote node DOES log a subquery — proving the query_log method
-    // actually detects remote contact (and the pruned zero above is real).
+    // the remote node DOES log a subquery, proving the query_log method
+    // detects remote contact and that the pruned zero above is real.
     let full_id = unique("full-scan-query");
     let _ = c
         .node0
@@ -799,7 +800,7 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
     let skus: Vec<String> = (0..16).map(|s| format!("SKU-{s:02}")).collect();
 
     // The fixture must exercise both shards AND differ from the equal-weight
-    // split for at least one sku — otherwise this proof adds nothing over
+    // split for at least one sku; otherwise this proof adds nothing over
     // proof A and a wrong interval model could pass vacuously.
     let on_shard0 = skus.iter().filter(|s| shard_w(s) == 0).count();
     assert!(

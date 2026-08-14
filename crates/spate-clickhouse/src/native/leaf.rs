@@ -8,7 +8,7 @@
 use bytes::{BufMut, BytesMut};
 
 /// ClickHouse `VarUInt` (unsigned LEB128, 1–10 bytes). Mirrors
-/// `rowbinary::put_leb128` — kept in step so the two encoders agree on the
+/// `rowbinary::put_leb128`, kept in step so the two encoders agree on the
 /// wire (a byte-unit test pins the encoding).
 pub(crate) fn put_leb128(buf: &mut BytesMut, mut value: u64) {
     loop {

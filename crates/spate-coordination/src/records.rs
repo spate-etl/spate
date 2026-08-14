@@ -2,17 +2,17 @@
 //!
 //! Everything persisted is schema-versioned compact JSON. Parsing is
 //! strict and every failure mode gets a distinct, actionable Fatal
-//! message — a corrupt or alien record means two incompatible jobs share
-//! a store prefix, and limping past that would corrupt fencing.
+//! message. A corrupt or alien record means two incompatible jobs share
+//! a store prefix, and limping past that corrupts fencing.
 //!
-//! A split's durable state is deliberately **two** records: the immutable
-//! [`SplitSpecRecord`] (descriptor — potentially hundreds of KiB), written
+//! A split's durable state is **two** records: the immutable
+//! [`SplitSpecRecord`] (descriptor, potentially hundreds of KiB), written
 //! once at planning, and the small mutable [`SplitProgressRecord`] (owner,
 //! epoch, attempts, watermark), which is the CAS target for every claim,
 //! fence, and commit. Commit cost is therefore independent of descriptor
 //! size. The leader creates the spec before the progress record, so a
 //! progress record implies its spec exists (watch delivery may still show
-//! them in either order — consumers buffer).
+//! them in either order, so consumers buffer).
 //!
 //! Layout (keys relative to the per-job buckets):
 //!
@@ -44,15 +44,14 @@ use std::hash::BuildHasher as _;
 /// checked on the plan record during startup and on every split and spec
 /// record afterwards, and a mismatch is [`Fatal`] on both sides. So a
 /// schema-3 worker cannot join a store a schema-2 fleet wrote, and vice
-/// versa — an upgrade needs a fresh store prefix, not merely a full-fleet
+/// versa. An upgrade needs a fresh store prefix rather than a full-fleet
 /// restart, and an in-flight bounded job restarts from the beginning.
 /// (At-least-once holds through that: the re-run duplicates, it does not
 /// lose.) See the "Upgrading" section of the scaling-out guide.
 ///
-/// Failing closed is the point. Ownership transfers on the durable
-/// progress-record CAS regardless of vintage, so a mixed fleet could not
-/// corrupt anything — but it would rebalance against two different models
-/// at once, and diagnosing that is far worse than refusing to start.
+/// The check fails closed. Ownership transfers on the durable
+/// progress-record CAS regardless of vintage, so a mixed fleet corrupts
+/// nothing, but it rebalances against two different models at once.
 ///
 /// [`Fatal`]: spate_core::coordination::CoordinationErrorKind::Fatal
 pub(crate) const SCHEMA: u32 = 3;
@@ -142,7 +141,7 @@ pub(crate) fn fingerprint_hash(fingerprint: &str) -> u64 {
     foldhash::fast::FixedState::with_seed(0).hash_one(fingerprint)
 }
 
-/// Milliseconds since the Unix epoch — **advisory only** (diagnostics);
+/// Milliseconds since the Unix epoch. **Advisory only** (diagnostics);
 /// never compared across machines and never part of any protocol rule.
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -235,7 +234,7 @@ impl SplitSpecRecord {
 }
 
 /// The mutable per-split record: fencing state and committed progress.
-/// Small by construction — this is what every claim and commit CASes, so
+/// Small by construction. This is what every claim and commit CASes, so
 /// its encode cost is the per-commit cost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +248,7 @@ pub(crate) struct SplitProgressRecord {
     pub(crate) epoch: u64,
     pub(crate) status: SplitStatus,
     /// Owner of the current/last tenancy. `None` after a graceful release
-    /// (or before any claim) — the claim path reads this, not watch
+    /// (or before any claim). The claim path reads this, not watch
     /// markers, to decide whether a takeover consumes a delivery attempt.
     pub(crate) owner: Option<String>,
     /// Delivery attempts consumed (non-graceful tenancy ends + explicit
@@ -380,7 +379,7 @@ pub(crate) struct PlanRecord {
     ///
     /// Treat it as a **lower bound**, not a census: seeding happens before
     /// the recount, and a publish that loses its CAS or errors leaves the
-    /// seeded records behind — a `Final` plan then never replans, so the
+    /// seeded records behind. A `Final` plan then never replans, so the
     /// count stays short for the life of the job. Terminal detection
     /// therefore uses it only to tell whether a worker has caught up, and
     /// renders its verdict against a fresh listing (see
@@ -487,7 +486,7 @@ pub(crate) struct WorkerVal {
     /// forces the fleet to be homogeneous (the job fingerprint covers
     /// *source* configuration, not coordination tuning), and a leader that
     /// assumed its own value would hand splits to a smaller worker that
-    /// then refuses to claim them — permanently, because that worker keeps
+    /// then refuses to claim them, permanently, because that worker keeps
     /// looking like the least loaded one.
     ///
     /// `#[serde(default)]` so a presence value written before the field

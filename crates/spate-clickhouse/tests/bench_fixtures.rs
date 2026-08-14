@@ -2,8 +2,8 @@
 //! one its recorded numbers were measured against.
 //!
 //! The Native encoder is driven by a column list written beside the row
-//! struct, and a mismatch between the two — a column added without its field,
-//! or a type that does not match — is a fatal error raised at encode time.
+//! struct, and a mismatch between the two (a column added without its field,
+//! or a type that does not match) is a fatal error raised at encode time.
 //! `cargo bench --no-run` cannot catch that: it compiles the bench without
 //! running it, so the first sign would be a failed valgrind job minutes into
 //! CI. This runs in milliseconds wherever `cargo test` does.
@@ -102,12 +102,12 @@ fn rowbinary_encodes_every_schema() {
 /// The encoded sizes, pinned.
 ///
 /// An instruction count only compares across two legs that encoded identical
-/// bytes, and the corpus is generated rather than stored — so a one-character
+/// bytes, and the corpus is generated rather than stored, so a one-character
 /// edit to a value formula in `rows.rs` re-baselines every comparison with
-/// nothing to say it happened. These numbers are what makes that edit fail
-/// here instead. They are the sizes the pull request that added each bench
-/// published, and changing one is a deliberate act: re-record it, and treat
-/// every count from before the change as measuring a different corpus.
+/// nothing to say it happened. These numbers make that edit fail here
+/// instead. They are the sizes the pull request that added each bench
+/// published; changing one means re-recording it and treating every count
+/// from before the change as measuring a different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
     let events = NativeSchema::from_columns(&rows::event_columns()).expect("event schema builds");
@@ -167,15 +167,15 @@ fn the_corpora_are_pinned_across_revisions() {
 
 /// The routing corpora, pinned the same way and for the same reason.
 ///
-/// The lengths are load-bearing rather than incidental: XXH64's cost is a
-/// function of input length alone, and it changes shape at 32 bytes, so
+/// The lengths decide the cost: XXH64's cost is a function of input length
+/// alone, and it changes shape at 32 bytes, so
 /// `str_short` and `str_long` are named for which side of that they sit on.
 /// A key format edited to one byte longer or shorter would keep every case
 /// running and quietly re-baseline it.
 ///
 /// The digest pins the bytes themselves. It folds the hash of every key in
 /// order, so a changed value, a changed seed, or a reordered corpus all
-/// fail — and because it is built from `hash_key`, it is simultaneously a
+/// fail, and because it is built from `hash_key`, it is simultaneously a
 /// check that the hash the bench measures is the one ClickHouse's
 /// `xxHash64(col)` agrees with (the vectors in `router.rs` pin the absolute
 /// values against a live server).
@@ -252,10 +252,9 @@ fn the_routing_corpora_are_pinned_across_revisions() {
 ///
 /// The uniform table takes the `hash % N` fast path and the tiered one the
 /// interval scan, which is the whole reason the bench carries a case for
-/// each. Pinning the total scan depth over a fixed corpus pins the thing
-/// that case exists to measure: if a change made the scan exit sooner on
-/// average, this number moves, and the count that moved with it has an
-/// explanation rather than a mystery.
+/// each. Pinning the total scan depth over a fixed corpus pins what that
+/// case measures: if a change made the scan exit sooner on average, this
+/// number moves, and the count that moved with it has an explanation.
 #[test]
 fn the_weight_tables_reach_both_selection_paths() {
     type Keys = Owned<String>;
@@ -270,12 +269,12 @@ fn the_weight_tables_reach_both_selection_paths() {
         .map(|k| DistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
         .collect();
 
-    // Every shard index is in range under both tables, and the scan depth —
-    // the sum of one-based positions the tiered table walks — is fixed.
+    // Every shard index is in range under both tables, and the scan depth
+    // (the sum of one-based positions the tiered table walks) is fixed.
     let uniform_total: usize = hashes.iter().map(|&h| uniform.shard_for_hash(h)).sum();
     let tiered_total: usize = hashes.iter().map(|&h| tiered.shard_for_hash(h) + 1).sum();
-    // Both are close to what a uniform hash predicts — 3.5 and 5.27 per
-    // record — which is the check that the corpus scatters rather than the
+    // Both are close to what a uniform hash predicts (3.5 and 5.27 per
+    // record), which checks that the corpus scatters rather than being the
     // point of the pin.
     assert_eq!(uniform_total, 349_449, "uniform placement");
     assert_eq!(tiered_total, 527_767, "tiered scan depth");

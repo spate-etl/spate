@@ -19,10 +19,10 @@ use std::sync::Arc;
 ///
 /// `F` is the **record family**: use `Owned<T>` for plain owned row structs
 /// (`ClickHouseEncoder::<Owned<MyRow>>::new()`), or a borrowed family whose
-/// `Rec<'buf>` points into the payload buffer for zero-copy pipelines — any
+/// `Rec<'buf>` points into the payload buffer for zero-copy pipelines. Any
 /// family whose records implement `Serialize` at every lifetime encodes.
 ///
-/// The row struct's **field declaration order is the wire contract** — it
+/// The row struct's **field declaration order is the wire contract**: it
 /// must match the column list configured for the sink (see the crate docs).
 /// [`ClickHouseEncoder::with_schema`] checks that contract against the
 /// live table's schema on each pipeline thread's first record.
@@ -52,7 +52,7 @@ impl<F> ClickHouseEncoder<F> {
     /// schema returned by [`crate::ClickHouseSink::validate_schema`]) on
     /// the first record it encodes: field names and order always, type
     /// classes in `full` mode. A mismatch is an
-    /// [`ErrorClass::Fatal`] error — it stops the pipeline before any
+    /// [`ErrorClass::Fatal`] error, which stops the pipeline before any
     /// misaligned batch is sent. Steady-state cost after the first record
     /// is one predictable branch.
     #[must_use]
@@ -122,7 +122,7 @@ where
 /// Passthrough for records that are **already RowBinary-encoded** rows
 /// (`Vec<u8>` payloads): appends the bytes verbatim. For pipelines that
 /// encode upstream or replicate pre-encoded data. One record must be
-/// exactly one encoded row — the framework counts rows by records.
+/// exactly one encoded row; the framework counts rows by records.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PreEncodedRows;
 

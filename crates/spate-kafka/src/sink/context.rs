@@ -4,15 +4,15 @@
 //! writer must not return until every message of the batch has a confirmed
 //! delivery report. Reports arrive asynchronously on the producer's poll
 //! thread; each produced message carries an `Arc<BatchInflight>` as its
-//! librdkafka opaque, and the callback decrements the batch's countdown —
-//! recording the first failure — then wakes the awaiting writer on the
+//! librdkafka opaque, and the callback decrements the batch's countdown,
+//! recording the first failure, then wakes the awaiting writer on the
 //! last report. The callback never blocks: it is atomics plus one
 //! `Notify::notify_one`.
 //!
 //! Abort safety: librdkafka holds one `Arc` reference per outstanding
-//! message and delivers exactly one report for each — success, error, or
-//! `Purge*` at teardown — so a `write_batch` future aborted at the drain
-//! deadline leaks nothing; late reports decrement a countdown nobody
+//! message and delivers exactly one report for each (success, error, or
+//! `Purge*` at teardown), so a `write_batch` future aborted at the drain
+//! deadline leaks nothing; late reports decrement a countdown nothing
 //! awaits and the last `Arc` drop frees the state.
 //!
 //! [`write_batch`]: spate_core::sink::ShardWriter::write_batch
@@ -29,7 +29,7 @@ use std::time::Instant;
 use tokio::sync::Notify;
 
 /// Per-batch delivery countdown. Created by `write_batch` after parsing
-/// the batch (so the total is known up front — incrementing per send would
+/// the batch (so the total is known up front; incrementing per send would
 /// race reports arriving mid-loop), cloned into every produced message's
 /// delivery opaque.
 #[derive(Debug)]
@@ -116,8 +116,8 @@ impl SinkContext {
 
     /// A context for probe producers: its slot is never filled (and the
     /// probe client config sets no statistics interval), so it publishes
-    /// nothing — the single main producer stays the sole statistics
-    /// source, keeping the absolute-counter mapping sound.
+    /// nothing. The single main producer stays the sole statistics source,
+    /// which keeps the absolute-counter mapping sound.
     pub(crate) fn detached() -> Self {
         SinkContext::new(Arc::new(Mutex::new(None)))
     }
@@ -152,7 +152,7 @@ impl ClientContext for SinkContext {
 impl ProducerContext for SinkContext {
     type DeliveryOpaque = Arc<BatchInflight>;
 
-    /// Runs on the producer's poll thread — never block here.
+    /// Runs on the producer's poll thread. Never block here.
     fn delivery(&self, delivery_result: &DeliveryResult<'_>, inflight: Arc<BatchInflight>) {
         if let Err((error, _message)) = delivery_result {
             inflight.record_failure(error.rdkafka_error_code(), error.to_string());

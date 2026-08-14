@@ -3,10 +3,10 @@
 //! write) instead of bytes, plus a class-based compatibility check
 //! between shapes and parsed ClickHouse types.
 //!
-//! Shape-vs-type checking is deliberately permissive — a `u32` field may
-//! feed `UInt32`, `DateTime`, or `IPv4`, and unknown server types always
-//! pass — with one hard rule: the `Nullable` prefix byte is a wire-format
-//! difference, so `Option`-ness must match exactly in both directions.
+//! Shape-vs-type checking is permissive: a `u32` field may feed `UInt32`,
+//! `DateTime`, or `IPv4`, and unknown server types always pass. One hard
+//! rule applies: the `Nullable` prefix byte is a wire-format difference, so
+//! `Option`-ness must match exactly in both directions.
 
 use super::typeparse::ChType;
 use serde::ser::{self, Serialize};
@@ -55,7 +55,7 @@ pub(crate) enum Shape {
     /// Elements back-to-back, no length (`Tuple`, `FixedString`, and the
     /// fixed-byte wire types).
     Tuple(Vec<Shape>),
-    /// A nested struct — same wire as a `Tuple`, with field names kept
+    /// A nested struct, with the same wire as a `Tuple` and field names kept
     /// for diagnostics.
     Struct(Vec<FieldShape>),
     /// A newtype wrapper: transparent bytes, observable name (the hook
@@ -75,7 +75,7 @@ pub(crate) struct FieldShape {
     pub(crate) shape: Shape,
 }
 
-/// Probing failed — the row type cannot be validated (and could not be
+/// Probing failed, so the row type cannot be validated (and could not be
 /// encoded either).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -89,7 +89,7 @@ pub(crate) enum ProbeError {
     /// A sequence did not report its length.
     #[error("sequences must have a known length ahead of time")]
     SequenceMustHaveLength,
-    /// `#[serde(flatten)]` — unsupported on row structs.
+    /// `#[serde(flatten)]`, unsupported on row structs.
     #[error("#[serde(flatten)] is not supported by RowBinary rows")]
     Flatten,
     /// An error raised by a `Serialize` implementation.
@@ -424,7 +424,7 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
         return true;
     }
 
-    // Unknown server types never fail validation — neither unparsed
+    // Unknown server types never fail validation, neither unparsed
     // constructors (Other) nor parameterless names outside the known
     // set. Failing on a type this parser has never heard of would be a
     // false positive.
@@ -493,7 +493,7 @@ fn tuple_compatible(elems: &[Shape], ty: &ChType) -> bool {
         ChType::Tuple(ts) => {
             elems.len() == ts.len() && elems.iter().zip(ts).all(|(s, t)| compatible(s, t))
         }
-        // [u8; N] probes as N U8 elements — same wire as FixedString(N).
+        // [u8; N] probes as N U8 elements, the same wire as FixedString(N).
         ChType::FixedString(n) => elems.len() == *n as usize && all_u8(),
         // Ipv6Addr's default impl probes as 16 U8s.
         ChType::Named(n) if n == "IPv6" => elems.len() == 16 && all_u8(),
@@ -505,7 +505,7 @@ fn tuple_compatible(elems: &[Shape], ty: &ChType) -> bool {
     }
 }
 
-/// Parameterless type names the class matrix actually understands.
+/// Parameterless type names the class matrix understands.
 const KNOWN_NAMED: &[&str] = &[
     "Bool",
     "Int8",

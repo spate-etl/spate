@@ -2,18 +2,18 @@
 //! delivery report.
 //!
 //! `write_batch` runs in two phases. First it parses **all** frames back
-//! into messages — validating the connector's framing before anything is
-//! enqueued, and fixing the delivery countdown's total up front (counting
+//! into messages, validating the connector's framing before anything is
+//! enqueued and fixing the delivery countdown's total up front (counting
 //! per send would race reports arriving mid-loop). Then it produces each
 //! message, absorbing librdkafka queue-full pushback with a bounded async
 //! backoff, and awaits the countdown under a deadline derived from the
 //! configured delivery timeout. Only when every report confirmed does it
-//! return `Ok` — the framework's durable-ack point.
+//! return `Ok`, which is the framework's durable-ack point.
 //!
 //! Failure semantics are honest at-least-once: a retryable error (report
 //! timeout, broker transport failure) makes the framework retry the whole
-//! sealed batch, re-producing any already-delivered prefix — duplicates,
-//! never loss. Errors that idempotence or configuration cannot heal
+//! sealed batch, re-producing any already-delivered prefix, so duplicates
+//! are possible and loss is not. Errors that idempotence or configuration cannot heal
 //! (authorization, unknown topic, a fenced idempotent producer) are fatal:
 //! the batch is abandoned, the watermark stalls, and the pipeline fails
 //! fast instead of spinning.
@@ -140,7 +140,7 @@ impl ShardWriter for KafkaWriter {
 
     /// Resolve the `spate_kafka_sink_*` statistics handles into the slot the
     /// producer context publishes through. No-op when `statistics_interval`
-    /// is zero — disabled statistics register no families.
+    /// is zero; disabled statistics register no families.
     fn attach_metrics(&mut self, meter: Option<Meter>) {
         if !self.statistics_enabled {
             return;
@@ -167,7 +167,7 @@ impl ShardWriter for KafkaWriter {
         // deadline. On a definitive send error librdkafka returns the
         // record (and its opaque) without a future report, so the batch
         // fails immediately; already-enqueued messages report into a
-        // countdown nobody awaits, which is harmless.
+        // countdown nothing awaits, which is harmless.
         for message in &messages {
             let mut record: BaseRecord<'_, [u8], [u8], Arc<BatchInflight>> =
                 BaseRecord::with_opaque_to(&self.topic, Arc::clone(&inflight));
@@ -220,7 +220,7 @@ impl ShardWriter for KafkaWriter {
             }
         }
 
-        // Phase 3: the durable-ack point — every report must confirm.
+        // Phase 3: the durable-ack point, where every report must confirm.
         // Re-anchor the deadline: `delivery.timeout.ms` bounds each message's
         // time-to-report from *its own* enqueue, and the send loop above may
         // have spent the whole send window in queue-full backoff, so the last
@@ -253,7 +253,7 @@ impl ShardWriter for KafkaWriter {
 
     /// Readiness: fetch the topic's metadata on a blocking thread (the
     /// underlying call blocks) and fail fast on an unknown topic. Runs
-    /// against a probe-only producer — see the config module.
+    /// against a probe-only producer; see the config module.
     async fn probe(&self, endpoint: &KafkaEndpoint) -> Result<(), SinkError> {
         let producer = endpoint.producer.clone();
         let topic = self.topic.clone();
@@ -299,9 +299,9 @@ impl ShardWriter for KafkaWriter {
 /// errors, an unknown topic, a message the broker's limits reject, and the
 /// idempotent producer's fenced/fatal states (retrying those would spin
 /// until the stalled-watermark deadline instead of surfacing the cause).
-/// Everything else — transport failures, timeouts, purges, and unknown
-/// codes — is retryable: with idempotence enabled a re-produce is safe
-/// in-session, and a batch replay costs duplicates, never loss.
+/// Everything else (transport failures, timeouts, purges, and unknown codes)
+/// is retryable: with idempotence enabled a re-produce is safe in-session,
+/// and a batch replay costs duplicates, never loss.
 fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
     use RDKafkaErrorCode as C;
     let class = match code {
@@ -441,8 +441,8 @@ mod tests {
     }
 
     /// Disabled statistics must register no families, and a missing Meter
-    /// (custom/reserved component_type) must leave the slot empty — the
-    /// producer context then publishes nothing.
+    /// (custom/reserved component_type) must leave the slot empty, so the
+    /// producer context publishes nothing.
     #[test]
     fn attach_metrics_gates_on_statistics_and_meter() {
         let mut disabled = test_writer(false);

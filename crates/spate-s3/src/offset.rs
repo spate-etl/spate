@@ -18,7 +18,7 @@
 //!   the composite ordering match (ordinal, index) ordering exactly.
 //! - A record is never emitted at index `MAX_RECORD_INDEX + 1 = 2^40 - 1`
 //!   (the lane's emit guard fails fatally first). That index is reserved so
-//!   a watermark — "one past the last acknowledged record" — can always be
+//!   a watermark ("one past the last acknowledged record") can always be
 //!   expressed *inside* the same ordinal, and the `+ 1` never carries into
 //!   the ordinal field claiming a later object started.
 
@@ -55,7 +55,7 @@ pub(crate) struct Position {
 }
 
 /// A position that cannot be encoded: the object or the lane outgrew the
-/// bit budget. Always fatal — continuing would corrupt watermarks.
+/// bit budget. Always fatal; continuing would corrupt watermarks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OffsetOverflow {
     what: &'static str,
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn watermark_after_last_emittable_record_stays_in_its_object() {
         // A record emitted at MAX_RECORD_INDEX yields watermark E + 1, which
-        // must decode to the *reserved* index of the same ordinal — never to
+        // must decode to the *reserved* index of the same ordinal, never to
         // (ordinal + 1, 0).
         let last = Position {
             ordinal: 7,
@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn maximum_watermark_is_i64_max() {
-        // The largest expressible watermark — reserved index of the last
-        // ordinal — is exactly i64::MAX, and is never itself incremented
+        // The largest expressible watermark, the reserved index of the last
+        // ordinal, is exactly i64::MAX, and is never itself incremented
         // (nothing can be emitted at the reserved index).
         let max = Position {
             ordinal: MAX_ORDINAL,

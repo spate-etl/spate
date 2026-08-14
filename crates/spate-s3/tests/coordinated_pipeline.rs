@@ -1,5 +1,5 @@
 //! Two full pipelines sharing one coordinated backfill over an
-//! in-process store — the issue's acceptance shape, infrastructure-free.
+//! in-process store: the issue's acceptance shape, infrastructure-free.
 //!
 //! Both instances run concurrently against the same prefix and the same
 //! coordination store; the collective result must cover the input exactly
@@ -39,9 +39,9 @@ sink: {{ capture: {{}} }}
 }
 
 /// [`config_yaml`] with a small in-flight budget, so a paced sink (delay per
-/// write) actually throttles the owner rather than letting many batches
-/// overlap their delays — the revocation test needs the owner to hold its splits
-/// open across several rebalance rounds.
+/// write) throttles the owner rather than letting many batches overlap their
+/// delays. The revocation test needs the owner to hold its splits open across
+/// several rebalance rounds.
 fn throttled_config_yaml(data: &std::path::Path) -> String {
     format!(
         r#"
@@ -90,7 +90,7 @@ fn two_instances_complete_collectively_and_only_the_leader_lists() {
     let data = dir.path().join("data");
     fs::create_dir_all(&data).unwrap();
     // 96 small objects → six splits at the 16-member cap: enough work for
-    // two instances (max_in_flight: 2 each) to genuinely share.
+    // two instances (max_in_flight: 2 each) to share.
     let mut expected: Vec<String> = Vec::new();
     for i in 0..96 {
         let lines = recs(&format!("o{i:02}"), 20);
@@ -143,7 +143,7 @@ fn two_instances_complete_collectively_and_only_the_leader_lists() {
 #[test]
 fn empty_and_recordless_objects_complete_via_the_sweep() {
     // Splits whose members frame zero records never produce a
-    // watermark-carrying commit — only the completion sweep can finish
+    // watermark-carrying commit; only the completion sweep can finish
     // them. Zero-byte objects and whitespace-only objects both take that
     // path; the job must still self-terminate cleanly.
     let dir = tempfile::tempdir().unwrap();
@@ -236,7 +236,7 @@ fn launch_revocable_instance(
 fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
     // The teeth of issue #58. When a *live* owner gives up a split, the
     // cooperative revocation drains its intake at an object boundary, commits the
-    // tail, and only then releases — so the peer resumes covering everything
+    // tail, and only then releases, so the peer resumes covering everything
     // the owner emitted, replay-free. The steal-era CAS transfer this replaces
     // moved ownership *before* the owner stopped reading, re-reading
     // `[committed watermark, fence]` and producing nonzero duplicates on every
@@ -249,7 +249,7 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
     // 96 objects → six splits at the 16-member cap (as in the two-instance
     // test): with instance A holding all six when B joins, at least three must
     // move for the fleet to balance. Records are padded so each split spans
-    // many sink batches — the paced sink then throttles the owner for seconds,
+    // many sink batches, so the paced sink throttles the owner for seconds,
     // holding its splits open (committed but incomplete) long enough for the
     // peer to take them over rather than the owner racing to the finish.
     let big = |prefix: &str, n: usize| -> Vec<String> {
@@ -280,11 +280,11 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
     };
 
     // Instance A starts alone with a working set large enough to claim every
-    // split — it over-claims relative to a two-instance fleet.
+    // split, over-claiming relative to a two-instance fleet.
     let a = launch_revocable_instance(&yaml, &store, "instance-a", 6, pace);
     // Give A a real head start: wait until it has captured (and therefore is
-    // committing) real progress — several checkpoint intervals (100ms) at the
-    // 250ms poll cadence — so B joins against a live owner with committed
+    // committing) real progress, several checkpoint intervals (100ms) at the
+    // 250ms poll cadence, so B joins against a live owner with committed
     // watermarks, not a cold job.
     wait_until(
         Duration::from_secs(30),
@@ -313,8 +313,8 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
         "the union must cover every record exactly"
     );
 
-    // Movement: both instances captured data, so splits genuinely moved from a
-    // live owner to its peer (not merely a solo run).
+    // Movement: both instances captured data, so splits moved from a live
+    // owner to its peer rather than the run being solo.
     assert!(
         !rows_a.is_empty() && !rows_b.is_empty(),
         "splits must move between live owners (a={}, b={})",
@@ -322,7 +322,7 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
         rows_b.len()
     );
 
-    // Zero duplicates — the point of the feature. `total == union` iff no
+    // Zero duplicates. `total == union` iff no
     // record was delivered twice; the steal-era transfer would make
     // `total > union`.
     assert_eq!(

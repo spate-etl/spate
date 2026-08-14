@@ -1,23 +1,21 @@
 //! The pure decision core of the coordination protocol.
 //!
-//! Everything here is a function of the observed store state — no I/O, no
-//! channels, no clocks — so the assignment, claim, and quarantine rules
-//! are unit- and property-testable in isolation. The task layer feeds
+//! Everything here is a function of the observed store state, with no I/O,
+//! no channels, and no clocks, so the assignment, claim, and quarantine
+//! rules are unit- and property-testable in isolation. The task layer feeds
 //! observations in and executes the decisions with conditional writes;
 //! losing any race is always safe because the write, not the decision, is
 //! what transfers ownership.
 //!
-//! [`desired_assignment`] is the balance decision in full, and lives here
-//! rather than in the task deliberately: it is the part most likely to
-//! change, and this is the half of the crate where a change is cheap to
-//! verify. Its contract is specified normatively by [the work-assignment
-//! page] — the numbered invariants there name the property tests at the
-//! bottom of this file, and they are that page's own scheme, separate from
-//! the framework's `INV-N`.
+//! [`desired_assignment`] is the balance decision in full. Its contract is
+//! specified normatively by [the work-assignment page]. The numbered
+//! invariants there name the property tests at the bottom of this file,
+//! and they are that page's own scheme, separate from the framework's
+//! `INV-N`.
 //!
 //! Liveness discipline: a split is claimable exactly when its durable
 //! progress record says `runnable` and no live lease key exists for it.
-//! Lease keys expire server-side (single clock — the store's), so there
+//! Lease keys expire server-side (a single clock, the store's), so there
 //! are no cross-machine clock comparisons anywhere; fencing (the progress
 //! record CAS) remains the only *correctness* mechanism regardless.
 //!
@@ -51,9 +49,9 @@ pub(crate) enum ClaimKind {
     /// Gracefully released (`owner` cleared by the releasing worker).
     Released,
     /// The lease key is still live but held by this worker's own stable
-    /// id under a foreign nonce: a restarted predecessor — reclaim fast,
-    /// without waiting out the lease. (The same observation with OUR
-    /// nonce on a split we do not hold is a live twin — Fatal, decided by
+    /// id under a foreign nonce, which is a restarted predecessor. Reclaim
+    /// fast, without waiting out the lease. (The same observation with OUR
+    /// nonce on a split we do not hold is a live twin, reported as Fatal by
     /// the task layer.)
     Reclaim,
     /// The lease expired with `owner` still set: the owner died.
@@ -103,16 +101,14 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 
 /// The leader's desired assignment: which splits each live member should
 /// hold. This is the whole balance decision, and the only place it is
-/// made — workers reconcile toward what they are given and never choose
+/// made. Workers reconcile toward what they are given and never choose
 /// for themselves.
 ///
-/// **Balance is on weight, not split count.** Split counts are a proxy,
-/// and a bad one here: an object at or above the packing target lands
-/// alone in its own split, so equal counts can mean wildly unequal bytes.
-/// The lane budget still caps the *count* per member — it is a
+/// **Balance is on weight, not split count.** An object at or above the
+/// packing target lands alone in its own split, so equal counts can mean
+/// unequal bytes. The lane budget still caps the *count* per member, as a
 /// materialization limit rather than a fairness one. Splits beyond the
-/// fleet's summed budget stay unassigned: they are the queue, exactly as
-/// unleased splits were before.
+/// fleet's summed budget stay unassigned and form the queue.
 ///
 /// `caps` gives each member its own lane budget, as that member advertised
 /// it on its presence key; `default_cap` covers a member whose presence
@@ -121,41 +117,37 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 /// leader would keep handing splits to whichever member looks least loaded
 /// while that member's own `max_in_flight` refuses to claim them, forever.
 ///
-/// `reserved` names splits withheld by the rebalance delay — work whose
-/// owner has departed but whose grace window has not elapsed. The window
+/// `reserved` names splits withheld by the rebalance delay, meaning work
+/// whose owner has departed but whose grace window has not elapsed. The
+/// window
 /// itself is the leader's bookkeeping (it needs a clock); this function
 /// only sees the resulting set, so it stays pure and replayable.
 ///
-/// The three passes, in order:
+/// The passes run in order:
 ///
 /// 1. **Sticky.** Every split whose current owner is still a live member
-///    stays put, subject to the lane cap. Stickiness is the point: a move
-///    costs a drain, so an assignment that churns for a marginally better
-///    balance is worse than one that does not.
+///    stays put, subject to the lane cap. A move costs a drain, so the
+///    assignment does not churn for a marginally better balance.
 /// 2. **Fill.** Unassigned splits go to the least-loaded member that has
-///    lane budget, heaviest split first — longest-processing-time greedy,
-///    which is where the approximation quality comes from.
+///    lane budget, heaviest split first (longest-processing-time greedy).
 /// 3. **Improve.** While some split can move from a heavier member to a
 ///    lighter one and strictly reduce imbalance, move it.
 ///
-/// Pass 3's admission rule is `load(from) > load(to) + weight`, which is
-/// exactly the condition under which the move reduces the sum of squared
-/// loads — the standard balance potential. It is also the weight-valued
-/// generalization of the pairwise `victim > own + 1` rule the previous
-/// work-stealing protocol used, so the convergence argument carries over
-/// unchanged: every move strictly improves, therefore none oscillate.
+/// Pass 3's admission rule is `load(from) > load(to) + weight`, the
+/// condition under which the move reduces the sum of squared loads, the
+/// standard balance potential. Every move strictly improves, so none
+/// oscillate.
 ///
 /// Because each move strictly decreases an integer potential bounded
-/// below, pass 3 terminates on its own; [`MAX_IMPROVING_MOVES`] is a
-/// belt-and-braces bound so a leader can never spin on pathological
-/// input rather than publish.
+/// below, pass 3 terminates on its own; [`MAX_IMPROVING_MOVES`] bounds
+/// the pass so a leader publishes instead of spinning on pathological
+/// input.
 ///
 /// The result is idempotent: feeding this function's own output back as
 /// current ownership reproduces it exactly. Pass 1 restores every
 /// placement, pass 2 finds nothing unassigned, and pass 3 finds no
-/// improving move because it already ran to fixpoint. That property is
-/// what makes a steady-state fleet publish an unchanging assignment and
-/// therefore never drain anything.
+/// improving move because it already ran to fixpoint. A steady-state
+/// fleet therefore publishes an unchanging assignment and drains nothing.
 ///
 /// `seed` keys the tie-breaks only (equal loads in pass 2, equal gains in
 /// pass 3). It must be a property of the **job**, not of the leader, or
@@ -191,7 +183,7 @@ pub(crate) fn desired_assignment(
     let mut load: BTreeMap<&str, u64> = members.iter().map(|m| (m.as_str(), 0u64)).collect();
 
     // Assignable pool: runnable, spec observed (its weight is the balance
-    // input, and a worker cannot start a split whose descriptor nobody
+    // input, and a worker cannot start a split whose descriptor no worker
     // has), and not withheld by the rebalance delay.
     let mut pool: Vec<(&str, u64, Option<&str>)> = splits
         .iter()
@@ -267,17 +259,17 @@ pub(crate) fn desired_assignment(
 
 /// Termination backstop for the improving-move pass. Each accepted move
 /// strictly decreases the sum of squared loads, so the pass converges
-/// without this; the bound only guarantees a leader publishes *something*
-/// on input we did not anticipate rather than spinning. Two moves per
-/// split is far above what greedy needs in practice — if this ever binds,
-/// the local-optimality property test is the thing that will say so.
+/// without this; the bound guarantees a leader publishes *something* on
+/// unanticipated input rather than spinning. Two moves per split is far
+/// above what greedy needs in practice. If this ever binds, the
+/// local-optimality property test reports it.
 const MAX_IMPROVING_MOVES: usize = 4096;
 
 /// Who holds a split now. The live lease is authoritative; the durable
 /// record's owner is the fallback for a split whose owner died and whose
-/// lease has expired but which nobody has reclaimed yet. Either way the
+/// lease has expired but which no worker has reclaimed yet. Either way the
 /// caller only acts on it when the name is a live member, so a stale
-/// owner simply reads as "unplaced".
+/// owner reads as "unplaced".
 fn current_owner(state: &SplitState) -> Option<&str> {
     state
         .lease
@@ -308,10 +300,10 @@ fn lightest<'a>(
 /// id breaking ties so the choice is deterministic.
 ///
 /// The gain is computed in `u128`. Both factors are planner-supplied
-/// weights — `spate-s3` reports bytes — so `weight * load` overflows `u64`
+/// weights (`spate-s3` reports bytes), so `weight * load` overflows `u64`
 /// once two splits of a few GiB each sit on one member against an idle
-/// peer, which would panic the coordination task under the debug profile's
-/// overflow checks and silently mis-rank moves under release.
+/// peer. That overflow panics the coordination task under the debug
+/// profile's overflow checks and silently mis-ranks moves under release.
 fn best_move(
     out: &BTreeMap<String, Vec<String>>,
     load: &BTreeMap<&str, u64>,
@@ -353,21 +345,19 @@ fn best_move(
 }
 
 /// Splits this worker *may* act on, with the quarantine decision folded
-/// in. Whether it *should* claim one is the assignment's call, not this
-/// function's — it validates eligibility and nothing more.
+/// in. Whether it *should* claim one is the assignment's call. This
+/// function validates eligibility and nothing more.
 ///
 /// A split is claimable when its progress record is `runnable`, this
 /// worker does not hold it, and there is no live foreign lease (a live
 /// lease under our own stable id is the fast-reclaim case). A claim also
-/// requires the spec record to have been observed — a `Gained` event
-/// carries the descriptor — while a quarantine does not (it writes only
+/// requires the spec record to have been observed, since a `Gained` event
+/// carries the descriptor, while a quarantine does not (it writes only
 /// the progress record).
 ///
-/// Ordered by [`ClaimKind`] priority then split id. There is deliberately
-/// no per-worker hash and no weight tie-break any more: both existed to
-/// spread self-selecting workers across the pool and to start the heaviest
-/// remainders first, and the leader's assignment now decides both. Two
-/// workers racing for the same split is no longer a thing that happens.
+/// Ordered by [`ClaimKind`] priority then split id. There is no per-worker
+/// hash and no weight tie-break; the leader's assignment decides both
+/// placement and order, and two workers never race for the same split.
 pub(crate) fn claim_candidates(
     splits: &BTreeMap<String, SplitState>,
     owned: impl Fn(&str) -> bool,
@@ -590,10 +580,8 @@ mod tests {
 
     #[test]
     fn candidates_order_by_claim_kind_then_id_and_ignore_weight() {
-        // Weight used to break ties near the tail so the heaviest
-        // remainders started first. The leader's LPT fill owns that now, so
-        // this function must be weight-blind — otherwise two orderings
-        // would be competing to decide the same thing.
+        // The leader's LPT fill decides which remainders start first, so
+        // this function must be weight-blind.
         let map = splits(vec![
             state(
                 record("aaa-heavy", SplitStatus::Runnable, None, 0, 0),
@@ -698,20 +686,19 @@ mod tests {
             .collect()
     }
 
-    /// `(id, weight, owner slot, status)`. The owner slot is deliberately
-    /// drawn wider than any fleet size the tests use, so a share of splits
-    /// carry an owner that is *not* a live member — the departed-owner
-    /// case, which is where reassignment has to happen.
+    /// `(id, weight, owner slot, status)`. The owner slot is drawn wider
+    /// than any fleet size the tests use, so a share of splits carry an
+    /// owner that is *not* a live member. That is the departed-owner case,
+    /// where reassignment has to happen.
     type AssignEntry = (String, u64, Option<u8>, u8);
 
     fn assignment_entries() -> impl Strategy<Value = Vec<AssignEntry>> {
         proptest::collection::vec(
             (
                 "[a-z]{1,6}",
-                // Two scales on purpose. Small weights explore the tie-break
-                // and lane-cap logic; byte-scale ones are what an
-                // object-store planner actually emits, and are where
-                // `weight * load` left `u64`.
+                // Two scales. Small weights explore the tie-break and
+                // lane-cap logic; byte-scale ones are what an object-store
+                // planner emits, and are where `weight * load` left `u64`.
                 prop_oneof![1u64..50, 1_000_000_000u64..8_000_000_000],
                 proptest::option::of(0u8..7),
                 0u8..3,
@@ -798,10 +785,10 @@ mod tests {
     #[test]
     fn byte_scale_weights_do_not_overflow_the_improving_move() {
         // `spate-s3` reports weight in BYTES, and any object at or above the
-        // packing target gets a split to itself — so multi-GiB weights are
-        // the designed case, not an abuse. The improving-move gain is
+        // packing target gets a split to itself, so multi-GiB weights are
+        // the designed case. The improving-move gain is
         // `weight * (from - to - weight)`, which leaves `u64` at around two
-        // 4.3 GB splits on one member against an idle peer: under the debug
+        // 4.3 GB splits on one member against an idle peer. Under the debug
         // profile's overflow checks that panicked the coordination task.
         const HUGE: u64 = 5_000_000_000;
         let map = assign_map(&[("a", HUGE, Some("w1")), ("b", HUGE, Some("w1"))]);
@@ -1003,9 +990,9 @@ mod tests {
         }
 
         /// Invariant 4 — converges to a local optimum: no single split can
-        /// move to a member with lane budget and reduce imbalance. This is
-        /// the property `MAX_IMPROVING_MOVES` would silently break if it
-        /// ever bound, which is why it is asserted rather than assumed.
+        /// move to a member with lane budget and reduce imbalance.
+        /// `MAX_IMPROVING_MOVES` binding would silently break this
+        /// property, so it is asserted rather than assumed.
         #[test]
         fn assignment_admits_no_improving_move(
             entries in assignment_entries(),

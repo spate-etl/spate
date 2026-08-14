@@ -2,7 +2,7 @@
 //! events and commit outcomes are scripted, the source runs its real
 //! `CoordinationDriver` + `SplitSource` machinery against real `file://`
 //! objects, and the script observes every commit, failure report, and
-//! release — deterministic, no store, no clock.
+//! release. Deterministic, no store, no clock.
 
 mod support;
 
@@ -113,7 +113,7 @@ fn a_mid_flow_gain_folds_the_drain_commit_and_completes() {
     // post-drain commit for A's acked watermark tripped the "unheld
     // split" fatal and killed the pipeline. Gains are additive now: the
     // commit must fold and both splits must complete. The 60s checkpoint
-    // interval doubles as the eager-commit check — completion can only
+    // interval doubles as the eager-commit check: completion can only
     // arrive through the commit-ready chase, never the periodic tick.
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -128,7 +128,7 @@ fn a_mid_flow_gain_folds_the_drain_commit_and_completes() {
     let (coordinator, script) = scripted_coordinator();
     script.gain(flow, 1, None);
     // Pace the sink so A still has acked-but-uncommitted progress in
-    // flight when B arrives — the exact shape that crashed pre-fix.
+    // flight when B arrives, the shape that crashed the earlier code.
     let yaml = config_yaml(&data).replace("interval: 100ms", "interval: 60s");
     let l = launch_scripted_coordinator(&yaml, coordinator, |sink| {
         for _ in 0..20 {
@@ -217,7 +217,7 @@ fn a_missing_object_reports_the_split_as_failed() {
     fs::create_dir_all(&data).unwrap();
     fs::write(data.join("real.ndjson"), lines_bytes(&recs("real", 5))).unwrap();
     // A descriptor naming an object that does not exist: the ranged path
-    // needs an ETag pin, so hand-craft one to route it there — a 404 on a
+    // needs an ETag pin, so hand-craft one to route it there. A 404 on a
     // pinned read is the deleted-after-planning shape.
     let mut ghost = spec_over(&data, &["real.ndjson"]);
     let ghost_descriptor = SplitDescriptor::new(vec![spate_s3::DescriptorObject {
@@ -302,7 +302,7 @@ fn stalled_is_fatal_by_default() {
     });
 
     // A stalled job (quarantined splits block completion) is fatal by
-    // default — never a silent partial "Completed".
+    // default, never a silent partial "Completed".
     script.stalled(3, 1);
     let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
@@ -328,7 +328,7 @@ fn shutdown_releases_splits_still_held() {
     script.gain(split, 1, None);
     // A tight in-flight budget, a tiny read window, and a paced sink keep
     // most of the object unfetched: the drain can flush what is in
-    // flight, but the split stays incomplete — the release path's
+    // flight, but the split stays incomplete, which is the release path's
     // precondition.
     let yaml = config_yaml(&data).replace(
         "    url:",

@@ -1,16 +1,16 @@
 //! Criterion wall-clock benchmarks for the row encoders.
 //!
-//! The same shape the instruction-count bench measures — a whole chunk of
-//! rows through one encoder, then `finish_chunk` — over the same corpora,
+//! The same shape the instruction-count bench measures (a whole chunk of
+//! rows through one encoder, then `finish_chunk`) over the same corpora,
 //! because the two only describe each other if they encode identical bytes.
 //! What this adds is time: an instruction count cannot see a cache miss, and
 //! the Native encoder's column buffers and the RowBinary encoder's single
 //! output stream have very different locality at block scale.
 //!
 //! Every schema runs through both encoders, which is the arm the counted
-//! bench leaves out for `exotic` — there it would measure serde rather than
+//! bench leaves out for `exotic`. There it would measure serde rather than
 //! this crate's column writers, but as a wall-clock reference for choosing a
-//! wire format it is exactly the comparison a deployment makes.
+//! wire format it is the comparison a deployment makes.
 //!
 //! Throughput is declared in rows, so the report reads as time per row
 //! amortised over a block rather than time per block.

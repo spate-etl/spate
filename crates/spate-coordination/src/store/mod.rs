@@ -1,11 +1,11 @@
 //! Store primitives the coordination protocol runs on.
 //!
-//! The protocol needs exactly six operations — create-if-absent,
-//! CAS-on-revision update, point read, guarded delete, prefix watch, and a
-//! reconcile listing — over two keyspaces: a **durable** one (split
-//! records, the plan record — survives owner death) and an **ephemeral**
-//! one whose keys expire a fixed TTL after their last write (leases —
-//! every heartbeat rewrite re-arms the clock). [`CoordinationStore`] is
+//! The protocol needs six operations (create-if-absent, CAS-on-revision
+//! update, point read, guarded delete, prefix watch, and a reconcile
+//! listing) over two keyspaces: a **durable** one holding split records and
+//! the plan record, which survive owner death, and an **ephemeral** one
+//! whose keys expire a fixed TTL after their last write, holding leases
+//! that every heartbeat rewrite re-arms. [`CoordinationStore`] is
 //! that contract, public so deployments can bring their own backend
 //! (Redis, etcd) next to the built-in NATS and in-memory stores.
 //!
@@ -22,7 +22,7 @@
 //! - `list` is the loss-proof backstop for missed watch events: a key the
 //!   consumer believes live but absent from a listing is treated as
 //!   deleted. (The protocol never depends on *which* marker a watch
-//!   delivered — graceful release vs expiry is decided from durable
+//!   delivered; graceful release vs expiry is decided from durable
 //!   record state, not from watch semantics.)
 
 use std::future::Future;
@@ -89,7 +89,7 @@ impl CasOutcome {
 pub enum WatchEvent {
     /// A key's current value (snapshot replay or live update).
     Put(Entry),
-    /// The key is gone — explicit delete or ephemeral expiry.
+    /// The key is gone, by explicit delete or ephemeral expiry.
     Delete {
         /// The key, relative to the keyspace.
         key: String,
@@ -132,7 +132,7 @@ pub type WatchStream = futures_util::stream::BoxStream<'static, Result<WatchEven
 ///   dyn-compatible (`Box<dyn CoordinationStore>` will not compile).
 ///   Deployments selecting a backend at runtime branch on the concrete
 ///   store and box the [`SplitCoordinator`](spate_core::coordination::
-///   SplitCoordinator) instead — that trait is the dyn-compatible seam.
+///   SplitCoordinator) instead; that trait is the dyn-compatible seam.
 pub trait CoordinationStore: Send + Sync + 'static {
     /// The TTL every [`Ephemeral`](Keyspace::Ephemeral) write re-arms.
     /// Fixed at store construction (per-write TTLs are not portable).

@@ -4,7 +4,7 @@
 //! The framework's sink seam ships opaque byte frames
 //! ([`SealedBatch::frames`](spate_core::sink::SealedBatch)) from pipeline
 //! threads to shard workers; the unit of a Kafka produce, however, is a
-//! *message* — key, headers, and payload. This module bridges the two: the
+//! *message*: key, headers, and payload. This module bridges the two: the
 //! encoder appends each record as one length-delimited message entry, and
 //! the writer parses the entries back out. The format never leaves this
 //! crate, so it can change freely.
@@ -19,7 +19,7 @@
 //! [payload_len, payload]        absent when bit1 (tombstone) is set
 //! ```
 //!
-//! Messages are appended back-to-back, so frames concatenate — the
+//! Messages are appended back-to-back, so frames concatenate, which is the
 //! contract [`EncodedChunk`](spate_core::sink::EncodedChunk) requires for
 //! workers to merge chunks without re-encoding. The unused flag bits are
 //! reserved for additive extensions (a version bump would set a new bit).
@@ -33,7 +33,7 @@ const KNOWN_FLAGS: u8 = FLAG_HAS_KEY | FLAG_TOMBSTONE;
 /// A framing failure. On the write side only oversized sections trip it;
 /// on the parse side any structural mismatch does. Both indicate a bug in
 /// this crate (the encoder writes what the parser reads), never bad user
-/// data — the writer surfaces parse failures as fatal.
+/// data; the writer surfaces parse failures as fatal.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FrameError {
     /// A section exceeds the format's `u32` length limit.
@@ -320,7 +320,7 @@ mod tests {
         )
         .unwrap();
 
-        // Every proper prefix must fail (never panic, never mis-parse) —
+        // Every proper prefix must fail (never panic, never mis-parse),
         // except the empty prefix, which is a legal empty frame.
         for cut in 1..buf.len() {
             let results = parse_all(&buf[..cut]);
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn absurd_header_count_errors_without_a_huge_allocation() {
         // A corrupt header count near `u32::MAX` with no header bytes behind it
-        // must surface a clean frame error via the bounded read — not attempt a
+        // must surface a clean frame error via the bounded read rather than a
         // multi-gigabyte pre-allocation (which would abort the process).
         let mut buf = BytesMut::new();
         buf.put_u8(0); // no key, no tombstone

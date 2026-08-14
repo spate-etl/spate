@@ -2,14 +2,14 @@
 //!
 //! ⚠ Required, not optional: `Uuid`'s default serde impl writes a
 //! LEB128-length-prefixed string/byte form, which a RowBinary `UUID`
-//! column cannot parse — or worse, misaligns the row. Always annotate:
+//! column cannot parse, or worse, misaligns the row. Always annotate:
 //!
 //! ```text
 //! #[serde(with = "spate_clickhouse::serde::uuid")]
 //! id: uuid::Uuid,
 //! ```
 //!
-//! Wire layout (matches the `clickhouse` crate): `as_u64_pair()` — the
+//! Wire layout (matches the `clickhouse` crate): `as_u64_pair()`, the
 //! most-significant half then the least-significant half, each written as
 //! a little-endian `u64`.
 

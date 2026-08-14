@@ -6,8 +6,8 @@
 //! connector-owned families [the metrics reference] documents under Kafka
 //! source. All fixed handles are resolved from the runtime-minted
 //! [`Meter`](spate_core::metrics::Meter) once at `open`; per-broker and
-//! per-partition handles are registered lazily on first sighting — a
-//! control-plane path, never per record.
+//! per-partition handles are registered lazily on first sighting, on a
+//! control-plane path and never per record.
 //!
 //! # Counter identity
 //!
@@ -19,7 +19,7 @@
 //! consumer exactly once per source lifetime (a second `open` is a hard
 //! error). If in-process consumer recreation is ever introduced, these
 //! series would restart at zero and the fetch-max guard would silently
-//! flat-line them at the old high-water mark (see Vector issue #20697) —
+//! flat-line them at the old high-water mark (see Vector issue #20697);
 //! switch to delta accumulation against the previous snapshot instead.
 //!
 //! # Windows
@@ -91,7 +91,7 @@ pub(crate) struct KafkaStatsMetrics {
     partitions: HashMap<i32, PartitionHandles>,
 }
 
-/// Per-broker series, labeled `broker="<host:port/id>"` — bounded by
+/// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
 /// cluster topology. The window gauges register lazily on the first
 /// non-empty window: an eagerly-registered gauge renders `0`, which for a
 /// latency reads as "no latency" rather than "no data".
@@ -228,11 +228,11 @@ impl KafkaStatsMetrics {
         let meter = &self.meter;
         // `logical` entries (the group coordinator) are separate librdkafka
         // connections that mirror an underlying broker. The join key is the
-        // resolved `nodename` (host:port) — a logical entry reports
+        // resolved `nodename` (host:port); a logical entry reports
         // `nodeid: -1` even once bound. Logical entries are excluded from
         // every sum and from per-broker series (they would double-count),
         // but they are real connections to that broker: `broker_up` reports
-        // a broker as up if any connection to it — regular or logical — is
+        // a broker as up if any connection to it, regular or logical, is
         // up. A broker whose only live link is the coordinator connection
         // is connected, not down.
         let logical_up: HashSet<&str> = stats
@@ -483,7 +483,7 @@ mod tests {
         assert!(!rendered.contains("throttle_avg"));
         assert!(!rendered.contains("throttle_p99"));
         // The `group_*` handles are fixed (registered in `new`), so with no
-        // cgrp they render at their unset default of 0 — assert only that
+        // cgrp they render at their unset default of 0; assert only that
         // health was never set to 1.
         assert!(!rendered.contains(&format!("spate_kafka_group_healthy{{{STD}}} 1")));
     }
@@ -692,7 +692,7 @@ mod tests {
         )));
         assert!(!rendered.contains(r#"partition="-1""#));
         // Partition 1's lag was -1 (unknown): the lag gauge registers lazily
-        // on the first known value, so no series exists — an unknown lag must
+        // on the first known value, so no series exists. An unknown lag must
         // not render as `0`.
         assert!(!rendered.contains(&format!(
             r#"spate_kafka_partition_lag_stored_records{{{STD},partition="1"}}"#
@@ -729,7 +729,7 @@ mod tests {
             "retain must drop the revoked partition"
         );
         // The exporter still renders partition 1's last value until its idle
-        // timeout — only the handle is dropped.
+        // timeout; only the handle is dropped.
         assert!(rendered.contains(&format!(
             r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 11"#
         )));
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract: a regressing upstream total
-        // (impossible today — one consumer per open) would flat-line, not
+        // (impossible with one consumer per open) would flat-line, not
         // dip. See the module docs.
         let rendered = render(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);

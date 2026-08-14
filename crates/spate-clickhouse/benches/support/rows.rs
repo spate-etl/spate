@@ -1,7 +1,7 @@
 //! Row fixtures for the encoder bench: three schemas chosen because they
 //! exercise different halves of the encoder.
 //!
-//! `events` is the wide, string-heavy shape — LowCardinality dictionaries,
+//! `events` is the wide, string-heavy shape: LowCardinality dictionaries,
 //! a Nullable null-map, an Array with its offsets, and a Decimal. `metrics`
 //! is narrow and fixed-width, almost entirely numeric. A change that speeds
 //! up dictionary handling and slows down fixed-width columns moves the two in
@@ -21,15 +21,15 @@
 //! Shared verbatim with the wall-clock sibling: `encode.rs` and
 //! `encode_gungraun.rs` both pull this module in, so the two tiers encode
 //! byte-identical corpora and a count here and a throughput number there
-//! describe the same work rather than merely comparable work.
+//! describe the same work rather than comparable work.
 //!
-//! Row values are pure functions of the index — no random source — because an
-//! instruction count is only comparable when both legs encoded identical
-//! bytes. The distributions matter beyond determinism, and they deliberately
-//! cover both dictionary regimes: `event_type`, `country` and `tags` repeat
-//! from small sets, so those dictionaries stay small and hit, while `city` is
-//! distinct on every row at this block size — a dictionary that grows one
-//! entry per row, which is the cost of the opposite case. `url` is a plain
+//! Row values are pure functions of the index, with no random source,
+//! because an instruction count is only comparable when both legs encoded
+//! identical bytes. The distributions cover both dictionary regimes:
+//! `event_type`, `country` and `tags` repeat from small sets, so those
+//! dictionaries stay small and hit, while `city` is distinct on every row at
+//! this block size, a dictionary that grows one entry per row, which is the
+//! cost of the opposite case. `url` is a plain
 //! `String` and pays no dictionary at all.
 
 use serde::Serialize;
@@ -51,12 +51,12 @@ const CODES: &[&str] = &[
 ];
 
 /// `LowCardinality(Nullable(String))` values. A small repeating set so the
-/// dictionary hits, and one row in seven is NULL — the reserved index-0 slot
-/// a nullable dictionary seeds and a plain one does not.
+/// dictionary hits, and one row in seven is NULL, exercising the reserved
+/// index-0 slot a nullable dictionary seeds and a plain one does not.
 const TIERS: &[&str] = &["free", "pro", "enterprise"];
 
 /// Rows per encoded chunk. A ClickHouse insert is a block, not a row, so the
-/// per-row cost is only meaningful amortised over one — and a dictionary
+/// per-row cost is only meaningful amortised over one, and a dictionary
 /// column only shows its hit path once a block holds repeats, which at this
 /// size `event_type`, `country` and `tags` provide.
 pub(crate) const ROWS: usize = 1_000;
@@ -97,7 +97,7 @@ pub(crate) struct MetricRow {
 }
 
 /// An `Enum8` column value. ClickHouse stores an `Enum8` as its `Int8`
-/// ordinal, which is what a `#[repr(i8)]` enum plus `serde_repr` produces —
+/// ordinal, which is what a `#[repr(i8)]` enum plus `serde_repr` produces:
 /// the shape a user of this sink writes, rather than a bare `i8` that would
 /// measure the same leaf without the derive in front of it.
 #[derive(Clone, Copy, Serialize_repr)]
@@ -175,10 +175,10 @@ pub(crate) fn metric_columns() -> Vec<(&'static str, &'static str)> {
 /// two schemas reach.
 ///
 /// `session` is declared `UUID` and carried as a `(u64, u64)` pair rather
-/// than a `uuid::Uuid`: the wire layout is identical — the two halves of the
-/// value as little-endian `u64`s, which is exactly what `serde::uuid` emits —
-/// and the bench builds under the crate's default features, where the
-/// optional `uuid` dependency is absent.
+/// than a `uuid::Uuid`. The wire layout is identical, the two halves of the
+/// value as little-endian `u64`s, which is what `serde::uuid` emits, and the
+/// bench builds under the crate's default features, where the optional
+/// `uuid` dependency is absent.
 pub(crate) fn exotic_columns() -> Vec<(&'static str, &'static str)> {
     vec![
         ("id", "UInt64"),

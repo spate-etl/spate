@@ -1,8 +1,8 @@
 //! The coordination protocol over a real NATS 2.11 server: validates the
-//! whole `NatsStore` mapping — bucket provisioning, the startup probe,
-//! revision CAS, marker-driven expiry surfacing through the watch, and
-//! heartbeats keeping leases alive across many TTLs — by running the same
-//! scenarios the in-memory suite proves, against the production backend.
+//! whole `NatsStore` mapping, covering bucket provisioning, the startup
+//! probe, revision CAS, marker-driven expiry surfacing through the watch,
+//! and heartbeats keeping leases alive across many TTLs, by running the same
+//! scenarios the in-memory suite proves against the production backend.
 //!
 //! Ignored by default; run with Docker available:
 //!
@@ -82,7 +82,7 @@ fn partition_takeover_and_completion_over_real_nats() {
     let planner = || Box::new(PhasedPlanner::one_final("nats-smoke:v1", &ids));
 
     // Two workers provision the buckets, pass the probe, and partition
-    // the plan 2/2 — claims arrive via real KV watches.
+    // the plan 2/2; claims arrive via real KV watches.
     let rt_a = runtime();
     let mut a = worker(port, "smoke", rt_a.handle(), "worker-a");
     a.start(planner()).unwrap();
@@ -102,8 +102,8 @@ fn partition_takeover_and_completion_over_real_nats() {
         },
     );
 
-    // Held leases survive well past the TTL — heartbeat rewrites re-arm
-    // the bucket's max_age per message, exactly as the spike pinned.
+    // Held leases survive well past the TTL. Heartbeat rewrites re-arm
+    // the bucket's max_age per message, as the spike pinned.
     let hold_until = Instant::now() + LEASE * 5 / 2;
     while Instant::now() < hold_until {
         held_a.fold(a.poll().unwrap());
@@ -133,7 +133,7 @@ fn partition_takeover_and_completion_over_real_nats() {
         |h| h.splits.len() == ids.len(),
     );
     // The lease expires one TTL after the LAST HEARTBEAT, which may be up
-    // to one renewal interval (TTL/3) before the death — so the earliest
+    // to one renewal interval (TTL/3) before the death, so the earliest
     // legitimate takeover is died_at + 2/3 TTL.
     assert!(
         died_at.elapsed() >= LEASE * 2 / 3,
@@ -179,7 +179,7 @@ fn resume_after_full_restart_reads_durable_records() {
     }
 
     // A brand-new process (fresh runtime, fresh connection) adopts the
-    // durable state instantly — released work needs no lease wait.
+    // durable state instantly; released work needs no lease wait.
     let rt = runtime();
     let started = Instant::now();
     let mut w = worker(port, "resume", rt.handle(), "gen-2");

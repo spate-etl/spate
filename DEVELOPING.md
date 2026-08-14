@@ -6,9 +6,9 @@ mechanics.
 ## Targets
 
 `make help` lists every target, grouped. `make gates` is the pull request bar and
-covers formatting, clippy, the type check, the test suite, doctests, the feature
-matrix, licences and advisories, and `make ci-lint`, the repository-metadata
-checks that read files and need no toolchain.
+covers formatting, clippy, the type check, the test suite, doctests, rustdoc,
+the feature matrix, licences and advisories, and `make ci-lint`, the
+repository-metadata checks that read files and need no toolchain.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
 status of the last command in the pipeline and have masked failures here. No
@@ -46,6 +46,11 @@ Tests run under [cargo-nextest](https://nexte.st), one process per test
 concurrently, where `cargo test` runs one binary at a time. Plain
 `cargo test --workspace` still works and is many times slower. nextest does not
 run doctests; `make doctest` does.
+
+`make doc` builds the API reference the way the site does, with
+`RUSTDOCFLAGS="-D warnings"`, so a broken intra-doc link fails the build
+instead of rendering as dead text on docs.rs. It does not reach bench support
+modules, which `cargo doc` never builds.
 
 The profiles in `.config/nextest.toml`:
 

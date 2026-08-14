@@ -5,7 +5,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help fmt fmt-check clippy lint check test doctest test-docker \
+.PHONY: help fmt fmt-check clippy lint check test doctest doc test-docker \
         test-examples \
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-arms bench-compare loom \
@@ -48,6 +48,9 @@ test: ## Unit and integration tests, no containers
 
 doctest: ## Doc tests, which nextest does not run
 	cargo test --workspace --all-features --locked --doc
+
+doc: ## Rustdoc as the site builds it, warnings denied
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
 test-examples: ## Just the examples, run as tests (subset of test)
 	cargo nextest run -p spate --all-features --locked -E 'kind(example)'
@@ -185,4 +188,4 @@ docs-serve: ## Serve the site locally with hot reload
 
 ##@ Gates
 
-gates: lint check test doctest check-features deny ci-lint ## Everything a pull request must pass
+gates: lint check test doctest doc check-features deny ci-lint ## Everything a pull request must pass

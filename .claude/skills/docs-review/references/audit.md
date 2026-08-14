@@ -1,7 +1,7 @@
 # Auditing the tree
 
-For a whole-tree sweep rather than a single page or diff — checking for drift
-after a restructure, before a release, or when a rule has just changed.
+For a whole-tree sweep rather than a single page or diff. Use it when checking
+for drift after a restructure, before a release, or when a rule has changed.
 
 An audit is **reading, fanned out**. There is no matcher for the defects that
 matter: a rule stated in vendor terms borrows the reasoning without borrowing
@@ -12,9 +12,8 @@ once and removed; do not reintroduce one.
 ## Fan out by directory
 
 The rendered tree under `docs/user-guide/`, plus the records under `docs/adr/`,
-is more than one reviewer should take at a sitting — they will be a worse
-reviewer by page 30, so split it. Each unit below is independent — no shared
-state, no ordering:
+is more than one reviewer should take at a sitting, so split it. Each unit below
+is independent, with no shared state and no ordering:
 
 | Unit | Carries |
 |---|---|
@@ -28,7 +27,7 @@ state, no ordering:
 
 Give each unit the same brief: [SKILL.md](../SKILL.md) steps 1–3 over every page
 in it, reporting findings rather than applying fixes. Ask for the quadrant and
-layer of each page as part of the report — a unit that cannot state them has
+layer of each page as part of the report. A unit that cannot state them has
 found a filing defect.
 
 **Do not fan out the fixes.** Findings come back to one place, get deduplicated,
@@ -41,7 +40,7 @@ Per-page review cannot catch these, so spend the audit's advantage on them:
 
 - **A vendor fact with two homes** (§ 1). Two connector pages, or a connector
   page and a framework page, carrying the same tuning guidance. Each reads fine
-  alone; together one of them is wrong and nobody knows which.
+  alone; together one of them is wrong, and the pair does not say which.
 - **A term defined twice, differently.** § 7 requires one definition in the
   glossary. Drift shows only when the definitions are read side by side.
 - **Card-index membership** (§ 2). Every connector appears in exactly one role
@@ -49,16 +48,16 @@ Per-page review cannot catch these, so spend the audit's advantage on them:
   complete; a connector in two is a filing error.
 - **Appendix coverage** (§ 4). Framework-owned keys that grew onto a connector
   page, and connector sections missing from the mapping table.
-- **Orphans.** A page nothing links to and no sidebar reaches. `make docs` will
-  not fail on it — a page can render perfectly and be unreachable.
-- **Quadrant balance.** A `02-concepts/` that has quietly become reference, or a
+- **Orphans.** A page nothing links to and no sidebar reaches. `make docs` does
+  not fail on it. A page can render perfectly and be unreachable.
+- **Quadrant balance.** A `02-concepts/` that has become reference, or a
   `03-guides/` where half the pages are tutorials. Visible only in aggregate.
 
 ## Close it out
 
-Findings are worth nothing unreported. For each: the path, the rule number, what
-it says now, and what it should say. Group by fix rather than by page — the same
-rewrite applied in six places is one decision, not six.
+Report each finding as the path, the rule number, what it says now, and what it
+should say. Group by fix rather than by page. The same rewrite applied in six
+places is one decision, not six.
 
 Then run step 4's gates over whatever was changed, by explicit exit code.
 

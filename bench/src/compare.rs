@@ -53,7 +53,7 @@
 //! **One replicate missing a metric removes that metric entirely**, rather than
 //! shrinking its sample. A mean over nine pairs and a mean over ten are not the
 //! same estimate, and silently mixing them would put the difference between two
-//! sample sizes into a column labelled as a difference between two builds. The
+//! sample sizes into a column labeled as a difference between two builds. The
 //! removal is disclosed under *Not comparable*, never silent.
 //!
 //! A single case whose corpus digest differs is demoted like any other, and the
@@ -76,9 +76,9 @@ pub const ALLOW_DIGEST: &str = "digest";
 /// The `--allow` value that waives the declared-build guard.
 pub const ALLOW_BUILD: &str = "build";
 
-/// Every value `--allow` recognises.
+/// Every value `--allow` recognizes.
 ///
-/// Validated rather than accepted, because an unrecognised one waives nothing
+/// Validated rather than accepted, because an unrecognized one waives nothing
 /// while the report header announces a waived guard, the worst combination
 /// available.
 #[must_use]
@@ -129,7 +129,7 @@ impl Leg {
 /// # Errors
 ///
 /// When the directory cannot be read, holds no records, holds a record this
-/// schema version does not recognise, or mixes records from more than one build
+/// schema version does not recognize, or mixes records from more than one build
 /// or machine. A leg assembled from two runs is not a leg.
 pub fn load_leg(dir: &Path) -> Result<Leg, String> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -257,7 +257,7 @@ pub enum Cause {
     /// under [`ALLOW_BUILD`].
     BuildSameCompared,
     /// Anything else: a one-sided case, mismatched iteration counts, an
-    /// unpaired replicate, a metric that could not be analysed.
+    /// unpaired replicate, a metric that could not be analyzed.
     Other,
 }
 
@@ -1630,7 +1630,7 @@ mod tests {
 
         // One literal, both consumers. The refusal and the report header
         // describe a difference through the same `Display`, so a reader who has
-        // seen one recognises the other.
+        // seen one recognizes the other.
         const DIFFERENCE: &str = "rustc: base 'rustc 1.94.0' vs head 'rustc 1.95.0'";
         assert!(err.contains(DIFFERENCE), "{err}");
 

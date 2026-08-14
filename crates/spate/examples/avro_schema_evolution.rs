@@ -12,7 +12,7 @@
 //! cargo run -p spate --features avro --example avro_schema_evolution
 //! ```
 //!
-//! Four mechanisms, labelled § 1 to § 4 throughout: a **new field with a
+//! Four mechanisms, labeled § 1 to § 4 throughout: a **new field with a
 //! default**, a **renamed record**, an **`int`→`long` promotion**, and
 //! `#[serde(default)]` on the Rust type, which solves an overlapping problem
 //! one layer further up. All four ride the one pipeline decode; § 2 and § 3

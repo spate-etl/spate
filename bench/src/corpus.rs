@@ -69,7 +69,7 @@ impl Corpus {
         }
     }
 
-    /// Folds one labelled input into the digest.
+    /// Folds one labeled input into the digest.
     ///
     /// Both the label and the length are hashed as well as the bytes. Without
     /// the lengths, two inputs absorbed back to back are indistinguishable from
@@ -81,7 +81,7 @@ impl Corpus {
         self.bytes += bytes.len() as u64;
     }
 
-    /// Folds one labelled input into the *build* digest instead.
+    /// Folds one labeled input into the *build* digest instead.
     ///
     /// For what a feature arm swapped in rather than for what the region read:
     /// a `cfg`-selected constant naming the compiled subject. It does not move
@@ -133,7 +133,7 @@ impl Corpus {
     }
 }
 
-/// Folds one labelled input into a hasher, identically for both channels.
+/// Folds one labeled input into a hasher, identically for both channels.
 ///
 /// Lengths are written as explicit little-endian bytes rather than through
 /// `write_u64`, whose default implementation is native-endian. The two legs of

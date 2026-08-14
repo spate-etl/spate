@@ -57,4 +57,4 @@ render lockup-light.svg     880  lockup-light.png
 render lockup-dark.svg      880  lockup-dark.png
 
 oxipng --quiet --opt 4 --strip safe "${rendered[@]}"
-echo "optimised ${#rendered[@]} PNGs"
+echo "optimized ${#rendered[@]} PNGs"

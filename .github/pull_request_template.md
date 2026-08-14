@@ -55,7 +55,7 @@ form. Read that file before ticking a box you are unsure about.
 Tick by exit code, not by memory.
 
 - [ ] `make gates` — formatting, clippy, check, tests, doctests, the feature
-      matrix, licences and advisories, and the repository consistency checks
+      matrix, licenses and advisories, and the repository consistency checks
 - [ ] Docs changed: `make docs`. It sets `CI=true`, without which the redirect
       validation silently does not run
 - [ ] Any ad-hoc cargo command run with `--locked`, as CI does

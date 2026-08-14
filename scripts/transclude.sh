@@ -63,7 +63,7 @@ meta_value() { # info, key
 
 # Is this line a fence delimiter? Echoes the run of markers if so.
 #
-# Only column-zero fences are recognised.
+# Only column-zero fences are recognized.
 fence_marker() { # line
     case "$1" in
     '```'*) printf '```' ;;

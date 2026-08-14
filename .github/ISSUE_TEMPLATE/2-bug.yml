@@ -82,7 +82,7 @@ body:
       label: Reproduction
       description: >-
         The smallest thing that shows it. `spate-test`'s in-memory source and
-        capture sink reproduce most engine behaviour with no infrastructure at
+        capture sink reproduce most engine behavior with no infrastructure at
         all, and a test written against them is what to aim for.
       render: rust
 

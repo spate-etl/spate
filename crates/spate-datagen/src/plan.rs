@@ -509,7 +509,7 @@ mod tests {
     }
 
     /// A lane falls through to a placement when the ring it would draw from is
-    /// empty, which is a warm-up behaviour: it happens in the opening handful
+    /// empty, which is a warm-up behavior: it happens in the opening handful
     /// of events and then not again.
     #[test]
     fn an_empty_ring_falls_through_to_a_placement_while_the_lane_warms_up() {

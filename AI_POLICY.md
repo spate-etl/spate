@@ -14,7 +14,7 @@ It will not give you the intuition, and this codebase punishes its absence. The
 properties the engine holds to are mostly *negative*: what must never happen, on
 a path that looks fine when it does. `docs/INVARIANTS.md` states them, each
 numbered `INV-N` and cited everywhere else by that number. Read them yourself, in
-the source, before changing engine behaviour.
+the source, before changing engine behavior.
 
 ## You own what you submit
 
@@ -53,7 +53,7 @@ unacknowledged data, is judged on evidence rather than on reasoning that reads
 well. A plausible explanation of why the fix is correct is not evidence. A
 failing test that passes afterwards is.
 
-`spate-test`'s in-memory source and capture sink reproduce most engine behaviour
+`spate-test`'s in-memory source and capture sink reproduce most engine behavior
 with no infrastructure at all, so that test is cheap to write. It is the most
 useful thing you can attach.
 
@@ -78,7 +78,7 @@ do not reference plans or iterations.
 
 Contributions are accepted under Apache-2.0 §5, inbound under the same terms as
 outbound. There is no CLA. If you reproduce code from elsewhere, whether you
-found it or a model produced it, you are responsible for its licence being
+found it or a model produced it, you are responsible for its license being
 compatible, and for saying where it came from.
 
 ---

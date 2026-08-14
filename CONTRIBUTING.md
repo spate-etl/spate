@@ -29,7 +29,7 @@ make help    # every target, grouped
 ```
 
 `make gates` covers formatting, clippy, the type check, the test suite, doctests,
-the feature matrix, licences and advisories, and the repository's own consistency
+the feature matrix, licenses and advisories, and the repository's own consistency
 checks. CI calls those same targets, so a target that passes here is what runs
 there. It is necessary and not sufficient: other jobs spell out invocations of
 their own.

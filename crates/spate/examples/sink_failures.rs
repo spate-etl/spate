@@ -57,7 +57,7 @@ const ORDERS: [&str; 3] = [
 ];
 
 /// Seal batches promptly: the default one-second linger would make every
-/// wait below a second longer than the behaviour it is demonstrating.
+/// wait below a second longer than the behavior it is demonstrating.
 fn prompt_pool() -> SinkPoolConfig {
     let mut cfg = SinkPoolConfig::default();
     cfg.batch.linger = Duration::from_millis(20);
@@ -290,7 +290,7 @@ sink: { capture: {} }
     let (first_doomed, last_doomed) = (doomed[0], *doomed.last().expect("three offsets"));
 
     // Nothing triggers shutdown here: the stall watchdog does. `run` returns
-    // on its own, which is the behaviour an operator sees as a crash-looping
+    // on its own, which is the behavior an operator sees as a crash-looping
     // pod rather than a silently idle one.
     let report = run
         .wait_exit(Duration::from_secs(30))

@@ -24,7 +24,7 @@
 #
 #   package   the cargo package built, for the Shard column.
 #   features  the feature arm's label; the empty string (or an absent key)
-#             means one unlabelled arm, rendered as the bare package name.
+#             means one unlabeled arm, rendered as the bare package name.
 #   baseline  what this job's old column is. The empty string means this job
 #             measured no baseline, and its rows read *no baseline* rather
 #             than *new*: one job's merge-base leg can fail while another's

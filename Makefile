@@ -120,7 +120,7 @@ bench-compare: ## Re-render two legs: make bench-compare BASE=dir HEAD=dir FORMA
 
 ##@ Supply chain
 
-deny: ## Licences, advisories, bans, sources
+deny: ## Licenses, advisories, bans, sources
 	cargo deny --all-features --locked check all
 
 attribution: ## Regenerate THIRD-PARTY.md
@@ -147,7 +147,7 @@ check-perf-report: ## The perf report's flag file stays parseable by perf-label.
 check-gungraun-benches: ## Every gungraun bench declares a harness-free target
 	./scripts/gungraun-benches.sh --self-test
 
-check-collected-region: ## The degenerate-region guard still recognises both shapes
+check-collected-region: ## The degenerate-region guard still recognizes both shapes
 	./scripts/gungraun-collected-region.sh --self-test
 
 # The site build resolves every `file=`/`region=` fence behind a persistent

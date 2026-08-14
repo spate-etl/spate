@@ -65,7 +65,7 @@
 //! A case whose per-iteration cost does not clear twice an empty loop's is
 //! refused rather than reported. That is the failure this surface has to be
 //! built against: a routine whose result is discarded gives `black_box` nothing
-//! to hold, the optimiser deletes the call, and what comes back is a well-formed
+//! to hold, the optimizer deletes the call, and what comes back is a well-formed
 //! record of the loop. The routine returning its result is what prevents it.
 
 use std::collections::BTreeMap;
@@ -126,7 +126,7 @@ const DEGENERATE_PROBE_MAX: u64 = 1 << 22;
 ///
 /// It is reachable by accident. `Bencher::iter` passes the routine's *return
 /// value* to `black_box`, so a routine written `|| { let _ = decode(&input); }`
-/// hands it `()`, which constrains nothing: the optimiser is then free to
+/// hands it `()`, which constrains nothing: the optimizer is then free to
 /// delete the call, and the case reports a per-iteration cost at the empty
 /// loop's floor with a valid corpus digest and no complaint. Measured on a
 /// scratch target, the difference between the two forms was 232 ns and
@@ -541,7 +541,7 @@ impl Case {
             return Err(format!(
                 "case '{}' took {per_iter:.3} ns per iteration against an empty loop's \
                  {floor:.3} ns, so it is measuring the loop rather than the routine. Either \
-                 the routine was optimised away — return its result instead of discarding \
+                 the routine was optimized away — return its result instead of discarding \
                  it, so black_box has something to hold on to — or one iteration is too \
                  little work to time, in which case fold more of it into each one.",
                 self.id
@@ -746,7 +746,7 @@ impl Bencher {
     ///
     /// **Return the routine's result.** It is what is passed through
     /// [`std::hint::black_box`], so a routine written `|| { let _ = f(x); }`
-    /// hands the black box `()` and leaves the optimiser free to delete the
+    /// hands the black box `()` and leaves the optimizer free to delete the
     /// call. That failure is caught, since `empty_loop_ns_per_iter` refuses
     /// a case whose per-iteration cost sits at an empty loop's, but the fix is
     /// here.
@@ -989,10 +989,10 @@ mod tests {
     /// routine returning `()` gives `black_box` nothing to hold, the call is
     /// deleted, and the case reports the cost of an empty loop as if it were a
     /// measurement.
-    /// A routine whose body the optimiser deleted is indistinguishable from one
+    /// A routine whose body the optimizer deleted is indistinguishable from one
     /// that never had a body, so the guard is asserted against the latter,
     /// which behaves the same way in every profile, where the deletion only
-    /// happens in an optimised build.
+    /// happens in an optimized build.
     #[test]
     fn a_routine_that_measures_nothing_is_refused() {
         let opts = RunOptions {

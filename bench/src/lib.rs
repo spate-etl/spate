@@ -87,7 +87,7 @@
 //!   measured, so neither the time nor the allocations of building a corpus are
 //!   attributed to the code under test.
 //! - **Return the routine's result.** It is what reaches `black_box`. A routine
-//!   written `|| { let _ = f(x); }` hands it `()`, and the call can be optimised
+//!   written `|| { let _ = f(x); }` hands it `()`, and the call can be optimized
 //!   away. A case whose per-iteration cost does not clear twice an empty loop's
 //!   is refused rather than reported, but the fix is to return the value.
 //! - **Absorb everything built into the [`Corpus`].** That digest is what proves
@@ -125,7 +125,7 @@
 //! - **A rig driven through `&mut self` has to be held in a `RefCell`.** A
 //!   routine receives its state by shared reference.
 //! - **A fold's parameters have to stay opaque.** A parameter written as a
-//!   literal is a constant the optimiser sees through, so a routine taking a
+//!   literal is a constant the optimizer sees through, so a routine taking a
 //!   shard count that way has its division folded into a mask and reports a
 //!   figure several times cheaper than the code it stands in for. `black_box`
 //!   around the parameter holds the routine to the shape production runs.

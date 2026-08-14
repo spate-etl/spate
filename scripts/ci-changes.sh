@@ -5,7 +5,7 @@
 # never reports its checks, and a required check that never reports blocks the
 # pull request forever, where a skipped *job* reports success.
 #
-# Classification is an ignore-list, not an allow-list: anything not recognised
+# Classification is an ignore-list, not an allow-list: anything not recognized
 # as documentation counts as code. An allow-list fails *open*: a new source
 # directory silently stops being tested, and nothing tells you.
 #
@@ -223,19 +223,19 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "::error::'ci: docker' no longer forces the container suites on."
         exit 1
     fi
-    # Every predicate must recognise exactly its own label. The labels share a
+    # Every predicate must recognize exactly its own label. The labels share a
     # prefix, so a pattern that lost a comma anchor would match a neighbour.
     if ! ci_label_wants_loom "ci: loom" ||
         ci_label_wants_loom "ci: docker" ||
         ci_label_wants_loom "ci: bench"; then
-        echo "::error::ci_label_wants_loom no longer recognises exactly the loom label."
+        echo "::error::ci_label_wants_loom no longer recognizes exactly the loom label."
         exit 1
     fi
     if ! ci_label_wants_bench "ci: bench" ||
         ci_label_wants_bench "ci: docker" ||
         ci_label_wants_bench "ci: loom" ||
         ci_label_wants_bench ""; then
-        echo "::error::ci_label_wants_bench no longer recognises exactly the bench label."
+        echo "::error::ci_label_wants_bench no longer recognizes exactly the bench label."
         exit 1
     fi
 

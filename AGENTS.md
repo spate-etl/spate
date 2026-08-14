@@ -15,7 +15,7 @@ on a failing test, not on reasoning that reads well.
 
 [`docs/INVARIANTS.md`](docs/INVARIANTS.md) numbers and states the engine's
 invariants in full, and is the only place they are stated. **Read it before
-changing engine behaviour.** It records any exception to a property.
+changing engine behavior.** It records any exception to a property.
 
 Most changes touch none of them. Touching one is not automatically wrong; the
 change then has to say how the property still holds. Cite the number rather than
@@ -33,7 +33,7 @@ cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 
 `make help` lists every target; `make gates` is what a pull request must pass.
 CI calls the same targets for lint, type check, doctests, the feature matrix,
-licences and every `ci-lint` member. Other jobs spell out invocations of their
+licenses and every `ci-lint` member. Other jobs spell out invocations of their
 own, so green gates locally is necessary and not sufficient.
 
 Traps here:
@@ -87,7 +87,7 @@ design.
   knows**, and never restate the line beside it.
 - **A file documents its own concerns.** A workflow does not explain a Makefile
   target's scheduling, and a script does not explain a job graph. A comment
-  about another file's behaviour sits where nobody updates it.
+  about another file's behavior sits where nobody updates it.
 - **If a gate enforces it, do not comment it.** The comment rots on its own; the
   gate does not.
 - **Do not explain why something cannot happen.** It gives the reader nothing to
@@ -192,7 +192,7 @@ closed unfixed). Check the issue afterwards.
 ## Done means
 
 - `make gates` green.
-- Normative docs changed in the *same commit* as the behaviour they describe.
+- Normative docs changed in the *same commit* as the behavior they describe.
 - A **changelog fragment** under `changelog.d/` whenever the change reaches a
   crate and somebody upgrading would care: `feat`, `fix`, `perf`, `revert` and
   `build`, plus **anything carrying `!` whatever its scope**.

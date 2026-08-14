@@ -196,7 +196,7 @@ FEAT(spate-core): a shouty type|need
 TABLE
 
     # The table above stays green if `crate_scopes` returns nothing: every
-    # scope would become "unrecognised", every case would still classify as
+    # scope would become "unrecognized", every case would still classify as
     # `need`, and the classifier would have silently stopped reading the tree.
     while IFS= read -r crate; do
         [ -n "$crate" ] || continue
@@ -214,7 +214,7 @@ TABLE
     # the day a crate is retired.
     if [ "$n" -lt 1 ]; then
         echo "changelog.sh: no crate scopes derived from crates/, so the extractor has gone" >&2
-        echo "  blind, and every scope is now unrecognised rather than checked." >&2
+        echo "  blind, and every scope is now unrecognized rather than checked." >&2
         failures=$((failures + 1))
     fi
 

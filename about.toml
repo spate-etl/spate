@@ -43,10 +43,10 @@ private = { ignore = true }
 
 workarounds = ["ring", "rustls"]
 
-# Per-crate clarifications, naming which file a licence text is read from. Both
-# crates below ship several files scanning as the same licence id at equal
+# Per-crate clarifications, naming which file a license text is read from. Both
+# crates below ship several files scanning as the same license id at equal
 # confidence, and the scan's tie-break is readdir order, so an unclarified crate
-# moves between licence-text groups from machine to machine (#87).
+# moves between license-text groups from machine to machine (#87).
 #
 # Three things to know before editing an entry:
 #
@@ -56,7 +56,7 @@ workarounds = ["ring", "rustls"]
 # - `license` here *replaces* the crate's declared expression rather than being
 #   checked against it, and nothing warns if the two drift. Re-check on a
 #   version bump.
-# - Listing several files for one licence id publishes all of their texts. The
+# - Listing several files for one license id publishes all of their texts. The
 #   site reproduces each, and `attribution.sh` collapses the duplicate rows that
 #   would otherwise appear in THIRD-PARTY.md.
 #

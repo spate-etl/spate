@@ -1,4 +1,4 @@
-# Third-party licences
+# Third-party licenses
 
 **Generated file. Do not edit.** Regenerate with:
 
@@ -20,7 +20,7 @@ When reading it:
   default build links a strict subset; the extra crates come from opt-in
   features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
   more than you distribute is safe, so this file is the superset.
-- **Full licence texts are not reproduced here**, to keep the file diffable.
+- **Full license texts are not reproduced here**, to keep the file diffable.
   They are published at <https://spate.kainth.dev/licenses/>, generated
   from the same lockfile by the same tool.
 
@@ -37,27 +37,27 @@ the repository.
 
 ## Summary
 
-| Licence | Crates |
+| License | Crates |
 |---|---|
 {{#each overview}}| `{{id}}` | {{count}} |
 {{/each}}
 
 ## Crates
 
-One row per crate, grouped by the licence elected for it and sorted by name
-within each group. `cargo-about` records each crate's own licence text
+One row per crate, grouped by the license elected for it and sorted by name
+within each group. `cargo-about` records each crate's own license text
 separately, since the copyright lines differ, so the full texts live on the site
 rather than here.
 
-This table is post-processed. `cargo-about` emits one row per licence *text*,
+This table is post-processed. `cargo-about` emits one row per license *text*,
 grouping crates by which text they share, and a crate that ships several files
-scanning as the same licence has its text chosen by the order those files are
+scanning as the same license has its text chosen by the order those files are
 read off disk. Group membership, and so each row's position, then varies from
 machine to machine. `scripts/attribution.sh` sorts the rows, collapses the
 duplicates a crate with several notices produces, and recomputes the counts
-above from what is left. The elected licence ids are unaffected either way.
+above from what is left. The elected license ids are unaffected either way.
 
-| Crate | Version | Licence |
+| Crate | Version | License |
 |---|---|---|
 {{#each licenses}}{{#each used_by}}| `{{crate.name}}` | {{crate.version}} | `{{../id}}` |
 {{/each}}{{/each}}

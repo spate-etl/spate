@@ -14,7 +14,7 @@
 #   needs:     what is blocking the issue, not what it is about.
 #
 # GitHub's native issue types carry the type axis and the forms set them, so a
-# bug arrives typed rather than labelled. `delivery-correctness` and
+# bug arrives typed rather than labeled. `delivery-correctness` and
 # `performance` are classes of bug with their own triage priority, so they stay
 # as labels below.
 #
@@ -85,7 +85,7 @@
 
 - name: "area: supply-chain"
   color: "5319e7"
-  description: "Licences, advisories, and the third-party inventory"
+  description: "Licenses, advisories, and the third-party inventory"
 
 - name: "area: workspace"
   color: "5319e7"

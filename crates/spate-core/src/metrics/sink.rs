@@ -334,9 +334,8 @@ impl SinkShardMetrics {
     /// permit, every failed attempt, every retry-backoff sleep and
     /// all-replicas-quarantined probe wait, and the write that finally
     /// succeeded. It is the right input for a commit-lag budget and the wrong
-    /// one for "how fast is the sink". [`write_attempt`](Self::write_attempt)
-    /// answers that, and [`permit_waited`](Self::permit_waited) the queueing
-    /// share.
+    /// one for "how fast is the sink". `write_attempt` answers that, and
+    /// `permit_waited` the queueing share.
     ///
     /// Only settled batches are observed. An abandoned one never reaches
     /// here, whether it was aborted at the drain deadline, rejected with a

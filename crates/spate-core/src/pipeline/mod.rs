@@ -10,8 +10,8 @@
 //!                         pause/resume application      backpressure ticks
 //! ```
 //!
-//! Communication: the controller sends [`ThreadControl`] messages to
-//! drivers (lane assignment, drain barriers); drivers send [`DriverEvent`]
+//! Communication: the controller sends `ThreadControl` messages to
+//! drivers (lane assignment, drain barriers); drivers send `DriverEvent`
 //! requests back (pause/resume and fatal reports). Only the controller
 //! touches the [`Source`](crate::source::Source). All channels are unbounded
 //! crossbeam channels; control traffic is rare and must never block a poll
@@ -97,7 +97,7 @@ pub(crate) enum DriverEvent {
 }
 
 /// What the sink reported when draining at shutdown. This is the sink
-/// layer's [`DrainReport`](crate::sink::DrainReport), re-exported so
+/// layer's [`DrainReport`], re-exported so
 /// assemblies hand `SinkPool::drain`'s result straight through.
 pub use crate::sink::DrainReport;
 

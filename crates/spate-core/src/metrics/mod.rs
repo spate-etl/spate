@@ -286,7 +286,7 @@ static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::Onc
 /// return the handle the admin server renders from.
 ///
 /// **Call this before constructing any metric handle structs**
-/// ([`SinkShardMetrics`](crate::metrics::SinkShardMetrics) and friends).
+/// ([`SinkShardMetrics`] and friends).
 /// Handles bind to the recorder present at construction, and handles built
 /// earlier record into the void. Idempotent; a second call returns the
 /// first call's handle (with a warning when the requested settings differ).

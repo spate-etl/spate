@@ -24,9 +24,9 @@ pub struct DrainReport {
 /// Shard workers plus the handles to probe and drain them.
 ///
 /// Construction wiring: build the queues with
-/// [`shard_queues`](super::shard_queues), hand the [`ShardQueues`]
-/// (senders) to the pipeline threads' terminal stages, and the receivers to
-/// [`SinkPool::spawn`].
+/// [`shard_queues`](super::shard_queues), hand the
+/// [`ShardQueues`](super::ShardQueues) (senders) to the pipeline threads'
+/// terminal stages, and the receivers to [`SinkPool::spawn`].
 #[derive(Debug)]
 pub struct SinkPool<W: ShardWriter> {
     writer: Arc<W>,
@@ -187,13 +187,13 @@ impl<W: ShardWriter> SinkPool<W> {
     /// writes get until `deadline` before being aborted and abandoned.
     ///
     /// Always returns. A worker that does not stop by `deadline` is
-    /// force-aborted [`BACKSTOP_GRACE`] later; its acknowledgments fail with
+    /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with
     /// it (so at-least-once holds and the data replays), but its counts are
     /// missing from the returned report.
     ///
-    /// Contract: the caller must have dropped every [`ShardQueues`]
-    /// (super::ShardQueues) clone first. Workers only enter their drain phase
-    /// once their queue closes.
+    /// Contract: the caller must have dropped every
+    /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
+    /// their drain phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
         let deadline_at = Instant::now() + deadline;
         let _ = self.drain_tx.send(Some(deadline_at));

@@ -5,7 +5,7 @@
 //! (several pipeline instances in one process sharing an
 //! `Arc<MemoryStore>`), and doubles as the reference implementation for
 //! custom backends. Ephemeral expiry runs via a lazily spawned sweeper
-//! task against an injected [`Clock`](crate::clock::Clock). The default is
+//! task against an injected [`Clock`]. The default is
 //! real wall time ([`new`](MemoryStore::new)), so realistic sub-second lease
 //! tests need no clock plumbing; a frozen clock
 //! ([`with_clock`](MemoryStore::with_clock)) makes expiry deterministic

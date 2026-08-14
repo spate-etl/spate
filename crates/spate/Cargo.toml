@@ -62,6 +62,10 @@ name = "e2e_drain_restart"
 required-features = ["full"]
 
 [[test]]
+name = "e2e_drain_outage"
+required-features = ["full"]
+
+[[test]]
 name = "e2e_poison"
 required-features = ["full"]
 

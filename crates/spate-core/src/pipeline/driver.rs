@@ -45,8 +45,8 @@ pub(crate) struct DriverParams {
     /// backpressure low watermark).
     pub queue_low_ratio: f64,
     /// Hard per-partition ceiling on registered-but-unadvanced batches
-    /// (`checkpoint.max_pending_batches`): a lane whose partition is at the
-    /// ceiling is skipped, not polled, so pending can never exceed it.
+    /// (`checkpoint.max_pending_batches`). A lane whose partition is at the
+    /// ceiling is skipped, not polled, so pending cannot exceed it.
     pub max_pending_batches: usize,
 }
 
@@ -165,21 +165,21 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                             params.thread,
                         );
                     }
-                    // One arrival per stopped lane: the source sized the
-                    // barrier by lane count (it cannot know how lanes were
-                    // distributed across threads).
+                    // One arrival per stopped lane. The source sized the
+                    // barrier by lane count and cannot know how lanes were
+                    // distributed across threads.
                     for _ in 0..stopped {
                         barrier.arrive();
                     }
                 }
                 ThreadControl::FlushNow => {
-                    // Two senders: the controller broadcasts on every commit
-                    // tick (sealing below-target chunks whose held acks would
-                    // otherwise pin partition watermarks under sustained
-                    // load), and the CommitReady chase targets threads whose
-                    // lane hit end-of-input — either way, push the tail out
-                    // now so the acks it is waiting on can resolve, instead
-                    // of holding them for a full `idle_flush` lull.
+                    // The controller broadcasts on every commit tick (sealing
+                    // below-target chunks whose held acks would otherwise pin
+                    // partition watermarks under sustained load), and the
+                    // CommitReady chase targets threads whose lane hit
+                    // end-of-input. Either way, push the tail out now so the
+                    // acks it is waiting on can resolve, instead of holding
+                    // them for a full `idle_flush` lull.
                     match chain.flush() {
                         PushOutcome::Done => flushed_since_data = true,
                         PushOutcome::Blocked { .. } => bp.on_send_rejected(),
@@ -192,8 +192,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     }
                 }
                 ThreadControl::DropLanes { lanes: drop } => {
-                    // Committed-and-complete lanes: drop them and keep
-                    // polling. No flush — their records are already
+                    // Committed-and-complete lanes are dropped, and polling
+                    // continues. There is no flush. Their records are already
                     // sink-durable, and flushing here would emit a partial
                     // chunk and stall this thread once per completed unit.
                     lanes.retain(|l| !drop.contains(&l.id()));
@@ -220,7 +220,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             }
         }
 
-        // 2. Backpressure transitions. Pause/resume are *requests* — only
+        // 2. Backpressure transitions. Pause/resume are *requests*; only
         // the controller thread touches the Source.
         let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
         if let Some(t) = bp.tick(&budget, queues_low) {
@@ -235,11 +235,11 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // 3. Poll one lane (round-robin), or idle.
         if lanes.is_empty() {
             // Wait on the control channel, not the clock. A thread with no
-            // lanes is waiting for exactly one thing — a control message —
-            // and sleeping out the full poll timeout delays every one of
-            // them by up to that long: `Shutdown` at the end of a job, and
-            // `AddLane` every time a coordinated source hands this thread
-            // its next unit of work.
+            // lanes is waiting only for a control message, and sleeping out
+            // the full poll timeout delays every one of them by up to that
+            // long, including `Shutdown` at the end of a job and `AddLane`
+            // every time a coordinated source hands this thread its next unit
+            // of work.
             park_on_control(&control, &mut parked, params.poll_timeout);
             idle_flush(
                 chain.as_mut(),
@@ -260,8 +260,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // poll with a zero timeout so one empty lane (a fetcher cold start,
         // a starved partition queue) never parks the thread while sibling
         // lanes hold ready data. Only after a full empty pass does the next
-        // poll block for the real timeout — same idle CPU as always, but
-        // data never waits behind an empty sibling.
+        // poll block for the real timeout. Idle CPU is unchanged, and data
+        // does not wait behind an empty sibling.
         let lane_timeout = if empty_polls >= lanes.len() {
             params.poll_timeout
         } else {
@@ -272,8 +272,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // ceiling of batches registered and not yet advanced past. The
         // check happens before the poll and a poll issues one batch, so
         // pending never exceeds the ceiling. When every lane is gated,
-        // park on the control channel — the controller's next harvest
-        // retires batches and reopens the gates; meanwhile control
+        // park on the control channel. The controller's next harvest
+        // retires batches and reopens the gates, and meanwhile control
         // messages (FlushNow above all) keep being serviced.
         let partition = lanes[lane_idx].partition();
         let at_ceiling = match gates.get_mut(&partition) {
@@ -339,7 +339,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     if let Some(g) = gates.get_mut(&partition) {
                         let id = batch.ack().batch_id();
                         // A batch stamped with another epoch is stale by
-                        // construction — its registration is discarded, so
+                        // construction. Its registration is discarded, so
                         // nothing would ever retire it from the gate.
                         if id.epoch == g.epoch {
                             g.issued = g.issued.max(id.seq + 1);
@@ -425,18 +425,18 @@ struct GateState {
     /// Batches the controller has advanced past (shared counter).
     advanced: AdvanceCounter,
     /// Batches this thread has issued for the partition, derived from the
-    /// contiguous ack sequence — exact, since a partition has one issuing
-    /// thread.
+    /// contiguous ack sequence. The count is exact, since a partition has one
+    /// issuing thread.
     issued: u64,
     /// Whether the partition is currently at the ceiling, so the WARN on
     /// closing (and the DEBUG on reopening) fire on the edge, not per poll.
     gated: bool,
 }
 
-/// Park on the control channel for up to `poll_timeout`: a thread with
-/// nothing pollable — no lanes, or every lane gated — is waiting for a
-/// control message (or, when gated, the controller's next harvest). A
-/// received message is stashed for the drain at the top of the loop.
+/// Park on the control channel for up to `poll_timeout`. A thread with nothing
+/// pollable (no lanes, or every lane gated) is waiting for a control message,
+/// or, when gated, for the controller's next harvest. A received message is
+/// stashed for the drain at the top of the loop.
 fn park_on_control<L>(
     control: &crossbeam_channel::Receiver<ThreadControl<L>>,
     parked: &mut Option<ThreadControl<L>>,
@@ -463,12 +463,12 @@ fn is_fatal(e: &SourceError) -> bool {
     *class == ErrorClass::Fatal
 }
 
-/// A fatal thread must not vanish before the drain choreography: the
+/// A fatal thread must not vanish before the drain choreography. The
 /// controller sizes its shutdown [`DrainBarrier`](crate::source::DrainBarrier)
 /// by thread count, so a driver that returned early would force every
 /// fatal-initiated shutdown to burn the full drain timeout waiting on an
-/// arrival that can never come. Park here — chain already dropped, lanes
-/// released on request — until `Shutdown` arrives, then join the barrier.
+/// arrival that can never come. Park here (chain already dropped, lanes
+/// released on request) until `Shutdown` arrives, then join the barrier.
 fn park_until_shutdown<L: SourceLane>(
     control: &crossbeam_channel::Receiver<ThreadControl<L>>,
     mut lanes: Vec<L>,
@@ -515,12 +515,11 @@ fn park_until_shutdown<L: SourceLane>(
 /// Push one batch through the chain, retrying blocked pushes with the
 /// resume cursor until the batch completes.
 ///
-/// The batch borrows the lane's buffers, so the retry loop must hold it —
-/// it cannot be stashed. While blocked, the loop keeps ticking the
-/// backpressure controller (raising a pause request the first time),
-/// heartbeats, and sleeps briefly. The never-block invariant is about
-/// channel sends; deferring this thread's *next* poll is exactly what
-/// backpressure is supposed to do.
+/// The batch borrows the lane's buffers, so the retry loop must hold it.
+/// While blocked, the loop keeps ticking the backpressure controller (raising
+/// a pause request the first time), heartbeats, and sleeps briefly. The
+/// never-block invariant is about channel sends; deferring this thread's
+/// *next* poll is what backpressure does.
 #[expect(
     clippy::too_many_arguments,
     reason = "free function over disjoint driver-state borrows"
@@ -539,7 +538,7 @@ fn drive_batch(
     pause_started: &mut Option<Instant>,
     shutdown: &AtomicBool,
 ) -> Result<(), FatalError> {
-    // Cloned before the first push: if the chain panics the batch may be
+    // Cloned before the first push. If the chain panics the batch may be
     // in an arbitrary state, but this handle can still fail it.
     let ack: AckRef = batch.ack().clone();
     let mut from = 0usize;
@@ -552,9 +551,9 @@ fn drive_batch(
                 debug_assert!(resume_at >= from, "resume cursor must not go backwards");
                 from = resume_at;
                 // A batch that can never unblock must not hold shutdown
-                // hostage until the barrier deadline: abandon it (fail its
-                // acknowledgment — the data replays after restart) and
-                // hand control back so the Shutdown message is processed.
+                // hostage until the barrier deadline. Abandon it, failing its
+                // acknowledgment so the data replays after restart, and hand
+                // control back so the Shutdown message is processed.
                 if shutdown.load(Ordering::Relaxed) {
                     tracing::warn!(
                         thread = params.thread,
@@ -568,9 +567,9 @@ fn drive_batch(
                     chain.abandon_batch();
                     return Ok(());
                 }
-                // Only genuine sink pressure engages the backpressure
-                // controller; a not-ready wait (schema fetch in flight) is
-                // counted by the chain and simply retried.
+                // Only sink pressure engages the backpressure controller; a
+                // not-ready wait (schema fetch in flight) is counted by the
+                // chain and retried.
                 if reason == BlockReason::Capacity {
                     bp.on_send_rejected();
                     let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
@@ -596,10 +595,10 @@ fn drive_batch(
 }
 
 /// Wraps a lane batch to count payloads and payload bytes as the chain
-/// consumes them — the `spate_source_records_total` / `spate_source_bytes_total`
-/// feed. Counting happens per payload (not per derived record), and each
-/// payload is yielded exactly once even across blocked-batch retries, so
-/// the totals are exact.
+/// consumes them, feeding `spate_source_records_total` and
+/// `spate_source_bytes_total`. Counting happens per payload (not per derived
+/// record), and each payload is yielded exactly once even across
+/// blocked-batch retries, so the totals are exact.
 struct CountingBatch<'a, 'buf> {
     inner: &'a mut dyn PayloadBatch<'buf>,
     records: u64,
@@ -631,7 +630,7 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
 }
 
 /// Best-effort chain flush with a deadline (revocation and shutdown).
-/// A flush still blocked at the deadline is abandoned: the terminal
+/// A flush still blocked at the deadline is abandoned. The terminal
 /// stage's Drop contract fails any parked acknowledgments, so abandoned
 /// data replays instead of being committed.
 fn flush_until(

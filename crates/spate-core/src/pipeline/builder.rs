@@ -1,15 +1,16 @@
 //! The pipeline builder: the primary assembly path.
 //!
-//! [`Pipeline::from_config`] owns startup initialization — telemetry, the
-//! metrics exporter, and the shared I/O runtime — so holding a `Pipeline`
-//! *guarantees* a live recorder: every metric handle built afterwards
+//! [`Pipeline::from_config`] owns startup initialization (telemetry, the
+//! metrics exporter, and the shared I/O runtime), so holding a `Pipeline`
+//! *guarantees* a live recorder. Every metric handle built afterwards
 //! (framework or custom) is live, and connectors get an I/O handle before
 //! any thread spawns. The builder is a thin composition of the public
-//! primitives it replaces; nothing here is required — the desugaring below
-//! remains a fully supported assembly path.
+//! primitives it replaces; nothing here is required, and the desugaring
+//! below remains a fully supported assembly path.
 //!
-//! The shape of an assembly (illustrative — connector construction elided;
-//! see the `spate` crate's examples for complete, compiling binaries):
+//! The shape of an assembly (illustrative; connector construction is
+//! elided, and the `spate` crate's examples carry complete, compiling
+//! binaries):
 //!
 //! ```ignore
 //! let pipeline = Pipeline::from_path(Path::new("pipeline.yaml"))?;
@@ -38,15 +39,15 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`] — the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!
 //! # Shutdown and drop ordering
 //!
 //! The sink only drains once every [`ShardQueues`] clone is gone. The
-//! builder discharges this structurally: it never exposes the queues
-//! outside the chain factory — each factory call receives a fresh clone in
+//! builder discharges this structurally by never exposing the queues
+//! outside the chain factory. Each factory call receives a fresh clone in
 //! its [`ChainCtx`], which the chain's terminal stage consumes and drops
 //! with the driver threads, and the wrapper factory itself is dropped by
 //! the runtime before the drain. Do not smuggle `ctx.queues` into
@@ -95,11 +96,11 @@ pub enum BuildError {
     #[error("a sink named {0:?} is already installed")]
     DuplicateSinkName(String),
     /// Another live handle set in this process already owns a metric series
-    /// this sink would publish — a second pipeline with the same pipeline and
-    /// sink name, usually. Gauge series cannot be shared, so assembly stops
-    /// here rather than letting one of the two publish readings the other
-    /// overwrites. A pipeline rebuilt *sequentially* is fine: drop the old one
-    /// first.
+    /// this sink would publish, usually a second pipeline with the same
+    /// pipeline and sink name. Gauge series cannot be shared, so assembly
+    /// stops here rather than letting one of the two publish readings the
+    /// other overwrites. A pipeline rebuilt *sequentially* is fine: drop the
+    /// old one first.
     #[error("{0}")]
     DuplicateSeries(String),
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a sink.
@@ -110,7 +111,7 @@ pub enum BuildError {
     MissingChains,
     /// The builder was constructed inside an async runtime. It owns a
     /// blocking tokio runtime (dropping or `block_on`-ing one inside async
-    /// context panics), so build pipelines from a plain thread — usually
+    /// context panics), so build pipelines from a plain thread, usually
     /// `main`.
     #[error(
         "Pipeline::from_config must be called outside any async runtime \
@@ -131,37 +132,35 @@ pub enum PipelineError {
     Start(#[from] StartError),
 }
 
-/// Per-thread wiring handed to the chain factory — everything the terminal
-/// [`.sink(...)`](crate::ops::ChainBuilder) stage needs, so assemblies stop
-/// threading queues, budget, and the pipeline name by hand.
+/// Per-thread wiring handed to the chain factory, carrying everything the
+/// terminal [`.sink(...)`](crate::ops::ChainBuilder) stage needs, so assemblies
+/// stop threading queues, budget, and the pipeline name by hand.
 ///
 /// Passed by value, once per pipeline thread; move the fields into the
-/// chain being built. Deliberately not `Clone` — see the module docs on
-/// drop ordering.
+/// chain being built. Not `Clone` (see the module docs on drop ordering).
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ChainCtx {
     /// Zero-based pipeline thread index.
     pub thread: usize,
     /// This thread's clone of the shard-queue senders for the **first**
-    /// installed sink — the back-compat handle for single-sink pipelines
+    /// installed sink, the back-compat handle for single-sink pipelines
     /// (`.sink(...)`). Multi-sink pipelines resolve each branch's queues by
     /// name via [`sink`](Self::sink) instead.
     pub queues: ShardQueues,
     /// The shared in-flight byte budget.
     pub budget: Arc<InflightBudget>,
-    /// The pipeline name — [`ChainBuilder::with_metrics`](crate::ops::ChainBuilder::with_metrics)'s
-    /// first argument.
+    /// The pipeline name
+    /// ([`ChainBuilder::with_metrics`](crate::ops::ChainBuilder::with_metrics)'s
+    /// first argument).
     pub pipeline: String,
     /// How the source frames its payloads
     /// ([`Source::framing_contract`](crate::source::Source::framing_contract)).
     /// Hand it to a deserializer builder (e.g. `JsonDeserializerBuilder::
     /// for_source_framing`) so the deserializer's granularity is derived from
-    /// the source and a double-framing configuration is rejected — instead of
-    /// coordinating the source's framing with the deserializer's `framing:`
-    /// by hand.
+    /// the source and a double-framing configuration is rejected.
     pub source_framing: FramingContract,
-    /// The **first** installed sink's resolved terminal-stage chunking — the
+    /// The **first** installed sink's resolved terminal-stage chunking, the
     /// back-compat handle for single-sink pipelines, mirroring [`queues`](Self::queues).
     /// Pass it to the chain's [`.sink(...)`](crate::ops::ChainBuilder::sink)
     /// terminal via [`chunk`](Self::chunk); split pipelines resolve each
@@ -176,15 +175,14 @@ pub struct ChainCtx {
 
 impl ChainCtx {
     /// The named sink's handles (name, shard queues, shared in-flight budget)
-    /// for a split-terminal branch — pass the result straight to
+    /// for a split-terminal branch. Pass the result straight to
     /// [`SplitBuilder::add`](crate::ops::SplitBuilder::add). The single-sink
     /// `.sink()` sugar installs its sink under the name `"default"`.
     ///
     /// # Panics
     ///
-    /// Panics if no sink was installed under `name` — a construction-time
-    /// wiring error (the chain factory runs once per thread, cold path,
-    /// before any data flows), surfaced the same way a bad sink topology is.
+    /// Panics if no sink was installed under `name`. The chain factory runs
+    /// once per thread, on the cold path, before any data flows.
     #[must_use]
     pub fn sink(&self, name: &str) -> SinkCtx {
         let (_, queues, chunk) = self
@@ -198,7 +196,7 @@ impl ChainCtx {
         SinkCtx::new(name.to_string(), queues.clone(), Arc::clone(&self.budget)).with_chunk(*chunk)
     }
 
-    /// The **first** installed sink's resolved terminal-stage chunking — the
+    /// The **first** installed sink's resolved terminal-stage chunking, the
     /// single-sink counterpart to [`queues`](Self::queues), fed straight to the
     /// chain's [`.sink(...)`](crate::ops::ChainBuilder::sink) terminal:
     ///
@@ -254,13 +252,13 @@ impl ChainCtx {
 #[non_exhaustive]
 pub struct SinkOptions {
     /// Per-shard chunk queue capacity, in chunks. The default suits most
-    /// pipelines, but the knob is not free: queued chunks are charged to the
-    /// in-flight byte budget, so `shards × queue_capacity × chunk.target_bytes`
-    /// has to fit under the budget's low watermark *alongside* pending writes.
-    /// When it does not, a saturated pipeline sits permanently above the high
-    /// watermark and the pause controller duty-cycles at its minimum pause —
-    /// throughput collapses with nothing otherwise wrong. [The backpressure
-    /// page][bp] carries the full sizing rule and a worked example.
+    /// pipelines. Queued chunks are charged to the in-flight byte budget, so
+    /// `shards × queue_capacity × chunk.target_bytes` has to fit under the
+    /// budget's low watermark *alongside* pending writes. When it does not, a
+    /// saturated pipeline sits permanently above the high watermark and the
+    /// pause controller duty-cycles at its minimum pause, collapsing
+    /// throughput with nothing otherwise wrong. [The backpressure page][bp]
+    /// carries the full sizing rule and a worked example.
     ///
     /// [bp]: https://spate.kainth.dev/docs/user-guide/concepts/backpressure
     pub queue_capacity: usize,
@@ -268,7 +266,7 @@ pub struct SinkOptions {
     /// (the default) defers to the per-sink YAML `chunk:` block, or to
     /// [`ChunkConfig::default`] if that is absent too. Setting it **and** a
     /// YAML `chunk:` block on the same sink is a decl-once
-    /// [`ConfigError`](crate::config::ConfigError) at install — the knob is
+    /// [`ConfigError`](crate::config::ConfigError) at install; the knob is
     /// declared in exactly one place. The resolved value reaches the chain
     /// terminal via [`ChainCtx::chunk`] / [`ChainCtx::sink`].
     pub chunk: Option<ChunkConfig>,
@@ -284,8 +282,8 @@ impl SinkOptions {
     }
 
     /// Set this sink's chunking programmatically, instead of via the YAML
-    /// `chunk:` block. Providing both on the same sink is a load error — see
-    /// [`chunk`](Self::chunk).
+    /// `chunk:` block. Providing both on the same sink is a load error (see
+    /// [`chunk`](Self::chunk)).
     #[must_use]
     pub fn with_chunk(mut self, chunk: ChunkConfig) -> Self {
         self.chunk = Some(chunk);
@@ -314,9 +312,9 @@ struct SinkAssembly {
 
 type ChainFactoryFn = Box<dyn FnMut(ChainCtx) -> Box<dyn RunnableChain> + Send>;
 
-/// The pipeline builder — see the [module docs](self) for the full picture.
+/// The pipeline builder. See the [module docs](self) for the full picture.
 ///
-/// Non-generic, nameable, and storable: the source type enters only at the
+/// Non-generic, nameable, and storable; the source type enters only at the
 /// terminal [`into_runtime`](Self::into_runtime)/[`run`](Self::run) call.
 pub struct Pipeline {
     config: PipelineConfig,
@@ -363,8 +361,8 @@ impl Pipeline {
     ///
     /// # Errors
     ///
-    /// [`BuildError::AsyncContext`] when called from inside an async
-    /// runtime — build pipelines from a plain thread, usually `main`.
+    /// [`BuildError::AsyncContext`] when called from inside an async runtime.
+    /// Build pipelines from a plain thread, usually `main`.
     pub fn from_config(config: PipelineConfig) -> Result<Self, BuildError> {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(BuildError::AsyncContext);
@@ -375,7 +373,7 @@ impl Pipeline {
             )));
         }
         // The YAML loaders run the full `PipelineConfig::validate`; a
-        // programmatically built config deliberately skips it (minimal test
+        // programmatically built config skips it by design (minimal test
         // fixtures). But `ComponentConfig::new` peels the reserved `chunk` key
         // before the connector's `deny_unknown_fields` could reject it, so
         // without this check a stray `chunk:` on a source/deserializer body
@@ -402,7 +400,7 @@ impl Pipeline {
         })
     }
 
-    /// The loaded configuration — connector sections (`config().source`,
+    /// The loaded configuration. Connector sections (`config().source`,
     /// `.deserializer`, `.sink`) still belong to the caller's connector
     /// factories.
     #[must_use]
@@ -430,14 +428,14 @@ impl Pipeline {
         self.io.handle().clone()
     }
 
-    /// Run a future on the I/O runtime, blocking this thread — for async
-    /// pre-flight steps such as schema validation.
+    /// Run a future on the I/O runtime, blocking this thread. Use it for
+    /// async pre-flight steps such as schema validation.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.io.block_on(future)
     }
 
     /// Install the single sink under the reserved name `"default"` with
-    /// default [`SinkOptions`] — the ergonomic path for single-sink
+    /// default [`SinkOptions`], the ergonomic path for single-sink
     /// pipelines. Sugar for [`add_sink`](Self::add_sink)`("default", bundle)`.
     pub fn sink<B: SinkBundle>(self, bundle: B) -> Result<Self, BuildError> {
         self.add_sink_with("default", bundle, SinkOptions::default())
@@ -466,11 +464,12 @@ impl Pipeline {
         self.add_sink_with(name, bundle, SinkOptions::default())
     }
 
-    /// Install a named sink: builds the per-shard chunk queues, registers the
-    /// per-shard metrics (E2E basis from the config; the sink `name` becomes
-    /// the `component` label, so each sink's `spate_sink_*` series is distinct),
-    /// spawns the [`SinkPool`] workers on the I/O runtime, and wires the drain
-    /// and readiness probe. The named sinks share the one pipeline
+    /// Install a named sink. This builds the per-shard chunk queues, registers
+    /// the per-shard metrics (E2E basis from the config; the sink `name`
+    /// becomes the `component` label, so each sink's `spate_sink_*` series is
+    /// distinct), spawns the [`SinkPool`] workers on the I/O runtime, and
+    /// wires the drain and readiness probe. The named sinks share the one
+    /// pipeline
     /// [`InflightBudget`] and one backpressure controller (a stall on any sink
     /// pauses the shared source).
     ///
@@ -526,12 +525,11 @@ impl Pipeline {
                     other => other,
                 })
             })?,
-            // No YAML section under this name — the sink is configured purely
-            // in code, which is legitimate (capture sinks in tests, named
-            // programmatic sinks beside a placeholder `sink:`). The one real
-            // hazard — a declared `chunk:` block that nothing ever installs —
-            // is warned about at `into_runtime`, where the installed-name set
-            // is complete.
+            // No YAML section under this name. The sink is configured purely
+            // in code (capture sinks in tests, named programmatic sinks beside
+            // a placeholder `sink:`). A declared `chunk:` block that nothing
+            // ever installs is warned about at `into_runtime`, where the
+            // installed-name set is complete.
             Err(_) => None,
         };
         let chunk = match (yaml_chunk, options.chunk) {
@@ -546,11 +544,11 @@ impl Pipeline {
         };
         // The YAML path already checked `> 0` in `ChunkSection::resolve`; the
         // programmatic `with_chunk` path skips that, so enforce parity here
-        // (naming the sink). No upper bound: the in-flight budget can be
-        // legitimately smaller than one chunk on a throttled config — that is
-        // just heavy backpressure, not a misconfiguration — so there is no
-        // budget-relative ceiling to enforce. `target_bytes` is a per-shard
-        // pre-allocation; sizing it is the operator's call (see the tuning docs).
+        // (naming the sink). There is no upper bound. The in-flight budget can
+        // be smaller than one chunk on a throttled config; that is heavy
+        // backpressure rather than a misconfiguration. `target_bytes` is a
+        // per-shard pre-allocation; sizing it is the operator's call (see the
+        // tuning docs).
         if chunk.target_bytes == 0 {
             return Err(BuildError::Config(ConfigError::Validation(format!(
                 "sink {sink_name:?}: chunk.target_bytes must be greater than zero"
@@ -602,10 +600,10 @@ impl Pipeline {
             .attach_metrics(&sink_labels)
             .map_err(|e| BuildError::DuplicateSeries(e.to_string()))?;
         let e2e_basis = metrics_settings(&self.config).e2e_basis;
-        // Fallible on purpose: a shard's gauges are edge-triggered, so two
-        // live handle sets on one series leave a lie standing rather than a
-        // double count. On the assembly path that is a wiring mistake we can
-        // still refuse, before any data flows.
+        // A shard's gauges are edge-triggered, so two live handle sets on one
+        // series leave a stale reading standing rather than a double count. On
+        // the assembly path that is a wiring mistake we can still refuse,
+        // before any data flows.
         let shard_metrics: Vec<SinkShardMetrics> = replica_labels
             .iter()
             .enumerate()
@@ -648,8 +646,8 @@ impl Pipeline {
     /// Install the chain factory, called once per pipeline thread with
     /// that thread's [`ChainCtx`]. Composition inside the closure is fully
     /// monomorphized ([`chain_owned`](crate::ops::chain_owned) and
-    /// friends); the returned `Box<dyn RunnableChain>` is the same single
-    /// per-batch erasure boundary as always.
+    /// friends); the returned `Box<dyn RunnableChain>` is the single
+    /// per-batch erasure boundary.
     #[must_use]
     pub fn chains<F>(mut self, factory: F) -> Self
     where
@@ -666,7 +664,7 @@ impl Pipeline {
         self
     }
 
-    /// Finish assembly into a [`PipelineRuntime`] — for callers that need
+    /// Finish assembly into a [`PipelineRuntime`], for callers that need
     /// [`shutdown_handle`](PipelineRuntime::shutdown_handle) before a
     /// spawned `run` (tests, embedded pipelines). The I/O runtime moves
     /// into it and is shut down when `run` returns.
@@ -701,7 +699,7 @@ impl Pipeline {
             }
         }
         // A declared sink section whose name nothing installed can carry a
-        // `chunk:` block that no install-time resolution will ever read — the
+        // `chunk:` block that no install-time resolution will ever read, the
         // one mismatch invisible to `add_sink_with`. (A *malformed* block is
         // already rejected by `PipelineConfig::validate` on the YAML loaders.)
         for config_name in self.config.sink_names() {
@@ -727,7 +725,7 @@ impl Pipeline {
         // runtime, and hand it to every per-thread ChainCtx.
         let source_framing = source.framing_contract();
         // This wrapper is the factory the runtime drops before the sink
-        // drain — the queue clones it captures die exactly there.
+        // drain; the queue clones it captures die there.
         let chains = move |thread: usize| {
             factory(ChainCtx {
                 thread,
@@ -762,9 +760,9 @@ impl Pipeline {
     }
 }
 
-/// Compose per-sink drain hooks into one: drain every sink concurrently under
-/// the shared deadline and sum their reports, so a multi-sink drain respects
-/// one wall-clock budget instead of N sequential ones.
+/// Compose per-sink drain hooks into one. Every sink drains concurrently under
+/// the shared deadline and their reports are summed, so a multi-sink drain
+/// respects one wall-clock budget instead of N sequential ones.
 fn combine_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
     Box::new(move |deadline| {
         Box::pin(async move {
@@ -780,8 +778,8 @@ fn combine_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
                         total.abandoned += report.abandoned;
                     }
                     // The panicked sink's counts are unknowable; its parked
-                    // acks still fail on drop, so at-least-once holds — but
-                    // the report is incomplete and must say so loudly.
+                    // acks still fail on drop, so at-least-once holds. The
+                    // report is incomplete and says so.
                     Err(e) => tracing::error!(
                         error = %e,
                         "a sink drain task panicked; its counts are missing \
@@ -794,9 +792,9 @@ fn combine_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
     })
 }
 
-/// Compose per-sink readiness probes into one: probe every sink and report
-/// connected only when all succeed (readiness is not a hot path, so the
-/// sequential short-circuit is fine).
+/// Compose per-sink readiness probes into one. Every sink is probed and the
+/// result is connected only when all succeed (readiness is not a hot path, so
+/// the sequential short-circuit is fine).
 fn combine_probes(probes: Vec<SinkProbeFn>) -> Option<SinkProbeFn> {
     if probes.is_empty() {
         return None;
@@ -913,11 +911,11 @@ mod tests {
 
     /// Two *live* pipelines with the same pipeline and sink name would resolve
     /// the same `spate_sink_*` and `spate_queue_*` gauge series. The second's
-    /// `add_sink` must refuse — those gauges cannot be shared, and letting both
+    /// `add_sink` must refuse; those gauges cannot be shared, and letting both
     /// through leaves each overwriting the other's readings.
     ///
-    /// A pipeline rebuilt *sequentially* — the supported way to replace one in
-    /// a process — is fine: the first's claim frees when it is dropped, so the
+    /// A pipeline rebuilt *sequentially* (the supported way to replace one in
+    /// a process) is fine. The first's claim frees when it is dropped, so the
     /// rebuild re-owns the series. Only overlap collides.
     #[test]
     fn two_live_pipelines_on_one_name_collide_but_sequential_reuse_is_fine() {
@@ -952,7 +950,7 @@ mod tests {
 
     #[test]
     fn reserved_and_empty_sink_names_error() {
-        // "sink" is the default sink's metric label — installing a sink under
+        // "sink" is the default sink's metric label; installing a sink under
         // that name would silently merge the two series.
         let p = Pipeline::from_config(test_config(1)).expect("builder");
         assert!(matches!(
@@ -1008,15 +1006,14 @@ mod tests {
     /// The chain factory sees every thread index exactly once, with the
     /// pipeline name from the config, and the assembled pipeline runs to a
     /// clean `Completed` through the real `SinkPool`. This guards `ChainCtx`
-    /// coverage and end-to-end assembly — not drop ordering: the drain
-    /// containment fix (`sink/worker.rs`) deliberately converts a leaked
-    /// `ShardQueues` clone from an unbounded hang into a bounded, loud
-    /// abandon, so completion here no longer implies clean drop ordering.
-    /// The drop-ordering + at-least-once contract is covered where it *can*
-    /// still fail observably: the whole-assembly test in `spate-test`'s
-    /// `tests/bundle.rs`, which routes real data through `ctx.queues` and
-    /// asserts the watermark only advances past the last record after a
-    /// durable write.
+    /// coverage and end-to-end assembly, not drop ordering. Drain containment
+    /// (`sink/worker.rs`) turns a leaked `ShardQueues` clone into a bounded
+    /// abandon rather than an unbounded hang, so completion here does not
+    /// imply clean drop ordering. The drop-ordering and at-least-once contract
+    /// is covered where it can still fail observably: the whole-assembly test
+    /// in `spate-test`'s `tests/bundle.rs`, which routes real data through
+    /// `ctx.queues` and asserts the watermark only advances past the last
+    /// record after a durable write.
     #[test]
     fn chain_ctx_covers_every_thread_and_run_completes() {
         let (source, shared, script) = FakeSource::new();
@@ -1042,7 +1039,7 @@ mod tests {
             .expect("sink")
             .chains(move |ctx| {
                 assert_eq!(ctx.pipeline, pipeline_name);
-                // The source's framing contract threads into every ChainCtx —
+                // The source's framing contract threads into every ChainCtx;
                 // FakeSource overrides it to the non-default PerRecord.
                 assert_eq!(ctx.source_framing, FramingContract::PerRecord);
                 seen.lock().unwrap().push(ctx.thread);
@@ -1069,7 +1066,7 @@ mod tests {
         assert_eq!(threads, vec![0, 1], "one ChainCtx per pipeline thread");
     }
 
-    /// A `chunk:` body peeled onto a `ComponentConfig` — the shape the framework
+    /// A `chunk:` body peeled onto a `ComponentConfig`, the shape the framework
     /// resolves at install without the connector ever seeing the key.
     fn chunk_body(yaml: &str) -> ComponentConfig {
         ComponentConfig::new("fake", serde_yaml::from_str(yaml).expect("chunk yaml"))
@@ -1174,7 +1171,7 @@ mod tests {
         );
     }
 
-    /// Drive a capture of `ctx.chunk()` through a full assembly — shared by
+    /// Drive a capture of `ctx.chunk()` through a full assembly, shared by
     /// the YAML-block and `with_chunk` propagation tests below.
     fn captured_default_chunk(
         build: impl FnOnce(Pipeline) -> Result<Pipeline, BuildError>,
@@ -1246,7 +1243,7 @@ mod tests {
     fn stray_chunk_on_a_source_body_is_rejected_by_from_config() {
         // `ComponentConfig::new` peels the reserved key before the connector's
         // `deny_unknown_fields` could reject it, so `from_config` must reject
-        // it itself — a stray `chunk:` on a source is an error, not a silent
+        // it itself. A stray `chunk:` on a source is an error, not a silent
         // no-op, even on the programmatic path that skips `validate`.
         let mut config = test_config(1);
         config.source = ComponentConfig::new(
@@ -1263,16 +1260,15 @@ mod tests {
     /// Regression: the runtime must hand the source the framework's
     /// source-stage handles at `open`.
     ///
-    /// `SourceMetrics::set_partition_lag` has exactly one possible caller —
-    /// the source, because only the client can see the log end. Those handles
-    /// used to be reachable only through a connector-side builder that
-    /// nothing in the tree called, so `spate_source_lag_records` rendered a
-    /// permanent `0` on every Kafka pipeline: a maximally backlogged consumer
-    /// reported no lag, and any alert or autoscaler keyed on it read as
-    /// caught up. Nothing failed; the series was simply always zero. Assert
-    /// the seam is connected — and see the Kafka crate's
-    /// `a_backlogged_consumer_publishes_its_lag` for the value actually
-    /// arriving, which this test deliberately does not cover.
+    /// `SourceMetrics::set_partition_lag` has exactly one possible caller, the
+    /// source, because only the client can see the log end. When those handles
+    /// are reachable only through a connector-side builder that nothing calls,
+    /// `spate_source_lag_records` renders a permanent `0` on every Kafka
+    /// pipeline. A maximally backlogged consumer reports no lag, and any alert
+    /// or autoscaler keyed on it reads as caught up. Nothing fails; the series
+    /// is always zero. This asserts the seam is connected. The Kafka crate's
+    /// `a_backlogged_consumer_publishes_its_lag` covers the value arriving,
+    /// which this test does not.
     #[test]
     fn source_open_receives_the_stage_metrics() {
         let (source, shared, script) = FakeSource::new();
@@ -1312,7 +1308,7 @@ mod tests {
     }
 
     /// The whole-builder happy path through `run()` (not `into_runtime`),
-    /// exercised over the real SinkPool: completes and commits.
+    /// exercised over the real SinkPool. Completes and commits.
     #[test]
     fn run_completes_via_builder_terminal() {
         let (source, shared, script) = FakeSource::new();

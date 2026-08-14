@@ -3,7 +3,7 @@
 //!
 //! Connector crates implement [`SinkBundle`] on their config-built sink
 //! type (e.g. a ClickHouse sink, a capturing test sink); hand-rolled sinks
-//! construct [`SinkParts`] directly — it implements the trait itself, so
+//! construct [`SinkParts`] directly; it implements the trait itself, so
 //! `Pipeline::sink` accepts either. The only bound is [`ShardWriter`]:
 //! connector-specific types appear solely as the implementor's associated
 //! types, keeping 0.x dependencies out of this crate's public bounds
@@ -31,7 +31,7 @@ pub trait SinkBundle {
 /// added without breaking implementors).
 ///
 /// `shard_endpoints` is indexed `[shard][replica]` and must be non-empty
-/// with every shard holding at least one replica — the builder rejects
+/// with every shard holding at least one replica. The builder rejects
 /// ragged or empty topologies before anything spawns.
 #[non_exhaustive]
 pub struct SinkParts<W: ShardWriter> {
@@ -46,9 +46,9 @@ pub struct SinkParts<W: ShardWriter> {
     /// Per-replica display labels for shard metrics, same shape as
     /// `shard_endpoints`. Defaults to `"{component_type}-{shard}-{replica}"`.
     pub replica_labels: Vec<Vec<String>>,
-    /// Optional readiness probe. Probes should use their own client set —
-    /// sharing the writer's connections would report the insert path
-    /// healthy simply because probing keeps it warm.
+    /// Optional readiness probe. Probes should use their own client set.
+    /// Sharing the writer's connections would report the insert path
+    /// healthy because probing keeps it warm.
     pub probe: Option<SinkProbeFn>,
 }
 

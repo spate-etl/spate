@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer};
 use std::time::Duration;
 
 /// Accept `128MiB`-style sizes on the wire while keeping the field a plain
-/// `u64` — `ByteSize` is a parsing convenience, not part of the batching API.
+/// `u64`. `ByteSize` is a parsing convenience, not part of the batching API.
 fn de_byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     ByteSize::deserialize(d).map(|b| b.as_u64())
 }
@@ -75,16 +75,16 @@ pub struct RetryConfig {
     /// Fraction of the delay randomized away (`0.0..=1.0`).
     pub jitter: f64,
     /// Total write attempts before the batch is abandoned (acknowledgments
-    /// failed, watermark stalls). `0` means unbounded — retry until the drain
+    /// failed, watermark stalls). `0` means unbounded, retrying until the drain
     /// deadline, at which point the attempt in flight is aborted and the batch
     /// abandoned. The at-least-once default.
     ///
     /// An unbounded policy holds its in-flight slot
     /// ([`InflightConfig::max_per_shard`]) for the whole outage, since a slot
-    /// frees only when its write task ends. That is intended — it is how a
-    /// down sink back-pressures the source rather than buffering — but it does
-    /// mean a shard talking to a dead sink runs at zero in-flight capacity
-    /// until either the sink recovers or the drain deadline arrives.
+    /// frees only when its write task ends. That is how a down sink
+    /// back-pressures the source rather than buffering, and it means a shard
+    /// talking to a dead sink runs at zero in-flight capacity until either the
+    /// sink recovers or the drain deadline arrives.
     pub max_attempts: u32,
 }
 
@@ -135,18 +135,17 @@ impl RetryConfig {
     /// per connector.
     ///
     /// This is about intent, not safety. [`Backoff`](super::retry) never
-    /// panics for *any* `RetryConfig` and always saturates at `max`, so
-    /// nothing here is load-bearing for the write loop. It returns a zero
-    /// delay only for a policy this rejects (`initial` or `max` of zero), so
-    /// "never zero" is a property of a **validated** policy, not of the type.
-    /// What
-    /// it catches is a policy no operator means: a sub-`1.0` multiplier
-    /// shrinks the delay instead of backing off, a zero delay is not a
-    /// backoff at all, and both are worth failing at load rather than at 3am.
+    /// panics for *any* `RetryConfig` and always saturates at `max`. It
+    /// returns a zero delay only for a policy this rejects (`initial` or
+    /// `max` of zero), so "never zero" is a property of a **validated**
+    /// policy, not of the type. What it catches is a policy no operator
+    /// means: a sub-`1.0` multiplier shrinks the delay instead of backing
+    /// off, a zero delay is not a backoff at all, and both are worth failing
+    /// at load rather than at 3am.
     ///
-    /// The bounds are deliberately generous and do **not** guarantee a
-    /// *sensible* policy — `initial: 1ns, max: 1ns` passes. They rule out the
-    /// nonsensical, not the merely aggressive.
+    /// The bounds are generous and do **not** guarantee a *sensible* policy.
+    /// `initial: 1ns, max: 1ns` passes. They rule out the nonsensical, not
+    /// the aggressive.
     ///
     /// # Errors
     ///
@@ -188,11 +187,11 @@ impl RetryConfig {
     /// batch is abandoned and the stall is bounded; with a short ceiling the
     /// retries keep visibly ticking. Only the combination goes quiet.
     ///
-    /// Deliberately not a [`validate`](Self::validate) rule. Nothing here is
-    /// unsafe — the drain deadline still aborts the sleep at shutdown, so
-    /// at-least-once holds — and a sink fronting an expensive or rate-limited
-    /// destination may well mean it. The threshold is a heuristic, which a
-    /// warning may use and a rejection may not.
+    /// Not a [`validate`](Self::validate) rule. Nothing here is unsafe; the
+    /// drain deadline still aborts the sleep at shutdown, so at-least-once
+    /// holds. A sink fronting an expensive or rate-limited destination may
+    /// well mean it. The threshold is a heuristic, which a warning may use
+    /// and a rejection may not.
     pub(crate) fn stalls_indefinitely(&self) -> bool {
         /// Past this, an unbounded policy stops reading as a backoff.
         const CEILING: Duration = Duration::from_secs(300);
@@ -450,7 +449,7 @@ mod tests {
     /// The cap exists because `on_failure` stamps `now + open_for` and
     /// `Instant + Duration` panics on overflow. Validation rejects the value,
     /// but `BreakerConfig` is a public `Copy` struct, so the breaker floors and
-    /// caps at the point of use too — this pins that the two agree on where
+    /// caps at the point of use too. This pins that the two agree on where
     /// the line is.
     #[test]
     fn breaker_cap_matches_what_the_breaker_applies() {

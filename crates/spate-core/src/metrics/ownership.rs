@@ -1,24 +1,22 @@
 //! Series ownership: one live owner per gauge series, process-wide.
 //!
 //! A handle struct addresses its series by label tuple, but the state that
-//! decides what to publish — a cached health bool, a backoff map, a partition
-//! set — is held per instance. Two instances resolving the same series
-//! therefore each believe they own it, and because the interesting gauge
-//! writers are edge-triggered, the loser's stale reading is never republished.
-//! Counters degrade into a sum under that collision; gauges degrade into a
-//! lie.
+//! decides what to publish (a cached health bool, a backoff map, a partition
+//! set) is held per instance. Two instances resolving the same series both
+//! write to it, and because the gauge writers here are edge-triggered, the
+//! loser's stale reading is never republished. Counters sum under that
+//! collision; gauge readings become wrong.
 //!
-//! So gauge series are claimed. The first handle set to resolve a given
+//! Gauge series are therefore claimed. The first handle set to resolve a given
 //! `(root, pipeline, component, component_type, …)` key owns it and publishes
-//! normally; a later one becomes a **shadow** — its counters and histograms
-//! still record (they aggregate correctly), its gauge writes are dropped (see
-//! [`OwnedGauge`](super::labels::OwnedGauge)). Ownership is checked once, at
-//! construction, so nothing is added to any write path.
+//! normally; a later one becomes a **shadow** whose counters and histograms
+//! still record (they aggregate correctly) while its gauge writes are dropped
+//! (see [`OwnedGauge`](super::labels::OwnedGauge)). Ownership is checked once,
+//! at construction, and no check runs on the write path.
 //!
-//! The registry is process-global and cannot see recorder scope: two handle
+//! The registry is process-global and cannot see recorder scope. Two handle
 //! sets built under separate [`metrics::with_local_recorder`] recorders still
-//! collide here. That is deliberate — the framework installs one global
-//! recorder — but it means test helpers must carry per-test labels rather than
+//! collide here, so test helpers must carry per-test labels rather than
 //! relying on recorder isolation for independence.
 
 use super::MetricsError;
@@ -33,13 +31,13 @@ static CLAIMS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(Ha
 /// struct lives.
 ///
 /// Dropping the claim frees the key, so a pipeline rebuilt **sequentially** in
-/// one process re-claims cleanly — but only once the previous owner is really
-/// gone. `SinkShardMetrics` in particular sits behind `Arc`s held by the
-/// shard's `BreakerSet` and its in-flight write tasks, so the claim frees when
-/// the *last* clone drops: after the drain, not when `SinkPool` is handed off.
-/// Overlapping lifetimes collide, and a shadow is never promoted (that would
-/// cost a check on every gauge write) — so an overlapping rebuild leaves the
-/// new instance gauge-silent for its whole life. Drop, then build.
+/// one process re-claims cleanly, but only once the previous owner is gone.
+/// `SinkShardMetrics` in particular sits behind `Arc`s held by the shard's
+/// `BreakerSet` and its in-flight write tasks, so the claim frees when the
+/// *last* clone drops, after the drain rather than when `SinkPool` is handed
+/// off. Overlapping lifetimes collide, and a shadow is never promoted, so an
+/// overlapping rebuild leaves the new instance gauge-silent for its whole
+/// life. Drop, then build.
 #[derive(Debug)]
 pub(crate) struct SeriesClaim {
     key: String,
@@ -47,7 +45,7 @@ pub(crate) struct SeriesClaim {
 
 impl SeriesClaim {
     /// Claim `key`, or fail because another live handle set owns it. The
-    /// fallible path, for the pipeline builder and runtime: a duplicate there
+    /// fallible path, for the pipeline builder and runtime, where a duplicate
     /// is a wiring mistake the caller can still refuse to start on.
     pub(crate) fn try_claim(key: String) -> Result<Self, MetricsError> {
         if Self::insert(&key) {
@@ -58,9 +56,9 @@ impl SeriesClaim {
     }
 
     /// Claim `key`, or log and return `None` so the caller becomes a shadow.
-    /// The infallible path, for direct construction (hand assembly, tests):
-    /// a label collision must not take down a process whose
-    /// data path is fine, but it must be impossible to miss in the logs.
+    /// The infallible path, for direct construction (hand assembly, tests),
+    /// where a label collision must not take down a process whose data path is
+    /// fine.
     pub(crate) fn claim_or_shadow(key: String) -> Option<Self> {
         if Self::insert(&key) {
             return Some(SeriesClaim { key });
@@ -79,7 +77,7 @@ impl SeriesClaim {
         Self::registry().insert(key.to_owned())
     }
 
-    /// Poison-tolerant: `Drop` runs during unwinding, where a panicking
+    /// Poison-tolerant because `Drop` runs during unwinding, where a panicking
     /// `expect` would abort the process. The critical section only inserts and
     /// removes, so a poisoned set is not a corrupt one.
     fn registry() -> std::sync::MutexGuard<'static, HashSet<String>> {
@@ -95,10 +93,10 @@ impl Drop for SeriesClaim {
 
 /// The claim key for one handle set: the stage root, the three standard
 /// labels, and whatever extra label pins the instance down (`shard=3`, a queue
-/// name) — `""` when the labels alone identify it.
+/// name), or `""` when the labels alone identify it.
 ///
 /// `root` is a [`RESERVED_ROOTS`](super::names::RESERVED_ROOTS) segment, so
-/// two different stages on identical labels never collide with each other.
+/// two different stages on identical labels do not collide.
 pub(crate) fn series_key(root: &str, labels: &ComponentLabels, extra: &str) -> String {
     format!(
         "spate_{root}_|{}|{}|{}|{extra}",
@@ -129,8 +127,8 @@ mod tests {
         drop(owner);
     }
 
-    /// A sequential rebuild — the supported way to replace a pipeline in one
-    /// process — must re-claim and publish, not inherit the shadow.
+    /// A sequential rebuild, the supported way to replace a pipeline in one
+    /// process, must re-claim and publish rather than inherit the shadow.
     #[test]
     fn dropping_the_owner_frees_the_key() {
         let key = series_key("sink", &labels("drop-frees"), "shard=0");

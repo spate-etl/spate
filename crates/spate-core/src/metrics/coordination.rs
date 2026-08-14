@@ -19,44 +19,43 @@ pub enum AcquireReason {
     Reclaimed,
     /// Takeover of a split whose lease expired unrenewed.
     Expired,
-    /// Claim of a split whose previous owner released it cleanly — a
-    /// drained revocation, or a shutdown/scale-down hand-back. Either way
+    /// Claim of a split whose previous owner released it cleanly, either a
+    /// drained revocation or a shutdown/scale-down hand-back. Either way
     /// the owner cleared the record before letting go, so the resume point
     /// covers everything it emitted and the claim is replay-free; a drained
     /// revocation additionally counts [`RevocationOutcome::Drained`] on the
     /// releasing side. Contrast [`Expired`](AcquireReason::Expired), where
     /// a dead owner's uncommitted tail replays.
     ///
-    /// One clean release counts here with *no* matching `drained`: the drain
-    /// left behind by a [`RevocationOutcome::Cancelled`] revocation, which
-    /// hands the split back to the worker that already had it. Counting it
-    /// `drained` would claim a move that never happened.
+    /// One clean release counts here with *no* matching `drained`. That is
+    /// the drain left behind by a [`RevocationOutcome::Cancelled`]
+    /// revocation, which hands the split back to the worker that already had
+    /// it. Counting it `drained` would claim a move that never happened.
     ///
-    /// The two clean cases are one reason on purpose: a claiming worker
-    /// cannot tell them apart (both present as a cleared owner and a
-    /// vanished lease), and a label it cannot populate correctly is a
-    /// series that reads zero forever.
+    /// The two clean cases share one reason because a claiming worker cannot
+    /// tell them apart; both present as a cleared owner and a vanished lease.
+    /// A label it cannot populate correctly is a series that reads zero
+    /// forever.
     Reassigned,
 }
 
 /// Outcome of one split revocation (the `outcome` label on
-/// `spate_coordination_revocations_total`) — the leader moving a split away
-/// from a live owner by dropping it from that owner's assignment.
+/// `spate_coordination_revocations_total`). A revocation is the leader moving
+/// a split away from a live owner by dropping it from that owner's assignment.
 ///
-/// All four count on the **releasing** worker, so they read as one
-/// lifecycle rather than as two sides of a negotiation: `Requested` is the
-/// denominator, and every revocation that leaves it terminates in exactly
-/// one of `Drained`, `Forced`, or `Cancelled` — including the paths that do
-/// not look like a revocation ending at all, where the split completes or is
-/// `fail`ed mid-drain, or the process departs while draining.
-/// `requested - drained - forced - cancelled` is therefore the **revocations**
-/// still in flight.
+/// All four count on the **releasing** worker, so they read as one lifecycle.
+/// `Requested` is the denominator, and every revocation that leaves it
+/// terminates in exactly one of `Drained`, `Forced`, or `Cancelled`. That
+/// includes the paths that do not look like a revocation ending at all, where
+/// the split completes or is `fail`ed mid-drain, or the process departs while
+/// draining. `requested - drained - forced - cancelled` is therefore the
+/// **revocations** still in flight.
 ///
 /// That is not the same number as `spate_coordination_splits_draining`, which
 /// counts **drains**. `Cancelled` ends a revocation while leaving its drain
 /// running, so the gauge sits one higher than the counter arithmetic for as
-/// long as that drain takes. Two questions, two series: "how much is the
-/// leader still trying to move" and "how many splits are winding down".
+/// long as that drain takes. The counter answers how much the leader is still
+/// trying to move; the gauge answers how many splits are winding down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RevocationOutcome {
@@ -64,29 +63,28 @@ pub enum RevocationOutcome {
     /// the cooperative drain began: stop intake at a safe boundary, chase
     /// the tail to a final fenced commit, release.
     Requested,
-    /// The drain finished cooperatively: the tail committed and the release
+    /// The drain finished cooperatively. The tail committed and the release
     /// landed, so the next owner resumes past everything this worker
-    /// emitted and replays nothing. The outcome the cooperative path exists
-    /// to produce; the gaining side counts
+    /// emitted and replays nothing. The gaining side counts
     /// [`AcquireReason::Reassigned`]. A split that *completes* mid-drain
-    /// counts here too — its tail is committed and nothing replays, which
-    /// is the same outcome even though nobody took it over.
+    /// counts here too; its tail is committed and nothing replays, even
+    /// though no worker took it over.
     Drained,
     /// The cooperative path did not finish, so the release was forced: the
     /// source declined to stop at a safe boundary, the drain outran
     /// `drain_deadline`, or the split was fenced away before the release
     /// landed. The uncommitted tail replays under the next owner. A decline
-    /// and an elapsed deadline are one outcome on purpose — the leader's
-    /// revocation is a decision, not a request, so both end the same way
-    /// and differ only in how long the fleet waited to find out.
+    /// and an elapsed deadline are one outcome. The leader's revocation is a
+    /// decision rather than a request, so both end the same way and differ
+    /// only in how long the fleet waited to find out.
     Forced,
-    /// The leader took the revocation back: it named the split for this
+    /// The leader took the revocation back by naming the split for this
     /// worker again while this worker still held it, so the pending forced
     /// release was dropped. Nothing is waiting for the split any more, so a
-    /// drain that is merely slower than `drain_deadline` gets to finish
-    /// cleanly instead of being charged a replay for a move nobody wants.
-    /// That is the whole of what cancelling buys — a drain that finishes
-    /// inside the deadline was never going to be forced anyway.
+    /// drain slower than `drain_deadline` finishes cleanly instead of being
+    /// charged a replay for a move no worker is waiting on. That is the whole
+    /// of what cancelling buys; a drain that finishes inside the deadline
+    /// would not have been forced.
     ///
     /// This counts the *revocation* ending, not the drain, and the two then
     /// diverge:
@@ -94,22 +92,22 @@ pub enum RevocationOutcome {
     /// - If the source had already stopped intake, the drain runs on
     ///   (resuming stopped intake is a seam sources do not have). It ends by
     ///   handing the split back, and this worker re-claims it
-    ///   ([`AcquireReason::Reassigned`]) replay-free — one lane teardown and
-    ///   re-open, counted under neither `drained` nor
+    ///   ([`AcquireReason::Reassigned`]) replay-free, at the cost of one lane
+    ///   teardown and re-open. It counts under neither `drained` nor
     ///   `drain_duration_seconds`, because by then it is not a revocation
     ///   ending. `splits_draining` stays up until it lands.
     /// - If the source declined, or was never asked, nothing stopped and
-    ///   nothing leaves: the split simply stays, still being read.
+    ///   nothing leaves; the split stays, still being read.
     ///
-    /// A cancelled drain is still bounded, just by silence rather than by
-    /// the deadline: if it commits nothing at all for `drain_deadline` the
-    /// split is released anyway and re-claimed with a fresh lane, because a
-    /// drain that never finishes would otherwise leave it owned, leased,
-    /// and read by nobody. That release counts a
-    /// [`SplitLossReason::Revoked`] and no second revocation outcome.
+    /// A cancelled drain is still bounded, by silence rather than by the
+    /// deadline. If it commits nothing for `drain_deadline` the split is
+    /// released anyway and re-claimed with a fresh lane; a drain that never
+    /// finishes would otherwise leave it owned, leased, and unread. That
+    /// release counts a [`SplitLossReason::Revoked`] and no second revocation
+    /// outcome.
     ///
     /// Sustained `cancelled` means the fleet's membership is flapping faster
-    /// than a drain takes: look at pod churn and at `drain_deadline`.
+    /// than a drain takes. Look at pod churn and at `drain_deadline`.
     Cancelled,
 }
 
@@ -118,7 +116,7 @@ pub enum RevocationOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SplitLossReason {
-    /// A write was rejected — a peer holds a higher lease epoch.
+    /// A write was rejected because a peer holds a higher lease epoch.
     Fenced,
     /// Self-fenced: no successful lease write for a full lease duration.
     Starved,
@@ -127,19 +125,19 @@ pub enum SplitLossReason {
     /// the source declined or outran `drain_deadline`, or the leader took
     /// the revocation back ([`RevocationOutcome::Cancelled`]) and the drain
     /// it left behind then went a full `drain_deadline` without committing
-    /// anything — a stalled drain releases too, or the split would stay
+    /// anything. A stalled drain releases too, or the split would stay
     /// owned with nothing reading it.
     ///
     /// The split's uncommitted tail replays under its next owner (for the
-    /// cancelled case, usually this same worker): the bounded-replay
-    /// outcome the cooperative path exists to avoid, and therefore a signal
-    /// that `drain_deadline` is too tight for this source's commit
-    /// interval, or that a lane is wedged.
+    /// cancelled case, usually this same worker). That is the bounded replay
+    /// the cooperative path avoids, so it signals that `drain_deadline` is
+    /// too tight for this source's commit interval, or that a lane is
+    /// wedged.
     ///
     /// Narrower than [`RevocationOutcome::Forced`], which also covers a
     /// revocation whose split was fenced away mid-drain; that one is lost
-    /// as [`Fenced`](SplitLossReason::Fenced), because a peer — not this
-    /// worker — ended the tenancy.
+    /// as [`Fenced`](SplitLossReason::Fenced), because a peer rather than
+    /// this worker ended the tenancy.
     Revoked,
 }
 
@@ -161,7 +159,7 @@ pub enum WriteOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReplanOutcome {
-    /// The plan advanced: new splits were written or finality changed.
+    /// The plan advanced; new splits were written or finality changed.
     Ok,
     /// The planner or the plan write failed.
     Error,
@@ -188,7 +186,7 @@ pub enum StoreOp {
 
 /// Coordination handles (`spate_coordination_*`), pre-registered at build
 /// time and handed to the coordination backend at construction.
-/// Cloning is cheap — the fields are shared recorder handles.
+/// Cloning is cheap; the fields are shared recorder handles.
 #[derive(Clone, Debug)]
 pub struct CoordinationMetrics {
     splits_owned: OwnedGauge,
@@ -229,8 +227,8 @@ pub struct CoordinationMetrics {
     store_op_watch: Histogram,
     drain_duration: Histogram,
     assignment_latency: Histogram,
-    /// Shared so `Clone` hands out co-owners rather than duplicate claimants:
-    /// the series is released when the last clone drops.
+    /// Shared so `Clone` hands out co-owners rather than duplicate claimants.
+    /// The series is released when the last clone drops.
     _claim: Option<Arc<SeriesClaim>>,
 }
 
@@ -239,8 +237,7 @@ impl CoordinationMetrics {
     ///
     /// Claims the `spate_coordination_*` series for these labels; a second live
     /// handle set logs and becomes a shadow, counting but publishing no gauge.
-    /// Cloning this struct shares the claim — clones are co-owners, not
-    /// competitors.
+    /// Cloning this struct shares the claim; clones are co-owners.
     pub fn new(labels: &ComponentLabels) -> Self {
         let claim = SeriesClaim::claim_or_shadow(Self::key(labels));
         Self::build(labels, claim.map(Arc::new))
@@ -389,34 +386,27 @@ impl CoordinationMetrics {
         }
     }
 
-    // The two timings below were one `_duration_seconds` family split by a
-    // `phase` label back when a move was a negotiation: the requester's
-    // wait strictly *contained* the victim's drain, so the two were nested
-    // terms of a single time-to-balance figure and belonged on one family.
+    // The two timings below are separate families, not one split by a `phase`
+    // label. Nothing spans both. A drain starts when the leader removes a
+    // split from one worker's assignment, an assignment wait starts when the
+    // leader adds a split to another's, and neither worker observes the
+    // other's clock. The denominators differ too. Every assigned split is
+    // waited for, including brand-new splits and dead owners' work that no
+    // revocation touched, so the assignment wait is not a revocation
+    // measurement.
     //
-    // Leader-assigned reconciliation destroyed that relationship. Nothing
-    // now spans both: a drain starts when the leader removes a split from
-    // one worker's assignment, an assignment wait starts when the leader
-    // adds a split to another's, and neither worker observes the other's
-    // clock. They also have different denominators — every assigned split
-    // is waited for, including brand-new splits and dead owners' work that
-    // no revocation ever touched, so the assignment wait is not a
-    // revocation measurement at all.
-    //
-    // Two families, therefore, not one with a label. A shared family would
-    // assert a composition that no longer exists, and it would leave
-    // `histogram_quantile` over `sum by (le)` — aggregating away `phase` —
-    // spelled exactly like a reasonable query while silently mixing two
-    // populations. Separate names make the meaningless aggregate
-    // unwritable rather than merely discouraged.
+    // A shared family would leave `histogram_quantile` over `sum by (le)`,
+    // aggregating away `phase`, spelled exactly like a reasonable query while
+    // silently mixing two populations. Separate names make that aggregate
+    // unwritable.
 
     /// Record one cooperative drain: revocation requested to the release
     /// landing, on the **releasing** worker.
     ///
     /// Observed only when the drain completes cooperatively
-    /// ([`RevocationOutcome::Drained`]) — a forced release is a failure of
+    /// ([`RevocationOutcome::Drained`]). A forced release is a failure of
     /// the drain, and timing it would mix `drain_deadline` into the
-    /// distribution of how long draining actually takes.
+    /// distribution of how long draining takes.
     pub fn drain_duration(&self, d: Duration) {
         self.drain_duration.record(d.as_secs_f64());
     }
@@ -425,11 +415,10 @@ impl CoordinationMetrics {
     /// assignment to this worker holding its lease, on the **gaining**
     /// worker.
     ///
-    /// This is the fleet's time-to-balance as an operator experiences it —
-    /// how long work the leader has already decided this worker should be
-    /// doing sat undone. It spans whatever stood in the way, including the
-    /// previous owner's drain, so it never flatters itself by timing only
-    /// the final claim.
+    /// This is the fleet's time-to-balance as an operator experiences it, the
+    /// time work the leader has already decided this worker should be doing
+    /// sat undone. It spans whatever stood in the way, including the previous
+    /// owner's drain, rather than timing only the final claim.
     pub fn assignment_latency(&self, d: Duration) {
         self.assignment_latency.record(d.as_secs_f64());
     }

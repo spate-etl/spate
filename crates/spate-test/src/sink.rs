@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-/// A replica endpoint tag — [`CaptureWriter`]'s
+/// A replica endpoint tag, [`CaptureWriter`]'s
 /// [`Endpoint`](ShardWriter::Endpoint).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReplicaTag {
@@ -39,7 +39,7 @@ pub enum ScriptedResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WriteOutcome {
-    /// Sleep this long (tokio time — controllable with `test-util`) before
+    /// Sleep this long (tokio time, controllable with `test-util`) before
     /// resolving.
     pub delay: Option<Duration>,
     /// How the write resolves.
@@ -171,7 +171,7 @@ impl SinkScript {
 
 /// A [`ShardWriter`] that records every attempt and resolves it according
 /// to the paired [`SinkScript`] (default: success). Unscripted writes
-/// succeed, so happy-path tests need no scripting at all.
+/// succeed, so happy-path tests need no scripting.
 #[derive(Clone, Debug)]
 pub struct CaptureWriter {
     state: Arc<Mutex<SinkState>>,
@@ -266,7 +266,7 @@ impl ShardWriter for CaptureWriter {
 ///
 /// The returned [`CaptureSink`] implements
 /// [`SinkBundle`](spate_core::sink::SinkBundle), so it drops straight into
-/// `Pipeline::sink` — the first-class mock path for testing whole
+/// `Pipeline::sink`, the first-class mock path for testing whole
 /// assemblies. Unscripted writes succeed; drive failures and probe health
 /// through the [`SinkScript`].
 #[must_use]
@@ -285,7 +285,7 @@ pub fn capture_sink(shards: usize, replicas: usize) -> (CaptureSink, SinkScript)
     )
 }
 
-/// A capturing sink bundle for whole-pipeline tests — see [`capture_sink`].
+/// A capturing sink bundle for whole-pipeline tests; see [`capture_sink`].
 #[derive(Clone, Debug)]
 pub struct CaptureSink {
     writer: CaptureWriter,
@@ -315,8 +315,8 @@ impl SinkBundle for CaptureSink {
             })
             .collect();
         // A mock scripts probe health directly (via `SinkScript`), so this
-        // reuses the capture writer rather than an independent client set —
-        // the separate-probe-clients rule matters for real connectors with a
+        // reuses the capture writer rather than an independent client set.
+        // The separate-probe-clients rule matters for real connectors with a
         // live pool, not an in-memory fake.
         let probe = endpoint_probe(self.writer.clone(), Arc::new(endpoints.clone()));
         SinkParts::new(self.writer, endpoints, self.pool)
@@ -346,7 +346,8 @@ impl RowEncoder<Owned<Vec<u8>>> for TestEncoder {
 ///
 /// # Panics
 ///
-/// Panics on truncated input — the frame did not come from [`TestEncoder`].
+/// Panics on truncated input, meaning the frame did not come from
+/// [`TestEncoder`].
 #[must_use]
 pub fn decode_rows(mut bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut rows = Vec::new();

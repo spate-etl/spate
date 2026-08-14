@@ -11,23 +11,23 @@
 //! | `$$` | A literal `$`. |
 //!
 //! A `$` not followed by `$` or `{` passes through literally. Substitution
-//! is applied to the whole text — including YAML comments and quoted
-//! strings — exactly like Vector; there is no YAML-aware skipping.
+//! is applied to the whole text, including YAML comments and quoted
+//! strings, exactly like Vector; there is no YAML-aware skipping.
 //! Variable names are `[A-Za-z0-9_]+`; a default/message runs to the first
 //! `}` (no nesting).
 //!
-//! # Values are spliced verbatim — mind YAML-special characters
+//! # Verbatim splicing and YAML-special characters
 //!
 //! Substitution happens on the raw text *before* YAML parsing, so a
 //! substituted value is not escaped for YAML. A value that contains a
 //! **newline or carriage return** is rejected with an
-//! [`InterpolationError`](ConfigError::Interpolation): it would change the
+//! [`InterpolationError`](ConfigError::Interpolation). It would change the
 //! document structure (start a sibling key, break out of a quoted scalar) and
-//! quoting the site cannot rescue it — mount such secrets as files and
+//! quoting the site cannot rescue it. Mount such secrets as files and
 //! reference the path instead.
 //!
 //! Other YAML-significant characters (`#`, `:`, `"`, leading `-`, `{`, `}`,
-//! ...) inside a value are **your** responsibility to contain: quote the
+//! ...) inside a value are **your** responsibility to contain; quote the
 //! interpolation site so the value lands in a quoted scalar. For example a
 //! password `p@ss #1` must be written `password: "${PASSWORD}"`, not
 //! `password: ${PASSWORD}` (where ` #1` would become a YAML comment).
@@ -39,9 +39,9 @@ pub(super) fn interpolate(input: &str) -> Result<String, ConfigError> {
     interpolate_with(input, |name| std::env::var(name).ok())
 }
 
-/// Interpolate with an explicit lookup function (deterministic in tests —
-/// mutating the process environment is unsafe and racy under a parallel
-/// test runner).
+/// Interpolate with an explicit lookup function. This keeps tests
+/// deterministic; mutating the process environment is unsafe and racy under
+/// a parallel test runner.
 pub(super) fn interpolate_with<F>(input: &str, lookup: F) -> Result<String, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -88,7 +88,7 @@ where
         let name = &input[name_start..j];
 
         let (value, close) = match bytes.get(j) {
-            // `${NAME}` — required, empty allowed.
+            // `${NAME}` is required, and empty is allowed.
             Some(b'}') => match lookup(name) {
                 Some(v) => (v, j),
                 None => {
@@ -101,7 +101,7 @@ where
                     ));
                 }
             },
-            // `${NAME:-default}` / `${NAME:?message}` — unset or empty
+            // For `${NAME:-default}` and `${NAME:?message}`, unset or empty
             // triggers the operator.
             Some(b':') => {
                 let op = *bytes

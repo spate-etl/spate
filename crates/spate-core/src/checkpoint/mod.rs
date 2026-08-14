@@ -1,8 +1,8 @@
 //! Checkpointing: acknowledgment tracking and watermark commits.
 //!
 //! One [`AckRef`] is created per source poll batch (by an [`AckIssuer`] on
-//! the polling thread) and cloned into every record derived from that batch
-//! — filter drops, `flat_map` fan-out, and multi-sink routing all compose
+//! the polling thread) and cloned into every record derived from that batch.
+//! Filter drops, `flat_map` fan-out, and multi-sink routing all compose
 //! through plain `Clone`/`Drop`. When the last clone drops, the batch
 //! resolves with the worst status observed and a message flows to the
 //! [`Checkpointer`], which advances per-partition contiguous watermarks

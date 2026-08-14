@@ -1,4 +1,4 @@
-//! [`Meter`] — the public instrumentation scope for connector- and
+//! [`Meter`], the public instrumentation scope for connector- and
 //! user-owned metric families.
 //!
 //! A `Meter` is bound to one component's three standard labels
@@ -8,16 +8,16 @@
 //! connector's or pipeline author's own series sit under the same `spate_`
 //! umbrella as the framework's and join cleanly in a query.
 //!
-//! You pass the metric's **local name** — `"schema_fetches_total"`, not
-//! `"spate_kafka_schema_fetches_total"`; the `Meter` adds the umbrella and
-//! namespace for you. That is the whole point: one greppable `spate_` root for
-//! operators, and no way to typo the prefix or collide with a framework
-//! metric.
+//! You pass the metric's **local name** (`"schema_fetches_total"`, not
+//! `"spate_kafka_schema_fetches_total"`); the `Meter` adds the umbrella and
+//! namespace for you. Operators get one greppable `spate_` root, and there is
+//! no way to typo the prefix or collide with a framework metric.
 //!
-//! The framework's own stages don't use `Meter` — they resolve fixed handle
+//! The framework's own stages don't use `Meter`; they resolve fixed handle
 //! structs ([`SourceMetrics`](super::SourceMetrics) and friends) directly.
 //! `Meter` is the seam for metrics the framework can't measure from the
-//! outside: a connector statistic, a pipeline author's business counter.
+//! outside, such as a connector statistic or a pipeline author's business
+//! counter.
 //!
 //! # Namespaces
 //!
@@ -26,13 +26,13 @@
 //! - [`Meter::with_namespace`] takes a segment a connector owns (`"kafka"` →
 //!   `spate_kafka_*`). A connector that can appear at both ends of a pipeline (a
 //!   Kafka source *and* a future Kafka sink) is separated by the runtime into
-//!   `spate_kafka_source_*` / `spate_kafka_sink_*` when it injects the component's
-//!   `Meter` — derived from the source-vs-sink position, not set by hand.
+//!   `spate_kafka_source_*` / `spate_kafka_sink_*` when it injects the
+//!   component's `Meter`. The role is derived from the source-vs-sink
+//!   position, not set by hand.
 //!
-//! The namespace is validated once, at construction: it must be a lowercase
+//! The namespace is validated once, at construction. It must be a lowercase
 //! `[a-z][a-z0-9_]*` segment and must not be one of the framework's reserved
-//! stage roots (`source`, `sink`, …), so a custom family can never collide
-//! with a current or future framework metric.
+//! stage roots (`source`, `sink`, …).
 //!
 //! # Where a `Meter` comes from
 //!
@@ -46,10 +46,10 @@
 //! # Hot-path discipline
 //!
 //! Resolve every handle **once, at build time**, and touch only the resolved
-//! `Counter`/`Gauge`/`Histogram` on the per-record path — exactly the rule
-//! the framework's own handles follow, and the one [the metrics reference]
-//! states for the taxonomy as a whole. The `Meter::counter` / `gauge` /
-//! `histogram` calls belong in construction, not the record loop.
+//! `Counter`/`Gauge`/`Histogram` on the per-record path. The framework's own
+//! handles follow the same rule, and [the metrics reference] states it for
+//! the taxonomy as a whole. The `Meter::counter` / `gauge` / `histogram`
+//! calls belong in construction, not the record loop.
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
@@ -58,8 +58,8 @@ use metrics::{Counter, Gauge, Histogram, SharedString};
 
 /// Which end of the pipeline a component sits at, appended to its namespace so
 /// a connector that can be both a source and a sink keeps its families apart
-/// (`spate_kafka_source_*` vs `spate_kafka_sink_*`). Not public: the runtime
-/// derives it from the wiring position when it builds a component's
+/// (`spate_kafka_source_*` vs `spate_kafka_sink_*`). The runtime derives it
+/// from the wiring position when it builds a component's
 /// [`Meter`](Meter::for_component), so connector code never names a role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MetricRole {
@@ -80,7 +80,7 @@ impl MetricRole {
 /// `spate_<namespace>_` name prefix applied to every metric it mints.
 ///
 /// Cheap to clone; the handles it mints are the `metrics` facade's own
-/// `Arc`-backed handles, safe to clone across pipeline threads — every clone
+/// `Arc`-backed handles, safe to clone across pipeline threads. Every clone
 /// feeds the same series.
 ///
 /// ```
@@ -102,7 +102,7 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// A scope for **pipeline-author custom metrics**: names land under the
+    /// A scope for **pipeline-author custom metrics**. Names land under the
     /// `spate_custom_` bucket. `component` is the instance id (e.g. `enrich`);
     /// `component_type` the implementation label. Reuse the `pipeline` /
     /// `component` values the framework was given so your series join against
@@ -120,7 +120,7 @@ impl Meter {
         )
     }
 
-    /// A scope under a specific `spate_<namespace>_` bucket — for a connector
+    /// A scope under a specific `spate_<namespace>_` bucket, for a connector
     /// that owns a segment (e.g. `"kafka"` → `spate_kafka_*`).
     ///
     /// # Panics
@@ -142,8 +142,8 @@ impl Meter {
     }
 
     /// The scope the runtime hands a built-in component (a `Source` or a sink
-    /// `ShardWriter`): the namespace is the component's `component_type`, and
-    /// `role` — derived from the wiring position — is appended, giving
+    /// `ShardWriter`). The namespace is the component's `component_type`, and
+    /// `role` (derived from the wiring position) is appended, giving
     /// `spate_<component_type>_<role>_*`. The `component_type` is also the
     /// standard `component_type` label, so a family joins the component's stage
     /// metrics.
@@ -153,12 +153,12 @@ impl Meter {
     ///
     /// - a **reserved root** (a source's default `"source"`, a sink set to
     ///   `"sink"`) or the **`custom`** author bucket (a sink's default
-    ///   `component_type`) — a silent opt-out, so an undeclared component simply
-    ///   gets no custom `Meter`. `custom` is reserved for pipeline-author
+    ///   `component_type`). A silent opt-out, so an undeclared component gets
+    ///   no custom `Meter`. `custom` is reserved for pipeline-author
     ///   metrics ([`Meter::new`]); a component keeps its families out of that
     ///   shared bucket by declaring a distinct `component_type`.
-    /// - a **malformed** string (not a `[a-z][a-z0-9_]*` segment) — the same
-    ///   `None`, but logged at `warn`: a `component_type` that is a legal label
+    /// - a **malformed** string (not a `[a-z][a-z0-9_]*` segment). The same
+    ///   `None`, but logged at `warn`. A `component_type` that is a legal label
     ///   yet an illegal metric-name segment (e.g. `"clickhouse-v2"`) is almost
     ///   always a wiring mistake that would otherwise drop the component's
     ///   families silently while its framework stage metrics keep emitting.
@@ -183,10 +183,10 @@ impl Meter {
                     role.segment()
                 ),
             }),
-            // A reserved root is a legitimate default (a source's `"source"`):
-            // silently no `Meter`, leaving the component's stage metrics intact.
+            // A reserved root is a legitimate default (a source's `"source"`).
+            // No `Meter`, and the component's stage metrics stay intact.
             Err(NamespaceRejection::Reserved) => None,
-            // Empty/malformed is a wiring mistake — surface it rather than drop
+            // Empty/malformed is a wiring mistake. Surface it rather than drop
             // the component's families silently.
             Err(reason) => {
                 tracing::warn!(
@@ -204,7 +204,7 @@ impl Meter {
     }
 
     /// Fully-qualify a local metric name under this scope's `spate_<namespace>_`
-    /// prefix. Panics if the caller already included an `spate_` prefix — pass
+    /// prefix. Panics if the caller already included an `spate_` prefix. Pass
     /// the local name only (`"schema_fetches_total"`, not
     /// `"spate_kafka_schema_fetches_total"`).
     fn qualify(&self, name: &str) -> SharedString {
@@ -215,9 +215,9 @@ impl Meter {
             super::names::PREFIX,
             self.prefix
         );
-        // A local name may not lead with a role segment (`source_`/`sink_`):
-        // the runtime injects exactly those to separate a connector's source
-        // and sink families (`spate_<ns>_source_*` / `_sink_*`), so a hand-written
+        // A local name may not lead with a role segment (`source_`/`sink_`).
+        // The runtime injects those to separate a connector's source and sink
+        // families (`spate_<ns>_source_*` / `_sink_*`), so a hand-written
         // `source_`/`sink_` name could otherwise alias a role-scoped family.
         let first = name.split('_').next().unwrap_or_default();
         assert!(

@@ -22,8 +22,8 @@ enum Outcome {
     /// behind the panicking one before it dies.
     ///
     /// Panics inside `write_batch` holding no lock, so it does **not** poison
-    /// the breaker mutex — `ProbeGuard::drop`'s poison tolerance is defensive
-    /// and stays uncovered by this.
+    /// the breaker mutex. `ProbeGuard::drop`'s poison tolerance stays
+    /// uncovered by this.
     Panic(Duration),
     /// Block the runtime thread outright, so an abort cannot land until it
     /// returns (simulates a writer doing synchronous work between awaits).
@@ -46,9 +46,8 @@ struct Call {
     /// tell a wake driven by an event from one driven by a timer.
     ///
     /// Explicitly tokio's `Instant`, not the `std` one this module inherits
-    /// from `sink`: only tokio's tracks `start_paused` time, and the `std`
-    /// one would silently record wall-clock and make every such assertion
-    /// vacuous.
+    /// from `sink`. Only tokio's tracks `start_paused` time; the `std` one
+    /// silently records wall-clock and makes every such assertion vacuous.
     at: tokio::time::Instant,
 }
 
@@ -136,8 +135,8 @@ impl ShardWriter for MockWriter {
                 unreachable!()
             }
             Outcome::BlockThread(d) => {
-                // A blocking loop, not an await: the task never reaches a
-                // yield point, so `abort` cannot land on it.
+                // A blocking loop rather than an await. The task never reaches
+                // a yield point, so `abort` cannot land on it.
                 let until = std::time::Instant::now() + d;
                 while std::time::Instant::now() < until && !self.release.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(5));
@@ -173,7 +172,7 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
     let writer = MockWriter::new();
     let (queues, receivers) = shard_queues(shards, queue_cap);
     let budget = Arc::new(InflightBudget::new());
-    // A distinct component per fixture: the shard gauges are owned by one live
+    // A distinct component per fixture. The shard gauges are owned by one live
     // handle set per series (`metrics::ownership`), and under `cargo test`
     // these fixtures are alive concurrently in one process. Sharing a label
     // set would make all but the first a shadow that publishes no gauge.
@@ -552,12 +551,10 @@ async fn drain_flushes_partials_and_abandons_hung_writes() {
     assert_eq!(f.budget.usage(), 0, "budget released for both outcomes");
 }
 
-/// A panicking write task must abandon *its own* batch — not the oldest
+/// A panicking write task must abandon *its own* batch rather than the oldest
 /// pending one. Two batches are in flight on one shard: the first (started
 /// first) hangs briefly then succeeds; the second panics immediately. The
 /// panicked batch's acks must resolve Failed and the healthy one Delivered.
-/// The old handler abandoned the minimum-`started` batch, so it failed the
-/// wrong (healthy) batch and stranded the panicked one.
 #[tokio::test(start_paused = true)]
 async fn write_task_panic_abandons_exactly_the_panicked_batch() {
     let mut cfg = small_batches();
@@ -604,8 +601,7 @@ async fn write_task_panic_abandons_exactly_the_panicked_batch() {
 /// The drain deadline may be published *after* a worker has already parked
 /// on a hung write in its drain phase (queues close when drivers drop their
 /// chains, strictly before `SinkPool::drain` runs). The worker must still
-/// observe the late deadline and abort — the old once-per-join deadline read
-/// deadlocked here.
+/// observe the late deadline and abort.
 #[tokio::test(start_paused = true)]
 async fn drain_deadline_published_after_worker_parks_is_observed() {
     let f = fixture(1, 1, small_batches(), 16);
@@ -620,8 +616,8 @@ async fn drain_deadline_published_after_worker_parks_is_observed() {
     drop(f.queues);
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Only now is the deadline published — the exact ordering that wedged
-    // graceful shutdown before the fix.
+    // Only now is the deadline published, the ordering that wedges graceful
+    // shutdown if the worker reads its deadline once per join.
     let report = f.pool.drain(Duration::from_millis(200)).await;
     assert_eq!(
         report,
@@ -635,10 +631,10 @@ async fn drain_deadline_published_after_worker_parks_is_observed() {
 }
 
 /// A `ShardQueues` clone leaked past shutdown (stashed outside the chain
-/// factory) must not wedge `drain` forever: the published deadline itself
-/// breaks the worker out of intake into the bounded drain, force-sealing
-/// and flushing the partial batch on the way. The old intake loop only
-/// exited when the queue closed, so this drain never returned.
+/// factory) must not wedge `drain` forever. The published deadline breaks the
+/// worker out of intake into the bounded drain, force-sealing and flushing the
+/// partial batch on the way. An intake loop that exits only when the queue
+/// closes never returns from this drain.
 #[tokio::test(start_paused = true)]
 async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
     let cfg = SinkPoolConfig {
@@ -652,7 +648,7 @@ async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
     let f = fixture(1, 1, cfg, 16);
 
     let (ack, ack_rx) = AckRef::test_pair();
-    // Below every seal threshold: sits in the accumulator until drain.
+    // Below every seal threshold, so it sits in the accumulator until drain.
     f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
     f.budget.add(32);
     drop(ack);
@@ -682,9 +678,9 @@ async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
 }
 
 /// With every in-flight permit held by a hung write, the drain-phase
-/// force-seal of a partial batch must not block on the semaphore: it parks
-/// the sealed batch and lets the deadline loop abort everything. The old
-/// force-seal awaited `acquire_owned()` here forever and never reached the
+/// force-seal of a partial batch must not block on the semaphore. It parks the
+/// sealed batch and lets the deadline loop abort everything. A force-seal that
+/// awaited `acquire_owned()` here would wait forever and never reach the
 /// deadline. Both the hung in-flight batch and the partial are abandoned.
 #[tokio::test(start_paused = true)]
 async fn drain_force_seal_does_not_block_on_a_held_permit() {
@@ -729,10 +725,10 @@ async fn drain_force_seal_does_not_block_on_a_held_permit() {
 
 /// The same hazard as the force-seal above, on the *intake* path (#83).
 /// Chunk B reaches `max_bytes` and so dispatches rather than sitting partial
-/// in the accumulator. `dispatch` used to await `acquire_owned()`, which
-/// parked the whole worker future outside both `select!`s: the drain deadline
-/// was never polled, `tasks.shutdown()` never ran, no permit was ever
-/// released, and `drain` waited forever with `drain_timeout` having no effect.
+/// in the accumulator. A `dispatch` that awaits `acquire_owned()` parks the
+/// whole worker future outside both `select!`s, so the drain deadline is never
+/// polled, `tasks.shutdown()` never runs, no permit is ever released, and
+/// `drain` waits forever with `drain_timeout` having no effect.
 #[tokio::test(start_paused = true)]
 async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
     let mut cfg = SinkPoolConfig {
@@ -783,10 +779,9 @@ async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
 
 /// Intake is gated off while a sealed batch waits for a permit, so the drain
 /// can begin with the shard queue **closed but not empty**. Those chunks must
-/// still be sealed and accounted: dropped unsealed with the receiver they
+/// still be sealed and accounted. Dropped unsealed with the receiver, they
 /// would fail their acknowledgments with no `abandoned` count, no log and no
-/// `DrainReport` entry — a silent loss of work, and the one regression the
-/// `waiting` gate introduced.
+/// `DrainReport` entry, losing work silently.
 #[tokio::test(start_paused = true)]
 async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     let mut cfg = SinkPoolConfig {
@@ -806,8 +801,8 @@ async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
     f.budget.add(32);
     tokio::time::sleep(Duration::from_millis(10)).await;
-    // B: seals with no permit free, so it parks in `waiting` — which is what
-    // gates intake off from here on.
+    // B: seals with no permit free, so it parks in `waiting`, which gates
+    // intake off from here on.
     f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
     f.budget.add(32);
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -840,11 +835,11 @@ async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     assert_eq!(f.budget.usage(), 0);
 }
 
-/// The routine reachability of #83, with no hung write anywhere: the default
-/// `retry.max_attempts` is 0 (unbounded), so against a sink that is merely
-/// *down* every write task retries forever and never releases its permit.
-/// A shutdown during a sink outage — the case the guide names explicitly —
-/// therefore hit the same wedge, on the default configuration.
+/// The routine reachability of #83, with no hung write anywhere. The default
+/// `retry.max_attempts` is 0 (unbounded), so against a sink that is *down*
+/// every write task retries forever and never releases its permit. A shutdown
+/// during a sink outage, the case the guide names explicitly, therefore
+/// reaches the same wedge on the default configuration.
 #[tokio::test(start_paused = true)]
 async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
     let mut cfg = SinkPoolConfig {
@@ -853,7 +848,7 @@ async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
             max_bytes: 32,
             linger: Duration::from_secs(3600),
         },
-        // Retry policy left at its default: unbounded attempts.
+        // Retry policy left at its default of unbounded attempts.
         ..SinkPoolConfig::default()
     };
     cfg.inflight.max_per_shard = 1;
@@ -893,8 +888,8 @@ async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
     assert_eq!(f.budget.usage(), 0);
 }
 
-/// The third way into `dispatch`: the linger timer rather than a size
-/// threshold. Same wedge, same fix — the sealed batch parks instead of
+/// The third way into `dispatch`, the linger timer rather than a size
+/// threshold. Same wedge, same fix; the sealed batch parks instead of
 /// blocking.
 #[tokio::test(start_paused = true)]
 async fn a_held_permit_does_not_wedge_the_linger_dispatch() {
@@ -946,8 +941,8 @@ async fn a_held_permit_does_not_wedge_the_linger_dispatch() {
 /// The general property the three tests above are instances of: whatever the
 /// sink is doing and however the in-flight window is saturated, `drain`
 /// returns and every reservation is released. Asserted over a matrix rather
-/// than a single scenario so the next unbounded await on this path is caught
-/// as a class, not left for the next reviewer to notice.
+/// than a single scenario, so the next unbounded await on this path is caught
+/// as a class.
 #[tokio::test(start_paused = true)]
 async fn drain_returns_under_any_permit_pressure() {
     let deadline = Duration::from_millis(200);
@@ -995,12 +990,12 @@ async fn drain_returns_under_any_permit_pressure() {
     }
 }
 
-/// A write that blocks its runtime thread cannot be aborted — `abort` only
+/// A write that blocks its runtime thread cannot be aborted; `abort` only
 /// lands at a yield point. The drain sweep bounds that wait rather than
 /// inheriting it, so the worker still runs its abandon accounting and still
 /// returns its own report instead of being force-aborted by the pool.
 ///
-/// Real time and a multi-threaded runtime on purpose: `std::thread::sleep`
+/// Real time and a multi-threaded runtime on purpose. `std::thread::sleep`
 /// does not participate in paused time, and the worker needs a thread of its
 /// own while the write task holds one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1035,7 +1030,7 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     .await
     .expect("the sweep must bound its wait for aborts it cannot land");
     let elapsed = started.elapsed();
-    // The point is proved; don't pay the rest of the block at teardown.
+    // The point is proved; skip the rest of the block at teardown.
     f.writer.release_blocked();
 
     assert_eq!(
@@ -1055,10 +1050,10 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     assert_eq!(f.budget.usage(), 0);
 }
 
-/// The pool's backstop under the cooperative deadline. A real worker cannot
-/// reach this any more — that is the whole point of the restructured intake
-/// loop — so the wedge is injected directly: `drain` must still return, and
-/// must say so on `spate_sink_drain_overrun_total` rather than only in a log.
+/// The pool's backstop under the cooperative deadline. The restructured intake
+/// loop puts this out of a real worker's reach, so the wedge is injected
+/// directly. `drain` must still return, and must say so on
+/// `spate_sink_drain_overrun_total` rather than only in a log.
 #[test]
 fn a_worker_that_ignores_the_deadline_is_force_aborted() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1162,9 +1157,9 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
         .unwrap();
 }
 
-/// Teardown without drain (a Failed exit dropping the I/O runtime) must
-/// never resolve un-written data as delivered: pending batches and queued
-/// chunks hold their acknowledgments in fail-on-drop sets.
+/// Teardown without drain (a Failed exit dropping the I/O runtime) must not
+/// resolve un-written data as delivered. Pending batches and queued chunks
+/// hold their acknowledgments in fail-on-drop sets.
 #[test]
 fn runtime_teardown_without_drain_fails_unwritten_acks() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1179,7 +1174,7 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
     let fx = rt.block_on(async {
         let fx = fixture(1, 1, small_batches(), 8);
         // First chunk seals immediately (max_rows = 1) and its write hangs
-        // forever: the batch stays pending in the worker's ledger.
+        // forever, so the batch stays pending in the worker's ledger.
         fx.writer.set_default(Outcome::Hang);
         fx.queues
             .try_send(0, chunk(1, 8, &in_flight_ack))
@@ -1196,8 +1191,8 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
     drop(in_flight_ack);
     drop(queued_ack);
 
-    // Tear the runtime down without draining the pool: worker futures and
-    // the queued chunk are dropped wherever they stand.
+    // Tear the runtime down without draining the pool. Worker futures and the
+    // queued chunk are dropped wherever they stand.
     rt.shutdown_background();
     drop(fx);
 
@@ -1218,7 +1213,7 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
 }
 
 /// Metric-level row conservation: `spate_sink_records_total` counts exactly
-/// the rows of durably written batches — no double-counting across chunk
+/// the rows of durably written batches, with no double-counting across chunk
 /// merging, sealing, or retries. Uses a current-thread runtime so the
 /// thread-local recorder sees the worker's increments.
 #[test]
@@ -1241,10 +1236,9 @@ fn sink_records_metric_matches_rows_written_exactly() {
             };
             let fx = fixture(1, 1, cfg, 64);
             let (ack, _rx) = AckRef::test_pair();
-            // 12 rows across chunks of 3. Sealing is chunk-granular: the
-            // accumulator crosses max_rows=5 at the second and fourth
-            // chunk, so two 6-row batches flush and nothing remains for
-            // the drain.
+            // 12 rows across chunks of 3. Sealing is chunk-granular, and the
+            // accumulator crosses max_rows=5 at the second and fourth chunk,
+            // so two 6-row batches flush and nothing remains for the drain.
             for _ in 0..4 {
                 fx.queues.try_send(0, chunk(3, 4, &ack)).expect("send");
             }
@@ -1271,9 +1265,9 @@ fn sink_records_metric_matches_rows_written_exactly() {
 ///
 /// This is the **first** matching line, not a sum across series. A family
 /// split by a label the caller does not pin (say `shard`, on a multi-shard
-/// fixture) returns whichever series the exporter happened to emit first, so
-/// pin every label that varies — otherwise the assertion silently covers one
-/// series out of several and passes for the wrong reason.
+/// fixture) returns whichever series the exporter happened to emit first. Pin
+/// every label that varies; otherwise the assertion silently covers one series
+/// out of several and passes for the wrong reason.
 fn metric_value(rendered: &str, name: &str, label: &str) -> f64 {
     let line = rendered
         .lines()
@@ -1287,8 +1281,8 @@ fn metric_value(rendered: &str, name: &str, label: &str) -> f64 {
 /// open. Drives the real worker/breaker path (not the breaker unit tests)
 /// through the Prometheus recorder. Per-replica error *attribution* is pinned
 /// by `replica_errors_attribute_failures_asymmetrically`, whose counts differ
-/// per replica — this scenario is symmetric (one failure each) and could not
-/// tell swapped indices apart.
+/// per replica. This scenario is symmetric (one failure each) and cannot tell
+/// swapped indices apart.
 #[test]
 fn shard_healthy_drops_to_zero_when_every_breaker_opens() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1343,7 +1337,7 @@ fn shard_healthy_drops_to_zero_when_every_breaker_opens() {
 /// and three attempts, round-robin rotation lands two failures on replica 0
 /// and one on replica 1, so any index miswiring (swap, off-by-one) breaks
 /// the 2-vs-1 assertion below. Replica 1 stays circuit-closed, which also
-/// pins `spate_sink_shard_healthy` staying 1 while a healthy replica remains.
+/// pins `spate_sink_shard_healthy` at 1 while a healthy replica remains.
 #[test]
 fn replica_errors_attribute_failures_asymmetrically() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1356,7 +1350,7 @@ fn replica_errors_attribute_failures_asymmetrically() {
         rt.block_on(async {
             let mut cfg = small_batches();
             // Two failures quarantine a replica; keep it open (no probe
-            // during the test). Three attempts: r0, r1, r0 — the third
+            // during the test). Three attempts run r0, r1, r0; the third
             // opens replica 0's breaker and exhausts the attempt budget.
             cfg.breaker.failure_threshold = 2;
             cfg.breaker.open_for = Duration::from_secs(3600);
@@ -1417,13 +1411,13 @@ fn replica_errors_attribute_failures_asymmetrically() {
 
 /// The scenario behind #79, reproduced: two batches, one sink speed, two very
 /// different flush durations. `spate_sink_flush_duration_seconds` spans seal to
-/// settle, so the second batch — which sealed at t=0 and could not start until
-/// the first released the shard's only in-flight permit at t=2 — reads twice
-/// what the first did against an identically fast writer. The split families
-/// are what tell the two apart: write duration is flat at 2s across both, and
-/// the whole difference lands in the permit-wait histogram.
+/// settle, so the second batch (sealed at t=0, unable to start until the first
+/// released the shard's only in-flight permit at t=2) reads twice what the
+/// first did against an identically fast writer. The split families tell the
+/// two apart: write duration is flat at 2s across both, and the whole
+/// difference lands in the permit-wait histogram.
 ///
-/// Paused time makes every figure exact rather than approximate: the only
+/// Paused time makes every figure exact rather than approximate. The only
 /// timers are the mock's own sleeps, so the runtime advances to them and
 /// nothing else.
 #[test]
@@ -1438,7 +1432,7 @@ fn permit_wait_separates_queueing_from_a_slow_write() {
             .expect("runtime");
         rt.block_on(async {
             let mut cfg = small_batches();
-            // One permit: the second batch provably queues behind the first.
+            // One permit, so the second batch provably queues behind the first.
             cfg.inflight.max_per_shard = 1;
             let fx = fixture(1, 1, cfg, 16);
             fx.writer
@@ -1491,7 +1485,7 @@ fn permit_wait_separates_queueing_from_a_slow_write() {
     );
 
     // And the family the issue is about: 2s + 4s, against a writer that never
-    // varied. Reading this as sink latency is the misdiagnosis.
+    // varied. Reading this as sink latency is the misdiagnosis it invites.
     assert_eq!(
         value("spate_sink_flush_duration_seconds_sum", "shard=\"0\""),
         6.0,
@@ -1502,7 +1496,7 @@ fn permit_wait_separates_queueing_from_a_slow_write() {
 /// The drain's force-sealed partial batch lands in the permit-wait histogram
 /// like any other, so a shutdown that queues behind a slow write is visible to
 /// someone sizing `drain_timeout`. This drives the drain loop's *late*
-/// acquisition: the force-seal cannot block on the semaphore (that would
+/// acquisition. The force-seal cannot block on the semaphore (that would
 /// deadlock shutdown), so it parks in `waiting` with its stamp and is observed
 /// only once a permit frees.
 ///
@@ -1568,8 +1562,8 @@ fn drain_force_seal_observes_the_permit_wait_it_queued_for() {
 
 /// The other drain branch: a partial batch force-sealed with the permit free
 /// is observed too, at ~0. Registering an observation only when the drain
-/// happens to queue would make the family read as absent exactly when an
-/// operator wants to confirm a clean shutdown did not queue at all.
+/// queues would make the family read as absent exactly when an operator wants
+/// to confirm a clean shutdown did not queue at all.
 #[test]
 fn drain_force_seal_observes_a_free_permit_as_no_wait() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1582,7 +1576,7 @@ fn drain_force_seal_observes_a_free_permit_as_no_wait() {
             .expect("runtime");
         rt.block_on(async {
             let mut cfg = small_batches();
-            // Nothing reaches max_rows, so the only seal is the drain's.
+            // Nothing reaches max_rows, so the drain's is the only seal.
             cfg.batch.max_rows = 2;
             let fx = fixture(1, 1, cfg, 16);
             fx.writer
@@ -1626,10 +1620,10 @@ fn drain_force_seal_observes_a_free_permit_as_no_wait() {
 }
 
 /// A failed attempt and a successful one are both attempts, and they are
-/// separated by the `outcome` label rather than averaged together — a fast
-/// reject would otherwise flatter the distribution and a slow timeout wreck
-/// it. Retries are observed like any other attempt, so the counts here are
-/// per attempt, not per batch.
+/// separated by the `outcome` label rather than averaged together. Averaged,
+/// a fast reject would flatter the distribution and a slow timeout wreck it.
+/// Retries are observed like any other attempt, so the counts here are per
+/// attempt, not per batch.
 #[test]
 fn write_duration_separates_failed_attempts_from_successful_ones() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1695,7 +1689,7 @@ fn write_duration_separates_failed_attempts_from_successful_ones() {
         (value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\"") - 0.1).abs() < 1e-6,
         "the successful attempt is 100ms, not the 1.1s the batch spent flushing"
     );
-    // One batch, one flush observation — spanning both attempts and the 1ms
+    // One batch, one flush observation, spanning both attempts and the 1ms
     // backoff between them.
     assert_eq!(
         value("spate_sink_flush_duration_seconds_count", "shard=\"0\""),
@@ -1709,12 +1703,12 @@ fn write_duration_separates_failed_attempts_from_successful_ones() {
 
 /// End-to-end wiring of `spate_sink_retry_backoff_seconds` through the real
 /// write loop: a shard parked between attempts publishes the step it is
-/// sleeping, and stops publishing it when the sleep ends — here by the drain
+/// sleeping, and stops publishing it when the sleep ends, here by the drain
 /// deadline *aborting* the task mid-sleep, the one exit that runs none of the
 /// write loop's own code. Registering the family proves nothing; a scrape
-/// taken while the shard is actually asleep does.
+/// taken while the shard is asleep does.
 ///
-/// Paused time makes the observation deterministic: it only advances when
+/// Paused time makes the observation deterministic. It only advances when
 /// nothing is ready, so the first attempt has failed and parked in its 60s
 /// backoff before the 1s observation sleep below returns.
 #[test]
@@ -1730,8 +1724,8 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
         rt.block_on(async {
             let mut cfg = small_batches();
             // A flat, patient policy: every attempt sleeps exactly 60s, and
-            // nothing ever abandons the batch — the shape the startup warning
-            // fires on, and the one this gauge exists to make visible.
+            // nothing ever abandons the batch. This is the shape the startup
+            // warning fires on, and the one this gauge makes visible.
             cfg.retry.initial = Duration::from_secs(60);
             cfg.retry.max = Duration::from_secs(60);
             cfg.retry.jitter = 0.0;
@@ -1765,7 +1759,7 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
 
             drop(ack);
             drop(fx.queues);
-            // A zero deadline: the sweep aborts the write task where it is
+            // A zero deadline, so the sweep aborts the write task where it is
             // parked, inside the sleep.
             let report = fx.pool.drain(Duration::ZERO).await;
             assert_eq!(
@@ -1794,8 +1788,8 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
 /// replica's single half-open probe slot, which is the state in which nothing
 /// is pickable *and* no deadline exists.
 ///
-/// The ladder is deliberately steep and unjittered, so the published step
-/// names the number of `next_delay` calls unambiguously: 1s, 8s, 64s (capped).
+/// The ladder is steep and unjittered, so the published step names the number
+/// of `next_delay` calls unambiguously: 1s, 8s, 64s (capped).
 fn quarantine_contention() -> SinkPoolConfig {
     let mut cfg = small_batches();
     cfg.inflight.max_per_shard = 2;
@@ -1816,7 +1810,7 @@ fn quarantine_contention() -> SinkPoolConfig {
 // docs/METRICS.md presents the counter and the gauge as complementary readings
 // of the same retry loop. It states no arithmetic identity between them, so
 // this pins the stronger one the loop maintains and the docs lean on: with
-// `jitter` at zero — required, since jitter shortens a delay — a batch that has
+// `jitter` at zero (required, since jitter shortens a delay) a batch that has
 // retried `n` times serves `initial * multiplier^(n-1)`. Also the only
 // assertion in the tree on `spate_sink_retries_total`.
 //
@@ -1827,8 +1821,8 @@ fn quarantine_contention() -> SinkPoolConfig {
 //   A sleeps its first real step, 1s, then waits out the open deadline.
 // * `t0+5s` — A is promoted and takes the single probe; its attempt runs 30s.
 // * `t0+6s` — B is sealed and finds the replica half-open with its budget
-//   spent and no open breaker to wait on: nothing pickable, and no deadline
-//   to sleep until. This is the state under test.
+//   spent and no open breaker to wait on, so nothing is pickable and there is
+//   no deadline to sleep until. This is the state under test.
 // * `t0+35s` — A's probe fails *fatally*, so A abandons without a backoff
 //   sleep and stops contributing to a gauge that reads the max across a
 //   shard's sleeping batches. The replica re-opens until `t0+40s`.
@@ -1860,8 +1854,8 @@ fn a_quarantine_wait_neither_retries_nor_advances_the_ladder() {
 
             let (ack_a, _rx_a) = AckRef::test_pair();
             fx.queues.try_send(0, chunk(1, 1, &ack_a)).expect("send a");
-            // Dispatch B only once A is inside the probe, so B provably lands
-            // in the all-half-open wait rather than racing A for the slot.
+            // Dispatch B only once A is inside the probe, so B lands in the
+            // all-half-open wait rather than racing A for the slot.
             tokio::time::sleep(Duration::from_secs(6)).await;
             assert_eq!(
                 fx.writer.calls().len(),
@@ -1916,7 +1910,7 @@ fn a_quarantine_wait_neither_retries_nor_advances_the_ladder() {
 /// timer-driven alternative is far away: waiting out a ladder step, a
 /// heartbeat, or the next probe window would all land visibly later than the
 /// probe's own completion. Asserting on the recorded attempt instants is what
-/// makes those distinguishable — under `start_paused` the clock auto-advances
+/// makes those distinguishable. Under `start_paused` the clock auto-advances
 /// to the next deadline, so wall-clock duration says nothing.
 #[test]
 fn a_recovered_replica_is_picked_up_without_waiting_out_a_timer() {
@@ -1960,8 +1954,8 @@ fn a_recovered_replica_is_picked_up_without_waiting_out_a_timer() {
 
         let calls = fx.writer.calls();
         // Three attempts: one failure, one probe, one write. Which *batch*
-        // makes which is not determined — both park on the same `open_for`
-        // deadline and poll order decides — and it does not matter here, since
+        // makes which is not determined (both park on the same `open_for`
+        // deadline and poll order decides), and it does not matter here, since
         // the property is about when the third attempt starts relative to the
         // second, not who owns them. Do not read batch identity into the
         // indices.
@@ -1981,16 +1975,13 @@ fn a_recovered_replica_is_picked_up_without_waiting_out_a_timer() {
 }
 
 /// A writer that panics mid-probe never reports an outcome, so the probe slot
-/// it held is never cleared by the state machine — `probes_in_flight` is
+/// it held is never cleared by the state machine; `probes_in_flight` is
 /// decremented only by *leaving* half-open. Unreleased, the replica is pinned
-/// half-open for the life of the process: `next_replica` never offers it
-/// again and every **later** batch finds the shard unwritable, which is the
-/// sharper consequence than the one parked batch at the time.
+/// half-open for the life of the process. `next_replica` never offers it
+/// again, and every **later** batch finds the shard unwritable.
 ///
-/// No timer recovers this, which is why the heartbeat is not the answer to it
-/// — re-picking finds the same exhausted budget. Nor is it a regression this
-/// change introduces: the old code was equally stuck, it just spun a backoff
-/// ladder while being so.
+/// No timer recovers this, so the heartbeat is not the answer to it;
+/// re-picking finds the same exhausted budget.
 ///
 /// B is sent after the panic has already happened, so the assertion is about
 /// the state the dead probe left behind rather than about a race.
@@ -2048,14 +2039,14 @@ fn a_panicked_probe_does_not_wedge_the_shard() {
 }
 
 /// Handing a probe slot back has to *wake* the batch parked because it was
-/// taken, not merely leave the state pickable for whoever looks next.
+/// taken, rather than leave the state pickable for whoever looks next.
 ///
-/// This is the production shape of a dead probe: somebody is already waiting
-/// on it, and the death is the event they are waiting for. B is parked in the
-/// all-half-open state — nothing pickable, no deadline — for the whole 10s A
+/// This is the production shape of a dead probe, where a batch is already
+/// waiting on it and the death is the event it waits for. B is parked in the
+/// all-half-open state (nothing pickable, no deadline) for the whole 10s A
 /// holds the probe, so the only thing that can release B promptly is the wake
 /// inside `release_probe`. `open_for` is far above the 30s heartbeat ceiling,
-/// so falling back to a heartbeat is plainly distinguishable.
+/// so falling back to a heartbeat is distinguishable.
 #[test]
 fn a_released_probe_slot_wakes_the_batch_that_was_waiting_for_it() {
     let rt = tokio::runtime::Builder::new_current_thread()

@@ -96,9 +96,10 @@ fn clone_drop_races_resolve_once() {
 }
 
 /// The pending-ceiling gate's read is safe under any interleaving with the
-/// controller's retirement adds: a driver computing `issued - advanced`
-/// can only over-estimate pending (a stale `advanced` read), never
-/// under-estimate it — the gate closes a round longer, never opens early.
+/// controller's retirement adds. A driver computing `issued - advanced` can
+/// only over-estimate pending (a stale `advanced` read), never
+/// under-estimate it, so the gate closes a round longer and never opens
+/// early.
 #[test]
 fn gate_reads_only_over_estimate_pending() {
     use super::gate::AdvanceCounter;

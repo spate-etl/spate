@@ -33,7 +33,7 @@
 //! metrics: { exporter: prometheus }
 //! ```
 //!
-//! Environment interpolation runs on the raw text before parsing — see
+//! Environment interpolation runs on the raw text before parsing. See
 //! [`interpolate`](self::interpolate::interpolate_with) for the exact
 //! semantics of `${VAR}`, `${VAR:-default}`, `${VAR:?message}`, and `$$`.
 //!
@@ -66,7 +66,7 @@ pub use error::ConfigError;
 /// [`ComponentConfig`]. `serde_yaml` is a 0.x dependency, so exposing its
 /// `Value` directly in `spate-core`'s public API would tie our semver to
 /// theirs; this alias is the documented exemption (mirroring the [`bytes`]
-/// and `AvroValue` re-export pattern — INV-6).
+/// and `AvroValue` re-export pattern, INV-6).
 /// A major bump of the YAML crate becomes a breaking change here,
 /// and only here.
 ///
@@ -106,7 +106,7 @@ pub struct PipelineConfig {
     /// ready-made records need none.
     #[serde(default)]
     pub deserializer: Option<ComponentConfig>,
-    /// Single sink component (opaque body) — sugar for the common one-sink
+    /// Single sink component (opaque body), sugar for the common one-sink
     /// case, addressed as `"default"`. Mutually exclusive with `sinks`.
     /// Resolve via [`sink_config`](Self::sink_config).
     #[serde(default)]
@@ -118,7 +118,7 @@ pub struct PipelineConfig {
     pub sinks: Option<BTreeMap<String, ComponentConfig>>,
 }
 
-/// `pipeline:` — identity and thread budget.
+/// Identity and thread budget (`pipeline:`).
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineSection {
@@ -150,7 +150,7 @@ pub enum PinningMode {
     Compact,
 }
 
-/// `checkpoint:` — watermark commit policy.
+/// Watermark commit policy (`checkpoint:`).
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CheckpointSection {
@@ -158,10 +158,10 @@ pub struct CheckpointSection {
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
     /// Hard per-partition ceiling on unacknowledged batches. A partition at
-    /// the ceiling has its lanes skipped at the poll boundary — no pause is
-    /// involved, and other partitions are unaffected — until acknowledgments
-    /// retire batches. Bounds tracker memory and the replay a stalled
-    /// partition can accumulate.
+    /// the ceiling has its lanes skipped at the poll boundary until
+    /// acknowledgments retire batches. No pause is involved, and other
+    /// partitions are unaffected. Bounds tracker memory and the replay a
+    /// stalled partition can accumulate.
     pub max_pending_batches: usize,
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
     /// `terminationGracePeriodSeconds`.
@@ -170,8 +170,8 @@ pub struct CheckpointSection {
     /// A partition watermark stalled behind a failed batch for longer than
     /// this fails the pipeline. Failed batches only stall watermarks
     /// permanently (their data replays after restart), so this converts a
-    /// permanent sink failure — a dropped table, revoked credentials — into
-    /// a clean `Failed` exit and a restart instead of a process that runs on
+    /// permanent sink failure (a dropped table, revoked credentials) into a
+    /// clean `Failed` exit and a restart instead of a process that runs on
     /// forever, consuming the source but committing nothing for that
     /// partition.
     #[serde(with = "humantime_serde")]
@@ -189,7 +189,7 @@ impl Default for CheckpointSection {
     }
 }
 
-/// `backpressure:` — in-flight budget and hysteresis.
+/// In-flight budget and hysteresis (`backpressure:`).
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BackpressureSection {
@@ -217,11 +217,11 @@ impl Default for BackpressureSection {
     }
 }
 
-/// `admin:` — the HTTP server carrying `/metrics`, `/healthz` and `/readyz`.
+/// The HTTP server carrying `/metrics`, `/healthz` and `/readyz` (`admin:`).
 ///
 /// One server serves all three. The probes answer regardless of
 /// [`MetricsSection::exporter`]. `/metrics` is served only where this
-/// pipeline's own handle renders an exposition — `exporter: none` leaves it a
+/// pipeline's own handle renders an exposition. `exporter: none` leaves it a
 /// 404, and so does a recorder another library installed first, which this
 /// pipeline records into but cannot render.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -248,7 +248,7 @@ impl Default for AdminSection {
 /// Deserialize a bind address or the literal `none`.
 ///
 /// Takes the value through a visitor rather than through `String` so that a
-/// YAML null — `~`, `null`, or a bare `listen:` — reports the two accepted
+/// YAML null (`~`, `null`, or a bare `listen:`) reports the two accepted
 /// spellings instead of a type mismatch against an intermediate this key does
 /// not otherwise have.
 fn listen_or_none<'de, D>(de: D) -> Result<Option<SocketAddr>, D::Error>
@@ -279,7 +279,7 @@ where
     de.deserialize_any(Visitor)
 }
 
-/// `metrics:` — exporter selection and observability knobs.
+/// Exporter selection and observability knobs (`metrics:`).
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MetricsSection {
@@ -319,10 +319,10 @@ pub enum MetricsExporter {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum E2eBasis {
-    /// Framework ingest time — immune to producer clock skew (default).
+    /// Framework ingest time, immune to producer clock skew (default).
     #[default]
     Ingest,
-    /// Record event time (e.g. Kafka message timestamp) — measures true
+    /// Record event time (e.g. Kafka message timestamp). Measures true
     /// pipeline lag but is sensitive to upstream clocks.
     Event,
 }
@@ -398,8 +398,8 @@ impl PipelineConfig {
         // The commit loop fires whenever `last_commit.elapsed() >= interval`,
         // so an interval below a poll cycle commits on nearly every loop.
         // A floor keeps sub-100ms intervals from hammering the source's
-        // offset store for no durability gain (checkpointing is not the
-        // durability boundary — the sink write is).
+        // offset store for no durability gain. The sink write is the
+        // durability boundary, not the checkpoint.
         const MIN_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
         if self.checkpoint.interval < MIN_COMMIT_INTERVAL {
             return fail(format!(
@@ -459,7 +459,7 @@ impl PipelineConfig {
         }
         self.reject_stray_chunk()?;
         // Resolve every declared sink's `chunk:` block now, so a malformed
-        // block is rejected at load — including for a `sinks:` entry this
+        // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
         if let Some(sink) = &self.sink {
             sink.resolved_chunk()?;
@@ -477,9 +477,9 @@ impl PipelineConfig {
     /// `chunk:` configures the chain terminal, which only sinks have; the
     /// framework peels the key indiscriminately, so a stray `chunk:` under
     /// `source`/`deserializer` would otherwise be silently swallowed. Split
-    /// out of [`validate`](Self::validate) so `Pipeline::from_config` — which
-    /// deliberately skips full validation for minimal programmatic configs —
-    /// can still enforce it.
+    /// out of [`validate`](Self::validate) so `Pipeline::from_config`, which
+    /// skips full validation for minimal programmatic configs, can still
+    /// enforce it.
     pub(crate) fn reject_stray_chunk(&self) -> Result<(), ConfigError> {
         if self.source.resolved_chunk()?.is_some() {
             return Err(ConfigError::Validation(
@@ -534,7 +534,7 @@ impl PipelineConfig {
 
 /// Re-anchor a `sinks:` entry's chunk error onto its map key. The entry's
 /// section prefix is the shared `sink.<type>`, which cannot distinguish two
-/// entries of the same connector type — `sinks.<name>.<...>` can.
+/// entries of the same connector type. `sinks.<name>.<...>` can.
 fn name_sinks_entry_error(name: &str, e: ConfigError) -> ConfigError {
     match e {
         ConfigError::Validation(m) => ConfigError::Validation(format!("sinks.{name}: {m}")),
@@ -628,7 +628,7 @@ sink: { memory: {} }
     }
 
     /// The bind address is `admin.listen`, and `metrics` carries no address
-    /// of its own: a file placing one there fails to load rather than parsing
+    /// of its own. A file placing one there fails to load rather than parsing
     /// into a pipeline whose server is somewhere else.
     #[test]
     fn the_metrics_section_takes_no_bind_address() {
@@ -685,7 +685,7 @@ sink:
     chunk: { target_bytes: 0B }
 "#;
         // `validate` resolves every declared sink chunk, so the loader itself
-        // rejects it — "rejected at load" in the reference docs is literal.
+        // rejects it. "Rejected at load" in the reference docs is literal.
         let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
         assert!(err.contains("chunk.target_bytes"), "{err}");
     }
@@ -693,7 +693,7 @@ sink:
     #[test]
     fn malformed_chunk_on_a_sinks_entry_is_rejected_at_load_naming_the_entry() {
         // Two entries of the same connector type share the dotted path
-        // `sink.memory.…`, so the error must be re-anchored on the map key —
+        // `sink.memory.…`, so the error must be re-anchored on the map key,
         // and an entry must fail at load even if no binary ever installs it.
         let yaml = r#"
 pipeline: { name: demo }
@@ -727,7 +727,7 @@ sinks:
         // the connector body shapes are verified by hand against
         // crates/spate-kafka/src/config.rs (brokers/topic/group_id),
         // crates/spate-avro/src/config.rs (registry.url), and
-        // crates/spate-clickhouse/src/config.rs (table/columns/shards) — and
+        // crates/spate-clickhouse/src/config.rs (table/columns/shards), and
         // stay consistent with crates/spate/examples/kafka_avro_to_clickhouse.yaml.
         let yaml = r#"
 pipeline: { name: orders, threads: 4, io_threads: 2 }

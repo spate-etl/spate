@@ -11,28 +11,30 @@ use serde::de::DeserializeOwned;
 /// The framework records which component type the section selects (`kafka`,
 /// `clickhouse`, `memory`, ...) and hands the body to that component's
 /// factory, which deserializes it into its own typed config via
-/// [`deserialize_into`](Self::deserialize_into). One key is the exception to
-/// that opacity: **`chunk` is framework-reserved** — it configures the chain
-/// terminal, not the connector, and is peeled out of the body at construction.
-/// A connector must not declare its own `chunk` field: it would never receive
-/// a value (on a sink section the framework consumes the key; on a
-/// `source`/`deserializer` section the key is rejected outright).
+/// [`deserialize_into`](Self::deserialize_into). **`chunk` is
+/// framework-reserved** and is the one exception to that opacity. It
+/// configures the chain terminal, not the connector, and is peeled out of the
+/// body at construction. A connector must not declare its own `chunk` field;
+/// it would never receive a value (on a sink section the framework consumes
+/// the key, and on a `source`/`deserializer` section the key is rejected
+/// outright).
 ///
-/// The nested-block shape (exactly one key) is what lets every typed struct
-/// in the tree keep `deny_unknown_fields` — a flattened shape would disable
-/// that check.
+/// The nested-block shape (exactly one key) lets every typed struct in the
+/// tree keep `deny_unknown_fields`. A flattened shape would disable that
+/// check.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentConfig {
     type_tag: String,
     raw: serde_yaml::Value,
     /// The framework-reserved `chunk:` block, peeled out of `raw` at
     /// construction so the connector's `deny_unknown_fields` never sees it.
-    /// Stored unparsed and resolved lazily by [`resolved_chunk`](Self::resolved_chunk)
-    /// (construction — including the infallible [`new`](Self::new) — must not
-    /// fail on a malformed block; it surfaces at assembly/validation instead).
+    /// Stored unparsed and resolved lazily by
+    /// [`resolved_chunk`](Self::resolved_chunk). Construction, including the
+    /// infallible [`new`](Self::new), must not fail on a malformed block; it
+    /// surfaces at assembly/validation instead.
     chunk: Option<serde_yaml::Value>,
     /// Where this section sits in the pipeline config (`source`, `sink`,
-    /// `deserializer`) — set after parsing, used to prefix error paths.
+    /// `deserializer`). Set after parsing, used to prefix error paths.
     section: Option<&'static str>,
 }
 
@@ -75,8 +77,8 @@ impl ComponentConfig {
         section.resolve().map(Some)
     }
 
-    /// Whether this section declared a `chunk:` block (without resolving it) —
-    /// lets assembly warn about a block that nothing will ever read.
+    /// Whether this section declared a `chunk:` block (without resolving it).
+    /// Lets assembly warn about a block that nothing will ever read.
     pub(crate) fn has_chunk(&self) -> bool {
         self.chunk.is_some()
     }
@@ -121,10 +123,9 @@ impl ComponentConfig {
     /// `spate-test` pipelines that skip YAML).
     ///
     /// `raw` is the opaque connector body as a [`YamlValue`](super::YamlValue)
-    /// (an `spate-core` re-export of `serde_yaml::Value` — see its docs for the
+    /// (an `spate-core` re-export of `serde_yaml::Value`; see its docs for the
     /// dependency-policy exemption). The framework-reserved `chunk` key is
-    /// peeled out of `raw` here, exactly as on the YAML path — see the struct
-    /// docs.
+    /// peeled out of `raw` here, as on the YAML path. See the struct docs.
     pub fn new(type_tag: impl Into<String>, mut raw: super::YamlValue) -> Self {
         let chunk = peel_chunk(&mut raw);
         ComponentConfig {
@@ -260,7 +261,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cc.type_tag(), "kafka");
-        // The connector's strict config still deserializes — `chunk` is gone.
+        // The connector's strict config still deserializes; `chunk` is gone.
         let typed: FakeKafkaConfig = cc.deserialize_into().unwrap();
         assert_eq!(typed.brokers, "b");
         // The framework resolves the peeled block.
@@ -290,8 +291,8 @@ mod tests {
 
     #[test]
     fn bare_chunk_key_resolves_to_the_defaults() {
-        // `chunk:` with no body (a natural "defaults, please") — the null
-        // value deserializes as an empty mapping, i.e. 64 KiB / Skip, matching
+        // `chunk:` with no body (a natural "defaults, please"). The null value
+        // deserializes as an empty mapping, i.e. 64 KiB / Skip, matching
         // `chunk: {}`. Pinned so a serde change can't turn it into an error.
         let cc = parse("clickhouse:\n  chunk:\n").unwrap();
         let chunk = cc.resolved_chunk().unwrap().expect("chunk present");

@@ -2,15 +2,15 @@
 //! one broker-less source's work without duplicates.
 //!
 //! Brokered sources bring their own coordination (a Kafka consumer group
-//! assigns partitions across processes). Broker-less sources — object-store
-//! backfills, database range scans, file tails — have no group protocol:
+//! assigns partitions across processes). Broker-less sources (object-store
+//! backfills, database range scans, file tails) have no group protocol, so
 //! two processes pointed at the same input each see all of it. This module
 //! closes that gap with a leader-assigned model:
 //!
 //! - A source-provided [`SplitPlanner`] enumerates the work as weighted
-//!   **splits** (an object-store backfill: object lists bin-packed by
-//!   bytes; a database source: balanced id ranges). The planner runs only
-//!   on the fleet's elected leader — workers receive split descriptors and
+//!   **splits** (an object-store backfill bin-packs object lists by bytes;
+//!   a database source produces balanced id ranges). The planner runs only
+//!   on the fleet's elected leader; workers receive split descriptors and
 //!   never re-enumerate.
 //! - The leader also computes a **desired assignment** and publishes it
 //!   per instance. Every worker holds a [`SplitCoordinator`] that leases
@@ -21,8 +21,8 @@
 //!   longer owns the split is rejected and writes nothing, so committed
 //!   progress can only replay, never regress.
 //!
-//! `spate-core` owns only the seam — the two traits and their handshake
-//! types — plus the reusable source-side driver
+//! `spate-core` owns the seam (the two traits and their handshake types)
+//! plus the reusable source-side driver
 //! ([`CoordinationDriver`](driver::CoordinationDriver)). Concrete backends
 //! live in backend crates (the NATS JetStream KV backend in
 //! `spate-coordination`); a source receives its coordinator at
@@ -32,29 +32,29 @@
 //! # Delivery contract
 //!
 //! Coordination preserves at-least-once, nothing stronger. Ownership
-//! revocations and takeovers may briefly overlap — a taken-over split's uncommitted tail is
-//! replayed by the new owner, and a zombie may emit records after its
-//! lease was seized. Both produce **duplicates, never loss**: the
-//! correctness boundary is [`SplitCoordinator::commit`], a fenced durable
-//! write that a backend must reject once the caller no longer owns the
-//! split ([`CoordinationErrorKind::Fenced`] — and a fenced write must
-//! write nothing).
+//! revocations and takeovers may briefly overlap. A taken-over split's
+//! uncommitted tail is replayed by the new owner, and a zombie may emit
+//! records after its lease was seized. Both produce **duplicates, never
+//! loss**. The correctness boundary is [`SplitCoordinator::commit`], a
+//! fenced durable write that a backend must reject once the caller no
+//! longer owns the split ([`CoordinationErrorKind::Fenced`]). A fenced
+//! write writes nothing.
 //!
 //! A split that repeatedly kills its owners (or is explicitly
 //! [`fail`](SplitCoordinator::fail)ed) is **quarantined** after a bounded
 //! number of attempts rather than crashing workers forever. Quarantined
-//! splits stay visible and block [`CoordinationEvent::AllComplete`]: a
+//! splits stay visible and block [`CoordinationEvent::AllComplete`], so a
 //! bounded job whose planned data went unprocessed finishes as
-//! [`CoordinationEvent::Stalled`], never as a false success.
+//! [`CoordinationEvent::Stalled`].
 //!
 //! # Threading
 //!
 //! Like [`Source`](crate::source::Source), a coordinator is driven
 //! synchronously from the pipeline's controller thread. Implementations
 //! own their I/O (typically a background task on the runtime handle they
-//! were built with), must bound every call, and must never rely on being
-//! polled to keep a lease alive — renewal runs in the background so
-//! backpressure cannot cost ownership.
+//! were built with), must bound every call, and must not rely on being
+//! polled to keep a lease alive. Lease renewal runs in the background,
+//! independently of polling.
 
 use crate::error::ErrorClass;
 use std::fmt;
@@ -66,12 +66,11 @@ pub const SPLIT_ID_MAX_LEN: usize = 128;
 
 /// Deterministic identity of one split, minted by the planner.
 ///
-/// Stable across replans of unchanged work — the property that makes
-/// replanning idempotent (create-if-absent in the store) and progress
-/// resumable across owners. Validated at construction so key-encoding
-/// problems surface as [`Fatal`](CoordinationErrorKind::Fatal) here, not
-/// as opaque backend write failures: 1–128 bytes of `[A-Za-z0-9_-]`
-/// (`.` is reserved as the store's key-hierarchy separator).
+/// Stable across replans of unchanged work, so replanning is idempotent
+/// (create-if-absent in the store) and progress resumes across owners.
+/// Validated at construction to 1–128 bytes of `[A-Za-z0-9_-]`; `.` is
+/// reserved as the store's key-hierarchy separator. A violation surfaces
+/// as [`Fatal`](CoordinationErrorKind::Fatal).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SplitId(String);
 
@@ -134,9 +133,9 @@ pub struct LeaseEpoch(pub u64);
 ///
 /// The descriptor is carried verbatim to whichever worker gains the split,
 /// so workers never re-enumerate the input (one LIST/scan per plan, on the
-/// leader). It is opaque to the framework and to backends; keep it small —
-/// backends enforce a size cap (the NATS backend: a fixed 512 KiB per
-/// stored value). Descriptors are written once at planning and never
+/// leader). It is opaque to the framework and to backends; keep it small,
+/// because backends enforce a size cap (the NATS backend uses a fixed
+/// 512 KiB per stored value). Descriptors are written once at planning and never
 /// rewritten by commits, so their size never taxes the commit path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -147,20 +146,17 @@ pub struct SplitSpec {
     /// split (an object-store source: member keys with etags and sizes; a
     /// database source: an id range).
     pub descriptor: Vec<u8>,
-    /// Relative cost hint (bytes, rows) — **the balance objective**.
+    /// Relative cost hint (bytes, rows), and **the balance objective**.
     ///
-    /// This is load, not sort order. Under the work-stealing balancer this
-    /// field only ordered claims and balance was on split *count*; a
-    /// planner that populated it as a ranking key rather than a cost will
-    /// now skew the leader's distribution.
+    /// This is load, not sort order. A planner that populates it as a
+    /// ranking key rather than a cost skews the leader's distribution.
     ///
-    /// The
-    /// leader distributes summed weight, not split count, so a planner
+    /// The leader distributes summed weight, not split count, so a planner
     /// that emits wildly uneven splits (an object-store planner gives any
     /// object at or above its packing target a split to itself) still
     /// balances correctly. A planner that leaves every weight at the
-    /// default degrades to count-balancing, which is the right behavior
-    /// when splits really are uniform. `0` is treated as `1`.
+    /// default degrades to count-balancing, which is correct when splits
+    /// are uniform. `0` is treated as `1`.
     pub weight: u64,
 }
 
@@ -183,9 +179,9 @@ impl SplitSpec {
     }
 }
 
-/// A split as the planner submits it: the spec plus optional seed
-/// progress. Seeds are first-writer-wins — a seed never overwrites an
-/// existing record — which is the migration path for work that already has
+/// A split as the planner submits it, the spec plus optional seed
+/// progress. Seeds are first-writer-wins; a seed never overwrites an
+/// existing record. That is the migration path for work that already has
 /// a pre-coordination checkpoint. A brand-new source plans without seeds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -228,8 +224,8 @@ pub enum PlanFinality {
 #[non_exhaustive]
 pub struct SplitPlan {
     /// The enumerated work. On a replan, splits already planned are
-    /// deduplicated by id (create-if-absent) — emitting them again is a
-    /// cheap no-op, which is what makes replanning idempotent.
+    /// deduplicated by id (create-if-absent), so emitting them again is a
+    /// no-op and replanning is idempotent.
     pub splits: Vec<PlannedSplit>,
     /// Whether this enumeration is complete.
     pub finality: PlanFinality,
@@ -286,10 +282,9 @@ impl<'a> PlanContext<'a> {
 /// [`commit`](SplitCoordinator::commit) and handed to the next owner in
 /// [`CoordinationEvent::Gained`].
 ///
-/// The `state` payload is opaque to the framework **and** to backends —
-/// arbitrary bytes, no encoding constraint. The source owns its schema;
-/// keeping it opaque is what keeps connector types out of `spate-core`'s
-/// public API.
+/// The `state` payload is opaque to the framework **and** to backends,
+/// arbitrary bytes with no encoding constraint. The source owns its schema;
+/// opacity keeps connector types out of `spate-core`'s public API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SplitProgress {
@@ -300,7 +295,7 @@ pub struct SplitProgress {
     /// Source-defined opaque resume state.
     pub state: Vec<u8>,
     /// Bounded jobs: this split is fully delivered and committed.
-    /// Terminal — a backend never re-offers a completed split.
+    /// This is terminal, and a backend never re-offers a completed split.
     pub completed: bool,
 }
 
@@ -337,8 +332,8 @@ pub enum CoordinationEvent {
     /// This instance now holds the lease for the split and must start (or
     /// resume) processing it.
     Gained {
-        /// The split now owned, descriptor included — the gaining worker
-        /// never saw the planner run.
+        /// The split now owned, descriptor included, because the gaining
+        /// worker never saw the planner run.
         split: SplitSpec,
         /// Fencing token for this tenancy.
         epoch: LeaseEpoch,
@@ -346,11 +341,11 @@ pub enum CoordinationEvent {
         /// a split that has never committed.
         progress: Option<SplitProgress>,
     },
-    /// The lease was lost — seized by a peer after expiry, stolen for
+    /// The lease was lost, either seized by a peer after expiry, stolen for
     /// balance, or self-fenced after renewals could not reach the backend.
     /// The source must stop the split promptly and must not commit it
     /// again (a late commit is rejected as
-    /// [`CoordinationErrorKind::Fenced`] regardless — this event is the
+    /// [`CoordinationErrorKind::Fenced`] regardless; this event is the
     /// cooperative fast path).
     Lost {
         /// The split no longer owned.
@@ -358,25 +353,24 @@ pub enum CoordinationEvent {
     },
     /// The leader has stopped assigning this split to this instance, and
     /// wants it back. The owner should stop intake at a safe boundary,
-    /// chase the split's tail to a final fenced commit, and release it —
-    /// the next owner then resumes from a point covering everything this
+    /// chase the split's tail to a final fenced commit, and release it. The
+    /// next owner then resumes from a point covering everything this
     /// one emitted, so the transfer replays nothing.
     ///
-    /// **The split is leaving either way.** Unlike the peer request this
-    /// replaced, a revocation is a decision rather than a proposal: a
-    /// source that declines — through the driver's
+    /// **The split is leaving either way.** A revocation is a decision
+    /// rather than a proposal. A source that declines (through the driver's
     /// [`SplitSource::begin_revoke`](driver::SplitSource::begin_revoke),
-    /// which defaults to declining — or that does not finish inside
+    /// which defaults to declining) or that does not finish inside
     /// `drain_deadline` has the release forced instead, and its
     /// uncommitted tail replays under the next owner. Declining is
-    /// therefore still *safe*; it is just the expensive way to comply.
+    /// therefore still *safe*; it is the expensive way to comply.
     ///
-    /// The one exception is not the source's to take: a backend may cancel a
-    /// revocation its leader took back — the split is named for this instance
-    /// again while it still holds it — and then nothing is forced. A source
+    /// The one exception is not the source's to take. A backend may cancel a
+    /// revocation its leader took back (the split is named for this instance
+    /// again while it still holds it), and then nothing is forced. A source
     /// cannot observe that and must not wait for it. It also changes little
     /// for a source that already accepted: intake stays stopped, the drain
-    /// still ends by handing the split back, and this instance is simply the
+    /// still ends by handing the split back, and this instance is the
     /// one that gains it again, through a fresh
     /// [`Gained`](CoordinationEvent::Gained) with a new lane. Only a source
     /// that *declined* keeps the split without interruption.
@@ -402,11 +396,11 @@ pub enum CoordinationEvent {
     /// Final plan and every split committed `completed`. Bounded sources
     /// translate this into
     /// [`SourceEvent::Drained`](crate::source::SourceEvent::Drained). An
-    /// instance that owns no splits must keep polling until this arrives —
-    /// it is the standby that covers an owner dying at the finish line.
+    /// instance that owns no splits must keep polling until this arrives;
+    /// it stands by to cover an owner dying at the finish line.
     AllComplete,
     /// Final plan, nothing left runnable or running, but quarantined
-    /// splits remain: the job cannot finish cleanly. Surfaced to every
+    /// splits remain, so the job cannot finish cleanly. Surfaced to every
     /// instance exactly where `AllComplete` would have been. The source
     /// decides whether this is fatal (the default in the driver) or a
     /// drain-with-warning.
@@ -422,9 +416,9 @@ pub enum CoordinationEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CoordinationErrorKind {
-    /// The fenced write lost: this instance no longer owns the split and
-    /// **nothing was written**. Not a pipeline error — callers intercept
-    /// it and treat the split as lost (the matching
+    /// The fenced write lost, so this instance no longer owns the split and
+    /// **nothing was written**. This is not a pipeline error; callers
+    /// intercept it and treat the split as lost (the matching
     /// [`CoordinationEvent::Lost`] follows from
     /// [`poll`](SplitCoordinator::poll)).
     Fenced,
@@ -461,7 +455,7 @@ impl CoordinationError {
 
     /// Map to the framework error taxonomy.
     /// [`Fenced`](CoordinationErrorKind::Fenced) maps to [`Fatal`](ErrorClass::Fatal)
-    /// only as a backstop — callers are expected to intercept it before
+    /// only as a backstop; callers are expected to intercept it before
     /// classification and handle the split loss instead of failing.
     #[must_use]
     pub fn class(&self) -> ErrorClass {
@@ -473,19 +467,19 @@ impl CoordinationError {
 }
 
 /// Source-provided work enumerator, run only on the fleet's elected
-/// leader — at job start and again on the replan interval while the plan
+/// leader, at job start and again on the replan interval while the plan
 /// is [`Open`](PlanFinality::Open).
 ///
 /// Every worker presents an equivalent planner at
 /// [`SplitCoordinator::start`]; whichever instance holds leadership uses
-/// its own copy. `plan` may block on real I/O (an object-store LIST, an
-/// index query) — backends call it off their async loop.
+/// its own copy. `plan` may block on I/O (an object-store LIST, an
+/// index query), so backends call it off their async loop.
 pub trait SplitPlanner: Send {
     /// Cheap, deterministic job identity, derived from *configuration*,
     /// never from the enumeration itself. Every worker joining the job
     /// must present a byte-equal fingerprint or be rejected as
-    /// [`Fatal`](CoordinationErrorKind::Fatal) — divergent configurations
-    /// can never interpret the same split table two ways.
+    /// [`Fatal`](CoordinationErrorKind::Fatal), so divergent configurations
+    /// cannot interpret the same split table two ways.
     fn fingerprint(&self) -> String;
 
     /// Enumerate the current work. Idempotency contract: unchanged work
@@ -500,7 +494,7 @@ pub trait SplitPlanner: Send {
 /// Dyn-compatible; sources hold a `Box<dyn SplitCoordinator>` injected at
 /// assembly time (typically via the
 /// [`CoordinationDriver`](driver::CoordinationDriver) rather than
-/// directly). Driven from the controller thread — implementations do their
+/// directly). Driven from the controller thread; implementations do their
 /// I/O elsewhere and bound every call.
 ///
 /// ```
@@ -620,20 +614,20 @@ pub trait SplitCoordinator: Send {
     fn set_waker(&mut self, waker: ControlWaker);
 
     /// Ownership and job-state changes since the last call. **Must not
-    /// block** — return whatever is pending, including nothing. The driver
+    /// block**; return whatever is pending, including nothing. The driver
     /// parks on the [`ControlWaker`] instead.
     fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError>;
 
     /// Fenced durable commit of one owned split's progress. `Ok` means
     /// durable. [`Fenced`](CoordinationErrorKind::Fenced) means the split
-    /// is no longer owned and **nothing was written** — stop the split,
-    /// never retry the write. [`Retryable`](CoordinationErrorKind::Retryable)
+    /// is no longer owned and **nothing was written**; stop the split and
+    /// do not retry the write. [`Retryable`](CoordinationErrorKind::Retryable)
     /// leaves the previous committed state authoritative; re-committing
     /// the merged progress on the next tick is idempotent.
     ///
-    /// A commit on a split this instance no longer holds — including one
-    /// it already committed `completed` — returns `Fenced` without a
-    /// following [`Lost`](CoordinationEvent::Lost) event: `Lost` marks an
+    /// A commit on a split this instance no longer holds (including one
+    /// it already committed `completed`) returns `Fenced` without a
+    /// following [`Lost`](CoordinationEvent::Lost) event. `Lost` marks an
     /// involuntary end of a live tenancy, and there is none. (The
     /// [`CoordinationDriver`](driver::CoordinationDriver) never issues
     /// such commits; hand-rolled callers must tolerate the error.)
@@ -653,12 +647,11 @@ pub trait SplitCoordinator: Send {
 
     /// Voluntarily hand back owned splits (shutdown, scale-down) so peers
     /// claim them without waiting out a lease. Consumes no delivery
-    /// attempts. Best-effort and idempotent; splits not released simply
-    /// expire.
+    /// attempts. Best-effort and idempotent; splits not released expire.
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
 
-    /// Release splits given up through a cooperative revocation — the owner
-    /// has drained each split, committed its tail, and is now handing it
+    /// Release splits given up through a cooperative revocation. The owner
+    /// has drained each split, committed its tail, and is handing it
     /// back. Semantically a [`release`](SplitCoordinator::release)
     /// (attempt-free, best-effort, idempotent), but distinguished so a
     /// revocation-aware backend can record the drain as having completed
@@ -666,16 +659,16 @@ pub trait SplitCoordinator: Send {
     /// fleet.
     ///
     /// Defaulted to [`release`](SplitCoordinator::release) so existing
-    /// backends keep working — the hand-back then reads as an ordinary one
-    /// — and so the trait stays dyn-compatible. A backend that implements
+    /// backends keep working (the hand-back then reads as an ordinary one)
+    /// and so the trait stays dyn-compatible. A backend that implements
     /// the revocation protocol overrides it.
     fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
         self.release(splits)
     }
 
     /// Decline a [`RevokeRequested`](CoordinationEvent::RevokeRequested)
-    /// the embedder cannot serve — the source refused to stop the split's
-    /// intake, or the split is not in a drainable state.
+    /// the embedder cannot serve, because the source refused to stop the
+    /// split's intake or the split is not in a drainable state.
     ///
     /// **A decline does not keep the split.** It reports that the *clean*
     /// path is unavailable, so the backend stops waiting and takes the
@@ -683,7 +676,7 @@ pub trait SplitCoordinator: Send {
     /// until its deadline; the split still leaves, and its uncommitted tail
     /// replays under the next owner. Best-effort and idempotent; declining
     /// a split that was never revoked is a no-op. The one case where a
-    /// decline does keep the split is not the source's doing: the backend
+    /// decline does keep the split is not the source's doing. The backend
     /// had already cancelled that revocation, so there is nothing left to
     /// comply with.
     ///
@@ -691,11 +684,11 @@ pub trait SplitCoordinator: Send {
     /// bound what it started, whatever the source does: force the release
     /// on a decline, and bound a drain that never finishes with a deadline
     /// of its own. Without that, one uncooperative source pins the fleet's
-    /// rebalancing open forever — and, worse, a source that *did* stop
-    /// intake for a drain that then wedges is left holding a split it will
-    /// never read again, since nothing can ask it to resume. A backend that
-    /// withdraws a revocation therefore does not get to drop that second
-    /// obligation with it. (`spate-coordination` spells the deadline
+    /// rebalancing open forever, and a source that *did* stop intake for a
+    /// drain that then wedges is left holding a split it will never read
+    /// again, since nothing can ask it to resume. A backend that withdraws
+    /// a revocation therefore keeps that second obligation.
+    /// (`spate-coordination` spells the deadline
     /// `drain_deadline`, and applies it to a withdrawn revocation's drain
     /// as a no-progress timeout rather than an absolute one.)
     ///
@@ -708,7 +701,7 @@ pub trait SplitCoordinator: Send {
 
 /// Wakes a coordinated source's control-plane wait.
 ///
-/// Cheap to clone and safe to signal from any thread — including a
+/// Cheap to clone and safe to signal from any thread, including a
 /// pipeline thread on the data path, because [`wake`](ControlWaker::wake)
 /// never blocks. The channel behind it holds a single slot, so a burst of
 /// signals collapses into one wakeup, and a signal that lands while the
@@ -721,8 +714,8 @@ pub trait SplitCoordinator: Send {
 pub struct ControlWaker(crossbeam_channel::Sender<()>);
 
 impl ControlWaker {
-    /// A waker attached to nothing: [`wake`](ControlWaker::wake) is a
-    /// no-op. For unit tests that construct a lane without a driver, and
+    /// A waker attached to nothing, where [`wake`](ControlWaker::wake) is
+    /// a no-op. For unit tests that construct a lane without a driver, and
     /// for sources that have no control-plane park to interrupt.
     #[must_use]
     pub fn inert() -> ControlWaker {
@@ -734,7 +727,7 @@ impl ControlWaker {
     /// Wake the driver if it is parked, or make its next park return
     /// immediately. Never blocks.
     pub fn wake(&self) {
-        // Full slot means a wakeup is already pending — nothing to add.
+        // Full slot means a wakeup is already pending; nothing to add.
         let _ = self.0.try_send(());
     }
 }

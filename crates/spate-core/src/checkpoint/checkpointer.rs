@@ -4,10 +4,10 @@
 //! Ownership model: the pipeline runtime owns the [`Checkpointer`]
 //! (`&mut self`, single-threaded); each pipeline thread owns an
 //! [`AckIssuer`] and creates one [`AckRef`] per source poll batch. Both
-//! directions are wait-free for producers: issuing sends a registration on
+//! directions are wait-free for producers. Issuing sends a registration on
 //! an unbounded channel, and batch resolution happens in `AckRef`'s drop
-//! path. Acks can therefore never block behind data — the invariant that
-//! makes the backpressure design deadlock-free.
+//! path. Acks therefore never block behind data. The backpressure design
+//! relies on that to stay deadlock-free.
 
 use super::ack::AckTx;
 use super::gate::AdvanceCounter;
@@ -37,17 +37,17 @@ pub struct DrainStats {
     pub stale_epoch: usize,
     /// Duplicate resolutions (already resolved or already advanced).
     pub duplicates: usize,
-    /// Resolutions that never found a registration — driver bug.
+    /// Resolutions that never found a registration, indicating a driver bug.
     pub unknown: usize,
 }
 
 /// Creates acknowledgment handles on pipeline threads.
 ///
 /// One issuer per pipeline thread. Within an epoch, a partition must be
-/// issued from exactly one issuer (the runtime guarantees this: a partition
-/// is owned by exactly one thread) — sequence numbering is issuer-local.
-/// Cloning yields an issuer with fresh sequence state for use by another
-/// thread and another set of partitions.
+/// issued from exactly one issuer; the runtime guarantees this, since a
+/// partition is owned by exactly one thread. Sequence numbering is
+/// issuer-local. Cloning yields an issuer with fresh sequence state for use
+/// by another thread and another set of partitions.
 #[derive(Debug)]
 pub struct AckIssuer {
     ack_tx: crossbeam_channel::Sender<AckMsg>,
@@ -203,17 +203,17 @@ impl Checkpointer {
         // sequences on the epoch change, so a partition may legitimately
         // reappear here.
         self.admitted = partitions.iter().copied().collect();
-        // Publish after trackers exist: an issuer that observes the new
-        // epoch will have its registrations accepted.
+        // Publish after trackers exist, so an issuer that observes the new
+        // epoch has its registrations accepted.
         self.shared_epoch.store(epoch, Ordering::Release);
     }
 
     /// Add partitions to the *current* epoch without disturbing existing
-    /// trackers (additive lane gains — [`SourceEvent::LanesAdded`]). The
+    /// trackers (additive lane gains, [`SourceEvent::LanesAdded`]). The
     /// epoch does not change, so in-flight batches for existing partitions
-    /// keep resolving; only genuinely new partitions may be added — a
-    /// partition revoked mid-epoch can only return in a new epoch, and
-    /// re-adding a live partition would discard its ack state.
+    /// keep resolving. Only new partitions may be added. A partition revoked
+    /// mid-epoch can only return in a new epoch, and re-adding a live
+    /// partition would discard its ack state.
     ///
     /// Ordering contract: as with [`Checkpointer::begin_epoch`], call this
     /// *before* distributing the new lanes to pipeline threads.
@@ -222,18 +222,18 @@ impl Checkpointer {
     ///
     /// Returns a [`FatalError`] if a partition was already admitted to this
     /// epoch, whether it is still live or has since been revoked. Both are
-    /// source bugs, and the revoked case is the dangerous one: its tracker
-    /// is gone, so it *looks* fresh, while issuers keep their sequence
-    /// counters until the epoch changes. Admitting it would pair a
-    /// mid-sequence registration with a tracker expecting zero, and
-    /// [`PartitionTracker::register`] would panic on the controller thread —
+    /// source bugs. The revoked case is the dangerous one. Its tracker is
+    /// gone, so it *looks* fresh, while issuers keep their sequence counters
+    /// until the epoch changes. Admitting it would pair a mid-sequence
+    /// registration with a tracker expecting zero, and
+    /// [`PartitionTracker::register`] would panic on the controller thread,
     /// taking down the pipeline with a message naming neither this method
     /// nor the contract that was broken.
     ///
     /// [`SourceEvent::LanesAdded`]: crate::source::SourceEvent::LanesAdded
     /// [`PartitionTracker::register`]: crate::checkpoint::PartitionTracker::register
     pub fn extend_epoch(&mut self, partitions: &[PartitionId]) -> Result<(), FatalError> {
-        // Check before mutating: a rejected extension must leave the epoch
+        // Check before mutating. A rejected extension must leave the epoch
         // exactly as it was.
         for &p in partitions {
             if self.admitted.contains(&p) {
@@ -282,7 +282,7 @@ impl Checkpointer {
     /// Apply all pending registrations and resolutions.
     ///
     /// Two passes exploit the causal order guaranteed by [`AckIssuer`]
-    /// (registration is sent before the batch's `AckRef` exists): a
+    /// (registration is sent before the batch's `AckRef` exists). A
     /// resolution whose registration has not been drained yet is retried
     /// once after re-draining registrations; if it is still unknown, the
     /// driver is buggy and the resolution is counted and dropped.
@@ -342,7 +342,7 @@ impl Checkpointer {
 
     /// Watermarks that advanced since the last call: `(partition,
     /// committable offset)` pairs ready for `Source::commit`. Empty when
-    /// nothing moved — callers skip the commit entirely.
+    /// nothing moved, so callers skip the commit entirely.
     #[must_use]
     pub fn take_watermarks(&mut self) -> Vec<(PartitionId, i64)> {
         let mut out = Vec::new();
@@ -462,7 +462,7 @@ mod tests {
         // In flight on P0 before the extension...
         let ack = issuer.issue(P0, 99);
         cp.extend_epoch(&[P1]).unwrap();
-        // ...still resolves after it: the epoch did not change.
+        // ...still resolves after it, because the epoch did not change.
         drop(ack);
         drop(issuer.issue(P1, 9));
         let stats = cp.drain();
@@ -481,11 +481,11 @@ mod tests {
     #[test]
     fn extend_epoch_rejects_a_partition_revoked_earlier_in_the_epoch() {
         // The dangerous half of the contract. `revoke` drops the tracker, so
-        // a re-add looks fresh — but issuers keep their sequence counters
+        // a re-add looks fresh, while issuers keep their sequence counters
         // until the epoch changes, so the next batch registers mid-sequence
-        // against a tracker expecting zero. That used to panic inside
-        // `PartitionTracker::register`, on the controller thread, naming
-        // neither this method nor the contract it broke.
+        // against a tracker expecting zero. Without this rejection that panics
+        // inside `PartitionTracker::register`, on the controller thread,
+        // naming neither this method nor the contract it broke.
         let (mut cp, mut issuer) = checkpointer(&[P0]);
         drop(issuer.issue(P0, 9));
         cp.drain();
@@ -498,15 +498,15 @@ mod tests {
             "{err}"
         );
 
-        // Rejected means unchanged: the partition is still revoked, so the
-        // issuer's next batch is discarded as stale rather than registered —
-        // its registration and its resolution both.
+        // Rejected means unchanged. The partition is still revoked, so the
+        // issuer's next batch is discarded as stale rather than registered,
+        // both its registration and its resolution.
         drop(issuer.issue(P0, 19));
         let stats = cp.drain();
         assert_eq!(stats.applied, 0);
         assert_eq!(stats.stale_epoch, 2);
 
-        // A new epoch is how it legitimately returns.
+        // A new epoch is how it returns.
         cp.begin_epoch(&[P0], 2);
         cp.extend_epoch(&[P1]).unwrap();
     }
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn registration_and_ack_in_same_drain() {
-        // Issue and resolve between two drains: the resolution's
+        // Issue and resolve between two drains. The resolution's
         // registration is found via the causality retry.
         let (mut cp, mut issuer) = checkpointer(&[P0]);
         drop(issuer.issue(P0, 9));

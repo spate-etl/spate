@@ -11,7 +11,7 @@
 //!   kubelet restarts the pod.
 //!
 //! The server takes the metrics renderer as a plain closure
-//! ([`RenderFn`]) so it has no dependency on exporter internals. The probes
+//! ([`RenderFn`]) and has no dependency on exporter internals. The probes
 //! are served regardless of the exporter; `/metrics` exists only when a
 //! renderer is supplied, and is a 404 otherwise.
 
@@ -87,7 +87,7 @@ impl HealthState {
     }
 
     /// Beat thread `thread`'s heart. Called once per poll iteration; out of
-    /// range indices are ignored (defensive — sizing is fixed at startup).
+    /// range indices are ignored.
     pub fn heartbeat(&self, thread: usize) {
         if let Some(hb) = self.heartbeats.get(thread) {
             hb.store(self.millis_since_epoch(Instant::now()), Ordering::Relaxed);
@@ -318,8 +318,8 @@ mod tests {
         assert!(health.healthy_at(now));
     }
 
-    /// Minimal HTTP/1.1 GET over the readiness API — avoids requiring
-    /// tokio's `io-util` feature just for this test.
+    /// Minimal HTTP/1.1 GET over the readiness API. Hand-rolled to avoid
+    /// adding tokio's `io-util` feature for one test.
     async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
         let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let req = format!("GET {path} HTTP/1.1\r\nHost: admin\r\nConnection: close\r\n\r\n");
@@ -398,7 +398,7 @@ mod tests {
 
     /// With no exporter there is no exposition, and `/metrics` says so. A 200
     /// carrying an empty body would read to a scraper as a healthy target
-    /// delivering no series, which is the one answer nothing can act on.
+    /// delivering no series.
     #[tokio::test]
     async fn probes_serve_without_an_exporter_and_metrics_does_not() {
         let health = HealthState::new(0, HealthThresholds::default());

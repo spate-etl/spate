@@ -1,25 +1,24 @@
 //! Reusable source-side choreography for coordinated sources.
 //!
-//! A coordinated source owns two very different jobs: reading its data
-//! (lanes, fetchers, offsets — connector-specific) and translating
-//! [`CoordinationEvent`]s into the controller's assignment protocol while
-//! keeping fenced-tenancy bookkeeping straight (source-generic, and where
-//! every subtle interleaving bug lives). [`CoordinationDriver`] owns the
-//! second job wholesale: a source embeds one next to a [`SplitSource`]
+//! A coordinated source owns two jobs: reading its data (lanes, fetchers,
+//! offsets, all connector-specific) and translating [`CoordinationEvent`]s
+//! into the controller's assignment protocol while keeping fenced-tenancy
+//! bookkeeping straight (source-generic). [`CoordinationDriver`] owns the
+//! second job. A source embeds one next to a [`SplitSource`]
 //! implementation and delegates `poll_events`/`commit` to it.
 //!
 //! # Tenancies, lanes, partitions
 //!
-//! Every continuous ownership span of a split — from `Gained` to whatever
-//! ends it — is one **tenancy**, and each tenancy gets a fresh, never
-//! reused [`PartitionId`] *and* a fresh, never reused [`LaneId`]: a lane
+//! Every continuous ownership span of a split (from `Gained` to whatever
+//! ends it) is one **tenancy**, and each tenancy gets a fresh, never
+//! reused [`PartitionId`] and a fresh, never reused [`LaneId`]. A lane
 //! materializes exactly once, when its tenancy's split is staged for
 //! opening, and lives untouched until the tenancy ends. Gains are
-//! additive ([`SourceEvent::LanesAdded`]) — flowing lanes are never
-//! drained because a peer's split arrived. Watermarks come back keyed by
-//! partition, so a late drain-commit from a lane that lost its split
-//! resolves to a retired tenancy and is skipped — a stale write cannot be
-//! folded, committed, or resurrected by construction.
+//! additive ([`SourceEvent::LanesAdded`]); a peer's split arriving never
+//! drains flowing lanes. Watermarks come back keyed by partition, so a
+//! late drain-commit from a lane that lost its split resolves to a retired
+//! tenancy and is skipped. A stale write is never folded, committed, or
+//! resurrected.
 //!
 //! # Event choreography
 //!
@@ -58,8 +57,8 @@ use std::fmt;
 use std::time::Duration;
 
 /// Everything the driver hands a source when a split's lane is
-/// materialized — exactly once per tenancy, when the gain is staged into
-/// a [`SourceEvent::LanesAdded`].
+/// materialized. This happens exactly once per tenancy, when the gain is
+/// staged into a [`SourceEvent::LanesAdded`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SplitOpening<'a> {
@@ -71,14 +70,14 @@ pub struct SplitOpening<'a> {
     /// Lane id minted for this tenancy's lifetime; never reused by this
     /// source.
     pub lane: LaneId,
-    /// Stable partition id for this tenancy — the key under which this
+    /// Stable partition id for this tenancy, the key under which this
     /// split's watermarks come back to [`CoordinationDriver::commit`].
     pub partition: PartitionId,
     /// Fencing token of the current tenancy.
     pub epoch: LeaseEpoch,
     /// Wakes the control-plane wait. Clone it into the lane and signal it
-    /// the moment the lane decides end-of-input or reports poison —
-    /// otherwise the driver only notices between waits and the split's
+    /// the moment the lane decides end-of-input or reports poison.
+    /// Otherwise the driver notices only between waits, and the split's
     /// completion waits out an idle timeout.
     pub waker: &'a ControlWaker,
 }
@@ -86,7 +85,7 @@ pub struct SplitOpening<'a> {
 /// What the driver needs from the embedding source.
 ///
 /// Implement it on the source's lane-assembly context (the sub-struct that
-/// holds what lane construction needs), not on the source itself — the
+/// holds what lane construction needs), not on the source itself. The
 /// driver lives beside that context as a sibling field, so both can be
 /// borrowed disjointly.
 pub trait SplitSource {
@@ -105,9 +104,9 @@ pub trait SplitSource {
     /// never opened, and the driver reports it as poison: one delivery
     /// attempt is consumed, the split is handed back for another instance,
     /// and at the attempt cap it is quarantined. The error's class then
-    /// decides this run — [`ErrorClass::Fatal`] stops the pipeline, which is
-    /// the honest end for progress nothing can reconcile; any other class is
-    /// logged and the run continues with the split left to the coordinator.
+    /// decides this run. [`ErrorClass::Fatal`] stops the pipeline; any other
+    /// class is logged and the run continues with the split left to the
+    /// coordinator.
     fn validate_resume(
         &self,
         split: &SplitSpec,
@@ -117,10 +116,10 @@ pub trait SplitSource {
         Ok(())
     }
 
-    /// Snapshot the split's committable progress at an acked watermark:
-    /// the opaque resume state plus whether that watermark completes the
-    /// split (fully delivered **and** fully acknowledged — the source owns
-    /// its eof/emitted accounting).
+    /// Snapshot the split's committable progress at an acked watermark. The
+    /// snapshot carries the opaque resume state plus whether that watermark
+    /// completes the split (fully delivered **and** fully acknowledged; the
+    /// source owns its eof/emitted accounting).
     fn encode_commit(
         &mut self,
         split: &SplitId,
@@ -128,16 +127,16 @@ pub trait SplitSource {
     ) -> Result<SplitProgress, SourceError>;
 
     /// Completion sweep for an owned split with no new watermark this
-    /// tick (empty splits; tails acked exactly at the previous commit):
-    /// `Some(terminal progress)` when complete, `None` while data is in
-    /// flight.
+    /// tick (empty splits; tails acked exactly at the previous commit).
+    /// Returns `Some(terminal progress)` when complete, `None` while data
+    /// is in flight.
     fn sweep(&mut self, split: &SplitId) -> Result<Option<SplitProgress>, SourceError>;
 
     /// The split's lane is being retired (lost, fenced, completed, or
-    /// shutdown): detach its fetcher — never abort it, the pipeline thread
-    /// may still be draining the lane. Must not block.
+    /// shutdown). Detach its fetcher; never abort it, because the pipeline
+    /// thread may still be draining the lane. Must not block.
     ///
-    /// This is the end of the tenancy: the driver never calls
+    /// This is the end of the tenancy. The driver never calls
     /// [`SplitSource::encode_commit`] or [`SplitSource::sweep`] for the
     /// split afterwards (its tenancy is retired first, and retired
     /// tenancies absorb late watermarks), so the source may drop the
@@ -147,61 +146,61 @@ pub trait SplitSource {
     /// Splits whose lanes decided end-of-input since the last call (the
     /// edge, not the level). The driver surfaces them as
     /// [`SourceEvent::CommitReady`] so the runtime chases their final acks
-    /// instead of waiting out the commit tick — the split then completes
+    /// instead of waiting out the commit tick. The split then completes
     /// (and frees its working-set slot) within milliseconds of its last
-    /// record becoming sink-durable. Purely a latency hint; the default
+    /// record becoming sink-durable. A latency hint only; the default
     /// reports none.
     fn take_finishing(&mut self) -> Vec<SplitId> {
         Vec::new()
     }
 
-    /// Begin a cooperative revocation of an owned split: stop its intake at a
+    /// Begin a cooperative revocation of an owned split. Stop its intake at a
     /// safe boundary while **keeping** its commit state, so the tail can
     /// still be chased to a final fenced commit. Unlike
     /// [`close_split`](SplitSource::close_split) (which ends the tenancy and
     /// lets the source drop the split's state), the split stays commit- and
-    /// sweep-adjacent here — the driver keeps committing its acked
+    /// sweep-adjacent here. The driver keeps committing its acked
     /// watermarks and then calls [`drain_ready`](SplitSource::drain_ready)
     /// until the drain finishes.
     ///
     /// Return `true` to accept the revocation, `false` to decline it (the
     /// default). **Contract: return `false` for any split this source has
-    /// not opened or has already closed or completed** — the driver also
+    /// not opened or has already closed or completed.** The driver also
     /// guards this (it declines tenancies without an open lane and feeds
     /// the decline back to the backend), but the source must not rely on
     /// that alone.
     ///
-    /// Declining is safe but not free. The split still leaves — a
-    /// revocation is the leader's decision, not a proposal — so the backend
-    /// forces the release instead and this split's uncommitted tail replays
-    /// under its next owner. (The exception is the backend's to decide, not
-    /// the source's: a revocation the leader takes back before the decline
-    /// lands is cancelled, and then the split stays and keeps being read.)
-    /// A source that *can* stop intake at a safe boundary should, because
-    /// that is the difference between a replay-free move and a
+    /// Declining is safe but not free. The split still leaves, because a
+    /// revocation is the leader's decision; the backend forces the release
+    /// instead and this split's uncommitted tail replays under its next
+    /// owner. (The backend cancels a revocation the leader takes back
+    /// before the decline lands, and then the split stays and keeps being
+    /// read.) A source that *can* stop intake at a safe boundary should,
+    /// because that is the difference between a replay-free move and a
     /// bounded-duplicate one.
     ///
     /// While a split is handing off, [`encode_commit`](SplitSource::encode_commit)
-    /// must never report it `completed` — a drain cut can look terminal to
-    /// the source (everything emitted is acked) but the split is
+    /// must never report it `completed`. A drain cut can look terminal to
+    /// the source (everything emitted is acked) while the split is
     /// half-read; the driver strips a `completed` flag it sees here and
-    /// logs an error, so a conforming source should never trigger it.
+    /// logs an error.
     fn begin_revoke(&mut self, split: &SplitId) -> bool {
         let _ = split;
         false
     }
 
-    /// Poll a handing-off split for its final progress: `Some(progress)`
-    /// with `completed: false` once every record it emitted is acked **and**
-    /// that watermark is committed, so the resume point handed to the next
-    /// owner covers everything this instance produced (a replay-free
-    /// transfer); `None` while any of that tail is still in flight, to be
-    /// retried on the next poll. Never reports `completed` — a revocation gives
-    /// the split away, it does not finish it. The default reports `None`.
+    /// Poll a handing-off split for its final progress. Returns
+    /// `Some(progress)` with `completed: false` once every record it emitted
+    /// is acked **and** that watermark is committed, so the resume point
+    /// handed to the next owner covers everything this instance produced (a
+    /// replay-free transfer); `None` while any of that tail is still in
+    /// flight, to be retried on the next poll. Never reports `completed`; a
+    /// revocation gives the split away rather than finishing it. The default
+    /// reports `None`.
     ///
     /// **Level-triggered, unlike [`take_finishing`](SplitSource::take_finishing):**
     /// keep returning `Some` on every poll until the driver retires the
-    /// split — the final store commit can defer on a store hiccup and is
+    /// split. The final store commit can defer on a store hiccup and is
     /// re-attempted from a fresh `drain_ready` answer, so an
     /// edge-triggered implementation would stall the drain until the
     /// backend forced it.
@@ -221,12 +220,12 @@ enum TenancyState {
     /// Owned; lane live or staged to open.
     Live,
     /// Owned, but intake has stopped at a safe boundary for a cooperative
-    /// revocation: the lane is draining toward one final fenced commit. Still
-    /// commit-eligible (tick commits keep folding its acked watermarks) and
-    /// never swept — a revocation gives the split away rather than completing
-    /// it. Becomes `Retired` (drained, so barrier-less) once that final
-    /// commit lands, or fenced-`Retired` (the loss path) if a peer fences
-    /// it mid-drain.
+    /// revocation, and the lane is draining toward one final fenced commit.
+    /// Still commit-eligible (tick commits keep folding its acked
+    /// watermarks) and never swept, because a revocation gives the split
+    /// away rather than completing it. Becomes `Retired` (drained, so
+    /// barrier-less) once that final commit lands, or fenced-`Retired` (the
+    /// loss path) if a peer fences it mid-drain.
     Draining,
     /// Ownership over (lost, fenced, failed, completed, handed off); entry
     /// retained only to absorb late watermarks until its revocation is
@@ -244,12 +243,12 @@ struct Tenancy {
     fenced: bool,
     /// Resume cache: the `Gained` carry, then every acked commit fold.
     /// Acked means sink-durable, so respawning from it can only skip data
-    /// that is already safe — at-least-once holds even when the durable
+    /// that is already safe. At-least-once holds even when the durable
     /// store lags a Retryable commit behind.
     progress: Option<SplitProgress>,
     /// Terminal progress reached the store; nothing further to commit.
     completed: bool,
-    /// This tenancy released its split through a cooperative revocation: its
+    /// This tenancy released its split through a cooperative revocation. Its
     /// final commit is durable, so the peer resumes replay-free. Routes the
     /// lane out through the barrier-less retired path, exactly like
     /// `completed` (nothing is in flight behind a drained revocation).
@@ -338,10 +337,10 @@ impl CoordinationDriver {
         self
     }
 
-    /// Join the job. Returns the event the source must return from the
-    /// *same* `poll_events` call: the empty `LanesAssigned` ready signal
-    /// (it bumps the controller's assignment epoch and marks the pipeline
-    /// running while splits are still being claimed).
+    /// Join the job. Returns the empty `LanesAssigned` ready signal, which
+    /// the source must return from the *same* `poll_events` call. It bumps
+    /// the controller's assignment epoch and marks the pipeline running
+    /// while splits are still being claimed.
     pub fn start<L>(
         &mut self,
         planner: Box<dyn SplitPlanner>,
@@ -361,12 +360,12 @@ impl CoordinationDriver {
     ) -> Result<SourceEvent<S::Lane>, SourceError> {
         assert!(self.started, "poll_events before start");
 
-        // Staged work can be consumed without producing an event — a batch
-        // of gains every one of which was retired before it could open — and
+        // Staged work can be consumed without producing an event (a batch of
+        // gains, every one of which was retired before it could open), and
         // then the drain has to look again. Loop rather than recurse: the
-        // fall-through below runs a second `coordinator.poll()`, so under
-        // recursion the depth tracked how many such batches a backend
-        // produced back to back, with nothing structural bounding it.
+        // fall-through below runs a second `coordinator.poll()`, so recursion
+        // depth would track how many such batches a backend produces back to
+        // back, with nothing structural bounding it.
         let mut park = timeout;
         loop {
             // 1. Losses first: stop lost lanes before anything else runs.
@@ -386,15 +385,15 @@ impl CoordinationDriver {
             // Reaching here means every queued revocation has been delivered
             // and the controller has drained + committed those lanes (its
             // revoke choreography is synchronous), so retired tenancies have
-            // absorbed every late watermark they can ever see. Prune them —
-            // and only them: `Live` tenancies are owned, and `Draining`
-            // ones are still draining toward their final commit and must
-            // survive to be advanced.
+            // absorbed every late watermark they can ever see. Prune only
+            // those: `Live` tenancies are owned, and `Draining` ones are
+            // still draining toward their final commit and must survive to
+            // be advanced.
             self.tenancies
                 .retain(|_, t| t.state != TenancyState::Retired);
 
             // 2. Staged gains: additive lanes for the newly-gained splits
-            // only. Existing lanes are untouched — a routine gain must never
+            // only. Existing lanes are untouched; a routine gain must never
             // drain flowing lanes.
             if !self.pending_open.is_empty() {
                 let lanes = self.open_pending(source)?;
@@ -435,7 +434,7 @@ impl CoordinationDriver {
                 }
             }
 
-            // 4. Drain the coordinator (never blocks — the wait is ours, at
+            // 4. Drain the coordinator (never blocks; the wait is ours, at
             // the end of this function).
             let events = self.coordinator.poll().map_err(as_source_error)?;
             // Apply every event even after one fails, and surface one
@@ -498,8 +497,8 @@ impl CoordinationDriver {
         }
 
         // 6. Nothing to report: park here, not inside the backend. Both
-        // producers signal the same waker — the backend when it has events,
-        // a lane the moment it decides end-of-input or reports poison — so
+        // producers signal the same waker (the backend when it has events,
+        // a lane the moment it decides end-of-input or reports poison), so
         // a completion surfaces in microseconds instead of waiting out the
         // remainder of this timeout. The sender half lives on `self`, so
         // the channel can never disconnect and this can never spin.
@@ -543,7 +542,7 @@ impl CoordinationDriver {
         reason: &str,
     ) -> Result<(), SourceError> {
         let Some(&partition) = self.by_split.get(split) else {
-            return Ok(()); // already lost — nothing to report
+            return Ok(()); // already lost, nothing to report
         };
         match self.coordinator.fail(split, reason) {
             Ok(()) => {}
@@ -633,7 +632,7 @@ impl CoordinationDriver {
                 {
                     // Report before the rejection leaves. No tenancy was
                     // recorded, so nothing else here releases the split and
-                    // the backend keeps renewing its lease — dropping the
+                    // the backend keeps renewing its lease. Dropping the
                     // rejection on the floor holds a split this instance
                     // never reads and never hands back.
                     self.report_rejected_gain(&split.id, &e);
@@ -660,23 +659,22 @@ impl CoordinationDriver {
             CoordinationEvent::RevokeRequested { split } => {
                 // The leader wants this split back. Accept only a split we
                 // hold live with an OPEN lane, un-fenced and not yet
-                // completed — a tenancy gained but not yet opened has no
-                // intake to stop and no drain to finish, and accepting it
-                // would strand it in `Draining` forever — and only if the
-                // source can stop its intake at a safe boundary. A refusal
-                // is declined back to the backend so it forces the release
-                // now instead of waiting out its drain deadline; the split
+                // completed, and only if the source can stop its intake at a
+                // safe boundary. A tenancy gained but not yet opened has no
+                // intake to stop and no drain to finish, so accepting it
+                // would strand it in `Draining` forever. A refusal is
+                // declined back to the backend so it forces the release now
+                // instead of waiting out its drain deadline; the split
                 // leaves either way.
                 //
                 // A repeat request for a tenancy already draining is
                 // satisfied by the drain in flight, so it is accepted
-                // silently — no second `begin_revoke`, no decline. Declining
-                // would tell the backend to force a handoff that is
-                // progressing fine, costing exactly the replay the
-                // cooperative path exists to avoid. Re-emission is reachable
-                // because the backend cancels a revocation the leader takes
-                // back: the leader can drop a split, restore it, drop it
-                // again.
+                // silently, with no second `begin_revoke` and no decline.
+                // Declining would tell the backend to force a handoff that is
+                // progressing fine, costing the replay the cooperative path
+                // avoids. Re-emission is reachable because the backend
+                // cancels a revocation the leader takes back, so the leader
+                // can drop a split, restore it, and drop it again.
                 if let Some(&partition) = self.by_split.get(&split)
                     && self
                         .tenancies
@@ -727,10 +725,8 @@ impl CoordinationDriver {
             CoordinationEvent::AllComplete => {
                 // A worker can watch a whole bounded job complete without
                 // ever holding a split: the job finished before this
-                // instance's first rebalance window (short bounded job),
-                // or the fleet simply has more replicas than splits.
-                // Normal either way — but without a line here it reads as
-                // a silent no-op instance, so say what happened.
+                // instance's first rebalance window (short bounded job), or
+                // the fleet has more replicas than splits. Normal either way.
                 if self.next_partition == 0 {
                     tracing::info!(
                         "coordinated job completed without this instance holding any split — \
@@ -768,8 +764,8 @@ impl CoordinationDriver {
         let split = tenancy.split.id.clone();
         if let Some(lane) = tenancy.lane.take() {
             if tenancy.completed || tenancy.handed_off {
-                // Fully delivered, acked, and committed — or drained and
-                // handed off with its final commit durable: nothing can be
+                // Fully delivered, acked, and committed, or drained and
+                // handed off with its final commit durable. Nothing can be
                 // in flight, so the lane leaves without a drain barrier.
                 self.pending_retired.push(lane);
             } else {
@@ -782,11 +778,11 @@ impl CoordinationDriver {
     /// Materialize lanes for the staged gains only. Each tenancy opens
     /// exactly once, with a lane id minted for its lifetime; a staged
     /// tenancy that ended before it could open (gained then immediately
-    /// lost or fenced) is skipped — its retirement already handled it.
+    /// lost or fenced) is skipped, its retirement having already handled it.
     ///
     /// All-or-nothing: a failure part way through undoes the whole batch
-    /// and re-stages it. Anything else strands the lanes already built —
-    /// they never reach the runtime, yet their tenancies stay `Live`
+    /// and re-stages it. Anything else strands the lanes already built.
+    /// They never reach the runtime, yet their tenancies stay `Live`
     /// holding a lane id, which the `lane.is_some()` guard then skips
     /// forever. The splits would keep their leases, heartbeated and
     /// unreadable, and the job would stall instead of failing.
@@ -860,8 +856,8 @@ impl CoordinationDriver {
     }
 
     /// Advance every in-flight cooperative revocation. For each `Draining`
-    /// tenancy whose drain has finished — [`SplitSource::drain_ready`]
-    /// returns the final progress once its tail is acked and committed —
+    /// tenancy whose drain has finished ([`SplitSource::drain_ready`]
+    /// returns the final progress once its tail is acked and committed),
     /// take one last fenced commit (never `completed`; a revocation gives the
     /// split away rather than finishing it) and dispose of it:
     ///
@@ -881,7 +877,7 @@ impl CoordinationDriver {
         for partition in draining {
             let split = self.tenancies[&partition].split.id.clone();
             let Some(progress) = source.drain_ready(&split)? else {
-                continue; // tail still in flight — retry next poll
+                continue; // tail still in flight, retry next poll
             };
             debug_assert!(
                 !progress.completed,
@@ -893,9 +889,9 @@ impl CoordinationDriver {
     }
 
     /// The disposition of one fenced commit attempt. Tick, sweep, and
-    /// drain commits triage the backend's three answers identically; only
-    /// what a durable `Ok` *means* differs, so each caller owns just that
-    /// arm and shares the fence/retry handling here.
+    /// drain commits triage the backend's three answers identically; each
+    /// caller owns only the durable arm and shares the fence/retry
+    /// handling here.
     fn try_commit<S: SplitSource>(
         &mut self,
         source: &mut S,
@@ -935,9 +931,9 @@ impl CoordinationDriver {
         // A handing-off split's drain cut can look terminal to the source
         // (every record it emitted is acked), but committing it
         // `completed: true` would mark a half-read split permanently done
-        // and its next owner would never resume it — silent data loss. The
-        // spate-s3 source guards this itself; enforce it centrally so a
-        // conforming third-party source cannot fall into the trap.
+        // and its next owner would never resume it. That is silent data
+        // loss, so the guard runs here for every source rather than being
+        // left to each one.
         let progress = if progress.completed
             && self
                 .tenancies
@@ -1016,7 +1012,7 @@ impl CoordinationDriver {
                     .release_drained(std::slice::from_ref(split))
                 {
                     // Liveness cost only: the lease expires on its own and a
-                    // peer takes over — no data is at risk. Retire anyway so
+                    // peer takes over, with no data at risk. Retire anyway so
                     // the lane leaves this instance.
                     tracing::warn!(
                         split = %split,
@@ -1084,7 +1080,7 @@ mod tests {
     use std::time::Instant;
 
     // ------------------------------------------------------------------
-    // Scripted coordinator double (the shape spate-test later publishes).
+    // Scripted coordinator double (the shape spate-test publishes).
 
     #[derive(Default)]
     struct ScriptState {
@@ -1092,7 +1088,7 @@ mod tests {
         commit_outcomes: HashMap<String, VecDeque<CoordinationErrorKind>>,
         commits: Vec<(SplitId, SplitProgress)>,
         fail_outcomes: HashMap<String, VecDeque<CoordinationErrorKind>>,
-        /// Every `fail` call, including the ones `fail_outcomes` refuses —
+        /// Every `fail` call, including the ones `fail_outcomes` refuses;
         /// the attempt is what a test asserts the driver made.
         fails: Vec<(SplitId, String)>,
         released: Vec<SplitId>,
@@ -1297,7 +1293,7 @@ mod tests {
         sweeps: Rc<RefCell<HashMap<String, SplitProgress>>>,
         complete_at: HashMap<String, i64>,
         /// Split ids whose carried progress `validate_resume` refuses, and
-        /// the class each refusal carries — so a batch can mix a drifted
+        /// the class each refusal carries, so a batch can mix a drifted
         /// split with a sound one, and one class with another.
         reject_resume: HashMap<String, ErrorClass>,
         finishing: Vec<String>,
@@ -1309,7 +1305,7 @@ mod tests {
         accept_revoke: HashSet<String>,
         /// Every `begin_revoke` call, in order (accepted or declined).
         begin_revoke_calls: Vec<String>,
-        /// Every `drain_ready` call, in order — proves a split did (or did
+        /// Every `drain_ready` call, in order. Proves a split did (or did
         /// not) transition to `Draining`.
         drain_ready_calls: Vec<String>,
         /// Scripted `drain_ready` results, sticky per split (returned on
@@ -1426,8 +1422,8 @@ mod tests {
         d.poll_events(s, Duration::ZERO).unwrap()
     }
 
-    /// A source whose `validate_resume` refuses exactly these splits, the
-    /// way a connector is told to: classed `Fatal`.
+    /// A source whose `validate_resume` refuses exactly these splits,
+    /// classed `Fatal` the way a connector is told to.
     fn rejecting(splits: &[&str]) -> TestSource {
         TestSource {
             reject_resume: splits
@@ -1443,12 +1439,11 @@ mod tests {
 
     #[test]
     fn a_signal_cuts_the_control_plane_park_short() {
-        // The driver owns the control-plane wait precisely so that both
-        // producers can end it: the backend, and a *lane* deciding
-        // end-of-input on a pipeline thread. If a `wake()` call site is
-        // ever dropped, the symptom is silent — completions simply wait out
-        // an idle timeout again — so assert the park is interruptible
-        // rather than trusting the wiring.
+        // The driver owns the control-plane wait so that both producers can
+        // end it: the backend, and a *lane* deciding end-of-input on a
+        // pipeline thread. If a `wake()` call site is ever dropped, the
+        // symptom is silent (completions wait out an idle timeout again), so
+        // assert the park is interruptible rather than trusting the wiring.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
@@ -1469,7 +1464,7 @@ mod tests {
         );
 
         // A signal landing mid-park ends it. The event itself surfaces on
-        // the following call — the drain runs at the top of `poll_events` —
+        // the following call (the drain runs at the top of `poll_events`),
         // so this asserts the wakeup, not the delivery.
         let signaller = script.clone();
         let handle = std::thread::spawn(move || {
@@ -1495,8 +1490,8 @@ mod tests {
         // `open_split` failing part way through must not abandon the lanes
         // already built: they never reach the runtime, yet their tenancies
         // would keep a lane id, be skipped by the `lane.is_some()` guard on
-        // every later attempt, and hold their leases — heartbeated,
-        // unreadable, and a stalled job rather than a failed one.
+        // every later attempt, and hold their leases, heartbeated and
+        // unreadable, making a stalled job rather than a failed one.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
@@ -1567,13 +1562,13 @@ mod tests {
             "a routine gain must never detach flowing fetchers"
         );
 
-        // The commit window that killed the pipeline pre-fix: a's acked
-        // watermark lands right after the gain. It must fold normally.
+        // The narrow commit window: a's acked watermark lands right after
+        // the gain. It must fold normally.
         d.commit(&mut s, &[(a_partition, 42)]).unwrap();
         assert_eq!(s.encoded, vec![("a".to_string(), 42)]);
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].0.as_str(), "a");
-        // a's lane is the original — never re-minted by the gain.
+        // a's lane is the original, never re-minted by the gain.
         assert!(
             d.assignments()
                 .contains(&(SplitId::new("a").unwrap(), LaneId(0)))
@@ -1670,8 +1665,8 @@ mod tests {
         assert!(s.encoded.is_empty());
 
         // ...and the mid-cycle Lost that follows the fence is a no-op,
-        // while a re-gain (higher epoch) starts a fresh tenancy — added
-        // beside b's untouched live lane, never draining it.
+        // while a re-gain (higher epoch) starts a fresh tenancy, added
+        // beside b's untouched live lane and never draining it.
         script.push(vec![
             CoordinationEvent::Lost {
                 split: SplitId::new("a").unwrap(),
@@ -1909,8 +1904,8 @@ mod tests {
         assert_eq!(script.fails().len(), 1);
 
         // A refused report leaves the split held here with no tenancy
-        // behind it, which is the state this whole path exists to avoid —
-        // so it is re-offered until the backend takes it, and then stops.
+        // behind it, so it is re-offered until the backend takes it, and
+        // then stops.
         poll(&mut d, &mut s);
         assert_eq!(script.fails().len(), 2);
         poll(&mut d, &mut s);
@@ -1996,7 +1991,7 @@ mod tests {
         script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
         poll(&mut d, &mut s);
 
-        // a's drain has finished — tail acked and committed — so
+        // a's drain has finished (tail acked and committed), so
         // `drain_ready` offers the final (non-terminal) progress.
         s.ready_progress
             .borrow_mut()
@@ -2204,7 +2199,7 @@ mod tests {
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
 
         // Asked, refused, and the refusal handed back to the backend exactly
-        // once — naming the split, so the backend cools down that split only.
+        // once, naming the split, so the backend cools down that split only.
         assert_eq!(s.begin_revoke_calls, ["a"]);
         assert_eq!(
             script.declined(),
@@ -2221,12 +2216,12 @@ mod tests {
 
     #[test]
     fn a_repeated_revoke_request_mid_drain_is_not_declined() {
-        // `RevokeRequested` is documented idempotent, and re-emission is real:
-        // the backend cancels a revocation the leader takes back, so a leader
-        // can drop a split, restore it, and drop it again. Answering the
-        // second request with a decline would tell the backend to force a
-        // handoff that is draining fine — the replay the cooperative path
-        // exists to avoid.
+        // `RevokeRequested` is documented idempotent, and re-emission is
+        // reachable: the backend cancels a revocation the leader takes back,
+        // so a leader can drop a split, restore it, and drop it again.
+        // Answering the second request with a decline would tell the backend
+        // to force a handoff that is draining fine, costing the replay the
+        // cooperative path avoids.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
@@ -2326,7 +2321,7 @@ mod tests {
         // (every record it emitted is acked), but committing it
         // `completed: true` would mark a half-read split permanently done and
         // its next owner would never resume it. The central guard must strip
-        // the flag — while still landing the commit (the watermark is acked).
+        // the flag while still landing the commit (the watermark is acked).
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {

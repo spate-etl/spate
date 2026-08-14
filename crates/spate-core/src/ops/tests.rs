@@ -113,7 +113,7 @@ impl RowEncoder<SubF> for SubEncoder {
 
 /// A second borrowed destination family for the split-terminal tests: stores
 /// the event key. Distinct row type from [`SubEvent`], so the two branches of
-/// a split are genuinely heterogeneous.
+/// a split are heterogeneous.
 #[derive(Debug)]
 struct KeyEvent<'buf> {
     key: &'buf [u8],
@@ -154,7 +154,7 @@ impl RowEncoder<Owned<Vec<u8>>> for VecEncoder {
 
 /// A mock **columnar** encoder: buffers rows inside `self` during `encode`
 /// (writing nothing to the per-chunk buffer), then emits one self-describing
-/// block — `[u32 row_count]` followed by length-prefixed rows — in
+/// block (`[u32 row_count]` followed by length-prefixed rows) in
 /// `finish_chunk`. Stands in for the ClickHouse Native encoder to prove the
 /// terminal stage drives the columnar contract: per-shard buffering, the
 /// `buffered_bytes` seal threshold, and `finish_chunk` at every seal.
@@ -293,7 +293,7 @@ fn drain_rows(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<Vec<u8>
         rows.extend(decode_rows(&chunk.frame));
         // These tests play the sink: consuming a chunk here stands in for
         // a durable write, so resolve its acknowledgments as delivered
-        // (an AckSet fails them on plain drop — teardown safety).
+        // (an AckSet fails them on plain drop, for teardown safety).
         chunk.acks.deliver();
     }
     rows
@@ -771,7 +771,8 @@ fn record_router_routes_flat_map_children_independently_by_payload() {
         .build();
 
     // ONE parent record: all four children carry identical RecordMeta, yet
-    // route by their own chunk length — even to shard 0, odd to shard 1.
+    // route by their own chunk length, with even to shard 0 and odd to
+    // shard 1.
     let bufs = payloads(&["k:aa|b|cc|d"]);
     let (mut batch, _rx) = TestBatch::new(&bufs);
     assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
@@ -854,7 +855,7 @@ fn columnar_encoder_seals_one_block_per_chunk_at_flush() {
     );
     assert!(rxs[0].try_recv().is_err(), "exactly one block");
 
-    // Delivering the block resolves the buffered rows' acks — never before.
+    // Delivering the block resolves the buffered rows' acks, never before.
     chunk.acks.deliver();
     drop(batch);
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
@@ -921,7 +922,7 @@ fn columnar_blocks_are_per_shard_pure_under_interleaving() {
         )
         .build();
 
-    // Offsets 0..6 route 0,1,0,1,0,1 — interleaved across two per-shard
+    // Offsets 0..6 route 0,1,0,1,0,1, interleaved across two per-shard
     // encoders. A single shared encoder would mix these into one block.
     let bufs = payloads(&["s0a", "s1a", "s0b", "s1b", "s0c", "s1c"]);
     let (mut batch, _rx) = TestBatch::new(&bufs);
@@ -1094,7 +1095,7 @@ fn split_unmatched_fail_stops_the_pipeline() {
 #[test]
 fn split_holds_watermark_until_every_branch_is_written() {
     // A single source batch fans across two branches; the batch resolves
-    // Delivered only once BOTH branches' chunks are durably written — the
+    // Delivered only once BOTH branches' chunks are durably written, the
     // multi-sink at-least-once contract, straight out of the shared AckRef.
     let (sub_q, mut sub_rx) = shard_queues(1, 64);
     let (key_q, mut key_rx) = shard_queues(1, 64);
@@ -1159,7 +1160,7 @@ fn split_holds_watermark_until_every_branch_is_written() {
 fn split_one_branch_failure_fails_the_whole_batch() {
     // Worst-status merge: if any branch's write is abandoned (its chunk's
     // AckSet drops undelivered), the source batch resolves Failed so its
-    // offsets never commit — even though the other branch wrote successfully.
+    // offsets never commit, even though the other branch wrote successfully.
     let (sub_q, mut sub_rx) = shard_queues(1, 64);
     let (key_q, mut key_rx) = shard_queues(1, 64);
     let budget = Arc::new(InflightBudget::new());
@@ -1265,7 +1266,7 @@ fn stages_flush_batch_metrics() {
 fn dropping_a_blocked_chain_fails_unsent_acks() {
     // Queue capacity 1 and per-row chunk sealing: the first chunk fills the
     // queue, the second parks. Tearing the chain down without draining must
-    // resolve the batch Failed — never Delivered — or offsets would commit
+    // resolve the batch Failed, never Delivered, or offsets would commit
     // for rows that no sink ever wrote.
     let (queues, rxs) = shard_queues(1, 1);
     let budget = Arc::new(InflightBudget::new());

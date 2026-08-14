@@ -1,11 +1,11 @@
 //! Error taxonomy and per-stage error policies.
 //!
-//! Three classes of failure exist in a pipeline (ADR-0010):
-//! *retryable* (transient I/O — handled by the sink retry layer),
-//! *record-level* (a bad payload or failed user code — subject to
-//! [`ErrorPolicy`]), and *fatal* (invariant violations — the pipeline
-//! stops). Record-level policies are deliberately limited to `Skip` and
-//! `Fail`; every skip is surfaced through metrics.
+//! A pipeline failure falls into one of three classes (ADR-0010):
+//! *retryable* (transient I/O, handled by the sink retry layer),
+//! *record-level* (a bad payload or failed user code, subject to
+//! [`ErrorPolicy`]), and *fatal* (invariant violations; the pipeline
+//! stops). Record-level policies are limited to `Skip` and `Fail`; every
+//! skip is surfaced through metrics.
 
 /// What to do when a record fails in a stage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,11 +60,11 @@ pub enum DeserError {
         /// Human-readable cause.
         reason: String,
     },
-    /// The payload cannot be decoded *yet*: a required resource (typically
+    /// The payload cannot be decoded *yet*. A required resource (typically
     /// a schema fetched from a registry) is still being obtained, and the
     /// deserializer has already triggered the asynchronous work that will
     /// make it available. The chain reports the batch `Blocked` at this
-    /// payload and the driver's retry loop re-pushes it — the record is
+    /// payload and the driver's retry loop re-pushes it. The record is
     /// neither dropped nor counted as an error, and the stage's
     /// [`ErrorPolicy`] does not apply.
     ///

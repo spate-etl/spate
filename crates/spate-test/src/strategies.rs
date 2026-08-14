@@ -43,7 +43,7 @@ pub fn lane_layout(
 }
 
 /// One step of a generated source script. Indices are relative to a
-/// [`lane_layout`] — the consuming test resolves them and skips steps that
+/// [`lane_layout`]; the consuming test resolves them and skips steps that
 /// are invalid in its current state (e.g. revoking an already-revoked
 /// lane).
 #[derive(Clone, Debug)]

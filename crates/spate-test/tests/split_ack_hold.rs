@@ -5,14 +5,13 @@
 //! at the full batch-issuance rate while the hot branch delivers normally.
 //!
 //! The only flush path for a partial buffer is `flush_terminal()` via the
-//! driver's `idle_flush`, which requires an *empty* poll plus an idle
-//! period — unreachable while data flows. The first test models continuous
-//! ingest (a source under sustained load never polls empty) and
-//! asserts the healthy contract: the watermark passes a low-volume-branch
-//! record while load continues. The second test is the control: identical
-//! topology, but the load stops, `idle_flush` fires, and everything
-//! commits — proving the stall is purely load-gated, not data loss or a
-//! slow sink.
+//! driver's `idle_flush`, which requires an *empty* poll plus an idle period
+//! and is unreachable while data flows. The first test models continuous
+//! ingest (a source under sustained load never polls empty) and asserts the
+//! healthy contract: the watermark passes a low-volume-branch record while
+//! load continues. The second test is the control: identical topology, but
+//! the load stops, `idle_flush` fires, and everything commits, showing the
+//! stall is load-gated rather than data loss or a slow sink.
 
 // The sample table on stderr is the test's diagnostic payload on failure.
 #![allow(clippy::print_stderr)]
@@ -33,7 +32,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 /// Fixed admin port for the sustained-load test. Only this test binds an
-/// admin listener — the control test asks for none — so even `cargo test`'s
+/// admin listener (the control test asks for none), so `cargo test`'s
 /// in-process test concurrency cannot collide on it.
 const ADMIN: &str = "127.0.0.1:39184";
 
@@ -129,7 +128,7 @@ fn build_pipeline(
         .chains(|ctx| {
             let mut split = chain_owned::<Vec<u8>, _>(BytesPassthrough)
                 .with_metrics(ctx.pipeline.clone(), "main")
-                // The default 64 KiB chunk target — unchanged on purpose.
+                // The default 64 KiB chunk target, unchanged on purpose.
                 .split(ErrorPolicy::Skip);
             let hot =
                 split.add::<Owned<Vec<u8>>, _, _>(TestEncoder, KeyHashRouter, ctx.sink("hot"));
@@ -151,8 +150,8 @@ fn build_pipeline(
 /// The healthy contract this repro pins down: a record routed to a
 /// low-volume split branch must not hold the partition watermark for longer
 /// than a bounded interval **while ingest continues**. Today it is held
-/// until the branch's shard buffer reaches `target_bytes` — potentially
-/// forever — because nothing seals a partial buffer under sustained load.
+/// until the branch's shard buffer reaches `target_bytes`, potentially
+/// forever, because nothing seals a partial buffer under sustained load.
 #[test]
 fn commits_advance_past_low_volume_branch_under_sustained_load() {
     let (source, handle) = memory_source();
@@ -166,12 +165,12 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
         sink_rare,
         RuntimeOptions {
             handle_signals: false,
-            // Model truly continuous ingest: at production rates a lane poll
-            // never comes back empty, so the driver's idle-flush path (the
-            // only thing that seals a partial buffer) is never reached. A
-            // large value here removes scheduler-jitter flakiness without
-            // changing what is being tested — the fix must bound the hold
-            // time *without* relying on an idle lull.
+            // Model continuous ingest: at production rates a lane poll never
+            // comes back empty, so the driver's idle-flush path (the only
+            // thing that seals a partial buffer) is never reached. A large
+            // value here removes scheduler-jitter flakiness without changing
+            // what is being tested; the fix must bound the hold time
+            // *without* relying on an idle lull.
             idle_flush: Duration::from_secs(30),
             ..RuntimeOptions::default()
         },
@@ -186,11 +185,10 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
     let hot_payload = vec![b'h'; 120];
     let rare_payload = vec![b'r'; 16];
 
-    // The very first record routes to the cold branch: its ack goes into
-    // that branch's shard buffer and the watermark is pinned at offset 0
-    // until the buffer seals. ~5 more rares trickle in below — together a
-    // few hundred bytes against a 64 KiB target, exactly a cold DNS-type
-    // table's arrival pattern.
+    // The first record routes to the cold branch: its ack goes into that
+    // branch's shard buffer and the watermark is pinned at offset 0 until the
+    // buffer seals. ~5 more rares trickle in below, together a few hundred
+    // bytes against a 64 KiB target, a cold DNS-type table's arrival pattern.
     let rare0 = handle.push(p, None, &rare_payload);
     let mut pushed = rare0;
 
@@ -263,8 +261,8 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
         // Healthy behavior: the commit tick sealed the cold branch's partial
         // buffer and the watermark moved past it while ingest continued.
         // Bound: commit interval (200ms flush cadence) + capture-sink linger
-        // (1s) + write + one more tick, with generous slack — a regression
-        // to a laxer cadence (e.g. leaning on batch-size alone) fails here.
+        // (1s) + write + one more tick, with generous slack. A regression to
+        // a laxer cadence (e.g. leaning on batch-size alone) fails here.
         eprintln!("watermark passed the cold-branch record after {at:?} of sustained load");
         assert!(
             at <= Duration::from_secs(4),
@@ -292,9 +290,9 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
 }
 
 /// Control: the *same* topology and record mix commits completely once the
-/// load stops — the driver's idle flush seals the cold branch's partial
-/// buffer. Passing today proves the sustained-load stall above is not data
-/// loss or sink slowness; the acks are simply held while ingest continues.
+/// load stops; the driver's idle flush seals the cold branch's partial
+/// buffer. Passing proves the sustained-load stall above is not data loss or
+/// sink slowness; the acks are held while ingest continues.
 #[test]
 fn low_volume_branch_acks_resolve_once_load_stops() {
     let (source, handle) = memory_source();

@@ -1,14 +1,14 @@
 //! Testing utilities for the Spate framework.
 //!
-//! Every mock pairs with a scripting/observation handle (the
-//! `tower-test` philosophy): [`MemorySource`] + [`SourceHandle`] for the
-//! source side, [`CaptureWriter`] + [`SinkScript`] for the sink side, plus
-//! [`TestDeserializer`], [`TestEncoder`], and [`EmitCollector`] to exercise
-//! the stages in between — all deterministic, no external infrastructure.
+//! Every mock pairs with a scripting/observation handle: [`MemorySource`] +
+//! [`SourceHandle`] for the source side, [`CaptureWriter`] + [`SinkScript`]
+//! for the sink side, plus [`TestDeserializer`], [`TestEncoder`], and
+//! [`EmitCollector`] to exercise the stages in between. All are deterministic
+//! and need no external infrastructure.
 //!
 //! # Example: source → deserialize → encode → acknowledge → commit
 //!
-//! The full life of a record, exactly as a pipeline thread drives it:
+//! The full life of a record, as a pipeline thread drives it:
 //!
 //! ```
 //! use spate_core::checkpoint::Checkpointer;
@@ -85,6 +85,5 @@ pub use source::{
     DrainBarrierProbe, MemoryBatch, MemoryLane, MemorySource, SourceHandle, memory_source,
 };
 
-/// Re-export of the framework's byte-passthrough deserializer, handy next
-/// to the mocks here.
+/// Re-export of the framework's byte-passthrough deserializer.
 pub use spate_core::deser::BytesPassthrough;

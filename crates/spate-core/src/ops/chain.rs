@@ -1,6 +1,6 @@
 //! Chain combinators and the typed chain behind the erasure boundary.
 //!
-//! Stages compose statically — `Map<G, Filter<P, Term>>` monomorphizes into
+//! Stages compose statically; `Map<G, Filter<P, Term>>` monomorphizes into
 //! one loop body. Beyond [`Collector`](super::Collector), every stage
 //! implements [`StageLifecycle`]: the cascade the boundary uses to flush
 //! per-batch metric accumulators, surface fatal errors, and reach the
@@ -8,7 +8,7 @@
 //! concrete type.
 //!
 //! Pressure discipline: the terminal stage never rejects a record
-//! mid-payload — it parks sealed chunks internally and reports pressure
+//! mid-payload. It parks sealed chunks internally and reports pressure
 //! through [`StageLifecycle::relieve`], which the chain checks *between*
 //! payloads. Operators therefore never re-run for an already-pushed record,
 //! and no lifetime-bearing state is ever stored across the boundary.
@@ -171,7 +171,7 @@ where
 }
 
 /// `filter`: drop records failing the predicate. A drop releases the
-/// record's ack share — it counts as success for the batch.
+/// record's ack share, so it counts as success for the batch.
 #[derive(Clone, Debug)]
 pub struct Filter<P, N> {
     pub(crate) p: P,
@@ -220,7 +220,7 @@ static TRY_MAP_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10))
 
 /// `try_map`: fallible transform with a per-stage [`ErrorPolicy`].
 /// `Skip` drops the record (releasing its ack share) and counts it;
-/// `Fail` records a fatal error — the batch aborts and the pipeline stops.
+/// `Fail` records a fatal error; the batch aborts and the pipeline stops.
 #[derive(Clone, Debug)]
 pub struct TryMap<G, N> {
     pub(crate) f: G,
@@ -283,7 +283,7 @@ where
 /// Stack-borrowed emitter handed to `flat_map` closures. Parameterized by
 /// the output *family* (a `'static` tag), so user closures never name the
 /// concrete downstream stack type or the buffer lifetime. Each `emit` is
-/// one virtual call — confined to flat_map stages.
+/// one virtual call, confined to flat_map stages.
 pub struct Emitter<'a, OutF: RecFamily> {
     next: &'a mut dyn CollectorFor<OutF>,
     meta: RecordMeta,
@@ -509,7 +509,7 @@ enum Step {
     /// Payload fully processed; keep going.
     Continue,
     /// Payload fully processed (output parked as needed); downstream is
-    /// backed up — stop accepting further payloads.
+    /// backed up, so stop accepting further payloads.
     Backpressure,
     /// Payload untouched: deserialization reported
     /// [`DeserError::NotReady`]; replay it later.
@@ -520,7 +520,7 @@ enum Step {
 
 /// A concrete chain: deserializer + statically composed operator stack,
 /// erased behind [`RunnableChain`]. `Ops` must accept the family's record
-/// type at every buffer lifetime — the HRTB is what makes borrowed records
+/// type at every buffer lifetime; the HRTB is what makes borrowed records
 /// legal behind the erased boundary.
 pub struct TypedChain<F: RecFamily, D, Ops> {
     deser: D,
@@ -531,7 +531,7 @@ pub struct TypedChain<F: RecFamily, D, Ops> {
     cursor: usize,
     mid_batch: bool,
     /// Not-ready payload awaiting replay (always belongs to the batch in
-    /// progress; carries no ack — the batch's handle covers it).
+    /// progress; carries no ack, since the batch's handle covers it).
     pending: Option<PendingPayload>,
     _family: PhantomData<fn() -> F>,
 }

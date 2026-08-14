@@ -204,22 +204,21 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let ack = make(tx, 0, 0);
         drop(rx);
-        drop(ack); // send fails silently — shutdown teardown ordering
+        drop(ack); // send fails silently during shutdown teardown
     }
 }
 
 /// A fail-safe collection of acknowledgment handles for data that has not
 /// been durably written yet (encoded chunks, sink batches).
 ///
-/// A bare [`AckRef`] resolves *Delivered* on drop — the right default for
-/// records, where drop means "consumed" (filtered out, skipped by policy,
-/// or written). Collections traveling the sink path are different: there,
-/// drop without an explicit outcome means the data was torn down (task
-/// aborted, queue dropped, worker cancelled), and resolving Delivered would
-/// commit offsets for rows that never reached the sink. `AckSet` therefore
-/// **fails** every handle it still holds when dropped; the happy path calls
-/// [`AckSet::deliver`] after the durable write. Over-failing is always safe
-/// under at-least-once — it costs replay, never loss.
+/// A bare [`AckRef`] resolves *Delivered* on drop, the default for records,
+/// where drop means "consumed" (filtered out, skipped by policy, or written).
+/// On the sink path, drop without an explicit outcome means the data was torn
+/// down (task aborted, queue dropped, worker cancelled), and resolving
+/// Delivered would commit offsets for rows that never reached the sink.
+/// `AckSet` therefore **fails** every handle it still holds when dropped; the
+/// happy path calls [`AckSet::deliver`] after the durable write. Over-failing
+/// is safe under at-least-once, costing replay rather than loss.
 #[derive(Debug, Default)]
 pub struct AckSet(Vec<AckRef>);
 
@@ -252,7 +251,7 @@ impl AckSet {
         self.0.len()
     }
 
-    /// Resolve the set as delivered: the data it covers is durably
+    /// Resolve the set as delivered, meaning the data it covers is durably
     /// written. Consumes the set; the handles drop with their default
     /// (Delivered) resolution.
     pub fn deliver(mut self) {

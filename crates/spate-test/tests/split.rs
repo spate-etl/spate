@@ -1,6 +1,6 @@
 //! A multi-sink **split** assembly through the `Pipeline` builder over this
 //! crate's mocks: memory source in, two capturing sinks out, routed by
-//! payload — the first-class path a framework user takes to test a split
+//! payload. This is the path a framework user takes to test a split
 //! pipeline (routing, the `unmatched` policy, and at-least-once across sinks).
 
 use spate_core::config::PipelineConfig;
@@ -72,7 +72,7 @@ fn split_routes_to_named_sinks_and_commits_at_least_once() {
     }
 
     // At-least-once: the watermark reaches one-past-last only after every
-    // record — routed to either sink, or Skipped — is accounted for.
+    // record (routed to either sink, or Skipped) is accounted for.
     assert!(
         handle.wait_committed(p, last + 1, Duration::from_secs(10)),
         "commit timeout (last committed: {:?})",
@@ -102,7 +102,7 @@ fn split_routes_to_named_sinks_and_commits_at_least_once() {
         vec![b"banana".to_vec(), b"berry".to_vec()],
         "b-prefixed rows routed to sink b, in order"
     );
-    // "cherry" matched no branch and was Skipped — it is in neither sink.
+    // "cherry" matched no branch and was Skipped, so it is in neither sink.
 }
 
 #[test]
@@ -152,8 +152,8 @@ sinks:
     handle.push(p, None, b"apple"); // routes to a
     handle.push(p, None, b"zebra"); // unmatched → Fail records a fatal
 
-    // The Fail-policy trip must stop the pipeline on its own — no external
-    // shutdown trigger. The timeout is far above the configured 2s
+    // The Fail-policy trip must stop the pipeline on its own, with no
+    // external shutdown trigger. The timeout is far above the configured 2s
     // drain_timeout so a regression to timeout-bound (or never) exits fails
     // here rather than being masked by a manual drain.
     let report = run

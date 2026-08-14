@@ -1,5 +1,5 @@
 //! Property tests exercising the `proptest`-feature strategies against the
-//! mocks — both to test the strategies and to demonstrate their use.
+//! mocks, covering the strategies themselves and demonstrating their use.
 #![cfg(feature = "proptest")]
 
 use proptest::prelude::*;
@@ -33,8 +33,8 @@ proptest! {
         prop_assert_eq!(decode_rows(&buf), payloads);
     }
 
-    /// Layouts have unique dense lanes and unique partitions — directly
-    /// usable with `SourceHandle::assign_lanes`.
+    /// Layouts have unique dense lanes and unique partitions, so they are
+    /// directly usable with `SourceHandle::assign_lanes`.
     #[test]
     fn lane_layouts_are_unique_and_dense(layout in strategies::lane_layout(8, 64)) {
         prop_assert!(!layout.is_empty());

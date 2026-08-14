@@ -4,11 +4,11 @@
 //! Invariant (INV-2): source threads never block on sends. When a
 //! `try_send` is rejected or the in-flight budget crosses its high
 //! watermark, the poll loop pauses its source lanes and
-//! *keeps polling*; it resumes only under hysteresis — usage back below the
-//! low watermark, downstream queues drained, and a minimum pause elapsed —
+//! *keeps polling*; it resumes only under hysteresis (usage back below the
+//! low watermark, downstream queues drained, and a minimum pause elapsed),
 //! so pause/resume cannot flap faster than once per `min_pause`.
 //!
-//! Everything here is synchronous and tokio-free: pipeline threads call it
+//! Everything here is synchronous and tokio-free. Pipeline threads call it
 //! on every poll iteration, and the [`InflightBudget`] atomics are modeled
 //! under [loom](https://docs.rs/loom). Run the loom suite with:
 //!
@@ -58,15 +58,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// enqueue to sink queues) and sink workers (which subtract when a batch is
 /// acknowledged or abandoned).
 ///
-/// This is a heuristic gauge, not a synchronization point: decisions taken
+/// This is a heuristic gauge, not a synchronization point. Decisions taken
 /// on a slightly stale reading are corrected on the next poll iteration and
 /// absorbed by the controller's hysteresis, so all operations use
 /// [`Ordering::Relaxed`]. Atomic read-modify-write operations cannot lose
 /// updates even under `Relaxed` (every RMW observes the latest value in the
 /// modification order); relaxation only permits *stale reads* in
 /// [`InflightBudget::usage`], which the hysteresis absorbs. Both directions
-/// saturate — `sub` can never underflow past zero even if an
-/// acknowledgment races ahead of the bookkeeping that added its bytes.
+/// saturate. `sub` cannot underflow past zero even if an acknowledgment
+/// races ahead of the bookkeeping that added its bytes.
 #[derive(Debug, Default)]
 pub struct InflightBudget {
     bytes: AtomicUsize,
@@ -139,7 +139,7 @@ pub struct BackpressureParams {
     /// Minimum time to stay paused. Bounds the pause/resume flap rate and
     /// amortizes the prefetch purge that pausing a source implies (a paused
     /// Kafka partition drops its prefetched messages and refetches on
-    /// resume — spike-verified).
+    /// resume).
     pub min_pause: Duration,
 }
 
@@ -149,8 +149,8 @@ impl BackpressureParams {
     /// # Panics
     ///
     /// Panics unless `max_inflight_bytes > 0` and
-    /// `0.0 < low_ratio <= high_ratio <= 1.0` — these are programmer
-    /// errors; user-facing validation happens at config load.
+    /// `0.0 < low_ratio <= high_ratio <= 1.0`. User-facing validation of the
+    /// same bounds happens at config load.
     #[must_use]
     pub fn from_budget(
         max_inflight_bytes: usize,
@@ -198,9 +198,8 @@ enum State {
 
 /// Per-pipeline-thread pause/resume state machine with hysteresis.
 ///
-/// The controller never calls anything: [`WatermarkController::tick`]
-/// returns a [`Transition`] and the driver applies it, which keeps this
-/// module free of source and metrics dependencies. Transitions strictly
+/// [`WatermarkController::tick`] returns a [`Transition`] and the driver
+/// applies it; the controller calls nothing itself. Transitions strictly
 /// alternate (`Pause`, `Resume`, `Pause`, ...) and each full cycle takes at
 /// least [`BackpressureParams::min_pause`].
 #[derive(Debug)]
@@ -234,8 +233,7 @@ impl<C: Clock> WatermarkController<C> {
 
     /// Record that a `try_send` to a downstream queue was rejected. Cheap;
     /// call from the poll loop's rejection path. While paused this restarts
-    /// the minimum-pause timer — a rejection is proof downstream is still
-    /// congested.
+    /// the minimum-pause timer.
     pub fn on_send_rejected(&mut self) {
         self.rejected = true;
         if let State::Paused { since } = &mut self.state {
@@ -263,9 +261,9 @@ impl<C: Clock> WatermarkController<C> {
             }
             State::Paused { since } => {
                 if self.rejected {
-                    // Consumed: `on_send_rejected` already restarted the
-                    // timer; clear the flag so one rejection is not counted
-                    // against two ticks.
+                    // `on_send_rejected` already restarted the timer; clear
+                    // the flag so one rejection is not counted against two
+                    // ticks.
                     self.rejected = false;
                     return None;
                 }
@@ -559,7 +557,7 @@ mod loom_tests {
     use loom::thread;
 
     /// Balanced concurrent add/sub from multiple threads never underflows
-    /// and always converges to zero: atomic RMW cannot lose updates, and
+    /// and always converges to zero. Atomic RMW cannot lose updates, and
     /// saturation bounds every interleaving.
     #[test]
     fn balanced_ops_converge_to_zero() {

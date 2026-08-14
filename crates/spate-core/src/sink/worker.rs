@@ -2,12 +2,12 @@
 //! replica rotation and retries, resolve acknowledgments.
 //!
 //! Acknowledgment handles never enter a write task: they stay in the
-//! worker's pending map and are resolved from task *outcomes*. This makes
-//! aborting write tasks at the drain deadline safe — an aborted task can
-//! never accidentally resolve a batch as delivered.
+//! worker's pending map and are resolved from task *outcomes*. Aborting a
+//! write task at the drain deadline is therefore safe; an aborted task
+//! cannot resolve a batch as delivered.
 //!
 //! Batches of one shard may complete out of order across the `max_inflight`
-//! window; the checkpointer's contiguity tracker absorbs this by design.
+//! window; the checkpointer's contiguity tracker absorbs this.
 
 use super::breaker::BreakerSet;
 use super::config::SinkPoolConfig;
@@ -24,34 +24,32 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 
-/// How long the drain sweep waits for aborted write tasks to actually stop.
+/// How long the drain sweep waits for aborted write tasks to stop.
 /// An abort only lands at a yield point, so a writer that blocks its thread
 /// would otherwise hold the worker here past the deadline. Kept below the
 /// pool's own backstop (`SinkPool::drain`) so an overrunning worker still
 /// returns its own report instead of being force-aborted and losing it.
-/// Generous for the intended case: a writer parked on I/O aborts at once.
+/// Generous for the intended case, where a writer parked on I/O aborts at once.
 const ABORT_GRACE: Duration = Duration::from_millis(500);
 
 /// Bounds on the quarantine re-check heartbeat, which is otherwise
 /// `breaker.open_for`.
 ///
-/// The floor is because `open_for: 0s` is still expressible through the public
-/// `Copy` [`BreakerConfig`](super::config::BreakerConfig), which `SinkParts`
-/// and `spate-test` can build without going through a loader.
+/// The floor covers `open_for: 0s`, which is expressible through the public
+/// `Copy` [`BreakerConfig`](super::config::BreakerConfig) that `SinkParts`
+/// and `spate-test` build without going through a loader.
 /// [`BreakerConfig::validate`](super::config::BreakerConfig::validate) rejects
-/// it on the YAML path; this covers the other one. It used to be harmless
-/// here: the wait fell back to a backoff step,
-/// and a *validated* retry policy can never yield a zero delay. Driving the
-/// wait from `open_for` instead removes that accidental floor, and
-/// `sleep_until(now)` returns instantly — a spin on the breaker mutex.
+/// it on the YAML path; this covers the other one. The wait is driven from
+/// `open_for`, and `sleep_until(now)` returns instantly, so a zero would spin
+/// on the breaker mutex.
 ///
-/// The ceiling is because `open_for` is a *probe cadence* — how hard to lean on
-/// an endpoint that has been failing — not a statement about how often a task
-/// may re-read state it already shares. An operator asking for an hour between
-/// probes is not asking for a sealed batch to sit that long behind a signal
-/// that never came. It is also what keeps `now + backstop` away from the
-/// `Instant + Duration` overflow an absurd `humantime` value would reach: the
-/// floor never fires above 100ms and does nothing for that.
+/// The ceiling holds because `open_for` is a *probe cadence*, how hard to lean
+/// on an endpoint that has been failing, and not a statement about how often a
+/// task may re-read state it already shares. An operator asking for an hour
+/// between probes is not asking for a sealed batch to sit that long behind a
+/// signal that never came. The ceiling also keeps `now + backstop` away from
+/// the `Instant + Duration` overflow an absurd `humantime` value would reach.
+/// The floor never fires above 100ms and does nothing for that.
 const QUARANTINE_BACKSTOP_MIN: Duration = Duration::from_millis(100);
 /// Ceiling for the quarantine heartbeat. See [`QUARANTINE_BACKSTOP_MIN`].
 const QUARANTINE_BACKSTOP_MAX: Duration = Duration::from_secs(30);
@@ -59,27 +57,22 @@ const QUARANTINE_BACKSTOP_MAX: Duration = Duration::from_secs(30);
 /// How long a write task parked on a fully-quarantined shard waits before
 /// re-checking on its own initiative.
 ///
-/// A heartbeat, not a recovery mechanism: the wake signal is what releases
-/// every state that *can* resolve, and re-picking cannot repair one that
-/// cannot. The identity at every default, where the clamp does not bind.
+/// A heartbeat. The wake signal releases every state that *can* resolve, and
+/// re-picking cannot repair one that cannot. At every default the clamp is the
+/// identity.
 ///
-/// Deliberately unpinned by any behavioral test, because it has no reachable
-/// signature. Every exit from "half-open, budget spent" runs through
-/// `on_success`, `on_failure` or `release_probe`, and all three publish a
-/// wake — the one path that used to leave without publishing was a probe task
-/// dying silently, which `ProbeGuard` now closes. Widening this constant
-/// therefore changes no observable behavior, and a test claiming otherwise
-/// would be pinning its own scaffolding.
+/// Widening this constant changes no observable behavior. Every exit from
+/// "half-open, budget spent" runs through `on_success`, `on_failure` or
+/// `release_probe`, and all three publish a wake; `ProbeGuard` covers the
+/// remaining path, a probe task dying silently.
 ///
-/// Narrowing it is a different matter, and the reason to be careful before
-/// treating this as free to move. Two pool tests get their discriminating
-/// power from this ceiling being far longer than the wake they are asserting:
-/// drop it to a few hundred milliseconds and the heartbeat alone carries them,
-/// so they pass whether or not the wake works. What it defends against is a
-/// future
-/// mutation that adds a fourth exit and forgets to publish: the shard stalls
-/// for `open_for` instead of forever. Only [`quarantine_backstop`]'s clamp is
-/// tested, which is the part with a decision in it.
+/// Narrowing it is a different matter. Two pool tests get their discriminating
+/// power from this ceiling being far longer than the wake they are asserting;
+/// at a few hundred milliseconds the heartbeat alone carries them, so they pass
+/// whether or not the wake works. What the heartbeat defends against is a
+/// future mutation that adds a fourth exit and forgets to publish, which stalls
+/// the shard for `open_for` rather than forever. Only
+/// [`quarantine_backstop`]'s clamp is tested.
 fn quarantine_backstop(open_for: Duration) -> Duration {
     open_for.clamp(QUARANTINE_BACKSTOP_MIN, QUARANTINE_BACKSTOP_MAX)
 }
@@ -111,10 +104,10 @@ struct Pending {
     /// Stamped at **seal**, before the batch has even asked for an in-flight
     /// permit. `settle` reports its elapsed time as
     /// `spate_sink_flush_duration_seconds`, so that histogram is seal-to-settle
-    /// and carries the permit wait, every attempt and every backoff sleep —
-    /// not the sink's round-trip, which is
+    /// and carries the permit wait, every attempt and every backoff sleep. The
+    /// sink's round-trip is a separate family,
     /// `spate_sink_write_duration_seconds`. Do not narrow this stamp to recover
-    /// a write time; the two are separate families on purpose.
+    /// a write time.
     started: Instant,
     /// Ingest time of the oldest record in the batch (e2e latency, ingest
     /// basis).
@@ -191,12 +184,12 @@ struct Ledger {
     /// Tokio task id → batch seq. A panicked write task's `JoinError`
     /// carries no seq, only the task id, so this map lets us abandon exactly
     /// the batch that died instead of guessing by age (which strands the
-    /// real victim's acks and budget forever).
+    /// victim's acks and budget forever).
     ids: HashMap<tokio::task::Id, u64>,
     report: WorkerReport,
     /// Held so the reservations of anything still pending are released even
-    /// when the worker never gets to sweep — `SinkPool::drain`'s backstop
-    /// aborting it, or the I/O runtime shutting down under it. `settle` and
+    /// when the worker never gets to sweep, whether because `SinkPool::drain`'s
+    /// backstop aborted it or the I/O runtime shut down under it. `settle` and
     /// `abandon` remove their entry before releasing, so the ordinary path
     /// drops an empty map and cannot double-release.
     budget: Arc<InflightBudget>,
@@ -241,26 +234,25 @@ impl<W: ShardWriter> ShardWorker<W> {
         let mut deadline_watch_live = true;
         let mut seq: u64 = 0;
         let mut recv_buf: Vec<EncodedChunk> = Vec::with_capacity(64);
-        // Batches sealed but not yet spawned, oldest first: the in-flight
+        // Batches sealed but not yet spawned, oldest first. The in-flight
         // window was full when they sealed. Their `Pending` is already in the
         // ledger (`seal` registers it), so the deadline sweep abandons them
         // like any other batch, dropping the sealed frames unspawned.
         //
         // Nothing on this path may *block* on the in-flight semaphore.
-        // `dispatch` is deliberately not `async`: an `.await` in it would
+        // `dispatch` is deliberately not `async`; an `.await` in it would
         // suspend `run` outside both `select!`s, where neither the drain
-        // deadline nor finished write tasks are polled — and with every permit
+        // deadline nor finished write tasks are polled. With every permit
         // held by a write that does not return (a hung sink, or the default
         // unbounded retry policy against a sink that is down) no permit would
         // ever free either. That deadlocked shutdown (#83). Instead the permit
         // wait is a `select!` arm below, so the deadline branch stays live
-        // while a batch waits, and intake is gated off meanwhile — the same
-        // backpressure the blocking acquire used to provide, though not
-        // instant-for-instant the same: intake finishes the `recv_many` pass
-        // it is already in, and resumes only once this drains fully rather
-        // than on the first freed permit.
+        // while a batch waits, and intake is gated off meanwhile. The gating
+        // is not instant-for-instant equivalent to a blocking acquire; intake
+        // finishes the `recv_many` pass it is already in, and resumes only
+        // once this drains fully rather than on the first freed permit.
         //
-        // Bounded: intake is gated on this being empty, so at most one
+        // Bounded. Intake is gated on this being empty, so at most one
         // `recv_many` pass can fill it (64 chunks, hence 64 batches only if
         // every chunk seals its own), plus the drain force-seal. More than one
         // entry needs a single chunk to cross `batch.max_bytes` by itself, so
@@ -269,7 +261,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         // them either way.
         //
         // While it is non-empty the queue keeps filling, so the drain phase
-        // must drain `rx` itself — see there.
+        // drains `rx` itself.
         let mut waiting: VecDeque<(u64, SealedBatch, Instant)> = VecDeque::new();
 
         loop {
@@ -291,8 +283,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                 }
 
                 // Gated on `waiting`: while a sealed batch has no permit the
-                // shard queue fills and back-pressures the chain, exactly as
-                // the blocking acquire used to make it.
+                // shard queue fills and back-pressures the chain.
                 n = self.rx.recv_many(&mut recv_buf, 64), if waiting.is_empty() => {
                     if n == 0 {
                         break; // intake closed: drain
@@ -306,16 +297,16 @@ impl<W: ShardWriter> ShardWorker<W> {
                     }
                 }
 
-                // Below `recv_many` on purpose: while intake is ungated,
-                // chunks already queued at shutdown are consumed before the
-                // deadline is considered (biased select polls in order). When
+                // Below `recv_many` so that while intake is ungated, chunks
+                // already queued at shutdown are consumed before the deadline
+                // is considered (biased select polls in order). When
                 // `waiting` has gated intake off this arm wins instead, and
-                // the drain phase below drains the queue itself — either way
+                // the drain phase below drains the queue itself. Either way
                 // nothing the drivers handed over is dropped unsealed.
                 changed = drain_deadline.changed(), if deadline_watch_live => {
                     match changed {
-                        // A deadline published while intake is still open:
-                        // a chunk sender leaked past shutdown. Enter the
+                        // A deadline published while intake is still open
+                        // means a chunk sender leaked past shutdown. Enter the
                         // bounded drain instead of waiting for a close that
                         // may never come; the deadline sweep below abandons
                         // whatever cannot finish in time.
@@ -335,10 +326,10 @@ impl<W: ShardWriter> ShardWorker<W> {
         // ---- Drain (see graceful-shutdown.mdx) ----
         // Intake is gated on `waiting`, and the deadline arm can win while it
         // is gated off, so the queue may still hold chunks the drivers handed
-        // over — closed but not empty. Consume them here. A chunk dropped
+        // over, closed but not empty. Consume them here. A chunk dropped
         // unsealed with the receiver fails its acknowledgments with no
-        // `abandoned` count, no log and no `DrainReport` entry: the one way
-        // this worker could lose work silently.
+        // `abandoned` count, no log and no `DrainReport` entry, losing work
+        // silently.
         while let Ok(chunk) = self.rx.try_recv() {
             acc.push(chunk, Instant::now());
             if let Some(reason) = self.seal_reason(&acc) {
@@ -381,9 +372,9 @@ impl<W: ShardWriter> ShardWorker<W> {
             }
 
             let deadline = *drain_deadline.borrow();
-            // No deadline was ever published and the sender is gone: the pool
-            // was dropped without draining, so nobody will ever ask us to stop
-            // and nobody is waiting for our report. Abandon now rather than
+            // No deadline was ever published and the sender is gone, so the
+            // pool was dropped without draining. No stop request is coming and
+            // no caller is waiting for the report. Abandon now rather than
             // waiting on writes that may never finish.
             if deadline.is_none() && !deadline_watch_live {
                 self.sweep(&mut tasks, &mut waiting, &mut ledger).await;
@@ -447,7 +438,7 @@ impl<W: ShardWriter> ShardWorker<W> {
 
     /// Deadline reached: abort every write still in flight and fail every
     /// batch this worker still holds, loudly. Their data replays after
-    /// restart — at-least-once holds.
+    /// restart; at-least-once holds.
     async fn sweep(
         &self,
         tasks: &mut JoinSet<WriteDone>,
@@ -455,10 +446,10 @@ impl<W: ShardWriter> ShardWorker<W> {
         ledger: &mut Ledger,
     ) {
         // An abort only lands at a yield point, so a writer that blocks its
-        // thread would hold us here indefinitely — and `SinkPool::drain`'s
+        // thread would hold us here indefinitely, and `SinkPool::drain`'s
         // backstop would then force-abort this worker and lose its report.
-        // Bound the wait instead: dropping the `JoinSet` when `run` returns
-        // finishes the aborts, and the accounting below still happens.
+        // The wait is bounded instead. Dropping the `JoinSet` when `run`
+        // returns finishes the aborts, and the accounting below still happens.
         if tokio::time::timeout(ABORT_GRACE, tasks.shutdown())
             .await
             .is_err()
@@ -494,8 +485,8 @@ impl<W: ShardWriter> ShardWorker<W> {
             }
             Err(join_err) => {
                 // A panicked write task (writer bug). Its seq is lost with
-                // it, but its task id is not: abandon exactly the batch that
-                // died so the healthy in-flight batch keeps its acks.
+                // it, but its task id is not, so abandon exactly the batch
+                // that died and the healthy in-flight batch keeps its acks.
                 let id = join_err.id();
                 tracing::error!(error = %join_err, "sink write task panicked");
                 match ledger.ids.remove(&id) {
@@ -602,26 +593,26 @@ impl<W: ShardWriter> ShardWorker<W> {
             let mut backoff = Backoff::new(retry, this_seq);
             let mut attempts: u32 = 0;
             loop {
-                // Pick a replica. "Nothing usable" is two conditions, not one,
-                // and they end differently — see the `breaker` module header.
+                // Pick a replica. "Nothing usable" is two conditions that end
+                // differently; see the `breaker` module header.
                 //
                 // `backoff` is deliberately untouched here. It is the retry
-                // ladder, and this is not a retry: a step spent on a wait that
-                // publishes no `BackoffGuard` and moves no
-                // `spate_sink_retries_total` is a step nobody can account for,
-                // so the shard climbs towards `retry.max` while quarantined and
-                // then serves that ceiling to the first real retry after
-                // recovery (#23). Nor is waiting an *attempt* — `attempts` is
+                // ladder, and a quarantine wait is not a retry. A step spent
+                // on a wait that publishes no `BackoffGuard` and moves no
+                // `spate_sink_retries_total` is unaccountable, so the shard
+                // would climb towards `retry.max` while quarantined and then
+                // serve that ceiling to the first retry after recovery (#23).
+                // Waiting is not an *attempt* either; `attempts` is
                 // incremented below this loop, so a quarantine of any length
                 // cannot exhaust `retry.max_attempts`.
                 let pick = loop {
-                    // One timestamp for the whole critical section, and
-                    // load-bearing beyond lock hygiene: `next_replica` promotes
-                    // any `Open` whose deadline has passed using *this* `now`,
-                    // so a `None` pick proves every surviving deadline is
-                    // strictly in the future. Read the clock twice and
-                    // `sleep_until` can be handed an instant already gone —
-                    // which, with no backoff step underneath it, is a spin.
+                    // One timestamp for the whole critical section.
+                    // `next_replica` promotes any `Open` whose deadline has
+                    // passed using *this* `now`, so a `None` pick proves every
+                    // surviving deadline is strictly in the future. Read the
+                    // clock twice and `sleep_until` can be handed an instant
+                    // already gone, which with no backoff step underneath it
+                    // is a spin.
                     let now = Instant::now();
                     let (picked, probe_at) = {
                         let mut b = breakers.lock().expect("breaker lock");
@@ -633,12 +624,11 @@ impl<W: ShardWriter> ShardWorker<W> {
                             // that state's own version. Any publisher runs in a
                             // strictly later critical section, so its bump is
                             // strictly later than the cursor and `changed()`
-                            // returns without ever suspending: there is no
-                            // interleaving in which this task reads a stale
-                            // state and also misses the wake. Carrying a
-                            // receiver across iterations instead would make
-                            // that a question of where the re-arm is written —
-                            // a discipline rather than a structure.
+                            // returns without suspending. No interleaving lets
+                            // this task read a stale state and also miss the
+                            // wake. Do not carry a receiver across iterations
+                            // instead; that makes correctness depend on where
+                            // the re-arm is written.
                             None => Picked::Park(b.subscribe()),
                         };
                         (picked, probe_at)
@@ -647,23 +637,22 @@ impl<W: ShardWriter> ShardWorker<W> {
                         Picked::Replica(p) => break p,
                         Picked::Park(mut wake) => {
                             // `min`, so the heartbeat still fires when a probe
-                            // window is known but further away — `open_for: 1h`
+                            // window is known but further away; `open_for: 1h`
                             // wakes this task every 30s to re-read state it
-                            // already shares. That is deliberate: the heartbeat
-                            // only ever shortens a wait, and paying a bounded
-                            // number of cheap wakeups is the price of never
-                            // sleeping through a signal that went missing.
+                            // already shares. The heartbeat only ever shortens
+                            // a wait, at the cost of a bounded number of cheap
+                            // wakeups.
                             let heartbeat = now + backstop;
                             let until = probe_at.map_or(heartbeat, |t| t.min(heartbeat));
                             tokio::select! {
                                 biased;
 
-                                // `Err` is unreachable: the sender is a field
-                                // of the `BreakerSet` this task holds an `Arc`
-                                // to, so it outlives this receiver. Serve the
-                                // deadline rather than looping on it anyway, so
-                                // a refactor breaking that invariant costs a
-                                // stall and not a spinning core.
+                                // `Err` is unreachable, because the sender is a
+                                // field of the `BreakerSet` this task holds an
+                                // `Arc` to and so outlives this receiver. Serve
+                                // the deadline anyway, so a refactor breaking
+                                // that invariant costs a stall and not a
+                                // spinning core.
                                 changed = wake.changed() => {
                                     if changed.is_err() {
                                         tokio::time::sleep_until(until).await;
@@ -677,19 +666,18 @@ impl<W: ShardWriter> ShardWorker<W> {
                 };
                 let replica = pick.replica;
                 // Armed only for a half-open probe, and disarmed the moment an
-                // outcome is reported. What it covers is the task dying with no
-                // outcome at all — a writer panic — which would otherwise
+                // outcome is reported. It covers the task dying with no
+                // outcome at all (a writer panic), which would otherwise
                 // consume the probe slot for good.
                 let mut probe = pick
                     .probe
                     .map(|episode| ProbeGuard::new(&breakers, replica, episode));
 
                 attempts += 1;
-                // Timed around `write_batch` alone: the replica pick and the
-                // probe wait above, and the backoff sleep below, are
-                // deliberately outside it. This histogram answers "how fast is
-                // the sink system" — the question `flush_duration`, which spans
-                // seal to settle, cannot.
+                // Timed around `write_batch` alone. The replica pick and the
+                // probe wait above, and the backoff sleep below, sit outside
+                // it, so this histogram measures the sink's own round-trip.
+                // `flush_duration`, which spans seal to settle, does not.
                 let attempt_at = Instant::now();
                 let outcome = writer.write_batch(&endpoints[replica], &batch).await;
                 metrics.write_attempt(
@@ -700,17 +688,16 @@ impl<W: ShardWriter> ShardWorker<W> {
                     },
                     attempt_at.elapsed(),
                 );
-                // Reporting is what clears the budget, so the guard has
-                // nothing left to hand back. What stops a stale drop crediting
-                // some *later* half-open run is the episode it carries, not
-                // this call — every report leaves the replica `Closed` or
-                // `Open`, so a same-episode release is already unreachable.
-                // Disarming still earns its keep twice over: it skips a lock
-                // acquisition in `Drop` on the path every reported probe takes,
-                // and it keeps the release harmless if a future outcome path
-                // ever leaves the replica half-open, where a second decrement
-                // would admit a probe over budget. No `.await` between here and
-                // the report, so no abort can interleave.
+                // Reporting clears the budget, so the guard has nothing left to
+                // hand back. The episode the guard carries is what stops a
+                // stale drop crediting a *later* half-open run; every report
+                // leaves the replica `Closed` or `Open`, so a same-episode
+                // release is unreachable. Disarming skips a lock acquisition
+                // in `Drop` on the path every reported probe takes, and keeps
+                // the release harmless if a future outcome path ever leaves
+                // the replica half-open, where a second decrement would admit
+                // a probe over budget. No `.await` between here and the
+                // report, so no abort can interleave.
                 if let Some(g) = probe.as_mut() {
                     g.disarm();
                 }
@@ -747,8 +734,8 @@ impl<W: ShardWriter> ShardWorker<W> {
                         }
                         metrics.retries(1);
                         // The guard publishes the step for the length of the
-                        // sleep and withdraws it on drop — which includes the
-                        // drain deadline aborting this task mid-sleep, the one
+                        // sleep and withdraws it on drop, including when the
+                        // drain deadline aborts this task mid-sleep, the one
                         // exit that runs no code of ours.
                         let delay = backoff.next_delay();
                         {
@@ -762,23 +749,22 @@ impl<W: ShardWriter> ShardWorker<W> {
         ids.insert(handle.id(), this_seq);
     }
 
-    /// Seal the accumulated batch and start writing it, or — when the
-    /// in-flight window is full — park it in `waiting` for the permit arm of
-    /// whichever loop is running.
+    /// Seal the accumulated batch and start writing it, or park it in
+    /// `waiting` for the permit arm of whichever loop is running when the
+    /// in-flight window is full.
     ///
     /// **Deliberately not `async`.** Blocking on the semaphore here would
     /// suspend `run` outside both of its `select!`s, where neither the drain
     /// deadline nor finished write tasks are polled; with every permit held by
     /// a write that does not return, nothing would ever wake it and shutdown
     /// would deadlock (#83). The permit wait belongs in a `select!` arm, and
-    /// the arm's guard on `waiting` reproduces the backpressure blocking here
-    /// used to provide.
+    /// the arm's guard on `waiting` reproduces the backpressure a blocking
+    /// acquire would provide.
     ///
-    /// The permit wait is timed because it is what `flush_duration` folds in
-    /// that is neither the sink's own speed nor a sleep of ours: a shard
-    /// queueing behind its in-flight cap and one talking to a slow server
-    /// produce the same flush histogram, which is how a healthy cluster reads
-    /// as a slow one.
+    /// The permit wait is timed because `flush_duration` folds it in alongside
+    /// the sink's own speed and our sleeps. A shard queueing behind its
+    /// in-flight cap and one talking to a slow server produce the same flush
+    /// histogram, so a healthy cluster can read as a slow one.
     #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &self,
@@ -797,8 +783,8 @@ impl<W: ShardWriter> ShardWorker<W> {
         let (this_seq, batch) = self.seal(acc, reason, seq, ledger);
         let queued_at = Instant::now();
         // Strict FIFO. Taking a permit while an older batch is parked would
-        // let this one overtake it — harmless for delivery (batches of a
-        // shard already settle out of order) but it charges the overtaken
+        // let this one overtake it. That is harmless for delivery (batches of
+        // a shard already settle out of order), but it charges the overtaken
         // batch's `permit_wait` observation for a queue it was at the front
         // of.
         if waiting.is_empty()
@@ -813,9 +799,9 @@ impl<W: ShardWriter> ShardWorker<W> {
 }
 
 /// The outcome of one trip round the replica picker: either a replica to write
-/// to, or the wake receiver to park on. Pairing them in one value is what makes
-/// "a receiver is taken exactly when nothing was pickable, in the same critical
-/// section" a property of the type rather than of the code that reads it.
+/// to, or the wake receiver to park on. Pairing them in one value makes "a
+/// receiver is taken exactly when nothing was pickable, in the same critical
+/// section" a property of the type.
 enum Picked {
     Replica(super::breaker::Pick),
     Park(watch::Receiver<u64>),
@@ -826,17 +812,17 @@ enum Picked {
 ///
 /// `probes_in_flight` is otherwise cleared only by *leaving* `HalfOpen`, which
 /// is what reporting an outcome does. A write task that dies without reporting
-/// — a writer panic, whose `JoinError` reaches `handle_join` carrying a task id
-/// and no replica — would consume the slot for good, and with the default
-/// `half_open_probes: 1` that pins the replica in `HalfOpen` forever: the shard
-/// is unwritable for the life of the process, and no amount of re-picking
-/// repairs it because the budget is genuinely gone.
+/// (a writer panic, whose `JoinError` reaches `handle_join` carrying a task id
+/// and no replica) would consume the slot for good. With the default
+/// `half_open_probes: 1` that pins the replica in `HalfOpen` forever, leaving
+/// the shard unwritable for the life of the process; re-picking does not repair
+/// it, because the budget is gone.
 ///
 /// The guard names the half-open *episode* it took its slot from, so a drop
 /// that arrives after the replica has re-opened and started probing again is
 /// discarded rather than granting that later run an extra concurrent probe.
-/// The write loop still disarms on the reporting path — see the comment there
-/// — because the episode check alone would credit a same-episode release.
+/// The write loop still disarms on the reporting path (see the comment there),
+/// because the episode check alone would credit a same-episode release.
 ///
 /// Note what the episode does *not* bound. It stops a late release crediting
 /// the wrong run; it does not stop the runs themselves overlapping. A failure
@@ -870,9 +856,9 @@ impl Drop for ProbeGuard {
         if !self.armed {
             return;
         }
-        // Poison-tolerant, because the case this guard exists for is a writer
-        // panic: an `expect` here would run while already unwinding and abort
-        // the process instead of releasing the slot. The critical section only
+        // Poison-tolerant, because this guard covers a writer panic. An
+        // `expect` here would run while already unwinding and abort the
+        // process instead of releasing the slot. The critical section only
         // decrements a counter, so a poisoned set is not a corrupt one.
         self.breakers
             .lock()

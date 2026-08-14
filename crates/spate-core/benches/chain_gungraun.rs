@@ -1,51 +1,50 @@
 //! Instruction counts for the operator-chain hot path (gungraun).
 //!
-//! One shape — one poll batch of 512 payloads through deserialize → filter →
-//! flat_map → encode → handoff, drained to encoded chunks — parameterized by
-//! the three things the terminal stage varies in production, plus the
-//! borrowed-versus-owned payload contrast `benches/chain_wall.rs` times:
+//! The shape is one poll batch of 512 payloads through deserialize → filter →
+//! flat_map → encode → handoff, drained to encoded chunks. It is
+//! parameterized by the three things the terminal stage varies in production,
+//! plus the borrowed-versus-owned payload contrast `benches/chain_wall.rs`
+//! times:
 //!
 //! - **The router.** `borrowed` pins a constant router over a keyless
 //!   corpus: no key is hashed and every record lands on shard 0.
 //!   `keyed_one_shard` is the same batch under the production
 //!   [`KeyHashRouter`](spate_core::sink::KeyHashRouter) over a keyed corpus,
-//!   which is what a source that carries message keys actually pays — a
-//!   stable hash of every key during deserialization, and a modulo per record
-//!   in the terminal stage. Read against `borrowed`, the pair is the price of
-//!   real routing.
+//!   which costs a stable hash of every key during deserialization and a
+//!   modulo per record in the terminal stage. Read against `borrowed`, the
+//!   pair prices routing on a source that carries message keys.
 //! - **The shard count.** Every shard owns its own encoder clone, chunk
 //!   buffer and `AckSet`, and `flush` seals each of them, so the stage's
 //!   bookkeeping scales with shards while the record count does not.
 //!   `keyed_sixteen_shards` is `keyed_one_shard` with the same records spread
 //!   sixteen ways.
 //! - **The chunk target.** The default 64 KiB target is above everything one
-//!   batch encodes, so the baselines never trip the seal check — the batch's
-//!   one chunk seals at `flush`. `chunk_half_batch` seals 2 chunks and
+//!   batch encodes, so the baselines never trip the seal check and the
+//!   batch's one chunk seals at `flush`. `chunk_half_batch` seals 2 chunks and
 //!   `chunk_sixteenth_batch` 16, so the 14-seal gap between them prices
 //!   `seal_and_send`: `BytesMut::split`, the fresh `reserve`, the in-flight
 //!   budget update, the `AckSet` hand-off, the next chunk's `Instant::now`,
 //!   and the queue `try_send`. Both targets divide the batch's encoding
 //!   exactly, so every one of those seals fires inside `push` and `flush`
-//!   finds the shard empty — the pair prices the steady-state seal, not the
+//!   finds the shard empty. The pair prices the steady-state seal, not the
 //!   flush-time partial one the baselines carry.
 //!
-//! Deliberately absent are the interior points of the two swept axes — four
-//! shards, a quarter-batch target — and every product of one axis with
-//! another. Both axes are linear in the stage by construction (a shard is a
-//! buffer and a seal; a smaller target is more seals of the same code), so
-//! their endpoints fix the slope and a midpoint only re-measures it. Six
-//! cases, not eighteen: callgrind runs the workload under emulation, and
+//! The two swept axes carry no interior points (four shards, a quarter-batch
+//! target) and no product of one axis with another. Both axes are linear in
+//! the stage by construction (a shard is a buffer and a seal; a smaller target
+//! is more seals of the same code), so their endpoints fix the slope and a
+//! midpoint re-measures it. Callgrind runs the workload under emulation, and
 //! `benches/chain_wall.rs` carries the fuller sweep at wall-clock prices.
 //!
 //! DHAT runs alongside callgrind in the same invocation, so every case also
 //! reports deterministic heap counts. `tests/chain_alloc.rs` bounds the
 //! chain's allocation *count* absolutely; DHAT adds bytes and the t-gmax
-//! peak, which a buffer that doubles in place moves without a new allocation
-//! — and which the seal cases move on purpose, since each seal hands off its
+//! peak, which a buffer that doubles in place moves without a new allocation,
+//! and which the seal cases move on purpose, since each seal hands off its
 //! allocation and reserves another.
 //!
-//! Needs valgrind and a same-version `gungraun-runner`, neither of which
-//! exists on every developer machine: run it with `make bench-gungraun`.
+//! Needs valgrind and a same-version `gungraun-runner`. Run it with
+//! `make bench-gungraun`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so
@@ -98,7 +97,7 @@ fn sealing(divisor: usize) -> Rig {
 // `#[doc]` attribute, which `#[library_benchmark]` rejects.
 //
 // Every per-record cost is `spate_core`'s and reached through the boxed
-// `RunnableChain` seam — a cross-crate virtual call the optimizer cannot
+// `RunnableChain` seam, a cross-crate virtual call the optimizer cannot
 // reshape into this module. What the rig itself contributes to the region is
 // the batch's payload callbacks and the drain sweep in `Rig::drive`; both have
 // side effects the compiler must keep, and `black_box` holds the row count.
@@ -116,11 +115,11 @@ fn push_batch(mut rig: Rig) -> Rig {
 
 library_benchmark_group!(name = chain; benchmarks = push_batch);
 
-// DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
-// and without it. `--num-callers=500` (the maximum) keeps allocation stacks
-// deep enough that heap blocks attribute to the chain under measurement
-// rather than to whichever frame the default depth of 4 happens to cut at.
+// DHAT is scoped as an extra tool rather than a callgrind argument, so the
+// callgrind invocation, and every `Ir` baseline with it, is bit-identical
+// with and without DHAT. `--num-callers=500` (the maximum) keeps allocation
+// stacks deep enough that heap blocks attribute to the chain under
+// measurement rather than to whichever frame the default depth of 4 cuts at.
 main!(
     config = LibraryBenchmarkConfig::default().tool(Dhat::with_args(["--num-callers=500"])),
     library_benchmark_groups = chain

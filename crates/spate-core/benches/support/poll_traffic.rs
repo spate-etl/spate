@@ -4,17 +4,16 @@
 //!
 //! The script is a corpus, not a repeat count. Every entry carries its own
 //! budget movement, its own queue reading and its own clock step, and the
-//! controller's state after an entry differs from its state before it — the
-//! unit of work being counted is a poll iteration, which is what a pipeline
-//! thread runs millions of.
+//! controller's state after an entry differs from its state before it. The
+//! unit of work being counted is a poll iteration, which a pipeline thread
+//! runs millions of.
 //!
 //! A single `tick` is tens of instructions, well under the resolution of any
 //! timer that could be pointed at it, so the wall tier measures a whole drive
-//! — all [`ITERATIONS`] of them folded into one iteration — rather than a
-//! call. What it adds over the instruction count is not a duration: it is
-//! [`Rig::reset`]-anchored allocation totals, which the poll loop must report
-//! as a flat zero, at a floor of 1% and on any machine rather than only where
-//! valgrind runs.
+//! (all [`ITERATIONS`] of them folded into one iteration) rather than a call.
+//! What it adds over the instruction count is [`Rig::reset`]-anchored
+//! allocation totals, which the poll loop must report as a flat zero, at a
+//! floor of 1% and on any machine rather than only where valgrind runs.
 //!
 //! Included with `#[path]` by `backpressure_gungraun.rs`,
 //! `control_plane_wall.rs` and `tests/bench_fixtures.rs`.
@@ -30,8 +29,8 @@ use std::time::{Duration, Instant};
 pub(crate) const ITERATIONS: usize = 32_768;
 
 /// The in-flight budget the watermarks are derived from. Small enough that a
-/// realistic chunk moves the reading appreciably, which is what lets the
-/// script cross a watermark on a schedule the fixture can state.
+/// realistic chunk moves the reading appreciably, so the script crosses a
+/// watermark on a schedule the fixture can state.
 const MAX_INFLIGHT: usize = 8 * 1024 * 1024;
 
 /// Bytes one sealed chunk contributes, matching
@@ -39,11 +38,10 @@ const MAX_INFLIGHT: usize = 8 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 /// Virtual time one poll iteration takes. Ten iterations therefore span
-/// [`MIN_PAUSE`], which is what makes the flapping script's resume land where
-/// the fixture says it does.
+/// [`MIN_PAUSE`], which puts the flapping script's resume where the fixture
+/// says it lands.
 ///
-/// A whole number of seconds, and that is load-bearing rather than a round
-/// number for readability. The clock's origin is a real [`Instant`], whose
+/// A whole number of seconds. The clock's origin is a real [`Instant`], whose
 /// sub-second part differs every run; adding a step with a nonzero
 /// nanosecond part carries into the seconds field for some origins and not
 /// others, and the carry is a branch. Measured at a 50-millisecond step, that
@@ -60,11 +58,11 @@ const STEP: Duration = Duration::from_secs(1);
 /// production. Virtual time has to advance in whole seconds to stay
 /// deterministic, so the pause floor can only be a whole number of steps; ten
 /// of them is the same *ratio* to the step that the shipped default has to a
-/// realistic poll interval, which is what decides how many iterations a pause
-/// lasts and so what the script measures.
+/// realistic poll interval, which decides how many iterations a pause lasts
+/// and so what the script measures.
 ///
 /// The value cannot move the count on its own in any case. `tick` compares
-/// against it — `duration_since(since) >= min_pause` — so what a different
+/// against it (`duration_since(since) >= min_pause`), so what a different
 /// floor changes is which arm the comparison selects, not the work the
 /// comparison does, and the three profiles put every arm under measurement
 /// regardless.
@@ -72,7 +70,7 @@ const MIN_PAUSE: Duration = Duration::from_secs(10);
 
 /// Iterations one phase of the flapping script holds its side of the
 /// hysteresis band. Longer than [`MIN_PAUSE`] in virtual time, so a resume is
-/// never blocked by the pause floor — the script is adversarial about the
+/// never blocked by the pause floor. The script is adversarial about the
 /// watermarks, not about the timer.
 const PHASE: usize = 16;
 
@@ -80,12 +78,12 @@ const PHASE: usize = 16;
 const REJECT_EVERY: usize = 64;
 
 /// Injected clock. The controller reads time through a
-/// [`Clock`](spate_core::backpressure::Clock) precisely so it can be driven
-/// without sleeping, and the bench takes that seam rather than the monotonic
-/// default: `Instant::now` is a libc read costing more than the state machine
-/// it would be timing, and counting it would put the case under the C library
-/// instead of under this crate. Virtual time advances explicitly, once per
-/// iteration, inside the measured loop.
+/// [`Clock`](spate_core::backpressure::Clock) so it can be driven without
+/// sleeping, and the bench takes that seam rather than the monotonic default.
+/// `Instant::now` is a libc read costing more than the state machine it would
+/// be timing, and counting it would put the case under the C library instead
+/// of under this crate. Virtual time advances explicitly, once per iteration,
+/// inside the measured loop.
 #[derive(Clone)]
 struct BenchClock {
     base: Instant,
@@ -132,7 +130,7 @@ struct Step {
 pub(crate) enum Profile {
     /// In-flight bytes ride well below the low watermark, queues stay
     /// drained, nothing bounces. Every `tick` takes the `Normal` arm and
-    /// returns no transition — the iteration a healthy pipeline runs for
+    /// returns no transition, the iteration a healthy pipeline runs for
     /// hours at a time.
     Quiet,
     /// In-flight bytes climb past the high watermark and stay there, the
@@ -140,10 +138,10 @@ pub(crate) enum Profile {
     /// periodically. One transition at the top, then every later `tick`
     /// takes the `Paused` arm and finds a reason not to resume.
     Congested,
-    /// The adversary: usage slams from above the high watermark to below the
-    /// low one and back, on a phase long enough that the minimum-pause floor
-    /// never blocks a resume. Both arms run, and the controller transitions
-    /// as often as its hysteresis allows.
+    /// Usage slams from above the high watermark to below the low one and
+    /// back, on a phase long enough that the minimum-pause floor never blocks
+    /// a resume. Both arms run, and the controller transitions as often as
+    /// its hysteresis allows.
     Flapping,
 }
 
@@ -151,8 +149,8 @@ impl Profile {
     /// In-flight bytes the script holds at iteration `i`.
     fn usage(self, params: &BackpressureParams, i: usize) -> usize {
         match self {
-            // A plateau a megabyte up: fifteen iterations climbing a chunk at
-            // a time, then one dropping the whole run back. Always far below
+            // A plateau a megabyte up, climbing a chunk at a time for fifteen
+            // iterations, then dropping the whole run back. Always far below
             // the low watermark, so no tick has a reason to pause.
             Profile::Quiet => 1024 * 1024 + (i % 16) * CHUNK,
             Profile::Congested => params.high_bytes + (i % 8 + 1) * CHUNK,
@@ -197,18 +195,18 @@ pub(crate) struct Rig {
     clock: BenchClock,
     script: Vec<Step>,
     /// Transitions the script must produce. Asserted rather than returned
-    /// unchecked, so a script that stopped crossing a watermark — and so
-    /// stopped exercising the arm its name claims — could not pass as a fast
+    /// unchecked, so a script that stopped crossing a watermark (and so
+    /// stopped exercising the arm its name claims) could not pass as a fast
     /// one.
     pub(crate) expect_transitions: usize,
 }
 
 impl Rig {
     /// The bytes this rig drives, for a caller that has to prove two builds
-    /// measured the same ones — the wall tier folds these into its corpus
-    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    /// measured the same ones. The wall tier folds these into its corpus
+    /// digest, which demotes a pair of legs whose corpora drifted.
     ///
-    /// The script *is* the corpus: each entry carries its own budget
+    /// The script *is* the corpus. Each entry carries its own budget
     /// movement, its own queue reading and its own rejection, and a change to
     /// any profile's trajectory changes these bytes.
     pub(crate) fn corpus(&self) -> Vec<u8> {
@@ -228,7 +226,7 @@ impl Rig {
     /// A drive is not idempotent on its own. The script's `add`/`sub` pairs
     /// are *relative* movements baked against a level trajectory that starts
     /// at zero, so re-running them against a budget the previous drive left
-    /// populated walks the reading upward — [`Profile::Quiet`] nets 2,031,616
+    /// populated walks the reading upward. [`Profile::Quiet`] nets 2,031,616
     /// bytes per drive, and its fourth drive opens above the high watermark of
     /// 6,710,886 and pauses on its first iteration, which is not the profile
     /// that never has a reason to pause. [`assert_in_band`] runs in the builder
@@ -238,8 +236,8 @@ impl Rig {
     /// [`Profile::Congested`] paused from the previous drive, reporting its
     /// single transition once and zero every time after; rebuilding the
     /// controller from its own parameters restores the `Normal` arm without
-    /// restating them here. Zeroing the clock rather than letting it run on is
-    /// what keeps every drive bit-identical, for the reason [`STEP`] gives: an
+    /// restating them here. Zeroing the clock rather than letting it run on
+    /// keeps every drive bit-identical, for the reason [`STEP`] gives. An
     /// offset that grew without bound would eventually change the carries.
     ///
     /// The whole thing is one saturating subtraction, one `Cell` write and
@@ -249,8 +247,7 @@ impl Rig {
     ///
     /// The one piece of this rig's state a test can see. Without it the claim
     /// that [`Rig::reset`] restores a profile whose expected transition count
-    /// is zero cannot be checked at all: a drive that did nothing whatsoever
-    /// also reports zero.
+    /// is zero cannot be checked. A drive that did nothing also reports zero.
     pub(crate) fn usage(&self) -> usize {
         self.budget.usage()
     }
@@ -296,17 +293,17 @@ impl Rig {
 
 /// Each profile's script must stay inside the watermark band its name claims,
 /// or the case silently stops exercising the arm the bench header attributes
-/// to it — the reading, not the transition count, is what selects the branches
-/// inside `tick`, and a script that drifted across a watermark would still
-/// produce a plausible number.
+/// to it. The reading, not the transition count, selects the branches inside
+/// `tick`, and a script that drifted across a watermark would still produce a
+/// plausible number.
 ///
 /// Checked in the builder, which gungraun evaluates before it starts
 /// collecting, so a drifted script fails loudly instead.
 ///
-/// [`Profile::Flapping`] has no band by construction — it is defined by
-/// crossing both watermarks — and asserting one would only restate
-/// [`Profile::usage`]. What pins that profile is the transition count the
-/// bench asserts: a script that stopped crossing could not produce it.
+/// [`Profile::Flapping`] has no band by construction, being defined by
+/// crossing both watermarks, and asserting one would only restate
+/// [`Profile::usage`]. The transition count the bench asserts pins that
+/// profile instead. A script that stopped crossing could not produce it.
 fn assert_in_band(profile: Profile, params: &BackpressureParams, level: usize) {
     match profile {
         Profile::Quiet => assert!(
@@ -330,12 +327,12 @@ fn assert_in_band(profile: Profile, params: &BackpressureParams, level: usize) {
 /// A rig driving [`ITERATIONS`] poll iterations under `profile`.
 ///
 /// The script is built here, outside anything measured, from the usage
-/// trajectory the profile declares: each entry's `add`/`sub` is whatever
+/// trajectory the profile declares. Each entry's `add`/`sub` is whatever
 /// moves the budget from the previous iteration's level to this one's, so the
-/// budget sees genuine movements of varying size rather than a constant
-/// rewritten every step. Both are handed to the budget on every iteration —
-/// one of them zero — so the count carries two saturating read-modify-writes
-/// per iteration whichever way the reading moved.
+/// budget sees movements of varying size rather than a constant rewritten
+/// every step. Both are handed to the budget on every iteration (one of them
+/// zero), so the count carries two saturating read-modify-writes per
+/// iteration whichever way the reading moved.
 pub(crate) fn rig(profile: Profile, expect_transitions: usize) -> Rig {
     let params = BackpressureParams::from_budget(MAX_INFLIGHT, 0.8, 0.5, MIN_PAUSE);
     let mut level = 0usize;

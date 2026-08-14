@@ -3,14 +3,14 @@
 //!
 //! The division of labour (ADR-0006):
 //!
-//! - **Pipeline threads** route each record to a shard — two tiers share
-//!   one seam: meta-only [`ShardRouter`] (the default [`KeyHashRouter`]:
-//!   key hash, else a stable partition hash) or record-aware
-//!   [`RecordRouter`] for payload-derived shard affinity — then run the
+//! - **Pipeline threads** route each record to a shard, then run the
 //!   sink's [`RowEncoder`] inside the chain's terminal stage, accumulating
 //!   encoded rows into small [`EncodedChunk`] frames per shard and
-//!   `try_send`ing them into bounded per-shard queues (never blocking — a
-//!   full queue surfaces as backpressure).
+//!   `try_send`ing them into bounded per-shard queues. The send never
+//!   blocks; a full queue surfaces as backpressure. Routing has two tiers
+//!   over one seam: meta-only [`ShardRouter`] (the default
+//!   [`KeyHashRouter`] uses the key hash, else a stable partition hash) or
+//!   record-aware [`RecordRouter`] for payload-derived shard affinity.
 //! - **Shard workers** (tokio tasks) merge chunks from all pipeline
 //!   threads into full-size batches, seal on `max_rows` / `max_bytes` /
 //!   `linger`, and dispatch up to `max_inflight` concurrent
@@ -57,7 +57,7 @@ pub type SinkProbeFn = Box<
 
 /// Build a [`SinkProbeFn`] that probes every replica of every shard in
 /// `shard_endpoints` (indexed `[shard][replica]`) via
-/// [`ShardWriter::probe`] — the readiness loop
+/// [`ShardWriter::probe`]. This is the readiness loop
 /// [`SinkParts::with_probe`](crate::sink::SinkParts::with_probe) expects.
 /// Back `writer` with an independent probe client set, never the insert
 /// clients (see [`SinkParts::probe`](crate::sink::SinkParts)).
@@ -91,13 +91,13 @@ use bytes::{Bytes, BytesMut};
 use std::time::Instant;
 
 /// A small frame of encoded rows produced on a pipeline thread, the unit
-/// shipped over the per-shard queues. Wire frames are concatenable — either
-/// the format is headerless (RowBinary rows appended back-to-back) or each
-/// frame is one complete, self-describing block (ClickHouse Native), and a
-/// concatenation of complete blocks is itself a legal insert stream — so
-/// workers accumulate chunks without re-encoding.
+/// shipped over the per-shard queues. Wire frames are concatenable, so
+/// workers accumulate chunks without re-encoding. Either the format is
+/// headerless (RowBinary rows appended back-to-back), or each frame is one
+/// complete, self-describing block (ClickHouse Native) and a concatenation
+/// of complete blocks is itself a legal insert stream.
 ///
-/// Teardown safety: `acks` is an [`AckSet`] — dropping a chunk anywhere
+/// Teardown safety: `acks` is an [`AckSet`]. Dropping a chunk anywhere
 /// (a closed queue, an aborted worker, a parked chunk at teardown) fails
 /// its batches so their offsets never commit; only a completed durable
 /// write delivers them.
@@ -125,11 +125,11 @@ pub struct EncodedChunk {
 /// like [`Deserializer`](crate::deser::Deserializer).
 pub trait RowEncoder<F: RecFamily>: Send {
     /// Append `rec`'s encoding to `buf`. Errors are record-level and
-    /// subject to the sink stage's `ErrorPolicy` — except errors of
-    /// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal), which stop
-    /// the pipeline regardless of policy (fatal means the encoder itself
-    /// is broken, e.g. the row type cannot match the target schema; every
-    /// subsequent record would fail identically).
+    /// subject to the sink stage's `ErrorPolicy`. Errors of
+    /// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal) stop the
+    /// pipeline regardless of policy; fatal means the encoder itself is
+    /// broken (e.g. the row type cannot match the target schema), so every
+    /// subsequent record would fail identically.
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,
@@ -153,14 +153,14 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// the encoder empty and ready for the next chunk. Row formats already
     /// wrote every row in [`encode`](Self::encode), so the default is a
     /// no-op. The terminal stage calls this immediately before it seals each
-    /// [`EncodedChunk`] — in steady state, on data lulls, and at drain — so a
-    /// columnar encoder's buffered rows are never silently dropped.
+    /// [`EncodedChunk`] (in steady state, on data lulls, and at drain), so a
+    /// columnar encoder's buffered rows are not silently dropped.
     ///
-    /// An `Err` is fatal (a broken encoder, not a bad record): the stage
+    /// An `Err` is fatal (a broken encoder, not a bad record). The stage
     /// ships no partial frame and the buffered rows' acknowledgments fail on
     /// teardown, so the data replays. Because a Native block concatenates
     /// with the blocks around it, each `finish_chunk` frame is independently
-    /// valid — workers still accumulate frames without re-encoding.
+    /// valid, so workers still accumulate frames without re-encoding.
     fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
         let _ = buf;
         Ok(())
@@ -179,7 +179,7 @@ pub struct SealedBatch {
     /// Total bytes across `frames`.
     pub bytes: u64,
     /// Deterministic-within-a-session batch identity. Retries of the same
-    /// sealed batch — including on other replicas — reuse the same token,
+    /// sealed batch (including on other replicas) reuse the same token,
     /// so sinks with server-side deduplication windows treat them as
     /// idempotent. Crash replay produces different tokens (documented
     /// at-least-once semantics).
@@ -187,7 +187,7 @@ pub struct SealedBatch {
 }
 
 /// The I/O half of a sink connector: writes one sealed batch to one
-/// replica endpoint. Returning `Ok` is the durable-ack point — only then
+/// replica endpoint. Returning `Ok` is the durable-ack point; only then
 /// may the framework resolve the batch's acknowledgments.
 pub trait ShardWriter: Send + Sync + 'static {
     /// A connected replica endpoint (e.g. one HTTP client per replica).
@@ -201,7 +201,7 @@ pub trait ShardWriter: Send + Sync + 'static {
     /// touch them). `None` when the sink's `component_type` cannot scope a
     /// family: the default `"custom"` (reserved for pipeline-author metrics) or
     /// a reserved root opts out silently, and a malformed value is logged and
-    /// also yields `None` — so declare a distinct `component_type` via
+    /// also yields `None`. Declare a distinct `component_type` via
     /// [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
     /// to receive a scope. Defaults to ignoring it.
     fn attach_metrics(&mut self, meter: Option<Meter>) {
@@ -211,7 +211,7 @@ pub trait ShardWriter: Send + Sync + 'static {
     /// Write `batch` to `endpoint` durably.
     ///
     /// **Bound it.** The framework guarantees that shutdown terminates, not
-    /// that this call does: at the drain deadline the write task is aborted,
+    /// that this call does. At the drain deadline the write task is aborted,
     /// which only lands if this future is at an await point. A client with no
     /// request timeout turns every shutdown into a wait for the deadline, and
     /// one that blocks its thread between awaits cannot be aborted at all.
@@ -233,8 +233,8 @@ pub trait ShardWriter: Send + Sync + 'static {
     }
 }
 
-/// Routes records to shards on metadata alone — the **meta-only tier** of
-/// sink routing. Pure and cheap — called per record on pipeline threads.
+/// Routes records to shards on metadata alone, the **meta-only tier** of
+/// sink routing. Pure and cheap; called per record on pipeline threads.
 ///
 /// Every `ShardRouter` is also a [`RecordRouter`] for every record family
 /// through a blanket bridge, so meta-only routers plug into the same
@@ -262,35 +262,35 @@ impl ShardRouter for KeyHashRouter {
     }
 }
 
-/// Routes records to shards with access to the full record — the
-/// **record-aware tier** of sink routing. Pure and cheap: called once per
-/// record on pinned pipeline threads, strictly before encoding; it must
+/// Routes records to shards with access to the full record, the
+/// **record-aware tier** of sink routing. Pure and cheap; called once per
+/// record on pinned pipeline threads, strictly before encoding. It must
 /// not perform I/O, block, or allocate per call. Family-generic and
 /// dyn-compatible, like [`RowEncoder`].
 ///
-/// Two tiers, one seam:
+/// The two tiers share one seam:
 ///
 /// - **Meta-only** ([`ShardRouter`]): routes on [`RecordMeta`] alone (key
 ///   hash, source partition). The default [`KeyHashRouter`] lives here.
 ///   Every `ShardRouter` is automatically a `RecordRouter` for every
 ///   family through a blanket bridge, so meta-only routers plug into the
 ///   same builder seam unchanged.
-/// - **Record-aware** (this trait): routes on the payload itself —
-///   required when shard affinity derives from a field of the terminal
+/// - **Record-aware** (this trait): routes on the payload itself.
+///   Required when shard affinity derives from a field of the terminal
 ///   record type (e.g. matching a sink cluster's own sharding expression),
-///   and the only way to route `flat_map` children independently: children
-///   inherit their parent's [`RecordMeta`], so a meta-only router
-///   necessarily colocates them.
+///   and the only way to route `flat_map` children independently, since
+///   children inherit their parent's [`RecordMeta`] and a meta-only router
+///   colocates them.
 ///
-/// The router sees the record exactly as the [`RowEncoder`] will — after
-/// every transform — so a routing key must survive to the terminal record
+/// The router sees the record exactly as the [`RowEncoder`] will (after
+/// every transform), so a routing key must survive to the terminal record
 /// type. A router may hold state (a weights table, an atomic counter);
 /// `&self` plus interior mutability covers stateful strategies.
 ///
 /// A router must also be **total**: return a shard index for every record
-/// and never panic. Routing deliberately has no per-record error policy —
-/// a record either has a well-defined shard or the router picks a
-/// deterministic fallback. Unlike an encoder error, which honors the sink
+/// and never panic. Routing has no per-record error policy; a record
+/// either has a well-defined shard or the router picks a deterministic
+/// fallback. Unlike an encoder error, which honors the sink
 /// stage's Skip/Fail policy, a router panic fails the in-flight batch and
 /// stops the pipeline; restart then replays the same record, so a
 /// payload-dependent panic is a deterministic crash loop until a code fix
@@ -313,7 +313,7 @@ impl ShardRouter for KeyHashRouter {
 /// }
 /// ```
 ///
-/// Implement **either** this trait **or** [`ShardRouter`], never both —
+/// Implement **either** this trait **or** [`ShardRouter`], never both;
 /// the bridge makes implementing both a coherence overlap:
 ///
 /// ```compile_fail,E0119
@@ -331,7 +331,7 @@ impl ShardRouter for KeyHashRouter {
 /// ```
 pub trait RecordRouter<F: RecFamily>: Send + Sync {
     /// The shard index in `0..num_shards` for `rec`. Must be
-    /// `< num_shards` — the terminal stage indexes its shard buffers
+    /// `< num_shards`; the terminal stage indexes its shard buffers
     /// directly with the result.
     fn route_record<'buf>(&self, rec: &Record<F::Rec<'buf>>, num_shards: usize) -> usize;
 }

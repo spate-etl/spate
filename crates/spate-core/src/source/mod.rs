@@ -1,8 +1,8 @@
 //! Source abstraction: a control plane ([`Source`]) and a data plane
 //! ([`SourceLane`]).
 //!
-//! A source is poll-based — no `futures::Stream`. The control plane surfaces
-//! lane assignment and revocation as events and owns commits and
+//! A source is poll-based rather than a `futures::Stream`. The control plane
+//! surfaces lane assignment and revocation as events and owns commits and
 //! pause/resume; each lane is a pollable unit pinned to one pipeline thread
 //! (for Kafka: a partition queue), yielding payloads that **borrow** the
 //! source's buffers for the duration of one `push_batch` call (ADR-0003).
@@ -29,8 +29,8 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LaneId(pub u32);
 
-/// One poll's worth of borrowed payloads. Streaming — payloads are handed
-/// out one at a time, and every payload shares the batch lifetime `'buf`.
+/// One poll's worth of borrowed payloads. Payloads are handed out one at a
+/// time, and every payload shares the batch lifetime `'buf`.
 /// The batch carries exactly one [`AckRef`], issued by the lane through its
 /// [`AckIssuer`]; records derived from these payloads clone it.
 pub trait PayloadBatch<'buf> {
@@ -45,7 +45,7 @@ pub trait PayloadBatch<'buf> {
 ///
 /// Contract: payloads yielded by [`SourceLane::poll`] are valid only until
 /// the returned batch is dropped, which happens before the next `poll` call
-/// on the same lane — records must be consumed or encoded within that
+/// on the same lane. Records must be consumed or encoded within that
 /// window (the operator chain guarantees this by construction).
 pub trait SourceLane: Send {
     /// The borrowed batch type (a GAT so payloads can borrow lane buffers).
@@ -61,8 +61,8 @@ pub trait SourceLane: Send {
     fn partition(&self) -> PartitionId;
 
     /// Poll up to `max_records` payloads, waiting at most `timeout`.
-    /// `Ok(None)` means nothing arrived — the driver treats it as idle.
-    /// Implementations must not busy-spin when idle: block up to `timeout`.
+    /// `Ok(None)` means nothing arrived; the driver treats it as idle.
+    /// Implementations must not busy-spin when idle; block up to `timeout`.
     fn poll(
         &mut self,
         max_records: usize,
@@ -82,8 +82,8 @@ pub enum SourceEvent<L> {
     /// Coordinated sources emit this for incremental split gains so a
     /// routine gain never drains flowing lanes (contrast
     /// [`SourceEvent::LanesAssigned`], whose eager-rebalance contract
-    /// replaces the full lane set). Lane ids must be new — never reuse an
-    /// id from this source's lifetime — and each lane's partition must be
+    /// replaces the full lane set). Lane ids must be new (never reuse an
+    /// id from this source's lifetime), and each lane's partition must be
     /// fresh, not one revoked earlier in the epoch.
     LanesAdded(Vec<L>),
     /// Lanes are being revoked. The runtime trips the [`DrainBarrier`] for
@@ -100,8 +100,8 @@ pub enum SourceEvent<L> {
     /// input is fully delivered, acknowledged, *and committed* (e.g. a
     /// coordinated split whose terminal progress reached the store), so
     /// by contract nothing unflushed or uncommitted can exist behind
-    /// them. The runtime removes them without a drain barrier — pure
-    /// bookkeeping, no pipeline stall. Sources must use
+    /// them. The runtime removes them without a drain barrier, so there is
+    /// no pipeline stall. Sources must use
     /// [`SourceEvent::LanesRevoked`] instead whenever any in-flight data
     /// or uncommitted acknowledgment may remain.
     LanesRetired {
@@ -116,9 +116,9 @@ pub enum SourceEvent<L> {
     /// coordinated split, freeing its working-set slot) until the acked
     /// watermark reaches it through `Source::commit`. The runtime responds
     /// by briefly tightening its commit cadence *for those partitions
-    /// only* — flowing partitions keep the periodic tick — until their
-    /// acks quiesce or one commit interval elapses. Purely a latency
-    /// optimization: correctness never depends on it, and sources that
+    /// only* (flowing partitions keep the periodic tick) until their
+    /// acks quiesce or one commit interval elapses. This is a latency
+    /// optimization; correctness does not depend on it, and sources that
     /// never emit it get the periodic cadence.
     CommitReady {
         /// Partitions whose final acks are worth chasing.
@@ -131,7 +131,7 @@ pub enum SourceEvent<L> {
     /// commit, and exits with [`ExitState::Completed`](crate::pipeline::ExitState).
     ///
     /// Contract: a source must not report `Drained` while any lane still
-    /// holds unemitted data — a lane's exhaustion may only be decided by a
+    /// holds unemitted data. A lane's exhaustion may only be decided by a
     /// `poll` that returned `Ok(None)` after its final batch was consumed
     /// (the poll→push→poll sequencing on the owning thread then guarantees
     /// the final batch was fully pushed downstream). Emitting `Drained` is
@@ -152,28 +152,28 @@ pub struct SourceCtx {
     /// metric families (e.g. consumer lag, broker statistics), pre-labeled
     /// with the standard `pipeline`/`component`/`component_type`. `None` unless
     /// the source declared a [`Source::component_type`] that is a usable,
-    /// non-reserved namespace — a reserved default (`"source"`) opts out
-    /// silently, a malformed value is logged and also yields `None`. Resolve
+    /// non-reserved namespace. A reserved default (`"source"`) opts out
+    /// silently, and a malformed value is logged and also yields `None`. Resolve
     /// handles from it once here in `open`; never on the poll path.
     pub meter: Option<Meter>,
     /// The framework's own source-stage handles (`spate_source_*`), shared with
     /// the controller. A source that can observe its own consumer lag
-    /// publishes it here — [`SourceMetrics::set_partition_lag`] and
+    /// publishes it here. [`SourceMetrics::set_partition_lag`] and
     /// [`SourceMetrics::retain_partitions`] have no other caller, because the
     /// framework cannot compute lag without the client's view of the log end,
     /// nor tell which partitions the client still owns. `None` only when the
     /// source is driven outside a pipeline (tests, or a direct `open` call),
-    /// in which case lag simply goes unpublished.
+    /// in which case lag goes unpublished.
     ///
-    /// Everything else on these handles — records, bytes, poll duration,
-    /// rebalances, active lanes — is recorded by the runtime itself; a source
+    /// Everything else on these handles (records, bytes, poll duration,
+    /// rebalances, active lanes) is recorded by the runtime itself; a source
     /// must not touch those.
     pub stage_metrics: Option<Arc<SourceMetrics>>,
     /// Whether cardinality-sensitive per-partition series are enabled
     /// (`metrics.per_partition_detail`). Gates a connector's own per-partition
     /// families: when `false`, register and emit only aggregate
     /// (per-component or per-broker) series. It does **not** gate
-    /// `spate_source_lag_records` — consumer lag has no aggregate series to fall
+    /// `spate_source_lag_records`; consumer lag has no aggregate series to fall
     /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
 }
@@ -201,7 +201,7 @@ impl SourceCtx {
     }
 
     /// Share the framework's source-stage handles so the source can publish
-    /// the one series only it can measure: consumer lag. Called by the
+    /// the one series only it can measure, consumer lag. Called by the
     /// runtime with the same instance the controller records against.
     #[must_use]
     pub fn with_stage_metrics(mut self, metrics: Option<Arc<SourceMetrics>>) -> Self {
@@ -239,9 +239,9 @@ pub trait Source: Send {
     /// pair it with a deserializer without the two being coordinated by hand
     /// (see [`FramingContract`]). A source that splits its own bytes into one
     /// record per payload returns [`FramingContract::PerRecord`]; the default
-    /// is [`FramingContract::WholePayload`] — the source emits whole payloads
-    /// and the deserializer owns framing (Kafka, and any source that does not
-    /// frame).
+    /// is [`FramingContract::WholePayload`], where the source emits whole
+    /// payloads and the deserializer owns framing (Kafka, and any source that
+    /// does not frame).
     fn framing_contract(&self) -> FramingContract {
         FramingContract::WholePayload
     }

@@ -2,9 +2,9 @@
 //!
 //! Every handle the record loop touches is resolved once at build time, and
 //! its methods take per-batch aggregates, as [the metrics reference]
-//! specifies. The per-partition lag series is the exception: it is resolved
-//! lazily, on the control plane, so that a partition whose lag has never been
-//! measured is absent rather than a `0` that reads as "caught up".
+//! specifies. The per-partition lag series is resolved lazily instead, on the
+//! control plane, so a partition whose lag has never been measured is absent
+//! rather than a `0` that reads as "caught up".
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
@@ -35,19 +35,19 @@ impl SourceMetrics {
     /// Resolve all source handles, claiming the `spate_source_*` series for
     /// these labels.
     ///
-    /// A pipeline builds several of these on identical labels — one per
-    /// pipeline thread plus the controller's — because every thread counts
+    /// A pipeline builds several of these on identical labels (one per
+    /// pipeline thread plus the controller's) because every thread counts
     /// records it polled. Only *one* of them may publish the source gauges,
-    /// and it must be the controller's: it holds the assignment and hands its
-    /// clone to the source, which is the only thing that can measure lag. The
-    /// per-thread instances are therefore built with [`shadow`](Self::shadow),
-    /// not this constructor. A collision here logs and shadows rather than
-    /// panicking.
+    /// and it must be the controller's. The controller holds the assignment
+    /// and hands its clone to the source, which is the only thing that can
+    /// measure lag. The per-thread instances are therefore built with
+    /// [`shadow`](Self::shadow), not this constructor. A collision here logs
+    /// and shadows rather than panicking.
     ///
-    /// Consumer lag is deliberately not gated by `per_partition_detail`: the
-    /// per-partition series is the *only* representation of a golden signal,
-    /// so a cardinality knob must not be able to delete it. The lag handles
-    /// are also not resolved here — `PartitionGauges` registers a partition's
+    /// Consumer lag is not gated by `per_partition_detail`. The per-partition
+    /// series is the *only* representation of a golden signal, so a
+    /// cardinality knob must not be able to delete it. The lag handles are
+    /// also not resolved here; `PartitionGauges` registers a partition's
     /// series on its first known value, so a partition whose lag has never
     /// been measured is absent rather than reporting a `0` that reads as
     /// "caught up".
@@ -57,7 +57,7 @@ impl SourceMetrics {
 
     /// Resolve all source handles, failing when another live handle set
     /// already owns the series. The pipeline runtime's path for the
-    /// controller's instance — the one that owns lag and lanes.
+    /// controller's instance (the one that owns lag and lanes).
     ///
     /// # Errors
     ///
@@ -67,12 +67,12 @@ impl SourceMetrics {
         Ok(Self::build(labels, Some(claim)))
     }
 
-    /// Resolve source handles that deliberately **do not** own their series:
-    /// counters and the poll histogram record as normal (they aggregate across
-    /// instances), gauge writes are dropped.
+    /// Resolve source handles that **do not** own their series. Counters and
+    /// the poll histogram record as normal (they aggregate across instances);
+    /// gauge writes are dropped.
     ///
-    /// This is how a pipeline thread gets to count its own polls without
-    /// competing for `spate_source_lag_records` and `spate_source_lanes_active`,
+    /// A pipeline thread counts its own polls this way without competing for
+    /// `spate_source_lag_records` and `spate_source_lanes_active`,
     /// which only the controller can populate correctly. Use it when a second
     /// instance on the same labels is intended; anything else should use
     /// [`new`](Self::new) or [`try_new`](Self::try_new) and hear about the
@@ -128,10 +128,10 @@ impl SourceMetrics {
 
     /// Publish one partition's consumer lag.
     ///
-    /// Only call this with a lag the client actually measured. The series is
-    /// registered on the first such call, so never publishing is how "lag
-    /// unknown" is expressed — a `0` would be indistinguishable from a
-    /// consumer that has caught up.
+    /// Only call this with a lag the client measured. The series is registered
+    /// on the first such call, so never publishing is how "lag unknown" is
+    /// expressed. A `0` would be indistinguishable from a consumer that has
+    /// caught up.
     pub fn set_partition_lag(&self, partition: PartitionId, lag: u64) {
         self.partition_lag.set(partition, lag as f64);
     }
@@ -139,15 +139,14 @@ impl SourceMetrics {
     /// Zero and drop the lag series for partitions this member no longer
     /// owns.
     ///
-    /// Load-bearing, but not by deleting anything: the exporter has no
-    /// deletion, so a partition that moved to another member would keep
-    /// rendering this member's last lag forever and every reader that sums
-    /// across partitions would count it twice. Zeroing first makes the sum
-    /// correct — the member that now owns the partition publishes the real
-    /// figure, and this one contributes the `0` it truthfully has.
+    /// The exporter has no deletion, so a partition that moved to another
+    /// member would keep rendering this member's last lag forever and every
+    /// reader that sums across partitions would count it twice. Zeroing first
+    /// makes the sum correct. The member that now owns the partition publishes
+    /// the real figure, and this one contributes the `0` it holds.
     ///
     /// Call this once the *new* assignment is known, not while partitions are
-    /// still draining: a member that is about to be handed a partition back
+    /// still draining. A member that is about to be handed a partition back
     /// should never publish a zero for it.
     pub fn retain_partitions(&self, keep: &[PartitionId]) {
         self.partition_lag.retain(keep);

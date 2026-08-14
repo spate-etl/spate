@@ -1,10 +1,10 @@
 //! Hard allocation assertions for the operator-chain hot path.
 //!
-//! The zero-alloc goal is a test, not an aspiration: pushing a batch of
-//! borrowed payloads through deserialize → filter → flat_map → encode →
-//! handoff must not allocate per record. Per-iteration overhead (one ack
-//! channel pair, chunk seals at flush) is bounded by a constant; quadrupling
-//! the record count must not increase the allocation count materially.
+//! Pushing a batch of borrowed payloads through deserialize → filter →
+//! flat_map → encode → handoff must not allocate per record. Per-iteration
+//! overhead (one ack channel pair, chunk seals at flush) is bounded by a
+//! constant; quadrupling the record count must not increase the allocation
+//! count materially.
 
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckMsg, AckRef};
@@ -215,7 +215,7 @@ fn steady_state_allocations_do_not_scale_with_records() {
         "per-iteration allocations must be a small constant, got {small_per_iter}"
     );
     // Quadrupling the records (≈ +4600/iter) must not add per-record
-    // allocations — only a few extra chunk seals and buffer regrowths.
+    // allocations, only a few extra chunk seals and buffer regrowths.
     assert!(
         big_per_iter <= small_per_iter + 48,
         "allocations scale with records: small {small_per_iter}/iter, big {big_per_iter}/iter"

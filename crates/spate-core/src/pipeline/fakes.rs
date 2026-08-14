@@ -28,12 +28,11 @@ pub(crate) struct SourceLog {
     pub(crate) flush_commits: usize,
     pub(crate) opened: bool,
     /// Whether `open` received the framework's source-stage handles. Guards
-    /// the seam a source publishes consumer lag through: the handles were
-    /// once reachable only via a builder nothing called, so the lag gauge
-    /// rendered a permanent zero on every pipeline.
+    /// the seam a source publishes consumer lag through; if the handles never
+    /// arrive, the lag gauge renders a permanent zero on every pipeline.
     pub(crate) stage_metrics_attached: bool,
-    /// When set, `commit` and `flush_commits` fail retryably — models a
-    /// checkpoint store outage (nothing is recorded as committed).
+    /// When set, `commit` and `flush_commits` fail retryably, modeling a
+    /// checkpoint store outage; nothing is recorded as committed.
     pub(crate) fail_commits: bool,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
@@ -41,14 +40,14 @@ pub(crate) struct SourceLog {
 
 pub(crate) enum Script {
     Assign(Vec<LaneSpec>),
-    /// Additive gain — lanes join the *current* epoch, as a coordinated
+    /// Additive gain. Lanes join the *current* epoch, as a coordinated
     /// source emits for an incremental unit of work.
     Add(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
-    /// Report the source permanently exhausted — models a bounded source
+    /// Report the source permanently exhausted, modeling a bounded source
     /// (backfill) requesting the graceful completion drain.
     Drained,
-    /// Panic inside `poll_events` — models a source bug that kills the
+    /// Panic inside `poll_events`, modeling a source bug that kills the
     /// controller thread outside its drain choreography.
     PanicPoll,
 }
@@ -104,9 +103,9 @@ impl Source for FakeSource {
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
         }
         // Publish a lag figure like a real source would, so a test can tell
-        // whether the handle set it was given actually owns the series. Only
-        // the owner registers a per-partition gauge; a shadow's write is
-        // dropped and the series never appears.
+        // whether the handle set it was given owns the series. Only the owner
+        // registers a per-partition gauge; a shadow's write is dropped and the
+        // series never appears.
         if let Some(m) = &ctx.stage_metrics {
             m.set_partition_lag(PartitionId(0), FAKE_SOURCE_LAG);
         }
@@ -292,7 +291,7 @@ pub(crate) enum ChainMode {
     FatalAtBatch(usize),
     PanicAtBatch(usize),
     /// Fail the ack of the n-th batch (1-based) after consuming it, stalling
-    /// that partition's watermark permanently — as a fatal sink write does.
+    /// that partition's watermark permanently, as a fatal sink write does.
     FailAckAtBatch(usize),
     /// Clone-and-stash every batch's ack so watermarks never advance and the
     /// checkpointer's pending count climbs. Setting `release` stops stashing;
@@ -302,9 +301,9 @@ pub(crate) enum ChainMode {
         release: Arc<AtomicBool>,
     },
     /// Park every batch's ack until the next `flush`, as a real terminal's
-    /// chunk buffer does: watermarks can only advance after a flush resolves
-    /// the stash. Pins choreography that must flush the chain before
-    /// committing (revocation, shutdown).
+    /// chunk buffer does. Watermarks advance only after a flush resolves the
+    /// stash. Pins choreography that must flush the chain before committing
+    /// (revocation, shutdown).
     HoldAcksUntilFlush {
         held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
     },
@@ -366,9 +365,9 @@ impl RunnableChain for FakeChain {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
         if let ChainMode::HoldAcksUntilFlush { held } = &self.mode {
-            // Dropping the stashed clones resolves the batches Delivered —
-            // the fake equivalent of sealing a partial chunk and having the
-            // sink write it.
+            // Dropping the stashed clones resolves the batches Delivered, the
+            // fake equivalent of sealing a partial chunk and having the sink
+            // write it.
             held.lock().unwrap().clear();
         }
         PushOutcome::Done
@@ -379,12 +378,10 @@ impl RunnableChain for FakeChain {
 ///
 /// Metric gauge series are owned by exactly one live handle set per process
 /// (`metrics::ownership`), and the pipeline name is part of every key. Under
-/// nextest each test is its own process and a fixed name would do, but
-/// `cargo test` runs a binary's tests concurrently in one process, where two
-/// pipelines called `test` are the very collision the ownership check exists
-/// to reject — the second would fail to start. Naming them apart keeps the
-/// two runners equivalent, and matches production, where two pipelines in one
-/// process are two different pipelines.
+/// nextest each test is its own process, but `cargo test` runs a binary's
+/// tests concurrently in one process, where two pipelines sharing a name
+/// collide and the second fails to start. Naming them apart keeps the two
+/// runners equivalent.
 pub(crate) fn test_pipeline_name() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(

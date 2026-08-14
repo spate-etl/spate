@@ -1,29 +1,29 @@
 //! Streaming record framing: the seam that cuts a decoded byte stream into
 //! records.
 //!
-//! Framing is a **transport- and format-agnostic seam**. Any streaming/pull
-//! source — object-storage backfills (`spate-s3`) today, HTTP chunked bodies,
-//! WebSocket message streams, or file tails tomorrow — must turn a byte stream
-//! into records before a [`Deserializer`](crate::deser::Deserializer) decodes
-//! each one. That "one payload → one record" split is what lets a single
-//! decoder serve every source; the framer decides what one payload *is*.
+//! Framing is a **transport- and format-agnostic seam**. Any streaming or pull
+//! source (object-storage backfills in `spate-s3`, HTTP chunked bodies,
+//! WebSocket message streams, file tails) must turn a byte stream into records
+//! before a [`Deserializer`](crate::deser::Deserializer) decodes each one.
+//! That "one payload → one record" split lets a single decoder serve every
+//! source; the framer decides what one payload *is*.
 //!
-//! `spate-core` owns only the seam here — the [`RecordFramer`] trait, the
-//! [`FramerWriter`] decompressor shim, and the [`FramingContract`] handshake.
+//! `spate-core` owns the seam here (the [`RecordFramer`] trait, the
+//! [`FramerWriter`] decompressor shim, and the [`FramingContract`] handshake).
 //! The concrete framers are owned by the **format** crates, because how a byte
-//! stream splits into records is a property of the format, not the transport:
-//! `spate-json` provides newline-delimited framing for NDJSON, a future
-//! `spate-avro` an object-container block framer, and so on. A source stays
-//! format-agnostic and receives its framer at pipeline-assembly time (e.g.
-//! `S3Source::with_framer`), so the same framer serves every streaming source
-//! and no source hard-codes a format.
+//! stream splits into records is a property of the format rather than the
+//! transport. `spate-json` provides newline-delimited framing for NDJSON, a
+//! future `spate-avro` an object-container block framer, and so on. A source
+//! stays format-agnostic and receives its framer at pipeline-assembly time
+//! (e.g. `S3Source::with_framer`), so the same framer serves every streaming
+//! source and no source hard-codes a format.
 //!
 //! A [`RecordFramer`] is fed decoded bytes in arbitrary chunks and yields
 //! completed record byte-slices. It **must be a pure function of the byte
-//! stream** — independent of how the bytes are chunked — so a source that
-//! resumes by record index replays deterministically (this is load-bearing for
-//! at-least-once resume; see the `spate-s3` offset model). Compression is *not*
-//! part of framing: a source that decompresses wraps its decompressor around a
+//! stream**, independent of how the bytes are chunked, so a source that
+//! resumes by record index replays deterministically; at-least-once resume
+//! depends on it (see the `spate-s3` offset model). Compression is *not* part
+//! of framing. A source that decompresses wraps its decompressor around a
 //! [`FramerWriter`], so the framer only ever sees already-decoded bytes.
 //!
 //! Dispatch through `Box<dyn RecordFramer>` happens once per fed chunk, never
@@ -35,10 +35,10 @@ use std::io::{self, Write};
 /// a source with a deserializer without the two being coordinated by hand.
 ///
 /// - [`PerRecord`](FramingContract::PerRecord): the source already framed one
-///   record per payload — it ran a [`RecordFramer`] over its byte stream (e.g.
-///   an `spate-s3` backfill framing each object with the format's framer). The
-///   deserializer must decode a *single* unit; a deserializer configured to
-///   *also* frame the payload is a double-framing error.
+///   record per payload, having run a [`RecordFramer`] over its byte stream
+///   (e.g. an `spate-s3` backfill framing each object with the format's
+///   framer). The deserializer must decode a *single* unit; a deserializer
+///   configured to *also* frame the payload is a double-framing error.
 /// - [`WholePayload`](FramingContract::WholePayload): the source emits whole
 ///   payloads and the deserializer owns framing (e.g. a Kafka message, which
 ///   may carry one record or many). This is the default for sources that do
@@ -46,18 +46,18 @@ use std::io::{self, Write};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FramingContract {
-    /// One record per payload — the deserializer decodes a single unit.
+    /// One record per payload; the deserializer decodes a single unit.
     PerRecord,
-    /// Whole payloads — the deserializer frames them.
+    /// Whole payloads; the deserializer frames them.
     WholePayload,
 }
 
 /// A streaming record framer: fed decoded bytes, yields record byte-payloads.
 ///
 /// Concrete implementations live in the format crates (`spate-json`'s NDJSON
-/// framer, a future `spate-avro` container framer, ...). Implementations **must
-/// be a pure function of the byte stream** — the record sequence must not
-/// depend on how bytes are split across [`push`](Self::push) calls — so
+/// framer, a future `spate-avro` container framer, ...). Implementations
+/// **must be a pure function of the byte stream**. The record sequence must
+/// not depend on how bytes are split across [`push`](Self::push) calls, so
 /// resume-by-record-index stays deterministic. Enforce any record-size bound
 /// inside `push` (return an error rather than buffer unboundedly).
 pub trait RecordFramer: Send {
@@ -90,13 +90,14 @@ impl FramerWriter {
         FramerWriter { framer }
     }
 
-    /// The wrapped framer (shared) — read `decoded_bytes`.
+    /// The wrapped framer (shared), for reading `decoded_bytes`.
     #[must_use]
     pub fn framer(&self) -> &dyn RecordFramer {
         &*self.framer
     }
 
-    /// The wrapped framer — pop records, read `decoded_bytes`, `finish`.
+    /// The wrapped framer, for popping records, reading `decoded_bytes`, and
+    /// `finish`.
     pub fn framer_mut(&mut self) -> &mut dyn RecordFramer {
         &mut *self.framer
     }
@@ -131,9 +132,9 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// A minimal in-crate [`RecordFramer`] for exercising the seam itself
-    /// without a concrete framer — those live in the format crates. It
-    /// concatenates everything pushed and emits it as one record at `finish`.
+    /// A minimal in-crate [`RecordFramer`] for exercising the seam without a
+    /// concrete framer; those live in the format crates. It concatenates
+    /// everything pushed and emits it as one record at `finish`.
     #[derive(Default)]
     struct WholeFramer {
         buf: Vec<u8>,

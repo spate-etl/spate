@@ -47,7 +47,7 @@ impl AdvanceCounter {
 /// Handed to a driver with each lane: the lane's assignment epoch and the
 /// advance counter for its partition. Batches acknowledged under a
 /// different epoch are stale by construction and must not be counted
-/// against the gate — their registrations are discarded by the
+/// against the gate. Their registrations are discarded by the
 /// checkpointer, so nothing would ever retire them.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingGate {

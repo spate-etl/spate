@@ -2,23 +2,22 @@
 //! and resolved through the public acknowledgment path and drained into
 //! per-partition watermarks a commit tick at a time.
 //!
-//! Everything here goes through `spate_core::checkpoint`'s public API —
-//! [`AckIssuer::issue`], `AckRef`'s drop, [`Checkpointer::drain`] and
-//! [`Checkpointer::take_watermarks`] — because that is the whole of what a
-//! pipeline thread and the runtime touch. The module is synchronous and
-//! tokio-free by invariant, which is exactly what makes it countable: there
-//! is no executor between the call and the work.
+//! Everything here goes through `spate_core::checkpoint`'s public API
+//! ([`AckIssuer::issue`], `AckRef`'s drop, [`Checkpointer::drain`] and
+//! [`Checkpointer::take_watermarks`]). That is the whole of what a pipeline
+//! thread and the runtime touch. The module is synchronous and tokio-free by
+//! invariant, so no executor sits between the call and the work and the path
+//! is countable.
 //!
-//! Two drivers over one schedule. [`rig`] issues and resolves on the calling
-//! thread, and is what the counted tier measures. [`threaded`] spreads the
-//! same schedule across a pinned number of worker threads, and is what the
-//! wall tier measures: what a thread count moves is contention on the two
-//! unbounded channels rather than arithmetic, and callgrind serializes
-//! threads, so the counted tier cannot see it at all.
+//! [`rig`] issues and resolves on the calling thread, and is what the counted
+//! tier measures. [`threaded`] spreads the same schedule across a pinned
+//! number of worker threads, and is what the wall tier measures. A thread
+//! count moves contention on the two unbounded channels rather than
+//! arithmetic, and callgrind serializes threads, so the counted tier cannot
+//! see that contention.
 //!
 //! Included with `#[path]` by `checkpoint_gungraun.rs`, `control_plane_wall.rs`
-//! and `tests/bench_fixtures.rs`. A bench target is its own crate, so several
-//! targets can only agree on a workload by compiling the same source.
+//! and `tests/bench_fixtures.rs`.
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
@@ -31,9 +30,9 @@ use std::time::{Duration, Instant};
 
 /// Source poll batches one case issues and resolves in total.
 ///
-/// The corpus is the batches, not the number of times one batch is replayed:
-/// every batch here carries its own partition, sequence and offset, and the
-/// tracker's state after it is different from the state before it.
+/// The corpus is the batches, not the number of times one batch is replayed.
+/// Every batch here carries its own partition, sequence and offset, and the
+/// tracker's state after it differs from the state before it.
 pub(crate) const BATCHES: usize = 8192;
 
 /// Partitions the epoch covers, and so the number of trackers a drain
@@ -51,8 +50,8 @@ pub(crate) const BATCHES: usize = 8192;
 /// [`threaded`] accepts divides it instead.
 pub(crate) const PARTITIONS: usize = 4;
 
-/// Source offsets one batch covers. Only the arithmetic depends on it — the
-/// tracker stores the last offset and reports `last_offset + 1` — but a
+/// Source offsets one batch covers. Only the arithmetic depends on it (the
+/// tracker stores the last offset and reports `last_offset + 1`), but a
 /// realistic stride keeps the watermarks strictly increasing per partition
 /// within a drive, as a real source's would be.
 const OFFSETS_PER_BATCH: i64 = 100;
@@ -64,14 +63,13 @@ const ENTRY_BYTES: usize = 4 + 8;
 /// issued them.
 #[derive(Clone, Copy)]
 pub(crate) enum Order {
-    /// Resolved in issue order, which is what a pipeline whose sinks
-    /// complete in flush order produces.
+    /// Resolved in issue order, the order a pipeline whose sinks complete in
+    /// flush order produces.
     Issued,
-    /// Resolved in a fixed scrambled permutation — the same shape the
-    /// `watermark_is_monotonic` unit test uses, `(step * 37) % n`, chosen
-    /// there and reused here rather than invented. 37 is coprime with every
-    /// window size this rig accepts, so the walk is a permutation and every
-    /// batch resolves exactly once.
+    /// Resolved in a fixed scrambled permutation, `(step * 37) % n`, the same
+    /// shape the `watermark_is_monotonic` unit test uses. 37 is coprime with
+    /// every window size this rig accepts, so the walk is a permutation and
+    /// every batch resolves exactly once.
     Scrambled,
 }
 
@@ -96,20 +94,18 @@ pub(crate) struct Entry {
 
 /// Every batch a drive issues, in issue order.
 ///
-/// Materialised here rather than computed inside a drive, for two reasons —
-/// the second is what earns the 96 KiB. A drive then walks a slice instead of
-/// carrying the rig's own modular arithmetic, so neither tier charges the
-/// checkpointer for work the fixture does; and the schedule becomes *bytes*,
-/// which is what the wall harness folds into its corpus digest to prove two
-/// legs drove the same batches. A rig whose corpus cannot be handed over
-/// compares equal to one that changed.
+/// Materialised here rather than computed inside a drive. A drive walks a
+/// slice instead of carrying the rig's own modular arithmetic, so neither
+/// tier charges the checkpointer for work the fixture does, and the schedule
+/// becomes *bytes* that the wall harness folds into its corpus digest to
+/// prove two legs drove the same batches.
 ///
-/// A pure function of nothing but the constants above — no RNG, no clock, no
-/// hash iteration order — so two checkouts straddling a dependency bump build
-/// it byte for byte alike, and the harness's seed argument is genuinely
-/// unused. `tests/bench_fixtures.rs` pins the result.
+/// A pure function of nothing but the constants above (no RNG, no clock, no
+/// hash iteration order), so two checkouts straddling a dependency bump build
+/// it byte for byte alike, and the harness's seed argument is unused.
+/// `tests/bench_fixtures.rs` pins the result.
 ///
-/// Independent of the tick width: a batch's partition is its global index
+/// Independent of the tick width. A batch's partition is its global index
 /// modulo [`PARTITIONS`], and every tick this rig accepts covers a whole
 /// number of partitions, so regrouping the same batches into wider or
 /// narrower ticks does not move any of them. The tick width is a property of
@@ -143,9 +139,9 @@ fn schedule_bytes(schedule: &[Entry]) -> Vec<u8> {
 /// batches one resolution order runs over.
 ///
 /// Checked in the builders, which every caller runs outside its measured
-/// region — gungraun evaluates a `#[bench]` argument expression before it
+/// region (gungraun evaluates a `#[bench]` argument expression before it
 /// starts collecting, and the wall harness builds the rig in a case's
-/// `setup`. A drive over a ragged corpus therefore fails loudly instead of
+/// `setup`). A drive over a ragged corpus therefore fails loudly instead of
 /// quietly reporting a number for work that is not happening.
 fn assert_shape(per_tick: usize, window: usize) {
     assert!(
@@ -158,13 +154,13 @@ fn assert_shape(per_tick: usize, window: usize) {
          leaves some of them without a batch, and so without a watermark"
     );
     // Cannot fire as the constants stand, and is kept for the edit that would
-    // change that rather than as a live guard. `BATCHES` is a power of two and
-    // `per_tick` must divide it, `threads` must divide `PARTITIONS`, so every
-    // reachable window is a power of two and 37 divides none of them. Move
-    // `BATCHES` off a power of two and this becomes the only thing standing
-    // between a scramble and a walk that resolves some batches twice and
-    // others never — with no evidence, at that point, that it ever worked.
-    // `tests/bench_fixtures.rs` is where that evidence lives instead.
+    // change that. `BATCHES` is a power of two and `per_tick` must divide it,
+    // `threads` must divide `PARTITIONS`, so every reachable window is a power
+    // of two and 37 divides none of them. Move `BATCHES` off a power of two
+    // and this becomes the only thing standing between a scramble and a walk
+    // that resolves some batches twice and others never, with no evidence at
+    // that point that it ever worked. `tests/bench_fixtures.rs` is where that
+    // evidence lives instead.
     assert!(
         !window.is_multiple_of(37),
         "a resolution window of {window} is divisible by the scramble stride, \
@@ -205,8 +201,8 @@ pub(crate) struct Rig {
 
 impl Rig {
     /// The bytes this rig drives, for a caller that has to prove two builds
-    /// measured the same ones — the wall tier folds these into its corpus
-    /// digest, which is what demotes a pair of legs whose corpora drifted.
+    /// measured the same ones. The wall tier folds these into its corpus
+    /// digest and demotes a pair of legs whose corpora drifted.
     pub(crate) fn corpus(&self) -> Vec<u8> {
         schedule_bytes(&self.schedule)
     }
@@ -219,18 +215,16 @@ impl Rig {
     /// [`AckRef`] per poll batch and drops it when the batch's records have
     /// all resolved, and the controller thread drains and takes watermarks on
     /// its commit interval. Both channels are unbounded, so nothing here can
-    /// block — the acknowledgment path never waits on data, by invariant.
+    /// block; the acknowledgment path never waits on data, by invariant.
     ///
     /// **Repeatable**, which the wall tier requires and the counted tier does
-    /// not: every batch a tick issues resolves inside that tick, so each
+    /// not. Every batch a tick issues resolves inside that tick, so each
     /// tracker's ring empties before the next tick starts and the hundredth
     /// drive is the same work as the first. Offsets repeat across drives
-    /// rather than climbing — `PartitionTracker::advance` reports
+    /// rather than climbing; `PartitionTracker::advance` reports
     /// `last_offset + 1` off the delivered prefix without comparing it to
     /// anything, so a repeated offset costs the same pops and the same
-    /// comparisons as a fresh one, and a schedule that is a pure function of
-    /// its constants is worth more here than the realism of an ever-climbing
-    /// offset.
+    /// comparisons as a fresh one.
     pub(crate) fn drive(&mut self) -> usize {
         let mut watermarks = 0;
         for entries in self.schedule.chunks(self.per_tick) {
@@ -253,8 +247,8 @@ impl Rig {
         watermarks
     }
 
-    /// Batches still unadvanced across every partition. Zero after a drive:
-    /// every batch a tick issues is resolved inside that tick, so each
+    /// Batches still unadvanced across every partition. Zero after a drive.
+    /// Every batch a tick issues is resolved inside that tick, so each
     /// tracker's ring empties before the next one starts.
     pub(crate) fn pending(&self) -> usize {
         self.checkpointer.max_pending()
@@ -290,23 +284,22 @@ pub(crate) fn rig(per_tick: usize, order: Order) -> Rig {
 
 /// How many times a party spins before falling back to `yield_now`.
 ///
-/// The waits here are a worker's share of a tick and the controller's drain —
+/// The waits here are a worker's share of a tick and the controller's drain,
 /// microseconds, with every party runnable throughout. Spinning that out
 /// costs far less than a kernel wake, and there are two waits per commit
 /// tick, so a parking primitive would be the same order of magnitude as the
 /// work being measured. `yield_now` is the escape hatch for a party that has
 /// been preempted, not the steady state.
 ///
-/// Kept modest rather than tuned: these cases do not spend their time here,
+/// Kept modest rather than tuned. These cases do not spend their time here,
 /// and a machine with fewer cores than parties should reach the fallback
 /// promptly instead of burning a scheduling quantum first.
 const SPIN_LIMIT: u32 = 1024;
 
 /// How long a party waits before deciding the other side is never coming.
 ///
-/// A bench process that hangs is the worst outcome this rig has: it produces
-/// no record, so the leg has a missing replicate and the whole comparison
-/// aborts — but only after somebody notices. [`ArriveOnUnwind`] handles the
+/// A bench process that hangs produces no record, so the leg has a missing
+/// replicate and the whole comparison aborts. [`ArriveOnUnwind`] handles the
 /// realistic cause, a worker panicking mid-tick, and reports it by name; this
 /// is the backstop for everything else.
 const GATE_DEADLINE: Duration = Duration::from_secs(30);
@@ -325,13 +318,13 @@ const SHUTDOWN: usize = usize::MAX;
 
 /// The controller/worker rendezvous for one commit tick.
 ///
-/// Deliberately *not* a barrier. Workers never wait on each other — only the
-/// controller waits for workers, and only workers wait for the controller —
-/// so a tick costs one plain store to release the workers plus one
-/// read-modify-write per worker to report, instead of two full symmetric
-/// crossings. Both counters are monotonic for the life of the rig and are
-/// never reset, so the generation a party is waiting for is unambiguous and
-/// there is no reuse hazard to guard against.
+/// Not a barrier. Workers never wait on each other (only the controller waits
+/// for workers, and only workers wait for the controller), so a tick costs
+/// one plain store to release the workers plus one read-modify-write per
+/// worker to report, instead of two full symmetric crossings. Both counters
+/// are monotonic for the life of the rig and are never reset, so the
+/// generation a party is waiting for is unambiguous and there is no reuse
+/// hazard to guard against.
 struct Gate {
     /// Controller to workers: generations `0..release` have been released.
     release: Padded<AtomicUsize>,
@@ -379,7 +372,7 @@ impl Gate {
     /// # Panics
     ///
     /// Panics as soon as a worker reports it has unwound, naming that rather
-    /// than waiting out the deadline — a worker that dies on the first of a
+    /// than waiting out the deadline. A worker that dies on the first of a
     /// drive's ticks would otherwise leave the controller short by one more
     /// arrival every tick, and the run would end thirty seconds later
     /// complaining about a timeout.
@@ -412,12 +405,10 @@ impl Gate {
 /// ended badly.
 ///
 /// A worker that panics mid-tick never increments `arrived` on its own, and
-/// every later tick leaves the controller short by one more — so the run ends
-/// at the deadline, reporting a timeout, which describes the symptom and not
-/// the cause. Reporting from a destructor closes the current tick; setting
-/// the poison flag is what makes the *next* one fail immediately and say
-/// which thing went wrong. The two together are why a dead worker surfaces
-/// promptly rather than thirty seconds later.
+/// every later tick leaves the controller short by one more, so the run ends
+/// at the deadline reporting a timeout rather than the cause. Reporting from
+/// a destructor closes the current tick; setting the poison flag makes the
+/// *next* one fail immediately and name what went wrong.
 struct ArriveOnUnwind<'a>(&'a Gate);
 
 impl Drop for ArriveOnUnwind<'_> {
@@ -433,7 +424,7 @@ impl Drop for ArriveOnUnwind<'_> {
 struct Worker {
     issuer: AckIssuer,
     /// The partitions this worker owns, as `PartitionId`s. Disjoint from
-    /// every other worker's: `AckIssuer` numbers sequences per issuer, and
+    /// every other worker's. `AckIssuer` numbers sequences per issuer, and
     /// `PartitionTracker::register` panics on a sequence gap, so a partition
     /// issued from two issuers inside one epoch is a crash rather than a
     /// slow path.
@@ -450,18 +441,18 @@ struct Worker {
 
 /// A checkpointer driven by a pinned number of acking threads.
 ///
-/// The main thread owns the [`Checkpointer`] — `drain` and `take_watermarks`
-/// take `&mut self`, and the runtime owns it the same way — while each worker
+/// The main thread owns the [`Checkpointer`] (`drain` and `take_watermarks`
+/// take `&mut self`, and the runtime owns it the same way), while each worker
 /// owns a cloned [`AckIssuer`] and a disjoint slice of the partitions. One
 /// commit tick is two barrier crossings: the first releases the workers, the
 /// second waits for them, and the main thread drains between the second and
 /// the next tick's first while the workers are already blocked.
 ///
-/// *A simplification worth knowing.* Each worker drops its own handles, so a
+/// The rig simplifies one thing. Each worker drops its own handles, so a
 /// batch is resolved by the thread that issued it. In production a sink
 /// worker drops handles a source thread issued, and resolution is
-/// cross-thread. What this rig reproduces is the part the thread count moves
-/// — several producers on one unbounded MPSC sender — not the handoff.
+/// cross-thread. This rig reproduces several producers on one unbounded MPSC
+/// sender, the part the thread count moves, not the handoff.
 pub(crate) struct Threaded {
     checkpointer: Checkpointer,
     workers: Vec<JoinHandle<()>>,
@@ -477,7 +468,7 @@ pub(crate) struct Threaded {
 }
 
 impl Threaded {
-    /// The bytes this rig drives — the same schedule the single-threaded
+    /// The bytes this rig drives, the same schedule the single-threaded
     /// driver walks, so a wall case and its counted sibling fold the same
     /// corpus.
     pub(crate) fn corpus(&self) -> Vec<u8> {
@@ -491,16 +482,16 @@ impl Threaded {
     /// Repeatable for the same reason [`Rig::drive`] is, and deterministic in
     /// the work it performs: the tick count, the batches per worker per tick,
     /// the drain count and the watermark count are all fixed by the schedule.
-    /// What the threads decide is the interleaving of the sends, which is the
-    /// thing being measured.
+    /// What the threads decide is the interleaving of the sends, the thing
+    /// being measured.
     ///
     /// The gate is also what keeps `drain` on one code path. Every worker has
     /// reported before the controller drains, so a registration is always
     /// already in its channel when the matching resolution is applied and
     /// `drain`'s deferred-retry arm never fires. A controller draining
     /// concurrently with issuing threads would take that arm at a rate the
-    /// machine decides, which is a second code path inside the measured
-    /// region appearing and disappearing between replicates.
+    /// machine decides, putting a second code path inside the measured region
+    /// that appears and disappears between replicates.
     pub(crate) fn drive(&mut self) -> usize {
         let mut watermarks = 0;
         for _ in 0..BATCHES / self.per_tick {
@@ -522,11 +513,11 @@ impl Drop for Threaded {
     fn drop(&mut self) {
         // Workers are waiting to be released into the next generation, so
         // publishing the sentinel is the whole of the protocol. Joining here
-        // rather than leaving it to field order is what guarantees no worker
-        // can still be issuing into a checkpointer whose channels have been
-        // dropped — and it runs on an unwind too, so a failed assertion
-        // inside a measured region tears the rig down rather than leaking
-        // four threads per replicate.
+        // rather than leaving it to field order guarantees no worker can still
+        // be issuing into a checkpointer whose channels have been dropped. It
+        // runs on an unwind too, so a failed assertion inside a measured
+        // region tears the rig down rather than leaking four threads per
+        // replicate.
         self.gate.release.0.store(SHUTDOWN, Ordering::Release);
         for handle in self.workers.drain(..) {
             let _ = handle.join();
@@ -539,8 +530,8 @@ impl Drop for Threaded {
 ///
 /// `threads` must divide [`PARTITIONS`], because a partition belongs to
 /// exactly one issuer within an epoch. The resolution window is therefore
-/// `per_tick / threads` — one worker's share of a tick — and that is what the
-/// scramble stride has to be coprime with.
+/// `per_tick / threads` (one worker's share of a tick), and the scramble
+/// stride has to be coprime with it.
 ///
 /// # Panics
 ///
@@ -559,10 +550,9 @@ pub(crate) fn threaded(per_tick: usize, order: Order, threads: usize) -> Threade
     checkpointer.begin_epoch(&partitions, 1);
 
     let schedule = schedule();
-    // Shared rather than cloned per worker: the schedule is read-only for the
+    // Shared rather than cloned per worker. The schedule is read-only for the
     // whole life of the rig, so every worker reading the same pages costs
-    // nothing beyond filling them, and four copies would be four times the
-    // cache footprint for no reason.
+    // nothing beyond filling them.
     let shared = Arc::new(schedule.clone());
     let per_thread = PARTITIONS / threads;
     let gate = Arc::new(Gate::new(threads));
@@ -570,7 +560,7 @@ pub(crate) fn threaded(per_tick: usize, order: Order, threads: usize) -> Threade
     let workers = (0..threads)
         .map(|k| {
             let owned: Vec<_> = partitions[k * per_thread..(k + 1) * per_thread].to_vec();
-            // A tick's batch `j` carries partition `j % PARTITIONS`: the tick
+            // A tick's batch `j` carries partition `j % PARTITIONS`. The tick
             // width is a multiple of `PARTITIONS`, so every tick starts on a
             // partition boundary and the pattern repeats within it.
             let slots: Vec<usize> = (0..per_tick)
@@ -583,9 +573,9 @@ pub(crate) fn threaded(per_tick: usize, order: Order, threads: usize) -> Threade
             // the partition run it owns. The worker maps a global partition
             // onto its own list by subtracting `first_partition`, which
             // underflows on a thread if the schedule's layout and the slot
-            // filter ever stop agreeing — and an underflow there surfaces as
-            // the gate's poison, several frames from the cause. Checked once
-            // in the builder, outside every measured region, so a shape change
+            // filter ever stop agreeing. An underflow there surfaces as the
+            // gate's poison, several frames from the cause. Checked once in
+            // the builder, outside every measured region, so a shape change
             // fails here instead.
             let first_partition = k * per_thread;
             for tick in 0..BATCHES / per_tick {
@@ -644,7 +634,7 @@ fn spawn_worker(
     } = worker;
     std::thread::spawn(move || {
         let window = slots.len();
-        // Sized once, here, and only ever cleared: a drive must not measure a
+        // Sized once, here, and only ever cleared. A drive must not measure a
         // `Vec` growing, and this is outside every measured region because
         // the rig is built in a case's setup.
         let mut live: Vec<Option<AckRef>> = Vec::with_capacity(window);
@@ -655,7 +645,7 @@ fn spawn_worker(
             // below surfaces as a wrong watermark count rather than a hang.
             let _arrive = ArriveOnUnwind(&gate);
             // Wrapping rather than counting drives is what makes the rig
-            // repeatable: a drive is exactly `ticks` generations, so the next
+            // repeatable. A drive is exactly `ticks` generations, so the next
             // drive starts back at the schedule's first tick.
             let base = (generation % ticks) * per_tick;
             for &slot in &slots {

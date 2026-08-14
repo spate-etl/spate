@@ -40,7 +40,7 @@ form. Read that file before ticking a box you are unsure about.
       surfaced through metrics rather than only logged.
 - [ ] **INV-8 — metrics handles are pre-registered at build time.** Never
       resolved on the per-record path.
-- [ ] **INV-9 — every metric family lives under the `spate_` umbrella.**
+- [ ] **INV-9 — every metric lives under the `spate_` umbrella.**
 - [ ] **INV-10 — a gauge series has exactly one live owner per process.**
 
 ## Semver

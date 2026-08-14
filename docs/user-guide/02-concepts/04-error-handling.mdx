@@ -21,7 +21,7 @@ metrics. There are no dead-letter queues and no silent drops.
   stalls, the process exits non-zero, and the data replays after restart.
 
 Defaults follow the likely blast radius: **deserializers default to Skip**
-(one poison message on a topic shouldn't take the pipeline down),
+(one poison record shouldn't take the pipeline down),
 **operators default to Fail** (an error in your own transform is a bug you
 want to see immediately). Both are overridable per stage. The policy is the
 second argument. The stage below is an ordinary transform that happens to be
@@ -39,9 +39,9 @@ which builds under the `full` facade feature;
 example end to end.
 
 There is deliberately no dead-letter queue in v1: the target environments
-have no owned DLQ topic, and a half-owned one is worse than none. If you
-need one, an `inspect`/`flat_map` stage that writes failures to your own
-side channel is the extension point. See
+have no owned destination for one, and a half-owned one is worse than none.
+If you need one, an `inspect`/`flat_map` stage that writes failures to your
+own side channel is the extension point. See
 [Custom operators](../06-extending/custom-operators.mdx).
 
 ## Everything is surfaced through metrics
@@ -96,8 +96,8 @@ messages are being skipped. See
 
 ## Choosing policies
 
-- Data you don't control (external topics): Skip at the deserializer, plus
-  an alert on the drop rate.
+- Data you don't control (an upstream source you don't own): Skip at the
+  deserializer, plus an alert on the drop rate.
 - Your own transforms: Fail. If a `try_map` starts erroring, you shipped a
   bug or the upstream contract changed. Either way you want a loud stop,
   not a quiet trickle of dropped records.

@@ -92,7 +92,7 @@ satisfy `0 < low_ratio < high_ratio <= 1`.
 ## Environment interpolation
 
 `${VAR}` forms interpolate from the process environment **on the raw text
-before YAML parsing** (Vector-compatible semantics), which is the standard
+before YAML parsing**, which is the standard
 way to feed Kubernetes ConfigMap/Secret values in. The forms (`${VAR}`,
 `${VAR:-default}`, `${VAR:?message}`, `$$`) and their exact unset-vs-empty
 semantics are tabulated in the

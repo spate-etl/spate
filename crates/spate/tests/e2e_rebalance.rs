@@ -3,7 +3,12 @@
 //! zero loss, and at no sampled instant do committed offsets exceed rows
 //! durably written, which is the at-least-once invariant observed live.
 //!
-//! `cargo test -p spate --test e2e_rebalance -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_rebalance -- --ignored
+//! ```
 
 // Scenario reports (row/duplicate counts) go to the test log by design.
 #![allow(clippy::print_stdout)]

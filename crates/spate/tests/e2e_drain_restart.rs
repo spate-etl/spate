@@ -3,7 +3,12 @@
 //! pipeline instance resumes from the committed positions and finishes
 //! with zero loss.
 //!
-//! `cargo test -p spate --test e2e_drain_restart -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_drain_restart -- --ignored
+//! ```
 
 // Scenario reports (row/duplicate counts) go to the test log by design.
 #![allow(clippy::print_stdout)]

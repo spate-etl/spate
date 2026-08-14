@@ -2,7 +2,12 @@
 //! the Skip policy: the pipeline never stalls, drops are counted in
 //! metrics, and every valid record lands.
 //!
-//! `cargo test -p spate --test e2e_poison -- --ignored` (requires Docker).
+//! Selecting it:
+//!
+//! ```sh
+//! cargo test -p spate --features full --locked \
+//!   --test e2e_poison -- --ignored
+//! ```
 
 #[path = "e2e_support/mod.rs"]
 mod support;

@@ -311,7 +311,8 @@ struct SinkAssembly {
 
 type ChainFactoryFn = Box<dyn FnMut(ChainCtx) -> Box<dyn RunnableChain> + Send>;
 
-/// The pipeline builder. See the [module docs](self) for the full picture.
+/// The pipeline builder. See the [module docs](crate::pipeline) for the full
+/// picture.
 ///
 /// Non-generic, nameable, and storable; the source type enters only at the
 /// terminal [`into_runtime`](Self::into_runtime)/[`run`](Self::run) call.

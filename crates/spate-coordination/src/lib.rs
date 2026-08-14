@@ -1,7 +1,7 @@
 //! Distributed work coordination for Spate sources.
 //!
 //! A leader-elected worker runs the source's
-//! [`SplitPlanner`](spate_core::coordination::SplitPlanner) to enumerate
+//! [`SplitPlanner`] to enumerate
 //! weighted work *splits* into a shared low-latency store, and publishes a
 //! desired assignment per instance; every worker leases the splits it was
 //! named for, heartbeats them, and cooperatively drains the ones it was

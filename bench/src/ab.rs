@@ -6,7 +6,7 @@
 //! were built with, and both are worth measuring. [`ab`] takes
 //! the first, checking the reference out into a worktree; [`arms`] takes the
 //! second, building one tree twice into two directories. Everything after "both
-//! legs exist" is [`two_legs`], so the properties below hold on both axes.
+//! legs exist" is `two_legs`, so the properties below hold on both axes.
 //!
 //! # The order things happen in, and why
 //!
@@ -297,7 +297,7 @@ pub fn ab(
 /// one build per directory and two arms sharing one would rebuild each other
 /// away between the legs.
 ///
-/// Everything that makes a comparison a comparison is [`two_legs`], shared with
+/// Everything that makes a comparison a comparison is `two_legs`, shared with
 /// [`ab`] rather than restated: one calibration pinned across both, a priming
 /// pass, and interleaving with the leg order flipped on replicate parity.
 ///

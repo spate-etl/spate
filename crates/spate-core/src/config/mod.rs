@@ -33,8 +33,8 @@
 //! ```
 //!
 //! Environment interpolation runs on the raw text before parsing. See
-//! [`interpolate`](self::interpolate::interpolate_with) for the exact
-//! semantics of `${VAR}`, `${VAR:-default}`, `${VAR:?message}`, and `$$`.
+//! `interpolate_with` for the exact semantics of `${VAR}`,
+//! `${VAR:-default}`, `${VAR:?message}`, and `$$`.
 //!
 //! # Example
 //!

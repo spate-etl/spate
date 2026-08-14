@@ -747,7 +747,7 @@ impl Bencher {
     /// **Return the routine's result.** It is what is passed through
     /// [`std::hint::black_box`], so a routine written `|| { let _ = f(x); }`
     /// hands the black box `()` and leaves the optimiser free to delete the
-    /// call. That failure is caught, since [`empty_loop_ns_per_iter`] refuses
+    /// call. That failure is caught, since `empty_loop_ns_per_iter` refuses
     /// a case whose per-iteration cost sits at an empty loop's, but the fix is
     /// here.
     ///

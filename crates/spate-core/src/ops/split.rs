@@ -303,7 +303,7 @@ impl SplitEmitter<'_> {
 
 /// The chain's split terminal. Runs the route closure over each record and
 /// aggregates the branches' lifecycle (relieve/flush/fatal). See the
-/// [module docs](self).
+/// [module docs](crate::ops).
 pub struct SplitTerminal<SrcF: RecFamily, G> {
     route: G,
     branches: Vec<Box<dyn ErasedBranch>>,

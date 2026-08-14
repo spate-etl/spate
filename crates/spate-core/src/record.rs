@@ -3,7 +3,7 @@
 //! A [`Record`] is what moves through an operator chain: a payload (which
 //! may borrow from the source's buffers), a [`Copy`] metadata struct, and a
 //! clone of the source batch's acknowledgment handle
-//! ([`AckRef`](crate::checkpoint::AckRef)). Records are born inside a chain's
+//! ([`AckRef`]). Records are born inside a chain's
 //! `push_batch` call (deserialization) and die inside the same call
 //! (serialized into shard frames, filtered out, or failed). They are never
 //! stored across the chain boundary, so borrowed payloads are sound

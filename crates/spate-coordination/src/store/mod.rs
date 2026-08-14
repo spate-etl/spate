@@ -131,8 +131,9 @@ pub type WatchStream = futures_util::stream::BoxStream<'static, Result<WatchEven
 /// - The trait uses `impl Future` returns and is therefore not
 ///   dyn-compatible (`Box<dyn CoordinationStore>` will not compile).
 ///   Deployments selecting a backend at runtime branch on the concrete
-///   store and box the [`SplitCoordinator`](spate_core::coordination::
-///   SplitCoordinator) instead; that trait is the dyn-compatible seam.
+///   store and box the
+///   [`SplitCoordinator`](spate_core::coordination::SplitCoordinator)
+///   instead; that trait is the dyn-compatible seam.
 pub trait CoordinationStore: Send + Sync + 'static {
     /// The TTL every [`Ephemeral`](Keyspace::Ephemeral) write re-arms.
     /// Fixed at store construction (per-write TTLs are not portable).

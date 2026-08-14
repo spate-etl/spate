@@ -358,7 +358,8 @@ impl ClickHouseSink {
         self.format
     }
 
-    /// Fetch the column schema and build a [`NativeSchema`] for a
+    /// Fetch the column schema and build a
+    /// [`NativeSchema`](crate::native::NativeSchema) for a
     /// [`crate::NativeEncoder`]. `format: native` always fetches
     /// `system.columns` (see [`Format`]), so this returns a schema whenever
     /// Native is configured. Call after [`build`], before the endpoints are

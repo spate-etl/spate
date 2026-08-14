@@ -134,7 +134,7 @@ impl RetryConfig {
     /// the message, so the rules stay in one place instead of being mirrored
     /// per connector.
     ///
-    /// This is about intent, not safety. [`Backoff`](super::retry) never
+    /// This is about intent, not safety. `Backoff` never
     /// panics for *any* `RetryConfig` and always saturates at `max`. It
     /// returns a zero delay only for a policy this rejects (`initial` or
     /// `max` of zero), so "never zero" is a property of a **validated**

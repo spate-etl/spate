@@ -225,7 +225,7 @@ key.** Each connector's page carries its own auth and TLS section; the matrix
 of which is which is in
 [Securing connections](../03-guides/securing-connections.mdx).
 
-### `sinks:` — multiple named sinks {#sinks}
+### `sinks:` map of named sinks {#sinks}
 
 A pipeline that writes to more than one destination declares `sinks:`, a
 `name -> component` map, **instead of** `sink:` (setting both, or neither, is a

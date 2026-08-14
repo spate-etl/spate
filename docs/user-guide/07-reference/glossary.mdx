@@ -90,9 +90,9 @@ replay, because after restart data re-batches with new boundaries and new tokens
 ([Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)).
 
 *Connector mapping:*
-[ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens--and-the-window-warning)
+[ClickHouse sink](../04-connectors/sinks/clickhouse/README.mdx#deduplication-tokens-and-the-window-warning)
 — honored, but silently inert without a server-side dedup window ·
-[Kafka sink](../04-connectors/sinks/kafka/README.mdx#delivery-semantics-honestly)
+[Kafka sink](../04-connectors/sinks/kafka/README.mdx#delivery-semantics)
 — unused; there is no destination-side dedup window to hand it to.
 
 ### Drain

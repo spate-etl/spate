@@ -39,7 +39,7 @@ overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
 or a settings **constraint** that pins any of these, fails the write. Keep the
 writer's profile at `readonly = 0` and leave those settings unconstrained. The
 tokens are what make retries idempotent; see the
-[dedup-window warning](./README.mdx#deduplication-tokens--and-the-window-warning).
+[dedup-window warning](./README.mdx#deduplication-tokens-and-the-window-warning).
 :::
 
 The `/readyz` liveness probe runs a bare `SELECT 1` (no table), which needs no

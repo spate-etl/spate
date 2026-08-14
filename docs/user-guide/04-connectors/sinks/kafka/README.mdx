@@ -118,7 +118,7 @@ Oversized records never reach the writer. The encoder's
 `max_message_bytes` guard fails them record-level, where the sink stage's
 Skip/Fail policy applies (default Skip: dropped and counted).
 
-## Delivery semantics, honestly
+## Delivery semantics
 
 At-least-once, with distinct duplicate windows, none of them loss:
 

@@ -46,7 +46,7 @@ The `source: { s3: ... }` section deserializes into `S3SourceConfig`
 fields are rejected with the offending key. Coordination is deliberately
 **not** here. It is assembly wiring
 ([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
-covered under [Scaling out](#scaling-out--and-the-solo-default).
+covered under [Scaling out](#scaling-out-and-the-solo-default).
 
 ```yaml
 source:
@@ -61,7 +61,7 @@ source:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
-| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#errors-poison-splits-not-skipped-objects). Part of the job fingerprint. |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Per-[lane](../../../07-reference/glossary.mdx#lane) read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. Must be at least `chunk_bytes`; a smaller value fails at load. |
@@ -178,7 +178,7 @@ not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
-## Scaling out — and the solo default
+## Scaling out and the solo default
 
 The coordinator is **assembly wiring**: build one over a durable
 [coordination store](../../coordination/README.mdx) and inject it, and every
@@ -253,7 +253,7 @@ possible, loss is not.
 Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
 overflows it **poisons its split** before any offset can be corrupted:
 handed back, retried, and quarantined at the attempt cap like any other
-[object-terminal failure](#errors-poison-splits-not-skipped-objects). Split
+[object-terminal failure](#object-errors-poison-the-split). Split
 member counts are structurally capped by the packing floor, far below the
 ordinal limit.
 
@@ -297,7 +297,7 @@ via `S3Source::with_framer` or another format's framer, and no fork is
 required. The framer is **required**: a source built without one refuses to
 start.
 
-## Errors: poison splits, not skipped objects
+## Object errors poison the split
 
 Object-level read problems are not record errors, and they are not instant
 pipeline failures either. Transient failures are retried inside the source

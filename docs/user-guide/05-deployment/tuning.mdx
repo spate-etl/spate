@@ -27,7 +27,7 @@ The loop is:
    at the pod limit, or the NIC/broker link full.
 5. **Only then scale horizontally**, by adding replicas.
 
-### Why the vertical work matters even when you could just add pods
+### What vertical scaling buys beyond throughput
 
 Throughput is not the only thing that improves. Sink batches seal on whichever
 of `max_rows`, `max_bytes`, or `linger` trips first. A source that cannot keep
@@ -282,7 +282,7 @@ manager** with Guaranteed QoS and integer CPU requests; anywhere else it
 sets affinity inside a shared cpuset and can hurt by fighting the
 scheduler. Leave it `off` unless you run that setup.
 
-## Where parallelism actually comes from
+## Where parallelism comes from
 
 Read parallelism is bounded by **lane count**, not thread count. Lanes map
 m:n onto pipeline threads, so threads cannot manufacture concurrency a source

@@ -3,14 +3,14 @@
 //!
 //! The framer is a **pure function of the object's byte stream**: however the
 //! fetcher slices an object into chunks, the emitted record sequence is
-//! identical. That determinism is load-bearing — resume positions are record
-//! indexes, and a resume replays the object and discards a count (see
-//! [`offset`](crate::offset)).
+//! identical. Resume positions are record indexes, and a resume replays the
+//! object and discards a count (see [`offset`](crate::offset)), so that
+//! determinism is what makes a resume land on the same record.
 //!
 //! The record-boundary logic itself lives behind
 //! [`spate_core::framing::RecordFramer`], whose concrete impl is supplied by the
 //! chosen format (e.g. `spate-json`'s `NdjsonFramer`) via
-//! [`S3Source::with_framer`](crate::S3Source::with_framer) — `spate-s3` owns no
+//! [`S3Source::with_framer`](crate::S3Source::with_framer); `spate-s3` owns no
 //! framing of its own. This module owns only the S3-specific parts:
 //! compression codec resolution by object-key extension, streaming
 //! decompression, and driving the supplied framer across object boundaries.

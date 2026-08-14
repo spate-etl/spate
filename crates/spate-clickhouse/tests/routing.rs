@@ -3,8 +3,8 @@
 //! through the framework's actual terminal stage (`chain(...).sink(...)`).
 //!
 //! The container suite proves placement parity against a live cluster; this
-//! test keeps the *wiring* — builder bound, per-record `route_record`
-//! dispatch, weighted interval selection, per-shard queue placement — under
+//! test keeps the *wiring* (builder bound, per-record `route_record`
+//! dispatch, weighted interval selection, per-shard queue placement) under
 //! the default `cargo test` gate.
 
 use bytes::BytesMut;
@@ -26,8 +26,8 @@ struct SkuRow {
     sku: String,
 }
 
-/// Sharding key: the row's own `sku` field (a fn item — the extractor is
-/// higher-ranked over the payload lifetime).
+/// Sharding key: the row's own `sku` field (a fn item, because the extractor
+/// is higher-ranked over the payload lifetime).
 fn sku_key(row: &SkuRow) -> ShardKey<'_> {
     ShardKey::Str(&row.sku)
 }
@@ -118,8 +118,8 @@ fn drain_skus(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<String>
 
 #[test]
 fn sink_minted_router_places_rows_by_payload_key_through_the_terminal_stage() {
-    // A real 2-shard *weighted* config — the router comes from the sink,
-    // exactly as production wiring mints it.
+    // A real 2-shard *weighted* config; the router comes from the sink, as
+    // production wiring mints it.
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(
         r#"
 table: t

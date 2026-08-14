@@ -17,7 +17,7 @@
 //! addr: Option<std::net::Ipv4Addr>,
 //! ```
 //!
-//! ## ⚠ These attributes are load-bearing, not ergonomic sugar
+//! ## ⚠ Omitting these attributes is silent data corruption
 //!
 //! `uuid::Uuid`, `std::net::Ipv4Addr`, and the `chrono`/`time` date types
 //! all have *default* serde representations that serialize **successfully

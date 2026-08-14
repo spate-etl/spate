@@ -5,8 +5,8 @@
 //! reference] documents under Kafka sink. Unlike the source (whose snapshots
 //! are drained on the controller thread), the sink has no control-plane tick:
 //! the producer's `ClientContext::stats` callback publishes directly from
-//! the producer's poll thread — once per statistics interval, never on the
-//! record path — through the shared slot the writer's `attach_metrics`
+//! the producer's poll thread, once per statistics interval and never on
+//! the record path, through the shared slot the writer's `attach_metrics`
 //! fills (see the sink context module).
 //!
 //! # Counter identity
@@ -14,7 +14,7 @@
 //! As on the source side, librdkafka reports cumulative totals; they are
 //! mirrored through [`Counter::absolute`] (fetch-max: idempotent under
 //! duplicate delivery, PromQL `rate()` works natively). The mapping is
-//! sound only while totals are monotonic — i.e. scoped to a single
+//! sound only while totals are monotonic, i.e. scoped to a single
 //! producer client. The sink guarantees this by construction: `build()`
 //! creates exactly one producer per sink instance, shared by every shard.
 //! If in-process producer recreation is ever introduced, switch to delta
@@ -23,7 +23,7 @@
 //! # Windows
 //!
 //! The latency gauges expose librdkafka's rolling-window estimates over
-//! the last statistics interval — `int_latency` (time in the producer
+//! the last statistics interval: `int_latency` (time in the producer
 //! queue), `outbuf_latency` (time in the transmit queue), and broker
 //! round-trip time, all reported in microseconds and converted to seconds.
 //! They are per-broker sampled quantiles and **cannot be aggregated**
@@ -75,7 +75,7 @@ pub(crate) struct KafkaSinkStatsMetrics {
     brokers: HashMap<String, BrokerHandles>,
 }
 
-/// Per-broker series, labeled `broker="<host:port/id>"` — bounded by
+/// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
 /// cluster topology. Window gauges register lazily on the first non-empty
 /// window (see the module docs).
 #[derive(Debug)]
@@ -159,7 +159,7 @@ impl KafkaSinkStatsMetrics {
         let meter = &self.meter;
         // Same contract as the source: `logical` entries (coordinators) are
         // excluded from every sum and per-broker series, but a broker is up
-        // if any connection to it — regular or logical — is up. The join
+        // if any connection to it, regular or logical, is up. The join
         // key is the resolved `nodename` (a logical entry's `nodeid` reads
         // -1 even once bound).
         let logical_up: HashSet<&str> = stats
@@ -467,8 +467,8 @@ mod tests {
     #[test]
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract (see the module docs): a
-        // regressing upstream total — impossible today, one producer per
-        // sink — would flat-line, not dip.
+        // regressing upstream total (impossible with one producer per
+        // sink) would flat-line, not dip.
         let rendered = render(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             m.update(&Statistics {

@@ -17,7 +17,7 @@ use std::time::Duration;
 /// map keys applied in unspecified order, an alias of an owned property would
 /// non-deterministically override it. Every alias of a reserved property is
 /// therefore denied alongside its canonical name. Auditing the reserved set
-/// against librdkafka's config table yields two alias names to add — the
+/// against librdkafka's config table yields two alias names to add; the
 /// other reserved properties (`group.id`, `enable.auto.offset.store`,
 /// `auto.commit.interval.ms`, `enable.partition.eof`, `statistics.interval.ms`,
 /// `group.protocol`, `partition.assignment.strategy`) have no alias.
@@ -117,9 +117,9 @@ pub struct KafkaSourceConfig {
     /// The framework sets no prefetch cap of its own, so
     /// `queued.min.messages` (default 100000) and
     /// `queued.max.messages.kbytes` (default 65536) sit at librdkafka's
-    /// defaults and bound memory *per assigned partition* — per-partition
-    /// because this source splits partition queues; on an unsplit consumer
-    /// the byte cap would apply once, to the whole client.
+    /// defaults and bound memory *per assigned partition*, which is
+    /// per-partition because this source splits partition queues; on an
+    /// unsplit consumer the byte cap would apply once, to the whole client.
     ///
     /// librdkafka multiplies the kbytes figure by 1000, so the default is
     /// 65.5 MB per partition and a 100-partition assignment can hold up to
@@ -332,9 +332,9 @@ mod tests {
     /// librdkafka's documented default (100000) applies and users can reason
     /// about it exactly as they would for any other Kafka client.
     ///
-    /// Asserting `None` rather than a value is the point: a default that
-    /// merely equals librdkafka's would still be the framework's, and would
-    /// silently diverge the day librdkafka changed its own.
+    /// Asserting `None` rather than a value: a default that equals
+    /// librdkafka's would still be the framework's, and would silently
+    /// diverge the day librdkafka changed its own.
     #[test]
     fn prefetch_is_left_at_the_librdkafka_default() {
         let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
@@ -349,7 +349,7 @@ mod tests {
 
     /// A TLS/SASL passthrough is accepted only when the `tls` feature compiled
     /// the transport into librdkafka. With the feature: the security keys
-    /// survive into the client and creation succeeds — client creation
+    /// survive into the client and creation succeeds, because client creation
     /// validates the build's capability (SSL present, and the SCRAM SASL
     /// provider present) without any network I/O. Without it: rejected at load
     /// with an actionable message. Default `cargo test -p spate-kafka` exercises

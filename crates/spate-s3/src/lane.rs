@@ -5,7 +5,7 @@
 //! assigns each record its composite offset, and hands out borrowed
 //! payload batches with one [`AckRef`] each.
 //!
-//! Three rules here are load-bearing for correctness:
+//! These rules govern correctness:
 //!
 //! - **End-of-input is only decided by a `poll` that returns `Ok(None)`**
 //!   after observing the channel closed with nothing buffered. The
@@ -13,7 +13,7 @@
 //!   lane's final batch was fully pushed downstream before that decision
 //!   records the terminal watermark.
 //! - **Blocking is bounded.** When idle the lane waits on the channel via
-//!   the I/O runtime with the poll timeout applied — it never busy-spins
+//!   the I/O runtime with the poll timeout applied, so it never busy-spins
 //!   and never parks longer than the driver allows.
 //! - **Poison never surfaces as a poll error.** A lane `poll` error is
 //!   terminal for the whole pipeline, so object-level failures (deleted,
@@ -88,8 +88,8 @@ pub struct S3Lane {
     /// The split hit poison: everything undelivered was discarded and
     /// every later poll idles with `Ok(None)` until the lane is retired.
     poisoned: bool,
-    /// One past the last emitted record's offset — the terminal watermark
-    /// `T` once end-of-input is observed. Starts at the resume watermark
+    /// One past the last emitted record's offset, which becomes the terminal
+    /// watermark `T` once end-of-input is observed. Starts at the resume watermark
     /// (0 fresh), so a tenancy that emits nothing terminates exactly where
     /// it began.
     watermark_candidate: i64,
@@ -165,9 +165,9 @@ impl S3Lane {
     }
 
     /// Report object-level poison and go quiescent. Everything undelivered
-    /// is discarded — none of it was acked, so replay by the split's next
-    /// owner cannot lose data — and every later poll idles with
-    /// `Ok(None)` until the control plane retires the lane.
+    /// is discarded; none of it was acked, so replay by the split's next
+    /// owner cannot lose data. Every later poll idles with `Ok(None)` until
+    /// the control plane retires the lane.
     fn poison(&mut self, kind: PoisonKind, reason: String) {
         self.held.clear();
         self.current = None;
@@ -204,7 +204,7 @@ impl S3Lane {
                 .expect("framed records only exist within an object");
             if cur.next_record > MAX_RECORD_INDEX {
                 // A property of the object's content: it will overflow on
-                // every owner, which is exactly what quarantine is for.
+                // every owner, which is what quarantine is for.
                 let key = cur.key.clone();
                 self.poison(
                     PoisonKind::Undecodable,
@@ -247,8 +247,8 @@ impl S3Lane {
         let cur = self.current.take().expect("finalize without an object");
         self.pending_end = false;
         if self.pending_discard > 0 {
-            // The object now frames fewer records than were committed
-            // against it — its content changed underneath the pin.
+            // The object frames fewer records than were committed against
+            // it; its content changed underneath the pin.
             self.poison(
                 PoisonKind::EtagDrift,
                 format!(
@@ -394,7 +394,7 @@ impl SourceLane for S3Lane {
         if self.poisoned {
             // Quiescent until the control plane retires the lane; bounded
             // idle, never a busy-spin, never an error (a poll error would
-            // fail the pipeline — poison must not).
+            // fail the pipeline; poison must not).
             std::thread::sleep(timeout);
             return Ok(None);
         }
@@ -404,7 +404,7 @@ impl SourceLane for S3Lane {
         // must not short-circuit the *first* receive: with `timeout` zero
         // (the driver's head-of-line rotation) `now >= deadline` is true
         // immediately, and bailing before `try_recv` would report the lane
-        // empty while a chunk sits ready in its channel — starving it for
+        // empty while a chunk sits ready in its channel, starving it for
         // as long as a sibling lane keeps the rotation fed.
         let mut recv_attempted = false;
 
@@ -421,7 +421,7 @@ impl SourceLane for S3Lane {
             }
             // `drain_framer` returns early only on a full batch (broken
             // above) or an empty queue, and an empty queue finalizes a
-            // pending object end — so no object can still be pending here.
+            // pending object end, so no object can still be pending here.
             debug_assert!(!self.pending_end, "pending object end past the drain");
             // The deadline caps the whole poll, not just the idle wait: a
             // stream of chunks that frames no records (one enormous line,
@@ -490,7 +490,7 @@ impl SourceLane for S3Lane {
                     }
                     // Nothing buffered anywhere and no more input: this
                     // poll's Ok(None) is the end-of-input decision (see
-                    // module docs) — everything emitted was already handed
+                    // module docs). Everything emitted was already handed
                     // out, so `watermark_candidate` is the terminal
                     // watermark.
                     self.tracker.set_terminal(self.watermark_candidate);
@@ -829,8 +829,8 @@ mod tests {
         start(&r, 0, "p/a.ndjson");
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"partial")));
         r.tx.take(); // fetcher gone without ObjectEnd or LaneFailed
-        // First poll returns the framed data? No — "partial" has no
-        // newline and the object never ends, so nothing is emittable.
+        // First poll returns no framed data: "partial" has no newline and
+        // the object never ends, so nothing is emittable.
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
         assert!(err.to_string().contains("mid-object"), "{err}");
         assert!(

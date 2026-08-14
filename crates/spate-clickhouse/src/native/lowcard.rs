@@ -32,9 +32,9 @@ use std::collections::HashMap;
 //      regardless of hash function.
 //   2. HashDoS exposure is bounded. The dict is per-block and reset each block
 //      (entries ≤ rows per block), and foldhash's RandomState seeds per
-//      instance — worst case is a bounded per-block probe cost, not unbounded
-//      amplification. SipHash is therefore not required here; the previously
-//      reverted hand-rolled FxHash failed on collision quality (trailing-digit
+//      instance, so the worst case is a bounded per-block probe cost rather
+//      than unbounded amplification. SipHash is therefore not required here.
+//      A hand-rolled FxHash fails on collision quality (trailing-digit
 //      keys), which foldhash's avalanche fixes.
 type DictMap = HashMap<Vec<u8>, u64, foldhash::fast::RandomState>;
 
@@ -120,7 +120,7 @@ impl LowCard {
     }
 
     pub(crate) fn write_prefix(&self, out: &mut BytesMut) {
-        // "sharedDictionariesWithAdditionalKeys" — the only defined version.
+        // "sharedDictionariesWithAdditionalKeys", the only defined version.
         out.put_i64_le(1);
     }
 

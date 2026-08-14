@@ -1,9 +1,9 @@
 //! Instruction counts for the leader's planning work (gungraun).
 //!
-//! One shape — pack a listing into splits and mint each split's id —
-//! parameterized by the listing profile, because what changes packing's cost
-//! is where the objects sit relative to the split target and the open-cost
-//! floor, not which function is called:
+//! One shape, packing a listing into splits and minting each split's id,
+//! parameterized by the listing profile. What changes packing's cost is where
+//! the objects sit relative to the split target and the open-cost floor, not
+//! which function is called:
 //!
 //! - `uniform_small` — 10,000 objects well under the target. The ordinary
 //!   backfill listing, and the denominator the other two are read against.
@@ -15,24 +15,24 @@
 //!   under the target, which fills the open-bin deque to `PACKING_LOOKBACK`
 //!   and makes its linear scan walk most of the window. Sizing those objects
 //!   *at or above* the target instead closes each bin on placement and the
-//!   scan never runs — measurably identical to `uniform_small`, which is what
-//!   an earlier version of this profile did.
+//!   scan never runs, giving a count measurably identical to
+//!   `uniform_small`.
 //! - `deep_keys` — `uniform_small`'s first tenth with keys just under the
 //!   store's 1024-byte cap and nothing else changed. Key length scales two
-//!   terms at once — the digest hashes every key byte, and the descriptor
-//!   carries every key verbatim into JSON — and it is the one of those that
+//!   terms at once (the digest hashes every key byte, and the descriptor
+//!   carries every key verbatim into JSON) and is the one of those that
 //!   varies, since a store reports ETags at a fixed width. The other three
 //!   profiles all sit at 54 bytes, so without this case a change whose cost
 //!   is per key *byte* rather than per object is invisible here.
 //!   Read per object against `uniform_small`, which shares its seed and size
 //!   draw exactly so that the difference is attributable.
 //!
-//! Packing, minting and descriptor encoding are one case rather than three on
-//! purpose: the planner does them as a single pass per split, and a change to
-//! any one moves the others — the id digests the member keys and ETags, and
-//! the descriptor serializes those same members immediately afterwards.
-//! Measuring them apart would miss the loop that carries all three, and would
-//! omit the serialization, which is the term most likely to dominate.
+//! Packing, minting and descriptor encoding are one case rather than three:
+//! the planner does them as a single pass per split, and a change to any one
+//! moves the others. The id digests the member keys and ETags, and the
+//! descriptor serializes those same members immediately afterwards. Measuring
+//! them apart would miss the loop that carries all three, and would omit the
+//! serialization, which is the term most likely to dominate.
 //! Attribution between the stages comes from the callgrind profile, which the
 //! run writes either way.
 //!
@@ -52,7 +52,7 @@ use std::hint::black_box;
 mod listing;
 
 // The corpus is built in the `#[bench]` argument expression, which gungraun
-// evaluates outside the collected region, and moved in — so the measured work
+// evaluates outside the collected region, and moved in, so the measured work
 // is the planner's, not the fixture builder's. The returned ids are handed
 // back rather than dropped in place: dropping a few thousand `SplitId`s
 // inside the region would charge the count for teardown.
@@ -70,7 +70,7 @@ fn plan(objects: Vec<(String, u64, String)>) -> Vec<spate_core::coordination::Sp
 library_benchmark_group!(name = split; benchmarks = plan);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the packing under measurement rather than to
 // whichever frame valgrind's default depth would otherwise cut at.

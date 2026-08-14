@@ -1,7 +1,7 @@
 //! Instruction counts for chunk-fed record framing (gungraun).
 //!
-//! One shape — drive a run of objects through one framer, as a lane does over
-//! the members of its split — parameterized by codec and by how the object is
+//! One shape, driving a run of objects through one framer as a lane does over
+//! the members of its split, parameterized by codec and by how the object is
 //! entered:
 //!
 //! - `plain_whole` — one 4 MiB NDJSON object in fetch-sized chunks. The
@@ -16,8 +16,8 @@
 //!   which is what an export key appended to by a run of upload sessions
 //!   holds. Decoded content is byte-identical to the `_whole` pair, so the
 //!   difference between them is the per-stream term those fixtures never
-//!   charge — trailer validation, decoder reinitialization, the next stream's
-//!   header parse — **plus** whatever the compressed input's own shape
+//!   charge (trailer validation, decoder reinitialization, the next stream's
+//!   header parse) **plus** whatever the compressed input's own shape
 //!   contributes, since sixteen streams each starting from a cleared window
 //!   do not compress to the same bytes as one. The pair bounds that term
 //!   rather than isolating it. Both codecs have to read every stream; a
@@ -26,20 +26,19 @@
 //!   than into a welcome fall in the number.
 //! - `plain_mid_offset` — the same object fed from a byte offset that falls
 //!   *inside* a record, which is what a reader entering a subdivided object
-//!   faces. The case asserts the record count, and that assertion is the
-//!   point: today the framer emits the partial leading line as a record, so
-//!   a subdivision change has to come here and say what the new contract is
-//!   rather than drift past it.
+//!   faces. The case asserts the record count: the framer emits the partial
+//!   leading line as a record, so a subdivision change has to come here and
+//!   say what the new contract is rather than drift past it.
 //! - `plain_many_small` — sixteen small objects through one framer. The
 //!   open-cost floor caps a split at ~16 members, so this is a full split's
-//!   worth of per-object codec resolution and state reset — the cost that
+//!   worth of per-object codec resolution and state reset, the cost that
 //!   grows when subdivision turns one object into several.
 //!
 //! Bodies are compressed in the fixture, never in the measured region, so
 //! these count decompression only. Framing is done with `spate-json`'s
 //! `NdjsonFramer` rather than a local copy: this crate ships no framer of its
 //! own, and object storage carrying newline-delimited JSON is the pairing
-//! production actually runs.
+//! production runs.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
 //! exists on every developer machine: run it with `make bench-gungraun`.
@@ -73,8 +72,8 @@ fn make_framer() -> MakeFramer {
     Arc::new(|| Box::new(NdjsonFramer::new(ndjson::MAX_RECORD_BYTES)))
 }
 
-/// One object whose body is transformed by `store` — identity for plain, a
-/// compressor otherwise — under a key whose extension matches.
+/// One object whose body is transformed by `store` (identity for plain, a
+/// compressor otherwise) under a key whose extension matches.
 ///
 /// Every case runs `Compression::Auto`, which is the shipped default and the
 /// only setting that consults the key at all: under an explicit `Gzip` or
@@ -110,7 +109,7 @@ fn zstd_whole() -> Rig {
 /// One object whose body is stored as several independent streams.
 ///
 /// The decoded bytes are the whole body either way, so `expect_records` is
-/// the same count the `_whole` case asserts — which is the assertion that
+/// the same count the `_whole` case asserts, which is the assertion that
 /// matters here: a decoder that stopped at the first stream would return one
 /// sixteenth of the records and fail rather than report a smaller number.
 fn multi_part_object(suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
@@ -136,9 +135,9 @@ fn zstd_multi_frame() -> Rig {
 /// The same object entered part-way through a record.
 ///
 /// The expected count is derived from the fixture rather than written down,
-/// so it tracks the record shape — but the *rule* it encodes is the thing
-/// under review: the leading partial line counts as a record today, because
-/// the framer has no way to know it entered mid-record. A reader that
+/// so it tracks the record shape. The *rule* it encodes is the thing under
+/// review: the leading partial line counts as a record, because the framer
+/// has no way to know it entered mid-record. A reader that
 /// discarded through the first delimiter would emit one fewer, and this is
 /// where that change has to be stated.
 fn plain_mid_offset() -> Rig {
@@ -197,7 +196,7 @@ fn frame(rig: Rig) -> Rig {
 library_benchmark_group!(name = framing; benchmarks = frame);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the framing under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at.

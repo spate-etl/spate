@@ -40,8 +40,8 @@ sink: {{ capture: {{}} }}
 }
 
 /// More than 1000 keys forces ListObjectsV2 pagination; ordering must
-/// hold across page boundaries for the planner's packing — and with it
-/// every split id and composite offset — to be stable.
+/// hold across page boundaries for the planner's packing, and with it
+/// every split id and composite offset, to be stable.
 #[test]
 #[ignore = "requires Docker"]
 fn paginated_listing_backfills_completely() {

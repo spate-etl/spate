@@ -8,8 +8,8 @@
 //! `cargo test` does.
 //!
 //! Two of the profiles also claim something about the *state* their fleet is
-//! in — that the settled one is a fixpoint, and that the recovering one
-//! carries every claim kind. Neither is visible in a count, and both would
+//! in: the settled one is a fixpoint, and the recovering one carries every
+//! claim kind. Neither is visible in a count, and both would
 //! degrade silently: a settled corpus that stopped being a fixpoint would
 //! measure a rebalance while calling itself steady state, and would still
 //! report a number.
@@ -64,8 +64,8 @@ fn the_corpora_are_reproducible() {
 
 /// Ids are the keys of the map both functions walk and the sort key the claim
 /// scan orders on, so a generator that collided would quietly shrink every
-/// corpus — the map would hold fewer entries than the vector did and every
-/// count would fall for a reason that has nothing to do with the code.
+/// corpus. The map would hold fewer entries than the vector did and every
+/// count would fall for a reason unrelated to the code.
 #[test]
 fn split_ids_are_distinct() {
     let corpus = fleet::recovering(fleet::SCAN_SPLITS);
@@ -98,7 +98,7 @@ fn the_settled_corpus_is_a_fixpoint() {
 
 /// `unowned_pool` is `settled_fleet`'s pair: same pool, same fleet, same
 /// budgets, nothing owned. Its claim is that the fill pass places the whole
-/// pool — a lane budget that bound would truncate it instead, and the two
+/// pool. A lane budget that bound would truncate it instead, and the two
 /// counts would stop being a difference in one pass.
 #[test]
 fn the_unowned_pool_is_placed_in_full() {
@@ -138,8 +138,8 @@ fn the_skewed_settled_corpus_is_a_fixpoint() {
     }
 }
 
-/// `joined_member` claims the opposite of `settled_fleet` — that adding a
-/// member really does give the improving pass a rebalance to do. A corpus
+/// `joined_member` claims the opposite of `settled_fleet`: adding a member
+/// gives the improving pass a rebalance to do. A corpus
 /// whose splits all happened to stay put would report the settled number
 /// under a name that promises otherwise.
 #[test]

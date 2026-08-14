@@ -4,7 +4,7 @@
 //! this handle drives it over channels from the pipeline's controller
 //! thread. Commands (commit/fail/release) get bounded blocking replies;
 //! events arrive on an unbounded queue the controller drains via `poll`.
-//! Nothing here blocks on the tokio runtime — the sync side uses plain
+//! Nothing here blocks on the tokio runtime. The sync side uses plain
 //! `std::sync::mpsc` receives, so a wedged runtime cannot deadlock the
 //! controller.
 
@@ -56,8 +56,8 @@ struct Running {
     events: std_mpsc::Receiver<TaskEvent>,
     task: tokio::task::JoinHandle<()>,
     /// Splits observed Gained (with their tenancy epoch) minus
-    /// Lost/completed — the release set the direct teardown fallback
-    /// works from. The epoch pins the tenancy: a direct release must
+    /// Lost/completed. This is the release set the direct teardown
+    /// fallback works from. The epoch pins the tenancy: a direct release must
     /// never clear a record a same-named restart has since reclaimed.
     held: BTreeMap<String, u64>,
 }
@@ -90,7 +90,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
 
     /// Like [`new`](StoreCoordinator::new) but drives the starvation
     /// self-fence from an injected [`Clock`]. A frozen clock makes fencing
-    /// deterministic under CI scheduler jitter — pass the same clock to the
+    /// deterministic under CI scheduler jitter. Pass the same clock to the
     /// store so its lease expiry stays coherent. See [`crate::clock`].
     ///
     /// # Errors
@@ -260,7 +260,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     /// Direct-store release for teardown paths where the background task
     /// (or its runtime) is already gone: a private current-thread runtime
     /// runs guarded lease deletes and owner-clears under one aggregate
-    /// deadline. Best-effort — anything it cannot reach simply expires.
+    /// deadline. Best-effort; anything it cannot reach expires.
     fn release_direct(&self, splits: &[(SplitId, u64)]) {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -292,11 +292,11 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
                     }
                     // Record: clear the owner so the next claim is
                     // attempt-free. The owner string alone is not proof of
-                    // tenancy — a restarted worker with the same stable
+                    // tenancy. A restarted worker with the same stable
                     // instance id may have reclaimed the split under a
                     // higher epoch, and clearing ITS owner would fence a
                     // live peer. The epoch pins our tenancy. Parsed
-                    // leniently (no fingerprint at hand) — the CAS on the
+                    // leniently (no fingerprint at hand); the CAS on the
                     // read revision is still safe.
                     if let Ok(Some(entry)) = store.get(Keyspace::Durable, &key).await
                         && let Ok(mut record) =
@@ -380,7 +380,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                     failure = Some((kind, reason));
                     break;
                 }
-                // Nothing queued. This call never blocks — the driver owns
+                // Nothing queued. This call never blocks. The driver owns
                 // the wait and the task wakes it when it enqueues.
                 Err(std_mpsc::TryRecvError::Empty) => break,
                 Err(std_mpsc::TryRecvError::Disconnected) => {
@@ -493,9 +493,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
     fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
         // A drained revocation, not a departure: the task keeps this
         // worker in the fleet even when the last split is handed back.
-        // Unlike `release`, there is NO direct-store teardown fallback —
-        // the process is live, so a release the task cannot land right now
-        // simply makes the rebalance slower (the leader forces it at
+        // Unlike `release`, there is NO direct-store teardown fallback.
+        // The process is live, so a release the task cannot land right now
+        // makes the rebalance slower (the leader forces it at
         // `drain_deadline`); an unreleased lease expires on its own.
         let result = self.command(|reply| Command::Release {
             splits: splits.to_vec(),
@@ -516,9 +516,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
     }
 
     fn decline_revoke(&mut self, split: &SplitId) -> Result<(), CoordinationError> {
-        // Best-effort: a decline the task never hears costs liveness only
-        // — the revocation is still forced at `drain_deadline`, just later
-        // than it needed to be — never correctness.
+        // Best-effort: a decline the task never hears costs liveness, never
+        // correctness. The revocation is still forced at `drain_deadline`,
+        // later than it needed to be.
         let result = self.command(|reply| Command::DeclineRevoke {
             split: split.clone(),
             reply,

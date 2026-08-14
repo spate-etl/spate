@@ -5,7 +5,7 @@
 //! `Tuple`, `FixedString`, date/time/decimal parameters, enums) to
 //! compare a column against a row struct's serde shape. Anything it does
 //! not recognize collapses to [`ChType::Other`], which the comparison
-//! treats as always-compatible — unknown server types must never fail
+//! treats as always-compatible; unknown server types must never fail
 //! validation.
 
 /// A parsed ClickHouse column type, shallow enough for class-based
@@ -17,7 +17,7 @@ pub(crate) enum ChType {
     Named(String),
     /// `Nullable(T)`.
     Nullable(Box<ChType>),
-    /// `LowCardinality(T)` — transparent for compatibility.
+    /// `LowCardinality(T)`, transparent for compatibility.
     LowCardinality(Box<ChType>),
     /// `Array(T)`.
     Array(Box<ChType>),
@@ -51,12 +51,12 @@ pub(crate) enum ChType {
         /// Fractional digits.
         scale: u8,
     },
-    /// `Enum8('a' = 1, ...)` — value list parsed for tokenizer
-    /// correctness, then dropped.
+    /// `Enum8('a' = 1, ...)`, whose value list is parsed for tokenizer
+    /// correctness then dropped.
     Enum8,
     /// `Enum16(...)`.
     Enum16,
-    /// Anything unrecognized — always compatible.
+    /// Anything unrecognized, always compatible.
     Other(String),
 }
 

@@ -9,10 +9,10 @@
 //! `cargo test` does.
 //!
 //! The guard-trip case needs more than a stable corpus. It rests on a claim
-//! about *why* it fails — that the header bytes are what push a record past
-//! the limit, not the payload — and a limit nudged either way would leave a
-//! case that still ran and still produced a number while measuring the
-//! opposite thing. That claim is checked here.
+//! about *why* it fails: the header bytes are what push a record past the
+//! limit, not the payload, and a limit nudged either way would leave a case
+//! that still ran and still produced a number while measuring the opposite
+//! thing. That claim is checked here.
 
 use bytes::BytesMut;
 use spate_core::checkpoint::AckRef;
@@ -81,11 +81,11 @@ where
 ///
 /// The length alone is not enough to pin a corpus. Every passthrough payload
 /// is exactly `PAYLOAD_LEN` bytes, so re-seeding the generator changes every
-/// byte the encoder copies and moves no length at all — the pin would pass
+/// byte the encoder copies and moves no length at all, so the pin would pass
 /// over a corpus that is not the one any recorded count was measured against.
-/// The digest is what closes that: it folds the frame the encoder actually
-/// produced, so a changed seed, a changed value formula and a reordered corpus
-/// all fail alike.
+/// The digest closes that: it folds the frame the encoder produced, so a
+/// changed seed, a changed value formula and a reordered corpus all fail
+/// alike.
 fn framed<T, M>(enc: KafkaEncoder<Owned<T>, M>, payloads: Vec<T>) -> (usize, u64)
 where
     T: Send + 'static,
@@ -105,8 +105,8 @@ where
 /// FNV-1a over the framed bytes.
 ///
 /// Written out rather than taken from `DefaultHasher`, whose output is
-/// explicitly not stable across releases — and a pin that could change under a
-/// toolchain bump is not a pin.
+/// explicitly not stable across releases, and a pin that could change under
+/// a toolchain bump is not a pin.
 fn digest(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in bytes {
@@ -142,14 +142,14 @@ fn the_corpora_are_reproducible() {
 /// The framed bytes of each corpus, pinned by length and digest.
 ///
 /// Two calls in one process only prove the generators are pure. The property
-/// the bench needs is stronger — that the corpus is the same *across
+/// the bench needs is stronger: the corpus must be the same *across
 /// revisions*, since a merge-base leg and a head leg run different builds. A
 /// one-character edit to a value formula, a seed, or a record count would
 /// otherwise re-baseline every comparison with nothing to say it happened.
-/// These numbers are what makes that edit fail here instead. They are what the
-/// pull request that added this bench published, and changing one is a
-/// deliberate act: re-record it, and treat every count from before the change
-/// as measuring a different corpus.
+/// These numbers make that edit fail here instead. They are what the pull
+/// request that added this bench published; changing one means re-recording
+/// it and treating every count from before the change as measuring a
+/// different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
     assert_eq!(
@@ -180,7 +180,7 @@ fn the_corpora_are_pinned_across_revisions() {
 /// That is what lets the JSON count be read against the passthrough ones as
 /// "what serialization costs over copying the same quantity of payload". A
 /// corpus that drifted to half or twice the size would still run, still be
-/// pinned, and quietly stop supporting that reading — so the comparability is
+/// pinned, and stop supporting that reading, so the comparability is
 /// asserted rather than assumed.
 #[test]
 fn the_typed_documents_match_the_payload_length() {
@@ -203,7 +203,7 @@ fn the_typed_documents_match_the_payload_length() {
 /// be accepted in full: that is what makes the payload innocent and the
 /// headers the whole difference. Without this, a `GUARD_LIMIT` that had
 /// drifted below the payload length would leave the bench measuring an
-/// oversized *payload* rejection — a different path from the one the case is
+/// oversized *payload* rejection, a different path from the one the case is
 /// named for, and one librdkafka's own key-plus-payload check already catches.
 #[test]
 fn the_guard_trips_on_the_header_bytes_not_the_payload() {
@@ -237,7 +237,7 @@ fn the_guard_trips_on_the_header_bytes_not_the_payload() {
 /// a limit of `PAYLOAD_LEN + HEADER_BYTES` every stamped record must pass (the
 /// guard rejects on strictly greater), and one byte below it every stamped
 /// record must fail. Those two together pin the guarded size exactly. A fifth
-/// header, or a renamed one, moves the total — and the guard case's margin
+/// header, or a renamed one, moves the total, and the guard case's margin
 /// with it.
 #[test]
 fn the_header_stamp_adds_the_declared_byte_count() {

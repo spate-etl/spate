@@ -1,7 +1,7 @@
 //! A serde `Serializer` producing ClickHouse [RowBinary].
 //!
 //! The `clickhouse` crate's own row serializer is crate-private, so
-//! `spate-clickhouse` ships its own. Wire semantics deliberately mirror the
+//! `spate-clickhouse` ships its own. Wire semantics mirror the
 //! crate's (its deserializer is used to read rows back in tests, so
 //! compatibility is proven by round-trips):
 //!
@@ -62,7 +62,7 @@
 //!   `serialize_struct`, so a short row looks self-consistent. Never put a
 //!   skip attribute on a row struct; model absent values as `Option<T>`
 //!   (`Nullable`) instead. (A `Serialize` impl that *lies* about its field
-//!   count — declares N but writes a different number — is caught with
+//!   count, declaring N but writing a different number, is caught with
 //!   [`RowBinaryError::FieldCountMismatch`].)
 //! - **`#[serde(flatten)]`** — serde lowers a flattened struct to a
 //!   length-less map; rejected with [`RowBinaryError::FlattenUnsupported`].
@@ -73,8 +73,8 @@
 //!
 //! ## `Variant` discriminant ordering
 //!
-//! A newtype enum variant writes serde's `variant_index` — the enum's
-//! **declaration order** — as the `Variant` discriminant byte. ClickHouse
+//! A newtype enum variant writes serde's `variant_index`, the enum's
+//! **declaration order**, as the `Variant` discriminant byte. ClickHouse
 //! does **not** use declaration order: it sorts a `Variant(T1, T2, ...)`'s
 //! member types **alphabetically by type name** and numbers the
 //! discriminators in that sorted order. There is no way to infer that
@@ -96,7 +96,7 @@
 //!
 //! Also note: `Option<Enum>` against such a column emits the `Nullable`
 //! `0`/`1` prefix, but ClickHouse encodes a `Variant` NULL as discriminant
-//! `255` and forbids `Nullable(Variant)` — so a nullable variant column is
+//! `255` and forbids `Nullable(Variant)`, so a nullable variant column is
 //! not representable; use the `Variant`'s own NULL support instead.
 //!
 //! [RowBinary]: https://clickhouse.com/docs/en/interfaces/formats#rowbinary
@@ -135,15 +135,15 @@ pub enum RowBinaryError {
     /// `serialize_struct` but serialized a different number of fields.
     /// RowBinary is positional, so a variable-width row misaligns every
     /// following column. (Note: `#[serde(skip)]`/`#[serde(skip_serializing_if)]`
-    /// evade this check — serde reports the post-skip count — which is why
-    /// those attributes are documented as unsupported.)
+    /// evade this check, since serde reports the post-skip count, which is
+    /// why those attributes are documented as unsupported.)
     #[error(
         "struct declared {expected} field(s) but serialized {got}: RowBinary rows are positional and must be fixed-width"
     )]
     FieldCountMismatch {
         /// Fields the `Serialize` impl declared.
         expected: usize,
-        /// Fields it actually serialized.
+        /// Fields it serialized.
         got: usize,
     },
     /// `Variant` discriminants are single bytes.
@@ -204,7 +204,7 @@ struct RowBinarySer<'a> {
     struct_depth: u32,
     /// The field count the outermost struct declared to `serialize_struct`.
     top_expected: usize,
-    /// The field count it actually serialized (compared at `end`).
+    /// The field count it serialized (compared at `end`).
     top_written: usize,
 }
 
@@ -383,10 +383,10 @@ impl<'a, 'b> ser::Serializer for &'a mut RowBinarySer<'b> {
         // ClickHouse `Variant`: one discriminant byte then the value.
         //
         // IMPORTANT: the discriminant written here is serde's
-        // `variant_index` — the enum's *declaration order*. ClickHouse
+        // `variant_index`, the enum's *declaration order*. ClickHouse
         // assigns `Variant(...)` discriminators in a different order (its
         // types sorted alphabetically by name), so declaration order must be
-        // made to match by the user. See the crate/type docs — there is no
+        // made to match by the user. See the crate/type docs; there is no
         // way to infer the mapping here.
         let idx = u8::try_from(variant_index)
             .map_err(|_| RowBinaryError::VariantOutOfRange(variant_index))?;
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn ipv6_default_impl_matches_the_16_byte_wire_format() {
         // Unlike Ipv4Addr (see crate::serde::ipv4), Ipv6Addr's default
-        // serde impl — 16 network-order octets — is exactly the IPv6
+        // serde impl (16 network-order octets) is exactly the IPv6
         // column's FixedString(16)-style layout.
         use std::net::Ipv6Addr;
         let localhost = Ipv6Addr::LOCALHOST;

@@ -25,7 +25,7 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
         statistics_interval: Duration::ZERO,
         rdkafka: BTreeMap::from([
             // These tests produce BEFORE the consumer joins. librdkafka's
-            // default (`latest`) would legitimately deliver nothing — any past
+            // default (`latest`) would legitimately deliver nothing. Any past
             // "green" run of that shape was a pause-race leaking a message to
             // the main queue, whose rewind seek overrode the reset policy.
             ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -303,7 +303,7 @@ fn startup_without_brokers_times_out_fatally() {
         match source.poll_events(Duration::from_millis(100)) {
             Ok(_) => continue,
             // Transient transport errors are expected with no broker; the
-            // runtime logs and keeps polling on Retryable — so does this
+            // runtime logs and keeps polling on Retryable, and so does this
             // loop. Only the fatal startup timeout ends it.
             Err(SourceError::Client {
                 class: ErrorClass::Retryable,
@@ -360,7 +360,7 @@ fn drive_step(
 /// members than partitions) must still acknowledge the rebalance with
 /// `assign()`. Under the deferred-completion protocol, skipping that leaves
 /// librdkafka's rebalance in progress forever, so the member can never
-/// complete a later rebalance — it sits idle and cannot pick up partitions
+/// complete a later rebalance; it sits idle and cannot pick up partitions
 /// even after the owner leaves. Two same-group members share a single
 /// partition: whichever ends up empty must still be able to take the
 /// partition over once the owner departs.
@@ -389,7 +389,7 @@ fn empty_assignment_completes_rebalance_protocol() {
     // Both conditions are required. Quiet alone is not settled: if the two
     // members do not land in the same initial rebalance window, the second
     // join re-forms an established group, and the mock broker paces that at
-    // `session.timeout.ms - 1000` — long enough to look quiet while the
+    // `session.timeout.ms - 1000`, long enough to look quiet while the
     // reassignment is still in flight.
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut quiet = 0;
@@ -471,7 +471,7 @@ fn empty_assignment_completes_rebalance_protocol() {
          (its rebalance protocol was not wedged)"
     );
 
-    // Sanity: the recovered member can actually consume the partition.
+    // Sanity: the recovered member can consume the partition.
     let rows = drain_lane(&mut lanes[0], 5);
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
@@ -546,7 +546,7 @@ fn statistics_populate_kafka_source_metrics() {
 #[test]
 fn statistics_disabled_registers_no_families() {
     // `statistics_interval: 0s` must disable the whole `spate_kafka_source_*`
-    // family, not merely stop updating it. Registering the fixed handles at
+    // family, not just stop updating it. Registering the fixed handles at
     // `open` regardless would leave them frozen at their unset default (e.g.
     // `group_healthy 0`, a documented alert signal) even though librdkafka
     // never emits a snapshot.
@@ -608,7 +608,7 @@ fn lag_series_count(rendered: &str) -> usize {
 /// ones that failed:
 ///
 /// 1. the framework's source-stage handles reach the connector at `open` (via
-///    `SourceCtx::stage_metrics`) — the existing statistics test opens without
+///    `SourceCtx::stage_metrics`); the existing statistics test opens without
 ///    them, so it could never have caught this;
 /// 2. the published value is the real backlog, per partition, rather than a
 ///    registered-but-never-written gauge's zero.
@@ -632,7 +632,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
     let handle = recorder.handle();
     // Committed offset per partition, captured from the run: `drain_lane`
     // polls in batches so it overshoots `CONSUMED`, and lag is measured
-    // against what was actually committed.
+    // against what was committed.
     let mut committed: Vec<(PartitionId, i64)> = Vec::new();
     metrics::with_local_recorder(&recorder, || {
         // Resolved inside the local recorder, exactly as the runtime resolves
@@ -653,8 +653,8 @@ fn a_backlogged_consumer_publishes_its_lag() {
         cp.begin_epoch(&partitions, 1);
 
         // Consume a prefix and commit it: `consumer_lag` is
-        // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`
-        // — unknown, and correctly unpublished — until a commit lands.
+        // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`,
+        // unknown and correctly unpublished, until a commit lands.
         for lane in &mut lanes {
             let rows = drain_lane(lane, CONSUMED);
             assert!(rows.len() >= CONSUMED, "drained {} rows", rows.len());
@@ -670,7 +670,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         source.flush_commits().expect("sync commit");
         committed = watermarks;
 
-        // Stop consuming (lanes stay assigned, simply unpolled) and drive the
+        // Stop consuming (lanes stay assigned but unpolled) and drive the
         // control plane until every partition has reported. Waiting for the
         // *first* series is not enough: `consumer_lag` is per partition, so a
         // snapshot can carry a number for p0 while p1 is still `-1`, and the

@@ -18,7 +18,7 @@
 //! from the parsed `ChType`.
 //!
 //! Targets `INSERT … FORMAT Native` over HTTP, which is hardcoded to
-//! revision 0 / default serialization — no `BlockInfo`, no
+//! revision 0 / default serialization: no `BlockInfo`, no
 //! `has_custom_serialization` byte, no sparse/detached columns.
 
 mod column;
@@ -118,9 +118,9 @@ impl NativeError {
     /// Map onto the framework's error taxonomy. A columnar encode failure is
     /// **fatal**: it poisons the pending block (columns of unequal length),
     /// and a type-driven encoder only fails when the row type disagrees with
-    /// the schema — which recurs for every record. Record-level skipping is
-    /// not possible without a mid-block rollback, which the happy path
-    /// deliberately does not pay for.
+    /// the schema, which recurs for every record. Record-level skipping is
+    /// not possible without a mid-block rollback, which the happy path does
+    /// not pay for.
     fn into_sink_error(self) -> SinkError {
         SinkError::Client {
             class: ErrorClass::Fatal,
@@ -172,7 +172,7 @@ impl NativeSchema {
     ///
     /// The normal path is [`ClickHouseSink::native_schema`](crate::ClickHouseSink::native_schema),
     /// which fetches the real types from `system.columns`. Use this only when
-    /// the schema is known statically — the type strings must match the
+    /// the schema is known statically; the type strings must match the
     /// server's column types exactly, or the server will reject the block.
     /// The first-record check runs at name level only (there is no fetched
     /// truth to compare type classes against).
@@ -215,10 +215,10 @@ impl NativeSchema {
 ///
 /// `F` is the **record family**: `Owned<T>` for plain owned row structs
 /// (`NativeEncoder::<Owned<MyRow>>::new(schema)`), or a borrowed family for
-/// zero-copy pipelines — any family whose records implement `Serialize` at
+/// zero-copy pipelines. Any family whose records implement `Serialize` at
 /// every lifetime encodes.
 ///
-/// Cloning mints a fresh, empty encoder over the same schema — the terminal
+/// Cloning mints a fresh, empty encoder over the same schema; the terminal
 /// stage clones one per shard.
 pub struct NativeEncoder<F> {
     schema: Arc<NativeSchema>,
@@ -275,8 +275,8 @@ impl<F> NativeEncoder<F> {
         // One up-front reservation for the whole block: a cheap overestimate
         // (compute_buffered over-counts LowCard keys ×8 and adds 16 B/column
         // slack) plus each column's name/type-name bytes and a constant for
-        // the two leading VarUInts. Deliberately not exact — the overestimate
-        // is what guarantees a single output allocation.
+        // the two leading VarUInts. Not exact: the overestimate is what
+        // guarantees a single output allocation.
         let reserve = self.compute_buffered()
             + self
                 .schema
@@ -331,7 +331,7 @@ where
         _buf: &mut BytesMut,
     ) -> Result<(), SinkError> {
         // First record only: validate the row's probed struct against the
-        // configured columns off the per-row path — positional dispatch would
+        // configured columns off the per-row path. Positional dispatch would
         // otherwise silently mis-column a same-wire-class field/column swap,
         // and (in `full` mode) a wire wrapper whose scale disagrees with the
         // column's declared precision would silently land wrong values.
@@ -351,7 +351,7 @@ where
         }
         // No per-row buffer bookkeeping on the happy path: route the row's
         // fields straight into the column buffers. A failure part-way leaves
-        // columns unequal, so poison the block — the error is fatal (a
+        // columns unequal, so poison the block. The error is fatal (a
         // type-driven encoder only fails on schema/struct mismatch, which
         // recurs), the pipeline stops, and the buffered rows fail and replay.
         match rec.payload.serialize(RowDispatchSer {
@@ -385,7 +385,7 @@ where
     fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
         if self.poisoned {
             // A prior row failed mid-encode; the columns are unequal length.
-            // Refuse rather than emit a corrupt block — the stage treats this
+            // Refuse rather than emit a corrupt block; the stage treats this
             // as fatal and the buffered rows fail (replay). Defensive: encode
             // already returned fatal, which should stop the pipeline first.
             return Err(SinkError::Client {
@@ -403,7 +403,7 @@ where
 #[cfg(test)]
 impl<T> NativeEncoder<T> {
     /// Encode `rows` into a single Native block and return the bytes. Panics
-    /// on encode failure — tests supply matching schema and rows.
+    /// on encode failure; tests supply matching schema and rows.
     pub(crate) fn block_of<R: Serialize>(
         schema: Arc<NativeSchema>,
         rows: &[R],

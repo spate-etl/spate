@@ -16,7 +16,7 @@
 //! payload slices.
 //!
 //! Configuration is read from the pipeline's opaque `source: { kafka: ... }`
-//! section — see [`KafkaSourceConfig`] for the schema and the raw
+//! section; see [`KafkaSourceConfig`] for the schema and the raw
 //! `rdkafka:` passthrough (framework-owned properties are validated and
 //! rejected with explanations).
 //!
@@ -34,20 +34,20 @@
 //! Observability: besides the framework's `spate_source_*` stage metrics, the
 //! source translates librdkafka's statistics snapshot (emitted every
 //! `statistics_interval`, default 5s) into connector-owned
-//! `spate_kafka_source_*` families — transport totals, per-broker health and
-//! round-trip time, client-side queue saturation, and consumer-group
-//! stability. [The metrics reference] carries the full table under Kafka
+//! `spate_kafka_source_*` families, covering transport totals, per-broker
+//! health and round-trip time, client-side queue saturation, and
+//! consumer-group stability. [The metrics reference] carries the full table under Kafka
 //! source; setting `statistics_interval: 0s` disables the families.
 //!
 //! # Sink
 //!
 //! The [`sink`] module is the producer half: pipelines terminate in a
 //! Kafka topic through the framework's sink seam, with a batch
-//! acknowledged only once **every** message's delivery report confirmed —
-//! see the module docs for topology, delivery semantics, and the
+//! acknowledged only once **every** message's delivery report confirmed.
+//! See the module docs for topology, delivery semantics, and the
 //! `sink: { kafka: ... }` configuration schema.
 //!
-//! This crate deliberately re-exports nothing from `rdkafka`: its types
+//! This crate re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
 //! changes here (INV-6; ADR-0011).
 //!

@@ -5,7 +5,7 @@ use spate_core::error::ErrorClass;
 /// Classify an `object_store` error for a **data** operation (list / GET).
 ///
 /// [`ErrorClass::Fatal`] here means *not worth retrying in place*, which is
-/// a narrower claim than "kill the pipeline" — how far a non-retryable
+/// a narrower claim than "kill the pipeline". How far a non-retryable
 /// failure reaches is [`is_pipeline_fatal`]'s decision, by scope:
 ///
 /// - `NotFound` / `Precondition` and friends mean the planned key set moved
@@ -38,10 +38,10 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
 /// pipeline rather than just the object being read.
 ///
 /// Credentials, permissions, and client misconfiguration hold for every
-/// object on every instance — no peer will fare better, so they stay
+/// object on every instance, and no peer will fare better, so they stay
 /// pipeline-fatal. The rest of the non-retryable classes (`NotFound`,
 /// `Precondition`, `NotModified`, `AlreadyExists`) are facts about **one
-/// object** — deleted after planning, overwritten under its ETag pin — and
+/// object** (deleted after planning, overwritten under its ETag pin) and
 /// are handled as split poison: the split is handed back, retried
 /// elsewhere, and quarantined at the attempt cap instead of killing a
 /// fleet-wide backfill.
@@ -84,7 +84,7 @@ mod tests {
         // (error, non-retryable?, pipeline-fatal?)
         let table: Vec<(E, bool, bool)> = vec![
             // One object's fact: deleted after planning / overwritten
-            // under the pin — poison, never pipeline-fatal.
+            // under the pin. Poison, never pipeline-fatal.
             (
                 E::NotFound {
                     path: "k".into(),

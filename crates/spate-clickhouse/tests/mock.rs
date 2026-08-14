@@ -1,6 +1,6 @@
 //! Integration tests against the `clickhouse` crate's mock server (no
 //! Docker). The mock's `record` handler decodes request bodies through the
-//! crate's own RowBinary deserializer — every row that round-trips here
+//! crate's own RowBinary deserializer, so every row that round-trips here
 //! proves our serializer is wire-compatible with the crate's.
 
 use bytes::BytesMut;
@@ -208,7 +208,7 @@ fn record<T>(payload: T) -> spate_core::record::Record<T> {
 #[tokio::test]
 async fn off_mode_issues_no_queries() {
     // No handlers queued: a request would error the fetch, and the mock
-    // itself panics on drop if a queued handler goes unconsumed — so a
+    // itself panics on drop if a queued handler goes unconsumed, so a
     // clean Ok(None) proves validation never talked to the server.
     let dead = Mock::new();
     let sink = sink_with(dead.url(), "off");
@@ -294,7 +294,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
 async fn type_mismatch_fails_full_but_passes_names() {
     use spate_core::sink::RowEncoder;
 
-    // score: Option<u32> against Nullable(Float64) — wrong width/class.
+    // score: Option<u32> against Nullable(Float64), a wrong width/class.
     #[derive(Clone, Serialize)]
     struct WrongType {
         id: u64,
@@ -647,7 +647,7 @@ mod prop_round_trip {
 
 // ---- distributed_check (DDL-parity guard) -----------------------------------
 //
-// The guard's query order is fixed — cluster topology, then table engine —
+// The guard's query order is fixed at cluster topology then table engine,
 // and these FIFO-mock tests depend on it (a comment in
 // `distributed::DistributedCheck::verify` pins the contract from the other
 // side). Early-failure tests queue only the handlers that will be consumed:
@@ -718,7 +718,7 @@ async fn distributed_check_passes_when_cluster_and_ddl_match() {
 #[tokio::test]
 async fn distributed_check_off_issues_no_queries() {
     // No handlers queued: a request would error, and the mock panics on
-    // drop if a queued handler goes unconsumed — a clean Ok proves the
+    // drop if a queued handler goes unconsumed, so a clean Ok proves the
     // guard never talked to the server without a `distributed_check` block.
     let dead = Mock::new();
     let sink = sink_for(dead.url());
@@ -815,7 +815,7 @@ async fn unknown_cluster_fails_distinguishably() {
         "empty topology is a Mismatch: {err}"
     );
 
-    // …while a failing query is a Fetch — connectivity, not configuration.
+    // …while a failing query is a Fetch: connectivity, not configuration.
     let failing = Mock::new();
     failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
     let sink = checked_sink(failing.url(), &[1], CHECK_ON_ID);

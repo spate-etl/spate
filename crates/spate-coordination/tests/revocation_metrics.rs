@@ -1,13 +1,13 @@
 //! The revocation observability seam, end to end.
 //!
 //! Registering a metric family proves nothing about whether anything ever
-//! records into it — a family in this repo once read 0 forever because only
+//! records into it. A family in this repo once read 0 forever because only
 //! its registration was asserted, and the assignment-latency histogram
 //! here read ~0 for the same reason until a benchmark caught it. These
 //! tests therefore drive a REAL revocation between two coordinators built
 //! with metrics and assert the series moved.
 //!
-//! This lives in its own file deliberately: the exporter installs a
+//! This lives in its own file: the exporter installs a
 //! process-global recorder, and each `tests/*.rs` is its own test binary,
 //! so nothing else in the suite can race the install.
 
@@ -42,13 +42,13 @@ fn histogram_count(text: &str, name: &str) -> Option<f64> {
 }
 
 /// How many observations across all component series landed strictly above
-/// `threshold` seconds — `total_count - cumulative_count(le = threshold)`.
+/// `threshold` seconds, as `total_count - cumulative_count(le = threshold)`.
 ///
 /// This is the statistic with teeth for the assignment-latency regression:
 /// the mean is diluted toward 0 by the many splits a worker claims the
-/// instant they are assigned, but a single genuine wait still shows up as
-/// one observation above the floor. The bug put every observation in the
-/// lowest buckets, so this returns 0 against it.
+/// instant they are assigned, but a single wait above the floor still shows
+/// up as one observation. The bug put every observation in the lowest
+/// buckets, so this returns 0 against it.
 #[track_caller]
 fn observations_above(text: &str, name: &str, threshold: f64) -> f64 {
     let count = format!("{name}_count");
@@ -64,12 +64,11 @@ fn observations_above(text: &str, name: &str, threshold: f64) -> f64 {
         .lines()
         .filter(|l| l.starts_with(&bucket) && l.contains(&le_needle))
         .collect();
-    // Without this the helper degrades to vacuous exactly when it stops
-    // working: no matching bucket line means `below == 0`, so it returns
-    // the full count and every assertion built on it passes against any
-    // observation at all. It matches today only because the threshold
-    // happens to format as a real bucket boundary — a boundary set the
-    // exporter is free to change.
+    // Without this the helper degrades to vacuous when it stops working:
+    // no matching bucket line means `below == 0`, so it returns the full
+    // count and every assertion built on it passes against any observation
+    // at all. It matches only because the threshold formats as a bucket
+    // boundary the exporter is free to change.
     assert!(
         !matched.is_empty(),
         "no `{bucket}` line at `{le_needle}` — the threshold is not a bucket boundary, \
@@ -152,11 +151,10 @@ fn a_real_revocation_moves_every_metric_seam() {
     b.start(planner()).unwrap();
     let mut held_b = support::Held::default();
 
-    // The latency floor. B is deliberately kept waiting at least this long
-    // between being assigned a split and being allowed to claim it, so a
-    // correctly-timed observation must land at or above it — a mere "an
-    // observation was recorded" check would pass even against the bug,
-    // which recorded ~0.
+    // The latency floor. B is kept waiting at least this long between being
+    // assigned a split and being allowed to claim it, so a correctly-timed
+    // observation must land at or above it. An "an observation was
+    // recorded" check would pass even against the bug, which recorded ~0.
     const AWAIT_FLOOR: Duration = Duration::from_millis(200);
     const TAIL: i64 = 42;
 
@@ -180,7 +178,7 @@ fn a_real_revocation_moves_every_metric_seam() {
             && revoked.is_none()
         {
             // The leader can revoke more than one split at once, so the
-            // gauge is however many are draining — assert it is positive.
+            // gauge is however many are draining; assert it is positive.
             if handle.render().lines().any(|l| {
                 l.starts_with("spate_coordination_splits_draining")
                     && l.contains(r#"component="worker-a""#)
@@ -192,11 +190,11 @@ fn a_real_revocation_moves_every_metric_seam() {
                 saw_draining = true;
             }
             // Keep A committing its still-held splits while B waits, exactly
-            // as a running pipeline checkpoints — this rewrites the durable
-            // record under B's awaited split, which is the event the buggy
+            // as a running pipeline checkpoints. This rewrites the durable
+            // record under B's awaited split, the event the buggy
             // timer-clear latched onto. Hold the release until both the
             // gauge has been seen AND the floor has elapsed, so B's wait is
-            // real and long enough to distinguish from ~0.
+            // long enough to distinguish from ~0.
             let waited = asked_at.is_some_and(|t| t.elapsed() >= AWAIT_FLOOR);
             if saw_draining && waited {
                 a.commit(&split_id(id), &SplitProgress::new(TAIL, b"tail".to_vec()))
@@ -217,7 +215,7 @@ fn a_real_revocation_moves_every_metric_seam() {
     }
     let revoked = revoked.expect("A was asked to give a split up");
 
-    // The move was replay-free — otherwise the latencies would describe
+    // The move was replay-free; otherwise the latencies would describe
     // something other than a cooperative revocation.
     assert_eq!(
         held_b.splits[&revoked].1.as_ref().map(|p| p.watermark),
@@ -228,7 +226,7 @@ fn a_real_revocation_moves_every_metric_seam() {
     // Let B's assignment-latency observation land: it is recorded on the
     // claim that transferred ownership, which the loop above waited for,
     // but the exporter render is a separate read. Poll for it rather than
-    // sleeping a guessed interval — it is the last of these signals to
+    // sleeping a guessed interval. It is the last of these signals to
     // arrive, so once it is present the rest have landed too.
     let name = "spate_coordination_assignment_latency_seconds";
     let mut text = handle.render();
@@ -290,15 +288,15 @@ fn a_real_revocation_moves_every_metric_seam() {
 
 /// A cancelled revocation must move its own seam, and only its own.
 ///
-/// `outcome=cancelled` is written from exactly one place, so nothing else in
-/// the suite would notice if it were recorded as `drained`, or not recorded
-/// at all — the behavioral tests in `multi_worker` assert events and held
-/// sets, which are identical either way. This drives a real cancellation and
+/// `outcome=cancelled` is written from one place, so nothing else in the
+/// suite would notice if it were recorded as `drained`, or not recorded at
+/// all; the behavioral tests in `multi_worker` assert events and held sets,
+/// which are identical either way. This drives a real cancellation and
 /// reads the exposition.
 ///
-/// The `splits_draining` assertion is the load-bearing one. The gauge counts
-/// **drains**, not revocations: cancelling ends the revocation and leaves the
-/// drain running, and that surviving entry is what bounds a drain that never
+/// The `splits_draining` assertion carries the rest. The gauge counts
+/// **drains**, not revocations: cancelling ends the revocation and leaves
+/// the drain running, and that surviving entry bounds a drain that never
 /// finishes. If cancelling dropped it, the gauge would read 0 here while a
 /// split sat with its intake stopped and nothing watching it.
 #[test]
@@ -336,7 +334,7 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
     support::commit_held(&mut a, &held_a);
 
     // B joins on its own runtime, the leader moves work toward it, and A is
-    // asked to give it up. A answers nothing — the drain is in flight.
+    // asked to give it up. A answers nothing; the drain is in flight.
     let rt_b = runtime();
     let b_labels = ComponentLabels::new("coord-metrics", "cancel-worker-b", "s3");
     let mut b = StoreCoordinator::with_clock(

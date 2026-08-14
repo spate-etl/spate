@@ -12,7 +12,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
-/// One placed order, already collapsed to a per-SKU quantity — the raw row
+/// One placed order, already collapsed to a per-SKU quantity: the raw row
 /// the sink writes, not the rollup the view builds from it. Only `Serialize`
 /// is needed: the wire path is RowBinary and
 /// the tests read the merged aggregates back as scalars, not typed rows.
@@ -177,7 +177,7 @@ async fn aggregate_states_round_trip_through_null_and_mv() {
 
 /// Replaying a batch under its original token is a no-op through the view;
 /// a distinct token re-aggregates. This is the 26.1+ exactly-once claim,
-/// verified empirically — and it hinges on the MV-dedup setting, not the
+/// verified empirically, and it hinges on the MV-dedup setting, not the
 /// version alone.
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -196,7 +196,7 @@ async fn mv_dedup_keeps_retries_exactly_once() {
     assert_eq!(merged_sum(&srv.admin, "eu-west", "KBD-01").await, 3);
 
     // Replaying the identical batch (same dedup token) must not double-count
-    // through the MV — the token propagates to the target's dedup window.
+    // through the MV; the token propagates to the target's dedup window.
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
         .await
@@ -224,7 +224,7 @@ async fn mv_dedup_keeps_retries_exactly_once() {
 }
 
 /// A sink pointed directly at AggregateFunction columns fails validation with
-/// an actionable message — it cannot write aggregate states on the wire.
+/// an actionable message; it cannot write aggregate states on the wire.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn direct_insert_into_aggregate_function_column_is_rejected() {

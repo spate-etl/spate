@@ -113,8 +113,8 @@ wire_newtype! {
 ///
 /// The scale is a const generic: `Decimal64<2>(150)` is `1.50` in a
 /// `Decimal(18, 2)` column. Making the scale part of the *type* keeps
-/// mixed-scale arithmetic from compiling, which is the whole guarantee a
-/// decimal wants; the wire format is the raw little-endian scaled integer.
+/// mixed-scale arithmetic from compiling; the wire format is the raw
+/// little-endian scaled integer.
 macro_rules! decimal_newtype {
     ($(#[$doc:meta])* $name:ident($inner:ty), max_scale = $max:literal) => {
         $(#[$doc])*
@@ -211,7 +211,7 @@ pub enum DecimalConvertError {
 /// wrappers. Rescaling delegates to `rust_decimal::Decimal::rescale`,
 /// which rounds midpoints away from zero (`1.505` at scale 2 → `1.51`);
 /// conversions are checked, never panicking. Convert in operator code,
-/// before the row struct — the encode hot path stays a plain integer
+/// before the row struct, so the encode hot path stays a plain integer
 /// write.
 #[cfg(feature = "rust_decimal")]
 mod rust_decimal_conv {

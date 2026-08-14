@@ -11,22 +11,23 @@
 //! [`payloads`] is the opaque-bytes shape a Kafka-to-Kafka passthrough
 //! carries, at one fixed length: the encode cost is a function of payload
 //! length, and holding it constant is what makes the keyless case a usable
-//! denominator for the keyed and header-stamped ones — the only thing that
+//! denominator for the keyed and header-stamped ones: the only thing that
 //! differs between the three is work the connector itself does. [`events`] is
 //! the typed shape a JSON encoder serializes, sized so its documents land near
 //! [`PAYLOAD_LEN`].
 //!
 //! [`HeaderStamp`] lives here rather than in the bench because the fixture
-//! test drives it too: the guard-trip case rests on the claim that the headers
-//! — not the payload — are what push a record past the limit, and that claim
-//! is checked wherever `cargo test` runs rather than only under valgrind.
+//! test drives it too. The guard-trip case rests on the claim that the
+//! headers, not the payload, are what push a record past the limit, and that
+//! claim is checked wherever `cargo test` runs rather than only under
+//! valgrind.
 
 // The bench and the fixture test each compile this module separately and use a
-// different subset of it — the declared header total and the typed key
-// extractor exist for the test to check, and no case measures them. So an item
-// is legitimately dead in one target while live in the other, which is a
-// module-wide `allow` rather than a per-item `expect`: an `expect` would itself
-// go unfulfilled in whichever target does use the item.
+// different subset of it: the declared header total and the typed key
+// extractor are there for the test to check, and no case measures them. An
+// item is therefore dead in one target while live in the other, which needs a
+// module-wide `allow` rather than a per-item `expect`: an `expect` would
+// itself go unfulfilled in whichever target does use the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use serde::Serialize;
@@ -41,7 +42,7 @@ use spate_kafka::sink::{KafkaMessage, MessageEncoder};
 /// what a counter can resolve against run-to-run codegen jitter, so the
 /// measured region has to be a run of records rather than one call. Ten
 /// thousand is roughly eighty sealed chunks at the shipped 64 KiB
-/// `ChunkConfig::target_bytes` for this payload size — long enough that
+/// `ChunkConfig::target_bytes` for this payload size, long enough that
 /// steady-state per-record encoding dominates and the scratch buffers'
 /// one-time growth to their high-water mark is a rounding error, which is the
 /// regime a running pipeline spends all of its time in. A single chunk's ~130
@@ -52,7 +53,7 @@ pub(crate) const RECORDS: usize = 10_000;
 ///
 /// Fixed rather than drawn from a range: the guard-trip case needs its trip to
 /// be a property of the header bytes at every record, not an accident of where
-/// a length landed, and a varying length would buy nothing else — the copy
+/// a length landed, and a varying length would buy nothing else: the copy
 /// cost is linear in it, so a spread only averages back to the same number.
 pub(crate) const PAYLOAD_LEN: usize = 512;
 
@@ -62,7 +63,7 @@ pub(crate) const PAYLOAD_LEN: usize = 512;
 /// source key's *hash*, never the key).
 pub(crate) const KEY_LEN: usize = 16;
 
-/// Header bytes [`HeaderStamp`] adds per message — names plus values, which is
+/// Header bytes [`HeaderStamp`] adds per message: names plus values, which is
 /// what the size guard sums.
 ///
 /// Restated as a constant so [`GUARD_LIMIT`] can be reasoned about here; the
@@ -73,15 +74,15 @@ pub(crate) const HEADER_BYTES: usize = 86;
 ///
 /// Exactly [`PAYLOAD_LEN`], so a payload on its own sits *at* the limit and
 /// passes, while the same payload carrying [`HeaderStamp`]'s headers is over
-/// it and fails. That is the property the case exists to exercise: this guard
+/// it and fails. That is the property the case exercises: this guard
 /// counts header bytes, unlike librdkafka's client-side key-plus-payload
 /// check, so an oversized-with-headers record stays under the record-level
 /// Skip/Fail policy instead of failing a whole batch at the broker.
 pub(crate) const GUARD_LIMIT: usize = PAYLOAD_LEN;
 
 // The relation the guard case rests on, checked where it is stated: a payload
-// fits and a payload plus the stamp's headers does not. It is the constants'
-// half of the claim — that the stamp really adds [`HEADER_BYTES`] is the
+// fits and a payload plus the stamp's headers does not. This is the
+// constants' half of the claim; that the stamp adds [`HEADER_BYTES`] is the
 // fixture test's half, since `guarded_size` is private.
 const _: () = assert!(
     PAYLOAD_LEN <= GUARD_LIMIT && PAYLOAD_LEN + HEADER_BYTES > GUARD_LIMIT,
@@ -110,11 +111,10 @@ impl Lcg {
 /// The message key a passthrough payload carries: its fixed-width leading
 /// identifier.
 ///
-/// A slice of the payload rather than a scan for a delimiter, deliberately.
-/// What the keyed case measures is the connector's own extra work — the copy
-/// into the accumulator's key buffer and the extra framed section — and a key
-/// function that walked the payload would fold the caller's cost into that
-/// difference.
+/// A slice of the payload rather than a scan for a delimiter. What the keyed
+/// case measures is the connector's own extra work (the copy into the
+/// accumulator's key buffer and the extra framed section), and a key function
+/// that walked the payload would fold the caller's cost into that difference.
 pub(crate) fn key_prefix(payload: &[u8]) -> Option<&[u8]> {
     payload.get(..KEY_LEN)
 }
@@ -182,9 +182,9 @@ pub(crate) struct Event {
 /// The message key an [`Event`] carries: the user identifier, which is what a
 /// keyed topic partitions on.
 ///
-/// Unused by the cases as they stand — the key axis is measured once, on the
-/// cheaper passthrough encoder, where the difference is not buried under
-/// serialization — but it is the extractor the fixture test uses to prove the
+/// Unused by the cases as they stand, since the key axis is measured once on
+/// the cheaper passthrough encoder where the difference is not buried under
+/// serialization. It is the extractor the fixture test uses to prove the
 /// typed corpus can be keyed at all.
 pub(crate) fn event_key(event: &Event) -> Option<&[u8]> {
     Some(event.user.as_bytes())

@@ -4,16 +4,16 @@
 // table's PARTITION BY column, and stamps one `insert_deduplication_token` per
 // batch (reused verbatim on retries). So a single INSERT routinely spans
 // several partitions (e.g. two dates) under one token. These tests pin down
-// what ClickHouse 26.3 actually does with that, since the at-least-once
-// guarantee leans on it. Both pin `26.3` (the LTS the docs target) and use a
-// non-replicated MergeTree with an explicit dedup window — the framework's
+// what ClickHouse 26.3 does with that, since the at-least-once guarantee
+// leans on it. Both pin `26.3` (the LTS the docs target) and use a
+// non-replicated MergeTree with an explicit dedup window, the framework's
 // documented "you must set the window" case.
 
 use super::*;
 
 /// A row whose `dt` (days since epoch) feeds a ClickHouse `Date` column,
 /// so distinct `dt` values land in distinct partitions under `PARTITION BY
-/// dt`. Only `Serialize` is needed — the wire path is RowBinary and the
+/// dt`. Only `Serialize` is needed: the wire path is RowBinary and the
 /// tests read back counts, not typed rows.
 #[derive(Debug, Clone, Serialize)]
 struct DatedRow {
@@ -49,7 +49,7 @@ async fn active_parts(admin: &clickhouse::Client) -> u64 {
 
 /// A batch that spans two date partitions under one token must (a) insert
 /// without error, (b) land every row across both partitions, and (c) be
-/// idempotent when the same token is replayed — ClickHouse deduplicates
+/// idempotent when the same token is replayed. ClickHouse deduplicates
 /// per partition, so both partitions dedupe independently.
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -89,7 +89,7 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
         .await
         .expect("multi-partition insert must succeed");
 
-    // (b) Every row landed, genuinely across two partitions.
+    // (b) Every row landed, across two partitions.
     assert_eq!(table_count(&srv.admin).await, 100, "all rows must land");
     assert_eq!(
         active_partitions(&srv.admin).await,
@@ -109,7 +109,7 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
         "same token must deduplicate in every partition"
     );
 
-    // Control: a different token inserts again — dedup is token-driven and
+    // Control: a different token inserts again; dedup is token-driven and
     // works independently per partition (both partitions double).
     let reinsert = sealed(&rows, "mp-2", 4);
     sink.writer
@@ -127,7 +127,7 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
 /// cannot arise from a batch. ClickHouse writes **one part per partition
 /// per insert**: even when the parser is told to form ten-row blocks
 /// (`max_insert_block_size = 10`, squashing disabled), a single-partition
-/// insert of 100 rows coalesces into exactly one part — so a batch's single
+/// insert of 100 rows coalesces into exactly one part, so a batch's single
 /// token maps to exactly one dedup unit per partition it touches, and there
 /// is no intra-insert collision to lose data to. (Several parts in one
 /// partition would take several *inserts*, i.e. several batches, and each

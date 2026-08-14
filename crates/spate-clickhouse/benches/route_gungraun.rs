@@ -1,35 +1,36 @@
 //! Instruction counts for Distributed-parity shard routing (gungraun).
 //!
-//! One shape — route a run of records through
-//! [`DistributedRouter`](spate_clickhouse::DistributedRouter), exactly as the
-//! shard-affinity terminal stage does before anything is batched —
+//! One shape, routing a run of records through
+//! [`DistributedRouter`](spate_clickhouse::DistributedRouter) as the
+//! shard-affinity terminal stage does before anything is batched,
 //! parameterized by the sharding key's type and the cluster's weights.
 //!
 //! Routing sits ahead of every other per-record cost in this sink: a record
 //! is hashed and placed before it reaches an encoder, so the count here is
 //! paid whether or not the batch it joins is ever written. The work is
 //! allocation-free and fully deterministic, which makes it exactly the kind
-//! of hot path an instruction count describes better than a wall clock — the
+//! of hot path an instruction count describes better than a wall clock: the
 //! numbers are tens of nanoseconds, small enough that timer resolution and
 //! frequency scaling dominate a measured duration.
 //!
 //! The cases cover the two axes that decide the cost. The **key** decides how
 //! much the hash digests: `str_short` and `str_long` sit either side of
 //! XXH64's 32-byte regime change, `blob` is a pre-encoded binary key, and the
-//! two integer cases hash a key column at its declared width — four bytes for
-//! `UInt32`, eight for `UInt64`, a distinction Distributed parity depends on.
+//! two integer cases hash a key column at its declared width, four bytes for
+//! `UInt32` and eight for `UInt64`, a distinction Distributed parity depends
+//! on.
 //! The **weights** decide which half of `shard_for_hash` runs: `uniform` is
 //! the all-weights-1 fast path that reduces to `hash % N`, and `tiered` is
 //! the interval scan a heterogeneous cluster takes.
 //!
-//! Deliberately absent is a case per `ShardKey` variant at matched length,
-//! and a weight pair for every key. `Str` and `Bytes` hash the same bytes
-//! through the same call — the variant is a match arm, not a code path — so a
-//! short `Str` against a 16-byte `Bytes` covers both variants and a third
-//! length at once. The weight axis is orthogonal to the key, so one pair of
-//! cases at a shared key measures it: six cases, not sixteen. Callgrind runs
-//! under emulation, and a case that only re-measures a combination two others
-//! already fix costs real time on every pull request.
+//! Absent is a case per `ShardKey` variant at matched length, and a weight
+//! pair for every key. `Str` and `Bytes` hash the same bytes through the same
+//! call (the variant is a match arm, not a code path), so a short `Str`
+//! against a 16-byte `Bytes` covers both variants and a third length at once.
+//! The weight axis is orthogonal to the key, so one pair of cases at a shared
+//! key measures it: six cases, not sixteen. Callgrind runs under emulation,
+//! and a case that only re-measures a combination two others already fix
+//! costs time on every pull request.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
 //! exists on every developer machine: run it with `make bench-gungraun`.
@@ -61,14 +62,14 @@ struct Rig<T: Send + 'static> {
 /// The measured work: a run of records placed on shards.
 ///
 /// The shard count is re-read inside the loop rather than hoisted, because
-/// that is what the terminal stage does — it passes its own `shards.len()` on
+/// that is what the terminal stage does: it passes its own `shards.len()` on
 /// every call, and the router asserts the two agree per record. It buys
 /// fidelity of shape, not a different number: both spellings were measured,
 /// and all six cases counted bit-identically either way.
 ///
 /// Summing the shard indices is what keeps the loop alive: the routing
 /// decision is otherwise unobserved, and without a use the optimizer is free
-/// to delete the call this exists to count.
+/// to delete the call being counted.
 fn route_all<T: Send + 'static>(rig: &Rig<T>) -> usize {
     let mut acc = 0usize;
     for rec in &rig.records {
@@ -85,8 +86,8 @@ fn route_all<T: Send + 'static>(rig: &Rig<T>) -> usize {
 /// The encoder bench gives every record its own [`AckRef::test_pair`]; at
 /// this record count that would be a hundred thousand live channels built in
 /// setup, so these clone a single ref instead. Nothing routes an
-/// acknowledgment — the router never touches the ack — and the receiver is
-/// leaked rather than dropped so that a resolved batch could not enqueue on a
+/// acknowledgment, since the router never touches the ack, and the receiver
+/// is leaked rather than dropped so that a resolved batch could not enqueue on a
 /// live channel and make the count depend on how many records a case built.
 fn records<T>(payloads: Vec<T>) -> Vec<Record<T>> {
     let (ack, rx) = AckRef::test_pair();
@@ -115,8 +116,8 @@ fn rig<T: Send + 'static>(router: DistributedRouter<Owned<T>>, payloads: Vec<T>)
 }
 
 // A `KeyExtractor` is a plain fn pointer over the `Rec<'buf>` GAT, so each of
-// these must take the family's owned record type by reference — `&String`,
-// not `&str` — for the coercion to hold. That is what `clippy::ptr_arg` sees.
+// these must take the family's owned record type by reference (`&String`,
+// not `&str`) for the coercion to hold. That is what `clippy::ptr_arg` sees.
 //
 // The routers are built here rather than by a generic helper for the same
 // reason: `<Owned<T> as RecFamily>::Rec<'buf>` only normalizes to `T` once `T`
@@ -219,7 +220,7 @@ library_benchmark_group!(
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the routing under measurement rather than to
 // whichever frame the default depth of 4 happens to cut at. Routing itself

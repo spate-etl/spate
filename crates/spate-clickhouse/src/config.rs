@@ -111,7 +111,7 @@ pub struct ClickHouseSinkConfig {
 ///
 /// `rowbinary` (default) streams rows; `native` transposes each chunk into a
 /// columnar block. Native is type-driven, so selecting it always fetches
-/// `system.columns` — [`build`] upgrades `validate_schema: off` to
+/// `system.columns`, and [`build`] upgrades `validate_schema: off` to
 /// [`SchemaValidation::Names`] so the encoder can learn each column's type.
 /// Pair it with [`crate::NativeEncoder`] on the chain (via
 /// [`ClickHouseSink::native_schema`]); RowBinary pairs with
@@ -157,22 +157,22 @@ pub enum SchemaValidation {
     /// [`SchemaValidation::Names`] plus a class-based type-compatibility
     /// check per position (permissive: a `u32` may feed `UInt32`,
     /// `DateTime`, or `IPv4`; unknown server types always pass; the
-    /// `Nullable`-vs-`Option` mismatch always fails — that one is wire
+    /// `Nullable`-vs-`Option` mismatch always fails, which is wire
     /// corruption).
     Full,
 }
 
 /// Transport (HTTP-body) compression the client applies to insert requests.
 ///
-/// This is wire-level compression negotiated per connection — it is unrelated
-/// to on-disk column `CODEC`s declared in table DDL, which stay the caller's
+/// This is wire-level compression negotiated per connection, unrelated to
+/// on-disk column `CODEC`s declared in table DDL, which stay the caller's
 /// responsibility. Deserialized from a scalar string:
 ///
 /// ```yaml
 /// compression: lz4         # off | none | lz4 | zstd | zstd:<1-22>
 /// ```
 ///
-/// `lz4` is fast and low-CPU (the default, matching prior behavior); `zstd`
+/// `lz4` is fast and low-CPU (the default); `zstd`
 /// trades CPU for a better ratio and accepts an explicit level (`zstd` alone
 /// uses level 3). `off` disables compression.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -254,7 +254,7 @@ fn default_weight() -> u32 {
     1
 }
 
-/// The opt-in `distributed_check:` block — a startup guard verifying that
+/// The opt-in `distributed_check:` block, a startup guard verifying that
 /// the sink config, the cluster topology, and the `Distributed` table's
 /// DDL agree (see [`ClickHouseSink::validate_distributed`]).
 ///
@@ -282,7 +282,7 @@ pub struct DistributedCheckSection {
     pub sharding_key: Option<String>,
     /// Escape hatch: the full expected sharding expression, compared
     /// textually after normalization (whitespace and identifier quoting
-    /// stripped) — inherently more brittle than `sharding_key`.
+    /// stripped), which is more brittle than `sharding_key`.
     #[serde(default)]
     pub sharding_expr: Option<String>,
     /// Endpoint to query for `system.clusters` / `system.tables`. The
@@ -328,8 +328,8 @@ pub struct ClickHouseSink {
     /// What `validate_schema()` will check, captured from the config.
     schema_check: schema::SchemaCheck,
     /// An independent client set for readiness probing: sharing the insert
-    /// clients would report the write path healthy merely because probing
-    /// keeps its connections warm.
+    /// clients would report the write path healthy because probing keeps
+    /// its connections warm.
     probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
     /// Per-shard weights in config order, for [`router`](Self::router).
     shard_weights: Arc<[u32]>,
@@ -339,7 +339,7 @@ pub struct ClickHouseSink {
 
 impl ClickHouseSink {
     /// Opt-in startup schema validation. Call **after** [`build`] and
-    /// **before** `SinkPool::spawn` consumes `endpoints` — a failure here
+    /// **before** `SinkPool::spawn` consumes `endpoints`; a failure here
     /// exits before any pipeline thread or sink worker exists.
     ///
     /// Instant `Ok(None)` when `validate_schema: off`. Otherwise fetches
@@ -362,7 +362,7 @@ impl ClickHouseSink {
     /// [`crate::NativeEncoder`]. `format: native` always fetches
     /// `system.columns` (see [`Format`]), so this returns a schema whenever
     /// Native is configured. Call after [`build`], before the endpoints are
-    /// consumed — like [`validate_schema`](Self::validate_schema).
+    /// consumed, as with [`validate_schema`](Self::validate_schema).
     pub async fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, SchemaError> {
         let schema = self.validate_schema().await?.ok_or_else(|| {
             SchemaError::Mismatch(
@@ -385,13 +385,12 @@ impl ClickHouseSink {
     }
 
     /// A [`DistributedRouter`] over this sink's shard topology and
-    /// configured weights — the record-aware router whose placement
-    /// matches a `Distributed` table with sharding expression
-    /// `xxHash64(<key column>)`. Infallible: the weights were validated at
-    /// [`build`].
+    /// configured weights. Its placement matches a `Distributed` table with
+    /// sharding expression `xxHash64(<key column>)`. Infallible: the weights
+    /// were validated at [`build`].
     ///
     /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
-    /// projections are not injective) — name it:
+    /// projections are not injective), so name it:
     /// `sink.router::<Owned<OrderLineRow>>(order_key)`.
     #[must_use]
     pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
@@ -403,11 +402,11 @@ impl ClickHouseSink {
     /// `distributed_check` block is configured. Otherwise verifies shard
     /// count, per-shard weights, and the `Distributed` table's sharding
     /// expression against the live cluster, failing fast with a readable
-    /// diff — placement/DDL drift does not error at query time, it
-    /// silently returns wrong results under `optimize_skip_unused_shards`.
+    /// diff. Placement/DDL drift does not error at query time; it silently
+    /// returns wrong results under `optimize_skip_unused_shards`.
     ///
     /// Call **after** [`build`] and **before** the pipeline consumes the
-    /// sink — alongside [`validate_schema`](Self::validate_schema) /
+    /// sink, alongside [`validate_schema`](Self::validate_schema) /
     /// [`native_schema`](Self::native_schema).
     pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
         match &self.distributed {
@@ -585,7 +584,7 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
             return fail(format!("column `{col}` is not a valid identifier"));
         }
         // Duplicate columns emit e.g. `INSERT INTO t (`id`, `id`)`, which
-        // ClickHouse rejects with DUPLICATE_COLUMN — a code the writer
+        // ClickHouse rejects with DUPLICATE_COLUMN, a code the writer
         // classifies retryable, so it would loop forever. Reject at load.
         if !seen.insert(col.as_str()) {
             return fail(format!("column `{col}` is listed more than once"));
@@ -625,7 +624,7 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     // Compression: the string parser already bounds the level, but a
     // programmatic `build()` caller can construct `Zstd(level)` directly, and
     // an out-of-range level is rejected by the server mid-stream (a retryable
-    // code — an infinite loop). Reject at load, mirroring the retry checks.
+    // code, so an infinite loop). Reject at load, mirroring the retry checks.
     if let Compression::Zstd(level) = cfg.compression
         && !(1..=22).contains(&level)
     {

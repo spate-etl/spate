@@ -6,14 +6,13 @@
 //! pre-formatted frames, and inserted one `INSERT ... FORMAT RowBinary`
 //! per sealed batch with a deterministic `insert_deduplication_token`.
 //! Direct-to-shard writes beat `Distributed`-table inserts for an ETL
-//! writer: bigger blocks, less merge pressure, and — crucially for
-//! checkpointing — a synchronous server acknowledgment
-//! (`wait_end_of_query=1`; `write_batch` returning `Ok` covers
-//! materialized views too).
+//! writer: bigger blocks, less merge pressure, and a synchronous server
+//! acknowledgment that checkpointing depends on (`wait_end_of_query=1`;
+//! `write_batch` returning `Ok` covers materialized views too).
 //!
-//! # ⚠ Deduplication requires a window — silently off on plain MergeTree
+//! # ⚠ Deduplication requires a window, and is silently off on plain MergeTree
 //!
-//! Retries reuse the batch's deduplication token, making them idempotent —
+//! Retries reuse the batch's deduplication token, making them idempotent,
 //! **but only if the server keeps a deduplication window**:
 //!
 //! - `Replicated*MergeTree`: deduplication is on by default
@@ -26,24 +25,24 @@
 //! SETTINGS non_replicated_deduplication_window = 100;
 //! ```
 //!
-//! # At-least-once, honestly
+//! # At-least-once delivery
 //!
 //! Tokens cover *same-batch retries* (including on another replica after a
 //! timeout). They do **not** cover crash replay: after a restart, data is
 //! re-batched with different boundaries and different tokens, and replayed
-//! rows will land again. Design target tables to tolerate duplicates —
+//! rows will land again. Design target tables to tolerate duplicates;
 //! `ReplacingMergeTree` with a version column is the sanctioned pattern.
 //!
-//! Re-homing is a different hazard entirely: a key that moves to another
-//! shard — changed shard weights, a changed sharding key, a changed shard
-//! count — leaves its already-written rows behind on the old shard, and
+//! Re-homing is a different hazard: a key that moves to another shard
+//! (changed shard weights, a changed sharding key, a changed shard count)
+//! leaves its already-written rows behind on the old shard, and
 //! nothing collapses them there. Dedup tokens are shard-scoped, and
 //! `ReplacingMergeTree` merges within one shard's local table only, so
 //! the old copies persist indefinitely: unpruned reads through a
 //! `Distributed` table return both homes' rows, while pruned reads return
-//! only the new home's. Treat a re-homing change as a planned migration —
-//! backfill or delete the moved keys' old-shard rows — not as replay
-//! noise that settles. A plain restart with unchanged topology is the
+//! only the new home's. Treat a re-homing change as a planned migration,
+//! backfilling or deleting the moved keys' old-shard rows, rather than as
+//! replay noise that settles. A plain restart with unchanged topology is the
 //! benign case: replayed rows land on the *same* shard, where the
 //! patterns above apply.
 //!
@@ -51,7 +50,7 @@
 //!
 //! [`DistributedRouter`] (built via [`ClickHouseSink::router`]) places each
 //! record on the same shard a ClickHouse `Distributed` table with sharding
-//! expression `xxHash64(<key column>)` would — so SELECTs through the
+//! expression `xxHash64(<key column>)` would, so SELECTs through the
 //! Distributed table can prune shards (`optimize_skip_unused_shards=1`)
 //! while inserts keep going direct-to-local. The ordering contract is the
 //! operator's: `shards[i]` in the sink config must be the cluster's
@@ -95,7 +94,7 @@
 //! The default is row-wise **RowBinary** ([`rowbinary`]). An opt-in columnar
 //! **Native** encoder ([`native`], `format: native`) transposes each chunk
 //! into one self-describing block: it costs more client CPU but cuts server
-//! parse CPU and compressed wire size substantially — build it from a fetched
+//! parse CPU and compressed wire size substantially. Build it from a fetched
 //! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
 
 pub mod config;

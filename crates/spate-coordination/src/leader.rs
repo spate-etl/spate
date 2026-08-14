@@ -5,14 +5,14 @@
 //! Election is a lease like any other: `create` the well-known leader key
 //! (expired keys are re-creatable), heartbeat it, lose it by fencing or
 //! expiry. The winner immediately bumps the plan record's `generation`
-//! via CAS — from that point, any in-flight plan write from a previous
+//! via CAS. From that point, any in-flight plan write from a previous
 //! leader loses by revision. Zombie *split* creates need no fence at all:
 //! deterministic ids + create-if-absent make a stale leader's writes
 //! byte-equivalent to the live leader's, or losers of the create race.
 //!
 //! The planner itself runs on the blocking pool and is joined by a select
 //! arm in the task loop ([`Task::maybe_start_plan`] starts it,
-//! [`Task::finish_plan`] lands it) — a slow enumeration must never stall
+//! [`Task::finish_plan`] lands it). A slow enumeration must never stall
 //! heartbeats, watch processing, or command service.
 
 use crate::error::store_error;
@@ -31,7 +31,7 @@ pub(crate) type PlannerOutput = (Box<dyn SplitPlanner>, Result<SplitPlan, Coordi
 
 /// A planner run in flight on the blocking pool, plus the plan-record
 /// snapshot its publish will CAS against (anything that moved the record
-/// meanwhile — a successor's generation bump — makes the publish lose).
+/// meanwhile, such as a successor's generation bump, makes the publish lose).
 pub(crate) struct PlanRun {
     pub(crate) handle: tokio::task::JoinHandle<PlannerOutput>,
     plan: records::PlanRecord,
@@ -140,7 +140,7 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     /// Kick a planner run off onto the blocking pool if one is due. The
-    /// run is joined by the task loop's select arm — never awaited here —
+    /// run is joined by the task loop's select arm and never awaited here,
     /// so heartbeats keep flowing through a slow enumeration.
     pub(crate) fn maybe_start_plan(&mut self) -> Result<Option<PlanRun>, CoordinationError> {
         if !self.plan_now || self.leadership.is_none() {
@@ -176,7 +176,7 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     /// Land a planner run: seed splits with create-if-absent (idempotent
-    /// by deterministic ids), recount, then CAS the plan record — the
+    /// by deterministic ids), recount, then CAS the plan record, the
     /// write that makes the run count.
     pub(crate) async fn finish_plan(
         &mut self,
@@ -256,7 +256,7 @@ impl<S: CoordinationStore> Task<S> {
         // `planned` is recounted from an authoritative listing, never
         // accumulated: only creates that WON are countable locally, so a
         // crash or failed publish between seeding and publishing would
-        // otherwise leave records no future run ever counts — and
+        // otherwise leave records no future run ever counts, and
         // terminal detection compares against this number forever.
         let listed = match self
             .store
@@ -271,7 +271,7 @@ impl<S: CoordinationStore> Task<S> {
             }
         };
 
-        // Publish the run: counts, cursor, finality — fenced by revision.
+        // Publish the run: counts, cursor, finality, fenced by revision.
         let finality = PlanFinalityRepr::from(split_plan.finality);
         let finality_changed = run.plan.finality != finality;
         let count_changed = run.plan.planned != listed;

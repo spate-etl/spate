@@ -11,7 +11,7 @@
 //! - **Completion** rides a [`SplitTracker`]: the lane records the terminal
 //!   watermark `T` (one past the last record it emitted) exactly once, at
 //!   its end-of-input decision. A split is complete when the **acked**
-//!   watermark `W` reaches `T` — the lane knows "fully framed", the
+//!   watermark `W` reaches `T`. The lane knows "fully framed", the
 //!   checkpoint tracker knows "fully acked", and [`SplitCtx::encode_commit`]
 //!   / [`SplitCtx::sweep`] are where the two meet.
 //! - **Poison** rides [`PoisonReport`]s: a lane may neither block nor
@@ -103,8 +103,8 @@ impl SplitTracker {
     }
 }
 
-/// What kind of object-level poison a split hit — the bounded `reason`
-/// label of `spate_s3_source_objects_failed_total`.
+/// What kind of object-level poison a split hit. This is the bounded
+/// `reason` label of `spate_s3_source_objects_failed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PoisonKind {
     /// A planned object no longer exists (deleted after planning).
@@ -216,8 +216,8 @@ struct SplitState {
     /// Objects not yet complete when this tenancy opened (settles the
     /// `objects_remaining` gauge at close).
     remaining_at_open: u64,
-    /// The watermark this tenancy resumed from (0 fresh) — the terminal
-    /// watermark of a tenancy that emits nothing.
+    /// The watermark this tenancy resumed from (0 fresh), which is the
+    /// terminal watermark of a tenancy that emits nothing.
     resume_watermark: i64,
     /// The most recent watermark handed to `encode_commit`.
     last_committed: Option<i64>,
@@ -347,7 +347,7 @@ impl SplitSource for SplitCtx {
         let start_ordinal = resume.map_or(0, |p| p.ordinal);
         // Pin the resume object to the content its committed records were
         // minted against: the carried pin, else the descriptor's ETag
-        // (identical content — the descriptor is immutable and in the
+        // (identical content, since the descriptor is immutable and in the
         // split's identity).
         let resume_etag = match opening.resume {
             Some(p) => ProgressState::decode(&p.state)
@@ -536,7 +536,7 @@ impl SplitSource for SplitCtx {
         //
         // The `!revocation` guard is correctness-critical. A handing-off split is
         // being given away, not finished, and its final tick commit lands on
-        // the *cut* watermark — which, once the stopped fetcher's tail drains,
+        // the *cut* watermark, which once the stopped fetcher's tail drains
         // equals `tracker.terminal()`. Without this guard that cut would be
         // committed `completed: true` and the store would mark a half-read
         // split terminally complete, so the peer would never resume it.
@@ -554,9 +554,9 @@ impl SplitSource for SplitCtx {
 
     fn begin_revoke(&mut self, split: &SplitId) -> bool {
         // Decline unless we hold this split live. An unknown, already-closed,
-        // or completed split is simply not in the table — `close_split`
-        // removes it, and the driver retires (and `close_split`s) a tenancy
-        // before it completes — and the driver relies on this `false` to never
+        // or completed split is not in the table (`close_split` removes it,
+        // and the driver retires and `close_split`s a tenancy before it
+        // completes), and the driver relies on this `false` to never
         // transition an unopened tenancy into `Draining`. Declining is
         // always safe: the requesting peer falls back to a replaying steal.
         let Some(state) = self.splits.get_mut(split) else {
@@ -577,8 +577,8 @@ impl SplitSource for SplitCtx {
             return Ok(None);
         };
         // A handing-off split is given away with `completed: false` through
-        // `drain_ready` and finished by its next owner — never completed by
-        // this sweep. Defense in depth: the driver no longer sweeps
+        // `drain_ready` and finished by its next owner, never completed by
+        // this sweep. Defense in depth: the driver does not sweep
         // `Draining` tenancies, but this guard must not depend on that.
         if state.revocation {
             return Ok(None);
@@ -607,7 +607,7 @@ impl SplitSource for SplitCtx {
         // The cut is the lane's terminal watermark: one past the last record
         // this instance emitted, recorded once the stopped fetcher closed its
         // channel at an object boundary and the lane's buffer drained. `None`
-        // while the lane is still draining — retry on the next poll.
+        // while the lane is still draining; retry on the next poll.
         let Some(cut) = state.tracker.terminal() else {
             return Ok(None);
         };
@@ -624,7 +624,7 @@ impl SplitSource for SplitCtx {
         let payload = ProgressState::at(&state.objects, cut).encode();
         // Never `completed`: a revocation gives the split away, it does not finish
         // it. The next owner opens at `cut`, emits nothing, and its own sweep
-        // completes the split — one extra hop, still zero replay. (Building the
+        // completes the split, one extra hop with zero replay. (Building the
         // progress state exactly as `sweep`/`encode_commit` do keeps the
         // encoding identical for the peer's `validate_resume`.)
         Ok(Some(SplitProgress::new(cut, payload)))
@@ -719,7 +719,7 @@ mod tests {
     // _kind`: carried progress must still mean what it meant when written.
     // Two historical rows have no coordinated analog by design: the rolling
     // keys_hash "compensating drift" check (descriptors are immutable and
-    // their keys+etags are in the split id — covered by the digest
+    // their keys+etags are in the split id, covered by the digest
     // sensitivity tests), and cross-listing drift (workers never list; a
     // drifted store surfaces at fetch time as If-Match poison).
 
@@ -869,7 +869,7 @@ mod tests {
         )
         .unwrap();
         // A watermark one past a maximally-full final member stays in its
-        // ordinal at the reserved index — inside the descriptor.
+        // ordinal at the reserved index, inside the descriptor.
         ctx.encode_commit(
             &id,
             Position {
@@ -1079,7 +1079,7 @@ mod tests {
         let (mut ctx, _rt) = test_ctx();
 
         // A tenancy that emitted nothing and resumed exactly at end-of-input
-        // would normally complete via the sweep — but not while handing off.
+        // would normally complete via the sweep, but not while handing off.
         let spec = spec_of(&[("a", Some("e-a"))]);
         let id = spec.id.clone();
         let tracker = seed_split(&mut ctx, &id, objects_of(&spec), 0);

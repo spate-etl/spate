@@ -12,7 +12,7 @@
 //!
 //! The lane therefore **owns** the polled messages across the batch's
 //! lifetime: `held` stores them with an erased lifetime, and is cleared
-//! only at the start of the next `poll(&mut self)` — at which point the
+//! only at the start of the next `poll(&mut self)`, at which point the
 //! borrow checker has already proven no batch (and no payload borrowed
 //! from it) is still alive, because the batch borrows `&mut self`. The
 //! erased lifetime is never observable: everything handed out is re-tied
@@ -76,7 +76,7 @@ impl KafkaLane {
 ///
 /// SAFETY: `BorrowedMessage<'a>` is `{ ptr: NativePtr<RDKafkaMessage>,
 /// _event: Arc<NativeEvent>, _owner: PhantomData<&'a u8> }` (rdkafka
-/// 0.39.0) — the `'a` parameter is phantom only: it affects no layout and
+/// 0.39.0). The `'a` parameter is phantom only: it affects no layout and
 /// no drop behavior, so transmuting the lifetime is sound. Validity of
 /// the message memory is self-contained: the message holds an `Arc` of its
 /// owning native event, and destruction happens in the `BorrowedMessage`
@@ -113,7 +113,7 @@ impl SourceLane for KafkaLane {
             None => return Ok(None),
             Some(Err(e)) => {
                 // A lane only exists after its partition was assigned, so
-                // any permanent condition here is genuinely post-startup.
+                // any permanent condition here is post-startup.
                 return Err(SourceError::Client {
                     class: crate::error::classify_poll_error(&e, true),
                     reason: format!("partition {} poll: {e}", self.partition.0),

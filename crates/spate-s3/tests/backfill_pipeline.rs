@@ -1,4 +1,4 @@
-//! Whole-pipeline backfill tests over a local filesystem store — the
+//! Whole-pipeline backfill tests over a local filesystem store, the
 //! infrastructure-free equivalent of spate-kafka's MockCluster suite.
 //!
 //! Each test assembles a real `Pipeline` (controller, drivers, capture
@@ -10,7 +10,7 @@
 //!
 //! Progress lives in the coordination store. Plain `launch` runs solo
 //! over the source's internal in-process store (ephemeral by design);
-//! `launch_on_store` shares one in-process store across launches — the
+//! `launch_on_store` shares one in-process store across launches, the
 //! infrastructure-free stand-in for a durable backend, which is what
 //! makes resume-across-restart testable here.
 
@@ -137,7 +137,7 @@ fn shutdown_handoff_resumes_from_committed_progress() {
     assert_eq!(r1.state, ExitState::Completed, "signal shutdown drains");
     let rows1 = captured_rows(&l1.script);
 
-    // Run 2: fresh pipeline over the same store — must finish the job.
+    // Run 2: fresh pipeline over the same store; it must finish the job.
     let l2 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
     let r2 = l2
         .run
@@ -204,8 +204,8 @@ fn restart_replays_fully_on_an_ephemeral_store() {
 
 /// Publish a plan over `fx` into `store`, without completing any of it.
 ///
-/// The mutation tests need a *planned* prefix — split descriptors holding
-/// each member's key and ETag — that they can then mutate underneath.
+/// The mutation tests need a *planned* prefix (split descriptors holding
+/// each member's key and ETag) that they can then mutate underneath.
 /// Doing that by racing a running pipeline (mutate while the first split
 /// streams, hoping the victim is still unclaimed) is a timing assumption
 /// that silently stops holding the moment split completion gets faster.
@@ -214,7 +214,7 @@ fn restart_replays_fully_on_an_ephemeral_store() {
 /// before any split can be claimed, so it always reaches the store, while
 /// the failing writes mean no batch is ever acknowledged and therefore no
 /// split can ever be committed complete. Stop it as soon as the plan is
-/// durable. What is left behind is a planned, wholly incomplete job — and
+/// durable. What is left behind is a planned, wholly incomplete job, and
 /// the mutation then happens with no pipeline running at all.
 fn plan_only_run(fx: &Fixture, store: &spate_coordination::store::memory::MemoryStore) {
     let l = launch_tuned(
@@ -379,7 +379,7 @@ fn slow_sink_backpressure_does_not_deadlock_the_backfill() {
         fx.write_plain(&format!("part-{i}.ndjson"), &recs(&format!("s{i}"), 500));
     }
     // A tight in-flight budget plus slow first writes engages the pause
-    // controller while fetchers are mid-stream — the regression shape for
+    // controller while fetchers are mid-stream, the regression shape for
     // an async edge that blocks the shared I/O runtime.
     let yaml = fx.config_yaml("backpressure: { max_inflight_bytes: 64KiB }");
     let l = launch_scripted(&yaml, test_options(), |script| {
@@ -429,7 +429,7 @@ fn corrupt_object_quarantines_its_split_and_stalls() {
     let store = shared_store();
 
     // Both objects share one split: the corrupt member poisons it on
-    // every delivery attempt, so the bounded job must end stalled — a
+    // every delivery attempt, so the bounded job must end stalled: a
     // loud failure, never a silently partial "Completed".
     let l = launch_tuned(
         &fx.config_yaml(""),

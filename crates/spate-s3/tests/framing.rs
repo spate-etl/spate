@@ -13,7 +13,7 @@ use std::io;
 use std::time::Duration;
 use support::{captured_rows, launch_customized, sorted, test_options};
 
-/// A trivial custom framer that splits records on `;` instead of `\n` — a
+/// A trivial custom framer that splits records on `;` instead of `\n`, a
 /// non-newline layout, to show the framer is chosen by the caller and the
 /// source itself is format-agnostic.
 #[derive(Default)]
@@ -115,7 +115,7 @@ sink: {{ capture: {{}} }}
 fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("data")).unwrap();
-    // A single object with `;`-separated records — not newline-delimited.
+    // A single object with `;`-separated records, not newline-delimited.
     std::fs::write(dir.path().join("data/records.txt"), b"alpha;beta;gamma").unwrap();
 
     let yaml = format!(

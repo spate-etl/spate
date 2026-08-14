@@ -6,19 +6,19 @@
 //! Two moments, two checks:
 //!
 //! - **Startup** (`validate`): the config's `columns` against
-//!   `system.columns` on every replica of every shard — missing columns,
-//!   non-insertable (MATERIALIZED/ALIAS) columns, inter-replica drift.
-//!   Config order differing from *table* order is deliberately not an
-//!   error: the `INSERT` column list maps by name, so only the struct
-//!   must agree with the config.
-//! - **First record** (`check_first_record`, driven by both encoders —
+//!   `system.columns` on every replica of every shard, catching missing
+//!   columns, non-insertable (MATERIALIZED/ALIAS) columns, and inter-replica
+//!   drift.
+//!   Config order differing from *table* order is not an error: the
+//!   `INSERT` column list maps by name, so only the struct must agree with
+//!   the config.
+//! - **First record** (`check_first_record`, driven by both encoders,
 //!   RowBinary's [`crate::ClickHouseEncoder::with_schema`] and the Native
 //!   encoder whenever its schema was fetched): the row struct's probed
-//!   field names, order, and — in `full` mode — type classes against the
+//!   field names, order, and, in `full` mode, type classes against the
 //!   configured columns, including wire-wrapper scale vs the column's
 //!   declared precision (`DateTime64Millis` into `DateTime64(6)` fails
-//!   here). This is where the positional wire contract is actually
-//!   enforced.
+//!   here). This is where the positional wire contract is enforced.
 
 pub(crate) mod probe;
 pub(crate) mod typeparse;
@@ -85,7 +85,7 @@ pub(crate) struct ColumnRow {
 }
 
 impl SchemaCheck {
-    /// `(database, bare table)` — a `db.table` qualification wins over the
+    /// `(database, bare table)`. A `db.table` qualification wins over the
     /// config's `database` field, mirroring how the INSERT resolves.
     fn target(&self) -> (Option<&str>, &str) {
         match self.table.split_once('.') {
@@ -155,13 +155,12 @@ fn table_column_list(cols: &[ColumnRow]) -> String {
 /// opaque, unframed, version-dependent internal serialization, and
 /// reproducing it client-side would couple us to one ClickHouse serialization
 /// version. A sink pointed straight at such a column is therefore a
-/// misconfiguration — the supported pattern is to INSERT raw rows into an
+/// misconfiguration. The supported pattern is to INSERT raw rows into an
 /// `ENGINE = Null` landing table and let a `MATERIALIZED VIEW` build the
 /// states into the target.
 ///
 /// Matched on the exact constructor name so `SimpleAggregateFunction(...)`,
-/// which stores the raw value and *is* directly insertable, is deliberately
-/// not flagged.
+/// which stores the raw value and *is* directly insertable, is not flagged.
 fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
     let ctor = type_.split_once('(').map(|(name, _)| name.trim())?;
     if ctor != "AggregateFunction" {
@@ -187,7 +186,7 @@ pub(crate) async fn validate(
         return Ok(None);
     }
 
-    // Every replica must agree — shard-local tables drift independently,
+    // Every replica must agree: shard-local tables drift independently,
     // and a broken replica should surface now, not at its first rotated
     // write.
     let mut reference: Option<(String, Vec<ColumnRow>)> = None;
@@ -481,7 +480,8 @@ mod tests {
     #[test]
     fn directly_insertable_types_are_not_flagged() {
         for ty in [
-            // SimpleAggregateFunction stores the raw value — insertable.
+            // SimpleAggregateFunction stores the raw value, so it is
+            // insertable.
             "SimpleAggregateFunction(sum, UInt64)",
             "SimpleAggregateFunction(sumMap, Map(String, UInt64))",
             "UInt64",

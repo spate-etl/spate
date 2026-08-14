@@ -24,7 +24,7 @@ use url::Url;
 ///
 /// `object_store` accepts several spellings for the same underlying option
 /// (its config keys parse with and without the `aws_` prefix and with
-/// historic aliases), and lowercases keys before parsing — so the check
+/// historic aliases), and lowercases keys before parsing, so the check
 /// here is case-insensitive over every spelling. Because the store is
 /// built from the `url` field, a passthrough bucket key could never take
 /// effect (the URL's bucket wins at build time); rejecting it keeps the
@@ -54,7 +54,7 @@ fn default_split_target_bytes() -> ByteSize {
 const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
 
 /// Debug view of a raw option map: keys are configuration, values may be
-/// credentials (`aws_secret_access_key`, session tokens) — never print
+/// credentials (`aws_secret_access_key`, session tokens). Never print
 /// them.
 struct Redacted<'a>(&'a BTreeMap<String, String>);
 
@@ -97,7 +97,7 @@ pub struct S3SourceConfig {
     /// Compression codec of the objects.
     #[serde(default)]
     pub compression: Compression,
-    /// Target size of one split — the unit of work distribution, and the
+    /// Target size of one split, the unit of work distribution and the
     /// unit the leader balances. Objects are packed toward it in listing
     /// order with a
     /// per-object cost floor of a sixteenth of the target, so a split
@@ -120,8 +120,8 @@ pub struct S3SourceConfig {
     /// while framing are a separate, smaller budget). An object at or below
     /// this size is read in a single GET.
     ///
-    /// Keep this modest. A large window is read as one long-held GET — which
-    /// works against the connection release this source relies on — and a
+    /// Keep this modest. A large window is read as one long-held GET, which
+    /// works against the connection release this source relies on, and a
     /// single window must complete inside the client request timeout (the
     /// `store` `timeout` option, 30s by default), so an oversized window on a
     /// slow link degrades into repeated whole-window retries. The 8 MiB default
@@ -133,7 +133,7 @@ pub struct S3SourceConfig {
     pub chunk_bytes: ByteSize,
     /// Raw `object_store` options, applied when building the store from
     /// `url` (credentials, region, endpoint, timeouts, ...). Bucket keys
-    /// are rejected — the bucket comes from `url`.
+    /// are rejected; the bucket comes from `url`.
     #[serde(default)]
     pub store: BTreeMap<String, String>,
 }

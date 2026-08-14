@@ -2,7 +2,7 @@
 //
 // Proves the columnar encoder against ClickHouse itself: row 1 is inserted
 // through the NativeEncoder (`INSERT ... FORMAT Native`), then read back and
-// compared to what we sent. The server is the arbiter — it parses our block
+// compared to what we sent. The server is the arbiter: it parses our block
 // bytes into its own columnar storage and re-serializes for the read, so a
 // misencoded column fails the write or diverges on read-back. The table
 // deliberately exercises the Native-specific risk cases the `wide` table
@@ -192,8 +192,8 @@ async fn native_format_round_trips_through_a_real_server() {
 /// The scale-declaration gate against a real table: under
 /// `validate_schema: full` a wire wrapper whose scale disagrees with the
 /// column's declared precision fails fatally at the first record (before
-/// any block is built), and the matching wrapper lands the exact instant
-/// — verified by the server's own `toUnixTimestamp64Micro`, not our
+/// any block is built), and the matching wrapper lands the exact instant,
+/// verified by the server's own `toUnixTimestamp64Micro` rather than our
 /// decoder.
 #[tokio::test]
 #[ignore = "requires Docker"]

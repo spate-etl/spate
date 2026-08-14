@@ -1,7 +1,7 @@
 // The 256-bit integers and nested Geo shapes: the client cannot decode
 // Int256/UInt256, and the nested Array-of-Array offset layout of Polygon /
 // MultiPolygon is otherwise only byte-unit tested. Prove them against a real
-// server via the toString oracle — row 1 through the Native encoder, row 2 as
+// server via the toString oracle: row 1 through the Native encoder, row 2 as
 // server-parsed literals, compared column by column.
 
 use super::*;

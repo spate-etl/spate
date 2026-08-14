@@ -17,8 +17,9 @@
 //! parity. The two integer corpora are separate for the same reason the two
 //! string lengths are.
 //!
-//! Key *content* changes no instruction count — XXH64's work is a function of
-//! length alone — but it does decide which shard each record lands on, and so
+//! Key *content* changes no instruction count, since XXH64's work is a
+//! function of length alone, but it does decide which shard each record lands
+//! on, and so
 //! how far the weighted interval scan walks before it exits. That is why the
 //! bytes come from a fixed generator rather than from the index directly: a
 //! corpus whose keys differ only in a trailing digit still hashes uniformly,
@@ -26,13 +27,13 @@
 
 /// Records per routing case. A single short-key route is tens of
 /// nanoseconds, so the measured region has to be a realistic run of records
-/// rather than one call — which is also what the sink's terminal stage does
+/// rather than one call, which is also what the sink's terminal stage does
 /// between seals. It is the same reasoning as the encoder's block size, at
 /// the scale routing actually operates on.
 pub(crate) const KEYS: usize = 100_000;
 
 /// A `String` key below XXH64's 32-byte threshold: the single-accumulator
-/// regime, and the length a tenant or session identifier actually has.
+/// regime, and the length a tenant or session identifier has.
 pub(crate) const SHORT_LEN: usize = 8;
 
 /// A `String` key above it: two full 32-byte stripes through the four-lane
@@ -54,7 +55,7 @@ pub(crate) const UNIFORM: [u32; SHARDS] = [1; SHARDS];
 
 /// A cluster of two hardware generations, four nodes each. The weights sum
 /// to 30 and the heavy shards sit late in config order, so the interval scan
-/// walks a little over five entries on average — enough for its cost to be
+/// walks a little over five entries on average, enough for its cost to be
 /// visible against the uniform case rather than lost in the hash.
 pub(crate) const TIERED: [u32; SHARDS] = [1, 2, 4, 8, 1, 2, 4, 8];
 
@@ -87,7 +88,7 @@ pub(crate) fn short_strings(n: usize) -> Vec<String> {
 }
 
 /// `n` keys of exactly [`LONG_LEN`] bytes, shaped like the composite
-/// tenant/device/stream key a multi-tenant ingest actually shards on.
+/// tenant/device/stream key a multi-tenant ingest shards on.
 ///
 /// The length is checked rather than assumed, and with `assert!` rather than
 /// `debug_assert!`: a bench builds in the release-derived profile, where a

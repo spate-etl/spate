@@ -1,7 +1,7 @@
 //! Deterministic NDJSON object bodies for the framing bench.
 //!
 //! Every fixture is built outside the measured region and, where a codec
-//! applies, **compressed here** — a bench that compressed inside the measured
+//! applies, **compressed here**: a bench that compressed inside the measured
 //! region would count the compressor instead of the decompressor it is
 //! supposed to be measuring.
 //!
@@ -12,9 +12,9 @@
 
 use std::io::Write as _;
 
-/// Bytes per fetched chunk — the source's default (`chunk.target_bytes`,
+/// Bytes per fetched chunk, the source's default (`chunk.target_bytes`,
 /// 512 KiB), so the framer's work is split across `push_chunk` calls at the
-/// granularity production actually uses.
+/// granularity production uses.
 pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
 
 /// Records per object in the single-object profiles. Chosen so the object
@@ -23,7 +23,7 @@ pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
 /// instruction budget under emulation.
 pub(crate) const RECORDS: usize = 16_000;
 
-/// Independently-encoded streams inside one compressed object — gzip calls
+/// Independently-encoded streams inside one compressed object. Gzip calls
 /// them members, zstd frames, and the decoders treat them alike: read to the
 /// end of one, validate its trailer, reinitialize, continue.
 ///
@@ -44,7 +44,7 @@ pub(crate) const RUN_RECORDS_EACH: usize = 200;
 /// case is measuring the cap check rejecting anything.
 pub(crate) const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
-/// One NDJSON line, deterministic in `index` and around 250 bytes — the
+/// One NDJSON line, deterministic in `index` and around 250 bytes, the
 /// same order as the flat record the Avro and JSON decode benches use.
 fn line(index: usize) -> String {
     format!(
@@ -83,8 +83,8 @@ pub(crate) fn whole_body() -> Vec<u8> {
 /// The standard single-object body encoded as [`MEMBERS`] independent
 /// streams, each covering an equal run of records.
 ///
-/// Every part is a complete stream in its own right — its own header, its own
-/// trailer — so the returned pieces concatenate into an object a decoder must
+/// Every part is a complete stream in its own right, with its own header and
+/// trailer, so the returned pieces concatenate into an object a decoder must
 /// re-enter [`MEMBERS`] times. `the_multi_part_objects_are_really_multi_part`
 /// pins that: without it the fixture could quietly encode one stream and the
 /// case would measure the same thing `gzip_whole` already does.
@@ -100,7 +100,7 @@ pub(crate) fn members(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<Vec<u8>> {
 
 /// [`members`] concatenated: one stored object, many streams. Byte-for-byte
 /// the same decoded content as [`whole_body`], which is what makes the pair a
-/// controlled comparison — the only difference is how many streams it took.
+/// controlled comparison; the only difference is how many streams it took.
 pub(crate) fn concatenated(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
     members(store).concat()
 }
@@ -123,7 +123,7 @@ pub(crate) fn zstd(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The byte offset of the first record boundary at or after `at`, plus a few
-/// bytes — so a chunk list starting here begins **inside** a record, which is
+/// bytes, so a chunk list starting here begins **inside** a record, which is
 /// what a reader entering a subdivided object at an arbitrary byte range
 /// faces.
 pub(crate) fn offset_inside_a_record(bytes: &[u8], at: usize) -> usize {

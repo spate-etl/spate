@@ -407,7 +407,7 @@ mod first_record_check {
     fn full_mode_rejects_a_wrapper_scale_mismatch() {
         // The struct declares milli scale via the wire wrapper; the table
         // column is micro precision. Without this check every timestamp
-        // would land ~1000x too small (1970-era) — the raw Int64 layout
+        // would land ~1000x too small (1970-era); the raw Int64 layout
         // cannot notice.
         #[derive(Serialize)]
         struct R {

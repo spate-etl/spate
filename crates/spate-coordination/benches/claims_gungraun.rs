@@ -1,22 +1,22 @@
 //! Instruction counts for a worker's claim scan (gungraun).
 //!
-//! One shape — walk an observed store state for the splits this worker may
-//! act on and order them — parameterized by the mix of claim kinds the pool
-//! holds, because what changes the scan's cost is how far down the
-//! eligibility ladder each split falls and how much of the pool survives to
-//! be sorted, not which function is called:
+//! One shape, walking an observed store state for the splits this worker may
+//! act on and ordering them, parameterized by the mix of claim kinds the pool
+//! holds. What changes the scan's cost is how far down the eligibility ladder
+//! each split falls and how much of the pool survives to be sorted, not which
+//! function is called:
 //!
 //! - `leased_pool` — every split this worker does not hold is under a live
 //!   foreign lease. Nothing is claimable, so the walk runs in full, nothing
 //!   is materialised and the sort is handed an empty vector. This is the
 //!   scan a worker with lane budget to spare pays on every watch event that
-//!   reaches it and gets nothing back for — the common case on a fleet whose
+//!   reaches it and gets nothing back for, the common case on a fleet whose
 //!   peers are all busy. Its cost is the walk and the membership probe
 //!   against what this worker already holds, and nothing else.
 //! - `unclaimed_pool` — a freshly published plan: nothing owned, nothing
 //!   leased, every split a `Create`. The whole pool survives to the sort,
-//!   which is handed input already in kind-and-id order — the state is walked
-//!   in id order and every candidate shares one kind. So this is the
+//!   which is handed input already in kind-and-id order, since the state is
+//!   walked in id order and every candidate shares one kind. So this is the
 //!   per-candidate term in isolation: an id clone and a push each, and a sort
 //!   over presorted input. Being an allocation per candidate, that term is
 //!   dominated by the allocator rather than by anything in this crate, which
@@ -29,11 +29,11 @@
 //!   the walk order and the sort has to move most of what it is given.
 //!   **This is the profile a change to the claim ordering moves**: read
 //!   against `unclaimed_pool`, whose pool size it shares, the difference is
-//!   what ordering a genuinely unordered input costs.
+//!   what ordering an unordered input costs.
 //!
 //! The eligibility walk, the attempts gate and the sort are one case rather
-//! than three because the scan exists to produce an *ordered* list — a
-//! candidate list nobody ordered is not a thing the worker ever holds.
+//! than three because the scan produces an *ordered* list, and the worker
+//! never holds an unordered candidate list.
 //! Attribution between them comes from the callgrind profile the run writes
 //! either way.
 //!
@@ -60,7 +60,7 @@ struct Rig {
     owned: BTreeSet<String>,
     /// `[create, released, reclaim, expired, quarantined]`. Asserted rather
     /// than returned unchecked, so a corpus that silently stopped carrying a
-    /// claim kind could not pass as a fast one — the mix *is* what
+    /// claim kind could not pass as a fast one; the mix *is* what
     /// distinguishes these profiles from each other.
     expect_census: ClaimCensus,
 }
@@ -97,7 +97,7 @@ fn recovering_pool() -> Rig {
 }
 
 // The corpus is built and snapshotted in the `#[bench]` argument expression,
-// which gungraun evaluates outside the collected region, and moved in — so
+// which gungraun evaluates outside the collected region, and moved in, so
 // the measured work is the worker's, not the fixture builder's. Building the
 // observed state is not part of the unit either way: the split map is
 // maintained by the store watch and lives across ticks.
@@ -129,7 +129,7 @@ fn scan(rig: Rig) -> (Rig, Opaque) {
 library_benchmark_group!(name = claims; benchmarks = scan);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the scan under measurement rather than to
 // whichever frame valgrind's default depth would otherwise cut at.

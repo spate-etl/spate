@@ -18,11 +18,11 @@
 //! statistics translation maps the client's cumulative counters
 //! absolutely, which is only sound with a single client (see the source's
 //! metrics module). The framework's `shards` are worker-side parallelism
-//! over clones of that producer — one replica per shard, so replica
+//! over clones of that producer, one replica per shard, so replica
 //! rotation is a no-op while the circuit breaker still provides
 //! quarantine, backpressure, and the `spate_sink_shard_healthy` signal.
 //!
-//! Durability is not negotiable: `acks=all` and `enable.idempotence=true`
+//! `acks=all` and `enable.idempotence=true`
 //! are forced (and denied in the passthrough), because the framework
 //! treats a confirmed delivery report as a durable write and commits
 //! source offsets past it. Weaker settings would silently turn
@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Properties the sink owns. Setting them through the passthrough is
-/// rejected at load time with an explanation — overriding them would break
+/// rejected at load time with an explanation; overriding them would break
 /// the durable-ack contract, the delivery-report countdown, or a typed
 /// field's ownership.
 ///
@@ -136,9 +136,9 @@ fn default_statistics_interval() -> Duration {
 
 /// Producer compression codec, applied as librdkafka's
 /// `compression.codec`. Codec availability depends on how librdkafka was
-/// built — the bundled build always has `snappy` and `lz4`, `gzip` via
+/// built: the bundled build always has `snappy` and `lz4`, `gzip` via
 /// zlib; `zstd` requires an rdkafka cargo feature the workspace does not
-/// enable today. An unavailable codec fails producer creation at startup
+/// enable. An unavailable codec fails producer creation at startup
 /// (surfaced as a config error), never mid-stream.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -179,7 +179,7 @@ pub struct KafkaSinkConfig {
     pub topic: String,
     /// Framework shards (worker parallelism). All shards share the single
     /// underlying producer, so raising this adds concurrent writers contending
-    /// on that one client — not producer parallelism. Keep the default of 1;
+    /// on that one client rather than producer parallelism. Keep the default of 1;
     /// the lever for producer throughput is batch size (see the Kafka sink
     /// benchmark).
     #[serde(default = "default_shards")]
@@ -350,7 +350,7 @@ impl KafkaSinkConfig {
 pub struct KafkaSink {
     /// The `ShardWriter` implementation.
     pub writer: KafkaWriter,
-    /// Per-shard endpoints, one replica each — clones of the single
+    /// Per-shard endpoints, one replica each, cloned from the single
     /// shared producer.
     pub endpoints: Vec<Vec<KafkaEndpoint>>,
     /// Pool knobs mapped onto the framework's configuration.
@@ -390,7 +390,7 @@ impl KafkaSink {
     }
 
     /// A readiness probe over the sink's probe-only producer (topic
-    /// metadata fetch — unknown topics fail fast). This is the probe
+    /// metadata fetch, so unknown topics fail fast). This is the probe
     /// [`SinkBundle::into_parts`] attaches; manual assemblies hand it to
     /// `SinkRuntime.probe` directly.
     #[must_use]
@@ -428,7 +428,7 @@ pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, Con
 /// Creates the producer eagerly: librdkafka validates property values and
 /// idempotence compatibility (`max.in.flight` ≤ 5, `retries` > 0) at
 /// creation, so a passthrough that conflicts with the forced durability
-/// settings fails here — at startup — rather than on the first batch.
+/// settings fails at startup here rather than on the first batch.
 pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
     cfg.validate()?;
 
@@ -538,7 +538,7 @@ mod tests {
 
     /// Regression: `acks` is the alias of `request.required.acks`; both
     /// must be denied or the forced `acks=all` could be overridden to `0`,
-    /// making "delivered" mean "left the client" — silent data loss.
+    /// making "delivered" mean "left the client", which is silent data loss.
     #[test]
     fn acks_aliases_are_both_denied() {
         for key in ["acks", "request.required.acks"] {
@@ -567,7 +567,7 @@ mod tests {
     }
 
     /// Sink counterpart to the source's TLS/SASL capability probe: a security
-    /// passthrough is accepted (and the producer creates — which validates the
+    /// passthrough is accepted (and the producer creates, which validates the
     /// build's SSL/SASL capability without connecting) only with the `tls`
     /// feature; otherwise it is rejected at load with an actionable message.
     #[test]

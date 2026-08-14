@@ -10,9 +10,9 @@ use std::time::Duration;
 /// `coordination:` config section.
 ///
 /// The mechanical floors here (`validate`) keep the protocol sound in
-/// tests as well as production — user-facing floors (e.g. "a lease below
+/// tests as well as production. User-facing floors (e.g. "a lease below
 /// 15s churns takeovers under routine GC pauses") belong to the embedding
-/// connector's config layer, which knows its deployment story.
+/// connector's config layer.
 ///
 /// Construct it from [`Default`] and override the fields you care about
 /// (`..CoordinationConfig::default()`); new tuning knobs are added over
@@ -28,8 +28,8 @@ pub struct CoordinationConfig {
     #[serde(with = "humantime_serde")]
     pub op_timeout: Duration,
     /// Stable identity for fast reclaim after a restart (e.g. the pod
-    /// name — must be UNIQUE per live worker; two live processes sharing
-    /// an id is detected and Fatal). Default: a random id per run.
+    /// name). It must be UNIQUE per live worker; two live processes sharing
+    /// an id is detected and Fatal. Default: a random id per run.
     pub instance_id: Option<String>,
     /// Delivery attempts before a split is quarantined. Default 4.
     pub max_attempts: u32,
@@ -45,7 +45,7 @@ pub struct CoordinationConfig {
     #[serde(with = "humantime_serde")]
     pub reconcile_interval: Duration,
     /// Startup retry budget (store probe, join, seeding) before giving
-    /// up; steady-state operations are not budgeted — they retry on the
+    /// up; steady-state operations are not budgeted, and retry on the
     /// next tick and escalate through lease expiry. Default 8.
     pub startup_max_attempts: u32,
     /// How long the leader withholds a departed instance's splits before
@@ -54,9 +54,9 @@ pub struct CoordinationConfig {
     ///
     /// The window is cancelled early when the instance comes back, so a
     /// fast restart costs nothing at all. Setting it to zero reassigns
-    /// immediately — a supported configuration, not a disabled feature.
+    /// immediately, which is a supported configuration.
     ///
-    /// Deliberately short. A long window suits systems whose work units are
+    /// The default is short. A long window suits systems whose work units are
     /// expensive to start, whereas a split starts by reading a descriptor
     /// and spawning a fetcher. When starting is cheap, idle work costs more
     /// than movement does.
@@ -66,16 +66,15 @@ pub struct CoordinationConfig {
     /// forced. Default 10s.
     ///
     /// Revocation is cooperative first: the owner stops intake at a safe
-    /// boundary, chases its tail to a final fenced commit, and releases —
-    /// which replays nothing. A source that declines, or one whose drain
+    /// boundary, chases its tail to a final fenced commit, and releases,
+    /// replaying nothing. A source that declines, or one whose drain
     /// outruns this deadline, is revoked outright instead and its
-    /// uncommitted tail replays under the new owner. The deadline exists
-    /// because a leader's revocation is a decision rather than a request:
-    /// without it, one wedged drain would pin a rebalance open forever.
+    /// uncommitted tail replays under the new owner. Without the deadline,
+    /// one wedged drain pins a rebalance open forever.
     ///
     /// It may exceed `lease_duration`. A draining split is still owned and
-    /// still heartbeated, so a long drain does not race its own lease — it
-    /// just makes the rebalance slow. Size it against how long the source
+    /// still heartbeated, so a long drain does not race its own lease; it
+    /// makes the rebalance slow. Size it against how long the source
     /// needs to flush a split's tail through its sink, which for a paced
     /// sink can be minutes.
     #[serde(with = "humantime_serde")]
@@ -146,15 +145,13 @@ impl CoordinationConfig {
         if self.startup_max_attempts == 0 {
             return Err(fatal("startup_max_attempts must be >= 1"));
         }
-        // Zero is legal and means "reassign immediately" — see the field
-        // docs. There is deliberately no floor here: the only unsafe value
-        // would be one long enough to strand work indefinitely, and that is
-        // bounded by the operator's own patience, not by the protocol.
-        // Deliberately NO upper bound against `lease_duration`. A draining
-        // split is still owned and still renewed, so a drain does not race
-        // its own lease however long it takes — a slow drain is a slow
-        // rebalance, not a correctness problem. Sources with paced sinks
-        // legitimately want deadlines far above the lease.
+        // Zero is legal and means "reassign immediately"; see the field
+        // docs. There is no floor here, and no upper bound against
+        // `lease_duration`. A draining split is still owned and still
+        // renewed, so a drain does not race its own lease however long it
+        // takes; a slow drain is a slow rebalance, not a correctness
+        // problem. Sources with paced sinks want deadlines far above the
+        // lease.
         if self.drain_deadline < self.op_timeout {
             return Err(fatal(format!(
                 "drain_deadline ({:?}) must be >= op_timeout ({:?}): a deadline shorter \

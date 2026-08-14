@@ -5,11 +5,11 @@
 //! (several pipeline instances in one process sharing an
 //! `Arc<MemoryStore>`), and doubles as the reference implementation for
 //! custom backends. Ephemeral expiry runs via a lazily spawned sweeper
-//! task against an injected [`Clock`](crate::clock::Clock) — real wall time
-//! by default ([`new`](MemoryStore::new)), so realistic sub-second lease
-//! tests need no clock plumbing, or a frozen clock
-//! ([`with_clock`](MemoryStore::with_clock)) when expiry must be
-//! deterministic under scheduler jitter.
+//! task against an injected [`Clock`](crate::clock::Clock). The default is
+//! real wall time ([`new`](MemoryStore::new)), so realistic sub-second lease
+//! tests need no clock plumbing; a frozen clock
+//! ([`with_clock`](MemoryStore::with_clock)) makes expiry deterministic
+//! under scheduler jitter.
 
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
@@ -100,7 +100,7 @@ impl MemoryStore {
 
     /// Like [`new`](MemoryStore::new) but drives ephemeral expiry from an
     /// injected [`Clock`]. A frozen clock makes lease expiry deterministic
-    /// under CI scheduler jitter — see [`crate::clock`].
+    /// under CI scheduler jitter; see [`crate::clock`].
     #[doc(hidden)]
     #[must_use]
     pub fn with_clock(lease_ttl: Duration, clock: Arc<dyn Clock>) -> MemoryStore {
@@ -135,7 +135,7 @@ impl MemoryStore {
                 };
                 let now = inner.clock.now();
                 // Draw and broadcast under the lock, like every other
-                // write path — see `delete`.
+                // write path; see `delete`.
                 let mut entries = inner.ephemeral.lock();
                 entries.retain(|key, v| {
                     let live = v.deadline.is_none_or(|d| d > now);
@@ -154,7 +154,7 @@ impl MemoryStore {
 
     /// Drop an ephemeral entry that expired between sweeps: reads must
     /// never observe a logically dead key. Broadcasts the deletion (the
-    /// sweeper cannot — the entry is gone before its next pass). `now` is
+    /// sweeper cannot, since the entry is gone before its next pass). `now` is
     /// the caller's clock snapshot, so every op in a call shares one instant.
     fn expire_in_place(
         space: &Space,
@@ -234,7 +234,7 @@ impl CoordinationStore for MemoryStore {
             self.ensure_sweeper();
         }
         let space = self.inner.space(ks);
-        // Broadcast under the lock — see `create`.
+        // Broadcast under the lock; see `create`.
         let mut entries = space.lock();
         Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
         let Some(current) = entries.get_mut(key) else {
@@ -276,7 +276,7 @@ impl CoordinationStore for MemoryStore {
         // The deletion's own revision is drawn AND broadcast under the
         // lock: drawn outside it, a racing re-create could slot a lower
         // revision between removal and draw, and watchers would order the
-        // fresh key's put BELOW this delete — reading a live lease as
+        // fresh key's put BELOW this delete, reading a live lease as
         // expired.
         let mut entries = space.lock();
         Self::expire_in_place(space, &mut entries, key, self.inner.clock.now());
@@ -302,7 +302,7 @@ impl CoordinationStore for MemoryStore {
         let space = self.inner.space(ks);
         let prefix = prefix.to_string();
         // Subscribe under the snapshot lock so nothing lands between the
-        // snapshot and the live tail (duplicates are fine — consumers
+        // snapshot and the live tail (duplicates are fine, since consumers
         // dedupe by revision; gaps are not).
         let (snapshot, live) = {
             let entries = space.lock();

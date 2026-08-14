@@ -3,7 +3,7 @@
 //! # Rebalance choreography (spike-verified, deferred completion)
 //!
 //! librdkafka runs rebalance callbacks inside `poll()` on the thread that
-//! calls it — here, the runtime controller calling
+//! calls it, which here is the runtime controller calling
 //! [`Source::poll_events`]. For assignment and revocation events the
 //! callback ([`SourceContext::rebalance`]) only records an intent and
 //! returns without acknowledging, which leaves the rebalance legally in
@@ -16,7 +16,7 @@
 //! 2. `pause(tpl)` immediately — no fetch may complete before the split,
 //!    so no message can leak onto the main queue;
 //! 3. `split_partition_queue` per partition (must be redone after *every*
-//!    assign — assign deactivates existing queues) and build lanes;
+//!    assign, since assign deactivates existing queues) and build lanes;
 //! 4. `resume(tpl)` — messages start flowing into the split queues, which
 //!    buffer until pipeline threads take the lanes over;
 //! 5. return [`SourceEvent::LanesAssigned`].
@@ -25,17 +25,17 @@
 //! 1. surface [`SourceEvent::LanesRevoked`] with a [`DrainBarrier`] sized
 //!    by lane count (the runtime's drivers arrive once per stopped lane);
 //! 2. the runtime stops the lanes, waits for the barrier, drains the
-//!    checkpointer, calls [`Source::commit`] + [`Source::flush_commits`] —
-//!    the sync commit happens while this member still owns the partitions
+//!    checkpointer, calls [`Source::commit`] + [`Source::flush_commits`].
+//!    The sync commit happens while this member still owns the partitions
 //!    (the rebalance is not yet acknowledged, so the group generation is
 //!    still valid);
 //! 3. the controller loops back into `poll_events`, which sees the pending
 //!    completion and calls `unassign()`, letting the rebalance finish.
 //!
 //! **Rebalance error** (the arbitrary-error event; spans two calls): the
-//! callback completes it inline with `unassign` — the event has no
-//! deferred form, and an unacknowledged one wedges the member for the
-//! process lifetime — so ownership is gone before `poll_events` consumes
+//! callback completes it inline with `unassign`, because the event has no
+//! deferred form and an unacknowledged one wedges the member for the
+//! process lifetime, so ownership is gone before `poll_events` consumes
 //! the intent. `poll_events` then surfaces [`SourceEvent::LanesRevoked`]
 //! for every live lane; the runtime drains them, but unlike a revocation
 //! the final commit is refused (`commit` consults ownership, which is
@@ -46,7 +46,7 @@
 //! Revoked lanes' queues go silent immediately (fetching stops); dropping
 //! a `PartitionQueue` before `unassign` would restore forwarding to the
 //! main queue, which is why any message that ever appears on the main
-//! queue is defensively rewound with `seek` rather than dropped — its
+//! queue is defensively rewound with `seek` rather than dropped; its
 //! offset would otherwise be committed past without processing.
 
 use crate::config::KafkaSourceConfig;
@@ -75,7 +75,7 @@ pub struct KafkaSource {
     consumer: Option<Arc<BaseConsumer<SourceContext>>>,
     issuer: Option<AckIssuer>,
     /// The framework's source-stage handles, shared by the runtime at `open`.
-    /// Only consumer lag is published through them — the runtime records
+    /// Only consumer lag is published through them; the runtime records
     /// everything else. `None` when the source is driven outside a pipeline.
     metrics: Option<Arc<SourceMetrics>>,
     /// Connector-owned `spate_kafka_source_*` families, resolved from the
@@ -87,7 +87,7 @@ pub struct KafkaSource {
     /// Lanes surfaced as revoked but not yet released by `unassign`. The
     /// member still owns these partitions (the rebalance is not acknowledged
     /// until `unassign`), so the post-drain final commit must still store
-    /// their offsets — `commit` consults this alongside `assignment`. Cleared
+    /// their offsets; `commit` consults this alongside `assignment`. Cleared
     /// when `unassign` completes the revocation.
     revoking: HashMap<LaneId, i32>,
     next_lane: u32,
@@ -178,14 +178,14 @@ impl KafkaSource {
     /// Zero and drop the lag series for partitions this member lost in the
     /// rebalance that just completed.
     ///
-    /// Called on `Intent::Assign` — once the new assignment is known — and
+    /// Called on `Intent::Assign`, once the new assignment is known, and
     /// on `Intent::Error`, where ownership is already released and no
     /// assignment is coming until the member rejoins. Never on
     /// `Intent::Revoke`: under eager rebalancing a revoke covers *every*
     /// partition, including the ones about to be handed straight back, so
     /// pruning there would zero the whole family on every rebalance and
     /// read as a phantom drain. It would also blank the partitions the
-    /// runtime is still draining and committing — the error path has no
+    /// runtime is still draining and committing. The error path has no
     /// such partitions, which is why pruning before its drain is sound.
     fn prune_lag_series(&self) {
         if let Some(m) = &self.metrics {
@@ -287,10 +287,10 @@ impl KafkaSource {
 /// consumer-lag series.
 ///
 /// Free function rather than a method so it is reachable from a unit test:
-/// `publish_stats` needs a live consumer, which is why this translation went
-/// untested long enough to render a permanent zero.
+/// `publish_stats` needs a live consumer, and this translation rendered a
+/// permanent zero for as long as it went untested.
 ///
-/// librdkafka reports `consumer_lag = -1` while the lag is unknown — before
+/// librdkafka reports `consumer_lag = -1` while the lag is unknown: before
 /// the first commit, and for any partition whose leader has not answered yet
 /// (`consumer_lag` is `(hi_offset or ls_offset) - committed_offset`; see the
 /// librdkafka `STATISTICS.md`). Those partitions are skipped rather than
@@ -306,7 +306,7 @@ impl KafkaSource {
 /// a `sum` across the family would exceed *this member's* backlog. The filter
 /// is one half of that; the other is
 /// [`SourceMetrics::retain_partitions`](spate_core::metrics::SourceMetrics::retain_partitions),
-/// which zeroes what the member lost — the exporter cannot delete a series,
+/// which zeroes what the member lost. The exporter cannot delete a series,
 /// so a partition left alone renders its last value forever.
 // ANCHOR: lag
 fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: &SourceMetrics) {
@@ -349,7 +349,7 @@ impl Source for KafkaSource {
             });
         }
         // Enforce the passthrough guard (and the whole denylist) before any
-        // client is created — the sink's choke point is `build()`; `open()` is
+        // client is created. The sink's choke point is `build()`; `open()` is
         // the source's, catching programmatic construction via
         // `KafkaSource::new` that bypasses `from_component_config`'s validation.
         self.config.validate().map_err(|e| SourceError::Client {
@@ -357,21 +357,21 @@ impl Source for KafkaSource {
             reason: e.to_string(),
         })?;
         // Resolve the connector-owned metric handles once, before the poll
-        // loop — but only when statistics are enabled. With
+        // loop, and only when statistics are enabled. With
         // `statistics_interval: 0s` librdkafka never emits a snapshot, so
         // registering the families would leave them frozen at their unset
         // default forever (e.g. `group_healthy 0`, a documented alert
-        // signal) — disabling statistics must disable the families with
-        // them. `absolute()`-mapped counters are scoped to this consumer's
-        // lifetime — sound because open() creates the consumer exactly once
-        // (see the `metrics` module docs).
+        // signal), so disabling statistics disables the families with them.
+        // `absolute()`-mapped counters are scoped to this consumer's
+        // lifetime, which is sound because open() creates the consumer
+        // exactly once (see the `metrics` module docs).
         self.metrics = ctx.stage_metrics.clone();
         self.stats_metrics = if self.config.statistics_interval.is_zero() {
             // Consumer lag is derived from the statistics snapshot and has no
             // other source, so disabling statistics removes a golden signal
-            // outright. That is the honest outcome — the series is absent
-            // rather than frozen at a `0` that reads as "caught up" — but it
-            // must not be silent.
+            // outright. The series is then absent rather than frozen at a
+            // `0` that reads as "caught up", but the absence must not be
+            // silent.
             tracing::warn!(
                 topic = %self.config.topic,
                 "statistics disabled (statistics_interval: 0s): consumer lag \
@@ -399,7 +399,7 @@ impl Source for KafkaSource {
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<KafkaLane>, SourceError> {
         // Startup deadline first: with unreachable brokers every poll below
-        // surfaces a Retryable transport error and returns early — checked
+        // surfaces a Retryable transport error and returns early. Checked
         // last, this deadline would never fire and a misconfigured pipeline
         // would retry forever instead of failing fast.
         if !self.saw_first_assignment
@@ -440,7 +440,7 @@ impl Source for KafkaSource {
 
         // Serve callbacks; with all partitions split and choreographed
         // correctly no message should ever surface here. If one does,
-        // rewind so it is refetched through its split queue — dropping it
+        // rewind so it is refetched through its split queue; dropping it
         // would let the watermark commit past an unprocessed record.
         if let Some(result) = consumer.poll(timeout) {
             match result {
@@ -481,13 +481,13 @@ impl Source for KafkaSource {
         // Rebalance intents recorded by the callback during the poll above
         // (or a previous one). One intent per call: each needs its runtime
         // choreography to complete before the next may be acted on. A
-        // pileup means rebalances arrived faster than they completed — the
-        // precondition under which a stale intent *could* be acted on after
-        // the group moved past it, though some shapes are benign (an error
-        // with the fresh rejoin assignment already queued behind it). It is
-        // surfaced loudly either way: every pileup accompanies a rebalance
-        // episode worth an operator's attention, and the queued kinds are
-        // what makes a field report of the stale case attributable.
+        // pileup means rebalances arrived faster than they completed, which
+        // is the precondition under which a stale intent *could* be acted on
+        // after the group moved past it, though some shapes are benign (an
+        // error with the fresh rejoin assignment already queued behind it).
+        // It is surfaced loudly either way: every pileup accompanies a
+        // rebalance episode worth an operator's attention, and the queued
+        // kinds make a field report of the stale case attributable.
         let (intent, queued) = {
             let ctx = self.consumer()?.context().clone();
             let mut intents = ctx.intents.lock().expect("intent lock");
@@ -547,7 +547,7 @@ impl Source for KafkaSource {
                     // The lag series are deliberately NOT pruned here. These
                     // partitions are still being drained and committed, and
                     // an eager rebalance revokes everything before handing
-                    // most of it back — zeroing now would blank the whole
+                    // most of it back, so zeroing now would blank the whole
                     // family for a rebalance that changed nothing. The prune
                     // happens once the new assignment is known, in
                     // `Intent::Assign`.
@@ -568,7 +568,7 @@ impl Source for KafkaSource {
                     // is dead and must be drained by the runtime before the
                     // error is reported. Unlike an ordinary revocation,
                     // ownership is already gone, so `commit` refuses the
-                    // drained watermarks and that work replays — delivery
+                    // drained watermarks and that work replays; delivery
                     // stays at-least-once.
                     let lanes: Vec<LaneId> = self.assignment.keys().copied().collect();
                     self.assignment.clear();
@@ -595,8 +595,8 @@ impl Source for KafkaSource {
         // Partitions this member still owns: the live assignment plus any
         // being revoked but not yet released by `unassign`. The revocation
         // choreography drains and commits those partitions while ownership is
-        // still valid — filtering them out here would silently drop exactly
-        // the offsets the drain produced, replaying that work after the move.
+        // still valid. Filtering them out here would silently drop the
+        // offsets the drain produced, replaying that work after the move.
         let owned = self.committable_partitions();
         let mut tpl = TopicPartitionList::new();
         for (p, offset) in watermarks {
@@ -614,9 +614,9 @@ impl Source for KafkaSource {
         }
         if tpl.count() == 0 {
             // Every offered watermark was refused: nothing this call was
-            // asked to persist will be. Normal in exactly one situation — a
-            // drain after ownership was already released (a rebalance-error
-            // revocation) — where the drained work replays. The commit
+            // asked to persist will be. Normal in one situation: a drain
+            // after ownership was already released (a rebalance-error
+            // revocation), where the drained work replays. The commit
             // itself succeeds (there is nothing storable), so without this
             // line the refusal is invisible outside per-partition DEBUG.
             tracing::warn!(
@@ -677,9 +677,9 @@ impl Source for KafkaSource {
 }
 
 /// Teardown: consumer close (inside `BaseConsumer::drop`) triggers a final
-/// revoke and then polls until the rebalance protocol completes — with the
-/// deferred-intent design, nothing would ever complete it and the drop
-/// would hang forever. Flip the context to inline-completion mode and
+/// revoke and then polls until the rebalance protocol completes. Under the
+/// deferred-intent design nothing would complete it and the drop would hang
+/// forever. Flip the context to inline-completion mode and
 /// settle any revocation that was surfaced but not yet acknowledged.
 impl Drop for KafkaSource {
     fn drop(&mut self) {
@@ -719,8 +719,8 @@ mod tests {
     }
 
     /// `open()` runs the TLS/SASL guard before creating the consumer, so a
-    /// source built programmatically via `new()` — bypassing
-    /// `from_component_config`'s config-load validation — still fails fast with
+    /// source built programmatically via `new()`, bypassing
+    /// `from_component_config`'s config-load validation, still fails fast with
     /// the actionable message instead of a late librdkafka error. Without the
     /// `tls` feature the guard rejects a security passthrough before any client
     /// (or broker contact); with it the guard is a no-op and the lazily
@@ -760,8 +760,9 @@ mod tests {
     }
 
     /// After a revocation the offsets of the partitions being revoked must
-    /// still be committable — they are drained and committed while the member
-    /// still owns them — while truly unowned partitions stay filtered out.
+    /// still be committable, since they are drained and committed while the
+    /// member still owns them, while truly unowned partitions stay filtered
+    /// out.
     #[test]
     fn committable_partitions_include_revoking_until_released() {
         let mut source = KafkaSource::new(test_config());
@@ -836,7 +837,7 @@ mod tests {
         }
 
         /// A rebalance error with live lanes surfaces their revocation
-        /// first — the runtime must drain them — and reports the classified
+        /// first, so the runtime drains them, and reports the classified
         /// error on the next call. Ownership bookkeeping is cleared: the
         /// callback already released the partitions, so nothing may remain
         /// committable.
@@ -918,10 +919,10 @@ mod tests {
         /// The component name is unique per call because `SourceMetrics` owns
         /// its gauge series: one live handle set per `(pipeline, component,
         /// component_type)` publishes, later ones shadow. That check is
-        /// process-wide and deliberately blind to the local recorder here, so
-        /// under `cargo test` — one process, tests in parallel — a fixed
-        /// component would leave every test but the first asserting on an
-        /// empty exposition. Hence the label string comes back with the
+        /// process-wide and blind to the local recorder here, so under
+        /// `cargo test` (one process, tests in parallel) a fixed component
+        /// would leave every test but the first asserting on an empty
+        /// exposition. Hence the label string comes back with the
         /// rendering rather than being a constant.
         fn render(f: impl FnOnce(&SourceMetrics)) -> (String, String) {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1017,8 +1018,9 @@ mod tests {
             );
         }
 
-        /// `consumer_lag = -1` means "not measured yet" — before the first
-        /// commit, or before the partition leader has answered. Publishing it
+        /// `consumer_lag = -1` means "not measured yet", covering the period
+        /// before the first commit and before the partition leader has
+        /// answered. Publishing it
         /// as `0` would read as "caught up" on exactly the consumer that is
         /// most behind.
         #[test]
@@ -1061,7 +1063,7 @@ mod tests {
 
         /// Once measured, a partition holds its last value through snapshots
         /// where librdkafka temporarily reports the lag as unknown (a leader
-        /// change, say) — dropping to `0` would look like a drain that never
+        /// change, say). Dropping to `0` would look like a drain that never
         /// happened.
         #[test]
         fn a_known_partition_holds_its_value_when_lag_goes_unknown() {
@@ -1095,7 +1097,7 @@ mod tests {
         /// partitions double-counts it.
         ///
         /// The exporter has no deletion and no idle timeout is configured, so
-        /// "contribute nothing" cannot mean "disappear" — the series renders
+        /// "contribute nothing" cannot mean "disappear"; the series renders
         /// for the life of the process whatever we do with the handle. It
         /// means `0`, which is the truth for a partition this member no
         /// longer owns. Both halves are asserted: the value is zeroed at the

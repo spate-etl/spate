@@ -10,8 +10,8 @@
 //! # Shape
 //!
 //! - **Work is planned as splits.** The fleet's elected leader lists the
-//!   prefix once and packs the sorted listing into **splits** — small
-//!   batches of whole objects, ~64 MiB by default — each with a
+//!   prefix once and packs the sorted listing into **splits**, small
+//!   batches of whole objects at ~64 MiB by default, each with a
 //!   deterministic identity ([`split_id_for`]) and a self-contained
 //!   [`SplitDescriptor`] carrying its member keys, sizes, and ETags.
 //!   Workers lease splits through the coordination store and read them
@@ -21,7 +21,7 @@
 //!   record's `i64` offset packs (member ordinal within the split, record
 //!   index within the object). `coordination.max_in_flight` bounds the
 //!   working set and therefore read parallelism.
-//! - **Progress lives in the coordination store — nowhere else.** Commits
+//! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
 //!   next owner from the acked watermark, drift-checked against the
 //!   descriptor's ETag pins. The coordinator is **assembly wiring**: hand
@@ -30,7 +30,7 @@
 //!   of the pipeline shares the backfill, takes a leader-assigned share, and
 //!   takes over from the dead. Without one the source runs solo over an
 //!   in-process store: correct, but a restart replays the prefix (a
-//!   startup WARN says so). This crate names no concrete backend — which
+//!   startup WARN says so). This crate names no concrete backend; which
 //!   store a deployment uses is the deployer's choice, not a connector
 //!   compile-time feature.
 //! - **Bad objects poison their split, not the pipeline.** An object
@@ -44,10 +44,10 @@
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*
 //!   for the objects' format via
-//!   [`S3Source::with_framer`](crate::S3Source::with_framer) — e.g. `spate-json`'s
-//!   `NdjsonFramer` for NDJSON — emitting one raw payload per framed record.
-//!   Deserialization then stays in the operator chain (`spate-json` etc.),
-//!   exactly as with the Kafka source.
+//!   [`S3Source::with_framer`](crate::S3Source::with_framer) (e.g.
+//!   `spate-json`'s `NdjsonFramer` for NDJSON), emitting one raw payload per
+//!   framed record. Deserialization then stays in the operator chain
+//!   (`spate-json` etc.), as with the Kafka source.
 //!
 //! # Split identity and drift
 //!
@@ -55,8 +55,8 @@
 //! packing-algorithm version), and every GET is pinned `If-Match` to the
 //! descriptor's ETag. The consequences:
 //!
-//! - Replanning an unchanged prefix reproduces identical ids — replans
-//!   are create-if-absent no-ops, and completed splits stay completed.
+//! - Replanning an unchanged prefix reproduces identical ids, so replans
+//!   are create-if-absent no-ops and completed splits stay completed.
 //! - An **overwritten** object shows up as a new split (new id) on the
 //!   next plan; under an in-flight split it trips the `If-Match` pin and
 //!   poisons the split. Either way it can never silently splice into
@@ -65,7 +65,7 @@
 //!
 //! Prefer an append-only prefix for the lifetime of a backfill; by
 //! default the listing is taken once (`refresh_listing: false`), so
-//! late-arriving keys are simply not part of the job.
+//! late-arriving keys are not part of the job.
 //!
 //! No `object_store` types appear in this crate's public API (the same
 //! dependency policy that keeps rdkafka out of `spate-kafka`'s). The one
@@ -74,9 +74,9 @@
 //! fault-injecting stores without that type reaching a real consumer. The
 //! same feature carries `bench_seams`, which reaches the pure, synchronous
 //! parts an instruction-count bench cannot get to through an async surface.
-//! It is deliberately unlinked: the module is `#[doc(hidden)]`, so the link
-//! would dangle on docs.rs (where the feature is off) and render as literal
-//! text in the published API reference (where it is on).
+//! That module is `#[doc(hidden)]`, so a link to it dangles on docs.rs
+//! (where the feature is off) and renders as literal text in the published
+//! API reference (where it is on).
 
 #[cfg(feature = "testing")]
 #[doc(hidden)]

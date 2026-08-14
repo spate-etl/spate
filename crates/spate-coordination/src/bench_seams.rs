@@ -1,23 +1,20 @@
 //! Measurable entry points into work this crate does not otherwise expose.
 //!
-//! Benches in this workspace drive their crate's public API, and a new crate
-//! is expected to. `spate-s3` is the one standing exception; this module is
-//! the second, for the same reason rather than a weaker one.
+//! Benches in this workspace drive their crate's public API. `spate-s3` is
+//! one standing exception; this module is the second.
 //!
 //! This crate's public entry point is
 //! [`StoreCoordinator`](crate::StoreCoordinator), which is asynchronous and
-//! driven by a store trait whose every method returns a future. Those are
-//! exactly the two properties that stop an instruction count being
-//! deterministic: under a runtime the number becomes a function of how the
-//! scheduler interleaved polls and how the store's futures happened to be
-//! ready, which is not a property of the code under review. The balance
-//! decision and the claim scan are pure functions of an observed store state
-//! — no I/O, no channels, no clocks — and they are the two whose cost scales
-//! with the size of a job, so they are countable; but reaching them means
-//! reaching past the async surface. So the seam exists because the public API
-//! is unmeasurable *by that instrument*, not because finer detail is wanted.
+//! driven by a store trait whose every method returns a future. Both
+//! properties stop an instruction count being deterministic: under a runtime
+//! the number becomes a function of how the scheduler interleaved polls and
+//! how the store's futures happened to be ready. The balance decision and
+//! the claim scan are pure functions of an observed store state, with no
+//! I/O, no channels and no clocks, and they are the two whose cost scales
+//! with the size of a job, so they are countable; reaching them means
+//! reaching past the async surface.
 //!
-//! Consequences of that reasoning, carried over from `spate-s3`'s seam:
+//! The seam holds to the same rules as `spate-s3`'s:
 //!
 //! - It is behind the off-by-default `testing` feature and `#[doc(hidden)]`,
 //!   so it is not part of this crate's semver surface and no consumer of the
@@ -28,10 +25,10 @@
 //!   [`Opaque`] is an alias over `std` types, which a caller must be able to
 //!   name to hold a snapshot across the boundary of a collected region at
 //!   all, and it fixes nothing: the value inside it is this crate's business.
-//! - Each function is one whole unit of the work a stage does — one leader's
-//!   balance decision, one worker's claim scan — not one internal call.
-//!   Attribution below that level comes from the callgrind profile the bench
-//!   already writes, not from a finer seam.
+//! - Each function is one whole unit of the work a stage does (one leader's
+//!   balance decision, one worker's claim scan) rather than one internal
+//!   call. Attribution below that level comes from the callgrind profile
+//!   the bench already writes.
 //!
 //! [`snapshot`] is separate from the two functions that consume it because
 //! building the observed state is **not** part of either unit. A worker's
@@ -50,17 +47,17 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A value this crate hands back for the caller to hold but not inspect.
 ///
 /// The observed store state is a map of a private type, and a bench has to
-/// build one in its fixture — outside the collected region — and pass it in.
-/// Boxing it as `dyn Any` is what lets it cross that boundary without the
-/// seam publishing the type: a caller can move it, borrow it and drop it,
-/// and can do nothing else with it.
+/// build one in its fixture, outside the collected region, and pass it in.
+/// Boxing it as `dyn Any` lets it cross that boundary without the seam
+/// publishing the type: a caller can move it, borrow it and drop it, and
+/// nothing else.
 pub type Opaque = Box<dyn Any + Send>;
 
 /// One split as a store snapshot presents it, in field order:
 ///
 /// 1. the split id;
 /// 2. the planner's weight, or `None` when the immutable spec record has not
-///    been observed yet — the two states differ for both consumers, and a
+///    been observed yet; the two states differ for both consumers, and a
 ///    weight is the only thing either reads out of that record;
 /// 3. the durable record's status, spelled as the record's own JSON spells
 ///    it: `"runnable"`, `"completed"` or `"quarantined"`;
@@ -85,7 +82,8 @@ pub type ObservedSplit = (
 
 /// How a claim scan classified the pool: the four claim kinds in the
 /// protocol's own priority order, then the splits the attempts gate parked
-/// instead of claiming — `[create, released, reclaim, expired, quarantined]`.
+/// instead of claiming, as
+/// `[create, released, reclaim, expired, quarantined]`.
 ///
 /// A census rather than the candidate list, because the list is one of this
 /// crate's private types. The slots partition the candidates, so the sum is
@@ -96,7 +94,7 @@ pub type ClaimCensus = [usize; 5];
 /// split, carrying its durable progress record, its spec record if observed,
 /// and its live lease if one exists.
 ///
-/// This is fixture work, not measured work — see the module docs. Every
+/// This is fixture work, not measured work; see the module docs. Every
 /// advisory field is fixed rather than sampled (`fp` zero, no watermark, no
 /// resume state, a zero write stamp), so the same input always produces the
 /// same state: neither consumer reads any of them, and a wall clock in a
@@ -163,18 +161,15 @@ pub fn snapshot(observed: Vec<ObservedSplit>) -> Opaque {
 /// hold, given the observed state.
 ///
 /// The whole of what a leader decides in one tick, and the only place the
-/// decision is made. All three passes — sticky, fill, improve — run as one
+/// decision is made. All three passes (sticky, fill, improve) run as one
 /// unit because that is how the leader runs them and because they share
 /// state: the fill pass places what the sticky pass left over, and the
-/// improve pass runs to fixpoint over the result of both. Measuring a pass
-/// alone would answer a question the leader never asks, and the improve pass
-/// is the term most likely to dominate, so a seam that skipped it would be
-/// the wrong number rather than a partial one.
+/// improve pass runs to fixpoint over the result of both.
 ///
 /// `caps` gives each member the lane budget it advertised, `default_cap`
-/// covers a member that advertised none, and `seed` keys the tie-breaks —
-/// the job fingerprint hash in production, so that a leader failover does not
-/// re-break every tie.
+/// covers a member that advertised none, and `seed` keys the tie-breaks,
+/// taking the job fingerprint hash in production so that a leader failover
+/// does not re-break every tie.
 ///
 /// # Panics
 ///
@@ -197,9 +192,9 @@ pub fn plan_assignment(
 ///
 /// The whole of what a worker's reconcile does before it starts writing:
 /// eligibility per split, the attempts gate, and the sort that makes the
-/// resulting order deterministic. The sort is inside because it is not
-/// separable — the scan exists to produce an ordered list, and a candidate
-/// list nobody ordered is not a thing the worker ever holds.
+/// resulting order deterministic. The sort is inside the unit: the scan
+/// produces an ordered list, and the worker never holds an unordered
+/// candidate list.
 ///
 /// `owned` is what this worker already holds, which production keys off a map
 /// bounded by the lane budget rather than off the split pool.

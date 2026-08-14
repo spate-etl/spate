@@ -1,6 +1,6 @@
 //! Split descriptors, deterministic split identity, and listing-order
-//! packing — the shared vocabulary between the leader's planner and every
-//! split reader.
+//! packing. These are the shared vocabulary between the leader's planner and
+//! every split reader.
 //!
 //! A **split** is a small batch of whole objects read as one leasable unit
 //! of work. The planner packs the sorted listing into splits; the
@@ -10,8 +10,8 @@
 //! # Identity
 //!
 //! [`split_id_for`] digests the member set (keys **and** ETags) plus the
-//! packing-algorithm version into a stable [`SplitId`]. The consequences
-//! are load-bearing:
+//! packing-algorithm version into a stable [`SplitId`], with these
+//! consequences:
 //!
 //! - Replanning unchanged work reproduces the same ids, so re-submitting a
 //!   plan is a store-side create-if-absent no-op.
@@ -31,8 +31,8 @@
 //! into one of a bounded window of open bins. It never reorders by size, so
 //! the output is a pure function of the listing order and objects sharing a
 //! key prefix stay in the same split. Each object costs at least
-//! `target / 16` — the open-cost floor that stops thousands of tiny objects
-//! coalescing into one split — so a split holds at most ~16 members and its
+//! `target / 16`, an open-cost floor that stops thousands of tiny objects
+//! coalescing into one split, so a split holds at most ~16 members and its
 //! descriptor stays far below backend value-size caps. An object at or above
 //! the target lands alone in its own split.
 
@@ -56,8 +56,8 @@ pub(crate) const PACKING_VERSION: u32 = 1;
 
 /// Maximum number of bins held open during packing. Bounds the open-bin
 /// window and how far out of listing order a member can land. The listing
-/// itself is resident for the whole plan, so it — not this — is what
-/// planner memory scales with.
+/// itself is resident for the whole plan, so planner memory scales with the
+/// listing rather than with this.
 pub(crate) const PACKING_LOOKBACK: usize = 10;
 
 /// Denominator of the per-object open-cost floor: each member costs at
@@ -78,7 +78,7 @@ pub struct DescriptorObject {
     /// GET to it (`If-Match`), so a concurrent overwrite surfaces as a
     /// precondition failure instead of a silent content splice.
     pub etag: Option<String>,
-    /// Last-modified time (ms since epoch) — the records' event time.
+    /// Last-modified time (ms since epoch), used as the records' event time.
     pub last_modified_ms: i64,
 }
 
@@ -87,9 +87,9 @@ pub struct DescriptorObject {
 /// split's member objects, in listing order.
 ///
 /// The encoding is versioned JSON ([`DESCRIPTOR_VERSION`]); member order is
-/// meaningful (composite offsets index into it). Out-of-process producers —
-/// an event-notification planner, a single-shot invocation minting one
-/// split from an S3 event — construct via [`SplitDescriptor::new`] (which
+/// meaningful (composite offsets index into it). Out-of-process producers
+/// (an event-notification planner, a single-shot invocation minting one
+/// split from an S3 event) construct via [`SplitDescriptor::new`] (which
 /// stamps the version; [`encode`](SplitDescriptor::encode) refuses anything
 /// else) and mint ids with [`split_id_for`], which together are the whole
 /// cross-process contract. Fields are freely readable.
@@ -111,8 +111,8 @@ struct VersionProbe {
 }
 
 impl SplitDescriptor {
-    /// Build a descriptor over `objects` (listing order — ordinals index
-    /// into it), stamped with the current [`DESCRIPTOR_VERSION`]. The only
+    /// Build a descriptor over `objects` (listing order, since ordinals
+    /// index into it), stamped with the current [`DESCRIPTOR_VERSION`]. The only
     /// way to construct one; [`encode`](SplitDescriptor::encode) refuses
     /// any other version.
     #[must_use]
@@ -164,7 +164,7 @@ impl SplitDescriptor {
     /// # Errors
     ///
     /// [`Fatal`](CoordinationErrorKind::Fatal) when the descriptor's
-    /// version is not [`DESCRIPTOR_VERSION`] — a descriptor written under a
+    /// version is not [`DESCRIPTOR_VERSION`]. A descriptor written under a
     /// wrong version fails pipeline-fatal on every worker that leases it.
     pub fn encode(&self) -> Result<Vec<u8>, CoordinationError> {
         if self.v != DESCRIPTOR_VERSION {
@@ -185,7 +185,7 @@ impl SplitDescriptor {
     /// # Errors
     ///
     /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse
-    /// or were written under a different [`DESCRIPTOR_VERSION`] — a worker
+    /// or were written under a different [`DESCRIPTOR_VERSION`]. A worker
     /// must never guess at an incompatible descriptor.
     pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, CoordinationError> {
         let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
@@ -207,20 +207,20 @@ impl SplitDescriptor {
 ///
 /// `members` are `(key, etag)` pairs; order does not matter (they are
 /// sorted by key before digesting). The id digests keys, ETags, and the
-/// packing version — see the module docs for why each is included. The
+/// packing version; see the module docs for why each is included. The
 /// result is always a valid [`SplitId`]: 25 bytes of `[A-Za-z0-9_-]`
 /// regardless of what the keys contain.
 ///
 /// Public so out-of-process producers mint byte-identical ids for the same
-/// members. The digest preimage is wire format — precise enough to
+/// members. The digest preimage is wire format, precise enough to
 /// reimplement in any language:
 ///
 /// 1. Sort the members ascending by key (byte-wise comparison of the
 ///    UTF-8 key bytes).
 /// 2. Feed SHA-256 with, in order:
 ///    - the domain tag: the 15 ASCII bytes `spate-s3-split\n`;
-///    - the packing version as a little-endian `u32` (currently `1` —
-///      the crate's `PACKING_VERSION`);
+///    - the packing version as a little-endian `u32` (currently `1`, the
+///      crate's `PACKING_VERSION`);
 ///    - for each member, in sorted order:
 ///      - the key's byte length as a little-endian `u32`, then the key's
 ///        UTF-8 bytes;
@@ -228,7 +228,7 @@ impl SplitDescriptor {
 ///        length as a little-endian `u32` and its UTF-8 bytes when
 ///        present, the single byte `0x00` when absent.
 /// 3. Truncate the 32-byte digest to its first 16 bytes, encode them as
-///    base64url without padding (RFC 4648 §5), and prefix `s3-` — a
+///    base64url without padding (RFC 4648 §5), and prefix `s3-`, giving a
 ///    25-character id over `[A-Za-z0-9_-]`.
 ///
 /// ```
@@ -245,7 +245,7 @@ impl SplitDescriptor {
 ///
 /// # Errors
 ///
-/// [`Fatal`](CoordinationErrorKind::Fatal) for an empty member set — a
+/// [`Fatal`](CoordinationErrorKind::Fatal) for an empty member set; a
 /// split with no members is meaningless.
 pub fn split_id_for<'a, I>(members: I) -> Result<SplitId, CoordinationError>
 where
@@ -254,8 +254,8 @@ where
     split_id_with_version(members, PACKING_VERSION)
 }
 
-/// [`split_id_for`] with an explicit packing version — the seam that lets
-/// tests pin version sensitivity.
+/// [`split_id_for`] with an explicit packing version. The seam lets tests
+/// pin version sensitivity.
 fn split_id_with_version<'a, I>(members: I, version: u32) -> Result<SplitId, CoordinationError>
 where
     I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
@@ -617,7 +617,7 @@ mod tests {
                 .collect();
             let bins = pack(listing, target);
             // floor = target/16 divides target exactly, so a bin never
-            // holds more than 16 members — the structural descriptor bound.
+            // holds more than 16 members, the structural descriptor bound.
             prop_assert!(bins.iter().all(|b| b.len() <= 16));
         }
 

@@ -1,6 +1,6 @@
 //! Test-only framer shared across the crate's unit tests.
 //!
-//! `spate-s3` ships no record framer of its own — production wires the format's
+//! `spate-s3` ships no record framer of its own; production wires the format's
 //! framer via [`S3Source::with_framer`](crate::S3Source::with_framer). The
 //! tests still need to turn newline-delimited object bytes into records, so
 //! they carry this local line framer, mirroring `spate-json`'s `NdjsonFramer`

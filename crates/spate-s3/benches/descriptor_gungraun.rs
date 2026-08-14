@@ -3,7 +3,7 @@
 //! The leader's half of the split descriptor is already counted: `plan`
 //! encodes one per split inside its measured region. This is the other half,
 //! and it is not the same number read backwards. A worker decodes a
-//! descriptor when it opens a split, and again when it validates a resume —
+//! descriptor when it opens a split, and again when it validates a resume,
 //! which the driver only does for a split gained with carried progress, so a
 //! resumed split pays it twice and a fresh one once. The parse allocates a
 //! `String` for every key and every ETag where the serializer only borrowed
@@ -12,9 +12,9 @@
 //! version before parsing the document, so an incompatible descriptor is
 //! reported as a version mismatch rather than as a parse error.
 //!
-//! One shape — decode a plan's worth of descriptors, the worker-side mirror
-//! of planning a listing's worth of splits — parameterized by how the same
-//! member count is arranged, because what a change to this path moves is the
+//! One shape, decoding a plan's worth of descriptors as the worker-side
+//! mirror of planning a listing's worth of splits, parameterized by how the
+//! same member count is arranged. What a change to this path moves is the
 //! split between per-document and per-member work:
 //!
 //! - `full_splits` — 400 descriptors of 16 members, which is what the
@@ -57,22 +57,21 @@ mod descriptors;
 //
 /// The measured work: a plan's worth of descriptors parsed in one pass.
 ///
-/// It lives outside the benchmark function and is `#[inline(never)]`, and
-/// both halves of that are load-bearing rather than stylistic. Collection is
-/// bounded by a callgrind toggle on the module the benchmark macro wraps the
-/// function in, and a toggle *flips* collection rather than forcing it on —
-/// so work the optimizer leaves in an unstable shape inside that module can
-/// end up outside the collected region entirely. Two earlier revisions of
-/// this bench proved it: one built the vector with `.iter().map().collect()`
-/// and counted 3,249 Ir, the other used a plain `for` in the benchmark
-/// function and counted 858,925 Ir whose callgrind profile was **100% glibc
-/// `malloc_consolidate` and `unlink_chunk`** — no `serde_json` frame at all,
-/// and the same total whether the corpus held 400 documents or 6,400.
+/// It lives outside the benchmark function and is `#[inline(never)]`.
+/// Collection is bounded by a callgrind toggle on the module the benchmark
+/// macro wraps the function in, and a toggle *flips* collection rather than
+/// forcing it on, so work the optimizer leaves in an unstable shape inside
+/// that module can end up outside the collected region entirely. Two earlier
+/// revisions of this bench showed it: one built the vector with
+/// `.iter().map().collect()` and counted 3,249 Ir, the other used a plain
+/// `for` in the benchmark function and counted 858,925 Ir whose callgrind
+/// profile was **100% glibc `malloc_consolidate` and `unlink_chunk`**, with
+/// no `serde_json` frame at all and the same total whether the corpus held
+/// 400 documents or 6,400.
 ///
-/// A named, never-inlined callee is a frame the toggle cannot lose, which is
-/// what the two working benches in this crate get by calling into
-/// `bench_seams`. This one reaches its work through public API instead, so
-/// the callee lives here.
+/// A named, never-inlined callee is a frame the toggle cannot lose, which the
+/// two working benches in this crate get by calling into `bench_seams`. This
+/// one reaches its work through public API instead, so the callee lives here.
 #[inline(never)]
 fn decode_plan(encoded: &[Vec<u8>]) -> Vec<SplitDescriptor> {
     let mut decoded = Vec::with_capacity(encoded.len());
@@ -110,7 +109,7 @@ fn decode(encoded: Vec<Vec<u8>>) -> (Vec<Vec<u8>>, Vec<SplitDescriptor>) {
 library_benchmark_group!(name = descriptor; benchmarks = decode);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
-// callgrind invocation — and so every `Ir` baseline — is bit-identical with
+// callgrind invocation, and so every `Ir` baseline, is bit-identical with
 // and without it. `--num-callers=500` (the maximum) keeps allocation stacks
 // deep enough to attribute to the parse under measurement rather than to
 // whichever frame valgrind's default depth would otherwise cut at.

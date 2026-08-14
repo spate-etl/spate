@@ -98,7 +98,7 @@ pub(crate) fn launch_scripted(
 
 /// Coordination tuning every suite shares: floors-compliant and fast.
 /// The store a test builds (via [`shared_store`]) must use
-/// [`TEST_LEASE`] — the coordinator fails fast on a store/config lease
+/// [`TEST_LEASE`]; the coordinator fails fast on a store/config lease
 /// divergence.
 pub(crate) const TEST_LEASE: Duration = Duration::from_secs(1);
 
@@ -117,17 +117,16 @@ pub(crate) fn test_tuning() -> CoordinationConfig {
         reconcile_interval: Duration::from_millis(300),
         // Zero: these suites assert that a dead instance's splits flow back
         // promptly, and a grace window is pure latency on every one of them.
-        // No spate-s3 test asserts the withhold behavior — the two arms that
+        // No spate-s3 test asserts the withhold behavior; the two arms that
         // do are `spate-coordination`'s, and they set the window themselves.
         rebalance_delay: Duration::ZERO,
         // NOT scaled with the lease. This one bounds how long a *data
         // plane* takes to drain, not how long a protocol step takes, and
         // these sinks are paced at ~100ms/write. Cut to a fraction of a
         // test lease it silently forces drains that would have completed
-        // cooperatively — same green suite, different code path, and
+        // cooperatively: same green suite, different code path, and
         // replayed tails instead of clean hand-offs. It only costs wall
-        // clock when a drain actually wedges, which is the case it exists
-        // to bound, so there is no speed to win here.
+        // clock when a drain wedges, which is the case it bounds.
         drain_deadline: Duration::from_secs(5),
         ..CoordinationConfig::default()
     }
@@ -140,9 +139,9 @@ pub(crate) fn shared_store() -> MemoryStore {
     MemoryStore::new(TEST_LEASE)
 }
 
-/// Launch a pipeline whose source coordinates over `store` — the seam
-/// that lets several launches (sequential resumes or concurrent
-/// instances) share one job.
+/// Launch a pipeline whose source coordinates over `store`, the seam that
+/// lets several launches (sequential resumes or concurrent instances) share
+/// one job.
 pub(crate) fn launch_on_store(
     yaml: &str,
     options: RuntimeOptions,
@@ -189,8 +188,8 @@ pub(crate) fn launch_customized(
     // Every launch gets its own pipeline name. Metric gauge series have a
     // single live owner per process (`docs/METRICS.md`, "Series ownership")
     // and the pipeline name is part of every key, so two launches of one
-    // config — tests running concurrently in a `cargo test` process, or a
-    // multi-instance test running two workers in-process — would collide.
+    // config (tests running concurrently in a `cargo test` process, or a
+    // multi-instance test running two workers in-process) would collide.
     // Coordination is unaffected: splits are namespaced by the store, not by
     // the pipeline name.
     config.pipeline.name = format!("{}-{}", config.pipeline.name, next_launch());

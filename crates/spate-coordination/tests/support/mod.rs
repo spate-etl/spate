@@ -35,7 +35,7 @@ pub fn config(instance_id: Option<&str>) -> CoordinationConfig {
         replan_interval: LEASE,
         reconcile_interval: Duration::from_millis(300),
         // Both defaults are sized against the 30s production lease and
-        // would swamp a 1.5s test one — `drain_deadline` would not even
+        // would swamp a 1.5s test one; `drain_deadline` would not
         // validate. Scaled here rather than in `Default` so production
         // keeps the documented values.
         drain_deadline: LEASE / 2,
@@ -60,7 +60,7 @@ pub fn store() -> MemoryStore {
 }
 
 /// The deterministic clock lives in the crate, behind its `testing`
-/// feature — these are external test binaries, so a `#[cfg(test)]` item
+/// feature. These are external test binaries, so a `#[cfg(test)]` item
 /// would be invisible to them. Re-exported here so the suites read
 /// unchanged. Share one instance between the store and the coordinator so
 /// expiry, the self-fence, and the control-loop cadence stay coherent.
@@ -272,8 +272,8 @@ pub fn drive(
             .poll()
             .unwrap_or_else(|e| panic!("poll failed while {what}: {e}"));
         if events.is_empty() {
-            // `poll` no longer blocks — the driver owns the wait in the
-            // real pipeline. These helpers drive a coordinator directly,
+            // `poll` does not block; the driver owns the wait in the real
+            // pipeline. These helpers drive a coordinator directly,
             // so pace the predicate check rather than spinning hot.
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -284,11 +284,11 @@ pub fn drive(
 /// Like [`drive`], but for a worker on a **frozen** clock: advance `clock`
 /// a fraction of a renew-interval each poll so the protocol keeps making
 /// progress (heartbeat, reconcile, replan, and the completion sweep all read
-/// the clock now, so a never-advanced frozen clock stalls them all).
+/// the clock, so a never-advanced frozen clock stalls them all).
 ///
-/// The step is small enough that a live worker renews inside it — the "advance
-/// to settle" pattern from [`spate_coordination::clock`] — so a genuine
-/// self-fence never fires merely because the test moved time in one jump.
+/// The step is small enough that a live worker renews inside it, the
+/// "advance to settle" pattern from [`spate_coordination::clock`], so a
+/// self-fence does not fire because the test moved time in one jump.
 pub fn drive_clocked(
     coordinator: &mut impl SplitCoordinator,
     clock: &TestClock,
@@ -339,16 +339,16 @@ pub const DRAINED_WATERMARK: i64 = 42;
 
 /// Answer every outstanding revocation the way a cooperating source does:
 /// commit the split's drained tail to manufacture a resume point, then
-/// release it. The release is what makes the transfer replay-free — the
-/// next owner starts from a watermark covering everything this one
-/// emitted, which is exactly what [`DRAINED_WATERMARK`] lets a test see.
+/// release it. The release makes the transfer replay-free: the next owner
+/// starts from a watermark covering everything this one emitted, which is
+/// what [`DRAINED_WATERMARK`] lets a test see.
 pub fn consent_to_revocations(coordinator: &mut impl SplitCoordinator, held: &mut Held) {
     for id in std::mem::take(&mut held.revoke_requests) {
         if !held.splits.contains_key(&id) {
             continue; // already gone: forced, completed, or fenced
         }
-        // A `Fenced` commit is normal — the lease may legitimately have
-        // moved — and leaves the release below a no-op. Clamped upward for
+        // A `Fenced` commit is normal (the lease may legitimately have
+        // moved) and leaves the release below a no-op. Clamped upward for
         // the same reason `commit_held` is: a split can be drained more
         // than once, and watermarks never move backwards.
         let watermark = held.splits[&id]
@@ -362,18 +362,18 @@ pub fn consent_to_revocations(coordinator: &mut impl SplitCoordinator, held: &mu
 }
 
 /// Commit a first watermark ([`BASE_WATERMARK`]) for everything a worker
-/// holds — what a running data plane does at its first checkpoint. A
+/// holds, as a running data plane does at its first checkpoint. A
 /// `Fenced` commit is normal here (the lease may legitimately have moved)
 /// and is ignored.
 ///
 /// Never regresses: a split that arrived carrying a drained tail is
 /// already past [`BASE_WATERMARK`], and the backend rejects a regressing
-/// watermark as a source bug — correctly, so the helper must behave like a
-/// real data plane and not walk backwards.
+/// watermark as a source bug, so the helper must behave like a data plane
+/// and not walk backwards.
 /// Like [`commit_held`], but silent about `skip`.
 ///
 /// A committing split is a *live* one as far as the coordinator is
-/// concerned — a landed commit is the only progress signal a draining split
+/// concerned. A landed commit is the only progress signal a draining split
 /// gives it, and what a cancelled revocation's watchdog is armed against.
 /// Excluding a split here is therefore how a test stages a wedged drain: it
 /// keeps the worker healthy while one split goes quiet.
@@ -435,16 +435,16 @@ pub fn drive_pair<C: SplitCoordinator>(
 /// Unlike [`drive_pair`], this one answers revocations: it commits and
 /// releases on both sides every iteration, so a hand-off completes the
 /// moment the leader asks rather than waiting out `drain_deadline`. Use it
-/// to reach a settled baseline before asserting on what a fleet does next
-/// — a mid-rebalance fleet revokes for its own reasons, and those requests
+/// to reach a settled baseline before asserting on what a fleet does next.
+/// A mid-rebalance fleet revokes for its own reasons, and those requests
 /// linger in [`Held::revoke_requests`], which nothing but
-/// [`consent_to_revocations`] ever drains. A test that needs a declining
+/// [`consent_to_revocations`] drains. A test that needs a declining
 /// source wants [`drive_pair`] instead.
 ///
 /// Reaching `done` is not enough on its own: the balancer can satisfy a
 /// split-count predicate mid-rebalance and revoke again a step later. So
 /// after `done` first holds this runs [`QUIET_ROUNDS`] further rounds
-/// *without* consenting — if a request arrives, the fleet was not settled,
+/// *without* consenting. If a request arrives, the fleet was not settled,
 /// so it consents and goes back to converging. Because the quiet rounds
 /// drain nothing, an empty slate on exit is a measurement rather than an
 /// artifact of having just drained it.

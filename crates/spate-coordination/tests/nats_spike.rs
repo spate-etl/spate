@@ -1,18 +1,18 @@
 //! Semantics spike against a real NATS 2.11 server: pins down the exact
 //! JetStream KV behaviors the lease design builds on, BEFORE anything
-//! builds on them. Each assertion is a design-load-bearing fact:
+//! builds on them. Each assertion pins one fact the design rests on:
 //!
-//! 1. CAS semantics — `create` is create-if-absent, `update` is
+//! 1. CAS semantics. `create` is create-if-absent, `update` is
 //!    compare-and-swap on revision, revisions are bucket-wide stream
 //!    sequences (strictly increasing per key), and a deleted/expired key
 //!    is re-creatable with `create`.
-//! 2. Heartbeats — a bucket-level `max_age` applies per *message*, so a
+//! 2. Heartbeats. A bucket-level `max_age` applies per *message*, so a
 //!    key that is CAS-rewritten inside the window survives indefinitely
 //!    (this is the lease heartbeat), while an untouched key expires.
-//! 3. Expiry visibility — with `limit_markers` configured, the expiry of
+//! 3. Expiry visibility. With `limit_markers` configured, the expiry of
 //!    an untouched key surfaces to a live watcher as a non-Put operation
 //!    (the takeover trigger), and the asserted variant documents which.
-//! 4. Watch snapshots — what a fresh watcher replays and how "caught up
+//! 4. Watch snapshots. What a fresh watcher replays and how "caught up
 //!    with current state" is detected.
 //!
 //! Ignored by default; run with Docker available:
@@ -175,7 +175,7 @@ async fn heartbeat_and_expiry(js: &async_nats::jetstream::Context) {
         }
     };
     // Pinned observation: the max_age limit marker surfaces as Purge
-    // (marker reason MaxAge), NOT Delete — watchers distinguishing
+    // (marker reason MaxAge), NOT Delete. Watchers distinguishing
     // graceful release (Delete) from expiry (Purge) can rely on this.
     assert_eq!(
         expiry_op,

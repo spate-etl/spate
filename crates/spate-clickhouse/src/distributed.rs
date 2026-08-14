@@ -2,14 +2,14 @@
 //!
 //! When the sink config carries a `distributed_check` block, startup
 //! verifies that the cluster topology and the `Distributed` table's DDL
-//! agree with the sink config — shard count, per-shard weights, and the
-//! sharding expression. Placement/DDL drift does not error at query time:
+//! agree with the sink config, covering shard count, per-shard weights, and
+//! the sharding expression. Placement/DDL drift does not error at query time:
 //! under `optimize_skip_unused_shards=1` it silently returns wrong
 //! results, which is why this fails startup instead.
 //!
 //! What is verified: shard count, weights, the sharding expression, and
 //! the DDL's cluster argument. What is documented-only: that config shard
-//! `i` actually IS the cluster's `shard_num = i + 1` — HTTP replica URLs
+//! `i` IS the cluster's `shard_num = i + 1`. HTTP replica URLs
 //! are not reliably mappable onto the cluster's native `host:port`
 //! entries (proxies, DNS aliases, the 8123/9000 port split), so ordering
 //! stays the operator's contract. A best-effort hostname cross-check
@@ -72,7 +72,8 @@ pub(crate) struct DistributedCheck {
     pub(crate) expected_expr: String,
     /// Configured per-shard weights, config order.
     pub(crate) weights: Arc<[u32]>,
-    /// Configured replica URL hostnames per shard — advisory cross-check.
+    /// Configured replica URL hostnames per shard, for the advisory
+    /// cross-check.
     pub(crate) replica_hosts: Vec<Vec<String>>,
 }
 
@@ -95,8 +96,8 @@ impl DistributedCheck {
         DistributedCheckError::Mismatch(format!("sink.clickhouse.distributed_check: {detail}"))
     }
 
-    /// Run the guard. Query order is fixed — cluster topology, then table
-    /// engine — and the mock tests depend on it.
+    /// Run the guard. Query order is fixed at cluster topology then table
+    /// engine, and the mock tests depend on it.
     pub(crate) async fn verify(&self) -> Result<(), DistributedCheckError> {
         let replicas = self
             .endpoint
@@ -329,7 +330,7 @@ fn engine_args(engine_full: &str) -> Option<Vec<String>> {
             }
             ')' => {
                 if depth == 0 {
-                    // The matching close of `Distributed(` — anything after
+                    // The matching close of `Distributed(`. Anything after
                     // (e.g. ` SETTINGS fsync_after_insert = 1`) is ignored.
                     args.push(cur.trim().to_string());
                     return Some(args);

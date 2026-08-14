@@ -1,7 +1,7 @@
 //! The coordinated backfill against the real production pair: a NATS
-//! JetStream coordination store and a SeaweedFS S3 gateway — durable
-//! resume across process "restarts" and multi-instance sharing, exactly
-//! as a deployment would assemble them.
+//! JetStream coordination store and a SeaweedFS S3 gateway, covering
+//! durable resume across process "restarts" and multi-instance sharing, as
+//! a deployment would assemble them.
 //!
 //! Ignored by default; run with Docker available:
 //!
@@ -92,9 +92,9 @@ fn launch_nats_instance(
 }
 
 /// Durable resume across a process boundary: run 1 makes partial
-/// progress and drains; run 2 — a fresh pipeline, fresh coordinator,
-/// same NATS job — finishes the backfill without losing a record and
-/// without re-reading what run 1 committed as complete.
+/// progress and drains; run 2 (a fresh pipeline, fresh coordinator, same
+/// NATS job) finishes the backfill without losing a record and without
+/// re-reading what run 1 committed as complete.
 #[test]
 #[ignore = "requires Docker"]
 fn durable_resume_across_restart_loses_nothing() {

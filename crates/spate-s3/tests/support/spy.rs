@@ -54,8 +54,8 @@ pub(crate) struct GetRecord {
 }
 
 impl GetRecord {
-    /// The key's last path segment — the staged file name, which is what a
-    /// test names its objects by.
+    /// The key's last path segment, the staged file name a test names its
+    /// objects by.
     pub(crate) fn object(&self) -> &str {
         self.key.rsplit('/').next().unwrap_or(&self.key)
     }
@@ -138,7 +138,7 @@ impl StoreSpy {
 
     /// The most `get_opts` calls ever in flight at one instant. A call
     /// resolves when the store returns the response, before the body is
-    /// necessarily consumed — `LocalFileSystem` hands the bytes over
+    /// necessarily consumed. `LocalFileSystem` hands the bytes over
     /// eagerly, so here call-overlap and read-overlap coincide, but against
     /// a store that streams lazily this counter would undercount body
     /// overlap. The gate below forces the overlap inside `get_opts` itself,
@@ -156,8 +156,8 @@ struct Depth {
     peak: AtomicUsize,
     /// Depth the gate waits for; zero means no gate.
     gate: usize,
-    /// Latches true once the gate opens — either because `gate` reads were
-    /// in flight together, or because a waiter hit `deadline`. It never
+    /// Latches true once the gate opens, either because `gate` reads were
+    /// in flight together or because a waiter hit `deadline`. It never
     /// closes again, so a run pays the gate at most once.
     open: watch::Sender<bool>,
     deadline: Duration,

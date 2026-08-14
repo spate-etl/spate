@@ -1,6 +1,6 @@
 //! Fault-injection regressions: scripted store failures at the exact
 //! writes whose loss used to wedge the protocol. Both scenarios run over
-//! the real coordinator through the public API — the fault store is a
+//! the real coordinator through the public API; the fault store is a
 //! [`CoordinationStore`] like any custom backend.
 
 mod support;
@@ -26,7 +26,7 @@ struct FaultStore {
     /// fails the call (Retryable, nothing written). Exhausted = pass.
     plan_update_script: Arc<Mutex<VecDeque<bool>>>,
     /// Once: the next ephemeral split-lease update WRITES but returns an
-    /// error — the maybe-landed renewal.
+    /// error, the maybe-landed renewal.
     lease_maybe_land: Arc<AtomicBool>,
     /// While armed: the next durable split-record write that clears the
     /// owner (a graceful release, or a revocation's final hand-back) is
@@ -103,10 +103,8 @@ impl CoordinationStore for FaultStore {
             && self.drop_assignment_publish.swap(false, Ordering::AcqRel)
         {
             // The leader's assignment write never lands. Nothing is
-            // wedged by this on its own — the point is that the leader
-            // must notice and republish rather than believing the fleet
-            // was told, which is the failure the old grant-annotation
-            // knob covered in the negotiated protocol.
+            // wedged by this on its own; the leader must notice and
+            // republish rather than believing the fleet was told.
             return Err(StoreError::Retryable(
                 "injected: assignment publish dropped".into(),
             ));
@@ -115,7 +113,7 @@ impl CoordinationStore for FaultStore {
             && key.starts_with("split.")
             && self.lease_maybe_land.swap(false, Ordering::AcqRel)
         {
-            // The write LANDS but the caller sees a failure — the
+            // The write LANDS but the caller sees a failure, the
             // maybe-landed renewal a flaky round-trip produces.
             let _ = self.inner.update(ks, key, value, expected).await?;
             return Err(StoreError::Retryable(
@@ -149,9 +147,9 @@ impl CoordinationStore for FaultStore {
 
 /// A failed plan publish must not desynchronize terminal detection: the
 /// splits were already seeded, so `planned` must be recounted from the
-/// store on the next run — under the pre-fix accounting (`planned +=
-/// creates won this run`) the re-run counted zero, the totals never
-/// matched again, and a bounded job idled forever instead of draining.
+/// store on the next run. Accounting by `planned += creates won this run`
+/// made the re-run count zero, the totals never matched again, and a
+/// bounded job idled forever instead of draining.
 #[test]
 fn failed_plan_publish_heals_and_the_job_still_completes() {
     let rt = runtime();
@@ -178,7 +176,7 @@ fn failed_plan_publish_heals_and_the_job_still_completes() {
             .unwrap();
     }
     // The replan tick recounts the seeded records and publishes Final;
-    // without the recount this drive times out — nothing ever fires.
+    // without the recount this drive times out; nothing ever fires.
     support::drive(&mut worker, &mut held, "healing the failed publish", |h| {
         h.all_complete
     });
@@ -186,20 +184,20 @@ fn failed_plan_publish_heals_and_the_job_still_completes() {
 
 /// A renewal whose write lands but whose reply is lost must be ADOPTED on
 /// the next heartbeat (the lease still carries our owner+nonce), not
-/// treated as a fence: the pre-fix path dropped the split as Lost and
-/// re-acquired it through an attempt-consuming reclaim — four flakes
-/// quarantined a healthy split.
+/// treated as a fence. Dropping the split as Lost and re-acquiring it
+/// through an attempt-consuming reclaim let four flakes quarantine a
+/// healthy split.
 #[test]
 fn maybe_landed_renewal_is_adopted_not_fenced() {
     let rt = runtime();
-    // Freeze time. Every protocol deadline now reads this clock — lease
-    // expiry, the self-fence, AND the renewal cadence — so nothing fires
-    // until the test advances it. That is exactly what makes the negative
-    // assertion below meaningful: a Lost/Quarantined can only come from
-    // mishandling the maybe-landed renewal, never from a CI scheduler stall.
-    // We drive the renewals ourselves by stepping the clock, one fraction of
-    // a renew-interval at a time so a live worker always gets to renew before
-    // the self-fence would fire (the "advance to settle" pattern — see
+    // Freeze time. Every protocol deadline reads this clock (lease expiry,
+    // the self-fence, AND the renewal cadence), so nothing fires until the
+    // test advances it. That makes the negative assertion below meaningful:
+    // a Lost/Quarantined can only come from mishandling the maybe-landed
+    // renewal, never from a CI scheduler stall. We drive the renewals
+    // ourselves by stepping the clock, one fraction of a renew-interval at a
+    // time so a live worker always gets to renew before the self-fence would
+    // fire (the "advance to settle" pattern; see
     // `spate_coordination::clock`).
     let clock = support::TestClock::frozen();
     let store = FaultStore::new(MemoryStore::with_clock(support::LEASE, clock.clone()));
@@ -265,8 +263,8 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     worker
         .commit(&split_id("r0"), &SplitProgress::completed(7, vec![]))
         .unwrap();
-    // The completion sweep runs on a reconcile tick, which is clock-driven
-    // now — keep stepping the frozen clock so it fires.
+    // The completion sweep runs on a reconcile tick, which is clock-driven;
+    // keep stepping the frozen clock so it fires.
     support::drive_clocked(
         &mut worker,
         &clock,
@@ -281,7 +279,7 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
 /// `assign.{instance}` record holds so it can CAS the next one; if a
 /// failed write left that cache believing a write it never made, every
 /// later publish for that instance would CAS against a revision the store
-/// never had and lose forever — and the worker, never having seen a
+/// never had and lose forever, and the worker, never having seen a
 /// record, would hold nothing and claim nothing.
 #[test]
 fn a_dropped_assignment_publish_is_republished() {

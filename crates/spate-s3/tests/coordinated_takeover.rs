@@ -4,7 +4,7 @@
 //!
 //! The crash is simulated at the coordination-store seam: a kill switch
 //! makes every store operation fail like a partitioned network, so the
-//! victim can neither renew, commit, nor gracefully release — exactly the
+//! victim can neither renew, commit, nor gracefully release, which is the
 //! state a killed process leaves behind. Its already-established watch
 //! keeps streaming (an in-memory stream has no socket to sever), which
 //! only lets the victim *observe* its losses; it cannot act on anything.
@@ -28,7 +28,7 @@ use support::{
 };
 
 /// Delegates to a [`MemoryStore`] until the switch flips, then fails every
-/// operation like a partitioned network (retryable — a real outage is).
+/// operation like a partitioned network (retryable, as a real outage is).
 #[derive(Clone)]
 struct KillSwitchStore {
     inner: MemoryStore,
@@ -170,7 +170,7 @@ fn a_hard_crashed_instance_loses_its_leases_and_a_peer_finishes_the_job() {
     );
 
     // Hard crash: from here the victim cannot renew, commit, claim, or
-    // release — its leases can only expire.
+    // release; its leases can only expire.
     dead.store(true, Ordering::Relaxed);
 
     // Survivor: healthy on the same store, joins after the crash.
@@ -207,7 +207,7 @@ fn a_hard_crashed_instance_loses_its_leases_and_a_peer_finishes_the_job() {
     let _ = victim.run.wait_exit(Duration::from_secs(60));
 
     // At-least-once across the crash: nothing the victim left behind is
-    // missing — the union of both sinks covers every staged record.
+    // missing, and the union of both sinks covers every staged record.
     let rows_victim = captured_rows(&victim.script);
     let mut union: Vec<String> = rows_victim
         .iter()

@@ -1,8 +1,8 @@
 //! `IPv4` columns: `std::net::Ipv4Addr` as a little-endian `UInt32`.
 //!
 //! ⚠ Required, not optional: `Ipv4Addr`'s default serde impl emits the
-//! four octets big-endian, which a RowBinary `IPv4` column reads as a
-//! **wrong address** — successfully. Always annotate:
+//! four octets big-endian, which a RowBinary `IPv4` column reads
+//! successfully as a **wrong address**. Always annotate:
 //!
 //! ```text
 //! #[serde(with = "spate_clickhouse::serde::ipv4")]
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn default_ipv4_serde_impl_is_documented_wrong_bytes() {
         // The footgun the module docs warn about: without the attribute,
-        // 1.2.3.4 encodes as network-order octets — a valid 4-byte value
+        // 1.2.3.4 encodes as network-order octets, a valid 4-byte value
         // that an IPv4 column would read as 4.3.2.1.
         assert_eq!(enc(&Ipv4Addr::new(1, 2, 3, 4)), [1, 2, 3, 4]);
     }

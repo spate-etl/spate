@@ -6,7 +6,7 @@ use std::fmt;
 use std::time::Duration;
 
 /// One connected ClickHouse replica. Wraps a `clickhouse::Client` (its own
-/// hyper connection pool) — the crate type stays private so its 0.x
+/// hyper connection pool). The crate type stays private so its 0.x
 /// breaking releases never become ours.
 pub struct ClickHouseEndpoint {
     client: clickhouse::Client,
@@ -40,9 +40,9 @@ impl fmt::Debug for ClickHouseEndpoint {
 }
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
-/// format — RowBinary or Native — is baked into `insert_sql`), carrying the
-/// batch's deduplication token so retries — including on other replicas —
-/// are idempotent within the server's dedup window. The transport is
+/// format, RowBinary or Native, is baked into `insert_sql`), carrying the
+/// batch's deduplication token so retries, including retries on other
+/// replicas, are idempotent within the server's dedup window. The transport is
 /// format-agnostic: frames concatenate to the request body (RowBinary rows
 /// or a stream of Native blocks). `write_batch` returning `Ok` is the
 /// durable-ack point (the server confirmed the insert, materialized views
@@ -114,7 +114,7 @@ impl ShardWriter for ClickHouseWriter {
 }
 
 /// Server exception codes that cannot succeed on retry: schema, parse,
-/// and authentication classes. Everything else is retried — with
+/// and authentication classes. Everything else is retried: with
 /// deduplication tokens a spurious retry is idempotent, and the circuit
 /// breaker plus the stalled-watermark alert surface persistent failures.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
@@ -158,8 +158,8 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
         ChError::InvalidParams(_) | ChError::SchemaMismatch(_) | ChError::Unsupported(_) => {
             ErrorClass::Fatal
         }
-        // Anything unanticipated: retry — idempotent under dedup tokens,
-        // and visible through breaker metrics if persistent.
+        // Anything unanticipated: retry, which is idempotent under dedup
+        // tokens and visible through breaker metrics if persistent.
         _ => ErrorClass::Retryable,
     };
     SinkError::Client {

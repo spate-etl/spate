@@ -29,8 +29,8 @@ use support::{
 /// choose (`prefetch_bytes` is the size of one ranged GET).
 ///
 /// `refresh_listing: false` is the default and is stated anyway: it is the
-/// field these tests are about — it makes the plan final, and a final plan is
-/// never re-listed.
+/// field these tests are about, since it makes the plan final, and a final
+/// plan is never re-listed.
 fn config_yaml(data: &std::path::Path, prefetch: &str, chunk: &str) -> String {
     format!(
         r#"
@@ -73,8 +73,8 @@ impl Staged {
 
 /// Write `objects` NDJSON objects of `records` lines each. At the 1 MiB split
 /// target the planner's open-cost floor is 64 KiB per object, so these tiny
-/// objects pack sixteen to a split — the number of objects therefore chooses
-/// the number of splits, and with it the read parallelism available.
+/// objects pack sixteen to a split, so the number of objects chooses the
+/// number of splits and with it the read parallelism available.
 fn stage(objects: usize, records: usize) -> Staged {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -253,8 +253,8 @@ fn windowed_reads_tile_each_object_without_overlap_or_repeat() {
 
 #[test]
 fn concurrent_reads_reach_the_in_flight_budget() {
-    // Read parallelism is one fetcher task per in-flight split — not a knob of
-    // its own — so 64 objects (four splits) against `max_in_flight: 4` must
+    // Read parallelism is one fetcher task per in-flight split and not a knob
+    // of its own, so 64 objects (four splits) against `max_in_flight: 4` must
     // put four reads in flight together. The spy holds each GET until four are
     // in flight, so the observation is the source's parallelism and not a
     // scheduler artifact; its deadline latches the gate open, so a collapse to
@@ -295,7 +295,7 @@ fn concurrent_reads_reach_the_in_flight_budget() {
 #[test]
 fn a_final_plan_is_never_re_listed() {
     // `refresh_listing: false` makes the plan final, and a final plan
-    // disables replanning outright — no tick is ever attempted. What this
+    // disables replanning outright, so no tick is ever attempted. What this
     // test establishes is therefore that the run outlived the interval at
     // which an *open* plan would have re-listed, and still cost one LIST.
     // The injected per-GET latency is what guarantees that span: twelve

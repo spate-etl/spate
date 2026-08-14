@@ -1,7 +1,7 @@
 //! Deterministic encoded-split-descriptor corpora for the decode bench.
 //!
 //! What a worker is handed is the leader's `encode` output, so the corpora
-//! are **encoded here**, outside the measured region — the same discipline
+//! are **encoded here**, outside the measured region, the same discipline
 //! the framing corpora follow by compressing in the fixture: a bench that
 //! serialized inside the region would count the serializer instead of the
 //! parser it is supposed to be measuring.
@@ -15,7 +15,7 @@
 //! uniformly small objects into exactly that: 10,000 objects into 625 splits.
 //! [`MEMBERS_PER_SPLIT`] is that same 16, and
 //! `the_chunked_grouping_matches_the_real_packer` pins the equivalence
-//! against `plan_listing` — so a change to the member cap fails a test rather
+//! against `plan_listing`, so a change to the member cap fails a test rather
 //! than silently reshaping this fixture. The single-member arrangement is
 //! pinned the same way by `the_profiles_pack_differently`, which holds the
 //! planner to one split per at-or-above-target object.
@@ -25,8 +25,8 @@
 //! Nothing here varies between runs: keys, ETags, sizes and timestamps are
 //! all functions of the member index. The listing corpus needs a generator
 //! for its sizes because packing is sensitive to the size *distribution*;
-//! decode is not — a descriptor costs what its bytes cost — so the values are
-//! derived directly and there is no generator to seed.
+//! decode is not, since a descriptor costs what its bytes cost, so the values
+//! are derived directly and there is no generator to seed.
 //!
 //! Key and ETag shapes mirror the listing corpus's, so a byte count here is
 //! comparable with one there. They are restated rather than shared because a
@@ -38,8 +38,8 @@ use spate_s3::{DescriptorObject, SplitDescriptor};
 /// Members in every corpus below, whatever shape they are arranged into.
 ///
 /// Holding it constant is what makes the profiles a comparison rather than
-/// two unrelated numbers: they put the same member count — and so nearly the
-/// same JSON byte volume — through the parser, and differ only in how many
+/// two unrelated numbers: they put the same member count, and so nearly the
+/// same JSON byte volume, through the parser, and differ only in how many
 /// documents it is spread over.
 ///
 /// 6,400 is a plan's worth. The `uniform_small` listing profile packs into
@@ -49,8 +49,8 @@ use spate_s3::{DescriptorObject, SplitDescriptor};
 /// inside the instruction budget under emulation.
 pub(crate) const MEMBERS: usize = 6_400;
 
-/// Members per descriptor in the full-split arrangement — the cap the
-/// open-cost floor imposes, and what an ordinary listing therefore produces.
+/// Members per descriptor in the full-split arrangement, the cap the
+/// open-cost floor imposes and what an ordinary listing therefore produces.
 pub(crate) const MEMBERS_PER_SPLIT: usize = 16;
 
 /// A member key shaped like a real partitioned prefix, so the parsed string
@@ -63,7 +63,7 @@ fn key(index: usize) -> String {
     format!("year=2026/month=08/day={day:02}/hour={hour:02}/part-{index:08}.ndjson")
 }
 
-/// A quoted 32-character hexadecimal ETag — the shape an S3-compatible store
+/// A quoted 32-character hexadecimal ETag, the shape an S3-compatible store
 /// reports for a single-part upload, quotes included. Length matters: the
 /// whole string is parsed and allocated per member.
 fn etag(index: usize) -> String {
@@ -109,7 +109,7 @@ pub(crate) fn full_split_plan() -> Vec<Vec<u8>> {
     plan(MEMBERS_PER_SPLIT)
 }
 
-/// The same members as one per descriptor — the shape a listing of
+/// The same members as one per descriptor, the shape a listing of
 /// at-or-above-target objects produces, where each lands alone in its split.
 pub(crate) fn single_member_plan() -> Vec<Vec<u8>> {
     plan(1)

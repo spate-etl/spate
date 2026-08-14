@@ -170,8 +170,8 @@ replays. These guarantees depend on it:
   router scatters a key's duplicates across shards, where nothing ever
   collapses them.
 - **Reads must find a key where the routing function says it lives.**
-  Anything that maps a key to a location at read time (a pruned SELECT
-  through a parity router, a per-shard dedup query) assumes every record
+  Anything that maps a key to a location at read time (a read pruned to one
+  shard through a parity router, a per-shard dedup query) assumes every record
   for that key sits on the shard the function names. One
   nondeterministically-placed record is invisible to such reads.
 

@@ -70,7 +70,11 @@ impl Encoder {
                 .map_err(|e| format!("encoding a datagen event as JSON: {e}")),
             #[cfg(feature = "avro")]
             Encoder::Avro(schema) => {
-                apache_avro::write_avro_datum_ref(schema, &AvroDatum(event), out)
+                // The built-in schema defines its four records inline and
+                // carries no `Schema::Ref`, so the resolution map is empty.
+                // `HashMap::new` does not allocate.
+                let names = apache_avro::schema::NamesRef::new();
+                apache_avro::write_avro_datum_ref(schema, &names, &AvroDatum(event), out)
                     .map(|_bytes_written| ())
                     .map_err(|e| format!("encoding a datagen event as an Avro datum: {e}"))
             }
@@ -103,19 +107,113 @@ impl serde::Serialize for AvroDatum<'_> {
         const NAME: &str = "StorefrontEvent";
         match self.0 {
             StorefrontEvent::OrderPlaced(e) => {
-                serializer.serialize_newtype_variant(NAME, 0, "OrderPlaced", e)
+                serializer.serialize_newtype_variant(NAME, 0, "OrderPlaced", &AvroRecord(e))
             }
             StorefrontEvent::PaymentCaptured(e) => {
-                serializer.serialize_newtype_variant(NAME, 1, "PaymentCaptured", e)
+                serializer.serialize_newtype_variant(NAME, 1, "PaymentCaptured", &AvroRecord(e))
             }
             StorefrontEvent::RefundIssued(e) => {
-                serializer.serialize_newtype_variant(NAME, 2, "RefundIssued", e)
+                serializer.serialize_newtype_variant(NAME, 2, "RefundIssued", &AvroRecord(e))
             }
         }
     }
 }
 
+/// A record in the numeric types `EVENT_SCHEMA_JSON` declares.
+///
+/// Avro has no unsigned types, so the schema declares `int` and `long` where
+/// the event model carries `u32` and `u64`. This view narrows each field to
+/// the declared type, and refuses a value the declared type cannot carry
+/// rather than wrapping it. The field order and names are the record's own;
+/// only the numeric types differ.
+#[cfg(feature = "avro")]
+struct AvroRecord<'a, T>(&'a T);
+
+/// `v` as the Avro `int` the schema declares.
+#[cfg(feature = "avro")]
+fn avro_int<E: serde::ser::Error>(field: &str, v: u32) -> Result<i32, E> {
+    i32::try_from(v)
+        .map_err(|_| E::custom(format!("{field} exceeds the Avro int the schema declares")))
+}
+
+/// `v` as the Avro `long` the schema declares.
+#[cfg(feature = "avro")]
+fn avro_long<E: serde::ser::Error>(field: &str, v: u64) -> Result<i64, E> {
+    i64::try_from(v)
+        .map_err(|_| E::custom(format!("{field} exceeds the Avro long the schema declares")))
+}
+
+#[cfg(feature = "avro")]
+impl serde::Serialize for AvroRecord<'_, crate::events::OrderPlaced> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let e = self.0;
+        let mut s = serializer.serialize_struct("OrderPlaced", 5)?;
+        s.serialize_field("order_id", &avro_long("order_id", e.order_id)?)?;
+        s.serialize_field("customer_id", &avro_int("customer_id", e.customer_id)?)?;
+        s.serialize_field("region", &e.region)?;
+        s.serialize_field("placed_at", &e.placed_at)?;
+        s.serialize_field("lines", &AvroLines(&e.lines))?;
+        s.end()
+    }
+}
+
+/// The `lines` array, each element in the declared numeric types.
+#[cfg(feature = "avro")]
+struct AvroLines<'a>(&'a [crate::events::OrderLine]);
+
+#[cfg(feature = "avro")]
+impl serde::Serialize for AvroLines<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut s = serializer.serialize_seq(Some(self.0.len()))?;
+        for line in self.0 {
+            s.serialize_element(&AvroRecord(line))?;
+        }
+        s.end()
+    }
+}
+
+#[cfg(feature = "avro")]
+impl serde::Serialize for AvroRecord<'_, crate::events::OrderLine> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let e = self.0;
+        let mut s = serializer.serialize_struct("OrderLine", 3)?;
+        s.serialize_field("sku", &e.sku)?;
+        s.serialize_field("qty", &avro_int("qty", e.qty)?)?;
+        s.serialize_field("unit_cents", &avro_int("unit_cents", e.unit_cents)?)?;
+        s.end()
+    }
+}
+
+#[cfg(feature = "avro")]
+impl serde::Serialize for AvroRecord<'_, crate::events::PaymentCaptured> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let e = self.0;
+        let mut s = serializer.serialize_struct("PaymentCaptured", 2)?;
+        s.serialize_field("order_id", &avro_long("order_id", e.order_id)?)?;
+        s.serialize_field("amount_cents", &avro_long("amount_cents", e.amount_cents)?)?;
+        s.end()
+    }
+}
+
+#[cfg(feature = "avro")]
+impl serde::Serialize for AvroRecord<'_, crate::events::RefundIssued> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let e = self.0;
+        let mut s = serializer.serialize_struct("RefundIssued", 3)?;
+        s.serialize_field("order_id", &avro_long("order_id", e.order_id)?)?;
+        s.serialize_field("amount_cents", &avro_long("amount_cents", e.amount_cents)?)?;
+        s.serialize_field("reason", &e.reason)?;
+        s.end()
+    }
+}
+
 #[cfg(test)]
+#[expect(deprecated, reason = "fixtures call the datum free functions directly")]
 mod tests {
     use super::*;
     use crate::config::DatagenSourceConfig;

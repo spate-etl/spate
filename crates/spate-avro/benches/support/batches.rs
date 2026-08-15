@@ -31,6 +31,7 @@
 //! Corpora and the flatten they feed. The rig that decodes them is
 //! `decode_rig.rs`.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 // Each bench target compiles this module separately and uses a different
 // subset of it: the counted tier measures cases the wall tier leaves out.
 #![allow(dead_code, reason = "each bench target uses a different subset")]

@@ -10,6 +10,8 @@
 //! `push_batch`. Copy this file as the template for your own borrowed
 //! pipelines.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};

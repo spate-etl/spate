@@ -14,6 +14,10 @@ use crate::cache::{CacheSnapshot, CompiledSchema, Lookup};
 use crate::registry::RegistryHandle;
 use crate::wire;
 use apache_avro::Schema;
+#[expect(
+    deprecated,
+    reason = "the replacement borrows the schema CompiledSchema owns"
+)]
 use apache_avro::from_avro_datum;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
@@ -128,6 +132,7 @@ impl DecoderCore {
                 // format.
                 reason: reason.clone(),
             })?;
+        #[expect(deprecated, reason = "see the import")]
         let value =
             from_avro_datum(schema, &mut datum, self.reader_schema.as_deref()).map_err(|e| {
                 DeserError::Malformed {
@@ -231,9 +236,8 @@ where
         out: &mut dyn EmitRecord<'buf, T>,
     ) -> Result<(), DeserError> {
         if let Some(value) = self.core.decode(raw)? {
-            // Second decode pass: apache-avro 0.21 has no single-pass
-            // datum→T path, so we re-decode the intermediate Value into T.
-            // See the type-level `# Performance` note.
+            // The second decode pass, which applies the reader schema's
+            // resolution rules. See the type-level `# Performance` note.
             let payload =
                 apache_avro::from_value::<T>(&value).map_err(|e| DeserError::Malformed {
                     reason: format!("avro record does not match the target type: {e}"),
@@ -249,6 +253,7 @@ where
 }
 
 #[cfg(test)]
+#[expect(deprecated, reason = "fixtures call the datum free functions directly")]
 mod tests {
     use super::*;
     use apache_avro::to_avro_datum;

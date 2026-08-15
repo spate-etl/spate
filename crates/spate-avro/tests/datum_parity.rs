@@ -9,6 +9,8 @@
 //! collection-item budget; skipped-field content validation; the uniform
 //! acceptance superset) are pinned by their own tests at the bottom.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use proptest::prelude::*;
@@ -337,6 +339,31 @@ fn uuid_decodes_to_the_canonical_lowercase_form() {
     let got: U = assert_parity(SCH, &datum);
     // Canonicalized: the uppercase input comes out lowercase on both paths.
     assert_eq!(got.u, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+}
+
+#[test]
+fn uuid_bytes_and_fixed_backing_are_identical() {
+    // A uuid may be backed by `string`, `bytes` or a 16-byte `fixed`. The
+    // first two are length-prefixed on the wire and the third is not, so the
+    // backing decides how the position is read.
+    const SCH: &str = r#"{"type":"record","name":"U2","fields":[
+        {"name":"ub","type":{"type":"bytes","logicalType":"uuid"}},
+        {"name":"uf","type":{"type":"fixed","name":"U16","size":16,"logicalType":"uuid"}}]}"#;
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct U2 {
+        ub: String,
+        uf: String,
+    }
+    let schema = Schema::parse_str(SCH).unwrap();
+    let uuid = apache_avro::Uuid::parse_str("f81d4fae-7dec-11d0-a765-00a0c91e6bf6").unwrap();
+    let record = Value::Record(vec![
+        ("ub".into(), Value::Uuid(uuid)),
+        ("uf".into(), Value::Uuid(uuid)),
+    ]);
+    let datum = to_avro_datum(&schema, record).unwrap();
+    let got: U2 = assert_parity(SCH, &datum);
+    assert_eq!(got.ub, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    assert_eq!(got.uf, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
 }
 
 #[test]
@@ -809,4 +836,68 @@ fn a_top_level_union_of_records_maps_to_a_positional_rust_enum() {
         let got: Event = assert_parity(SCH, &datum);
         assert_eq!(got, expected);
     }
+}
+
+/// `char` and the three named-`fixed` integer shapes decode on the two-pass
+/// path and error on the single-pass one. A field of any of these types is a
+/// per-record error under the deserializer's `ErrorPolicy`.
+#[test]
+fn char_and_wide_integer_targets_diverge_by_design() {
+    fn two_pass_decodes_single_pass_errors<T>(schema_json: &str, datum: &[u8])
+    where
+        T: serde::de::DeserializeOwned + Send + Debug + 'static,
+    {
+        let b = builder(schema_json);
+        let (ack, _rx) = AckRef::test_pair();
+
+        let mut two_pass = Collected::<T>(Vec::new());
+        b.build_serde::<T>()
+            .unwrap()
+            .deserialize(&raw(datum), &ack, &mut two_pass)
+            .expect("the two-pass path decodes this target");
+        assert_eq!(two_pass.0.len(), 1);
+
+        let mut single_pass = Collected::<T>(Vec::new());
+        let err = b
+            .build_serde_datum::<T>()
+            .unwrap()
+            .deserialize(&raw(datum), &ack, &mut single_pass)
+            .unwrap_err();
+        assert!(
+            matches!(err, spate_core::error::DeserError::Malformed { .. }),
+            "{err}"
+        );
+        assert!(single_pass.0.is_empty());
+    }
+
+    const CHAR_SCH: &str = r#"{"type":"record","name":"C","fields":[
+        {"name":"c","type":"string"}]}"#;
+    #[derive(Debug, serde::Deserialize)]
+    struct C {
+        #[allow(dead_code)]
+        c: char,
+    }
+    let datum = to_avro_datum(
+        &Schema::parse_str(CHAR_SCH).unwrap(),
+        Value::Record(vec![("c".into(), Value::String("x".into()))]),
+    )
+    .unwrap();
+    two_pass_decodes_single_pass_errors::<C>(CHAR_SCH, &datum);
+
+    const U64_SCH: &str = r#"{"type":"record","name":"U","fields":[
+        {"name":"n","type":{"type":"fixed","name":"org.apache.avro.rust.u64","size":8}}]}"#;
+    #[derive(Debug, serde::Deserialize)]
+    struct U {
+        #[allow(dead_code)]
+        n: u64,
+    }
+    let datum = to_avro_datum(
+        &Schema::parse_str(U64_SCH).unwrap(),
+        Value::Record(vec![(
+            "n".into(),
+            Value::Fixed(8, u64::MAX.to_le_bytes().to_vec()),
+        )]),
+    )
+    .unwrap();
+    two_pass_decodes_single_pass_errors::<U>(U64_SCH, &datum);
 }

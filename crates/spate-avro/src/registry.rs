@@ -194,9 +194,6 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
                 );
                 return FetchOutcome::Resolved;
             }
-            // `CompiledSchema::compile` catches apache-avro 0.21's parse
-            // *panics* on malformed names (like `"my-record"`), so a schema the
-            // parser rejects negative-caches as an ordinary failure.
             let compiled = CompiledSchema::compile(id, &registered.schema);
             match compiled.unusable_reason() {
                 None => {

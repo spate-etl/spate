@@ -21,8 +21,8 @@
 //!
 //! # What resolves, and what does not
 //!
-//! The decoder underneath is `apache-avro` 0.21. What its schema resolution
-//! does, and where it departs from the Avro specification:
+//! What the decoder's schema resolution does, and where it departs from the
+//! Avro specification:
 //!
 //! - A reader field carrying a `default` fills in for a writer that never
 //!   wrote it. Works; § 1 asserts it.
@@ -38,8 +38,10 @@
 //!   policy drops and acks the whole stream. § 2 asserts that failure rather
 //!   than describing it, and renames on the Rust side with `#[serde(alias)]`,
 //!   which does work. Tracked as spate issue #74.
-//! - `int`→`long` promotion resolves. Works; § 3 asserts it, and asserts what
-//!   the *reverse* does, which is worse than failing.
+//! - `int`→`long` promotion resolves. Works; § 3 asserts it. The reverse is
+//!   not a promotion, and a `long` too large for the reader's `int` fails the
+//!   record; § 3 asserts that too. A `double` narrowed to a `float` is not
+//!   checked and saturates to infinity.
 //!
 //! # A schema miss is not a drop
 //!
@@ -64,7 +66,9 @@
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use apache_avro::{Schema, from_avro_datum, to_avro_datum};
+use apache_avro::reader::datum::GenericDatumReader;
+use apache_avro::writer::datum::GenericDatumWriter;
+use apache_avro::{Schema, types::Value as AvroRecordValue};
 use serde::Deserialize;
 use spate::avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, SchemaSource};
 use spate::prelude::*;
@@ -117,8 +121,8 @@ const READER_UNRELATED_NAME: &str = r#"{"type":"record","name":"Unrelated","fiel
 /// § 3, the promotion run backwards: one field, written wide, read narrow.
 const WIDE_WRITER: &str =
     r#"{"type":"record","name":"Count","fields":[{"name":"quantity","type":"long"}]}"#;
-/// § 3, the reader that narrows it. Avro forbids this direction; the decoder
-/// does not.
+/// § 3, the reader that narrows it. Avro does not list this direction as a
+/// promotion, and a value too large for the `int` fails the record.
 const NARROW_READER: &str =
     r#"{"type":"record","name":"Count","fields":[{"name":"quantity","type":"int"}]}"#;
 
@@ -184,16 +188,26 @@ fn v1_datum(order_id: &str, sku: &str, quantity: i32) -> Result<Vec<u8>, Box<dyn
     record.put("order_id", order_id);
     record.put("sku", sku);
     record.put("quantity", quantity);
-    Ok(to_avro_datum(&schema, record)?)
+    encode(&schema, record)
 }
 
-/// Resolve one datum against a reader schema, through the same
-/// `from_avro_datum` call the deserializer makes internally, reached directly here so a section
-/// can assert on one reader schema at a time without a pipeline around it.
+/// Encode one value as a bare datum, with no container framing.
+fn encode(schema: &Schema, value: impl Into<AvroRecordValue>) -> Result<Vec<u8>, Box<dyn Error>> {
+    Ok(GenericDatumWriter::builder(schema)
+        .build()?
+        .write_value_to_vec(value)?)
+}
+
+/// Resolve one datum against a reader schema, the way the deserializer does
+/// internally, reached directly here so a section can assert on one reader
+/// schema at a time without a pipeline around it.
 fn resolve(writer: &str, reader: &str, datum: &[u8]) -> Result<AvroValue, apache_avro::Error> {
     let writer = Schema::parse_str(writer)?;
     let reader = Schema::parse_str(reader)?;
-    from_avro_datum(&writer, &mut &datum[..], Some(&reader))
+    GenericDatumReader::builder(&writer)
+        .reader_schema(&reader)
+        .build()?
+        .read_value(&mut &datum[..])
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -332,23 +346,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(err.to_string().contains("item_code"), "{err}");
 
     // ── § 3, the promotion's forbidden direction ────────────────────────
-    // Avro permits `int`→`long` and not the reverse. This decoder does not
-    // enforce the rule: it narrows and wraps, so a quantity of five billion
-    // arrives as seven hundred million, with no error anywhere. Widen a field
-    // freely; do not narrow one.
+    // Avro permits `int`→`long` and not the reverse. A value too large for
+    // the reader's `int` fails the record, which then takes the
+    // deserializer's `ErrorPolicy` like any other undecodable payload. A
+    // value that does fit still resolves, so this checks the range and not
+    // the direction. Widen a field freely; do not narrow one.
     let wide_schema = Schema::parse_str(WIDE_WRITER)?;
     let mut wide =
         apache_avro::types::Record::new(&wide_schema).ok_or("WIDE_WRITER is not a record")?;
     wide.put("quantity", 5_000_000_000_i64);
-    let wide = to_avro_datum(&wide_schema, wide)?;
-    let AvroValue::Record(fields) = resolve(WIDE_WRITER, NARROW_READER, &wide)? else {
-        return Err("expected a record value".into());
-    };
-    assert_eq!(
-        fields[0].1,
-        AvroValue::Int(705_032_704),
-        "narrowing truncates silently; it must not be mistaken for a promotion"
-    );
+    let wide = encode(&wide_schema, wide)?;
+    let err = resolve(WIDE_WRITER, NARROW_READER, &wide)
+        .expect_err("a long too large for the reader's int must fail the record");
+    assert!(err.to_string().contains("5000000000"), "{err}");
+    println!("§ 3 narrowing rejected: {err}");
 
     println!("\npipeline exit: {:?}", report.state);
     println!("final watermarks: {:?}", report.final_watermarks);

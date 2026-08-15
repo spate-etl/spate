@@ -12,6 +12,7 @@
 //! cargo test -p spate -- --ignored --test-threads=1
 //! ```
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 // Each binary uses the slice of the harness it needs; `pub` here is
 // module-internal API for the scenario binaries.
 #![allow(dead_code, unreachable_pub)]

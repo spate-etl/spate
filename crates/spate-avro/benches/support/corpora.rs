@@ -57,6 +57,7 @@
 //! nondeterminism would mean giving up either the reader schema or a
 //! realistic map target, which is the whole of what those cases measure.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 // Each bench target compiles this module separately and uses a different
 // subset of it: a target that parses framings does not decode every corpus,
 // and the fixtures test reads items no bench drives. So an item dead in one

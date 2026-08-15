@@ -10,6 +10,7 @@
 //!
 //! The corpus where one datum carries an array of lines is `batches.rs`.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 // Each bench target compiles this module separately and uses a different
 // subset of it: a target that parses framings does not decode every corpus,
 // and the fixtures test reads items no bench drives. So an item is

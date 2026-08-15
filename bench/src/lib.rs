@@ -238,5 +238,15 @@ pub(crate) fn note(message: &str) {
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
+/// Renders identifiers for a message: `'a', 'b', 'c'`. Empty in, empty out.
+#[cfg(feature = "driver")]
+pub(crate) fn quoted<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    names
+        .into_iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub use case::{Bencher, Case, CaseBuilder, Suite, suite};
 pub use corpus::Corpus;

@@ -99,23 +99,28 @@ bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind
 # value containing a comma is not read as more arguments.
 REF ?= main
 REPS ?= 10
+# A space-separated list, one `--package` per name: the driver's flag repeats
+# rather than splitting a value.
+PACKAGE ?=
 FILTER ?=
 FORMAT ?= table
 BASE_FEATURES ?=
 HEAD_FEATURES ?=
 
-bench-list: ## Every wall-clock bench case, with its flags (FILTER=substr narrows it)
+bench-list: ## Every wall-clock bench case, with its flags (PACKAGE=crate, FILTER=substr narrow it)
 	cargo run -p spate-bench --features driver --locked --bin bench -- list --cases \
-		$(if $(FILTER),--filter "$(FILTER)")
+		$(foreach p,$(PACKAGE),--package "$(p)") $(if $(FILTER),--filter "$(FILTER)")
 
-bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=10 FILTER=substr
+bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=10 PACKAGE=crate FILTER=substr
 	cargo run -p spate-bench --features driver --locked --bin bench -- ab "$(REF)" \
-		--replicates "$(REPS)" --format "$(FORMAT)" $(if $(FILTER),--filter "$(FILTER)")
+		--replicates "$(REPS)" --format "$(FORMAT)" \
+		$(foreach p,$(PACKAGE),--package "$(p)") $(if $(FILTER),--filter "$(FILTER)")
 
-bench-arms: ## Compare two feature arms: make bench-arms HEAD_FEATURES=pkg/feat FILTER=substr
+bench-arms: ## Compare two feature arms: make bench-arms HEAD_FEATURES=pkg/feat PACKAGE=crate FILTER=substr
 	cargo run -p spate-bench --features driver --locked --bin bench -- arms \
 		--base-features "$(BASE_FEATURES)" --head-features "$(HEAD_FEATURES)" \
-		--replicates "$(REPS)" --format "$(FORMAT)" $(if $(FILTER),--filter "$(FILTER)")
+		--replicates "$(REPS)" --format "$(FORMAT)" \
+		$(foreach p,$(PACKAGE),--package "$(p)") $(if $(FILTER),--filter "$(FILTER)")
 
 bench-compare: ## Re-render two legs: make bench-compare BASE=dir HEAD=dir FORMAT=markdown
 	cargo run -p spate-bench --features driver --locked --bin bench -- compare \

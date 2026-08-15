@@ -80,6 +80,11 @@ pub struct Plan {
     pub out: PathBuf,
     /// `base`, `head`, or a name a bare `run` was given.
     pub leg: String,
+    /// Packages whose targets to build and measure. Empty selects every one.
+    ///
+    /// Applied to discovery before the build, where `filter` is applied to the
+    /// case list after it.
+    pub packages: Vec<String>,
     /// Substring a case id must contain, if any.
     pub filter: Option<String>,
     /// Corpus seed, identical across legs and replicates.
@@ -112,7 +117,7 @@ struct Prepared {
 
 /// Builds a leg and asks it what it can measure.
 fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Prepared, String> {
-    let discovery = cargo::discover(&plan.dir, &plan.feature_args)?;
+    let mut discovery = cargo::discover(&plan.dir, &plan.feature_args)?;
     if discovery.targets.is_empty() {
         return Err(format!(
             "{} declares no wall-clock bench targets. They are named \
@@ -121,6 +126,10 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
             cargo::WALL_SUFFIX
         ));
     }
+    discovery.select(
+        &plan.packages,
+        &format!("the {} leg at {}", plan.leg, plan.dir.display()),
+    )?;
 
     note(&format!(
         "building {} target(s) for the {} leg in {}",
@@ -372,9 +381,10 @@ fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
     let shared: Vec<CaseId> = base.cases.intersection(&head.cases).cloned().collect();
     if shared.is_empty() {
         return Err(format!(
-            "the two legs share no case. base has {}, head has {}. \
+            "the two legs share no case{}. base has {}, head has {}. \
              A filter that matches nothing, or a target added on one side only, \
              both look like this.",
+            selection(base_plan),
             base.cases.len(),
             head.cases.len()
         ));
@@ -535,10 +545,25 @@ fn runner_for<'a>(leg: &'a Prepared, case: &CaseId) -> Result<&'a Runner, String
     })
 }
 
+/// " within 'a', 'b'" for a narrowed plan, and nothing for an unnarrowed one.
+///
+/// Appended to a message about an empty case set, where the selection is one of
+/// the reasons the set can be empty.
+fn selection(plan: &Plan) -> String {
+    if plan.packages.is_empty() {
+        return String::new();
+    }
+    format!(
+        " within {}",
+        crate::quoted(plan.packages.iter().map(String::as_str))
+    )
+}
+
 fn no_cases(plan: &Plan) -> String {
+    let within = selection(plan);
     match &plan.filter {
-        Some(filter) => format!("no case id contains '{filter}'"),
-        None => "no cases were declared by any wall-clock target".to_owned(),
+        Some(filter) => format!("no case id{within} contains '{filter}'"),
+        None => format!("no cases were declared by any wall-clock target{within}"),
     }
 }
 

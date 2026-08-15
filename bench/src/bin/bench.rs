@@ -43,6 +43,7 @@
 //! | Flag | Default | Meaning |
 //! |---|---|---|
 //! | `--replicates` / `-n` | `10` | Measured replicates per case |
+//! | `--package` / `-p` | every package | Only the targets this package declares |
 //! | `--filter` | none | Only cases whose id contains this substring |
 //! | `--seed` | `20260804` | Corpus seed, identical on both legs and across replicates |
 //! | `--target-ms` | `50` | How long one calibrated measured region should take |
@@ -56,9 +57,21 @@
 //! dropped rather than forwarded, so an arm with no features asked for is the
 //! default set.
 //!
+//! `--package` chooses which targets are built and `--filter` chooses cases
+//! within them, so the two compose. Names are exact and the flag repeats. The
+//! selection is checked against the working tree before anything is built, so a
+//! misspelling costs no compilation.
+//!
+//! A selection narrows the build, never the resolved features the two legs are
+//! guarded on: a bench binary links what its package depends on, so a set
+//! narrowed to the selection would stop guarding packages the leg compiled.
+//! A narrowed run can therefore be refused over a feature neither leg built,
+//! which `--allow features` waives.
+//!
 //! `--filter` and the feature flags also apply to `list --cases`: a filter is a
-//! filter on case ids, so it needs the case list to filter. `run` takes
-//! `--leg NAME` (default `head`) for the name stamped into every record.
+//! filter on case ids, so it needs the case list to filter. `--package` names
+//! targets rather than cases, so it applies to a bare `list` as well. `run`
+//! takes `--leg NAME` (default `head`) for the name stamped into every record.
 //!
 //! `arms` builds each arm into its own directory under the bench cache, keyed by
 //! the flags it was given and kept between runs. Neither arm uses the
@@ -94,8 +107,11 @@
 //! # Exit codes, and three refusals worth knowing in advance
 //!
 //! Exit code 2 means the thing you named does not exist: anything the parser
-//! rejects, a reference or directory that is not there, and not being inside a
-//! git repository at all. Exit code 1 means something failed while running.
+//! rejects, a reference or directory that is not there, a `--package` the
+//! *working tree* declares no wall-clock target in, and not being inside a git
+//! repository at all. Exit code 1 means something failed while running, which
+//! includes a selected package the working tree declares a target in and the
+//! reference does not: the name is right and the comparison is impossible.
 //!
 //! A comparison in which *nothing* was comparable also exits 1, after writing
 //! the report. That is "the command did no work", not a verdict: a comparison
@@ -165,6 +181,12 @@ impl From<String> for Failure {
 }
 
 fn cli() -> Cli {
+    let package = Arg::new("package")
+        .long("package")
+        .short('p')
+        .value_name("NAME")
+        .action(ArgAction::Append)
+        .help("Only targets this package declares, repeatable");
     let filter = Arg::new("filter")
         .long("filter")
         .value_name("SUBSTRING")
@@ -231,6 +253,7 @@ fn cli() -> Cli {
                         .action(ArgAction::SetTrue)
                         .help("Build the targets and list their cases too"),
                 )
+                .arg(package.clone())
                 .arg(filter.clone())
                 .arg(features.clone())
                 .arg(all_features.clone()),
@@ -251,6 +274,7 @@ fn cli() -> Cli {
                         .default_value(HEAD_LEG)
                         .help("The leg name stamped into every record"),
                 )
+                .arg(package.clone())
                 .arg(filter.clone())
                 .arg(replicates.clone())
                 .arg(seed.clone())
@@ -292,6 +316,7 @@ fn cli() -> Cli {
                         .value_name("DIR")
                         .help("Where to write both legs (default: under the bench cache)"),
                 )
+                .arg(package.clone())
                 .arg(filter.clone())
                 .arg(replicates.clone())
                 .arg(seed.clone())
@@ -335,6 +360,7 @@ fn cli() -> Cli {
                         .action(ArgAction::SetTrue)
                         .help("Pass --all-features to the head arm"),
                 )
+                .arg(package)
                 .arg(filter)
                 .arg(replicates)
                 .arg(seed)
@@ -345,12 +371,42 @@ fn cli() -> Cli {
         )
 }
 
+/// The packages a command was narrowed to, in the order given.
+fn packages(args: &ArgMatches) -> Vec<String> {
+    args.get_many::<String>("package")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Refuses a `--package` this working tree declares no wall-clock target in,
+/// before anything is built.
+///
+/// Each leg refuses the same thing, but `ab` prepares the base leg first, and
+/// that leg is a worktree at the reference: a name misspelled here would
+/// otherwise be reported against a tree the caller is not looking at. Only run
+/// when a selection was given, since it costs a `cargo metadata`.
+fn check_packages(
+    repo: &Path,
+    packages: &[String],
+    feature_args: &[String],
+) -> Result<(), Failure> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    cargo::discover(repo, feature_args)?
+        .select(packages, &repo.display().to_string())
+        .map_err(|message| Failure {
+            message,
+            code: EXIT_NOT_FOUND,
+        })
+}
+
 fn list(args: &ArgMatches) -> Result<(), Failure> {
     let repo = repo_root()?;
     let feature_args = feature_args(args);
-    let discovery = cargo::discover(&repo, &feature_args)?;
+    let packages = packages(args);
+    let mut discovery = cargo::discover(&repo, &feature_args)?;
 
-    let mut out = std::io::stdout().lock();
     if discovery.targets.is_empty() {
         return Err(format!(
             "no wall-clock bench targets in {}. They are named \
@@ -360,14 +416,22 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
         )
         .into());
     }
+    // Narrowing what this command already discovered is the pre-check the other
+    // subcommands make with `check_packages`, and it narrows a bare `list` too.
+    discovery
+        .select(&packages, &repo.display().to_string())
+        .map_err(|message| Failure {
+            message,
+            code: EXIT_NOT_FOUND,
+        })?;
 
     if !args.get_flag("cases") {
+        let mut out = std::io::stdout().lock();
         for target in &discovery.targets {
             let _ = writeln!(out, "{} {}", target.package, target.target);
         }
         return Ok(());
     }
-    drop(out);
 
     // Listing cases means running the binaries, which means building them.
     let plan = Plan {
@@ -375,6 +439,7 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
         target_dir: head_target_dir(&repo),
         out: PathBuf::new(),
         leg: HEAD_LEG.to_owned(),
+        packages,
         filter: args.get_one::<String>("filter").cloned(),
         seed: 0,
         replicates: 0,
@@ -408,18 +473,22 @@ fn run(args: &ArgMatches) -> Result<(), Failure> {
         .get_one::<String>("out")
         .map_or_else(|| default_out().join(&leg), PathBuf::from);
     outside_repo(&repo, &out, "a leg")?;
+    let feature_args = feature_args(args);
+    let packages = packages(args);
+    check_packages(&repo, &packages, &feature_args)?;
 
     let plan = Plan {
         dir: repo.clone(),
         target_dir: head_target_dir(&repo),
         out,
         leg,
+        packages,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
         target_ms: *args.get_one::<u64>("target-ms").expect("defaulted"),
         warmup_ms: *args.get_one::<u64>("warmup-ms").expect("defaulted"),
-        feature_args: feature_args(args),
+        feature_args,
         // A bare `run` is one leg, so it has no axis of its own. It records the
         // ordinary one, which is what makes two `run`s comparable with each
         // other and refuses to pair either with an arm leg.
@@ -472,11 +541,14 @@ fn ab_run(args: &ArgMatches) -> Result<(), Failure> {
         worktree::cache_root().join(format!("target-{}", &commit[..12.min(commit.len())]));
     outside_repo(&repo, &base_target_dir, "the base leg's build artifacts")?;
     let feature_args = feature_args(args);
+    let packages = packages(args);
+    check_packages(&repo, &packages, &feature_args)?;
     let common = Plan {
         dir: repo.clone(),
         target_dir: head_target_dir(&repo),
         out: out.join(HEAD_LEG),
         leg: HEAD_LEG.to_owned(),
+        packages,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
@@ -521,6 +593,11 @@ fn arms_run(args: &ArgMatches) -> Result<(), Failure> {
         outside_repo(&repo, dir, "an arm's build artifacts")?;
     }
 
+    // Either arm's answer would do. A bench target's existence is a property of
+    // the manifest, and no feature cargo resolves changes it.
+    let packages = packages(args);
+    check_packages(&repo, &packages, &head_features)?;
+
     // Both arms are the working tree. There is no worktree and no reference:
     // what separates them is what cargo was asked to compile, so the tree they
     // are compiled from has to be the same one down to the uncommitted changes.
@@ -529,6 +606,7 @@ fn arms_run(args: &ArgMatches) -> Result<(), Failure> {
         target_dir: head_target_dir,
         out: out.join(HEAD_LEG),
         leg: HEAD_LEG.to_owned(),
+        packages,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
@@ -726,6 +804,15 @@ mod tests {
             named_feature_args(&matches, "base-all-features", "base-features"),
             ["--all-features"]
         );
+    }
+
+    /// The flag appends one value per occurrence. A selector taking several
+    /// values at once would swallow `ab`'s required reference in
+    /// `bench ab -p spate-avro main`.
+    #[test]
+    fn the_package_selector_repeats() {
+        let matches = arms_matches(&["-p", "spate-avro", "--package", "spate-json"]);
+        assert_eq!(super::packages(&matches), ["spate-avro", "spate-json"]);
     }
 
     /// The parser is built once and shared by five subcommands; a duplicated

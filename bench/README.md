@@ -14,9 +14,16 @@ counting is comparable across shared machines and timing is not.
 make bench-list                              # every case, with its flags
 make bench-ab REF=main REPS=10               # compare this tree against a ref
 make bench-ab REF=main FILTER=decode         # only cases whose id contains this
+make bench-ab REF=main PACKAGE=spate-avro    # only that crate's targets
 make bench-arms HEAD_FEATURES=spate-json/simd   # compare two feature arms
 make bench-compare BASE=dir HEAD=dir FORMAT=markdown
 ```
+
+`PACKAGE=` narrows the *build*, by exact crate name and repeatable as a
+space-separated list; `FILTER=` narrows the case list within whatever was built.
+Narrowing never narrows the resolved features the two legs are guarded on, so a
+narrowed run can be refused over a feature neither leg built; `--allow features`
+waives that, and the report's header says it was waived.
 
 `bench-ab` builds the reference in a detached worktree, builds this tree, and
 interleaves the two — expect two full bench-profile builds before the first

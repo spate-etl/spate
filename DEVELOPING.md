@@ -195,8 +195,13 @@ machine you control.
 ```sh
 make bench-list                 # every case, with its flags
 make bench-ab REF=main REPS=10  # this tree against a reference
+make bench-ab REF=main PACKAGE=spate-avro       # only one crate's targets
 make bench-arms HEAD_FEATURES=spate-json/simd   # two feature arms of this tree
 ```
+
+`PACKAGE=` narrows the build as well as the report. Use it while writing or
+debugging one crate's cases, and leave it off for the run a change is accepted
+on.
 
 Targets follow the same rule as the counted tier: `benches/<name>_wall.rs` plus
 a `[[bench]]` with `harness = false`. Without the stanza cargo builds the target

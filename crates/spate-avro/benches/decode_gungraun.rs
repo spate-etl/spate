@@ -26,9 +26,16 @@
 //! Those six cases decode a single payload. The four groups below decode a
 //! batch of them (`corpora::BATCH`), because what they measure is a
 //! *steady state* rather than a first touch: the schema memo, the reader
-//! schema and the compiled decode spec are all state the deserializer carries
-//! across a poll batch, and a one-payload region only ever measures the walk
-//! that populates them.
+//! schema, the held datum reader and the compiled decode spec are all state
+//! the deserializer carries across a poll batch, and a one-payload region only
+//! ever measures the walk that populates them.
+//!
+//! The held reader makes that gap visible rather than theoretical. A
+//! single-payload region builds one and then decodes through it exactly once,
+//! so it counts the build on top of the resolution it already paid, and reads
+//! *higher* than the same code did before the reader was held — while the
+//! wall tier, which walks a whole corpus per iteration, reads lower. The two
+//! tiers disagreeing on that commit is the split working, not a fault.
 //!
 //! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo

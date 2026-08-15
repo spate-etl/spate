@@ -3997,6 +3997,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "hyper-util",
+ "ouroboros",
  "proptest",
  "schema_registry_converter",
  "serde",

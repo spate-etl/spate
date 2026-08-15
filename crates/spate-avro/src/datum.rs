@@ -52,7 +52,7 @@ use std::marker::PhantomData;
 /// # Parity and strictness
 ///
 /// Decoded values are identical to running the two-pass path
-/// (`from_avro_datum` + `from_value`) for every well-formed payload both
+/// (the `Value` decode plus `from_value`) for every well-formed payload both
 /// accept; the differential suite in `tests/datum_parity.rs` pins this.
 /// The deliberate differences are strictness on truncated payloads (this
 /// path errors where apache-avro 0.21 silently yields `Null`), a per-datum
@@ -181,12 +181,12 @@ mod tests {
     }
 
     fn raw_core() -> DecoderCore {
-        DecoderCore {
-            mode: SchemaSourceMode::Raw {
+        DecoderCore::new(
+            SchemaSourceMode::Raw {
                 schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER)),
             },
-            reader_schema: None,
-        }
+            None,
+        )
     }
 
     fn test_ack() -> AckRef {
@@ -254,12 +254,12 @@ mod tests {
     fn an_unusable_schema_is_unavailable_per_record_not_a_panic() {
         let mut compiled = crate::cache::CompiledSchema::compile(0, WRITER);
         compiled.datum = Err("schema 0 is not usable on the datum path: nope".into());
-        let core = DecoderCore {
-            mode: SchemaSourceMode::Raw {
+        let core = DecoderCore::new(
+            SchemaSourceMode::Raw {
                 schema: Arc::new(compiled),
             },
-            reader_schema: None,
-        };
+            None,
+        );
         let mut out = Collected::<Event>(Vec::new());
         let err = AvroDatumDeserializer::<Owned<Event>>::new(core)
             .deserialize(&raw_payload(&datum(4, "poison")), &test_ack(), &mut out)
@@ -277,13 +277,13 @@ mod tests {
         let schema = Schema::parse_str(WRITER).unwrap();
         let fp = schema.fingerprint::<Rabin>();
         let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
-        let core = DecoderCore {
-            mode: SchemaSourceMode::SingleObject {
+        let core = DecoderCore::new(
+            SchemaSourceMode::SingleObject {
                 schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER)),
                 fingerprint,
             },
-            reader_schema: None,
-        };
+            None,
+        );
         let mut framed = vec![0xC3, 0x01];
         framed.extend_from_slice(&fingerprint.to_le_bytes());
         framed.extend_from_slice(&datum(9, "so"));

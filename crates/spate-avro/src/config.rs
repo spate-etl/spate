@@ -282,10 +282,7 @@ impl AvroDeserializerBuilder {
             }
         };
         Ok(AvroDeserializerBuilder {
-            core: DecoderCore {
-                mode,
-                reader_schema,
-            },
+            core: DecoderCore::new(mode, reader_schema),
         })
     }
 

@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 apache-avro = { workspace = true }
+ouroboros = { workspace = true }
 bytes = { workspace = true }
 spate-core = { workspace = true }
 schema_registry_converter = { workspace = true, features = ["futures", "rustls_tls"] }

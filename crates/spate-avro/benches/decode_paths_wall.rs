@@ -47,15 +47,19 @@
 //!
 //! | Framework case | Floor |
 //! |---|---|
-//! | `raw_flat15_value` | `lib_flat15_value` |
-//! | `raw_flat15_serde` | `lib_flat15_typed` |
-//! | `raw_batch_value` | `lib_batch_value` |
-//! | `raw_batch_serde` | `lib_batch_typed` |
-//! | `resolved_reordered` | `lib_resolved` |
+//! | `raw_flat15_value` | `lib_flat15_value_held` |
+//! | `raw_batch_value` | `lib_batch_value_held` |
+//! | `resolved_reordered` | `lib_resolved_held` |
+//! | `raw_flat15_serde`, `raw_batch_serde` | none; the library offers no held-reader route that also reads a `T` out of the `Value` |
 //! | `raw_flat15_datum`, `raw_batch_datum`, `raw_batch_datum_borrowed` | none; see below |
 //! | `raw_batch_value_flatten`, `raw_batch_datum_flatten` | none; read each against its decode-only partner above, the same corpus without the flatten |
 //! | `resolved_writer_only`, `resolved_promoted`, `resolved_defaulted` | none; read against `lib_resolved` and `resolved_reordered`, one reader schema at a time |
 //! | `mode_*`, `shapes_*`, `err_*` | none; they price this crate's framing, schema cache and error isolation, which the library has no counterpart for. Read them against `raw_flat15_value` over the same records |
+//!
+//! The `*_held` floors are the partners, not the free-function ones: the crate
+//! holds a reader per writer schema id, so a floor calling `from_avro_datum`
+//! resolves per payload where its partner does not, and would read as the
+//! framework beating its own floor.
 //!
 //! Each floor runs a near-subset of its partner, which keeps the margin
 //! between them small and a relative reading of that margin noisy. A library
@@ -88,8 +92,9 @@
 //! run the same work as `lib_flat15_value`, `lib_batch_value` and
 //! `lib_resolved` through a `GenericDatumReader` built in setup rather than
 //! the free function that resolves the writer schema's named types on every
-//! call. Each pair prices that resolution, which is what this crate pays per
-//! payload at `deser.rs`'s `from_avro_datum` call.
+//! call. Each pair prices that resolution. The `*_held` half is what this
+//! crate does; the free-function half is what it did before it held a reader
+//! per schema id.
 //!
 //! ## Two metrics with a narrower meaning than their names
 //!

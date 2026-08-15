@@ -56,6 +56,44 @@ pub struct Discovery {
     pub features: Vec<String>,
 }
 
+impl Discovery {
+    /// Narrows [`targets`](Discovery::targets) to the named packages.
+    ///
+    /// Names are exact, and an empty selection keeps everything. `whose` names
+    /// the tree the names were looked for in, since the two legs of a
+    /// comparison are two trees and only one of them may be missing a package.
+    ///
+    /// [`features`](Discovery::features) is left whole. A selected package's
+    /// bench binary links whatever it depends on, `spate-bench` among them, so
+    /// a set narrowed to the selection would stop guarding packages the leg
+    /// compiled. Held whole it can refuse a narrowed run over a feature neither
+    /// leg built, which `--allow features` waives and the report's header names.
+    ///
+    /// # Errors
+    ///
+    /// When a name owns no wall-clock target here. Every such name is named.
+    pub fn select(&mut self, packages: &[String], whose: &str) -> Result<(), String> {
+        if packages.is_empty() {
+            return Ok(());
+        }
+        let owners: BTreeSet<&str> = self.targets.iter().map(|t| t.package.as_str()).collect();
+        let wanted: BTreeSet<&str> = packages.iter().map(String::as_str).collect();
+        let unknown: Vec<&str> = wanted.difference(&owners).copied().collect();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "no wall-clock bench target in {whose} belongs to {}. The packages that \
+                 declare one there are {}. A package that declares none and a name that \
+                 is no package at all both look like this.",
+                crate::quoted(unknown),
+                crate::quoted(owners.iter().copied())
+            ));
+        }
+        self.targets
+            .retain(|target| wanted.contains(target.package.as_str()));
+        Ok(())
+    }
+}
+
 // --- the four fields read out of `cargo metadata` ---------------------------
 
 #[derive(Debug, Deserialize)]
@@ -570,6 +608,91 @@ mod tests {
         let metadata: Metadata = serde_json::from_str(&both_members).expect("parses");
         let err = super::discovery_from(&metadata).expect_err("refused");
         assert!(err.contains("must be unique"), "{err}");
+    }
+
+    /// Two owning packages, so a selection has something to leave out.
+    /// `other` is promoted to a workspace member and given a resolve node of
+    /// its own; its target name stays distinct, unlike the duplicate case.
+    fn two_owners() -> super::Discovery {
+        let both = FIXTURE
+            .replace(
+                r#""workspace_members": ["path+file:///w/crates/spate-json#spate-json@0.1.0"]"#,
+                r#""workspace_members": ["path+file:///w/crates/spate-json#spate-json@0.1.0", "registry+https://github.com/rust-lang/crates.io-index#other@1.0.0"]"#,
+            )
+            .replace(
+                r#""resolve": {"nodes": [{"#,
+                r#""resolve": {"nodes": [{"id": "registry+https://github.com/rust-lang/crates.io-index#other@1.0.0", "features": ["std"]}, {"#,
+            );
+        let metadata: Metadata = serde_json::from_str(&both).expect("parses");
+        super::discovery_from(&metadata).expect("discovers")
+    }
+
+    /// A selection narrows the targets and leaves the resolved features whole.
+    /// `other/std` surviving is the guard staying in force over a package the
+    /// selected one links but does not name.
+    #[test]
+    fn a_selection_narrows_the_targets_and_leaves_the_features_whole() {
+        let mut found = two_owners();
+        found
+            .select(&["spate-json".to_owned()], "the tree")
+            .expect("selects");
+
+        assert_eq!(
+            found.targets,
+            [super::BenchTarget {
+                package: "spate-json".to_owned(),
+                target: "decode_wall".to_owned(),
+            }]
+        );
+        assert_eq!(
+            found.features,
+            ["other/std", "spate-json/default", "spate-json/simd"]
+        );
+    }
+
+    /// A name that owns no target is a typo or a crate with no wall target, and
+    /// the reader cannot tell which from the name alone, so the message names
+    /// the set that does work.
+    #[test]
+    fn an_unknown_package_is_refused_and_names_the_ones_that_declare_a_target() {
+        let mut found = two_owners();
+        let err = found
+            .select(&["spate-jsn".to_owned()], "the tree")
+            .expect_err("refused");
+
+        assert!(err.contains("'spate-jsn'"), "{err}");
+        assert!(
+            err.contains("'other'") && err.contains("'spate-json'"),
+            "{err}"
+        );
+        assert_eq!(found, two_owners(), "a refusal narrowed the discovery");
+    }
+
+    /// Measuring a subset of what was asked for would report a scope the flags
+    /// do not describe.
+    #[test]
+    fn an_unknown_name_beside_a_known_one_is_still_refused() {
+        let mut found = two_owners();
+        let err = found
+            .select(&["spate-json".to_owned(), "nope".to_owned()], "the tree")
+            .expect_err("refused");
+
+        // The known name appears in the second clause, which lists what does
+        // work, so the first clause is what has to be checked.
+        let (named, _) = err.split_once(". The packages").expect("two clauses");
+        assert!(named.contains("'nope'"), "{err}");
+        assert!(
+            !named.contains("'spate-json'"),
+            "a known name was reported as unknown: {err}"
+        );
+    }
+
+    /// The default path, which every unnarrowed run takes.
+    #[test]
+    fn an_empty_selection_changes_nothing() {
+        let mut found = two_owners();
+        found.select(&[], "the tree").expect("selects");
+        assert_eq!(found, two_owners());
     }
 
     /// `executables_in` itself, over the lines cargo emits, including a

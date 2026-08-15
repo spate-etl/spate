@@ -24,6 +24,23 @@
 //! they are near-deterministic, and a five-percent floor there would suppress a
 //! real regression.
 //!
+//! # A derived metric and the metric it comes from
+//!
+//! `records_per_s` and `bytes_per_s` are not measurements. A case declares how
+//! many items or bytes an iteration covers, and the rate is that constant over
+//! the wall time with the iteration count pinned across both legs, so each is
+//! `const / wall_ns_per_iter` on every replicate.
+//!
+//! A floor applied to both separately asks two different questions about one
+//! measurement. A wall difference `d` reaches a rate as `-d / (1 + d)`, and
+//! `|d| >= f` and `|-d / (1 + d)| >= f` are not the same condition: either side
+//! of the floor lies a band where the rows describing one timing event
+//! disagree. A derived row therefore carries the verdict of the quantity that
+//! was measured, and keeps its own difference, interval and floor, which
+//! describe the metric a reader asked for. [`derived_from`] names that quantity.
+//! [`crate::compare::Row::is_finding`] is what keeps the derived row out of the
+//! significant-changes table, so one timing event is one finding.
+//!
 //! Fewer than five paired replicates prints the difference and declines to judge
 //! it. Below that, the tail of a bootstrap is decided by which single pair was
 //! drawn least often, so an interval would be an assertion about the resampler
@@ -65,7 +82,10 @@ use std::hash::Hasher as _;
 
 use twox_hash::XxHash64;
 
-use crate::record::{ALLOC_BYTES_PER_ITER, ALLOC_COUNT_PER_ITER, PEAK_RSS_BYTES};
+use crate::record::{
+    ALLOC_BYTES_PER_ITER, ALLOC_COUNT_PER_ITER, BYTES_PER_S, PEAK_RSS_BYTES, RECORDS_PER_S,
+    WALL_NS_PER_ITER,
+};
 use crate::rng::SplitMix64;
 
 /// Below this many paired replicates, a difference is printed without a
@@ -98,6 +118,21 @@ pub const RSS_FLOOR: f64 = 0.10;
 /// that allocates two percent more really does allocate two percent more, and a
 /// five-percent floor would suppress it.
 pub const ALLOC_FLOOR: f64 = 0.01;
+
+/// The metric a derived one is computed from, or `None` when it is measured.
+///
+/// A throughput is the case's declared item or byte count over the wall time,
+/// so it carries no information the wall time does not. A caller holding a
+/// case's rows uses this to give the derived row the measured row's verdict;
+/// judging the two against a floor apiece makes them contradict each other in a
+/// band either side of it.
+#[must_use]
+pub fn derived_from(metric: &str) -> Option<&'static str> {
+    match metric {
+        RECORDS_PER_S | BYTES_PER_S => Some(WALL_NS_PER_ITER),
+        _ => None,
+    }
+}
 
 /// The floor this metric is judged against, as a fraction of the base mean.
 #[must_use]

@@ -646,7 +646,7 @@ impl RowReport {
             ci_high: row.analysis.ci_high,
             floor: row.analysis.floor,
             verdict: row.analysis.verdict.token(),
-            significant: !row.erratic && row.analysis.verdict.is_significant(),
+            significant: row.is_finding(),
         }
     }
 }

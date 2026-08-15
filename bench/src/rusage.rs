@@ -204,11 +204,20 @@ mod tests {
         );
 
         // Rising above the baseline is what makes a figure attributable, and
-        // the figure is the peak itself rather than the growth.
+        // the figure is the peak itself rather than the growth. The mark is
+        // monotonic and every call reads it afresh, so the reported figure
+        // falls between the mark read before the call and the mark read after.
+        // The growth sits a whole baseline below the peak, which the assertion
+        // above proved non-zero, so it falls outside that window.
         let reported = watch
             .peak_rss_bytes()
             .expect("the ballast rose above the baseline");
-        assert_eq!(reported, peak);
+        let after = peak_rss_bytes().expect("readable");
+        assert!(
+            (peak..=after).contains(&reported),
+            "the watch reported {reported}, outside the [{peak}, {after}] the \
+             mark held across the call — it is not reading the peak"
+        );
 
         drop(ballast);
         assert!(

@@ -79,7 +79,7 @@
 //!
 //! # Why a bootstrap
 //!
-//! The per-pair differences are not normal, there are ten of them, and their
+//! The per-pair differences are not normal, there are few of them, and their
 //! distribution is decided by the machine rather than by anything modellable.
 //! The percentile bootstrap asks the data what its own spread is, which needs
 //! no distributional assumption and no history, and there is no history here
@@ -152,9 +152,9 @@ const Z: f64 = 1.644_853_626_951_472_2;
 
 /// `t(0.95, v)` for `v` degrees of freedom, indexed by `v - 1`.
 ///
-/// Tabulated over the range where the correction is largest and an
-/// approximation is worst: at four degrees of freedom the expansion
-/// [`t_quantile`] falls back on is 5% low.
+/// Tabulated over the range where the correction is largest and the expansion
+/// [`t_quantile`] falls back on is least accurate. That function states where
+/// the table gives way and how close the expansion is either side of it.
 const T_95: [f64; 30] = [
     6.313_751_515,
     2.919_985_580,
@@ -191,8 +191,9 @@ const T_95: [f64; 30] = [
 /// `t(0.95, v)`, the one-sided critical value each tail of the interval sits at.
 ///
 /// [`T_95`] up to thirty degrees of freedom, and the Cornish-Fisher expansion of
-/// the quantile beyond it, which is within 0.002% of exact from there on and
-/// converges to [`Z`].
+/// the quantile beyond it. The expansion is 5% low at two degrees of freedom and
+/// 0.8% low at four, which is what the table is for; from thirty on it is within
+/// 0.002% and converges to [`Z`].
 fn t_quantile(freedom: usize) -> f64 {
     // One degree of freedom is the floor. The table starts there and the
     // expansion divides by the count, so zero would otherwise reach the
@@ -280,8 +281,7 @@ pub enum Verdict {
     /// The rule was not applied. The difference is still printed, and
     /// [`Analysis::replicates_needed`] says what it would take to apply it.
     ///
-    /// Two causes, stated in the module header: fewer than [`MIN_REPLICATES`]
-    /// paired replicates, or an interval no narrower than the metric's floor.
+    /// The module header states when.
     NoVerdict,
 }
 
@@ -442,10 +442,8 @@ pub fn analyse(
         // a difference this size is exactly what a wide interval must not hide.
         (cleared, None)
     } else if half_width >= floor {
-        // The floor asks whether a difference is worth telling anybody, and can
-        // only answer that while it is wider than the interval. An interval that
-        // straddles the floor leaves the question open, and answering it from a
-        // point estimate reports the machine.
+        // An interval straddling the floor leaves the floor's question open;
+        // answering it from the point estimate reports the machine.
         (Verdict::NoVerdict, replicates_for(half_width, n, floor))
     } else if (ci_low > 0.0 || ci_high < 0.0) && delta.abs() >= floor {
         // Both halves still asked. A widened interval has two arms of different

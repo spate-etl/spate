@@ -63,7 +63,7 @@
 //! itself and must flag nothing, because a flag there means the harness is
 //! measuring its own noise rather than the code under test.
 //!
-//! Both narrowings belong to the claim: it is made about this target at that
+//! Both narrowings belong to the claim, which is made about this target at that
 //! count. [`stats`] states what sets the count another target needs.
 //!
 //! # Declaring a target

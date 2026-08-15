@@ -363,9 +363,8 @@ fn guard_out(base_plan: &Plan, head_plan: &Plan) -> Result<(), String> {
 /// before measuring, intersect, calibrate once and pin, prime, interleave) live
 /// here and are therefore the same on both axes by construction.
 fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
-    // Both callers guard this, each before the setup it does that a bad count
-    // should not cost. Restated here because the interleave below is what the
-    // guard is for, and a third caller is where it would go missing.
+    // Both callers guard this, each before the setup a bad count should not
+    // cost. Asserted again here, beside the interleave the guard exists for.
     debug_assert!(
         guard_parity(head_plan.replicates).is_ok(),
         "an odd replicate count reached the interleave"
@@ -619,7 +618,7 @@ fn guard_parity(replicates: u32) -> Result<(), String> {
     Err(format!(
         "--replicates is {replicates}, and a comparison needs an even count. The two legs \
          alternate which goes first, so {replicates} runs one leg first {} times and the other \
-         {}, and a cost of running second lands on one leg rather than cancelling. Use {}.",
+         {}, and a cost of running second lands on one leg rather than canceling. Use {}.",
         replicates.div_ceil(2),
         replicates / 2,
         even_neighbours.join(" or "),
@@ -650,9 +649,9 @@ mod tests {
         let order: Vec<bool> = (0..6).map(base_first).collect();
         assert_eq!(order, [true, false, true, false, true, false]);
 
-        // At every count a comparison accepts, rather than at one of them. An
-        // odd count cannot satisfy this — it is `3 == 2` at five — which is
-        // what `guard_parity` refuses before a leg is built.
+        // At every count a comparison accepts. `guard_parity` refuses the odd
+        // ones before a leg is built, which is what makes this assertion the
+        // right one to make.
         for count in (2..=64).step_by(2) {
             let first = (0..count)
                 .filter(|replicate| base_first(*replicate))

@@ -243,7 +243,7 @@ impl Row {
     /// one timing event twice.
     ///
     /// A derived row whose measured metric is absent keeps the verdict it was
-    /// analysed with, and is a finding on its own account. Nothing else in the
+    /// analyzed with, and is a finding on its own account. Nothing else in the
     /// report carries that difference.
     ///
     /// Asked here rather than at each caller, so the table a reader sees and the
@@ -376,10 +376,9 @@ impl Comparison {
 
     /// The rows the rule reached no conclusion about.
     ///
-    /// Too few paired replicates, or an interval no narrower than the metric's
-    /// floor; [`crate::stats::Verdict::NoVerdict`] states both. There is a
-    /// difference to print and nothing concluded from it. Disjoint from
-    /// [`Comparison::significant`].
+    /// There is a difference to print and nothing concluded from it. Disjoint
+    /// from [`Comparison::significant`]; [`crate::stats::Verdict::NoVerdict`]
+    /// says when a row lands here.
     pub fn unjudged(&self) -> impl Iterator<Item = &Row> {
         self.rows
             .iter()
@@ -703,7 +702,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
             .collect();
 
         // Where this case's rows start, so the derived ones can be reconciled
-        // against the measured one once every metric has been analysed. The
+        // against the measured one once every metric has been analyzed. The
         // metric names are visited in sorted order, and `wall_ns_per_iter` sorts
         // after both throughputs.
         let case_start = rows.len();
@@ -871,7 +870,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
 
 /// Gives each derived row the verdict of the metric it comes from.
 ///
-/// Takes one case's rows, every metric already analysed.
+/// Takes one case's rows, every metric already analyzed.
 /// [`crate::stats::derived_from`] states the relationship and why one verdict
 /// has to cover both. The derived row keeps its own difference, interval and
 /// floor; the verdict and the replicate count that goes with it are taken.
@@ -881,7 +880,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
 /// fell are one event, and both are `Regressed`.
 ///
 /// A case whose measured metric is absent leaves its derived rows as they were
-/// analysed, and not marked inherited. It can fail to pair, carry records
+/// analyzed, and not marked inherited. It can fail to pair, carry records
 /// disagreeing on a unit, or be one [`crate::stats::analyse`] refused.
 fn inherit_derived_verdicts(rows: &mut [Row]) {
     for index in 0..rows.len() {
@@ -896,9 +895,9 @@ fn inherit_derived_verdicts(rows: &mut [Row]) {
             continue;
         };
         // Both together. The count says what applying the rule to this row
-        // would take, so a row that took someone else's verdict has to take
-        // their count with it — its own describes a decision that was not made,
-        // and the two render side by side as "improved (needs 8 replicates)".
+        // would take, so a row taking another row's verdict takes its count
+        // too. Kept apart, the two render side by side as
+        // "improved (needs 8 replicates)".
         rows[index].analysis.verdict = verdict;
         rows[index].analysis.replicates_needed = needed;
         rows[index].inherited = true;

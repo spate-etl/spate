@@ -56,8 +56,14 @@
 //! reaches the floor unaided, and which case clears it is decided by the run.
 //! [`replicates_for`] names the count that brings the interval back inside the
 //! floor, so a run too short for a case degrades to "no verdict, needs
-//! eighteen" rather than to a difference the next run contradicts. The default
-//! is ten.
+//! eighteen" rather than to a difference the next run contradicts.
+//!
+//! The default is twenty, and it is a default rather than a rule. What a
+//! target needs is set by its own spread and by the machine it runs on, both
+//! of which this module measures per case and neither of which one number
+//! covers: a case whose differences barely move is trustworthy at six, and one
+//! that swings ten percent between replicates needs nearer thirty. A count
+//! below what a case needs costs verdicts on that case and nothing else.
 //!
 //! # Pairing, and why it is not a ratio of means
 //!

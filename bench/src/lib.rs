@@ -62,6 +62,10 @@
 //! compares it against itself and must flag nothing, because a flag there means
 //! the harness is measuring its own noise rather than the code under test.
 //!
+//! Six there, against a default of twenty, is what those four cases need and
+//! not a count to reuse. A real target's cases each say how many they need; see
+//! [`stats`].
+//!
 //! # Declaring a target
 //!
 //! A wall-clock target is a bench target whose name ends in `_wall`, in any

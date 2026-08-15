@@ -12,7 +12,7 @@ counting is comparable across shared machines and timing is not.
 
 ```sh
 make bench-list                              # every case, with its flags
-make bench-ab REF=main REPS=10               # compare this tree against a ref
+make bench-ab REF=main REPS=20               # compare this tree against a ref
 make bench-ab REF=main FILTER=decode         # only cases whose id contains this
 make bench-ab REF=main PACKAGE=spate-avro    # only that crate's targets
 make bench-arms HEAD_FEATURES=spate-json/simd   # compare two feature arms
@@ -56,3 +56,6 @@ Each bench target's own `//!` header is the account of what *that* target
 measures and the traps particular to it. `benches/selftest_wall.rs` carries every
 shape the case builder supports, and is what the A/A acceptance run drives:
 `make bench-ab REF=HEAD REPS=6` compares it against itself and must flag nothing.
+Six is what those four cases need, against a default of twenty; a real target's
+cases each say how many they need, and a run too short for one declines a
+verdict on it and names the count.

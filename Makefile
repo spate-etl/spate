@@ -98,7 +98,7 @@ bench-gungraun-check: ## Every instruction-count bench still builds (no valgrind
 # Plain variables, not `$(or ...)`, so a command-line `REF=` still wins and a
 # value containing a comma is not read as more arguments.
 REF ?= main
-REPS ?= 10
+REPS ?= 20
 # A space-separated list, one `--package` per name: the driver's flag repeats
 # rather than splitting a value.
 PACKAGE ?=
@@ -111,7 +111,7 @@ bench-list: ## Every wall-clock bench case, with its flags (PACKAGE=crate, FILTE
 	cargo run -p spate-bench --features driver --locked --bin bench -- list --cases \
 		$(foreach p,$(PACKAGE),--package "$(p)") $(if $(FILTER),--filter "$(FILTER)")
 
-bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=10 PACKAGE=crate FILTER=substr
+bench-ab: ## Compare this tree against a ref: make bench-ab REF=main REPS=20 PACKAGE=crate FILTER=substr
 	cargo run -p spate-bench --features driver --locked --bin bench -- ab "$(REF)" \
 		--replicates "$(REPS)" --format "$(FORMAT)" \
 		$(foreach p,$(PACKAGE),--package "$(p)") $(if $(FILTER),--filter "$(FILTER)")

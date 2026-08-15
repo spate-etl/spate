@@ -350,9 +350,10 @@ pub struct Analysis {
     /// The conclusion.
     pub verdict: Verdict,
     /// Paired replicates this metric would need before the rule can be applied
-    /// to it, and `None` whenever it was applied.
+    /// to it.
     ///
-    /// Set for every [`Verdict::NoVerdict`]. `None` past
+    /// `None` where the rule was applied, and `None` for a
+    /// [`Verdict::NoVerdict`] whose spread is past
     /// [`MAX_SUGGESTED_REPLICATES`], where the answer is that this case is not
     /// measurable here rather than a count.
     pub replicates_needed: Option<usize>,

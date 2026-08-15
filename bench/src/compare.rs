@@ -223,6 +223,11 @@ pub struct Row {
     pub erratic: bool,
     /// Why the case is noisy, if it said.
     pub erratic_reason: Option<String>,
+    /// Whether the verdict came from the metric this one is derived from.
+    ///
+    /// False for a measured metric, and false for a derived one whose measured
+    /// metric this comparison does not carry.
+    pub inherited: bool,
     /// The decided comparison.
     pub analysis: Analysis,
 }
@@ -232,18 +237,20 @@ impl Row {
     ///
     /// Two exclusions on top of the verdict. An erratic case never reaches the
     /// table, whatever its interval says: it is reported so a reader can look,
-    /// and excluded so a known-noisy number cannot be the headline. A derived
-    /// metric never reaches it either, because it already carries the verdict of
-    /// the metric it comes from (see [`crate::stats::derived_from`]) and listing
-    /// it again would count one timing event as three findings.
+    /// and excluded so a known-noisy number cannot be the headline. A row that
+    /// took its verdict from the metric it is derived from does not reach it
+    /// either, since that metric is in the table already and listing both counts
+    /// one timing event twice.
+    ///
+    /// A derived row whose measured metric is absent keeps the verdict it was
+    /// analysed with, and is a finding on its own account. Nothing else in the
+    /// report carries that difference.
     ///
     /// Asked here rather than at each caller, so the table a reader sees and the
     /// `significant` field a script reads cannot answer it differently.
     #[must_use]
     pub fn is_finding(&self) -> bool {
-        !self.erratic
-            && crate::stats::derived_from(&self.metric).is_none()
-            && self.analysis.verdict.is_significant()
+        !self.erratic && !self.inherited && self.analysis.verdict.is_significant()
     }
 }
 
@@ -379,15 +386,25 @@ impl Comparison {
             .filter(|row| !row.analysis.verdict.is_judged())
     }
 
-    /// The largest replicate count any unjudged row asks for, and `None` when
-    /// every row was judged or none of them named a count.
+    /// The largest replicate count the unjudged rows ask for, and whether any of
+    /// them asks for more than a count can give.
     ///
-    /// The largest, since that is the count at which every row is judged.
+    /// The largest, since that is the count that judges every row naming one.
+    /// A row past [`crate::stats::MAX_SUGGESTED_REPLICATES`] names nothing and
+    /// is reported by the flag instead, so a run holding both says both.
+    ///
+    /// Erratic rows are left out. The rule never flags one whatever its
+    /// interval, so a count that would make it judgeable buys nothing, and
+    /// `selftest_wall` declares one on purpose.
     #[must_use]
-    pub fn replicates_needed(&self) -> Option<usize> {
-        self.unjudged()
-            .filter_map(|row| row.analysis.replicates_needed)
-            .max()
+    pub fn replicates_needed(&self) -> (Option<usize>, bool) {
+        let rows = || self.unjudged().filter(|row| !row.erratic);
+        (
+            rows()
+                .filter_map(|row| row.analysis.replicates_needed)
+                .max(),
+            rows().any(|row| row.analysis.replicates_needed.is_none()),
+        )
     }
 
     /// Every guarded field the two legs disagree about.
@@ -758,6 +775,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
                     higher_is_better,
                     erratic,
                     erratic_reason: erratic_reason.clone(),
+                    inherited: false,
                     analysis,
                 }),
                 Err(why) => not_comparable.push(NotComparable {
@@ -862,9 +880,9 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
 /// the verdict transfers unchanged: a wall time that rose and a throughput that
 /// fell are one event, and both are `Regressed`.
 ///
-/// A case whose measured metric is absent, having failed to pair or carried
-/// records disagreeing on a unit, leaves its derived rows as they were
-/// analysed.
+/// A case whose measured metric is absent leaves its derived rows as they were
+/// analysed, and not marked inherited. It can fail to pair, carry records
+/// disagreeing on a unit, or be one [`crate::stats::analyse`] refused.
 fn inherit_derived_verdicts(rows: &mut [Row]) {
     for index in 0..rows.len() {
         let Some(measured) = crate::stats::derived_from(&rows[index].metric) else {
@@ -883,6 +901,7 @@ fn inherit_derived_verdicts(rows: &mut [Row]) {
         // and the two render side by side as "improved (needs 8 replicates)".
         rows[index].analysis.verdict = verdict;
         rows[index].analysis.replicates_needed = needed;
+        rows[index].inherited = true;
     }
 }
 
@@ -1365,6 +1384,44 @@ mod tests {
             );
         }
         assert_eq!(out.significant().count(), 0);
+    }
+
+    /// A throughput whose wall time this comparison does not carry is the only
+    /// row describing that difference, so it is a finding on its own account.
+    ///
+    /// Excluding every derived row unconditionally leaves the report saying
+    /// "None. No metric cleared both halves of the rule below." beside a
+    /// throughput that halved.
+    #[test]
+    fn a_derived_row_with_no_measured_row_is_a_finding() {
+        let values = ten(1000.0);
+        let halved: Vec<f64> = values.iter().map(|v| v * 2.0).collect();
+        let mut base = Builder::new("base")
+            .throughput(1024.0, 65536.0)
+            .series("a", &values)
+            .build();
+        let mut head = Builder::new("head")
+            .throughput(1024.0, 65536.0)
+            .series("a", &halved)
+            .build();
+        // As a leg that lost the metric looks: `bench compare` accepts two
+        // directories it did not produce, and pairs whatever they hold.
+        for leg in [&mut base, &mut head] {
+            for record in &mut leg.records {
+                record.metrics.remove(WALL_NS_PER_ITER);
+            }
+        }
+
+        let out = compare(base, head, &[]).expect("compares");
+        let rate = out
+            .rows
+            .iter()
+            .find(|row| row.metric == RECORDS_PER_S)
+            .expect("rate");
+        assert!(!rate.inherited);
+        assert_eq!(rate.analysis.verdict, Verdict::Regressed);
+        assert!(rate.is_finding());
+        assert_eq!(out.significant().count(), 2);
     }
 
     /// The measurement from the report, in nanoseconds per iteration. Its mean

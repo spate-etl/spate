@@ -607,17 +607,22 @@ fn guard_parity(replicates: u32) -> Result<(), String> {
     if replicates.is_multiple_of(2) {
         return Ok(());
     }
+    // Both neighbours are checked rather than computed: one is absent at the
+    // ends of the range, and `u32::MAX` is odd, so an unchecked `+ 1` reaches
+    // this line and panics on the input it exists to reject.
+    let even_neighbours: Vec<String> = [replicates.checked_sub(1), replicates.checked_add(1)]
+        .into_iter()
+        .flatten()
+        .filter(|count| *count >= 2)
+        .map(|count| count.to_string())
+        .collect();
     Err(format!(
         "--replicates is {replicates}, and a comparison needs an even count. The two legs \
          alternate which goes first, so {replicates} runs one leg first {} times and the other \
          {}, and a cost of running second lands on one leg rather than cancelling. Use {}.",
         replicates.div_ceil(2),
         replicates / 2,
-        if replicates == 1 {
-            "2".to_owned()
-        } else {
-            format!("{} or {}", replicates - 1, replicates + 1)
-        },
+        even_neighbours.join(" or "),
     ))
 }
 
@@ -667,9 +672,12 @@ mod tests {
         assert!(err.contains("first 3 times and the other 2"), "{err}");
         assert!(err.contains("Use 4 or 6."), "{err}");
 
-        // One replicate has no count below it to suggest.
-        let err = guard_parity(1).expect_err("odd");
-        assert!(err.contains("Use 2."), "{err}");
+        // One replicate has no count below it to suggest, and the largest odd
+        // count has none above it. Both reach the message rather than the
+        // arithmetic that would produce it.
+        assert!(guard_parity(1).expect_err("odd").contains("Use 2."),);
+        let err = guard_parity(u32::MAX).expect_err("odd");
+        assert!(err.contains(&format!("Use {}.", u32::MAX - 1)), "{err}");
 
         for even in (2..=20).step_by(2) {
             assert!(guard_parity(even).is_ok(), "at {even}");

@@ -47,13 +47,12 @@ pub fn decision_rule() -> String {
          interval on the mean per-pair relative difference excludes zero, AND the difference is \
          at least the metric's floor — {default:.0}% for wall time, CPU time and throughput, \
          {rss:.0}% for the peak resident set, {alloc:.0}% for allocation totals. The interval is \
-         widened for the sample size, so its stated coverage is its coverage. Replicates are \
-         interleaved and paired by index, so machine drift cancels within a pair. The rule is \
-         applied only where it can separate a real difference from the machine: fewer than {min} \
-         pairs, or an interval no narrower than the floor, print a difference and no verdict, \
-         with the replicate count that metric would need. A throughput carries the verdict of \
-         the wall time it is computed from, and is not counted again beside it. A case marked \
-         erratic is reported and never flagged.",
+         widened for the sample size. Replicates are interleaved and paired by index, so machine \
+         drift cancels within a pair. An interval lying wholly past the floor is flagged whatever \
+         its width. An interval straddling the floor, or fewer than {min} pairs, prints a \
+         difference with no verdict and, where more replicates would settle it, the count that \
+         metric needs. A throughput carries the verdict of the wall time it is computed from, and \
+         is not counted again beside it. A case marked erratic is reported and never flagged.",
         confidence = CONFIDENCE * 100.0,
         default = DEFAULT_FLOOR * 100.0,
         rss = RSS_FLOOR * 100.0,
@@ -81,8 +80,8 @@ pub enum Summary {
         unjudged: usize,
         /// How many rows there were in total.
         total: usize,
-        /// The largest replicate count those rows ask for, when any named one.
-        needed: Option<usize>,
+        /// What [`Comparison::replicates_needed`] says about those rows.
+        needed: (Option<usize>, bool),
     },
     /// The rule was applied and no metric cleared it.
     NoneCleared,
@@ -161,12 +160,17 @@ impl Summary {
 /// What to do about rows the rule was not applied to, stated once for every
 /// sentence that mentions them.
 ///
-/// A count when one is within reach, and otherwise the fact that no count is:
-/// a case whose spread is that wide is not measured by running it more times.
-fn advice(needed: Option<usize>) -> String {
+/// Both halves of [`Comparison::replicates_needed`], because a run can hold
+/// rows a longer run would judge and rows no run on this machine will.
+fn advice(needed: (Option<usize>, bool)) -> String {
     match needed {
-        Some(replicates) => format!(" Re-run with --replicates {replicates}."),
-        None => " No replicate count within reach would apply it.".to_owned(),
+        (Some(replicates), false) => format!(" Re-run with --replicates {replicates}."),
+        (Some(replicates), true) => format!(
+            " Re-run with --replicates {replicates}; the rest are past what more \
+             replicates will settle."
+        ),
+        (None, true) => " No replicate count within reach would apply it.".to_owned(),
+        (None, false) => String::new(),
     }
 }
 
@@ -757,6 +761,7 @@ mod tests {
             higher_is_better: false,
             erratic,
             erratic_reason: erratic.then(|| "the allocator decides".to_owned()),
+            inherited: false,
             analysis: Analysis {
                 replicates: 10,
                 base_mean: 1000.0,
@@ -896,6 +901,53 @@ mod tests {
             );
             assert!(rendered.contains("--replicates 28"), "{rendered}");
         }
+    }
+
+    /// A run holding both kinds of declined row says both. Advising only the
+    /// count leaves the reader to discover on the re-run that one row was never
+    /// going to be judged.
+    #[test]
+    fn a_run_holding_both_kinds_of_declined_row_says_both() {
+        let mut reachable = unjudged_row("reachable");
+        reachable.analysis.replicates_needed = Some(28);
+        let mut beyond = unjudged_row("beyond");
+        beyond.analysis.replicates_needed = None;
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), reachable, beyond],
+            Vec::new(),
+        );
+
+        let rendered = table(&cmp);
+        assert!(rendered.contains("--replicates 28"), "{rendered}");
+        assert!(
+            rendered.contains("past what more replicates will settle"),
+            "{rendered}"
+        );
+    }
+
+    /// An erratic case is never flagged whatever its interval, so a count that
+    /// would make it judgeable buys nothing and must not set the advice for the
+    /// run. `selftest_wall` declares one on purpose, in every acceptance run.
+    #[test]
+    fn an_erratic_row_does_not_set_the_replicate_advice() {
+        let mut noisy = unjudged_row("erratic_case");
+        noisy.erratic = true;
+        noisy.analysis.replicates_needed = Some(120);
+        let mut real = unjudged_row("real_case");
+        real.analysis.replicates_needed = Some(14);
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), noisy, real],
+            Vec::new(),
+        );
+
+        assert_eq!(cmp.replicates_needed(), (Some(14), false));
+        let rendered = table(&cmp);
+        assert!(rendered.contains("--replicates 14"), "{rendered}");
+        assert!(!rendered.contains("--replicates 120"), "{rendered}");
+
+        // Its own row still carries its own count. What the erratic flag
+        // withholds is the headline, not the number.
+        assert!(rendered.contains("needs 120 replicates"), "{rendered}");
     }
 
     /// A spread no count within the cap reaches says so, and names none.
@@ -1123,7 +1175,8 @@ mod tests {
         assert!(rule.contains("10% for the peak resident set"), "{rule}");
         assert!(rule.contains("1% for allocation totals"), "{rule}");
         assert!(rule.contains("fewer than 5 pairs"), "{rule}");
-        assert!(rule.contains("no narrower than the floor"), "{rule}");
+        assert!(rule.contains("straddling the floor"), "{rule}");
+        assert!(rule.contains("wholly past the floor"), "{rule}");
         assert!(rule.contains("widened for the sample size"), "{rule}");
     }
 

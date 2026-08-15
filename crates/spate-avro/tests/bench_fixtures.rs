@@ -318,6 +318,49 @@ fn the_batch_corpus_decodes_on_every_path() {
     assert_eq!(outcomes(deser, &payloads), want, "the borrowed path");
 }
 
+/// The two `lib_*_read_deser` cases drive `apache-avro`'s own single-pass
+/// route over the bench corpora. It emits each writer-schema field under that
+/// field's name, so a target whose field is *renamed* stops decoding, and it
+/// refuses target types the two-pass route accepts. Whether a corpus reaches
+/// it is therefore a property of the fixture rather than of the harness. A
+/// bench run asserts that by panicking on a machine that runs benches; this
+/// asserts it everywhere `cargo test` does.
+///
+/// Each payload is asserted to be consumed whole, so a target that decoded
+/// only a prefix would fail here rather than report a shorter region.
+#[test]
+fn the_corpora_decode_on_apache_avros_single_pass_route() {
+    use apache_avro::reader::datum::GenericDatumReader;
+
+    let flat_schema = apache_avro::Schema::parse_str(orders::SCHEMA).unwrap();
+    let reader = GenericDatumReader::builder(&flat_schema).build().unwrap();
+    let flat = corpora::order_datums();
+    assert_eq!(flat.len(), corpora::BATCH);
+    for payload in &flat {
+        let mut cursor = payload.as_slice();
+        let _: orders::Order = reader
+            .read_deser(&mut cursor)
+            .expect("the flat corpus decodes on the single-pass library route");
+        assert!(cursor.is_empty(), "the datum was not consumed whole");
+    }
+
+    let batch_schema = apache_avro::Schema::parse_str(batches::BATCH_SCHEMA).unwrap();
+    let reader = GenericDatumReader::builder(&batch_schema).build().unwrap();
+    let batches = batches::order_batches();
+    assert_eq!(batches.len(), usize::try_from(batches::BATCHES).unwrap());
+    for payload in &batches {
+        let mut cursor = payload.as_slice();
+        let decoded: batches::OrderPlaced = reader
+            .read_deser(&mut cursor)
+            .expect("the batch corpus decodes on the single-pass library route");
+        assert!(cursor.is_empty(), "the datum was not consumed whole");
+        assert_eq!(
+            decoded.lines.len(),
+            usize::try_from(batches::LINES_PER_BATCH).unwrap()
+        );
+    }
+}
+
 /// The flatten both bench arms drive drops the same lines whichever record it
 /// walks. The two are separate traversals — one positional over the decoded
 /// tree, one over the typed record — so a change to either alone would make

@@ -41,33 +41,55 @@
 //!
 //! ## Which cases carry a floor
 //!
-//! One floor per library entry point, over the same bytes as its framework
-//! partner. Every case in the target appears:
+//! A floor is the library call a framework case makes, over the same bytes, so
+//! that a regression in the dependency is not read as one in the framework. It
+//! applies where the framework case reaches `apache-avro` to decode:
 //!
 //! | Framework case | Floor |
 //! |---|---|
 //! | `raw_flat15_value` | `lib_flat15_value` |
-//! | `raw_flat15_serde`, `raw_flat15_datum` | `lib_flat15_typed` |
+//! | `raw_flat15_serde` | `lib_flat15_typed` |
 //! | `raw_batch_value` | `lib_batch_value` |
-//! | `raw_batch_serde`, `raw_batch_datum` | `lib_batch_typed` |
+//! | `raw_batch_serde` | `lib_batch_typed` |
 //! | `resolved_reordered` | `lib_resolved` |
-//! | `raw_batch_datum_borrowed` | none; the library has no route that borrows into the payload |
+//! | `raw_flat15_datum`, `raw_batch_datum`, `raw_batch_datum_borrowed` | none; see below |
 //! | `raw_batch_value_flatten`, `raw_batch_datum_flatten` | none; read each against its decode-only partner above, the same corpus without the flatten |
 //! | `resolved_writer_only`, `resolved_promoted`, `resolved_defaulted` | none; read against `lib_resolved` and `resolved_reordered`, one reader schema at a time |
-//! | `mode_*`, `shapes_*`, `err_*` | none; see below |
+//! | `mode_*`, `shapes_*`, `err_*` | none; they price this crate's framing, schema cache and error isolation, which the library has no counterpart for. Read them against `raw_flat15_value` over the same records |
 //!
-//! The two typed framework cases share one floor because `apache-avro` 0.21
-//! offers a single route from a datum to a `T`: build the `Value`, then read
-//! the target out of it. `lib_flat15_typed` is that route, so it serves the
-//! two-pass path and the single-pass one alike. It runs a near-subset of what
-//! `raw_flat15_serde` runs, which keeps the margin between them small and a
-//! relative reading of that margin noisy. A library regression moves both. A
-//! framework regression moves the framework case alone.
+//! Each floor runs a near-subset of its partner, which keeps the margin
+//! between them small and a relative reading of that margin noisy. A library
+//! regression moves both. A framework regression moves the framework case
+//! alone.
 //!
-//! The `mode_`, `shapes_` and `err_` cases have no floor. They price this
-//! crate's framing, its schema cache and its error isolation, which the library
-//! has no counterpart for. Read them against `raw_flat15_value` over the same
-//! records.
+//! ## The `lib_*` cases that are not floors
+//!
+//! The `raw_*_datum` cases have no floor. `AvroDatumDeserializer` walks the
+//! datum itself and calls no library decoder, so a regression inside
+//! `apache-avro`'s decoder cannot move them.
+//!
+//! `lib_flat15_read_deser` and `lib_batch_read_deser` are a **competitor
+//! baseline** for those cases rather than a floor: the library's own
+//! single-pass route to a `T`, over the same bytes, read against the crate's.
+//! Both amortize schema resolution — the crate resolves once per compiled
+//! schema, these once per corpus — so the margin between them is decode.
+//!
+//! Read them against `lib_*_typed` only with that in mind: the two-pass route
+//! resolves per call, so a margin taken there mixes decode with resolution.
+//! The `*_held` pairs below price the resolution separately.
+//!
+//! `read_deser` takes `T: DeserializeOwned` from an `impl Read`, so it
+//! allocates every string and bytes field and cannot borrow into the payload.
+//! `raw_batch_datum_borrowed` has no counterpart for that reason.
+//!
+//! ## The `*_held` cases
+//!
+//! `lib_flat15_value_held`, `lib_batch_value_held` and `lib_resolved_held`
+//! run the same work as `lib_flat15_value`, `lib_batch_value` and
+//! `lib_resolved` through a `GenericDatumReader` built in setup rather than
+//! the free function that resolves the writer schema's named types on every
+//! call. Each pair prices that resolution, which is what this crate pays per
+//! payload at `deser.rs`'s `from_avro_datum` call.
 //!
 //! ## Two metrics with a narrower meaning than their names
 //!
@@ -87,6 +109,7 @@
 use std::cell::RefCell;
 
 use apache_avro::Schema;
+use apache_avro::reader::datum::GenericDatumReader;
 use spate_avro::{AvroDatumDeserializer, AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};
 use spate_bench::{Corpus, Suite, bench_main};
 use spate_core::deser::{Deserializer, Owned, RecFamily};
@@ -368,11 +391,40 @@ fn error_cases(suite: Suite) -> Suite {
 // `lib_`: apache-avro over the same bytes
 // ---------------------------------------------------------------------------
 
-/// A parsed writer schema, an optional reader schema, and the corpus.
+/// A parsed writer schema, an optional reader schema, the corpus, and a
+/// [`GenericDatumReader`] over the pair.
+///
+/// The schemas are leaked so the reader can borrow them for `'static` and be
+/// built in setup, outside every measured region. A leak per case is bounded
+/// by the number of floor cases, since setup runs once each.
 struct Floor {
-    writer: Schema,
-    reader: Option<Schema>,
+    writer: &'static Schema,
+    reader: Option<&'static Schema>,
+    held: GenericDatumReader<'static>,
     payloads: Vec<Vec<u8>>,
+}
+
+impl Floor {
+    fn new(writer_json: &str, reader_json: Option<&str>, payloads: Vec<Vec<u8>>) -> Floor {
+        let writer: &'static Schema = Box::leak(Box::new(
+            Schema::parse_str(writer_json).expect("the writer schema parses"),
+        ));
+        let reader: Option<&'static Schema> = reader_json.map(|json| {
+            &*Box::leak(Box::new(
+                Schema::parse_str(json).expect("the reader schema parses"),
+            ))
+        });
+        let held = GenericDatumReader::builder(writer)
+            .maybe_reader_schema(reader)
+            .build()
+            .expect("the fixture schema resolves");
+        Floor {
+            writer,
+            reader,
+            held,
+            payloads,
+        }
+    }
 }
 
 /// The library's route to a `Value`. The decoded value is returned rather than
@@ -381,24 +433,73 @@ struct Floor {
 fn floor_values(f: &Floor) -> usize {
     let mut decoded = 0usize;
     for payload in &f.payloads {
-        let value =
-            apache_avro::from_avro_datum(&f.writer, &mut payload.as_slice(), f.reader.as_ref())
-                .expect("the fixture decodes");
+        let value = apache_avro::from_avro_datum(f.writer, &mut payload.as_slice(), f.reader)
+            .expect("the fixture decodes");
         std::hint::black_box(&value);
         decoded += 1;
     }
     decoded
 }
 
-/// The library's only route from a datum to a `T` on 0.21: build the `Value`,
-/// then read the target out of it.
+/// The library's two-pass route from a datum to a `T`: build the `Value`, then
+/// read the target out of it. The only route that applies a reader schema.
 fn floor_typed<T: serde::de::DeserializeOwned>(f: &Floor) -> usize {
     let mut decoded = 0usize;
     for payload in &f.payloads {
-        let value =
-            apache_avro::from_avro_datum(&f.writer, &mut payload.as_slice(), f.reader.as_ref())
-                .expect("the fixture decodes");
+        let value = apache_avro::from_avro_datum(f.writer, &mut payload.as_slice(), f.reader)
+            .expect("the fixture decodes");
         let target: T = apache_avro::from_value(&value).expect("the fixture matches the target");
+        std::hint::black_box(&target);
+        decoded += 1;
+    }
+    decoded
+}
+
+/// The library's route to a `Value` through [`Floor::held`], which resolves
+/// the writer schema's named types once for the corpus where the free function
+/// above resolves them on every call.
+fn floor_values_held(f: &Floor) -> usize {
+    let mut decoded = 0usize;
+    for payload in &f.payloads {
+        let value = f
+            .held
+            .read_value(&mut payload.as_slice())
+            .expect("the fixture decodes");
+        std::hint::black_box(&value);
+        decoded += 1;
+    }
+    decoded
+}
+
+/// The library's two-pass route to a `T` through [`Floor::held`].
+fn floor_typed_held<T: serde::de::DeserializeOwned>(f: &Floor) -> usize {
+    let mut decoded = 0usize;
+    for payload in &f.payloads {
+        let value = f
+            .held
+            .read_value(&mut payload.as_slice())
+            .expect("the fixture decodes");
+        let target: T = apache_avro::from_value(&value).expect("the fixture matches the target");
+        std::hint::black_box(&target);
+        decoded += 1;
+    }
+    decoded
+}
+
+/// The library's single-pass route from a datum to a `T`, through
+/// [`Floor::held`].
+///
+/// `T: DeserializeOwned` and the reader is `impl Read`, so every string and
+/// bytes field is a fresh allocation: there is no counterpart here to the
+/// crate's borrowed family. Panics if a reader schema is configured, so this
+/// route carries no `resolved_*` case.
+fn floor_read_deser<T: serde::de::DeserializeOwned>(f: &Floor) -> usize {
+    let mut decoded = 0usize;
+    for payload in &f.payloads {
+        let target: T = f
+            .held
+            .read_deser(&mut payload.as_slice())
+            .expect("the fixture decodes");
         std::hint::black_box(&target);
         decoded += 1;
     }
@@ -430,29 +531,19 @@ fn floor_case<T: 'static>(
 }
 
 fn flat_floor() -> Floor {
-    Floor {
-        writer: Schema::parse_str(orders::SCHEMA).expect("the order schema parses"),
-        reader: None,
-        payloads: corpora::order_datums(),
-    }
+    Floor::new(orders::SCHEMA, None, corpora::order_datums())
 }
 
 fn batch_floor() -> Floor {
-    Floor {
-        writer: Schema::parse_str(batches::BATCH_SCHEMA).expect("the batch schema parses"),
-        reader: None,
-        payloads: batches::order_batches(),
-    }
+    Floor::new(batches::BATCH_SCHEMA, None, batches::order_batches())
 }
 
 fn resolved_floor() -> Floor {
-    Floor {
-        writer: Schema::parse_str(corpora::EVENT_WRITER).expect("the writer schema parses"),
-        reader: Some(
-            Schema::parse_str(corpora::EVENT_REORDERED).expect("the reader schema parses"),
-        ),
-        payloads: corpora::event_datums(),
-    }
+    Floor::new(
+        corpora::EVENT_WRITER,
+        Some(corpora::EVENT_REORDERED),
+        corpora::event_datums(),
+    )
 }
 
 fn floor_cases(suite: Suite) -> Suite {
@@ -478,11 +569,46 @@ fn floor_cases(suite: Suite) -> Suite {
         batch_floor,
         floor_typed::<batches::OrderPlaced>,
     );
-    floor_case(
+    let s = floor_case(
         s,
         "lib_resolved",
         RECORDS,
         resolved_floor,
         floor_typed::<corpora::Evolved>,
+    );
+    let s = floor_case(
+        s,
+        "lib_flat15_read_deser",
+        RECORDS,
+        flat_floor,
+        floor_read_deser::<orders::Order>,
+    );
+    let s = floor_case(
+        s,
+        "lib_batch_read_deser",
+        batches::LINES,
+        batch_floor,
+        floor_read_deser::<batches::OrderPlaced>,
+    );
+    let s = floor_case(
+        s,
+        "lib_flat15_value_held",
+        RECORDS,
+        flat_floor,
+        floor_values_held,
+    );
+    let s = floor_case(
+        s,
+        "lib_batch_value_held",
+        batches::LINES,
+        batch_floor,
+        floor_values_held,
+    );
+    floor_case(
+        s,
+        "lib_resolved_held",
+        RECORDS,
+        resolved_floor,
+        floor_typed_held::<corpora::Evolved>,
     )
 }

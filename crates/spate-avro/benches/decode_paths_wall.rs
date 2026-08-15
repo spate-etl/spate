@@ -79,6 +79,11 @@
 //! whose fetcher is never polled, so its `peak_rss_bytes` covers that queue as
 //! well as the error path. Both legs queue alike, so a comparison holds.
 
+#![expect(
+    deprecated,
+    reason = "the lib_ floors measure the library's own datum functions"
+)]
+
 use std::cell::RefCell;
 
 use apache_avro::Schema;

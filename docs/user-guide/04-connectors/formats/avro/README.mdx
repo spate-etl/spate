@@ -142,6 +142,15 @@ defaults for missing fields, type promotions, aliases. Pin a reader schema to
 keep a struct stable while producers evolve. Registry schemas using schema
 references are not supported yet and surface as unavailable.
 
+Promotion runs one way. A reader may widen a field an `int` was written as
+to a `long`, and a `float` to a `double`; the reverse is not a promotion.
+Narrowing is nonetheless accepted, and only one direction of it is checked:
+a `long` too large for the reader's `int` fails the record, which then takes
+the deserializer's `ErrorPolicy`. A `double` narrowed to a `float` is **not**
+checked and saturates to infinity, and a `long` narrowed to a `float` or a
+`double` loses precision, both without an error and without a metric moving.
+Widen a field freely; do not narrow one.
+
 ## Metrics
 
 This deserializer registers no families of its own. Decode outcomes surface in

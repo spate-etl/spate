@@ -140,6 +140,7 @@ where
 }
 
 #[cfg(test)]
+#[expect(deprecated, reason = "fixtures call the datum free functions directly")]
 mod tests {
     use super::*;
     use crate::deser::SchemaSourceMode;

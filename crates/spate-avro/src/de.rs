@@ -11,9 +11,9 @@
 //!
 //! # Parity with the two-pass path
 //!
-//! The dispatch table mirrors `apache-avro` 0.21's `decode_internal` +
-//! `from_value` pair, with these deliberate differences (each one is pinned
-//! by a test in this module or in `tests/datum_parity.rs`):
+//! The dispatch table mirrors `apache-avro`'s `decode_internal` +
+//! `from_value` pair, with these differences (each one is pinned by a test in
+//! this module or in `tests/datum_parity.rs`):
 //!
 //! - **Strict truncation.** `decode_internal` maps EOF to `Value::Null` in
 //!   three places (a truncated boolean, a truncated string body, a truncated
@@ -24,9 +24,12 @@
 //!   `deserialize_string` accepts; `deserialize_map` refuses a union that
 //!   `deserialize_struct` unwraps). Here every method unwraps a union
 //!   branch, accepts the enum-symbol string, and feeds a string position
-//!   into a unit enum by variant name, which is a strict superset: anything
-//!   the two-pass path decodes, this decodes identically, and some target
-//!   shapes it rejects also work.
+//!   into a unit enum by variant name.
+//! - **Four target types decode on the two-pass path and not here**: `char`,
+//!   and `u64`, `u128` and `i128` over the named `fixed` schemas
+//!   `org.apache.avro.rust.{u64,u128,i128}`. A field of one of those types
+//!   errors per record, under the deserializer's `ErrorPolicy`. Every other
+//!   target the two-pass path decodes, this decodes identically.
 //! - **Enum symbols and record field names are transient** (`visit_str`),
 //!   never `'de`-borrowed, because they live in the schema and not the payload. A
 //!   `&'de str` target works for string *contents* only.
@@ -74,7 +77,9 @@
 //! unboundedly on any input.
 
 use apache_avro::Schema;
-use apache_avro::schema::{DecimalSchema, RecordSchema, UnionSchema};
+use apache_avro::schema::{
+    DecimalSchema, InnerDecimalSchema, RecordSchema, UnionSchema, UuidSchema,
+};
 use serde::de::{self, DeserializeSeed, Visitor};
 use std::collections::HashMap;
 use std::fmt;
@@ -277,9 +282,9 @@ pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
     let mut names = Names::new();
     for (name, s) in resolved.get_names() {
         names
-            .entry(name.namespace.clone().unwrap_or_default())
+            .entry(name.namespace().unwrap_or_default().to_owned())
             .or_default()
-            .insert(name.name.clone(), (*s).clone());
+            .insert(name.name().to_owned(), (*s).clone());
     }
     scan_supported(schema)?;
     for named in names.values().flat_map(HashMap::values) {
@@ -293,7 +298,7 @@ pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
 /// recursive schema terminates.
 fn scan_supported(schema: &Schema) -> Result<(), String> {
     match schema {
-        Schema::Duration | Schema::BigDecimal => Err(format!(
+        Schema::Duration(_) | Schema::BigDecimal => Err(format!(
             "the datum deserializer does not support {schema:?} \
              (use build_value or build_serde for this schema)"
         )),
@@ -311,7 +316,7 @@ fn scan_supported(schema: &Schema) -> Result<(), String> {
             }
             Ok(())
         }
-        Schema::Decimal(DecimalSchema { inner, .. }) => scan_supported(inner),
+        // A decimal's backing is `bytes` or `fixed`, both leaves.
         _ => Ok(()),
     }
 }
@@ -371,7 +376,7 @@ fn resolve_schema<'x>(
         Schema::Ref { name } => {
             let target =
                 lookup_named(names, name, enclosing).ok_or_else(|| missing_ref(name, enclosing))?;
-            Ok((target, name.namespace.as_deref().or(enclosing)))
+            Ok((target, name.namespace().or(enclosing)))
         }
         other => Ok((other, enclosing)),
     }
@@ -385,15 +390,15 @@ fn lookup_named<'x>(
     name: &apache_avro::schema::Name,
     enclosing: Option<&str>,
 ) -> Option<&'x Schema> {
-    let ns = name.namespace.as_deref().or(enclosing).unwrap_or_default();
-    names.get(ns)?.get(name.name.as_str())
+    let ns = name.namespace().or(enclosing).unwrap_or_default();
+    names.get(ns)?.get(name.name())
 }
 
 /// The unresolved-`Ref` error, rendered on the failure path only.
 fn missing_ref(name: &apache_avro::schema::Name, enclosing: Option<&str>) -> DatumError {
-    DatumError(match name.namespace.as_deref().or(enclosing) {
-        Some(ns) => format!("schema reference `{ns}.{}` has no definition", name.name),
-        None => format!("schema reference `{}` has no definition", name.name),
+    DatumError(match name.namespace().or(enclosing) {
+        Some(ns) => format!("schema reference `{ns}.{}` has no definition", name.name()),
+        None => format!("schema reference `{}` has no definition", name.name()),
     })
 }
 
@@ -456,34 +461,42 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
         })
     }
 
-    /// Decode a uuid position, mirroring apache-avro's dual
-    /// representation: a 16-byte payload is raw uuid bytes, anything else
-    /// is parsed as text. Callers render the canonical hyphenated form
-    /// into a stack buffer, with no heap `String` per field.
-    fn uuid_value(cur: &mut Cursor<'de>) -> Result<apache_avro::Uuid, DatumError> {
-        let bytes = cur.len_prefixed()?;
-        if bytes.len() == 16 {
-            apache_avro::Uuid::from_slice(bytes)
-                .map_err(|e| DatumError(format!("invalid uuid bytes: {e}")))
-        } else {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| DatumError(format!("uuid is not valid UTF-8: {e}")))?;
-            apache_avro::Uuid::parse_str(s)
-                .map_err(|e| DatumError(format!("invalid uuid string: {e}")))
+    /// Decode a uuid position under its declared backing: `string` is
+    /// length-prefixed text, `bytes` is a length-prefixed 16-byte payload,
+    /// and `fixed` is that payload unprefixed. Callers render the canonical
+    /// hyphenated form into a stack buffer, with no heap `String` per field.
+    fn uuid_value(
+        cur: &mut Cursor<'de>,
+        backing: &UuidSchema,
+    ) -> Result<apache_avro::Uuid, DatumError> {
+        match backing {
+            UuidSchema::String => {
+                let s = cur.utf8()?;
+                apache_avro::Uuid::parse_str(s)
+                    .map_err(|e| DatumError(format!("invalid uuid string: {e}")))
+            }
+            UuidSchema::Bytes => Self::uuid_from_bytes(cur.len_prefixed()?),
+            UuidSchema::Fixed(f) => Self::uuid_from_bytes(cur.take(f.size)?),
         }
+    }
+
+    /// A uuid's 16 raw bytes.
+    fn uuid_from_bytes(bytes: &[u8]) -> Result<apache_avro::Uuid, DatumError> {
+        apache_avro::Uuid::from_slice(bytes)
+            .map_err(|e| DatumError(format!("invalid uuid bytes: {e}")))
     }
 
     /// Decode a decimal position (bytes- or fixed-backed) to its wire
     /// bytes, unchanged. `from_value` emits `Decimal::to_vec()`, which
     /// sign-extends the value back to its original wire length, i.e. the
     /// bytes as written.
-    fn decimal_bytes(cur: &mut Cursor<'de>, inner: &Schema) -> Result<&'de [u8], DatumError> {
+    fn decimal_bytes(
+        cur: &mut Cursor<'de>,
+        inner: &InnerDecimalSchema,
+    ) -> Result<&'de [u8], DatumError> {
         match inner {
-            Schema::Bytes => cur.len_prefixed(),
-            Schema::Fixed(f) => cur.take(f.size),
-            other => Err(DatumError(format!(
-                "decimal inner schema must be bytes or fixed, got {other:?}"
-            ))),
+            InnerDecimalSchema::Bytes => cur.len_prefixed(),
+            InnerDecimalSchema::Fixed(f) => cur.take(f.size),
         }
     }
 }
@@ -514,13 +527,16 @@ fn skip_datum(
         | Schema::LocalTimestampNanos => cur.zag_i64().map(drop),
         Schema::Float => cur.take(4).map(drop),
         Schema::Double => cur.take(8).map(drop),
-        Schema::Bytes | Schema::String | Schema::Uuid => cur.len_prefixed().map(drop),
-        Schema::Fixed(f) => cur.take(f.size).map(drop),
-        Schema::Decimal(DecimalSchema { inner, .. }) => {
-            skip_datum(cur, inner, names, enclosing, depth + 1)
+        Schema::Bytes | Schema::String | Schema::Uuid(UuidSchema::String | UuidSchema::Bytes) => {
+            cur.len_prefixed().map(drop)
         }
+        Schema::Fixed(f) | Schema::Uuid(UuidSchema::Fixed(f)) => cur.take(f.size).map(drop),
+        Schema::Decimal(DecimalSchema { inner, .. }) => match inner {
+            InnerDecimalSchema::Bytes => cur.len_prefixed().map(drop),
+            InnerDecimalSchema::Fixed(f) => cur.take(f.size).map(drop),
+        },
         Schema::Record(rec) => {
-            let ns = rec.name.namespace.as_deref().or(enclosing);
+            let ns = rec.name.namespace().or(enclosing);
             for field in &rec.fields {
                 skip_datum(cur, &field.schema, names, ns, depth + 1)?;
             }
@@ -582,11 +598,11 @@ fn skip_datum(
                 cur,
                 target,
                 names,
-                name.namespace.as_deref().or(enclosing),
+                name.namespace().or(enclosing),
                 depth + 1,
             )
         }
-        Schema::Duration | Schema::BigDecimal => Err(DatumError(format!(
+        Schema::Duration(_) | Schema::BigDecimal => Err(DatumError(format!(
             "unsupported schema {schema:?} survived spec compilation"
         ))),
     }
@@ -615,7 +631,7 @@ impl<'a, 'de> RecordAccess<'a, 'de> {
             fields: rec.fields.iter(),
             pending: None,
             names,
-            enclosing: rec.name.namespace.as_deref().or(enclosing),
+            enclosing: rec.name.namespace().or(enclosing),
             depth,
         }
     }
@@ -974,8 +990,8 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
             Schema::Bytes => visitor.visit_borrowed_bytes(self.cur.len_prefixed()?),
             Schema::Fixed(f) => visitor.visit_borrowed_bytes(self.cur.take(f.size)?),
             Schema::Enum(e) => visitor.visit_str(Self::enum_symbol(self.cur, &e.symbols)?),
-            Schema::Uuid => {
-                let uuid = Self::uuid_value(self.cur)?;
+            Schema::Uuid(backing) => {
+                let uuid = Self::uuid_value(self.cur, backing)?;
                 let mut buf = apache_avro::Uuid::encode_buffer();
                 visitor.visit_str(uuid.hyphenated().encode_lower(&mut buf))
             }
@@ -1014,7 +1030,7 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 let (_, branch) = Self::union_branch(self.cur, u)?;
                 self.child(branch, enclosing)?.deserialize_any(visitor)
             }
-            Schema::Duration | Schema::BigDecimal => Err(DatumError(format!(
+            Schema::Duration(_) | Schema::BigDecimal => Err(DatumError(format!(
                 "unsupported schema {schema:?} survived spec compilation"
             ))),
             Schema::Ref { .. } => unreachable!("resolved() strips Ref"),
@@ -1052,8 +1068,8 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 visitor.visit_borrowed_str(s)
             }
             Schema::Enum(e) => visitor.visit_str(Self::enum_symbol(self.cur, &e.symbols)?),
-            Schema::Uuid => {
-                let uuid = Self::uuid_value(self.cur)?;
+            Schema::Uuid(backing) => {
+                let uuid = Self::uuid_value(self.cur, backing)?;
                 let mut buf = apache_avro::Uuid::encode_buffer();
                 visitor.visit_str(uuid.hyphenated().encode_lower(&mut buf))
             }
@@ -1084,7 +1100,9 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
                 visitor.visit_borrowed_bytes(self.cur.len_prefixed()?)
             }
             Schema::Fixed(f) => visitor.visit_borrowed_bytes(self.cur.take(f.size)?),
-            Schema::Uuid => visitor.visit_bytes(Self::uuid_value(self.cur)?.as_bytes()),
+            Schema::Uuid(backing) => {
+                visitor.visit_bytes(Self::uuid_value(self.cur, backing)?.as_bytes())
+            }
             Schema::Decimal(DecimalSchema { inner, .. }) => {
                 visitor.visit_borrowed_bytes(Self::decimal_bytes(self.cur, inner)?)
             }

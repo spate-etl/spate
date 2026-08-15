@@ -30,6 +30,8 @@
 //!   --test-threads 1
 //! ```
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+
 #[path = "e2e_support/mod.rs"]
 mod support;
 

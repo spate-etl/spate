@@ -3,6 +3,8 @@
 //! the asynchronous fetch; failures negative-cache with a TTL; pre-warm
 //! loads subjects at startup.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use http_body_util::Full;
@@ -486,15 +488,14 @@ async fn prewarm_loads_subjects_at_startup() {
     assert_eq!(rows.len(), 1);
 }
 
-/// apache-avro 0.21 `Schema::parse_str` *panics* (not `Err`) on some
-/// malformed names: `"my-record"` trips an internal unwrap. The compile
-/// catches the panic and stores it as an ordinary failure, so the id
-/// surfaces a per-record poison (SchemaUnavailable) the ErrorPolicy can act
-/// on, never a permanent NotReady stall and never an unwind on whichever
-/// pipeline thread touched it first. (The caught panic prints a backtrace to
-/// stderr; that is expected and harmless.)
+/// A schema the parser refuses — here a record named `"my-record"`, which
+/// the Avro name rules reject — surfaces as a per-record poison
+/// (SchemaUnavailable) the ErrorPolicy can act on, never a permanent
+/// NotReady stall and never an unwind on whichever pipeline thread touched
+/// it first. The compile catches a panicking refusal too; if one happens it
+/// prints a backtrace to stderr, which is expected and harmless.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn panicking_schema_parse_poisons_the_id_rather_than_stalling() {
+async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     let stub = StubRegistry::default();
     let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
     stub.script("/schemas/ids/77", 200, &schema_body(bad), 0);
@@ -517,7 +518,7 @@ async fn panicking_schema_parse_poisons_the_id_rather_than_stalling() {
     .unwrap_err();
     assert!(
         matches!(err, DeserError::SchemaUnavailable { .. }),
-        "a panicking schema parse must poison the id, not stall at NotReady: {err}"
+        "a refused schema parse must poison the id, not stall at NotReady: {err}"
     );
 }
 

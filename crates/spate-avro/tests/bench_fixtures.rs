@@ -16,6 +16,8 @@
 //! its case is named for, including the alias rule, which does not work at
 //! all and is pinned as such.
 
+#![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+
 use spate_avro::{
     AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection, SchemaSource,
 };

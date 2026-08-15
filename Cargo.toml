@@ -82,7 +82,7 @@ rdkafka = "0.39"
 # either widens the client's features for workspace builds only, or puts two
 # majors in the graph.
 clickhouse = "0.15"
-apache-avro = "0.21"
+apache-avro = "0.22"
 object_store = "0.14"
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.

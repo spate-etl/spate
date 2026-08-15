@@ -34,12 +34,12 @@ impl CompiledSchema {
     /// Compile a schema. `json` must be the schema's *original* JSON source,
     /// never a canonical form, which strips logical types and defaults.
     ///
-    /// apache-avro 0.21 *panics* rather than erroring on some malformed names
-    /// (e.g. a record named `"my-record"`). The panic is caught and stored as
-    /// an ordinary failure: a poison schema arriving from the registry must
+    /// A schema the parser rejects becomes an ordinary failure whether it
+    /// errors or panics: a poison schema arriving from the registry must
     /// negatively cache, not unwind the pipeline thread that happened to
-    /// touch it first. (The caught panic prints a backtrace to stderr; that
-    /// is harmless.)
+    /// touch it first. The `catch_unwind` covers the panicking half; do not
+    /// remove it. (A caught panic prints a backtrace to stderr; that is
+    /// harmless.)
     pub(crate) fn compile(id: u32, json: &str) -> Self {
         let compiled = std::panic::catch_unwind(|| {
             let schema = Schema::parse_str(json);
@@ -215,9 +215,8 @@ mod tests {
     const SCHEMA_JSON: &str =
         r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#;
 
-    /// apache-avro 0.21 *panics* rather than erroring on the dashed record
-    /// name, which is the case `compile` has to catch.
-    const PARSER_PANICS_JSON: &str =
+    /// A record name the Avro name rules reject.
+    const BAD_NAME_JSON: &str =
         r#"{"type":"record","name":"my-record","fields":[{"name":"a","type":"long"}]}"#;
 
     fn compiled(id: u32) -> CompiledSchema {
@@ -232,13 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn a_parser_panic_becomes_an_ordinary_failure() {
-        // The point of the `catch_unwind` in `compile`: a poison schema from
-        // the registry must negatively cache, not unwind whichever pipeline
-        // thread happened to touch it first.
-        let entry = CompiledSchema::compile(6, PARSER_PANICS_JSON);
+    fn a_rejected_schema_name_becomes_an_ordinary_failure() {
+        // A poison schema from the registry negatively caches rather than
+        // unwinding whichever pipeline thread happened to touch it first,
+        // whichever way the parser refuses it.
+        let entry = CompiledSchema::compile(6, BAD_NAME_JSON);
         assert!(
-            matches!(&entry.schema, Err(reason) if reason.contains("panicked")),
+            matches!(&entry.schema, Err(reason) if reason.contains("my-record")),
             "{:?}",
             entry.schema.as_ref().err()
         );

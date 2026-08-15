@@ -39,7 +39,7 @@ the repository.
 
 | License | Crates |
 |---|---|
-| `MIT` | 300 |
+| `MIT` | 308 |
 | `Apache-2.0` | 23 |
 | `Unicode-3.0` | 19 |
 | `ISC` | 6 |
@@ -64,7 +64,7 @@ above from what is left. The elected license ids are unaffected either way.
 
 | Crate | Version | License |
 |---|---|---|
-| `apache-avro` | 0.21.0 | `Apache-2.0` |
+| `apache-avro` | 0.22.0 | `Apache-2.0` |
 | `async-nats` | 0.49.1 | `Apache-2.0` |
 | `aws-lc-sys` | 0.42.0 | `Apache-2.0` |
 | `bytesize` | 2.4.2 | `Apache-2.0` |
@@ -102,6 +102,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `untrusted` | 0.9.0 | `ISC` |
 | `adler2` | 2.0.1 | `MIT` |
 | `aho-corasick` | 1.1.4 | `MIT` |
+| `aliasable` | 0.1.3 | `MIT` |
 | `allocator-api2` | 0.2.21 | `MIT` |
 | `anstyle` | 1.0.14 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
@@ -194,6 +195,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `hashbrown` | 0.14.5 | `MIT` |
 | `hashbrown` | 0.16.1 | `MIT` |
 | `hashbrown` | 0.17.1 | `MIT` |
+| `heck` | 0.4.1 | `MIT` |
 | `heck` | 0.5.0 | `MIT` |
 | `hex` | 0.4.3 | `MIT` |
 | `higher-kinded-types` | 0.2.1 | `MIT` |
@@ -241,6 +243,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `metrics-util` | 0.20.4 | `MIT` |
 | `minimal-lexical` | 0.2.1 | `MIT` |
 | `miniz_oxide` | 0.8.9 | `MIT` |
+| `miniz_oxide` | 0.9.1 | `MIT` |
 | `mio` | 1.2.1 | `MIT` |
 | `never-say-never` | 6.6.666 | `MIT` |
 | `nix` | 0.31.3 | `MIT` |
@@ -257,6 +260,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `openssl-probe` | 0.2.1 | `MIT` |
 | `openssl-src` | 300.6.1+3.6.3 | `MIT` |
 | `openssl-sys` | 0.9.117 | `MIT` |
+| `ouroboros` | 0.18.5 | `MIT` |
+| `ouroboros_macro` | 0.18.5 | `MIT` |
 | `parking_lot` | 0.12.5 | `MIT` |
 | `parking_lot_core` | 0.9.12 | `MIT` |
 | `paste` | 1.0.15 | `MIT` |
@@ -274,6 +279,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `prettyplease` | 0.2.37 | `MIT` |
 | `proc-macro-crate` | 3.5.0 | `MIT` |
 | `proc-macro2` | 1.0.106 | `MIT` |
+| `proc-macro2-diagnostics` | 0.10.1 | `MIT` |
 | `procfs` | 0.18.0 | `MIT` |
 | `procfs-core` | 0.18.0 | `MIT` |
 | `proptest` | 1.11.0 | `MIT` |
@@ -346,9 +352,10 @@ above from what is left. The elected license ids are unaffected either way.
 | `spin` | 0.10.1 | `MIT` |
 | `spki` | 0.7.3 | `MIT` |
 | `stable_deref_trait` | 1.2.1 | `MIT` |
+| `static_assertions` | 1.1.0 | `MIT` |
 | `strsim` | 0.11.1 | `MIT` |
-| `strum` | 0.27.2 | `MIT` |
-| `strum_macros` | 0.27.2 | `MIT` |
+| `strum` | 0.28.0 | `MIT` |
+| `strum_macros` | 0.28.0 | `MIT` |
 | `syn` | 2.0.118 | `MIT` |
 | `syn` | 3.0.3 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
@@ -394,6 +401,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `want` | 0.3.1 | `MIT` |
 | `winnow` | 1.0.3 | `MIT` |
 | `yaml_serde` | 0.10.4 | `MIT` |
+| `yansi` | 1.0.1 | `MIT` |
 | `zerocopy` | 0.8.52 | `MIT` |
 | `zeroize` | 1.9.0 | `MIT` |
 | `zmij` | 1.0.21 | `MIT` |

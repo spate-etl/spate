@@ -55,7 +55,9 @@ cargo doc -p spate-bench --all-features --no-deps --open
 Each bench target's own `//!` header is the account of what *that* target
 measures and the traps particular to it. `benches/selftest_wall.rs` carries every
 shape the case builder supports, and is what the A/A acceptance run drives:
-`make bench-ab REF=HEAD REPS=6` compares it against itself and must flag nothing.
-Six is what those four cases need, against a default of twenty; a real target's
-cases each say how many they need, and a run too short for one declines a
-verdict on it and names the count.
+`make bench-ab REF=HEAD REPS=6 PACKAGE=spate-bench` compares it against itself
+and must flag nothing. Both narrowings are part of the claim: `PACKAGE=` makes
+the run that target rather than every `_wall` target in the workspace, and six
+is what its four quiet cases need against a default of twenty. A real target's
+cases each say how many replicates they need, and a run too short for one
+declines a verdict on it and names the count.

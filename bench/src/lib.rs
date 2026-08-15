@@ -58,12 +58,15 @@
 //! That is the whole of the minimum. `benches/selftest_wall.rs` carries every
 //! shape the builder supports (an allocating workload, the same workload
 //! through `iter_batched`, a non-allocating one and an erratic one) and is
-//! also what the A/A acceptance run drives: `make bench-ab REF=HEAD REPS=6`
-//! compares it against itself and must flag nothing, because a flag there means
-//! the harness is measuring its own noise rather than the code under test.
+//! also what the A/A acceptance run drives:
+//! `make bench-ab REF=HEAD REPS=6 PACKAGE=spate-bench` compares it against
+//! itself and must flag nothing, because a flag there means the harness is
+//! measuring its own noise rather than the code under test.
 //!
-//! Six there, against a default of twenty, is what those four cases need and
-//! not a count to reuse. A real target's cases each say how many they need; see
+//! Both narrowings are the claim. `PACKAGE=` is what makes the run this target
+//! rather than every `_wall` target in the workspace, and six is what these
+//! four quiet cases need, against a default of twenty. Neither number carries
+//! to a real target, whose cases each say how many replicates they need; see
 //! [`stats`].
 //!
 //! # Declaring a target

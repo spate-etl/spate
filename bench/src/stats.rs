@@ -64,6 +64,14 @@
 //! no distributional assumption and no history, and there is no history here
 //! by design.
 //!
+//! Its cuts are then widened for the sample size, by [`widening`]. Resampling
+//! spreads the means by the plug-in standard deviation and cuts them at normal
+//! critical values, both of which understate what a small sample supports: at
+//! five pairs the interval is 31% narrower than its stated coverage, which puts
+//! a nominally one-in-ten interval nearer one in five. The widening is where
+//! this module assumes the mean of the differences is roughly normal; the shape
+//! of the interval, including any skew, still comes from the resampling.
+//!
 //! The resampling is seeded from the case and metric names, so re-rendering the
 //! same two legs produces the same interval to the last digit. A report whose
 //! numbers move when it is regenerated is a report no one can quote. It draws
@@ -103,6 +111,80 @@ pub const BOOTSTRAP_RESAMPLES: usize = 10_000;
 
 /// The interval's coverage.
 pub const CONFIDENCE: f64 = 0.90;
+
+/// The normal critical value the resampled percentiles sit at for
+/// [`CONFIDENCE`]: `z(0.95)`.
+const Z: f64 = 1.644_853_626_951_472_2;
+
+/// `t(0.95, v)` for `v` degrees of freedom, indexed by `v - 1`.
+///
+/// Tabulated over the range where the correction is largest and an
+/// approximation is worst: at four degrees of freedom the expansion
+/// [`t_quantile`] falls back on is 5% low.
+const T_95: [f64; 30] = [
+    6.313_751_515,
+    2.919_985_580,
+    2.353_363_435,
+    2.131_846_786,
+    2.015_048_373,
+    1.943_180_281,
+    1.894_578_605,
+    1.859_548_038,
+    1.833_112_933,
+    1.812_461_123,
+    1.795_884_819,
+    1.782_287_556,
+    1.770_933_396,
+    1.761_310_136,
+    1.753_050_356,
+    1.745_883_676,
+    1.739_606_726,
+    1.734_063_607,
+    1.729_132_812,
+    1.724_718_243,
+    1.720_742_903,
+    1.717_144_374,
+    1.713_871_528,
+    1.710_882_080,
+    1.708_140_761,
+    1.705_617_920,
+    1.703_288_446,
+    1.701_130_934,
+    1.699_127_027,
+    1.697_260_887,
+];
+
+/// `t(0.95, v)`, the one-sided critical value each tail of the interval sits at.
+///
+/// [`T_95`] up to thirty degrees of freedom, and the Cornish-Fisher expansion of
+/// the quantile beyond it, which is within 0.002% of exact from there on and
+/// converges to [`Z`].
+fn t_quantile(freedom: usize) -> f64 {
+    if let Some(exact) = T_95.get(freedom.wrapping_sub(1)) {
+        return *exact;
+    }
+    let v = freedom as f64;
+    Z + (Z.powi(3) + Z) / (4.0 * v)
+        + (5.0 * Z.powi(5) + 16.0 * Z.powi(3) + 3.0 * Z) / (96.0 * v * v)
+}
+
+/// How much wider than its percentile cuts an interval on `n` pairs has to be
+/// for its stated coverage to be its coverage.
+///
+/// Two corrections, which multiply. The resampled means are spread by the
+/// plug-in standard deviation, which divides by `n`, where the spread a sample
+/// of `n` supports divides by `n - 1`. And the cuts sit at a normal critical
+/// value, where a mean estimated from `n` pairs is a *t* one on `n - 1` degrees
+/// of freedom. The factor is 1.449 at five pairs, 1.079 at twenty, and falls to
+/// one as the sample grows.
+///
+/// Panics in debug on fewer than two pairs, which has no spread to widen.
+#[must_use]
+pub fn widening(n: usize) -> f64 {
+    debug_assert!(n >= 2, "widening needs at least two pairs");
+    let count = n as f64;
+    t_quantile(n - 1) / Z * (count / (count - 1.0)).sqrt()
+}
 
 /// The default significance floor: a difference smaller than this is not
 /// reported however tight its interval.
@@ -338,7 +420,11 @@ fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-/// The percentile bootstrap on the mean of `deltas`.
+/// The percentile bootstrap on the mean of `deltas`, widened for the sample
+/// size.
+///
+/// The cuts alone state a coverage they do not have on a small sample; see
+/// [`widening`], which is the factor applied here.
 fn bootstrap_ci(deltas: &[f64], seed: u64) -> (f64, f64) {
     let n = deltas.len();
     if n == 1 {
@@ -360,7 +446,17 @@ fn bootstrap_ci(deltas: &[f64], seed: u64) -> (f64, f64) {
     means.sort_by(f64::total_cmp);
 
     let tail = (1.0 - CONFIDENCE) / 2.0;
-    (percentile(&means, tail), percentile(&means, 1.0 - tail))
+    let low = percentile(&means, tail);
+    let high = percentile(&means, 1.0 - tail);
+
+    // Widened about the estimate rather than about the interval's own centre,
+    // so a percentile interval that came out lopsided stays lopsided.
+    let centre = mean(deltas);
+    let factor = widening(n);
+    (
+        centre - factor * (centre - low),
+        centre + factor * (high - centre),
+    )
 }
 
 /// Nearest-rank percentile of a sorted slice.
@@ -375,7 +471,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 mod tests {
     use super::{
         ALLOC_FLOOR, Analysis, DEFAULT_FLOOR, MIN_REPLICATES, RSS_FLOOR, Verdict, analyse,
-        floor_for, seed_for,
+        floor_for, seed_for, widening,
     };
     use crate::record::{ALLOC_BYTES_PER_ITER, PEAK_RSS_BYTES, WALL_NS_PER_ITER};
 
@@ -475,6 +571,70 @@ mod tests {
         assert_eq!(first.ci_low.to_bits(), again.ci_low.to_bits());
         assert_eq!(first.ci_high.to_bits(), again.ci_high.to_bits());
         assert_eq!(first.delta.to_bits(), again.delta.to_bits());
+    }
+
+    /// The factor at the two counts the rule is read at, against `t(0.95, n-1)`
+    /// and `z(0.95)` computed elsewhere. A table entry mistyped by a digit
+    /// changes an interval on every report and nothing else notices.
+    #[test]
+    fn the_widening_matches_the_critical_values_it_is_built_from() {
+        assert!((widening(5) - 1.449_051).abs() < 1e-6, "{}", widening(5));
+        assert!((widening(20) - 1.078_548).abs() < 1e-6, "{}", widening(20));
+        assert!((widening(2) - 5.428_442).abs() < 1e-6, "{}", widening(2));
+
+        // Strictly decreasing, always widening, and gone in the limit. The
+        // expansion takes over past thirty degrees of freedom and must not step
+        // when it does.
+        let mut previous = f64::INFINITY;
+        for n in 2..=2000 {
+            let factor = widening(n);
+            assert!(factor > 1.0, "at {n}: {factor}");
+            assert!(factor < previous, "at {n}: {factor} then {previous}");
+            previous = factor;
+        }
+        assert!(widening(2000) < 1.001, "{}", widening(2000));
+
+        // The seam is a join rather than a step: the last tabulated value and
+        // the first computed one differ by less than the gap before them.
+        let step_before = widening(30) - widening(31);
+        let step_across = widening(31) - widening(32);
+        assert!(step_across < step_before, "{step_across} {step_before}");
+    }
+
+    /// The interval a sample supports, end to end. Twelve deltas of known
+    /// spread, against `t(0.95, 11) * s / sqrt(12)` computed by hand: the
+    /// bootstrap's own Monte-Carlo error is what the tolerance covers.
+    #[test]
+    fn the_interval_is_the_width_the_sample_supports() {
+        let deltas: Vec<f64> = (0..12).map(|k| 0.10 * (f64::from(k) - 5.5)).collect();
+        let base = vec![1000.0; deltas.len()];
+        let head: Vec<f64> = deltas.iter().map(|d| 1000.0 * (1.0 + d)).collect();
+        let out = wall(&base, &head);
+
+        let count = deltas.len() as f64;
+        let mean_delta = deltas.iter().sum::<f64>() / count;
+        let variance = deltas.iter().map(|d| (d - mean_delta).powi(2)).sum::<f64>() / (count - 1.0);
+        let expected = 1.795_884_819 * variance.sqrt() / count.sqrt();
+
+        let half = (out.ci_high - out.ci_low) / 2.0;
+        assert!(
+            (half - expected).abs() < 0.06 * expected,
+            "half {half} against {expected}"
+        );
+    }
+
+    /// The estimate stays inside its own interval, and the interval stays put
+    /// when the differences carry no spread at all.
+    #[test]
+    fn widening_moves_the_ends_and_not_the_estimate() {
+        let base = jittered(1000.0, 8);
+        let head: Vec<f64> = base.iter().map(|v| v * 1.03).collect();
+        let out = wall(&base, &head);
+        assert!(out.ci_low < out.delta && out.delta < out.ci_high);
+
+        let flat = vec![500.0; 8];
+        let still = wall(&flat, &flat);
+        assert!(still.ci_low.abs() < f64::EPSILON && still.ci_high.abs() < f64::EPSILON);
     }
 
     #[test]

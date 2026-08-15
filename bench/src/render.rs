@@ -560,9 +560,8 @@ fn write_markdown_rows(out: &mut String, rows: &[&Row]) {
 
 /// The verdict as it reads on a row, carrying the count a declined one names.
 ///
-/// Per row rather than only in the note below the table: which metric of which
-/// case needs how many is the part a reader acts on, and one number for the
-/// whole run is the largest of them.
+/// Carried per row as well as in the note below the table, which states the
+/// largest count over the run.
 fn verdict_text(row: &Row) -> String {
     match row.analysis.replicates_needed {
         Some(replicates) => format!(
@@ -899,7 +898,7 @@ mod tests {
         }
     }
 
-    /// A spread no count reaches says so, rather than naming one nobody runs.
+    /// A spread no count within the cap reaches says so, and names none.
     #[test]
     fn a_row_beyond_reach_names_no_count() {
         let mut hopeless = unjudged_row("hopeless");

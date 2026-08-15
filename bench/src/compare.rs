@@ -382,8 +382,7 @@ impl Comparison {
     /// The largest replicate count any unjudged row asks for, and `None` when
     /// every row was judged or none of them named a count.
     ///
-    /// The largest rather than one per row, because it is what a reader passes
-    /// to `--replicates` to judge the lot.
+    /// The largest, since that is the count at which every row is judged.
     #[must_use]
     pub fn replicates_needed(&self) -> Option<usize> {
         self.unjudged()
@@ -863,9 +862,9 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
 /// the verdict transfers unchanged: a wall time that rose and a throughput that
 /// fell are one event, and both are `Regressed`.
 ///
-/// A case whose measured metric is absent — it failed to pair, or its records
-/// disagreed on a unit — leaves its derived rows as they were analysed. There is
-/// nothing in the report for them to contradict.
+/// A case whose measured metric is absent, having failed to pair or carried
+/// records disagreeing on a unit, leaves its derived rows as they were
+/// analysed.
 fn inherit_derived_verdicts(rows: &mut [Row]) {
     for index in 0..rows.len() {
         let Some(measured) = crate::stats::derived_from(&rows[index].metric) else {
@@ -1257,7 +1256,7 @@ mod tests {
     /// measured row whose is not.
     ///
     /// Judged apiece, the throughput declines a verdict and the wall time
-    /// returns one, which renders as "improved (needs 8 replicates)" — a row
+    /// returns one, and the row renders as "improved (needs 8 replicates)",
     /// stating both that the rule applied and that it did not. The count
     /// describes a decision, so it travels with the verdict it belongs to.
     #[test]

@@ -592,11 +592,11 @@ const fn base_first(replicate: u32) -> bool {
 /// Refuses a replicate count the two legs cannot share evenly.
 ///
 /// An alternating order of odd length gives one leg `ceil(n / 2)` of the first
-/// positions, and the statistic is the mean of per-pair differences, so a cost
-/// of running second does not cancel: it survives as that cost over `n`, with a
-/// definite sign, and adds to whatever the change did. Only an even count
-/// balances, so an odd one is refused rather than corrected — the count a
-/// caller asked for is the count that runs.
+/// positions. The statistic is the mean of per-pair differences, so a cost of
+/// running second survives as that cost over `n`, with a definite sign, and adds
+/// to whatever the change did. Only an even count balances. An odd one is
+/// refused rather than rounded, so the count a caller asked for is the count
+/// that runs.
 ///
 /// A single-leg `run` has no partner to be second to and is not subject to this.
 ///

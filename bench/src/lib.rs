@@ -63,11 +63,8 @@
 //! itself and must flag nothing, because a flag there means the harness is
 //! measuring its own noise rather than the code under test.
 //!
-//! Both narrowings are the claim. `PACKAGE=` is what makes the run this target
-//! rather than every `_wall` target in the workspace, and six is what these
-//! four quiet cases need, against a default of twenty. Neither number carries
-//! to a real target, whose cases each say how many replicates they need; see
-//! [`stats`].
+//! Both narrowings belong to the claim: it is made about this target at that
+//! count. [`stats`] states what sets the count another target needs.
 //!
 //! # Declaring a target
 //!

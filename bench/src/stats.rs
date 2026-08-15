@@ -36,9 +36,9 @@
 //! `|d| >= f` and `|-d / (1 + d)| >= f` are not the same condition: either side
 //! of the floor lies a band where the rows describing one timing event
 //! disagree. A derived row therefore carries the verdict of the quantity that
-//! was measured, and keeps its own difference, interval and floor, which
-//! describe the metric a reader asked for. [`derived_from`] names that quantity.
-//! [`crate::compare::Row::is_finding`] is what keeps the derived row out of the
+//! was measured, and keeps its own difference, interval and floor.
+//! [`derived_from`] names that quantity, and
+//! [`crate::compare::Row::is_finding`] keeps the derived row out of the
 //! significant-changes table, so one timing event is one finding.
 //!
 //! # When the rule is not applied
@@ -55,15 +55,11 @@
 //! that while it is wider than the interval. Past that point a case's own spread
 //! reaches the floor unaided, and which case clears it is decided by the run.
 //! [`replicates_for`] names the count that brings the interval back inside the
-//! floor, so a run too short for a case degrades to "no verdict, needs
-//! eighteen" rather than to a difference the next run contradicts.
+//! floor.
 //!
-//! The default is twenty, and it is a default rather than a rule. What a
-//! target needs is set by its own spread and by the machine it runs on, both
-//! of which this module measures per case and neither of which one number
-//! covers: a case whose differences barely move is trustworthy at six, and one
-//! that swings ten percent between replicates needs nearer thirty. A count
-//! below what a case needs costs verdicts on that case and nothing else.
+//! The count a case needs is set by its own spread and by the machine it runs
+//! on, and is answered per case rather than for a run: a count short of what a
+//! case needs costs verdicts on that case alone.
 //!
 //! # Pairing, and why it is not a ratio of means
 //!
@@ -86,10 +82,9 @@
 //! Its cuts are then widened for the sample size, by [`widening`]. Resampling
 //! spreads the means by the plug-in standard deviation and cuts them at normal
 //! critical values, both of which understate what a small sample supports: at
-//! five pairs the interval is 31% narrower than its stated coverage, which puts
-//! a nominally one-in-ten interval nearer one in five. The widening is where
-//! this module assumes the mean of the differences is roughly normal; the shape
-//! of the interval, including any skew, still comes from the resampling.
+//! five pairs the interval is 31% narrower than its stated coverage. The
+//! widening is where this module assumes the mean of the differences is roughly
+//! normal. The interval's shape, skew included, comes from the resampling.
 //!
 //! The resampling is seeded from the case and metric names, so re-rendering the
 //! same two legs produces the same interval to the last digit. A report whose
@@ -127,15 +122,14 @@ pub const MIN_REPLICATES: usize = 5;
 /// rounded up to an even number.
 ///
 /// An A/B run alternates which leg goes first, so an odd count leaves one leg
-/// second more often than the other. What [`replicates_for`] recommends is a
-/// count a two-leg run will accept.
+/// second more often than the other. [`replicates_for`] recommends a count a
+/// two-leg run will accept.
 pub const MIN_BALANCED_REPLICATES: usize = MIN_REPLICATES + MIN_REPLICATES % 2;
 
 /// The largest count [`replicates_for`] will name.
 ///
-/// A case whose spread needs more than this is not going to be measured on this
-/// machine by taking more replicates, and a report that says so is more use than
-/// one naming a number nobody will run.
+/// Past this, the answer a report carries is that the case is not measurable on
+/// this machine rather than a count.
 pub const MAX_SUGGESTED_REPLICATES: usize = 200;
 
 /// Resamples per bootstrap. Enough that the interval's own Monte-Carlo error is
@@ -195,8 +189,9 @@ const T_95: [f64; 30] = [
 /// converges to [`Z`].
 fn t_quantile(freedom: usize) -> f64 {
     // One degree of freedom is the floor. The table starts there and the
-    // expansion divides by the count, so zero would otherwise index off the end
-    // of the table and return an infinity the interval carries to a report.
+    // expansion divides by the count, so zero would otherwise reach the
+    // expansion as an index off the end of the table and return an infinity
+    // that the interval carries all the way to a report.
     let freedom = freedom.max(1);
     match T_95.get(freedom - 1) {
         Some(exact) => *exact,
@@ -279,11 +274,8 @@ pub enum Verdict {
     /// The rule was not applied. The difference is still printed, and
     /// [`Analysis::replicates_needed`] says what it would take to apply it.
     ///
-    /// Two causes: fewer than [`MIN_REPLICATES`] paired replicates, or an
-    /// interval no narrower than the metric's floor. The second is the one that
-    /// makes an A/A run quiet. A floor suppresses noise only while it is wider
-    /// than the interval; past that, a case's own spread reaches the floor on
-    /// its own and which case is flagged is decided by the run.
+    /// Two causes, stated in the module header: fewer than [`MIN_REPLICATES`]
+    /// paired replicates, or an interval no narrower than the metric's floor.
     NoVerdict,
 }
 

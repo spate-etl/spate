@@ -194,7 +194,7 @@ machine you control.
 
 ```sh
 make bench-list                 # every case, with its flags
-make bench-ab REF=main REPS=10  # this tree against a reference
+make bench-ab REF=main REPS=20  # this tree against a reference
 make bench-ab REF=main PACKAGE=spate-avro       # only one crate's targets
 make bench-arms HEAD_FEATURES=spate-json/simd   # two feature arms of this tree
 ```

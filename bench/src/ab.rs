@@ -90,6 +90,9 @@ pub struct Plan {
     /// Corpus seed, identical across legs and replicates.
     pub seed: u64,
     /// How many measured replicates per case.
+    ///
+    /// A comparison needs an even count, since the two legs alternate which one
+    /// goes first; [`ab`] and [`arms`] refuse an odd one before they build.
     pub replicates: u32,
     /// How long a calibrated region should take.
     pub target_ms: u64,
@@ -277,6 +280,7 @@ pub fn ab(
     allow: &[String],
 ) -> Result<AbOutcome, String> {
     guard_out(base_plan, head_plan)?;
+    guard_parity(head_plan.replicates)?;
 
     // Before anything is built: a mistyped reference must not cost a
     // compilation.
@@ -316,6 +320,7 @@ pub fn ab(
 /// comparable.
 pub fn arms(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
     guard_out(base_plan, head_plan)?;
+    guard_parity(head_plan.replicates)?;
     if base_plan.target_dir == head_plan.target_dir {
         return Err(format!(
             "both arms would build into {}. Cargo keeps one build per target directory, \
@@ -358,6 +363,13 @@ fn guard_out(base_plan: &Plan, head_plan: &Plan) -> Result<(), String> {
 /// before measuring, intersect, calibrate once and pin, prime, interleave) live
 /// here and are therefore the same on both axes by construction.
 fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOutcome, String> {
+    // Both callers guard this, each before the setup a bad count should not
+    // cost. Asserted again here, beside the interleave the guard exists for.
+    debug_assert!(
+        guard_parity(head_plan.replicates).is_ok(),
+        "an odd replicate count reached the interleave"
+    );
+
     // Both legs built before either is measured.
     let (head_describe, head_dirty) = worktree::describe(&head_plan.dir);
     if head_dirty {
@@ -576,6 +588,43 @@ const fn base_first(replicate: u32) -> bool {
     replicate.is_multiple_of(2)
 }
 
+/// Refuses a replicate count the two legs cannot share evenly.
+///
+/// An alternating order of odd length gives one leg `ceil(n / 2)` of the first
+/// positions. The statistic is the mean of per-pair differences, so a cost of
+/// running second survives as that cost over `n`, with a definite sign, and adds
+/// to whatever the change did. Only an even count balances. An odd one is
+/// refused rather than rounded, so the count a caller asked for is the count
+/// that runs.
+///
+/// A single-leg `run` has no partner to be second to and is not subject to this.
+///
+/// # Errors
+///
+/// When `replicates` is odd.
+fn guard_parity(replicates: u32) -> Result<(), String> {
+    if replicates.is_multiple_of(2) {
+        return Ok(());
+    }
+    // Both neighbours are checked rather than computed: one is absent at the
+    // ends of the range, and `u32::MAX` is odd, so an unchecked `+ 1` reaches
+    // this line and panics on the input it exists to reject.
+    let even_neighbours: Vec<String> = [replicates.checked_sub(1), replicates.checked_add(1)]
+        .into_iter()
+        .flatten()
+        .filter(|count| *count >= 2)
+        .map(|count| count.to_string())
+        .collect();
+    Err(format!(
+        "--replicates is {replicates}, and a comparison needs an even count. The two legs \
+         alternate which goes first, so {replicates} runs one leg first {} times and the other \
+         {}, and a cost of running second lands on one leg rather than canceling. Use {}.",
+        replicates.div_ceil(2),
+        replicates / 2,
+        even_neighbours.join(" or "),
+    ))
+}
+
 fn check_interrupt() -> Result<(), String> {
     if worktree::interrupted() {
         // No mention of the worktree: a `run` and an `arms` reach this too and
@@ -588,7 +637,7 @@ fn check_interrupt() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::base_first;
+    use super::{base_first, guard_parity};
 
     /// Neither leg may be systematically second. Asserted rather than read off
     /// the expression, because the property is about the sequence and the
@@ -599,11 +648,39 @@ mod tests {
     fn the_leg_order_alternates_and_starts_with_the_base() {
         let order: Vec<bool> = (0..6).map(base_first).collect();
         assert_eq!(order, [true, false, true, false, true, false]);
-        assert_eq!(
-            order.iter().filter(|first| **first).count(),
-            order.len() / 2,
-            "one leg ran first more often than the other"
-        );
+
+        // At every count a comparison accepts. `guard_parity` refuses the odd
+        // ones before a leg is built, which is what makes this assertion the
+        // right one to make.
+        for count in (2..=64).step_by(2) {
+            let first = (0..count)
+                .filter(|replicate| base_first(*replicate))
+                .count();
+            assert_eq!(
+                first,
+                count as usize / 2,
+                "one leg ran first more often than the other at {count} replicate(s)"
+            );
+        }
+    }
+
+    #[test]
+    fn an_odd_replicate_count_is_refused_and_names_the_counts_either_side() {
+        let err = guard_parity(5).expect_err("odd");
+        assert!(err.contains("even count"), "{err}");
+        assert!(err.contains("first 3 times and the other 2"), "{err}");
+        assert!(err.contains("Use 4 or 6."), "{err}");
+
+        // One replicate has no count below it to suggest, and the largest odd
+        // count has none above it. Both reach the message rather than the
+        // arithmetic that would produce it.
+        assert!(guard_parity(1).expect_err("odd").contains("Use 2."),);
+        let err = guard_parity(u32::MAX).expect_err("odd");
+        assert!(err.contains(&format!("Use {}.", u32::MAX - 1)), "{err}");
+
+        for even in (2..=20).step_by(2) {
+            assert!(guard_parity(even).is_ok(), "at {even}");
+        }
     }
 }
 

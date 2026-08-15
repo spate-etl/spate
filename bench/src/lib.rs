@@ -58,9 +58,13 @@
 //! That is the whole of the minimum. `benches/selftest_wall.rs` carries every
 //! shape the builder supports (an allocating workload, the same workload
 //! through `iter_batched`, a non-allocating one and an erratic one) and is
-//! also what the A/A acceptance run drives: `make bench-ab REF=HEAD REPS=6`
-//! compares it against itself and must flag nothing, because a flag there means
-//! the harness is measuring its own noise rather than the code under test.
+//! also what the A/A acceptance run drives:
+//! `make bench-ab REF=HEAD REPS=6 PACKAGE=spate-bench` compares it against
+//! itself and must flag nothing, because a flag there means the harness is
+//! measuring its own noise rather than the code under test.
+//!
+//! Both narrowings belong to the claim, which is made about this target at that
+//! count. [`stats`] states what sets the count another target needs.
 //!
 //! # Declaring a target
 //!

@@ -42,7 +42,7 @@
 //!
 //! | Flag | Default | Meaning |
 //! |---|---|---|
-//! | `--replicates` / `-n` | `10` | Measured replicates per case |
+//! | `--replicates` / `-n` | `20` | Measured replicates per case; `ab` and `arms` need an even count |
 //! | `--package` / `-p` | every package | Only the targets this package declares |
 //! | `--filter` | none | Only cases whose id contains this substring |
 //! | `--seed` | `20260804` | Corpus seed, identical on both legs and across replicates |
@@ -195,9 +195,9 @@ fn cli() -> Cli {
         .long("replicates")
         .short('n')
         .value_name("N")
-        .default_value("10")
+        .default_value("20")
         .value_parser(value_parser!(u32).range(1..))
-        .help("Measured replicates per case");
+        .help("Measured replicates per case; even for a comparison");
     let seed = Arg::new("seed")
         .long("seed")
         .value_name("N")

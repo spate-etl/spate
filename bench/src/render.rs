@@ -32,7 +32,7 @@ use crate::stats::{ALLOC_FLOOR, CONFIDENCE, DEFAULT_FLOOR, MIN_REPLICATES, RSS_F
 /// the records a leg is written from, and [`crate::protocol::PROTOCOL_VERSION`]
 /// versions the conversation with a bench binary. A report is rendered from
 /// records rather than being one, so the two move apart.
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// The rule, stated the same way in every rendering.
 ///
@@ -46,10 +46,13 @@ pub fn decision_rule() -> String {
         "A metric is flagged only when BOTH hold: the bootstrapped {confidence:.0}% confidence \
          interval on the mean per-pair relative difference excludes zero, AND the difference is \
          at least the metric's floor — {default:.0}% for wall time, CPU time and throughput, \
-         {rss:.0}% for the peak resident set, {alloc:.0}% for allocation totals. Replicates are \
-         interleaved and paired by index, so machine drift cancels within a pair. Fewer than \
-         {min} pairs prints a difference and no verdict. A case marked erratic is reported and \
-         never flagged.",
+         {rss:.0}% for the peak resident set, {alloc:.0}% for allocation totals. The interval is \
+         widened for the sample size. Replicates are interleaved and paired by index, so machine \
+         drift cancels within a pair. An interval lying wholly past the floor is flagged whatever \
+         its width. An interval straddling the floor, or fewer than {min} pairs, prints a \
+         difference with no verdict and, where more replicates would settle it, the count that \
+         metric needs. A throughput carries the verdict of the wall time it is computed from, and \
+         is not counted again beside it. A case marked erratic is reported and never flagged.",
         confidence = CONFIDENCE * 100.0,
         default = DEFAULT_FLOOR * 100.0,
         rss = RSS_FLOOR * 100.0,
@@ -70,13 +73,15 @@ pub enum Summary {
     /// Nothing paired, so there is no table at all.
     NothingComparable,
     /// Rows exist, and not one of them was both judged and eligible to be
-    /// flagged. `unjudged` fell short of the replicate floor; the rest come from
-    /// cases marked erratic.
+    /// flagged. The rule was not applied to `unjudged` of them; the rest come
+    /// from cases marked erratic.
     NothingJudged {
-        /// How many rows fell short of the replicate floor.
+        /// How many rows the rule was not applied to.
         unjudged: usize,
         /// How many rows there were in total.
         total: usize,
+        /// What [`Comparison::replicates_needed`] says about those rows.
+        needed: (Option<usize>, bool),
     },
     /// The rule was applied and no metric cleared it.
     NoneCleared,
@@ -102,6 +107,7 @@ impl Summary {
             return Self::NothingJudged {
                 unjudged: comparison.unjudged().count(),
                 total: comparison.rows.len(),
+                needed: comparison.replicates_needed(),
             };
         }
         if comparison.significant().next().is_none() {
@@ -125,21 +131,46 @@ impl Summary {
                  erratic, which the rule below never flags. See Informational."
                     .to_owned(),
             ),
-            Self::NothingJudged { unjudged, total } if unjudged == total => Some(format!(
-                "None — and no metric was judged at all: all {total} have fewer than \
-                 {MIN_REPLICATES} paired replicates, so the rule below was never applied. Re-run \
-                 with --replicates {MIN_REPLICATES} or more."
+            Self::NothingJudged {
+                unjudged,
+                total,
+                needed,
+            } if unjudged == total => Some(format!(
+                "None — and no metric was judged at all: the rule below was not applied to any of \
+                 the {total}.{}",
+                advice(needed)
             )),
-            Self::NothingJudged { unjudged, total } => Some(format!(
-                "None — and no metric was judged at all: {unjudged} of {total} have fewer than \
-                 {MIN_REPLICATES} paired replicates and the rest come from cases marked erratic, \
-                 so the rule below was never applied."
+            Self::NothingJudged {
+                unjudged,
+                total,
+                needed,
+            } => Some(format!(
+                "None — and no metric was judged at all: the rule below was not applied to \
+                 {unjudged} of {total} and the rest come from cases marked erratic.{}",
+                advice(needed)
             )),
             Self::NoneCleared => {
                 Some("None. No metric cleared both halves of the rule below.".to_owned())
             }
             Self::Findings => None,
         }
+    }
+}
+
+/// What to do about rows the rule was not applied to, stated once for every
+/// sentence that mentions them.
+///
+/// Both halves of [`Comparison::replicates_needed`], because a run can hold
+/// rows a longer run would judge and rows no run on this machine will.
+fn advice(needed: (Option<usize>, bool)) -> String {
+    match needed {
+        (Some(replicates), false) => format!(" Re-run with --replicates {replicates}."),
+        (Some(replicates), true) => format!(
+            " Re-run with --replicates {replicates}; the rest are past what more \
+             replicates will settle."
+        ),
+        (None, true) => " No replicate count within reach would apply it.".to_owned(),
+        (None, false) => String::new(),
     }
 }
 
@@ -158,9 +189,9 @@ fn shortfall(comparison: &Comparison, summary: &Summary) -> Option<String> {
     let total = comparison.rows.len();
     (unjudged > 0).then(|| {
         format!(
-            "{unjudged} of the {total} metric(s) below have fewer than {MIN_REPLICATES} paired \
-             replicates and were not judged; the rule was not applied to them. Re-run with \
-             --replicates {MIN_REPLICATES} or more."
+            "{unjudged} of the {total} metric(s) below were not judged — fewer than \
+             {MIN_REPLICATES} paired replicates, or an interval no narrower than the floor.{}",
+            advice(comparison.replicates_needed())
         )
     })
 }
@@ -480,7 +511,7 @@ fn write_plain_rows(out: &mut String, rows: &[&Row]) {
             percent(row.analysis.delta),
             percent(row.analysis.ci_low),
             percent(row.analysis.ci_high),
-            row.analysis.verdict.label(),
+            verdict_text(row),
         );
     }
 
@@ -531,12 +562,26 @@ fn write_markdown_rows(out: &mut String, rows: &[&Row]) {
     }
 }
 
+/// The verdict as it reads on a row, carrying the count a declined one names.
+///
+/// Carried per row as well as in the note below the table, which states the
+/// largest count over the run.
+fn verdict_text(row: &Row) -> String {
+    match row.analysis.replicates_needed {
+        Some(replicates) => format!(
+            "{} (needs {replicates} replicates)",
+            row.analysis.verdict.label()
+        ),
+        None => row.analysis.verdict.label().to_owned(),
+    }
+}
+
 /// The verdict cell, marked when the case is one the rule never flags.
 fn verdict_cell(row: &Row) -> String {
     if row.erratic {
-        format!("{} (erratic)", row.analysis.verdict.label())
+        format!("{} (erratic)", verdict_text(row))
     } else {
-        row.analysis.verdict.label().to_owned()
+        verdict_text(row)
     }
 }
 
@@ -626,6 +671,7 @@ struct RowReport {
     ci_high: f64,
     floor: f64,
     verdict: &'static str,
+    replicates_needed: Option<usize>,
     significant: bool,
 }
 
@@ -646,7 +692,8 @@ impl RowReport {
             ci_high: row.analysis.ci_high,
             floor: row.analysis.floor,
             verdict: row.analysis.verdict.token(),
-            significant: !row.erratic && row.analysis.verdict.is_significant(),
+            replicates_needed: row.analysis.replicates_needed,
+            significant: row.is_finding(),
         }
     }
 }
@@ -714,6 +761,7 @@ mod tests {
             higher_is_better: false,
             erratic,
             erratic_reason: erratic.then(|| "the allocator decides".to_owned()),
+            inherited: false,
             analysis: Analysis {
                 replicates: 10,
                 base_mean: 1000.0,
@@ -723,6 +771,7 @@ mod tests {
                 ci_high: 0.35,
                 floor: 0.05,
                 verdict,
+                replicates_needed: (verdict == Verdict::NoVerdict).then_some(18),
             },
         }
     }
@@ -818,7 +867,9 @@ mod tests {
             rendered.contains("no metric was judged at all"),
             "{rendered}"
         );
-        assert!(rendered.contains("--replicates 5"), "{rendered}");
+        // The largest count the unjudged rows ask for, which is what re-running
+        // the whole comparison takes.
+        assert!(rendered.contains("--replicates 18"), "{rendered}");
         assert!(
             !rendered.contains("No metric cleared both halves"),
             "{rendered}"
@@ -830,6 +881,109 @@ mod tests {
             !plain.contains("note:"),
             "the whole-run case is stated once, not twice: {plain}"
         );
+    }
+
+    /// A declined row says what it would take, on the row itself, and the note
+    /// under the table names the largest count the run as a whole needs.
+    #[test]
+    fn a_declined_row_names_the_replicates_it_needs() {
+        let mut noisy = unjudged_row("noisy");
+        noisy.analysis.replicates_needed = Some(28);
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), noisy],
+            Vec::new(),
+        );
+
+        for rendered in [markdown(&cmp), table(&cmp)] {
+            assert!(
+                rendered.contains("no verdict (needs 28 replicates)"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("--replicates 28"), "{rendered}");
+        }
+    }
+
+    /// A run holding both kinds of declined row says both. Advising only the
+    /// count leaves the reader to discover on the re-run that one row was never
+    /// going to be judged.
+    #[test]
+    fn a_run_holding_both_kinds_of_declined_row_says_both() {
+        let mut reachable = unjudged_row("reachable");
+        reachable.analysis.replicates_needed = Some(28);
+        let mut beyond = unjudged_row("beyond");
+        beyond.analysis.replicates_needed = None;
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), reachable, beyond],
+            Vec::new(),
+        );
+
+        let rendered = table(&cmp);
+        assert!(rendered.contains("--replicates 28"), "{rendered}");
+        assert!(
+            rendered.contains("past what more replicates will settle"),
+            "{rendered}"
+        );
+    }
+
+    /// An erratic case is never flagged whatever its interval, so a count that
+    /// would make it judgeable buys nothing and must not set the advice for the
+    /// run. `selftest_wall` declares one on purpose, in every acceptance run.
+    #[test]
+    fn an_erratic_row_does_not_set_the_replicate_advice() {
+        let mut noisy = unjudged_row("erratic_case");
+        noisy.erratic = true;
+        noisy.analysis.replicates_needed = Some(120);
+        let mut real = unjudged_row("real_case");
+        real.analysis.replicates_needed = Some(14);
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), noisy, real],
+            Vec::new(),
+        );
+
+        assert_eq!(cmp.replicates_needed(), (Some(14), false));
+        let rendered = table(&cmp);
+        assert!(rendered.contains("--replicates 14"), "{rendered}");
+        assert!(!rendered.contains("--replicates 120"), "{rendered}");
+
+        // Its own row still carries its own count. What the erratic flag
+        // withholds is the headline, not the number.
+        assert!(rendered.contains("needs 120 replicates"), "{rendered}");
+    }
+
+    /// A spread no count within the cap reaches says so, and names none.
+    #[test]
+    fn a_row_beyond_reach_names_no_count() {
+        let mut hopeless = unjudged_row("hopeless");
+        hopeless.analysis.replicates_needed = None;
+        let cmp = comparison(
+            vec![row("quiet", Verdict::Regressed, false), hopeless],
+            Vec::new(),
+        );
+
+        let rendered = table(&cmp);
+        assert!(
+            rendered.contains("No replicate count within reach"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("(needs"), "{rendered}");
+    }
+
+    /// The count a declined row names reaches a script too, and a judged row
+    /// carries none.
+    #[test]
+    fn the_json_row_carries_the_replicates_a_declined_row_needs() {
+        let mut noisy = unjudged_row("noisy");
+        noisy.analysis.replicates_needed = Some(28);
+        let cmp = comparison(
+            vec![noisy, row("quiet", Verdict::NoChange, false)],
+            Vec::new(),
+        );
+
+        let text = json(&cmp).expect("serialises");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        assert_eq!(parsed["rows"][0]["verdict"], "no_verdict");
+        assert_eq!(parsed["rows"][0]["replicates_needed"], 28);
+        assert!(parsed["rows"][1]["replicates_needed"].is_null());
     }
 
     /// The same false claim with a different cause: an erratic row is excluded
@@ -1020,7 +1174,10 @@ mod tests {
         assert!(rule.contains("5% for wall time"), "{rule}");
         assert!(rule.contains("10% for the peak resident set"), "{rule}");
         assert!(rule.contains("1% for allocation totals"), "{rule}");
-        assert!(rule.contains("Fewer than 5 pairs"), "{rule}");
+        assert!(rule.contains("fewer than 5 pairs"), "{rule}");
+        assert!(rule.contains("straddling the floor"), "{rule}");
+        assert!(rule.contains("wholly past the floor"), "{rule}");
+        assert!(rule.contains("widened for the sample size"), "{rule}");
     }
 
     /// A run that paired ten replicates for one case and three for another has
@@ -1262,6 +1419,7 @@ mod tests {
                 "higher_is_better",
                 "metric",
                 "replicates",
+                "replicates_needed",
                 "significant",
                 "unit",
                 "verdict",

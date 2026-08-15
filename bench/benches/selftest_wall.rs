@@ -2,9 +2,9 @@
 //!
 //! Two jobs. It is the worked example a bench author copies, with four cases
 //! covering the shapes the builder supports, and it is what the acceptance run
-//! drives: `make bench-ab REF=HEAD REPS=6` compares this target against itself
-//! and must flag nothing. A flag there means the harness is measuring its own
-//! noise rather than the code under test.
+//! drives. `make bench-ab REF=HEAD REPS=6 PACKAGE=spate-bench` compares this
+//! target against itself and must flag nothing. A flag there means the harness
+//! is measuring its own noise rather than the code under test.
 //!
 //! It also proves the feature split. This file compiles against `spate-bench`'s
 //! **default** features, so a crate adding a `benches/*_wall.rs` of its own

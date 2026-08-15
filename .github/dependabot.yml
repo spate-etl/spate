@@ -38,7 +38,12 @@ updates:
 
   # ------------------------------------------------------- GitHub Actions ----
   - package-ecosystem: github-actions
-    directory: "/"
+    # `/` reaches `.github/workflows/` and nothing else. A composite action's
+    # own `uses:` pins sit in its own directory and need it named; the glob
+    # takes in any action added later.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: weekly
       day: tuesday

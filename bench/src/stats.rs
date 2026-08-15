@@ -46,20 +46,26 @@
 //! Two conditions stop it before it starts. Both print the difference with no
 //! verdict beside it, and name the replicate count that case would need.
 //!
-//! Fewer than five paired replicates: below that, the tail of a bootstrap is
+//! Fewer than five paired replicates. Below that, the tail of a bootstrap is
 //! decided by which single pair was drawn least often, so an interval would be
-//! an assertion about the resampler rather than about the code.
+//! an assertion about the resampler rather than about the code. The count named
+//! there is projected from an interval this module does not otherwise trust,
+//! and is a starting point.
 //!
-//! An interval no narrower than the metric's floor: a floor separates a
-//! difference worth telling anybody about from one that is not, and can only do
-//! that while it is wider than the interval. Past that point a case's own spread
-//! reaches the floor unaided, and which case clears it is decided by the run.
-//! [`replicates_for`] names the count that brings the interval back inside the
-//! floor.
+//! An interval that straddles the metric's floor. A floor separates a
+//! difference worth telling anybody about from one that is not, and can only
+//! answer that while it is wider than the interval. Where the interval is
+//! wider, a case's own spread reaches the floor unaided and which case clears
+//! it is decided by the run. [`replicates_for`] names the count that brings the
+//! interval back inside the floor.
+//!
+//! An interval lying *wholly* past the floor is a third case, and is judged.
+//! The floor has separated that difference whatever the interval's width, and
+//! declining it would hide the largest movements a run can find.
 //!
 //! The count a case needs is set by its own spread and by the machine it runs
-//! on, and is answered per case rather than for a run: a count short of what a
-//! case needs costs verdicts on that case alone.
+//! on, and is answered per case. A count short of what a case needs costs
+//! verdicts on that case alone.
 //!
 //! # Pairing, and why it is not a ratio of means
 //!
@@ -418,27 +424,33 @@ pub fn analyse(
     let (ci_low, ci_high) = bootstrap_ci(&deltas, seed);
     let floor = floor_for(metric);
 
+    // The direction of *goodness*, not the sign: a throughput that rose is an
+    // improvement, a latency that rose is a regression.
+    let cleared = if (delta > 0.0) == higher_is_better {
+        Verdict::Improved
+    } else {
+        Verdict::Regressed
+    };
+
     let half_width = (ci_high - ci_low) / 2.0;
     let (verdict, replicates_needed) = if n < MIN_REPLICATES {
-        (Verdict::NoVerdict, Some(MIN_BALANCED_REPLICATES))
+        (Verdict::NoVerdict, replicates_for(half_width, n, floor))
+    } else if ci_low > floor || ci_high < -floor {
+        // The whole interval is past the floor, so the floor has separated this
+        // difference however wide the interval is. Asked before the width, since
+        // a difference this size is exactly what a wide interval must not hide.
+        (cleared, None)
     } else if half_width >= floor {
         // The floor asks whether a difference is worth telling anybody, and can
-        // only answer while it is wider than the interval. Once the spread
-        // reaches the floor on its own, applying the rule reports the machine.
+        // only answer that while it is wider than the interval. An interval that
+        // straddles the floor leaves the question open, and answering it from a
+        // point estimate reports the machine.
         (Verdict::NoVerdict, replicates_for(half_width, n, floor))
     } else if (ci_low > 0.0 || ci_high < 0.0) && delta.abs() >= floor {
         // Both halves still asked. A widened interval has two arms of different
         // lengths, so a difference past the floor with a half-width inside it
         // does not by itself put the whole interval one side of zero.
-        //
-        // The direction of *goodness*, not the sign: a throughput that rose is
-        // an improvement, a latency that rose is a regression.
-        let verdict = if (delta > 0.0) == higher_is_better {
-            Verdict::Improved
-        } else {
-            Verdict::Regressed
-        };
-        (verdict, None)
+        (cleared, None)
     } else {
         (Verdict::NoChange, None)
     };
@@ -711,6 +723,75 @@ mod tests {
             replicates_for(0.0, 40, DEFAULT_FLOOR),
             Some(MIN_BALANCED_REPLICATES)
         );
+    }
+
+    /// Samples with a given mean and sample standard deviation, so a fixture
+    /// can name the interval it wants rather than being tuned to it.
+    fn shaped(n: usize, mean_delta: f64, sd: f64) -> (Vec<f64>, Vec<f64>) {
+        let count = n as f64;
+        let centred: Vec<f64> = (0..n).map(|k| (k as f64) - (count - 1.0) / 2.0).collect();
+        let scale = (centred.iter().map(|z| z * z).sum::<f64>() / (count - 1.0)).sqrt();
+        let head = centred
+            .iter()
+            .map(|z| 1000.0 * (1.0 + mean_delta + sd * z / scale))
+            .collect();
+        (vec![1000.0; n], head)
+    }
+
+    /// A difference the floor has separated is judged however wide the interval
+    /// is. A width test applied first declines a 40% regression whose interval
+    /// runs from +34% to +45%, which is the largest movement a run can find.
+    #[test]
+    fn an_interval_wholly_past_the_floor_is_judged_at_any_width() {
+        for (n, delta, sd) in [(20, 0.40, 0.145), (6, 0.15, 0.070), (20, -0.40, 0.145)] {
+            let (base, head) = shaped(n, delta, sd);
+            let out = wall(&base, &head);
+            let half = (out.ci_high - out.ci_low) / 2.0;
+            assert!(
+                half >= out.floor,
+                "the fixture must be wider than the floor: {half} at n={n}"
+            );
+            assert!(
+                out.ci_low > out.floor || out.ci_high < -out.floor,
+                "and wholly past it: [{}, {}]",
+                out.ci_low,
+                out.ci_high
+            );
+            let expected = if delta > 0.0 {
+                Verdict::Regressed
+            } else {
+                Verdict::Improved
+            };
+            assert_eq!(out.verdict, expected, "at n={n} delta={delta}");
+            assert_eq!(out.replicates_needed, None);
+        }
+    }
+
+    /// And the measured rows that made two A/A runs of one commit disagree stay
+    /// declined. Each straddles the floor rather than clearing it, so the rule
+    /// above does not reach them.
+    ///
+    /// Given as a difference and a spread rather than as the intervals the
+    /// report carried, because those were cut before [`widening`] existed. The
+    /// spread behind a reported half-width `h` at five pairs is `h * 2.5 / z`.
+    #[test]
+    fn the_spreads_that_made_two_a_a_runs_disagree_are_still_declined() {
+        for (case, delta, sd) in [
+            ("err_truncated_value · wall_ns_per_iter", 0.0666, 0.0791),
+            ("raw_batch_serde · wall_ns_per_iter", 0.0902, 0.0834),
+            ("resolved_writer_only · wall_ns_per_iter", 0.0853, 0.0753),
+        ] {
+            let (base, head) = shaped(5, delta, sd);
+            let out = wall(&base, &head);
+            assert_eq!(
+                out.verdict,
+                Verdict::NoVerdict,
+                "{case}: [{}, {}]",
+                out.ci_low,
+                out.ci_high
+            );
+            assert!(out.replicates_needed.is_some(), "{case}");
+        }
     }
 
     /// A spread nothing on this machine will resolve names no count at all,

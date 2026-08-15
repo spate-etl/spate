@@ -369,13 +369,26 @@ impl Comparison {
 
     /// The rows the rule reached no conclusion about.
     ///
-    /// Fewer than [`crate::stats::MIN_REPLICATES`] paired replicates, so there
-    /// is a difference to print and nothing concluded from it. Disjoint from
+    /// Too few paired replicates, or an interval no narrower than the metric's
+    /// floor; [`crate::stats::Verdict::NoVerdict`] states both. There is a
+    /// difference to print and nothing concluded from it. Disjoint from
     /// [`Comparison::significant`].
     pub fn unjudged(&self) -> impl Iterator<Item = &Row> {
         self.rows
             .iter()
             .filter(|row| !row.analysis.verdict.is_judged())
+    }
+
+    /// The largest replicate count any unjudged row asks for, and `None` when
+    /// every row was judged or none of them named a count.
+    ///
+    /// The largest rather than one per row, because it is what a reader passes
+    /// to `--replicates` to judge the lot.
+    #[must_use]
+    pub fn replicates_needed(&self) -> Option<usize> {
+        self.unjudged()
+            .filter_map(|row| row.analysis.replicates_needed)
+            .max()
     }
 
     /// Every guarded field the two legs disagree about.
@@ -844,7 +857,7 @@ pub fn compare(base: Leg, head: Leg, allow: &[String]) -> Result<Comparison, Str
 /// Takes one case's rows, every metric already analysed.
 /// [`crate::stats::derived_from`] states the relationship and why one verdict
 /// has to cover both. The derived row keeps its own difference, interval and
-/// floor; only the verdict is taken.
+/// floor; the verdict and the replicate count that goes with it are taken.
 ///
 /// [`crate::stats::Verdict`] is a direction of goodness rather than a sign, so
 /// the verdict transfers unchanged: a wall time that rose and a throughput that
@@ -858,14 +871,19 @@ fn inherit_derived_verdicts(rows: &mut [Row]) {
         let Some(measured) = crate::stats::derived_from(&rows[index].metric) else {
             continue;
         };
-        let Some(verdict) = rows
+        let Some((verdict, needed)) = rows
             .iter()
             .find(|row| row.metric == measured)
-            .map(|row| row.analysis.verdict)
+            .map(|row| (row.analysis.verdict, row.analysis.replicates_needed))
         else {
             continue;
         };
+        // Both together. The count says what applying the rule to this row
+        // would take, so a row that took someone else's verdict has to take
+        // their count with it — its own describes a decision that was not made,
+        // and the two render side by side as "improved (needs 8 replicates)".
         rows[index].analysis.verdict = verdict;
+        rows[index].analysis.replicates_needed = needed;
     }
 }
 
@@ -1233,6 +1251,121 @@ mod tests {
                 out.significant().map(|r| &r.metric).collect::<Vec<_>>()
             );
         }
+    }
+
+    /// A derived row whose own interval is wider than the floor, beside the
+    /// measured row whose is not.
+    ///
+    /// Judged apiece, the throughput declines a verdict and the wall time
+    /// returns one, which renders as "improved (needs 8 replicates)" — a row
+    /// stating both that the rule applied and that it did not. The count
+    /// describes a decision, so it travels with the verdict it belongs to.
+    #[test]
+    fn a_derived_row_takes_the_replicate_count_with_the_verdict() {
+        // Mean zero, sample standard deviation one, over six pairs.
+        let unit = [
+            -1.336_306, -0.801_784, -0.267_261, 0.267_261, 0.801_784, 1.336_306,
+        ];
+        let base = vec![1000.0; unit.len()];
+        let head: Vec<f64> = unit
+            .iter()
+            .map(|z| 1000.0 * (1.0 - 0.066 + 0.055 * z))
+            .collect();
+
+        let out = compare(
+            Builder::new("base")
+                .throughput(1024.0, 65536.0)
+                .series("a", &base)
+                .build(),
+            Builder::new("head")
+                .throughput(1024.0, 65536.0)
+                .series("a", &head)
+                .build(),
+            &[],
+        )
+        .expect("compares");
+
+        let half = |metric: &str| {
+            let row = out
+                .rows
+                .iter()
+                .find(|row| row.metric == metric)
+                .expect(metric);
+            (
+                (row.analysis.ci_high - row.analysis.ci_low) / 2.0,
+                row.analysis.floor,
+            )
+        };
+        // The corner this test is about, asserted rather than assumed: the
+        // reciprocal stretches the far tail, so the rate's interval reaches the
+        // floor where the wall time's does not.
+        let (wall_half, floor) = half(WALL_NS_PER_ITER);
+        let (rate_half, _) = half(RECORDS_PER_S);
+        assert!(wall_half < floor, "{wall_half} against {floor}");
+        assert!(rate_half >= floor, "{rate_half} against {floor}");
+
+        let by_metric = verdicts(&out);
+        assert_eq!(by_metric[WALL_NS_PER_ITER], Verdict::Improved);
+        assert_eq!(by_metric[RECORDS_PER_S], Verdict::Improved);
+        assert_eq!(by_metric[BYTES_PER_S], Verdict::Improved);
+
+        // The invariant the two fields carry between them, over every row: a
+        // count is present exactly when the rule was not applied.
+        for row in &out.rows {
+            assert_eq!(
+                row.analysis.replicates_needed.is_some(),
+                row.analysis.verdict == Verdict::NoVerdict,
+                "{} · {}: {:?} with {:?}",
+                row.case,
+                row.metric,
+                row.analysis.verdict,
+                row.analysis.replicates_needed
+            );
+        }
+    }
+
+    /// The mirror image: the measured row declines, so the rows derived from it
+    /// decline with it and ask for the same count.
+    #[test]
+    fn a_derived_row_declines_when_the_measured_row_does() {
+        let unit = [-1.264_911, -0.632_456, 0.0, 0.632_456, 1.264_911];
+        let base = vec![1000.0; unit.len()];
+        let head: Vec<f64> = unit
+            .iter()
+            .map(|z| 1000.0 * (1.0 + 0.0902 + 0.0834 * z))
+            .collect();
+
+        let out = compare(
+            Builder::new("base")
+                .throughput(1024.0, 65536.0)
+                .series("a", &base)
+                .build(),
+            Builder::new("head")
+                .throughput(1024.0, 65536.0)
+                .series("a", &head)
+                .build(),
+            &[],
+        )
+        .expect("compares");
+
+        let wall = out
+            .rows
+            .iter()
+            .find(|row| row.metric == WALL_NS_PER_ITER)
+            .expect("wall");
+        assert_eq!(wall.analysis.verdict, Verdict::NoVerdict);
+        let needed = wall.analysis.replicates_needed.expect("a count");
+
+        for row in &out.rows {
+            assert_eq!(row.analysis.verdict, Verdict::NoVerdict, "{}", row.metric);
+            assert_eq!(
+                row.analysis.replicates_needed,
+                Some(needed),
+                "{}",
+                row.metric
+            );
+        }
+        assert_eq!(out.significant().count(), 0);
     }
 
     /// The measurement from the report, in nanoseconds per iteration. Its mean

@@ -41,10 +41,23 @@
 //! [`crate::compare::Row::is_finding`] is what keeps the derived row out of the
 //! significant-changes table, so one timing event is one finding.
 //!
-//! Fewer than five paired replicates prints the difference and declines to judge
-//! it. Below that, the tail of a bootstrap is decided by which single pair was
-//! drawn least often, so an interval would be an assertion about the resampler
-//! rather than about the code. The default is ten.
+//! # When the rule is not applied
+//!
+//! Two conditions stop it before it starts. Both print the difference with no
+//! verdict beside it, and name the replicate count that case would need.
+//!
+//! Fewer than five paired replicates: below that, the tail of a bootstrap is
+//! decided by which single pair was drawn least often, so an interval would be
+//! an assertion about the resampler rather than about the code.
+//!
+//! An interval no narrower than the metric's floor: a floor separates a
+//! difference worth telling anybody about from one that is not, and can only do
+//! that while it is wider than the interval. Past that point a case's own spread
+//! reaches the floor unaided, and which case clears it is decided by the run.
+//! [`replicates_for`] names the count that brings the interval back inside the
+//! floor, so a run too short for a case degrades to "no verdict, needs
+//! eighteen" rather than to a difference the next run contradicts. The default
+//! is ten.
 //!
 //! # Pairing, and why it is not a ratio of means
 //!
@@ -103,6 +116,21 @@ use crate::rng::SplitMix64;
 /// with four pairs the 5th percentile of the resampled means is decided by
 /// which single pair was drawn least often.
 pub const MIN_REPLICATES: usize = 5;
+
+/// The smallest count that is both judgeable and balanced: [`MIN_REPLICATES`]
+/// rounded up to an even number.
+///
+/// An A/B run alternates which leg goes first, so an odd count leaves one leg
+/// second more often than the other. What [`replicates_for`] recommends is a
+/// count a two-leg run will accept.
+pub const MIN_BALANCED_REPLICATES: usize = MIN_REPLICATES + MIN_REPLICATES % 2;
+
+/// The largest count [`replicates_for`] will name.
+///
+/// A case whose spread needs more than this is not going to be measured on this
+/// machine by taking more replicates, and a report that says so is more use than
+/// one naming a number nobody will run.
+pub const MAX_SUGGESTED_REPLICATES: usize = 200;
 
 /// Resamples per bootstrap. Enough that the interval's own Monte-Carlo error is
 /// far below the floors below, and cheap enough to run for every metric of
@@ -236,7 +264,14 @@ pub enum Verdict {
     Regressed,
     /// Either the interval includes zero or the difference is below the floor.
     NoChange,
-    /// Too few paired replicates to judge. The difference is still printed.
+    /// The rule was not applied. The difference is still printed, and
+    /// [`Analysis::replicates_needed`] says what it would take to apply it.
+    ///
+    /// Two causes: fewer than [`MIN_REPLICATES`] paired replicates, or an
+    /// interval no narrower than the metric's floor. The second is the one that
+    /// makes an A/A run quiet. A floor suppresses noise only while it is wider
+    /// than the interval; past that, a case's own spread reaches the floor on
+    /// its own and which case is flagged is decided by the run.
     NoVerdict,
 }
 
@@ -249,10 +284,9 @@ impl Verdict {
 
     /// Whether the rule reached a conclusion at all.
     ///
-    /// False only for [`Verdict::NoVerdict`]: fewer than [`MIN_REPLICATES`]
-    /// paired replicates, so the rule was never applied rather than applied and
-    /// not met. A report that conflates the two claims the opposite of what
-    /// happened.
+    /// False only for [`Verdict::NoVerdict`], where the rule was never applied
+    /// rather than applied and not met. A report that conflates the two claims
+    /// the opposite of what happened.
     #[must_use]
     pub const fn is_judged(self) -> bool {
         !matches!(self, Self::NoVerdict)
@@ -305,6 +339,13 @@ pub struct Analysis {
     pub floor: f64,
     /// The conclusion.
     pub verdict: Verdict,
+    /// Paired replicates this metric would need before the rule can be applied
+    /// to it, and `None` whenever it was applied.
+    ///
+    /// Set for every [`Verdict::NoVerdict`]. `None` past
+    /// [`MAX_SUGGESTED_REPLICATES`], where the answer is that this case is not
+    /// measurable here rather than a count.
+    pub replicates_needed: Option<usize>,
 }
 
 /// Compares one metric's paired samples.
@@ -373,18 +414,29 @@ pub fn analyse(
     let (ci_low, ci_high) = bootstrap_ci(&deltas, seed);
     let floor = floor_for(metric);
 
-    let verdict = if n < MIN_REPLICATES {
-        Verdict::NoVerdict
+    let half_width = (ci_high - ci_low) / 2.0;
+    let (verdict, replicates_needed) = if n < MIN_REPLICATES {
+        (Verdict::NoVerdict, Some(MIN_BALANCED_REPLICATES))
+    } else if half_width >= floor {
+        // The floor asks whether a difference is worth telling anybody, and can
+        // only answer while it is wider than the interval. Once the spread
+        // reaches the floor on its own, applying the rule reports the machine.
+        (Verdict::NoVerdict, replicates_for(half_width, n, floor))
     } else if (ci_low > 0.0 || ci_high < 0.0) && delta.abs() >= floor {
+        // Both halves still asked. A widened interval has two arms of different
+        // lengths, so a difference past the floor with a half-width inside it
+        // does not by itself put the whole interval one side of zero.
+        //
         // The direction of *goodness*, not the sign: a throughput that rose is
         // an improvement, a latency that rose is a regression.
-        if (delta > 0.0) == higher_is_better {
+        let verdict = if (delta > 0.0) == higher_is_better {
             Verdict::Improved
         } else {
             Verdict::Regressed
-        }
+        };
+        (verdict, None)
     } else {
-        Verdict::NoChange
+        (Verdict::NoChange, None)
     };
 
     Ok(Analysis {
@@ -396,7 +448,29 @@ pub fn analyse(
         ci_high,
         floor,
         verdict,
+        replicates_needed,
     })
+}
+
+/// The smallest count whose interval this case's spread would fit inside the
+/// floor, given a `half_width` measured over `n` pairs.
+///
+/// An interval's width falls as `t(0.95, m - 1) / sqrt(m)`, and the spread it
+/// is built from is a property of the case rather than of the count, so
+/// `half(m) = half(n) * t(0.95, m - 1) / t(0.95, n - 1) * sqrt(n / m)`. Searched
+/// rather than solved: the numerator is tabulated, and the answer has to be an
+/// even number a two-leg run will accept.
+///
+/// `None` past [`MAX_SUGGESTED_REPLICATES`].
+#[must_use]
+pub fn replicates_for(half_width: f64, n: usize, floor: f64) -> Option<usize> {
+    let measured = t_quantile(n.saturating_sub(1));
+    (MIN_BALANCED_REPLICATES..=MAX_SUGGESTED_REPLICATES)
+        .step_by(2)
+        .find(|m| {
+            let scaled = (n as f64 / *m as f64).sqrt();
+            half_width * t_quantile(m - 1) / measured * scaled < floor
+        })
 }
 
 /// The bootstrap's seed for one (case, metric) pair.
@@ -470,8 +544,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOC_FLOOR, Analysis, DEFAULT_FLOOR, MIN_REPLICATES, RSS_FLOOR, Verdict, analyse,
-        floor_for, seed_for, widening,
+        ALLOC_FLOOR, Analysis, DEFAULT_FLOOR, MIN_BALANCED_REPLICATES, MIN_REPLICATES, RSS_FLOOR,
+        Verdict, analyse, floor_for, seed_for, widening,
     };
     use crate::record::{ALLOC_BYTES_PER_ITER, PEAK_RSS_BYTES, WALL_NS_PER_ITER};
 
@@ -540,14 +614,17 @@ mod tests {
     }
 
     /// And the mirror image: a large difference the replicates cannot resolve.
+    /// The interval is wider than the floor, so the rule declines rather than
+    /// calling it no change, and says what resolving it would take.
     #[test]
     fn a_large_difference_with_an_interval_spanning_zero_is_not_a_finding() {
         let base = vec![100.0, 100.0, 100.0, 100.0, 100.0, 100.0];
-        let head = vec![40.0, 190.0, 60.0, 170.0, 50.0, 180.0];
+        let head = vec![84.0, 94.0, 103.0, 113.0, 122.0, 132.0];
         let out = wall(&base, &head);
         assert!(out.delta.abs() > DEFAULT_FLOOR);
         assert!(out.ci_low < 0.0 && out.ci_high > 0.0);
-        assert_eq!(out.verdict, Verdict::NoChange);
+        assert_eq!(out.verdict, Verdict::NoVerdict);
+        assert!(out.replicates_needed.is_some(), "{out:?}");
     }
 
     #[test]
@@ -558,6 +635,82 @@ mod tests {
         assert_eq!(out.replicates, MIN_REPLICATES - 1);
         assert_eq!(out.verdict, Verdict::NoVerdict);
         assert!((out.delta - 1.0).abs() < 1e-9, "{}", out.delta);
+        // Even, so the count it asks for is one a two-leg run accepts.
+        assert_eq!(out.replicates_needed, Some(MIN_BALANCED_REPLICATES));
+        assert_eq!(MIN_BALANCED_REPLICATES % 2, 0);
+    }
+
+    /// The case from the A/A report, as a spread rather than as its records:
+    /// five pairs, a +9.02% mean difference and an interval half again as wide
+    /// as the floor. Judged, it reads as a 9% regression; both A/A runs
+    /// produced one of these and neither produced the same one.
+    #[test]
+    fn a_spread_the_floor_cannot_suppress_is_declined_with_a_count() {
+        // Mean zero, sample standard deviation one, so the deltas below carry
+        // exactly the spread named.
+        let unit = [-1.264_911, -0.632_456, 0.0, 0.632_456, 1.264_911];
+        let base = vec![1000.0; unit.len()];
+        let head: Vec<f64> = unit
+            .iter()
+            .map(|z| 1000.0 * (1.0 + 0.0902 + 0.0834 * z))
+            .collect();
+
+        let out = wall(&base, &head);
+        assert_eq!(out.replicates, 5);
+        assert!(out.delta > DEFAULT_FLOOR, "{}", out.delta);
+        assert!(
+            out.ci_low > 0.0,
+            "the interval excludes zero: {}",
+            out.ci_low
+        );
+        assert_eq!(
+            out.verdict,
+            Verdict::NoVerdict,
+            "an interval wider than the floor is not a verdict"
+        );
+
+        // The count it names is even, larger than what was run, and enough:
+        // re-measuring that many times puts the interval inside the floor.
+        let needed = out.replicates_needed.expect("a count");
+        assert_eq!(needed % 2, 0, "{needed}");
+        assert!(needed > out.replicates, "{needed}");
+        let half = (out.ci_high - out.ci_low) / 2.0;
+        assert!(super::replicates_for(half, out.replicates, out.floor) == Some(needed));
+
+        // And one step below it is not enough, so the count is the smallest
+        // that works rather than a round number.
+        assert!(
+            needed == MIN_BALANCED_REPLICATES || {
+                let shorter = needed - 2;
+                super::t_quantile(shorter - 1) / super::t_quantile(out.replicates - 1)
+                    * (out.replicates as f64 / shorter as f64).sqrt()
+                    * half
+                    >= out.floor
+            }
+        );
+    }
+
+    /// A spread nothing on this machine will resolve names no count at all,
+    /// rather than a number nobody will run.
+    #[test]
+    fn a_spread_beyond_reach_names_no_count() {
+        let base = vec![100.0; 8];
+        let head = vec![5.0, 400.0, 8.0, 350.0, 12.0, 380.0, 6.0, 420.0];
+        let out = wall(&base, &head);
+        assert_eq!(out.verdict, Verdict::NoVerdict);
+        assert_eq!(out.replicates_needed, None);
+    }
+
+    /// A difference well past the floor, measured precisely, is still a
+    /// finding: the gate is about the interval, not about the difference.
+    #[test]
+    fn a_precise_measurement_is_still_judged() {
+        let base = jittered(1000.0, 12);
+        let head: Vec<f64> = base.iter().map(|v| v * 1.09).collect();
+        let out = wall(&base, &head);
+        assert!((out.ci_high - out.ci_low) / 2.0 < out.floor);
+        assert_eq!(out.verdict, Verdict::Regressed);
+        assert_eq!(out.replicates_needed, None);
     }
 
     /// The report must be reproducible from the same two legs, or a number

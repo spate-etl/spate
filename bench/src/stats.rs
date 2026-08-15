@@ -194,12 +194,18 @@ const T_95: [f64; 30] = [
 /// the quantile beyond it, which is within 0.002% of exact from there on and
 /// converges to [`Z`].
 fn t_quantile(freedom: usize) -> f64 {
-    if let Some(exact) = T_95.get(freedom.wrapping_sub(1)) {
-        return *exact;
+    // One degree of freedom is the floor. The table starts there and the
+    // expansion divides by the count, so zero would otherwise index off the end
+    // of the table and return an infinity the interval carries to a report.
+    let freedom = freedom.max(1);
+    match T_95.get(freedom - 1) {
+        Some(exact) => *exact,
+        None => {
+            let v = freedom as f64;
+            Z + (Z.powi(3) + Z) / (4.0 * v)
+                + (5.0 * Z.powi(5) + 16.0 * Z.powi(3) + 3.0 * Z) / (96.0 * v * v)
+        }
     }
-    let v = freedom as f64;
-    Z + (Z.powi(3) + Z) / (4.0 * v)
-        + (5.0 * Z.powi(5) + 16.0 * Z.powi(3) + 3.0 * Z) / (96.0 * v * v)
 }
 
 /// How much wider than its percentile cuts an interval on `n` pairs has to be
@@ -550,8 +556,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOC_FLOOR, Analysis, DEFAULT_FLOOR, MIN_BALANCED_REPLICATES, MIN_REPLICATES, RSS_FLOOR,
-        Verdict, analyse, floor_for, seed_for, widening,
+        ALLOC_FLOOR, Analysis, DEFAULT_FLOOR, MAX_SUGGESTED_REPLICATES, MIN_BALANCED_REPLICATES,
+        MIN_REPLICATES, RSS_FLOOR, Verdict, analyse, floor_for, replicates_for, seed_for, widening,
     };
     use crate::record::{ALLOC_BYTES_PER_ITER, PEAK_RSS_BYTES, WALL_NS_PER_ITER};
 
@@ -696,6 +702,25 @@ mod tests {
         );
     }
 
+    /// `replicates_for` is public and takes the count it measured as an
+    /// argument, so it answers for counts `analyse` never hands it.
+    #[test]
+    fn a_count_the_rule_never_produces_is_still_answered() {
+        for n in [0, 1, 2, MIN_REPLICATES, MAX_SUGGESTED_REPLICATES] {
+            let answer = replicates_for(0.2, n, DEFAULT_FLOOR);
+            assert!(
+                answer.is_none_or(|m| m % 2 == 0 && m <= MAX_SUGGESTED_REPLICATES),
+                "at {n}: {answer:?}"
+            );
+        }
+        // A spread already inside the floor asks for the smallest count that is
+        // judgeable and balanced, rather than for the count it was measured at.
+        assert_eq!(
+            replicates_for(0.0, 40, DEFAULT_FLOOR),
+            Some(MIN_BALANCED_REPLICATES)
+        );
+    }
+
     /// A spread nothing on this machine will resolve names no count at all,
     /// rather than a number nobody will run.
     #[test]
@@ -758,6 +783,14 @@ mod tests {
         let step_before = widening(30) - widening(31);
         let step_across = widening(31) - widening(32);
         assert!(step_across < step_before, "{step_across} {step_before}");
+
+        // Every count produces a finite factor. An infinity here reaches a
+        // report as an interval spanning everything, and the table lookup is one
+        // index away from returning one.
+        for n in [2, 3, 5, 30, 31, 200, usize::MAX] {
+            assert!(widening(n).is_finite(), "at {n}");
+        }
+        assert!(super::t_quantile(0).is_finite());
     }
 
     /// The interval a sample supports, end to end. Twelve deltas of known

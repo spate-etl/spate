@@ -166,9 +166,10 @@ more client CPU. Whether that is a net win depends on your workload and where th
 bottleneck sits.
 **Reach for `native`** when ClickHouse is the CPU bottleneck or your network
 egress is the constraint (cross-region, metered), and **keep `rowbinary`** when
-client CPU is what's scarce, then measure. See the
-[Native format](./native-format.mdx) guide for the full trade and the type
-support matrix.
+client CPU is what's scarce, then measure. The
+[Native format](./native-format.mdx) guide carries the full trade, and
+[ClickHouse column types](./column-types.mdx) carries what each format
+writes.
 
 ## Compression
 

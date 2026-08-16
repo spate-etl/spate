@@ -1549,7 +1549,7 @@ impl<S: CoordinationStore> Task<S> {
             let now: BTreeSet<String> = val.splits.iter().cloned().collect();
             // Start the acquisition clock for newly-named splits, and
             // stop it for anything no longer expected. Not for one
-            // already held: that reports a drain as a fleet handover.
+            // already held: that reports a drain as a reassignment.
             for id in now.difference(&self.assigned) {
                 if self.owned.contains_key(id) {
                     continue;
@@ -1809,7 +1809,7 @@ impl<S: CoordinationStore> Task<S> {
         self.record_claim(id, kind, reason, next_epoch, lease_rev, started)
             .await?;
         // Assignment-to-acquisition. Observed on the write that
-        // transferred ownership, so a rising median means slow handovers
+        // transferred ownership, so a rising median means slow reassignments
         // are *succeeding*, not that they got slower.
         if self.owned.contains_key(id)
             && let Some(since) = self.awaiting.remove(id)

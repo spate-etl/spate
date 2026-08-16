@@ -125,7 +125,7 @@ pub(crate) fn test_tuning() -> CoordinationConfig {
         // these sinks are paced at ~100ms/write. Cut to a fraction of a
         // test lease it silently forces drains that would have completed
         // cooperatively: same green suite, different code path, and
-        // replayed tails instead of clean hand-offs. It only costs wall
+        // replayed tails instead of clean releases. It only costs wall
         // clock when a drain wedges, which is the case it bounds.
         drain_deadline: Duration::from_secs(5),
         ..CoordinationConfig::default()

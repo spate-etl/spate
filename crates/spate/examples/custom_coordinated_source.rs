@@ -477,7 +477,7 @@ fn check_resume_drift() -> Result<(), Box<dyn std::error::Error>> {
     let spec = SplitSpec::new(SplitId::new("rows-000250-000375")?, descriptor.clone());
     let len = 125;
 
-    // Accepted. What a takeover hands over is a split-local watermark inside
+    // Accepted. What a takeover inherits is a split-local watermark inside
     // the range, pinned to the descriptor it was read against. The band is
     // inclusive at both ends, so 0 and `len` are resume points too.
     ctx.validate_resume(&spec, &SplitProgress::new(0, descriptor.clone()))?;

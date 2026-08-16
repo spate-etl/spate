@@ -224,7 +224,7 @@ struct SplitState {
     /// This split's end-of-input was already reported through
     /// `take_finishing` (the commit-ready hint fires once per tenancy).
     hinted: bool,
-    /// This split is being cooperatively handed off (controller-thread only —
+    /// This split is being cooperatively revoked (controller-thread only —
     /// `begin_revoke`/`encode_commit`/`sweep`/`drain_ready` all run there).
     /// Its cut watermark must commit `completed: false` and the sweep must
     /// never finish it: a revocation gives the split away, it does not complete
@@ -517,7 +517,7 @@ impl SplitSource for SplitCtx {
         let payload = ProgressState::at(&state.objects, watermark).encode();
         // Complete iff the lane decided end-of-input at exactly this acked
         // watermark: fully framed (T known) and fully acked (W == T).
-        // Dropping the `!revocation` guard commits a handing-off split's cut
+        // Dropping the `!revocation` guard commits a draining split's cut
         // watermark as `completed: true`, marking a half-read split terminally
         // complete in the store.
         Ok(
@@ -546,7 +546,7 @@ impl SplitSource for SplitCtx {
         let Some(state) = self.splits.get(split) else {
             return Ok(None);
         };
-        // A handing-off split is given away through `drain_ready` and finished
+        // A draining split is given away through `drain_ready` and finished
         // by its next owner, never completed by this sweep.
         if state.revocation {
             return Ok(None);
@@ -576,9 +576,9 @@ impl SplitSource for SplitCtx {
         let Some(cut) = state.tracker.terminal() else {
             return Ok(None);
         };
-        // Hand over only once every emitted record is acked and folded into a
-        // commit-ready watermark: the resume point then covers everything this
-        // instance emitted, and the transfer replays nothing.
+        // Give the split up only once every emitted record is acked and
+        // folded into a commit-ready watermark: the resume point then covers
+        // everything this instance emitted, and the transfer replays nothing.
         let acked_all = state.last_committed == Some(cut)
             || (state.last_committed.is_none() && state.resume_watermark == cut);
         if !acked_all {
@@ -973,12 +973,12 @@ mod tests {
         .unwrap();
         tracker.set_terminal(cut);
         let progress = ctx.encode_commit(&id, cut).unwrap();
-        // ...yet a handing-off split's cut must commit `completed: false`: the
+        // ...yet a draining split's cut must commit `completed: false`: the
         // split is being given away, not finished.
         assert_eq!(progress.watermark, cut);
         assert!(
             !progress.completed,
-            "the cut watermark of a handing-off split must never complete it"
+            "the cut watermark of a draining split must never complete it"
         );
     }
 
@@ -1011,11 +1011,11 @@ mod tests {
         let progress = ctx
             .drain_ready(&id)
             .unwrap()
-            .expect("the acked tail is handed over");
+            .expect("the acked tail is given up");
         assert_eq!(progress.watermark, cut);
         assert!(
             !progress.completed,
-            "a revocation hands the split off with completed: false"
+            "a revocation gives the split away with completed: false"
         );
     }
 
@@ -1024,7 +1024,7 @@ mod tests {
         let (mut ctx, _rt) = test_ctx();
 
         // A tenancy that emitted nothing and resumed exactly at end-of-input
-        // would normally complete via the sweep, but not while handing off.
+        // would normally complete via the sweep, but not while draining.
         let spec = spec_of(&[("a", Some("e-a"))]);
         let id = spec.id.clone();
         let tracker = seed_split(&mut ctx, &id, objects_of(&spec), 0);
@@ -1035,7 +1035,7 @@ mod tests {
         );
         assert!(
             ctx.sweep(&id).unwrap().is_none(),
-            "a handing-off split is given away via drain_ready, never completed by the sweep"
+            "a draining split is given away via drain_ready, never completed by the sweep"
         );
 
         // Control: the identical shape without a revocation DOES complete via the

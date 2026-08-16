@@ -105,7 +105,9 @@ different sentence.
 - **Name the settings, types and metrics a reader will search for.** Somebody
   arrives at this file because a gauge moved or a config key stopped working.
 - No pull request number and no author. The number is derived at release time
-  from the commit that added the fragment; contributors are credited in a
+  from the commit that added the fragment — its squash subject if that carries
+  one, and the GitHub API for the commit if it does not. A commit that reached
+  `main` outside a pull request links to itself. Contributors are credited in a
   section of their own, from everyone who committed in the release range rather
   than only those who left a fragment. There is nothing to type for either.
 

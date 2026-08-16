@@ -30,12 +30,13 @@
 //! the deserializer carries across a poll batch, and a one-payload region only
 //! ever measures the walk that populates them.
 //!
-//! The held reader makes that gap visible rather than theoretical. A
-//! single-payload region builds one and then decodes through it exactly once,
-//! so it counts the build on top of the resolution it already paid, and reads
-//! *higher* than the same code did before the reader was held — while the
-//! wall tier, which walks a whole corpus per iteration, reads lower. The two
-//! tiers disagreeing on that commit is the split working, not a fault.
+//! A single-payload region on the value or serde path builds a held reader and
+//! decodes through it once, so it prices the build. The wall tier builds one
+//! during warm-up, outside the recorded region, and walks a whole corpus per
+//! iteration, so it prices only the steady state that build buys. Holding a
+//! reader, or ceasing to, therefore moves the two tiers in opposite
+//! directions; a change to what a build costs moves this tier alone, and a
+//! change to what a decode costs moves both.
 //!
 //! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo

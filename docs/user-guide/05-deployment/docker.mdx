@@ -127,7 +127,7 @@ replay after restart. Delivery stays at-least-once either way.
   sees the node's cores and spawns a thread per core. See
   [Tuning](tuning.mdx).
 - One pod is one member of the source's assignment. Scaling the Deployment
-  triggers a rebalance; revoked work drains and commits before handover, so a
+  triggers a rebalance; revoked work drains and commits before release, so a
   scale event costs redelivery of only the uncommitted tail.
 - Memory is dominated by `backpressure.max_inflight_bytes` plus whatever the
   source client buffers on its own; size `resources.limits.memory` above their

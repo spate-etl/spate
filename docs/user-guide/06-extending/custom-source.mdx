@@ -317,7 +317,7 @@ What each callback owes the driver:
   and the job never completes. The ledger's ranges are never empty, so its
   implementation is a comment and a `None`.
 - **`close_split`** ends the tenancy. The split's lane is being retired (lost,
-  fenced, completed, handed off, or shut down), so *detach* its fetcher rather
+  fenced, completed, released, or shut down), so *detach* its fetcher rather
   than abort it, since the pipeline thread may still be draining the lane, and
   do not block. The driver calls neither `encode_commit` nor `sweep` for that
   split afterwards, so drop its state here.
@@ -343,8 +343,8 @@ tick, so a split completes and frees its working-set slot within milliseconds
 of its last record becoming sink-durable. Completion is correct without it;
 the terminal commit lands on the next tick either way.
 
-**`begin_revoke`** and **`drain_ready`** are the cooperative handoff, and they
-are a pair. When the leader moves an owned split to another instance,
+**`begin_revoke`** and **`drain_ready`** are the cooperative revocation, and
+they are a pair. When the leader moves an owned split to another instance,
 `begin_revoke` asks this one to stop that split's intake at a safe boundary
 while keeping its commit state; return `true` to accept, and the default
 `false` declines. `drain_ready` then reports that split's final progress:
@@ -420,7 +420,7 @@ arrived); a fresh `PartitionId` per tenancy (so a late drain-commit from
 a lost split resolves to a retired tenancy and is skipped, with no zombie
 folds); the exit split, where losses and fences leave through `LanesRevoked`
 with the drain barrier, while a split that reached its terminal commit and
-one that finished a cooperative handoff both leave barrier-less through
+one whose drain completed both leave barrier-less through
 `LanesRetired` (in either case a landed commit already proved nothing is in
 flight); fenced-commit triage (`Fenced` → quarantine the tenancy, surface
 the loss; `Retryable` → defer to the split's next commit); completion sweeps

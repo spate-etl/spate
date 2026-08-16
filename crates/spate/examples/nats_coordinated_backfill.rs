@@ -16,7 +16,7 @@
 //! assigned, reads them straight from the split descriptors, and commits
 //! fenced per-split progress. Each exits `Completed` once every split is
 //! complete, and the union of the two covers the whole prefix. Delivery is
-//! at-least-once, so a forced handoff can replay a tail but never drop one.
+//! at-least-once, so a forced revocation can replay a tail but never drop one.
 //!
 //! The chain paces itself on purpose (see `PACE`): without that the
 //! backfill is over before you can reach the second terminal.
@@ -37,8 +37,8 @@
 //! recomputes the assignment the moment the new member appears and revokes
 //! the newcomer's share from the first instance, which drains those splits
 //! cooperatively before the second claims them. It finishes the object it
-//! has open, cuts at that boundary, and commits its tail before handing them
-//! back, so the move replays nothing. Each instance prints the objects it
+//! has open, cuts at that boundary, and commits its tail before releasing
+//! them, so the move replays nothing. Each instance prints the objects it
 //! covered.
 //!
 //! The first terminal narrates that: `peer joined` as the new member's
@@ -46,12 +46,12 @@
 //! changed hands. The second reports the fleet it walked into. Per-split
 //! detail (`split claimed`, `drain started`, `drain finished`) is a level
 //! down, at `RUST_LOG=info,spate_coordination=debug`, which is the run to
-//! make to watch one object's worth of handover.
+//! make to watch one object's worth of reassignment.
 //!
 //! Draining a paced chain takes time, so `drain_deadline` below sits far
 //! above its default. A drain that outruns the deadline is revoked outright
 //! and its uncommitted tail replays under the new owner instead. Both are
-//! safe; only the first is a clean handoff.
+//! safe; only the first is a clean revocation.
 //!
 //! # Killing one instance
 //!
@@ -64,7 +64,7 @@
 //! the released records on its watch and picks them up as soon as it holds
 //! the leadership that assigns them, seconds after the signal rather than a
 //! lease after it. Because the departing instance commits its tail before
-//! letting go, the handoff replays nothing.
+//! letting go, the release replays nothing.
 //!
 //! **`kill -9`** writes nothing. The dead instance's lease keys stop
 //! being rewritten and expire on the bucket's age limit one lease after the
@@ -261,7 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // and still heartbeated, so a long drain costs a slow rebalance,
         // never a race. The default leaves the drain racing the deadline on
         // this workload, and a drain that loses is forced instead of
-        // cooperative. The tail still replays, but the handoff is not the
+        // cooperative. The tail still replays, but the revocation is not the
         // one this example shows.
         drain_deadline: Duration::from_secs(60),
         ..CoordinationConfig::default()

@@ -186,7 +186,7 @@ fn graceful_release_hands_off_without_waiting_out_the_lease() {
     });
     assert!(
         released_at.elapsed() < LEASE,
-        "released splits must hand off without a lease wait: {:?}",
+        "released splits must be reassigned without a lease wait: {:?}",
         released_at.elapsed()
     );
 }
@@ -667,7 +667,7 @@ fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
     // as the clock advances. A is alive and must keep its own lease, so step
     // in fractions of a renew-interval; a single lease-sized jump expires A
     // too. `advanced` is the clock time from the crash to the
-    // hand-off: B's lease expiry plus, for a non-zero delay, the whole grace
+    // takeover: B's lease expiry plus, for a non-zero delay, the whole grace
     // window on top.
     crash(rt_b, b);
     let cap = LEASE * 10;

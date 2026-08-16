@@ -433,7 +433,7 @@ pub fn drive_pair<C: SplitCoordinator>(
 /// up**. Returns with both revocation slates provably empty.
 ///
 /// Unlike [`drive_pair`], this one answers revocations: it commits and
-/// releases on both sides every iteration, so a hand-off completes the
+/// releases on both sides every iteration, so a revocation completes the
 /// moment the leader asks rather than waiting out `drain_deadline`. Use it
 /// to reach a settled baseline before asserting on what a fleet does next.
 /// A mid-rebalance fleet revokes for its own reasons, and those requests

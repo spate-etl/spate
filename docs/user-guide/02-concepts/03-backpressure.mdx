@@ -19,7 +19,7 @@ and a loop parked inside `send()` stops servicing it. For a source whose
 liveness proof rides the read loop itself, the proof lapses and the
 assignment is withdrawn. For a source whose liveness runs in the
 background, the [leases](../07-reference/glossary.mdx#lease) stay healthy
-but the parked loop cannot answer a reassignment request, so the handoff
+but the parked loop cannot answer a reassignment request, so the revocation
 stalls to its deadline and the work is
 [revoked forcibly](../07-reference/glossary.mdx#cooperative-revocation)
 and replayed by the next owner. Either way the damage is fleet-wide. Peers

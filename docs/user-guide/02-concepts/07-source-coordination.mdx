@@ -114,7 +114,8 @@ Fencing is the only correctness mechanism; the store supplies latency.
 
 ## What this is not
 
-- **Not exactly-once.** Handovers duplicate; they never lose.
+- **Not exactly-once.** Forced revocations and takeovers duplicate; they
+  never lose.
 - **Not a data path.** Only coordination metadata (split records, leases,
   the plan) touches the store; records flow through the pipeline as
   always.

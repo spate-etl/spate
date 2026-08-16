@@ -179,7 +179,7 @@ pub trait SplitSource {
     /// because that is the difference between a replay-free move and a
     /// bounded-duplicate one.
     ///
-    /// While a split is handing off, [`encode_commit`](SplitSource::encode_commit)
+    /// While a split is draining, [`encode_commit`](SplitSource::encode_commit)
     /// must never report it `completed`. A drain cut can look terminal to
     /// the source (everything emitted is acked) while the split is
     /// half-read; the driver strips a `completed` flag it sees here and
@@ -189,7 +189,7 @@ pub trait SplitSource {
         false
     }
 
-    /// Poll a handing-off split for its final progress. Returns
+    /// Poll a draining split for its final progress. Returns
     /// `Some(progress)` with `completed: false` once every record it emitted
     /// is acked **and** that watermark is committed, so the resume point
     /// handed to the next owner covers everything this instance produced (a
@@ -227,7 +227,7 @@ enum TenancyState {
     /// barrier-less) once that final commit lands, or fenced-`Retired` (the
     /// loss path) if a peer fences it mid-drain.
     Draining,
-    /// Ownership over (lost, fenced, failed, completed, handed off); entry
+    /// Ownership over (lost, fenced, failed, completed, released); entry
     /// retained only to absorb late watermarks until its revocation is
     /// delivered.
     Retired,
@@ -850,7 +850,7 @@ impl CoordinationDriver {
             };
             debug_assert!(
                 !progress.completed,
-                "a revocation commit hands the split off, it must not complete it"
+                "a revocation commit gives the split away, it must not complete it"
             );
             self.commit_drained(source, partition, &split, progress)?;
         }
@@ -895,9 +895,9 @@ impl CoordinationDriver {
         split: &SplitId,
         progress: SplitProgress,
     ) -> Result<(), SourceError> {
-        // A handing-off split's drain cut can look terminal to the source
-        // (every record it emitted is acked). Committing it `completed: true`
-        // marks a half-read split permanently done, and its next owner never
+        // A drain cut can look terminal to the source (every record it
+        // emitted is acked). Committing it `completed: true` marks a
+        // half-read split permanently done, and its next owner never
         // resumes it: silent data loss.
         let progress = if progress.completed
             && self
@@ -907,7 +907,7 @@ impl CoordinationDriver {
         {
             tracing::error!(
                 split = %split,
-                "source reported a handing-off split completed; forcing \
+                "source reported a draining split completed; forcing \
                  completed=false — a drain cut is never terminal"
             );
             SplitProgress::new(progress.watermark, progress.state)
@@ -948,7 +948,7 @@ impl CoordinationDriver {
         split: &SplitId,
         progress: SplitProgress,
     ) -> Result<(), SourceError> {
-        // Same guard as `commit_progress`: handover progress is never terminal.
+        // Same guard as `commit_progress`: drain progress is never terminal.
         let progress = if progress.completed {
             tracing::error!(
                 split = %split,
@@ -964,7 +964,7 @@ impl CoordinationDriver {
                 let tenancy = self
                     .tenancies
                     .get_mut(&partition)
-                    .expect("handing-off tenancy");
+                    .expect("draining tenancy");
                 tenancy.progress = Some(progress);
                 tenancy.handed_off = true;
                 if let Err(e) = self
@@ -989,7 +989,7 @@ impl CoordinationDriver {
                 let tenancy = self
                     .tenancies
                     .get_mut(&partition)
-                    .expect("handing-off tenancy");
+                    .expect("draining tenancy");
                 tenancy.progress = Some(progress);
             }
         }
@@ -1917,7 +1917,7 @@ mod tests {
             "the source was asked to stop intake"
         );
 
-        // A tick commit for the handing-off tenancy must still fold.
+        // A tick commit for the draining tenancy must still fold.
         d.commit(&mut s, &[(partition, 42)]).unwrap();
         assert_eq!(s.encoded, vec![("a".to_string(), 42)]);
         assert_eq!(script.commits().len(), 1);
@@ -2048,7 +2048,7 @@ mod tests {
         }]);
 
         // Deferred: nothing written, nothing released, the split stays owned
-        // and handing off.
+        // and draining.
         assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
         assert!(script.commits().is_empty(), "deferred, not written");
         assert!(script.released_drained().is_empty());
@@ -2164,8 +2164,8 @@ mod tests {
     fn a_repeated_revoke_request_mid_drain_is_not_declined() {
         // Re-emission is reachable: the backend cancels a revocation the
         // leader takes back, so a leader can drop a split, restore it, and
-        // drop it again. A decline would force a handoff that is draining
-        // fine, costing the replay the cooperative path avoids.
+        // drop it again. A decline would force the release of a split
+        // draining fine, costing the replay the cooperative path avoids.
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource {
@@ -2254,7 +2254,7 @@ mod tests {
         d.commit(&mut s, &[(partition, 25)]).unwrap();
         assert_eq!(s.encoded, vec![("a".to_string(), 25)]);
         assert_eq!(script.commits().len(), 1);
-        // And it was never actually handed off.
+        // And it was never released as drained.
         assert!(script.released_drained().is_empty());
     }
 
@@ -2298,7 +2298,7 @@ mod tests {
         );
 
         // The tenancy is neither completed nor retired: still owned, still
-        // handing off, no lane has left.
+        // draining, no lane has left.
         assert!(
             d.assignments().iter().any(|(id, _)| id.as_str() == "a"),
             "still owned"

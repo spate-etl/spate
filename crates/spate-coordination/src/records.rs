@@ -37,17 +37,9 @@ use std::hash::BuildHasher as _;
 
 /// Schema version stamped into every record.
 ///
-/// 3 replaced the peer-to-peer revocation-request key with the leader's
-/// `assign.{instance}` records.
-///
-/// The versions do not interoperate, and they do not *try* to: this pin is
-/// checked on the plan record during startup and on every split and spec
-/// record afterwards, and a mismatch is [`Fatal`] on both sides. So a
-/// schema-3 worker cannot join a store a schema-2 fleet wrote, and vice
-/// versa. An upgrade needs a fresh store prefix rather than a full-fleet
-/// restart, and an in-flight bounded job restarts from the beginning.
-/// (At-least-once holds through that: the re-run duplicates, it does not
-/// lose.) See the "Upgrading" section of the scaling-out guide.
+/// The versions do not interoperate. This pin is checked on the plan record
+/// during startup and on every split and spec record afterwards, and a
+/// mismatch is [`Fatal`] whichever build reads it.
 ///
 /// The check fails closed. Ownership transfers on the durable
 /// progress-record CAS regardless of vintage, so a mixed fleet corrupts
@@ -667,9 +659,9 @@ mod tests {
         let err = parse_val::<AssignmentVal>("assign.worker-a", br#"{"schema":3,"who":"x"}"#)
             .unwrap_err();
         assert!(err.to_string().contains("unreadable"), "{err}");
-        // A schema-2 peer wrote `revocation.{victim}` values here instead;
-        // they must fail to parse rather than read as an empty assignment,
-        // which the caller would act on by releasing everything.
+        // A value carrying another schema's shape must fail to parse rather
+        // than read as an empty assignment, which the caller would act on by
+        // releasing everything.
         let err = parse_val::<AssignmentVal>(
             "assign.worker-a",
             br#"{"schema":2,"requester":"b","nonce":"n","granted":[]}"#,

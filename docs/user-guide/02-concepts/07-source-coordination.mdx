@@ -98,19 +98,20 @@ and drains. The standby covers an owner dying at the finish line.
 
 ## Why an external store
 
-An earlier design coordinated instances over the checkpoint object store
-itself, using its conditional writes, trading latency for zero extra
-infrastructure. It was rejected on review before merging: it made an
-object store the required substrate for *every* coordinated source (a
-database source would have deployed one purely to coordinate), and object-store
-round-trips are poll-based and slow, which caps how fast work can be
-distributed. The full record of that reversal lives in the
-[ADR-0024](../../adr/0024-coordination-store-external-kv.md). The store dependency is deliberately
-narrow: six primitives (create-if-absent, compare-and-swap, guarded
-delete, point read, prefix watch, listing) behind a public trait, so
-Redis- or etcd-class backends can be added without touching the protocol.
-Correctness never leans on the store's clock or its watch semantics.
-Fencing is the only correctness mechanism; the store supplies latency.
+Coordination runs over a store of its own. Coordinating over the object
+storage a backfill is already reading would make an object store the
+required substrate for *every* coordinated source (a database source would
+deploy one purely to coordinate), and object-store round-trips are
+poll-based and slow, which caps how fast work can be distributed.
+[ADR-0024](../../adr/0024-coordination-store-external-kv.md) records the
+decision.
+
+The store dependency is deliberately narrow: six primitives
+(create-if-absent, compare-and-swap, guarded delete, point read, prefix
+watch, listing) behind a public trait, so Redis- or etcd-class backends can
+be added without touching the protocol. Correctness never leans on the
+store's clock or its watch semantics. Fencing is the only correctness
+mechanism; the store supplies latency.
 
 ## What this is not
 

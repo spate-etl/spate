@@ -1,6 +1,7 @@
 <!--
-Thank you for this. Delete whichever sections do not apply. A typo fix does
-not need the invariants checklist.
+Delete every section that does not apply, and every comment like this one. If
+the commit message already carries the argument, a link and a sentence is a
+complete description.
 
 Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 -->
@@ -8,43 +9,31 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 ## What this changes, and why
 
 <!--
-`Closes #123.` on a line of its own first, if an issue tracks this. Then the
-change: which crates, and the problem it solves.
+`Closes #123.` on a line of its own first, if an issue tracks this.
+
+There is no need to repeat what that issue says. The diff shows the code and
+the issue states the problem, so use this space for what neither can tell a
+reviewer: the approach, the decisions that were not forced, and what someone
+using the framework sees differently.
+
+When no issue tracks this, state the problem here, in terms of what a user
+hits. "`ChunkWriter` drops the last frame" is a symptom of the implementation.
+"The final batch never reaches the sink on shutdown" is the user-visible
+problem.
+
+Say where this delivers less, more, or something other than the issue asked
+for. That comparison is the one a reviewer cannot make alone.
 -->
 
 ## Invariants
 
 <!--
-Tick the ones this change touches. Ticking one is not a problem. It means
-the description above should say how the property still holds.
+Name the numbers this change touches and say how each property still holds.
+Touching one is not a problem. Answer "None." if it touches none.
 
-The numbers are canonical and defined in docs/INVARIANTS.md, which states each
-property in full and is the only place that does. What follows is the short
-form. Read that file before ticking a box you are unsure about.
+docs/INVARIANTS.md states each invariant in full and is the only place that
+does.
 -->
-
-- [ ] **INV-1 — delivery is at-least-once.** A source watermark is never
-      committed past unacknowledged data, including across rebalances and
-      shutdown.
-- [ ] **INV-2 — source threads never block on a channel send.** Backpressure is
-      `try_send` + `Source::pause` + keep polling. A blocked poll loop gets the
-      consumer evicted from its group.
-- [ ] **INV-3 — the checkpoint tracker stays synchronous and free of async
-      runtimes.** It is loom-tested and must remain so.
-- [ ] **INV-4 — acks never block behind data.** The ack path is unbounded and
-      atomic.
-- [ ] **INV-5 — the sink worker's intake path never awaits outside its
-      `select!`.** Anything it blocks on sits in a branch alongside the drain
-      deadline, or shutdown deadlocks.
-- [ ] **INV-6 — no connector types in `spate-core`'s public API**, and no 0.x
-      dependency types in any public trait bound. The `metrics` facade is the
-      one sanctioned exception.
-- [ ] **INV-7 — record error policies are Skip or Fail only**, and both are
-      surfaced through metrics rather than only logged.
-- [ ] **INV-8 — metrics handles are pre-registered at build time.** Never
-      resolved on the per-record path.
-- [ ] **INV-9 — every metric lives under the `spate_` umbrella.**
-- [ ] **INV-10 — a gauge series has exactly one live owner per process.**
 
 ## Semver
 
@@ -55,30 +44,26 @@ form. Read that file before ticking a box you are unsure about.
 
 ## Checks
 
-Tick by exit code, not by memory.
+<!-- Tick what you ran. Nothing else belongs under this heading. -->
 
-- [ ] `make gates` — formatting, clippy, check, tests, doctests, the feature
-      matrix, licenses and advisories, and the repository consistency checks
-- [ ] Docs changed: `make docs`. It sets `CI=true`, without which the redirect
-      validation silently does not run
-- [ ] Any ad-hoc cargo command run with `--locked`, as CI does
-- [ ] Dependency changes: covered by `make gates`. `THIRD-PARTY.md` is *not*
-      required to be current here, since it is checked nightly and regenerated
-      at release. `make attribution` is welcome if you are adding a dependency
-      rather than bumping one
-- [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org),
-      scoped to the crate touched, and carry no AI attribution trailers
-- [ ] Crate-reaching `feat`, `fix`, `perf`, `revert`, `build`, or any `!`
-      whatever its scope: a fragment under `changelog.d/`, from
-      `make changelog-new TYPE=… SLUG=…`. Scoping to a non-crate area is the
-      exemption; leaving the scope off is not. A fix to a bug that was never
-      released takes a `Changelog: none` trailer instead. **The fragment title
-      is what lands on `main`**
+- [ ] `make gates`
+- [ ] `make docs`, if this touches docs
+- [ ] Conventional Commits, scoped to the crate touched, no AI attribution
+      trailers
+- [ ] A fragment under `changelog.d/`, if this reaches a crate somebody
+      upgrading would care about. `changelog.d/README.md` says when
 
 ## Anything else
 
 <!--
-If you measured something, say what you measured it on, and on how quiet a
-machine. A figure only reaches the docs carrying how it was established (see
-docs/STYLE.md § 7).
+Most changes delete this section.
+
+Keep it to point a reviewer at the lines worth their attention, to say how to
+reject one part without blocking the rest, or to report something you verified
+by hand that no automated test captures. A change with no runtime behavior has
+nothing of that last kind to report.
+
+A defect you found along the way and left alone belongs in its own issue rather
+than here. If you measured something, say what you measured it on and how quiet
+the machine was.
 -->

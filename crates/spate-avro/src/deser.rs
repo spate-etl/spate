@@ -25,10 +25,9 @@ use std::sync::Arc;
 
 /// How many readers one deserializer caches.
 ///
-/// Past this the cache stops growing and further schema ids decode through a
-/// reader built for the payload and dropped with it, so a stream carrying an
-/// unbounded number of schema versions costs bounded memory and no more time
-/// per payload than resolving on every one.
+/// Each chain lane clones its own deserializer and so holds its own map, so a
+/// resident reader costs its resolved name maps once per lane. That per-lane
+/// multiplier is what the number is sized against.
 const MAX_HELD_READERS: usize = 64;
 
 /// The generic Avro value type emitted by [`AvroValueDeserializer`].
@@ -115,21 +114,20 @@ pub(crate) struct DecoderCore {
     /// promotions, aliases).
     pub(crate) reader_schema: Option<Arc<Schema>>,
     /// Readers by writer schema id, holding each id's resolved named types
-    /// across payloads. At most [`MAX_HELD_READERS`] entries.
+    /// across payloads. At most [`MAX_HELD_READERS`] entries: at the ceiling an
+    /// arriving id displaces an arbitrary resident one, so no id is shut out of
+    /// the cache for this deserializer's life.
     ///
     /// The key is the writer id alone, which is valid only while
     /// `reader_schema` is fixed for this deserializer's life. Do not hoist this
     /// into `CompiledSchema`: that is keyed by writer id and carries no
     /// reader-schema identity, so a reader stored there is correct only while
     /// every consumer of one cache shares one reader schema.
-    ///
-    /// Each chain lane clones its own deserializer, so this is per lane.
     held: HashMap<u32, HeldReader>,
 }
 
-/// A clone starts with no readers. `HeldReader` wraps a `GenericDatumReader`,
-/// which is not `Clone`, so the map cannot come along; every lane builds its
-/// own on first use.
+/// A clone starts with no readers: `HeldReader` wraps a `GenericDatumReader`,
+/// which is not `Clone`, so the map cannot come along.
 impl Clone for DecoderCore {
     fn clone(&self) -> Self {
         DecoderCore::new(self.mode.clone(), self.reader_schema.clone())
@@ -226,15 +224,19 @@ impl DecoderCore {
             return Ok(Some(read_datum(held, &mut datum)?));
         }
         // Cached on a successful build, before the read: a reader that builds
-        // is valid for its schema, and whether one payload decodes says
-        // nothing about it. Caching after would rebuild per payload for a
-        // stream where every payload is malformed.
+        // is valid for its schema whatever the payload does, so this must not
+        // move below the read. It must also stay above the eviction, which is
+        // what keeps an unusable schema from displacing a resident reader it
+        // cannot replace.
         let built = HeldReader::compile(writer, self.reader_schema.clone())?;
-        if self.held.len() < MAX_HELD_READERS {
-            let held = self.held.entry(id).or_insert(built);
-            return Ok(Some(read_datum(held, &mut datum)?));
+        if self.held.len() >= MAX_HELD_READERS {
+            // An arbitrary resident id, neither the oldest nor a uniform draw.
+            if let Some(&victim) = self.held.keys().next() {
+                self.held.remove(&victim);
+            }
         }
-        Ok(Some(read_datum(&built, &mut datum)?))
+        let held = self.held.entry(id).or_insert(built);
+        Ok(Some(read_datum(held, &mut datum)?))
     }
 }
 
@@ -279,8 +281,9 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 /// # Performance
 ///
 /// This path decodes each record **twice**, once into an intermediate
-/// [`AvroValue`] and then again into `T` via `from_value`, roughly doubling the per-record allocations and CPU of
-/// the dynamically-typed path. Choose it when you need Avro's full
+/// [`AvroValue`] and then again into `T` via `from_value`, roughly
+/// doubling the per-record allocations and CPU of the dynamically-typed
+/// path. Choose it when you need Avro's full
 /// schema-resolution rules (a configured `reader_schema`: field
 /// reordering, type promotions, defaults, aliases). When you don't,
 /// [`crate::AvroDatumDeserializer`] decodes the same `T` in a single pass
@@ -407,12 +410,12 @@ mod tests {
         assert_eq!(lane.held.len(), 1, "and builds its own on first payload");
     }
 
-    /// The cache stops growing at its ceiling, and ids past it still decode —
-    /// through a reader built for the payload rather than a cached one. The
-    /// entries already held are kept, so a stream cycling more ids than the
-    /// ceiling keeps its hits rather than losing them all at once.
+    /// At the ceiling an arriving id takes a resident id's place, so the cache
+    /// stays bounded and every id a stream carries can reach it. A cache that
+    /// stopped admitting at the ceiling passes the bound and the decode; the
+    /// residency assertions are what fail it.
     #[test]
-    fn the_held_reader_map_is_bounded() {
+    fn an_id_past_the_ceiling_replaces_a_resident_reader() {
         let mut core = raw_core(None);
         let bytes = datum(1, "a");
 
@@ -425,20 +428,76 @@ mod tests {
             core.decode(&raw_payload(&bytes)).unwrap().unwrap();
         }
         assert_eq!(core.held.len(), MAX_HELD_READERS);
+        let before: Vec<u32> = core.held.keys().copied().collect();
 
+        let arriving = MAX_HELD_READERS as u32;
         core.mode = SchemaSourceMode::Raw {
-            schema: Arc::new(crate::cache::CompiledSchema::compile(
-                MAX_HELD_READERS as u32,
-                WRITER_V1,
-            )),
+            schema: Arc::new(crate::cache::CompiledSchema::compile(arriving, WRITER_V1)),
         };
-        let decoded = core.decode(&raw_payload(&bytes)).unwrap();
-        assert!(decoded.is_some(), "an id past the ceiling still decodes");
-        assert_eq!(
-            core.held.len(),
-            MAX_HELD_READERS,
-            "and the readers already cached are kept"
+        let decoded = core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        let Value::Record(fields) = &decoded else {
+            panic!("expected a record, got {decoded:?}");
+        };
+        assert_eq!(fields[0].1, Value::Int(1));
+
+        assert_eq!(core.held.len(), MAX_HELD_READERS, "the cache stays bounded");
+        assert!(
+            core.held.contains_key(&arriving),
+            "the arriving id is resident"
         );
+        let mut evicted = before.iter().filter(|id| !core.held.contains_key(id));
+        let evicted = *evicted.next().expect("one resident id made way");
+        assert!(
+            before
+                .iter()
+                .filter(|id| !core.held.contains_key(id))
+                .nth(1)
+                .is_none(),
+            "and only one"
+        );
+
+        // The evicted id is re-admitted on its next payload, which is the whole
+        // difference from a cache that stops admitting at the ceiling.
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(crate::cache::CompiledSchema::compile(evicted, WRITER_V1)),
+        };
+        let again = core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        assert_eq!(again, decoded);
+        assert!(core.held.contains_key(&evicted), "and is resident again");
+        assert_eq!(core.held.len(), MAX_HELD_READERS, "still bounded");
+    }
+
+    /// A schema that will not build displaces nothing. The build is fallible
+    /// and runs before the eviction, so a stream of unusable ids arriving at a
+    /// full cache cannot empty it of the readers its good ids are using.
+    #[test]
+    fn an_unusable_schema_at_the_ceiling_evicts_nothing() {
+        let mut core = raw_core(None);
+        let bytes = datum(1, "a");
+
+        for id in 0..MAX_HELD_READERS as u32 {
+            core.mode = SchemaSourceMode::Raw {
+                schema: Arc::new(crate::cache::CompiledSchema::compile(id, WRITER_V1)),
+            };
+            core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        }
+        let before: Vec<u32> = core.held.keys().copied().collect();
+
+        let mut poison = crate::cache::CompiledSchema::compile(MAX_HELD_READERS as u32, WRITER_V1);
+        poison.schema = Err("schema 64 is not usable: nope".into());
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(poison),
+        };
+        let err = core.decode(&raw_payload(&bytes)).unwrap_err();
+        assert!(
+            matches!(err, DeserError::SchemaUnavailable { .. }),
+            "got {err:?}"
+        );
+
+        assert_eq!(core.held.len(), MAX_HELD_READERS);
+        for id in &before {
+            assert!(core.held.contains_key(id), "id {id} is still resident");
+        }
     }
 
     /// Two ids carrying *different* schemas decode as their own schema says.

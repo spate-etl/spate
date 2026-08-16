@@ -140,7 +140,7 @@ configuration; an optional `reader_schema` pins the shape records resolve
 into, using Avro's standard schema-resolution rules: field reordering,
 defaults for missing fields, type promotions, aliases. Pin a reader schema to
 keep a struct stable while producers evolve. Registry schemas using schema
-references are not supported yet and surface as unavailable.
+references are not supported and surface as unavailable.
 
 Promotion runs one way. A reader may widen a field an `int` was written as
 to a `long`, and a `float` to a `double`; the reverse is not a promotion.

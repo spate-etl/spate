@@ -48,9 +48,9 @@ deserializer:
 
 Setting `framing: ndjson` here while the source already line-frames is a
 **double-framing** error, rejected at startup. A source that emits *whole*
-payloads (Kafka, or a future whole-object mode) instead lets the deserializer
-frame, so `framing: ndjson` / `array` then apply. The rule is: exactly one side
-frames.
+payloads (Kafka, or any other source that does not frame) instead lets the
+deserializer frame, so `framing: ndjson` / `array` then apply. The rule is:
+exactly one side frames.
 
 Deserialization is a small trait; the same [Extending](../../06-extending/README.mdx)
 guide covers writing your own decoder, and the framing seam (`RecordFramer`) that

@@ -39,6 +39,10 @@ Deployment carries a narrow set of guarantees:
   name is what separates two coordinated jobs sharing one store.
 - **Every live replica has a distinct `instance_id`.** Two live processes
   sharing one is detected and fatal.
+- **Every replica reads the store at the same record schema.** A worker that
+  finds a record it cannot read as this build's schema exits fatally. The
+  remedy is a fresh job name, which leaves the committed per-split progress
+  behind and re-runs a bounded job from the beginning.
 
 ## Kubernetes
 
@@ -98,9 +102,9 @@ after, so a forced revocation costs up to one commit interval
 rather than after the deadline, because the source has already said the answer
 will not change.
 
-Unlike the peer-to-peer protocol this replaced, a revocation does not
-require the split to have committed once already: the drain manufactures
-the resume point, so even a freshly-claimed fleet rebalances cleanly.
+A revocation does not require the split to have committed once already:
+the drain manufactures the resume point, so even a freshly-claimed fleet
+rebalances cleanly.
 
 ### When a rebalance happens {#when-a-rebalance-happens}
 
@@ -255,78 +259,3 @@ those. It means no successor was elected because the
 leadership key aged out, which takes a full lease without a successful
 store write; the fleet re-elects, but the write stall that caused it is the
 thing worth chasing.
-
-Coordination moving to leader-assigned balancing renamed two families:
-`handoffs_total` → `revocations_total` (new label set), and the
-old `revocations_total` → `split_losses_total`. Dashboards carrying the old
-names need updating; `handoff_duration_seconds` and `handoffs_in_flight`
-are gone entirely.
-
-## Upgrading from the work-stealing balancer
-
-Leader-assigned coordination replaced a peer-to-peer work-stealing
-balancer. [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records why; this section is
-what an upgrade requires.
-
-### The store must be empty (or new)
-
-The on-store record schema went from 2 to 3. **The versions do not
-interoperate, and a schema-3 worker will not read a schema-2 store at
-all.** It reads the plan record during startup, finds the wrong schema
-version, and exits fatally with `upgrade or isolate the store prefix`. The
-same pin covers every `spec.` and `split.` record.
-
-So "stop the fleet, restart it on the new build" is *not* sufficient: point
-the new fleet at a fresh job name, or an empty store. That discards
-committed per-split progress, so an in-flight bounded backfill restarts
-from the beginning. Delivery is at-least-once either way, because the re-run
-duplicates and does not lose. Drain a job to completion before
-upgrading if you would rather not pay for it.
-
-### Configuration
-
-`handoff_rounds` and `handoff_max_grants` are gone; `rebalance_delay`
-(default 20s) and `drain_deadline` (default 10s) replace them. Because
-`CoordinationConfig` is `deny_unknown_fields`, a YAML file still carrying
-the old keys fails to parse rather than silently ignoring them.
-
-One new floor can reject a config you did not change: `drain_deadline` must
-be at least `op_timeout`, and both default to 10s. If you raised
-`op_timeout` for a slow store, raise `drain_deadline` to match.
-
-### Metrics
-
-| Was | Now |
-|---|---|
-| `spate_coordination_handoffs_total{outcome}` | `spate_coordination_revocations_total{outcome}` — new label values (`requested`/`drained`/`forced`/`cancelled`) |
-| `spate_coordination_revocations_total{reason}` | `spate_coordination_split_losses_total{reason}` — **the old name now means something else**, so an unchanged dashboard silently reads the wrong series |
-| `spate_coordination_handoff_duration_seconds{phase}` | `spate_coordination_drain_duration_seconds` and `spate_coordination_assignment_latency_seconds` — two families that [do not compose](../../METRICS.md#the-coordination-latencies-do-not-compose) |
-| `spate_coordination_handoffs_in_flight` | `spate_coordination_splits_draining` |
-| `acquisitions_total{reason="stolen"}` | gone — there is no steal path |
-| `acquisitions_total{reason="handoff"}` | `acquisitions_total{reason="reassigned"}` |
-| `acquisitions_total{reason="released"}` | folded into `reassigned` — a claiming worker cannot tell a drained revocation from a shutdown hand-back, and a label it cannot populate is a series that reads zero |
-
-### Rust API
-
-Only relevant if you implement the seam yourself or read the metric
-handles directly:
-
-- `CoordinationEvent::HandoffRequested` → `RevokeRequested`.
-- `SplitSource::begin_handoff`/`handoff_ready` → `begin_revoke`/`drain_ready`,
-  and `SplitCoordinator::release_handoff`/`decline_handoff` →
-  `release_drained`/`decline_revoke`. Renamed methods that you *overrode*
-  fail to compile; ones you left defaulted do not. The default
-  `begin_revoke` declines, and under this protocol that costs a forced
-  revocation and a replayed tail on every rebalance, where before it only
-  declined an offer.
-- `HandoffOutcome` and `HandoffPhase` are deleted, along with the
-  `L_PHASE` label constant and `AcquireReason::{Stolen, Released}`.
-  `AcquireReason::Handoff` is now `Reassigned`.
-- `CoordinationMetrics::handoff` → `revocation`;
-  `handoff_duration(phase, d)` splits into `drain_duration(d)` and
-  `assignment_latency(d)`; `set_handoffs_in_flight` → `set_splits_draining`.
-- `SplitSpec::weight` kept its name, type and default but changed meaning:
-  it was an ordering hint over count-based balancing, and it is now the
-  balance objective itself. A planner that populated it as a ranking key
-  rather than a cost will skew the leader's distribution, with no compile
-  error to warn you.

@@ -1,0 +1,98 @@
+# ClickHouse column types
+
+Which column types each of the sink's wire formats writes, and what to do about
+the ones it does not. The `format` key selects between them; they carry the
+same rows and differ in which column types they can express.
+
+They reach that limit differently. `format: native` is type-driven: the encoder
+builds one writer per column from the type `system.columns` reports, so a type
+it does not model is rejected **at construction**, before any row is sent, with
+an error naming the column. RowBinary never sees the column type at all. The row
+struct's field types alone decide the bytes, positionally.
+
+That gives the two format columns different meanings. Under Native, `no` is a
+refusal by the encoder. Under RowBinary, `no` means no field type, wrapper or
+serde module in the crate produces the bytes the column expects, and `manual`
+means one does, on a value the row has already scaled or ordered by hand.
+
+Which Rust field, wrapper or `#[serde(with = "…")]` module a given column takes
+is in the `rowbinary` module of the
+[`spate-clickhouse` reference](https://docs.rs/spate-clickhouse).
+
+| ClickHouse type | RowBinary | Native | Notes |
+|---|---|---|---|
+| `Bool` | yes | yes | |
+| `Int8` | yes | yes | |
+| `Int16` | yes | yes | |
+| `Int32` | yes | yes | |
+| `Int64` | yes | yes | |
+| `Int128` | yes | yes | |
+| `Int256` | yes | yes | |
+| `UInt8` | yes | yes | |
+| `UInt16` | yes | yes | |
+| `UInt32` | yes | yes | |
+| `UInt64` | yes | yes | |
+| `UInt128` | yes | yes | |
+| `UInt256` | yes | yes | |
+| `Float32` | yes | yes | |
+| `Float64` | yes | yes | |
+| `String` | yes | yes | |
+| `FixedString(N)` | yes | yes | Native pads a short value to `N` with NUL; a RowBinary field is exactly `N` bytes |
+| `Date` | yes | yes | |
+| `Date32` | yes | yes | |
+| `DateTime` | yes | yes | |
+| `DateTime64(P)` | yes | yes | Native emits the raw `Int64` without rescaling; see the scale warning on [Native format](./native-format.mdx) |
+| `Time` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
+| `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
+| `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38 |
+| `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. `validate_schema: full` rejects that field against such a column, and the mode is sink-wide, so the whole sink drops to `names` and loses type checking on every column |
+| `Decimal256(S)` | manual | no | Parses as a `Decimal` of precision 76, so the row above applies |
+| `Enum8` | yes | yes | |
+| `Enum16` | yes | yes | |
+| `UUID` | yes | yes | Needs `#[serde(with = "…uuid")]`. The bare `Uuid` impl serializes successfully into the wrong bytes, and only `validate_schema: full` catches it |
+| `IPv4` | yes | yes | Needs `#[serde(with = "…ipv4")]`. The bare `Ipv4Addr` impl serializes successfully into the wrong bytes, and only `validate_schema: full` catches it |
+| `IPv6` | yes | yes | `Ipv6Addr`'s own impl is correct |
+| `Nullable(T)` | yes | yes | Native accepts any inner it accepts on its own |
+| `Array(T)` | yes | yes | Native accepts any inner it accepts on its own |
+| `Tuple(…)` | yes | yes | Native accepts any element it accepts on its own |
+| `Map(K, V)` | yes | yes | Native accepts any key and value it accepts on its own |
+| `LowCardinality(String)` | yes | yes | |
+| `LowCardinality(Nullable(String))` | yes | yes | |
+| `LowCardinality(T)` for any other `T` | yes | no | RowBinary writes the plain `T` and the server builds the dictionary |
+| `Point` | yes | yes | |
+| `Ring` | yes | yes | |
+| `LineString` | yes | yes | |
+| `Polygon` | yes | yes | |
+| `MultiLineString` | yes | yes | |
+| `MultiPolygon` | yes | yes | |
+| `Nested(…)` | no | no | Under `flatten_nested = 1` the table exposes `outer.inner` columns, and `columns:` rejects a name containing `.`. Under `flatten_nested = 0` the column stays one unflattened value that nothing in the crate covers |
+| `JSON` | yes | no | A `String` of JSON text, with `input_format_binary_read_json_as_string: "1"` under `settings:` |
+| `Variant(…)` | manual | no | The discriminant byte follows the Rust enum's declaration order and the server orders member types by name, so the row declares its variants in the server's order; `Nullable(Variant)` has no representation |
+| `Dynamic` | no | no | |
+| `SimpleAggregateFunction(f, T)` | yes | no | The column stores the plain `T`, so the row declares the field `T` takes |
+| `AggregateFunction(f, T)` | no | no | See [Aggregate states](#aggregate-states) |
+| Any other type | no | no | Neither format is written for it. Native recognizes a closed set and refuses the rest at construction; RowBinary has no wrapper, and a plain field lands correctly only where the type's wire form happens to match one |
+
+## Aggregate states
+
+An `AggregateFunction` column holds an opaque, version-dependent serialization
+of a partial aggregation, and neither format writes one: reproducing that
+serialization in a client ties the pipeline to a single server version. Insert
+raw rows into an `ENGINE = Null` landing table and let a `MATERIALIZED VIEW`
+compute the states into the target instead.
+[Ingesting into AggregatingMergeTree](./aggregating-mergetree.mdx) works that
+pattern end to end.
+
+Startup validation refuses such a column and names that pattern, under
+`validate_schema: names` and `full` alike. `format: native` upgrades `off` to
+`names`, so the check always runs there; a RowBinary sink left at
+`validate_schema: off` skips it.
+
+## Related
+
+- [ClickHouse sink](./README.mdx) — the full sink configuration, including the
+  `format` key.
+- [Native format](./native-format.mdx) — what the columnar encoder buys, and
+  the `DateTime64` scale rule.
+- [Schema validation](./schema-validation.mdx) — the `validate_schema` modes
+  that decide which of the checks above run.

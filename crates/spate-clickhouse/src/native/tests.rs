@@ -329,10 +329,93 @@ fn array_of_lowcardinality_puts_dictionary_prefix_before_offsets() {
     );
 }
 
+// These tests hold the Native column of the matrix in
+// docs/user-guide/04-connectors/sinks/clickhouse/column-types.mdx. A type
+// moving between them is a page edit as well as a code change.
+
 #[test]
-fn unsupported_column_type_fails_at_build() {
-    let err = NativeSchema::from_columns(&[("v", "Variant(Int64, String)")]);
-    assert!(err.is_err(), "Variant must be rejected at build");
+fn documented_supported_column_types_build() {
+    for ty in [
+        "Bool",
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "Int128",
+        "Int256",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "UInt128",
+        "UInt256",
+        "Float32",
+        "Float64",
+        "String",
+        "FixedString(4)",
+        "Date",
+        "Date32",
+        "DateTime",
+        "DateTime('UTC')",
+        "DateTime64(3, 'UTC')",
+        "Decimal(9, 2)",
+        "Decimal(18, 4)",
+        "Decimal(38, 0)",
+        "Decimal32(2)",
+        "Decimal64(4)",
+        "Decimal128(10)",
+        "Enum8('lo' = -1)",
+        "Enum16('big' = 300)",
+        "UUID",
+        "IPv4",
+        "IPv6",
+        "Nullable(Float64)",
+        "Array(Nullable(String))",
+        "Tuple(String, UInt32)",
+        "Map(LowCardinality(String), UInt64)",
+        "LowCardinality(String)",
+        "LowCardinality(Nullable(String))",
+        "Point",
+        "Ring",
+        "LineString",
+        "Polygon",
+        "MultiLineString",
+        "MultiPolygon",
+    ] {
+        assert!(
+            NativeSchema::from_columns(&[("c", ty)]).is_ok(),
+            "`{ty}` is documented as supported by the Native encoder"
+        );
+    }
+}
+
+#[test]
+fn documented_unsupported_column_types_are_rejected_at_build() {
+    for ty in [
+        "Variant(Int64, String)",
+        "Dynamic",
+        "JSON",
+        "Time",
+        "Time64(3)",
+        "Decimal(39, 0)",
+        "Decimal(40, 2)",
+        "Decimal256(2)",
+        "Nested(a UInt32, b String)",
+        "AggregateFunction(sum, UInt64)",
+        "SimpleAggregateFunction(sum, UInt64)",
+        "LowCardinality(UInt64)",
+        "LowCardinality(Nullable(UInt64))",
+        "SomeTypeClickHouseHasNotShippedYet",
+    ] {
+        let err = NativeSchema::from_columns(&[("c", ty)])
+            .err()
+            .unwrap_or_else(|| panic!("`{ty}` is documented as rejected by the Native encoder"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`c`") && msg.contains("not supported by the Native encoder"),
+            "rejecting `{ty}` names the column and the encoder: {msg}"
+        );
+    }
 }
 
 #[test]

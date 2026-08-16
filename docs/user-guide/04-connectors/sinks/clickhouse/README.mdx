@@ -120,8 +120,10 @@ configured `columns` list and the row struct's **field declaration
 order** must match; reordering either is a breaking change to the
 pipeline. `validate_schema: names` (or `full`) plus
 `ClickHouseEncoder::with_schema` turns this contract into a fail-fast
-check; see [Schema validation](./schema-validation.mdx). The
-full type mapping is in the crate's `rowbinary` module docs.
+check; see [Schema validation](./schema-validation.mdx). Which column
+types each format writes is in
+[ClickHouse column types](./column-types.mdx), and the Rust field each
+one takes is in the crate's `rowbinary` module docs.
 :::
 
 ## Deduplication tokens and the window warning
@@ -261,8 +263,10 @@ and `spate_sink_write_duration_seconds{outcome}` for insert latency. See
 - [Multi-table split](./multi-table.mdx) — write to one table per record kind
   from a single pipeline (the `sinks:` map + the split terminal).
 - [Native format](./native-format.mdx) — the opt-in columnar
-  `format: native`: when to use it, the supported type matrix, and the
-  measured trade-off (server CPU/wire vs client CPU).
+  `format: native`: when to use it, and the measured trade-off (server
+  CPU/wire vs client CPU).
+- [ClickHouse column types](./column-types.mdx) — which column types each
+  wire format writes, and what to do about the rest.
 - [Performance tuning](./performance-tuning.mdx) — batch/part size, writer
   parallelism, `async_insert`, and the reasoning behind each starting-point
   setting.

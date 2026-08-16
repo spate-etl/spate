@@ -129,16 +129,17 @@ client.
 
 `SimpleAggregateFunction(func, T)` is a separate case that stores the **plain
 value** `T` (the partial state equals the final value, e.g. for `min`/`max`/
-`sumMap`), so those columns *are* directly insertable with the ordinary
-encoders and are not subject to any of the above. Use them when you control
-the schema and the function qualifies.
+`sumMap`), so those columns *are* directly insertable and are not subject to
+any of the above. They take `format: rowbinary`, where the row declares the
+field `T` takes; the Native encoder does not model the type and rejects the
+column. Use them when you control the schema and the function qualifies.
 
 ## Related
 
 - [ClickHouse sink](./README.mdx) — the full sink configuration and the
   [dedup-window warning](./README.mdx#deduplication-tokens-and-the-window-warning).
-- [Native format](./native-format.mdx) — the columnar encoder (also lists
-  `AggregateFunction` under its unsupported types).
+- [ClickHouse column types](./column-types.mdx) — where
+  `AggregateFunction` and `SimpleAggregateFunction` sit for each wire format.
 - [Performance tuning](./performance-tuning.mdx) — batch/block sizing.
 - [Schema validation](./schema-validation.mdx) — the fetch that
   powers the guardrail.

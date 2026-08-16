@@ -42,6 +42,12 @@ egress / wire size is the constraint (cross-region, metered links).
 **Keep `rowbinary` (the default) when** ETL-worker CPU is the constraint;
 RowBinary's row encode is near-memcpy-fast and hard to beat.
 
+Native also encodes a narrower set of column types, and rejects the rest at
+construction, before any row is sent. What `rowbinary` does with a column Native
+refuses varies by type, and some it refuses too, so a table holding one is a
+question for [ClickHouse column types](./column-types.mdx) rather than for the
+CPU trade above.
+
 ## Enabling it
 
 `format: native` is **type-driven**. The encoder needs each column's
@@ -79,17 +85,6 @@ a larger terminal-stage chunk target (the sink's YAML
 512 KiB) keeps each block substantial; the sink still merges blocks up to
 `batch.max_bytes` per insert.
 
-## Supported column types
-
-Bool; `Int`/`UInt` 8–256; `Float32/64`; `Date`, `Date32`; `DateTime`,
-`DateTime64`; `Decimal32/64/128`; `Enum8/16`; `String`; `FixedString(N)`;
-`UUID`; `IPv4`; `IPv6`; `Nullable(T)`; `Array(T)`; `Tuple(…)`; `Map(K, V)`;
-`Nested` (as parallel dotted `Array` columns); `LowCardinality(String)` and
-`LowCardinality(Nullable(String))`; and the Geo aliases (`Point`, `Ring`,
-`Polygon`, …). Field encodings match the [RowBinary type table](./README.mdx):
-use the same wire-wrapper newtypes (`DateTime64Millis`, `Decimal64<S>`, …)
-and `#[serde(with = "…")]` modules (`uuid`, `ipv4`).
-
 :::warning
 The Native writer emits the raw little-endian `Int64` and does not rescale
 to the column's declared precision, so a `DateTime64(6)` column fed
@@ -100,21 +95,6 @@ then fails fatally on the first record, before anything is inserted. A
 plain `i64` field declares no scale, so nothing can validate it and the
 mismatch stays silent.
 :::
-
-## Not supported
-
-`Variant`, `Dynamic`, `JSON`, `Time`/`Time64`, `Decimal256`,
-`AggregateFunction`, `LowCardinality` of non-`String` inner, and `Nested`
-with `flatten_nested = 0`. A column of an unsupported type is rejected
-**at construction** (before any row is sent) with a clear error naming the
-column and type. Fall back to `format: rowbinary` (which supports the wider
-set; see the [RowBinary type table](./README.mdx)) for tables that use
-them.
-
-`AggregateFunction` is unsupported by design in *both* formats, because its
-state is opaque and version-dependent. Feed those tables with raw rows through a Null
-table + Materialized View instead; see
-[Ingesting into AggregatingMergeTree](./aggregating-mergetree.mdx).
 
 ## Semantics that do **not** change
 
@@ -130,6 +110,8 @@ table + Materialized View instead; see
 ## Related
 
 - [ClickHouse sink](./README.mdx) — the full sink configuration.
+- [ClickHouse column types](./column-types.mdx) — which column types each
+  format writes, and what to do about the rest.
 - [Schema validation](./schema-validation.mdx) — the schema fetch
   Native relies on.
 - [Permissions](./permissions.mdx) — `format: native` forces the

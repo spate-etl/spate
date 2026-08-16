@@ -24,8 +24,9 @@ wiring further down:
 ```
 
 Reordering either the struct fields or the `columns` list is a breaking
-change to the pipeline. The type mapping lives in the `spate-clickhouse`
-crate's `rowbinary` module docs.
+change to the pipeline. Which column types each format writes is in
+[ClickHouse column types](./column-types.mdx); the Rust field each one takes
+lives in the `spate-clickhouse` crate's `rowbinary` module docs.
 
 ## The three modes
 

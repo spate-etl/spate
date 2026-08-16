@@ -25,9 +25,8 @@ use std::sync::Arc;
 
 /// How many readers one deserializer caches.
 ///
-/// Each chain lane clones its own deserializer and so holds its own map, so a
-/// resident reader costs its resolved name maps once per lane. That per-lane
-/// multiplier is what the number is sized against.
+/// Each chain lane clones its own deserializer and holds its own map, so a
+/// resident reader costs its resolved name maps once per lane.
 const MAX_HELD_READERS: usize = 64;
 
 /// The generic Avro value type emitted by [`AvroValueDeserializer`].
@@ -114,9 +113,8 @@ pub(crate) struct DecoderCore {
     /// promotions, aliases).
     pub(crate) reader_schema: Option<Arc<Schema>>,
     /// Readers by writer schema id, holding each id's resolved named types
-    /// across payloads. At most [`MAX_HELD_READERS`] entries: at the ceiling an
-    /// arriving id displaces an arbitrary resident one, so no id is shut out of
-    /// the cache for this deserializer's life.
+    /// across payloads. At most [`MAX_HELD_READERS`] entries; at the ceiling an
+    /// arriving id displaces an arbitrary resident one.
     ///
     /// The key is the writer id alone, which is valid only while
     /// `reader_schema` is fixed for this deserializer's life. Do not hoist this
@@ -126,8 +124,7 @@ pub(crate) struct DecoderCore {
     held: HashMap<u32, HeldReader>,
 }
 
-/// A clone starts with no readers: `HeldReader` wraps a `GenericDatumReader`,
-/// which is not `Clone`, so the map cannot come along.
+/// A clone starts with no held readers and builds its own on first payload.
 impl Clone for DecoderCore {
     fn clone(&self) -> Self {
         DecoderCore::new(self.mode.clone(), self.reader_schema.clone())
@@ -223,11 +220,9 @@ impl DecoderCore {
         if let Some(held) = self.held.get(&id) {
             return Ok(Some(read_datum(held, &mut datum)?));
         }
-        // Cached on a successful build, before the read: a reader that builds
-        // is valid for its schema whatever the payload does, so this must not
-        // move below the read. It must also stay above the eviction, which is
-        // what keeps an unusable schema from displacing a resident reader it
-        // cannot replace.
+        // Build before the eviction and cache before the read: a schema that
+        // will not build must not displace a resident reader, and a payload
+        // that will not decode must not discard a valid one.
         let built = HeldReader::compile(writer, self.reader_schema.clone())?;
         if self.held.len() >= MAX_HELD_READERS {
             // An arbitrary resident id, neither the oldest nor a uniform draw.
@@ -411,9 +406,7 @@ mod tests {
     }
 
     /// At the ceiling an arriving id takes a resident id's place, so the cache
-    /// stays bounded and every id a stream carries can reach it. A cache that
-    /// stopped admitting at the ceiling passes the bound and the decode; the
-    /// residency assertions are what fail it.
+    /// stays bounded and every id a stream carries can reach it.
     #[test]
     fn an_id_past_the_ceiling_replaces_a_resident_reader() {
         let mut core = raw_core(None);
@@ -456,8 +449,7 @@ mod tests {
             "and only one"
         );
 
-        // The evicted id is re-admitted on its next payload, which is the whole
-        // difference from a cache that stops admitting at the ceiling.
+        // The evicted id is re-admitted on its next payload.
         core.mode = SchemaSourceMode::Raw {
             schema: Arc::new(crate::cache::CompiledSchema::compile(evicted, WRITER_V1)),
         };
@@ -501,8 +493,6 @@ mod tests {
     }
 
     /// Two ids carrying *different* schemas decode as their own schema says.
-    /// Every other test here reuses one schema, so a key that collided two ids
-    /// would pass them; this one fails.
     #[test]
     fn two_ids_decode_under_their_own_schemas() {
         const OTHER: &str = r#"{"type":"record","name":"Event","fields":[

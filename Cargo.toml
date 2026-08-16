@@ -58,8 +58,6 @@ time = { version = "0.3.36", default-features = false, features = ["std", "macro
 rust_decimal = { version = "1.13", default-features = false, features = ["std"] }
 bytesize = { version = "2.4", features = ["serde"] }
 
-# Self-referencing structs: spate-avro holds a decoder beside the schema it
-# borrows. Arrives transitively through apache-avro regardless.
 ouroboros = "0.18"
 thiserror = "2.0.17"
 tracing = "0.1.44"

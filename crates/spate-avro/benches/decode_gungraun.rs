@@ -33,10 +33,9 @@
 //! A single-payload region on the value or serde path builds a held reader and
 //! decodes through it once, so it prices the build. The wall tier builds one
 //! during warm-up, outside the recorded region, and walks a whole corpus per
-//! iteration, so it prices only the steady state that build buys. Holding a
-//! reader, or ceasing to, therefore moves the two tiers in opposite
-//! directions; a change to what a build costs moves this tier alone, and a
-//! change to what a decode costs moves both.
+//! iteration, so it prices only the steady state that build buys. A change to
+//! what a build costs moves this tier alone; a change to what a decode costs
+//! moves both.
 //!
 //! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo

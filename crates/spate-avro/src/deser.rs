@@ -14,17 +14,20 @@ use crate::cache::{CacheSnapshot, CompiledSchema, Lookup};
 use crate::registry::RegistryHandle;
 use crate::wire;
 use apache_avro::Schema;
-#[expect(
-    deprecated,
-    reason = "the replacement borrows the schema CompiledSchema owns"
-)]
-use apache_avro::from_avro_datum;
+use apache_avro::reader::datum::GenericDatumReader;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
 use spate_core::record::{RawPayload, Record};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+/// How many readers one deserializer caches.
+///
+/// Each chain lane clones its own deserializer and holds its own map, so a
+/// resident reader costs its resolved name maps once per lane.
+const MAX_HELD_READERS: usize = 64;
 
 /// The generic Avro value type emitted by [`AvroValueDeserializer`].
 ///
@@ -56,14 +59,95 @@ pub(crate) enum SchemaSourceMode {
     },
 }
 
+/// A [`GenericDatumReader`] beside the schemas it borrows.
+///
+/// The reader resolves each schema's named types once at construction. Both
+/// schemas outlive it here: the writer's is owned by the `CompiledSchema` the
+/// cache hands out, the reader's by the deserializer.
+#[ouroboros::self_referencing]
+struct HeldReader {
+    writer: Arc<CompiledSchema>,
+    reader_schema: Option<Arc<Schema>>,
+    #[borrows(writer, reader_schema)]
+    #[covariant]
+    reader: GenericDatumReader<'this>,
+}
+
+impl HeldReader {
+    /// Build a reader over a compiled schema, or the pre-rendered reason that
+    /// schema is unusable.
+    fn compile(
+        writer: Arc<CompiledSchema>,
+        reader_schema: Option<Arc<Schema>>,
+    ) -> Result<HeldReader, DeserError> {
+        HeldReaderTryBuilder {
+            writer,
+            reader_schema,
+            reader_builder: |writer, reader_schema| {
+                let schema =
+                    writer
+                        .schema
+                        .as_ref()
+                        .map_err(|reason| DeserError::SchemaUnavailable {
+                            // Pre-rendered in `CompiledSchema::compile`:
+                            // clone, never format.
+                            reason: reason.clone(),
+                        })?;
+                GenericDatumReader::builder(schema)
+                    .maybe_reader_schema(reader_schema.as_deref())
+                    .build()
+                    .map_err(|e| DeserError::SchemaUnavailable {
+                        reason: format!("schema {} cannot be resolved: {e}", writer.id),
+                    })
+            },
+        }
+        .try_build()
+    }
+}
+
 /// Shared framing + schema resolution + decode.
-#[derive(Clone, Debug)]
 pub(crate) struct DecoderCore {
     pub(crate) mode: SchemaSourceMode,
     /// Optional reader schema: pins the shape records are resolved into
     /// (Avro schema-resolution rules: field reordering, defaults, type
     /// promotions, aliases).
     pub(crate) reader_schema: Option<Arc<Schema>>,
+    /// Readers by writer schema id, holding each id's resolved named types
+    /// across payloads. At most [`MAX_HELD_READERS`] entries; at the ceiling an
+    /// arriving id displaces an arbitrary resident one.
+    ///
+    /// The key is the writer id alone, which is valid only while
+    /// `reader_schema` is fixed for this deserializer's life. Do not hoist this
+    /// into `CompiledSchema`: that is keyed by writer id and carries no
+    /// reader-schema identity, so a reader stored there is correct only while
+    /// every consumer of one cache shares one reader schema.
+    held: HashMap<u32, HeldReader>,
+}
+
+/// A clone starts with no held readers and builds its own on first payload.
+impl Clone for DecoderCore {
+    fn clone(&self) -> Self {
+        DecoderCore::new(self.mode.clone(), self.reader_schema.clone())
+    }
+}
+
+impl std::fmt::Debug for DecoderCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecoderCore")
+            .field("mode", &self.mode)
+            .field("reader_schema", &self.reader_schema)
+            .field("held", &self.held.keys())
+            .finish()
+    }
+}
+
+/// Decode one datum through a reader.
+fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserError> {
+    held.borrow_reader()
+        .read_value(datum)
+        .map_err(|e| DeserError::Malformed {
+            reason: format!("avro datum decode failed: {e}"),
+        })
 }
 
 /// A resolved payload: the writer schema plus the datum slice, which borrows
@@ -71,6 +155,14 @@ pub(crate) struct DecoderCore {
 type Resolved<'buf> = Option<(Arc<CompiledSchema>, &'buf [u8])>;
 
 impl DecoderCore {
+    pub(crate) fn new(mode: SchemaSourceMode, reader_schema: Option<Arc<Schema>>) -> DecoderCore {
+        DecoderCore {
+            mode,
+            reader_schema,
+            held: HashMap::new(),
+        }
+    }
+
     /// The backend-agnostic prefix of every decode: the tombstone rule,
     /// framing, and schema resolution. The returned datum slice borrows the
     /// payload buffer (`'buf`), so a borrowed-record backend can decode
@@ -124,22 +216,22 @@ impl DecoderCore {
         let Some((writer, mut datum)) = self.resolve(raw)? else {
             return Ok(None);
         };
-        let schema = writer
-            .schema
-            .as_ref()
-            .map_err(|reason| DeserError::SchemaUnavailable {
-                // Pre-rendered in `CompiledSchema::compile`: clone, never
-                // format.
-                reason: reason.clone(),
-            })?;
-        #[expect(deprecated, reason = "see the import")]
-        let value =
-            from_avro_datum(schema, &mut datum, self.reader_schema.as_deref()).map_err(|e| {
-                DeserError::Malformed {
-                    reason: format!("avro datum decode failed: {e}"),
-                }
-            })?;
-        Ok(Some(value))
+        let id = writer.id;
+        if let Some(held) = self.held.get(&id) {
+            return Ok(Some(read_datum(held, &mut datum)?));
+        }
+        // Build before the eviction and cache before the read: a schema that
+        // will not build must not displace a resident reader, and a payload
+        // that will not decode must not discard a valid one.
+        let built = HeldReader::compile(writer, self.reader_schema.clone())?;
+        if self.held.len() >= MAX_HELD_READERS {
+            // An arbitrary resident id, neither the oldest nor a uniform draw.
+            if let Some(&victim) = self.held.keys().next() {
+                self.held.remove(&victim);
+            }
+        }
+        let held = self.held.entry(id).or_insert(built);
+        Ok(Some(read_datum(held, &mut datum)?))
     }
 }
 
@@ -184,9 +276,9 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 /// # Performance
 ///
 /// This path decodes each record **twice**, once into an intermediate
-/// [`AvroValue`] via `from_avro_datum` and then again into `T` via
-/// `from_value`, roughly doubling the per-record allocations and CPU of
-/// the dynamically-typed path. Choose it when you need Avro's full
+/// [`AvroValue`] and then again into `T` via `from_value`, roughly
+/// doubling the per-record allocations and CPU of the dynamically-typed
+/// path. Choose it when you need Avro's full
 /// schema-resolution rules (a configured `reader_schema`: field
 /// reordering, type promotions, defaults, aliases). When you don't,
 /// [`crate::AvroDatumDeserializer`] decodes the same `T` in a single pass
@@ -298,13 +390,158 @@ mod tests {
         to_avro_datum(&schema, rec).unwrap()
     }
 
+    /// A held reader borrows into an `Arc` a clone does not share, so a clone
+    /// starts empty and each chain lane builds its own on first payload.
+    #[test]
+    fn a_clone_starts_with_no_held_readers() {
+        let mut core = raw_core(None);
+        let bytes = datum(1, "a");
+        core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        assert_eq!(core.held.len(), 1, "the original holds one after decoding");
+
+        let mut lane = core.clone();
+        assert!(lane.held.is_empty(), "a clone holds none");
+        lane.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        assert_eq!(lane.held.len(), 1, "and builds its own on first payload");
+    }
+
+    /// At the ceiling an arriving id takes a resident id's place, so the cache
+    /// stays bounded and every id a stream carries can reach it.
+    #[test]
+    fn an_id_past_the_ceiling_replaces_a_resident_reader() {
+        let mut core = raw_core(None);
+        let bytes = datum(1, "a");
+
+        // Every id maps to the same compiled schema here; only the key varies,
+        // which is what fills the map.
+        for id in 0..MAX_HELD_READERS as u32 {
+            core.mode = SchemaSourceMode::Raw {
+                schema: Arc::new(crate::cache::CompiledSchema::compile(id, WRITER_V1)),
+            };
+            core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        }
+        assert_eq!(core.held.len(), MAX_HELD_READERS);
+        let before: Vec<u32> = core.held.keys().copied().collect();
+
+        let arriving = MAX_HELD_READERS as u32;
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(crate::cache::CompiledSchema::compile(arriving, WRITER_V1)),
+        };
+        let decoded = core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        let Value::Record(fields) = &decoded else {
+            panic!("expected a record, got {decoded:?}");
+        };
+        assert_eq!(fields[0].1, Value::Int(1));
+
+        assert_eq!(core.held.len(), MAX_HELD_READERS, "the cache stays bounded");
+        assert!(
+            core.held.contains_key(&arriving),
+            "the arriving id is resident"
+        );
+        let mut evicted = before.iter().filter(|id| !core.held.contains_key(id));
+        let evicted = *evicted.next().expect("one resident id made way");
+        assert!(
+            before
+                .iter()
+                .filter(|id| !core.held.contains_key(id))
+                .nth(1)
+                .is_none(),
+            "and only one"
+        );
+
+        // The evicted id is re-admitted on its next payload.
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(crate::cache::CompiledSchema::compile(evicted, WRITER_V1)),
+        };
+        let again = core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        assert_eq!(again, decoded);
+        assert!(core.held.contains_key(&evicted), "and is resident again");
+        assert_eq!(core.held.len(), MAX_HELD_READERS, "still bounded");
+    }
+
+    /// A schema that will not build displaces nothing. The build is fallible
+    /// and runs before the eviction, so a stream of unusable ids arriving at a
+    /// full cache cannot empty it of the readers its good ids are using.
+    #[test]
+    fn an_unusable_schema_at_the_ceiling_evicts_nothing() {
+        let mut core = raw_core(None);
+        let bytes = datum(1, "a");
+
+        for id in 0..MAX_HELD_READERS as u32 {
+            core.mode = SchemaSourceMode::Raw {
+                schema: Arc::new(crate::cache::CompiledSchema::compile(id, WRITER_V1)),
+            };
+            core.decode(&raw_payload(&bytes)).unwrap().unwrap();
+        }
+        let before: Vec<u32> = core.held.keys().copied().collect();
+
+        let mut poison = crate::cache::CompiledSchema::compile(MAX_HELD_READERS as u32, WRITER_V1);
+        poison.schema = Err("schema 64 is not usable: nope".into());
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(poison),
+        };
+        let err = core.decode(&raw_payload(&bytes)).unwrap_err();
+        assert!(
+            matches!(err, DeserError::SchemaUnavailable { .. }),
+            "got {err:?}"
+        );
+
+        assert_eq!(core.held.len(), MAX_HELD_READERS);
+        for id in &before {
+            assert!(core.held.contains_key(id), "id {id} is still resident");
+        }
+    }
+
+    /// Two ids carrying *different* schemas decode as their own schema says.
+    #[test]
+    fn two_ids_decode_under_their_own_schemas() {
+        const OTHER: &str = r#"{"type":"record","name":"Event","fields":[
+            {"name":"id","type":"string"}]}"#;
+
+        let other_schema = Schema::parse_str(OTHER).unwrap();
+        let mut other_rec = apache_avro::types::Record::new(&other_schema).unwrap();
+        other_rec.put("id", "an-id");
+        let other_bytes = to_avro_datum(&other_schema, other_rec).unwrap();
+        let v1_bytes = datum(7, "seven");
+
+        let mut core = raw_core(None);
+
+        // Id 0 is the two-field WRITER_V1 record.
+        let v1 = core.decode(&raw_payload(&v1_bytes)).unwrap().unwrap();
+        let Value::Record(fields) = &v1 else {
+            panic!("expected a record, got {v1:?}");
+        };
+        assert_eq!(fields[0].1, Value::Int(7));
+        assert_eq!(fields.len(), 2);
+
+        // Id 1 is a one-field record whose `id` is a string. Decoding it under
+        // id 0's schema would read the string's length prefix as an int.
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(crate::cache::CompiledSchema::compile(1, OTHER)),
+        };
+        let other = core.decode(&raw_payload(&other_bytes)).unwrap().unwrap();
+        let Value::Record(fields) = &other else {
+            panic!("expected a record, got {other:?}");
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1, Value::String("an-id".into()));
+
+        // And id 0 still decodes as itself afterwards.
+        core.mode = SchemaSourceMode::Raw {
+            schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
+        };
+        let again = core.decode(&raw_payload(&v1_bytes)).unwrap().unwrap();
+        assert_eq!(again, v1);
+        assert_eq!(core.held.len(), 2);
+    }
+
     fn raw_core(reader: Option<&str>) -> DecoderCore {
-        DecoderCore {
-            mode: SchemaSourceMode::Raw {
+        DecoderCore::new(
+            SchemaSourceMode::Raw {
                 schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
             },
-            reader_schema: reader.map(|r| Arc::new(Schema::parse_str(r).unwrap())),
-        }
+            reader.map(|r| Arc::new(Schema::parse_str(r).unwrap())),
+        )
     }
 
     fn test_ack() -> AckRef {
@@ -393,12 +630,14 @@ mod tests {
         let schema = writer_schema();
         let fp = schema.fingerprint::<Rabin>();
         let fingerprint = u64::from_le_bytes(fp.bytes.as_slice().try_into().unwrap());
-        let core = |expected: u64| DecoderCore {
-            mode: SchemaSourceMode::SingleObject {
-                schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
-                fingerprint: expected,
-            },
-            reader_schema: None,
+        let core = |expected: u64| {
+            DecoderCore::new(
+                SchemaSourceMode::SingleObject {
+                    schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
+                    fingerprint: expected,
+                },
+                None,
+            )
         };
 
         let mut framed = vec![0xC3, 0x01];
@@ -425,12 +664,12 @@ mod tests {
         // policy fodder, instead of unwinding the pipeline thread.
         let mut compiled = crate::cache::CompiledSchema::compile(0, WRITER_V1);
         compiled.schema = Err("schema 0 is not usable: nope".into());
-        let core = DecoderCore {
-            mode: SchemaSourceMode::Raw {
+        let core = DecoderCore::new(
+            SchemaSourceMode::Raw {
                 schema: Arc::new(compiled),
             },
-            reader_schema: None,
-        };
+            None,
+        );
 
         let mut out = Collected::<AvroValue>(Vec::new());
         let err = AvroValueDeserializer::new(core)

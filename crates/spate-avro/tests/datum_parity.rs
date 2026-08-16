@@ -1,5 +1,5 @@
 //! Differential parity suite: every payload the two-pass path
-//! (`build_serde`: `from_avro_datum` → `from_value`) decodes, the
+//! (`build_serde`: a `Value` decode, then `from_value`) decodes, the
 //! single-pass path (`build_serde_datum`) must decode to the **same
 //! value**. Payloads are encoded with apache-avro itself, so the reference
 //! semantics come from the reference implementation, not from this suite's

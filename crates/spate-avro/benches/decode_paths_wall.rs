@@ -47,15 +47,21 @@
 //!
 //! | Framework case | Floor |
 //! |---|---|
-//! | `raw_flat15_value` | `lib_flat15_value` |
-//! | `raw_flat15_serde` | `lib_flat15_typed` |
-//! | `raw_batch_value` | `lib_batch_value` |
-//! | `raw_batch_serde` | `lib_batch_typed` |
-//! | `resolved_reordered` | `lib_resolved` |
+//! | `raw_flat15_value` | `lib_flat15_value_held` |
+//! | `raw_flat15_serde` | `lib_flat15_typed_held` |
+//! | `raw_batch_value` | `lib_batch_value_held` |
+//! | `raw_batch_serde` | `lib_batch_typed_held` |
+//! | `resolved_reordered` | `lib_resolved_held` |
 //! | `raw_flat15_datum`, `raw_batch_datum`, `raw_batch_datum_borrowed` | none; see below |
 //! | `raw_batch_value_flatten`, `raw_batch_datum_flatten` | none; read each against its decode-only partner above, the same corpus without the flatten |
-//! | `resolved_writer_only`, `resolved_promoted`, `resolved_defaulted` | none; read against `lib_resolved` and `resolved_reordered`, one reader schema at a time |
+//! | `resolved_promoted`, `resolved_defaulted` | none; read against `lib_resolved_held` and `resolved_reordered`, one reader schema at a time |
+//! | `resolved_writer_only` | none; it configures no reader schema, so no `lib_resolved*` case runs its work. Read it against the other three `resolved_*` cases, whose distance from it is what resolution costs |
 //! | `mode_*`, `shapes_*`, `err_*` | none; they price this crate's framing, schema cache and error isolation, which the library has no counterpart for. Read them against `raw_flat15_value` over the same records |
+//!
+//! The `*_held` floors are the partners, not the free-function ones: the crate
+//! holds a reader per writer schema id, so a floor calling `from_avro_datum`
+//! resolves per payload where its partner does not, and would read as the
+//! framework beating its own floor.
 //!
 //! Each floor runs a near-subset of its partner, which keeps the margin
 //! between them small and a relative reading of that margin noisy. A library
@@ -74,9 +80,10 @@
 //! Both amortize schema resolution — the crate resolves once per compiled
 //! schema, these once per corpus — so the margin between them is decode.
 //!
-//! Read them against `lib_*_typed` only with that in mind: the two-pass route
-//! resolves per call, so a margin taken there mixes decode with resolution.
-//! The `*_held` pairs below price the resolution separately.
+//! Read them against `lib_*_typed_held` rather than `lib_*_typed`: both sides
+//! then amortize resolution, so the margin is decode. The free-function
+//! `lib_*_typed` resolves per call, and a margin taken there mixes decode with
+//! resolution. The `*_held` pairs below price that resolution separately.
 //!
 //! `read_deser` takes `T: DeserializeOwned` from an `impl Read`, so it
 //! allocates every string and bytes field and cannot borrow into the payload.
@@ -84,12 +91,13 @@
 //!
 //! ## The `*_held` cases
 //!
-//! `lib_flat15_value_held`, `lib_batch_value_held` and `lib_resolved_held`
-//! run the same work as `lib_flat15_value`, `lib_batch_value` and
-//! `lib_resolved` through a `GenericDatumReader` built in setup rather than
-//! the free function that resolves the writer schema's named types on every
-//! call. Each pair prices that resolution, which is what this crate pays per
-//! payload at `deser.rs`'s `from_avro_datum` call.
+//! Five cases pair with a free-function twin: `lib_flat15_value_held`,
+//! `lib_flat15_typed_held`, `lib_batch_value_held`, `lib_batch_typed_held` and
+//! `lib_resolved_held` run the same work as `lib_flat15_value`,
+//! `lib_flat15_typed`, `lib_batch_value`, `lib_batch_typed` and `lib_resolved`
+//! through a `GenericDatumReader` built in setup rather than the free function
+//! that resolves the writer schema's named types on every call. Each pair
+//! prices that resolution, and the crate's paths run the held half.
 //!
 //! ## Two metrics with a narrower meaning than their names
 //!
@@ -599,10 +607,24 @@ fn floor_cases(suite: Suite) -> Suite {
     );
     let s = floor_case(
         s,
+        "lib_flat15_typed_held",
+        RECORDS,
+        flat_floor,
+        floor_typed_held::<orders::Order>,
+    );
+    let s = floor_case(
+        s,
         "lib_batch_value_held",
         batches::LINES,
         batch_floor,
         floor_values_held,
+    );
+    let s = floor_case(
+        s,
+        "lib_batch_typed_held",
+        batches::LINES,
+        batch_floor,
+        floor_typed_held::<batches::OrderPlaced>,
     );
     floor_case(
         s,

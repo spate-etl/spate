@@ -26,9 +26,16 @@
 //! Those six cases decode a single payload. The four groups below decode a
 //! batch of them (`corpora::BATCH`), because what they measure is a
 //! *steady state* rather than a first touch: the schema memo, the reader
-//! schema and the compiled decode spec are all state the deserializer carries
-//! across a poll batch, and a one-payload region only ever measures the walk
-//! that populates them.
+//! schema, the held datum reader and the compiled decode spec are all state
+//! the deserializer carries across a poll batch, and a one-payload region only
+//! ever measures the walk that populates them.
+//!
+//! A single-payload region on the value or serde path builds a held reader and
+//! decodes through it once, so it prices the build. The wall tier builds one
+//! during warm-up, outside the recorded region, and walks a whole corpus per
+//! iteration, so it prices only the steady state that build buys. A change to
+//! what a build costs moves this tier alone; a change to what a decode costs
+//! moves both.
 //!
 //! - **`confluent`** — the production default framing, parameterized by what
 //!   the schema cache answers. `cached_schema` is the steady state: the memo

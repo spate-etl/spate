@@ -1,12 +1,12 @@
-**Avro decoding no longer re-resolves the writer schema on every payload**
-(`spate-avro`). `build_value()` and `build_serde::<T>()` rebuilt the schema's
-named-type lookup for each record they decoded; the deserializer now keeps a
-reader per writer schema id and reuses it. Worth 6.9% end-to-end throughput and
-4.8% of per-row CPU on the cross-framework rig, with nothing to change in a
-pipeline to get it.
+**Writer-schema resolution held across payloads** (`spate-avro`) — `build_value()`
+and `build_serde::<T>()` rebuild the schema's named-type lookup once per writer
+schema id instead of once per record, keeping a reader per id and reusing it. On
+a cross-framework rig whose payloads each carry one record, that is worth 6.9% of
+end-to-end throughput and 4.8% of per-row CPU. A payload carrying a batch
+amortizes the work across its rows already and does not move. Each chain lane
+keeps up to 64 readers and displaces one to admit another, so a stream carrying
+more schema ids than that still decodes and still costs bounded memory.
 
-It shows where one payload carries one record. A payload carrying a batch
-already amortized that work across its rows and does not move.
 `build_datum()` and `build_serde_datum::<T>()` never went through that decoder
 and are unchanged — they remain the throughput path by a wide margin, and are
 still the answer if Avro decode is what bounds your pipeline.

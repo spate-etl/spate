@@ -7,7 +7,10 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 
 ## What this changes, and why
 
-<!-- Which crates, and the problem it solves. Link the issue if there is one. -->
+<!--
+`Closes #123.` on a line of its own first, if an issue tracks this. Then the
+change: which crates, and the problem it solves.
+-->
 
 ## Invariants
 

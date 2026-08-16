@@ -230,6 +230,31 @@ TABLE
         fi
     done
 
+    # The subject half of the reference lookup. `-` is an empty result, where
+    # the subject carries no number and `--build` asks the API for one.
+    while IFS='|' read -r subject want; do
+        case "$subject" in '' | '#'*) continue ;; esac
+        if [ "$want" = '-' ]; then want=''; fi
+        got=$(pr_from_subject "$subject")
+        if [ "$got" != "$want" ]; then
+            echo "changelog.sh: pr_from_subject: '$subject' -> '$got', expected '$want'" >&2
+            failures=$((failures + 1))
+        fi
+    done <<'TABLE'
+# --- a squash subject, which GitHub numbers ---
+fix(spate-core): enforce max_pending_batches at the poll boundary (#200)|200
+feat(spate-avro,bench): decode datums into typed records (#31)|31
+# --- a rebase merge appends nothing. All three are real history. ---
+fix(spate-kafka): count logical coordinator links toward broker_up|-
+refactor(examples)!: name the JSON example for what it teaches|-
+chore: release v0.2.0|-
+# --- a citation mid-subject is not the merge's own number ---
+docs(workspace): supersede (#12) with a record of its own|-
+fix(spate-s3): restore what (#42) changed, and pin the ETag|-
+# --- the last one wins when the subject ends in two ---
+fix(spate-core): revert (#41) (#57)|57
+TABLE
+
     # The fragment-name parser, driven with no filesystem state.
     sample=$(fragment_type "changelog.d/retry-ladder.fixed.md")
     if [ "$sample" != "fixed" ]; then
@@ -559,12 +584,57 @@ TEMPLATE
     echo "  Edit it, then commit it with your change. $fragments/README.md has the conventions."
 }
 
+# The pull request number GitHub appends to a squash subject, or nothing. A
+# `(#12)` written mid-subject cites another pull request and is not read.
+pr_from_subject() {
+    printf '%s\n' "$1" | sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p'
+}
+
+# What an entry carrying no reference of its own points at. That is the pull
+# request that merged the fragment, or the commit that added it.
+#
+# Three sources in order. A squash subject ends in `(#N)`. A rebase merge
+# appends nothing, so the adding commit is looked up on the API next. A commit
+# that reached `main` outside a pull request links to itself.
+#
+# Prints `pr <number>` or `commit <sha>`. A fragment with no history, written
+# but not yet committed, prints nothing.
+#
+# Called from `--build` alone. `--check` runs on every pull request, forks
+# included, and makes no network call.
+fragment_reference() {
+    local file=$1 sha subject pr
+
+    sha=$(git log --diff-filter=A --format='%H' -- "$file" 2>/dev/null | head -n 1)
+    [ -n "$sha" ] || return 0
+
+    subject=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null | head -n 1)
+    pr=$(pr_from_subject "$subject")
+    if [ -n "$pr" ]; then
+        printf 'pr %s\n' "$pr"
+        return 0
+    fi
+
+    # Merged pull requests only, and the first of them. A commit can also be
+    # associated with one that never landed.
+    if command -v gh >/dev/null 2>&1; then
+        pr=$(gh api "repos/${repo_url#https://github.com/}/commits/$sha/pulls" \
+            --jq 'map(select(.merged_at)) | first | .number // empty' 2>/dev/null || true)
+        if [ -n "$pr" ]; then
+            printf 'pr %s\n' "$pr"
+            return 0
+        fi
+    fi
+
+    printf 'commit %s\n' "$sha"
+}
+
 # ---------------------------------------------------------------------------
 # --build
 # ---------------------------------------------------------------------------
 cmd_build() {
     local version=${1:-} today previous range explicit n
-    local block links contributors type file body pr found=0
+    local block links contributors type file body pr reference sha found=0
 
     [ -n "$version" ] || fail "usage: ./scripts/changelog.sh --build <version>"
     [ -f "$changelog" ] || fail "$changelog not found"
@@ -646,20 +716,28 @@ cmd_build() {
             if [ -n "$explicit" ]; then
                 : # already collected above
             else
-                # Otherwise the number comes from the subject of the commit
-                # that *added* the fragment: squash subjects end in `(#NN)`. A
-                # fragment added by a direct push renders without a link.
-                pr=$(git log --diff-filter=A --format='%s' -- "$file" 2>/dev/null |
-                    sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p' | head -n 1)
-                if [ -n "$pr" ]; then
-                    # On its own line, never appended to the last one. A
-                    # fragment may end in a fenced code block, and CommonMark
-                    # allows only whitespace after a closing fence: appending
-                    # leaves it unclosed and swallows every section below.
+                # Otherwise it comes from the commit that *added* the fragment.
+                #
+                # Each form goes on its own line, never appended to the last
+                # one. A fragment may end in a fenced code block, and CommonMark
+                # allows only whitespace after a closing fence: appending leaves
+                # it unclosed and swallows every section below.
+                reference=$(fragment_reference "$file")
+                case "$reference" in
+                "pr "*)
+                    pr=${reference#pr }
                     body="$body
 ([#$pr])"
                     printf '[#%s]: %s/pull/%s\n' "$pr" "$repo_url" "$pr" >>"$links"
-                fi
+                    ;;
+                "commit "*)
+                    # An inline link. The definition list holds `[#N]` alone
+                    # and sorts on that number.
+                    sha=${reference#commit }
+                    body="$body
+([\`${sha:0:7}\`]($repo_url/commit/$sha))"
+                    ;;
+                esac
             fi
 
             # The bullet and continuation indent are applied here so the file

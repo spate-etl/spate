@@ -48,15 +48,33 @@ pub enum ShardKey<'a> {
     U32(u32),
 }
 
-/// Pure per-record key extractor for family `F`. A plain `fn` pointer: the
-/// higher-ranked signature over the `Rec<'buf>` GAT defeats closure
-/// inference, so write a named fn; fn items and non-capturing closures
-/// coerce to this type:
+/// Pure per-record key extractor for family `F`. The type is a `fn`
+/// pointer, so `fn` items and non-capturing closures both coerce to it:
 ///
-/// ```ignore
+/// ```
+/// use spate_clickhouse::{KeyExtractor, ShardKey};
+/// use spate_core::deser::Owned;
+///
+/// struct OrderLineRow {
+///     order_id: u64,
+/// }
+///
 /// fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
 ///     ShardKey::U64(row.order_id)
 /// }
+///
+/// let _: KeyExtractor<Owned<OrderLineRow>> = order_key;
+/// let _: KeyExtractor<Owned<OrderLineRow>> = |row| ShardKey::U64(row.order_id);
+/// ```
+///
+/// A capturing closure does not coerce, whatever its signature:
+///
+/// ```compile_fail,E0308
+/// use spate_clickhouse::{KeyExtractor, ShardKey};
+/// use spate_core::deser::Owned;
+///
+/// let fallback: u64 = 0;
+/// let _: KeyExtractor<Owned<Vec<u8>>> = |_row| ShardKey::U64(fallback);
 /// ```
 ///
 /// The extractor must be **total**: return a key for every record the
@@ -223,6 +241,34 @@ mod tests {
         }
     }
 
+    /// A borrowing family: the record holds a key borrowed from the payload
+    /// buffer, and an extractor over it returns a key borrowed from the
+    /// record it is given.
+    struct Ev<'a> {
+        key: &'a str,
+    }
+    struct EvFam;
+    impl RecFamily for EvFam {
+        type Rec<'buf> = Ev<'buf>;
+    }
+
+    fn ev_record(key: &str) -> Record<Ev<'_>> {
+        let (ack, _rx) = AckRef::test_pair();
+        Record {
+            payload: Ev { key },
+            meta: RecordMeta {
+                partition: PartitionId(0),
+                offset: 0,
+                event_time_ms: 0,
+                key_hash: None,
+            },
+            ack,
+        }
+    }
+
+    /// `xxHash64("abc")`, the key hash the borrowed-family tests route on.
+    const ABC_HASH: u64 = 0x44BC_2CF5_AD77_0999;
+
     #[test]
     fn equal_weights_reduce_to_hash_modulo_shard_count() {
         let router = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 1, 1, 1]).unwrap();
@@ -321,34 +367,29 @@ mod tests {
 
     #[test]
     fn borrowed_fn_item_extractor_coerces_and_routes() {
-        // The lifetime story, compiled and run: a borrowed family whose
-        // extractor returns a field borrowed from the payload.
-        struct Ev<'a> {
-            key: &'a str,
-        }
-        struct EvFam;
-        impl RecFamily for EvFam {
-            type Rec<'buf> = Ev<'buf>;
-        }
         fn key_of<'a>(rec: &'a Ev<'_>) -> ShardKey<'a> {
             ShardKey::Str(rec.key)
         }
 
         let router = DistributedRouter::<EvFam>::new(key_of, &[1, 1]).unwrap();
-        let (ack, _rx) = AckRef::test_pair();
-        let rec = Record {
-            payload: Ev { key: "abc" },
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: 0,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        };
+        let rec = ev_record("abc");
         assert_eq!(
             RecordRouter::route_record(&router, &rec, 2),
-            (0x44BC_2CF5_AD77_0999u64 % 2) as usize,
+            (ABC_HASH % 2) as usize,
+        );
+    }
+
+    #[test]
+    fn borrowed_non_capturing_closure_extractor_coerces_and_routes() {
+        // The argument type is left to inference, so this covers inference
+        // over the `Rec<'buf>` GAT as well as the coercion.
+        let extract: KeyExtractor<EvFam> = |rec| ShardKey::Str(rec.key);
+
+        let router = DistributedRouter::<EvFam>::new(extract, &[1, 1]).unwrap();
+        let rec = ev_record("abc");
+        assert_eq!(
+            RecordRouter::route_record(&router, &rec, 2),
+            (ABC_HASH % 2) as usize,
         );
     }
 }

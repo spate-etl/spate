@@ -52,10 +52,11 @@ reintroduces the per-record allocation the design exists to avoid.
 - Bad, because the chain is monomorphized, so compile time and binary size grow
   with the number of distinct chains in a program.
 - Bad, because higher-ranked lifetimes hit a language limit for borrowing
-  families: `map` and `try_map` closures cannot be inferred (E0582 — the
-  higher-ranked lifetime must appear in an associated-type projection), so those
-  two combinators need a `map_rec`/`try_map_rec` tier taking plain `fn` items.
-  `filter`, `inspect` and `flat_map` are unaffected.
+  families. `map` and `try_map` would need a bound that mentions `'buf` only
+  inside associated types, which is E0582, so rustc rejects it where the method
+  is defined and neither is offered on a borrowing family. Such a family
+  transforms through a `map_rec`/`try_map_rec` tier instead. `filter`, `inspect`
+  and `flat_map` are unaffected.
 
 ### Confirmation
 

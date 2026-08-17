@@ -19,7 +19,7 @@ use spate_core::ops::{ChunkConfig, chain_owned};
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, SinkOptions};
 
 use spate_core::record::PartitionId;
-use spate_core::sink::{BatchConfig, InflightConfig, KeyHashRouter, SinkPoolConfig};
+use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_core::source::LaneId;
 use spate_test::{
     BytesPassthrough, PipelineRun, TestEncoder, WriteOutcome, capture_sink, memory_source,
@@ -42,14 +42,13 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
     let (sink, script) = capture_sink(1, 1);
     // One permit, and batches that seal on a single row: the second row's
     // batch has nowhere to go the moment the first write starts retrying.
-    let sink = sink.with_pool_config(SinkPoolConfig {
-        batch: BatchConfig {
-            max_rows: 1,
-            max_bytes: u64::MAX,
-            linger: Duration::from_millis(50),
-        },
-        inflight: InflightConfig { max_per_shard: 1 },
-        ..SinkPoolConfig::default()
+    let sink = sink.with_pool_config({
+        let mut pool = SinkPoolConfig::default();
+        pool.batch.max_rows = 1;
+        pool.batch.max_bytes = u64::MAX;
+        pool.batch.linger = Duration::from_millis(50);
+        pool.inflight.max_per_shard = 1;
+        pool
     });
 
     // Scripts fall back to success once exhausted, which would heal the sink

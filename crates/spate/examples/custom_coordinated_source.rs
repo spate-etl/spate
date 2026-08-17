@@ -403,22 +403,16 @@ fn run_instance(
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&config_yaml(instance))?)?;
 
     // ANCHOR: coordinator
-    let coordinator = StoreCoordinator::new(
-        store,
-        CoordinationConfig {
-            // Demo-fast takeover; production floors are far higher (see
-            // the deployment guide). The store was built from the same
-            // constant, and the coordinator rejects a store whose TTL
-            // diverges from lease_duration.
-            lease_duration: LEASE,
-            op_timeout: Duration::from_millis(250),
-            instance_id: Some(instance.to_string()),
-            replan_interval: Duration::from_secs(1),
-            ..CoordinationConfig::default()
-        },
-        pipeline.io_handle(),
-        None,
-    )?;
+    let mut tuning = CoordinationConfig::default();
+    // Demo-fast takeover; production floors are far higher (see the
+    // deployment guide). The store was built from the same constant, and
+    // the coordinator rejects a store whose TTL diverges from
+    // lease_duration.
+    tuning.lease_duration = LEASE;
+    tuning.op_timeout = Duration::from_millis(250);
+    tuning.instance_id = Some(instance.to_string());
+    tuning.replan_interval = Duration::from_secs(1);
+    let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
     let source = LedgerSource::new(Box::new(coordinator));
     // ANCHOR_END: coordinator
 

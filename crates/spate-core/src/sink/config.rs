@@ -5,6 +5,10 @@
 //! YAML deserialize straight into them. The keys and defaults are meant to be
 //! identical across connectors, so they are literally one type rather than a
 //! per-connector mirror that has to be kept in step by hand.
+//!
+//! Every struct here is `#[non_exhaustive]`. Construct one with `default()`
+//! (or [`SinkPoolConfig::new`]) and assign the fields you are tuning; a knob
+//! added later arrives as a new default and existing code keeps compiling.
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Deserializer};
@@ -21,6 +25,7 @@ fn de_byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
 /// overshoot `max_rows`/`max_bytes` by at most one chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct BatchConfig {
     /// Seal at this many rows (for a message-oriented sink, messages).
     pub max_rows: u64,
@@ -46,6 +51,7 @@ impl Default for BatchConfig {
 /// In-flight write limits for one shard worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct InflightConfig {
     /// Concurrent sealed batches per shard (for a replicated sink, writes to
     /// different replicas). While all permits are taken the worker stops
@@ -63,6 +69,7 @@ impl Default for InflightConfig {
 /// the sealed batch and its deduplication token are reused unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct RetryConfig {
     /// First backoff delay.
     #[serde(with = "humantime_serde")]
@@ -156,7 +163,8 @@ impl RetryConfig {
     ///
     /// assert!(RetryConfig::default().validate().is_ok());
     ///
-    /// let hot_loop = RetryConfig { multiplier: 0.5, ..RetryConfig::default() };
+    /// let mut hot_loop = RetryConfig::default();
+    /// hot_loop.multiplier = 0.5;
     /// assert_eq!(hot_loop.validate(), Err(RetryConfigError::Multiplier(0.5)));
     /// ```
     pub fn validate(&self) -> Result<(), RetryConfigError> {
@@ -202,6 +210,7 @@ impl RetryConfig {
 /// Per-replica circuit breaker thresholds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct BreakerConfig {
     /// Consecutive failures that open the breaker, quarantining that endpoint.
     pub failure_threshold: u32,
@@ -255,7 +264,8 @@ impl BreakerConfig {
     ///
     /// assert!(BreakerConfig::default().validate().is_ok());
     ///
-    /// let wedged = BreakerConfig { half_open_probes: 0, ..BreakerConfig::default() };
+    /// let mut wedged = BreakerConfig::default();
+    /// wedged.half_open_probes = 0;
     /// assert_eq!(wedged.validate(), Err(BreakerConfigError::ZeroHalfOpenProbes));
     /// ```
     pub fn validate(&self) -> Result<(), BreakerConfigError> {
@@ -289,6 +299,7 @@ pub enum BreakerConfigError {
 
 /// Complete sink worker-pool configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SinkPoolConfig {
     /// Batch sealing thresholds.
     pub batch: BatchConfig,
@@ -298,6 +309,39 @@ pub struct SinkPoolConfig {
     pub retry: RetryConfig,
     /// Replica circuit breaker.
     pub breaker: BreakerConfig,
+}
+
+impl SinkPoolConfig {
+    /// All four sections at once, as a connector's factory assembles them
+    /// from its config.
+    ///
+    /// ```
+    /// use spate_core::sink::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
+    ///
+    /// let mut batch = BatchConfig::default();
+    /// batch.max_rows = 1_000;
+    /// let pool = SinkPoolConfig::new(
+    ///     batch,
+    ///     InflightConfig::default(),
+    ///     RetryConfig::default(),
+    ///     BreakerConfig::default(),
+    /// );
+    /// assert_eq!(pool.batch.max_rows, 1_000);
+    /// ```
+    #[must_use]
+    pub fn new(
+        batch: BatchConfig,
+        inflight: InflightConfig,
+        retry: RetryConfig,
+        breaker: BreakerConfig,
+    ) -> SinkPoolConfig {
+        SinkPoolConfig {
+            batch,
+            inflight,
+            retry,
+            breaker,
+        }
+    }
 }
 
 #[cfg(test)]

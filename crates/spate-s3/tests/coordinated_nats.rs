@@ -76,13 +76,11 @@ fn launch_nats_instance(
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
     let nats = NatsConfig::new(vec![format!("nats://127.0.0.1:{nats_port}")], job);
-    let tuning = CoordinationConfig {
-        lease_duration: LEASE,
-        op_timeout: Duration::from_secs(1),
-        instance_id: Some(instance.to_string()),
-        replan_interval: LEASE,
-        ..CoordinationConfig::default()
-    };
+    let mut tuning = CoordinationConfig::default();
+    tuning.lease_duration = LEASE;
+    tuning.op_timeout = Duration::from_secs(1);
+    tuning.instance_id = Some(instance.to_string());
+    tuning.replan_interval = LEASE;
     launch_customized(yaml, test_options(), pre, move |source, io| {
         let store = NatsStore::new(nats, LEASE).expect("nats store");
         let coordinator =

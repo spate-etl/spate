@@ -142,6 +142,7 @@ fn default_statistics_interval() -> Duration {
 /// (surfaced as a config error), never mid-stream.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Compression {
     /// No compression.
     None,
@@ -169,8 +170,13 @@ impl Compression {
 
 /// Configuration of a Kafka sink, deserialized from the pipeline's opaque
 /// `sink: { kafka: ... }` section.
+///
+/// Construct with [`KafkaSinkConfig::new`] and set the optional fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct KafkaSinkConfig {
     /// Comma-separated bootstrap servers.
     pub brokers: String,
@@ -223,6 +229,26 @@ pub struct KafkaSinkConfig {
 }
 
 impl KafkaSinkConfig {
+    /// A config for `brokers` and `topic`. Every other field starts at its
+    /// YAML default.
+    #[must_use]
+    pub fn new(brokers: impl Into<String>, topic: impl Into<String>) -> KafkaSinkConfig {
+        KafkaSinkConfig {
+            brokers: brokers.into(),
+            topic: topic.into(),
+            shards: default_shards(),
+            delivery_timeout: default_delivery_timeout(),
+            max_message_bytes: default_max_message_bytes(),
+            statistics_interval: default_statistics_interval(),
+            compression: None,
+            batch: BatchConfig::default(),
+            inflight: InflightConfig::default(),
+            retry: RetryConfig::default(),
+            breaker: BreakerConfig::default(),
+            rdkafka: BTreeMap::new(),
+        }
+    }
+
     /// Cross-field validation, including the passthrough denylist.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let fail = |msg: String| Err(ConfigError::Validation(format!("sink.kafka: {msg}")));
@@ -455,12 +481,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         })?;
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
-    let pool = SinkPoolConfig {
-        batch: cfg.batch,
-        inflight: cfg.inflight,
-        retry: cfg.retry,
-        breaker: cfg.breaker,
-    };
+    let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
 
     Ok(KafkaSink {
         writer: KafkaWriter::new(
@@ -507,6 +528,16 @@ mod tests {
         assert!(cfg.rdkafka.is_empty());
         assert_eq!(cfg.batch, BatchConfig::default());
         assert_eq!(cfg.retry, RetryConfig::default());
+    }
+
+    /// `new` and the YAML defaults are two spellings of one config, so a
+    /// knob added to the struct has to reach both.
+    #[test]
+    fn new_matches_the_yaml_defaults() {
+        assert_eq!(
+            KafkaSinkConfig::new("localhost:9092", "orders"),
+            parse(&minimal()).unwrap()
+        );
     }
 
     #[test]

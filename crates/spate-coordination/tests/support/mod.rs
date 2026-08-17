@@ -28,23 +28,22 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub const DEADLINE: Duration = Duration::from_secs(20);
 
 pub fn config(instance_id: Option<&str>) -> CoordinationConfig {
-    CoordinationConfig {
-        lease_duration: LEASE,
-        op_timeout: Duration::from_millis(200),
-        instance_id: instance_id.map(str::to_string),
-        replan_interval: LEASE,
-        reconcile_interval: Duration::from_millis(300),
-        // Both defaults are sized against the 30s production lease and
-        // would swamp a 1.5s test one; `drain_deadline` would not
-        // validate. Scaled here rather than in `Default` so production
-        // keeps the documented values.
-        drain_deadline: LEASE / 2,
-        // Zero by default: most tests assert that a dead worker's splits
-        // flow back promptly, and a grace window would just add latency to
-        // every one of them. The tests that care about the window set it.
-        rebalance_delay: Duration::ZERO,
-        ..CoordinationConfig::default()
-    }
+    let mut cfg = CoordinationConfig::default();
+    cfg.lease_duration = LEASE;
+    cfg.op_timeout = Duration::from_millis(200);
+    cfg.instance_id = instance_id.map(str::to_string);
+    cfg.replan_interval = LEASE;
+    cfg.reconcile_interval = Duration::from_millis(300);
+    // Both defaults are sized against the 30s production lease and would
+    // swamp a 1.5s test one; `drain_deadline` would not validate. Scaled
+    // here rather than in `Default` so production keeps the documented
+    // values.
+    cfg.drain_deadline = LEASE / 2;
+    // Zero by default: most tests assert that a dead worker's splits flow
+    // back promptly, and a grace window would just add latency to every one
+    // of them. The tests that care about the window set it.
+    cfg.rebalance_delay = Duration::ZERO;
+    cfg
 }
 
 pub fn runtime() -> tokio::runtime::Runtime {

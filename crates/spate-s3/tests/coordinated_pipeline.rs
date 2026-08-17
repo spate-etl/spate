@@ -8,7 +8,6 @@
 
 mod support;
 
-use spate_coordination::CoordinationConfig;
 use spate_core::pipeline::ExitState;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
 use std::fs;
@@ -69,11 +68,9 @@ fn launch_instance(
 ) -> (Launched, Arc<AtomicUsize>) {
     let (spy, lists) = counting_local_store();
     let store = store.clone();
-    let tuning = CoordinationConfig {
-        instance_id: Some(instance.to_string()),
-        max_in_flight: 2,
-        ..test_tuning()
-    };
+    let mut tuning = test_tuning();
+    tuning.instance_id = Some(instance.to_string());
+    tuning.max_in_flight = 2;
     let launched = launch_customized(yaml, test_options(), pre, move |source, io| {
         let coordinator = spate_coordination::StoreCoordinator::new(store, tuning, io, None)
             .expect("coordinator builds");
@@ -219,16 +216,14 @@ fn launch_revocable_instance(
     max_in_flight: u32,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    let tuning = CoordinationConfig {
-        instance_id: Some(instance.to_string()),
-        max_in_flight,
-        // A paced drain takes far longer than the default deadline, and a
-        // forced revocation would reintroduce exactly the duplicates this
-        // test refutes. The forced path is covered by the
-        // coordination-level tests; this one is about the clean path.
-        drain_deadline: Duration::from_secs(600),
-        ..test_tuning()
-    };
+    let mut tuning = test_tuning();
+    tuning.instance_id = Some(instance.to_string());
+    tuning.max_in_flight = max_in_flight;
+    // A paced drain takes far longer than the default deadline, and a
+    // forced revocation would reintroduce exactly the duplicates this test
+    // refutes. The forced path is covered by the coordination-level tests;
+    // this one is about the clean path.
+    tuning.drain_deadline = Duration::from_secs(600);
     launch_tuned(yaml, test_options(), store, tuning, pre)
 }
 

@@ -245,27 +245,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&config_yaml(&data))?)?;
 
-    let tuning = CoordinationConfig {
-        lease_duration: LEASE,
-        op_timeout: Duration::from_secs(2),
-        instance_id: Some(instance.clone()),
-        // Replanning faster than leadership can be observed to fail is
-        // churn; the floor is the lease and the prefix never grows here.
-        replan_interval: LEASE,
-        // Shortened from its 20s default so a `kill -9` demo does not
-        // outlast the reader's patience. See the module docs.
-        rebalance_delay: LEASE,
-        // Raised well above its 10s default, and above the lease: a revoked
-        // split drains by pushing its tail through the chain to a final
-        // commit, and this chain is paced. A draining split is still owned
-        // and still heartbeated, so a long drain costs a slow rebalance,
-        // never a race. The default leaves the drain racing the deadline on
-        // this workload, and a drain that loses is forced instead of
-        // cooperative. The tail still replays, but the revocation is not the
-        // one this example shows.
-        drain_deadline: Duration::from_secs(60),
-        ..CoordinationConfig::default()
-    };
+    let mut tuning = CoordinationConfig::default();
+    tuning.lease_duration = LEASE;
+    tuning.op_timeout = Duration::from_secs(2);
+    tuning.instance_id = Some(instance.clone());
+    // Replanning faster than leadership can be observed to fail is churn;
+    // the floor is the lease and the prefix never grows here.
+    tuning.replan_interval = LEASE;
+    // Shortened from its 20s default so a `kill -9` demo does not outlast
+    // the reader's patience. See the module docs.
+    tuning.rebalance_delay = LEASE;
+    // Raised well above its 10s default, and above the lease: a revoked
+    // split drains by pushing its tail through the chain to a final commit,
+    // and this chain is paced. A draining split is still owned and still
+    // heartbeated, so a long drain costs a slow rebalance, never a race. The
+    // default leaves the drain racing the deadline on this workload, and a
+    // drain that loses is forced instead of cooperative. The tail still
+    // replays, but the revocation is not the one this example shows.
+    tuning.drain_deadline = Duration::from_secs(60);
     // Construction is lazy: connecting and provisioning the two buckets
     // happen on the coordinator's startup probe, so a wrong URL rides the
     // startup retry budget and a wrong server version is fatal at startup

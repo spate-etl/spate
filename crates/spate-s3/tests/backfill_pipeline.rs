@@ -16,7 +16,6 @@
 
 mod support;
 
-use spate_coordination::CoordinationConfig;
 use spate_core::pipeline::{ExitState, RuntimeOptions};
 use spate_test::{WriteOutcome, wait_until};
 use std::fs;
@@ -263,9 +262,10 @@ fn assert_stalls(fx: &Fixture, store: &spate_coordination::store::memory::Memory
         &fx.config_yaml(""),
         test_options(),
         store,
-        CoordinationConfig {
-            max_attempts: 2,
-            ..test_tuning()
+        {
+            let mut tuning = test_tuning();
+            tuning.max_attempts = 2;
+            tuning
         },
         |_| {},
     );
@@ -435,9 +435,10 @@ fn corrupt_object_quarantines_its_split_and_stalls() {
         &fx.config_yaml(""),
         test_options(),
         &store,
-        CoordinationConfig {
-            max_attempts: 2,
-            ..test_tuning()
+        {
+            let mut tuning = test_tuning();
+            tuning.max_attempts = 2;
+            tuning
         },
         |_| {},
     );

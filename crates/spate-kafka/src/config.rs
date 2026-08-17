@@ -83,8 +83,13 @@ fn default_statistics_interval() -> Duration {
 
 /// Configuration of a [`KafkaSource`](crate::KafkaSource), deserialized
 /// from the pipeline's opaque `source: { kafka: ... }` section.
+///
+/// Construct with [`KafkaSourceConfig::new`] and set the optional fields.
+/// The struct is `#[non_exhaustive]` so new knobs can be added without
+/// breaking callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct KafkaSourceConfig {
     /// Comma-separated bootstrap servers.
     pub brokers: String,
@@ -135,6 +140,25 @@ pub struct KafkaSourceConfig {
 }
 
 impl KafkaSourceConfig {
+    /// A config for `brokers`, `topic` and `group_id`. Every other field
+    /// starts at its YAML default.
+    #[must_use]
+    pub fn new(
+        brokers: impl Into<String>,
+        topic: impl Into<String>,
+        group_id: impl Into<String>,
+    ) -> KafkaSourceConfig {
+        KafkaSourceConfig {
+            brokers: brokers.into(),
+            topic: topic.into(),
+            group_id: group_id.into(),
+            commit_interval: default_commit_interval(),
+            startup_timeout: default_startup_timeout(),
+            statistics_interval: default_statistics_interval(),
+            rdkafka: BTreeMap::new(),
+        }
+    }
+
     /// Deserialize and validate from the pipeline's opaque component
     /// section.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
@@ -245,6 +269,16 @@ mod tests {
         assert_eq!(cfg.startup_timeout, Duration::from_secs(30));
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
         assert!(cfg.rdkafka.is_empty());
+    }
+
+    /// `new` and the YAML defaults are two spellings of one config, so a
+    /// knob added to the struct has to reach both.
+    #[test]
+    fn new_matches_the_yaml_defaults() {
+        assert_eq!(
+            KafkaSourceConfig::new("localhost:9092", "orders", "spate"),
+            KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap()
+        );
     }
 
     #[test]

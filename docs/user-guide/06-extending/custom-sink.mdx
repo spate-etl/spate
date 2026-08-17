@@ -133,7 +133,9 @@ workers, their queues and their metric labels from the topology it carries.
   indexed `[shard][replica]` and must be non-empty with at least one
   replica per shard; the builder rejects ragged or empty topologies before
   anything spawns. `SinkPoolConfig` carries the batching, in-flight, retry,
-  and breaker tuning ([Tuning](../05-deployment/tuning.mdx)).
+  and breaker tuning ([Tuning](../05-deployment/tuning.mdx)). It is
+  `#[non_exhaustive]`, so build it from `new` or `default()`, as the example
+  above does.
 - `.with_component_type("...")` — sets the `component_type` metric label
   (default `"custom"`) on every sink series
   ([Monitoring](../05-deployment/monitoring.mdx)).

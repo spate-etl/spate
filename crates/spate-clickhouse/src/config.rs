@@ -41,8 +41,13 @@ use std::time::Duration;
 ///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
+///
+/// Construct with [`ClickHouseSinkConfig::new`] and set the optional
+/// fields. The struct is `#[non_exhaustive]` so new knobs can be added
+/// without breaking callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClickHouseSinkConfig {
     /// Target table, optionally `database.table`-qualified.
     pub table: String,
@@ -118,6 +123,7 @@ pub struct ClickHouseSinkConfig {
 /// [`crate::ClickHouseEncoder`].
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Format {
     /// Row-wise RowBinary (default).
     #[default]
@@ -146,6 +152,7 @@ impl Format {
 /// ```
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SchemaValidation {
     /// No validation (default).
     #[default]
@@ -176,6 +183,7 @@ pub enum SchemaValidation {
 /// trades CPU for a better ratio and accepts an explicit level (`zstd` alone
 /// uses level 3). `off` disables compression.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Compression {
     /// No transport compression.
     None,
@@ -237,9 +245,45 @@ fn to_client_compression(c: Compression) -> clickhouse::Compression {
     }
 }
 
+impl ClickHouseSinkConfig {
+    /// A config for `table`, the insert `columns` in row-struct field
+    /// order, and the shard topology. Every other field starts at its YAML
+    /// default.
+    #[must_use]
+    pub fn new(
+        table: impl Into<String>,
+        columns: Vec<String>,
+        shards: Vec<ShardConfig>,
+    ) -> ClickHouseSinkConfig {
+        ClickHouseSinkConfig {
+            table: table.into(),
+            columns,
+            shards,
+            database: None,
+            user: None,
+            password: None,
+            settings: BTreeMap::new(),
+            batch: BatchConfig::default(),
+            inflight: InflightConfig::default(),
+            retry: RetryConfig::default(),
+            breaker: BreakerConfig::default(),
+            timeouts: TimeoutSection::default(),
+            compression: Compression::default(),
+            validate_schema: SchemaValidation::default(),
+            format: Format::default(),
+            distributed_check: None,
+        }
+    }
+}
+
 /// One shard's replica endpoints.
+///
+/// Construct with [`ShardConfig::new`] and set the optional fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ShardConfig {
     /// HTTP(S) URLs of this shard's replicas.
     pub replicas: Vec<String>,
@@ -252,6 +296,18 @@ pub struct ShardConfig {
 
 fn default_weight() -> u32 {
     1
+}
+
+impl ShardConfig {
+    /// A shard served by `replicas`. The weight starts at its YAML
+    /// default.
+    #[must_use]
+    pub fn new(replicas: Vec<String>) -> ShardConfig {
+        ShardConfig {
+            replicas,
+            weight: default_weight(),
+        }
+    }
 }
 
 /// The opt-in `distributed_check:` block, a startup guard verifying that
@@ -268,8 +324,13 @@ fn default_weight() -> u32 {
 ///       # sharding_expr: "xxHash64(order_id)"  # escape hatch — exactly one
 ///       # endpoint: "http://ch-front:8123"     # default: shard 0, replica 0
 /// ```
+///
+/// Construct with [`DistributedCheckSection::new`] and set the optional
+/// fields. The struct is `#[non_exhaustive]` so new knobs can be added
+/// without breaking callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DistributedCheckSection {
     /// The cluster the `Distributed` table is defined over.
     pub cluster: String,
@@ -292,9 +353,36 @@ pub struct DistributedCheckSection {
     pub endpoint: Option<String>,
 }
 
+impl DistributedCheckSection {
+    /// A check of `table` on `cluster`, sharded by `sharding_key`. Every
+    /// other field starts at its YAML default.
+    ///
+    /// To compare against a full expression instead, clear `sharding_key`
+    /// and set `sharding_expr`: [`build`] takes exactly one of the two.
+    #[must_use]
+    pub fn new(
+        cluster: impl Into<String>,
+        table: impl Into<String>,
+        sharding_key: impl Into<String>,
+    ) -> DistributedCheckSection {
+        DistributedCheckSection {
+            cluster: cluster.into(),
+            table: table.into(),
+            sharding_key: Some(sharding_key.into()),
+            sharding_expr: None,
+            endpoint: None,
+        }
+    }
+}
+
 /// Client-side timeouts for one insert.
+///
+/// Construct with [`TimeoutSection::default`] and set the fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct TimeoutSection {
     /// Per-`send` timeout (one frame reaching the socket).
     #[serde(with = "humantime_serde")]
@@ -500,12 +588,7 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
         }
     });
 
-    let pool = SinkPoolConfig {
-        batch: cfg.batch,
-        inflight: cfg.inflight,
-        retry: cfg.retry,
-        breaker: cfg.breaker,
-    };
+    let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
 
     Ok(ClickHouseSink {
         writer,
@@ -981,12 +1064,49 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn validation_rejects_out_of_range_programmatic_zstd_level() {
-        let mut cfg: ClickHouseSinkConfig =
-            serde_yaml::from_str("table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n")
-                .unwrap();
+        let mut cfg = ClickHouseSinkConfig::new(
+            "t",
+            vec!["id".into()],
+            vec![ShardConfig::new(vec!["http://a".into()])],
+        );
         cfg.compression = Compression::Zstd(99);
         let err = build(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
+    }
+
+    /// `new` and the YAML defaults are two spellings of one config, so a
+    /// knob added to the struct has to reach both.
+    #[test]
+    fn new_matches_the_yaml_defaults() {
+        let from_yaml: ClickHouseSinkConfig = serde_yaml::from_str(MINIMAL).unwrap();
+        assert_eq!(
+            ClickHouseSinkConfig::new(
+                "orders",
+                vec!["id".into(), "name".into()],
+                vec![ShardConfig::new(vec!["http://a:8123".into()])],
+            ),
+            from_yaml
+        );
+    }
+
+    /// The nested section has the same two spellings, and `new` must
+    /// produce one `build` accepts rather than one it rejects.
+    #[test]
+    fn distributed_check_new_matches_the_yaml_defaults_and_builds() {
+        let from_yaml: DistributedCheckSection =
+            serde_yaml::from_str("cluster: prod\ntable: db.t_dist\nsharding_key: id\n").unwrap();
+        assert_eq!(
+            DistributedCheckSection::new("prod", "db.t_dist", "id"),
+            from_yaml
+        );
+
+        let mut cfg = ClickHouseSinkConfig::new(
+            "t",
+            vec!["id".into()],
+            vec![ShardConfig::new(vec!["http://a:8123".into()])],
+        );
+        cfg.distributed_check = Some(DistributedCheckSection::new("prod", "db.t_dist", "id"));
+        build(cfg).expect("a config built entirely from `new` passes validation");
     }
 
     #[test]

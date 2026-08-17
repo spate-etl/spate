@@ -12,8 +12,8 @@
 
 mod support;
 
+use spate_coordination::StoreCoordinator;
 use spate_coordination::store::memory::MemoryStore;
-use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::pipeline::ExitState;
 use std::collections::BTreeMap;
 use std::fs;
@@ -107,11 +107,9 @@ fn launch_spied(
 ) -> (Launched, StoreSpy) {
     let (spy_store, spy) = spying_local_store(options);
     let store = store.clone();
-    let tuning = CoordinationConfig {
-        instance_id: Some(instance.to_string()),
-        max_in_flight,
-        ..test_tuning()
-    };
+    let mut tuning = test_tuning();
+    tuning.instance_id = Some(instance.to_string());
+    tuning.max_in_flight = max_in_flight;
     let launched = launch_customized(
         yaml,
         test_options(),

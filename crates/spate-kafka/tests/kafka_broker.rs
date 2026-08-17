@@ -19,17 +19,14 @@ use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 const TOPIC: &str = "orders";
 
 fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
-    KafkaSourceConfig {
-        brokers: brokers.to_string(),
-        topic: TOPIC.to_string(),
-        group_id: group.to_string(),
-        commit_interval: Duration::from_millis(200),
-        startup_timeout: Duration::from_secs(60),
-        statistics_interval: Duration::from_secs(1),
-        // Tests produce before the consumer joins; without this, librdkafka's
-        // `latest` default correctly delivers nothing (see mock_cluster.rs).
-        rdkafka: BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]),
-    }
+    let mut cfg = KafkaSourceConfig::new(brokers, TOPIC, group);
+    cfg.commit_interval = Duration::from_millis(200);
+    cfg.startup_timeout = Duration::from_secs(60);
+    cfg.statistics_interval = Duration::from_secs(1);
+    // Tests produce before the consumer joins; without this, librdkafka's
+    // `latest` default correctly delivers nothing (see mock_cluster.rs).
+    cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]);
+    cfg
 }
 
 #[test]

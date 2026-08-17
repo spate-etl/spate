@@ -103,33 +103,31 @@ pub(crate) fn launch_scripted(
 pub(crate) const TEST_LEASE: Duration = Duration::from_secs(1);
 
 pub(crate) fn test_tuning() -> CoordinationConfig {
-    CoordinationConfig {
-        lease_duration: TEST_LEASE,
-        op_timeout: Duration::from_millis(200),
-        replan_interval: TEST_LEASE,
-        // Both below are sized against the 30s production lease; left at
-        // their defaults they dwarf a 1s test one, and every takeover test
-        // pays the full production grace window in wall clock —
-        // `rebalance_delay` alone was ~20s of the 32s `coordinated_takeover`
-        // run. Scaled here rather than in `Default` so production keeps the
-        // documented values, the same split `spate-coordination`'s own
-        // `config()` helper makes.
-        reconcile_interval: Duration::from_millis(300),
-        // Zero: these suites assert that a dead instance's splits flow back
-        // promptly, and a grace window is pure latency on every one of them.
-        // No spate-s3 test asserts the withhold behavior; the two arms that
-        // do are `spate-coordination`'s, and they set the window themselves.
-        rebalance_delay: Duration::ZERO,
-        // NOT scaled with the lease. This one bounds how long a *data
-        // plane* takes to drain, not how long a protocol step takes, and
-        // these sinks are paced at ~100ms/write. Cut to a fraction of a
-        // test lease it silently forces drains that would have completed
-        // cooperatively: same green suite, different code path, and
-        // replayed tails instead of clean releases. It only costs wall
-        // clock when a drain wedges, which is the case it bounds.
-        drain_deadline: Duration::from_secs(5),
-        ..CoordinationConfig::default()
-    }
+    let mut cfg = CoordinationConfig::default();
+    cfg.lease_duration = TEST_LEASE;
+    cfg.op_timeout = Duration::from_millis(200);
+    cfg.replan_interval = TEST_LEASE;
+    // Both below are sized against the 30s production lease; left at their
+    // defaults they dwarf a 1s test one, and every takeover test pays the
+    // full production grace window in wall clock — `rebalance_delay` alone
+    // was ~20s of the 32s `coordinated_takeover` run. Scaled here rather
+    // than in `Default` so production keeps the documented values, the same
+    // split `spate-coordination`'s own `config()` helper makes.
+    cfg.reconcile_interval = Duration::from_millis(300);
+    // Zero: these suites assert that a dead instance's splits flow back
+    // promptly, and a grace window is pure latency on every one of them. No
+    // spate-s3 test asserts the withhold behavior; the two arms that do are
+    // `spate-coordination`'s, and they set the window themselves.
+    cfg.rebalance_delay = Duration::ZERO;
+    // NOT scaled with the lease. This one bounds how long a *data plane*
+    // takes to drain, not how long a protocol step takes, and these sinks
+    // are paced at ~100ms/write. Cut to a fraction of a test lease it
+    // silently forces drains that would have completed cooperatively: same
+    // green suite, different code path, and replayed tails instead of clean
+    // releases. It only costs wall clock when a drain wedges, which is the
+    // case it bounds.
+    cfg.drain_deadline = Duration::from_secs(5);
+    cfg
 }
 
 /// An in-process coordination store tests share across pipeline launches

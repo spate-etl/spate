@@ -85,6 +85,10 @@ pub enum Compression {
 
 /// Configuration of an `S3Source`, deserialized from the pipeline's opaque
 /// `source: { s3: ... }` section.
+///
+/// Construct with [`S3SourceConfig::new`] and set the optional fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -155,6 +159,21 @@ impl std::fmt::Debug for S3SourceConfig {
 }
 
 impl S3SourceConfig {
+    /// A config for the bucket and prefix at `url`. Every other field
+    /// starts at its YAML default.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> S3SourceConfig {
+        S3SourceConfig {
+            url: url.into(),
+            compression: Compression::default(),
+            split_target_bytes: default_split_target_bytes(),
+            refresh_listing: false,
+            prefetch_bytes: default_prefetch_bytes(),
+            chunk_bytes: default_chunk_bytes(),
+            store: BTreeMap::new(),
+        }
+    }
+
     /// Deserialize and validate from the pipeline's opaque component
     /// section.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
@@ -240,6 +259,16 @@ mod tests {
         assert_eq!(cfg.split_target_bytes, ByteSize::mib(64));
         assert!(!cfg.refresh_listing);
         assert!(cfg.store.is_empty());
+    }
+
+    /// `new` and the YAML defaults are two spellings of one config, so a
+    /// knob added to the struct has to reach both.
+    #[test]
+    fn new_matches_the_yaml_defaults() {
+        assert_eq!(
+            S3SourceConfig::new("s3://bucket/exports/"),
+            S3SourceConfig::from_component_config(&section(&minimal())).unwrap()
+        );
     }
 
     #[test]

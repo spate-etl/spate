@@ -117,14 +117,13 @@ fn kafka_to_kafka_split_round_trip() {
     produce(&brokers, A_TOPIC, &[b"warmup".to_vec()]);
     produce(&brokers, B_TOPIC, &[b"warmup".to_vec()]);
 
-    let source = KafkaSource::new(KafkaSourceConfig {
-        brokers: brokers.clone(),
-        topic: IN_TOPIC.to_string(),
-        group_id: GROUP.to_string(),
-        commit_interval: Duration::from_millis(200),
-        startup_timeout: Duration::from_secs(60),
-        statistics_interval: Duration::ZERO,
-        rdkafka: BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]),
+    let source = KafkaSource::new({
+        let mut cfg = KafkaSourceConfig::new(brokers.clone(), IN_TOPIC, GROUP);
+        cfg.commit_interval = Duration::from_millis(200);
+        cfg.startup_timeout = Duration::from_secs(60);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]);
+        cfg
     });
     let sink_a = spate_kafka::sink::build(sink_config(&brokers, A_TOPIC)).expect("sink a");
     let sink_b = spate_kafka::sink::build(sink_config(&brokers, B_TOPIC)).expect("sink b");

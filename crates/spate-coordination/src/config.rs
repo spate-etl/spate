@@ -14,11 +14,12 @@ use std::time::Duration;
 /// 15s churns takeovers under routine GC pauses") belong to the embedding
 /// connector's config layer.
 ///
-/// Construct it from [`Default`] and override the fields you care about
-/// (`..CoordinationConfig::default()`); new tuning knobs are added over
-/// time, and that form keeps picking up their defaults.
+/// Construct with [`CoordinationConfig::default`] and set the fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without
+/// breaking callers.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CoordinationConfig {
     /// Takeover-latency ceiling: a dead worker's splits flow back to the
     /// fleet one lease after its last heartbeat. Default 30s.

@@ -15,31 +15,28 @@ use std::time::{Duration, Instant};
 const TOPIC: &str = "orders";
 
 fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
-    KafkaSourceConfig {
-        brokers: brokers.to_string(),
-        topic: TOPIC.to_string(),
-        group_id: group.to_string(),
-        commit_interval: Duration::from_millis(200),
-        startup_timeout: Duration::from_secs(30),
-        // Statistics off: deterministic tests.
-        statistics_interval: Duration::ZERO,
-        rdkafka: BTreeMap::from([
-            // These tests produce BEFORE the consumer joins. librdkafka's
-            // default (`latest`) would legitimately deliver nothing. Any past
-            // "green" run of that shape was a pause-race leaking a message to
-            // the main queue, whose rewind seek overrode the reset policy.
-            ("auto.offset.reset".to_string(), "earliest".to_string()),
-            // The mock broker paces a rebalance of an *established* group at
-            // `session.timeout.ms - 1000` (rdkafka_mock_cgrp.c: the JOINING
-            // timeout), so librdkafka's 45s default made every second-member
-            // test wait ~44s for its reassignment. Only the group's *first*
-            // formation uses `group.initial.rebalance.delay.ms`. 6s keeps us at
-            // real Kafka's `group.min.session.timeout.ms` floor while capping
-            // that wait at 5s.
-            ("session.timeout.ms".to_string(), "6000".to_string()),
-            ("heartbeat.interval.ms".to_string(), "2000".to_string()),
-        ]),
-    }
+    let mut cfg = KafkaSourceConfig::new(brokers, TOPIC, group);
+    cfg.commit_interval = Duration::from_millis(200);
+    cfg.startup_timeout = Duration::from_secs(30);
+    // Statistics off: deterministic tests.
+    cfg.statistics_interval = Duration::ZERO;
+    cfg.rdkafka = BTreeMap::from([
+        // These tests produce BEFORE the consumer joins. librdkafka's
+        // default (`latest`) would legitimately deliver nothing. Any past
+        // "green" run of that shape was a pause-race leaking a message to
+        // the main queue, whose rewind seek overrode the reset policy.
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        // The mock broker paces a rebalance of an *established* group at
+        // `session.timeout.ms - 1000` (rdkafka_mock_cgrp.c: the JOINING
+        // timeout), so librdkafka's 45s default made every second-member
+        // test wait ~44s for its reassignment. Only the group's *first*
+        // formation uses `group.initial.rebalance.delay.ms`. 6s keeps us at
+        // real Kafka's `group.min.session.timeout.ms` floor while capping
+        // that wait at 5s.
+        ("session.timeout.ms".to_string(), "6000".to_string()),
+        ("heartbeat.interval.ms".to_string(), "2000".to_string()),
+    ]);
+    cfg
 }
 
 fn produce(brokers: &str, per_partition: usize, partitions: i32, tag: &str) {

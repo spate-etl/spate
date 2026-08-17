@@ -11,11 +11,11 @@
 
 mod support;
 
+use spate_coordination::StoreCoordinator;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
 };
-use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::pipeline::ExitState;
 use spate_test::{WriteOutcome, wait_until};
 use std::fs;
@@ -153,11 +153,9 @@ fn a_hard_crashed_instance_loses_its_leases_and_a_peer_finishes_the_job() {
             }
         },
         move |source, io| {
-            let tuning = CoordinationConfig {
-                instance_id: Some("victim".to_string()),
-                max_in_flight: 2,
-                ..test_tuning()
-            };
+            let mut tuning = test_tuning();
+            tuning.instance_id = Some("victim".to_string());
+            tuning.max_in_flight = 2;
             let coordinator =
                 StoreCoordinator::new(wrapped, tuning, io, None).expect("coordinator builds");
             line_framer(source).with_coordinator(Box::new(coordinator))
@@ -178,9 +176,10 @@ fn a_hard_crashed_instance_loses_its_leases_and_a_peer_finishes_the_job() {
         &config_yaml(&data, "s3-takeover-survivor"),
         test_options(),
         &store,
-        CoordinationConfig {
-            instance_id: Some("survivor".to_string()),
-            ..test_tuning()
+        {
+            let mut tuning = test_tuning();
+            tuning.instance_id = Some("survivor".to_string());
+            tuning
         },
         |_sink| {},
     );

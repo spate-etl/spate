@@ -51,26 +51,19 @@ fn nats_config(port: u16, job: &str) -> NatsConfig {
 
 fn worker(port: u16, job: &str, io: &tokio::runtime::Handle, instance_id: &str) -> NatsCoordinator {
     let store = NatsStore::new(nats_config(port, job), LEASE).expect("nats store");
-    StoreCoordinator::new(
-        store,
-        CoordinationConfig {
-            lease_duration: LEASE,
-            op_timeout: Duration::from_secs(1),
-            instance_id: Some(instance_id.to_string()),
-            replan_interval: LEASE,
-            reconcile_interval: Duration::from_secs(1),
-            // A dead worker's splits flow back on lease expiry alone; the
-            // grace window is for absorbing a restart, which this suite
-            // does not exercise. Left at its 20s default it would delay
-            // takeover past the test deadline.
-            rebalance_delay: Duration::ZERO,
-            drain_deadline: LEASE / 2,
-            ..CoordinationConfig::default()
-        },
-        io.clone(),
-        None,
-    )
-    .expect("coordinator")
+    let mut cfg = CoordinationConfig::default();
+    cfg.lease_duration = LEASE;
+    cfg.op_timeout = Duration::from_secs(1);
+    cfg.instance_id = Some(instance_id.to_string());
+    cfg.replan_interval = LEASE;
+    cfg.reconcile_interval = Duration::from_secs(1);
+    // A dead worker's splits flow back on lease expiry alone; the grace
+    // window is for absorbing a restart, which this suite does not
+    // exercise. Left at its 20s default it would delay takeover past the
+    // test deadline.
+    cfg.rebalance_delay = Duration::ZERO;
+    cfg.drain_deadline = LEASE / 2;
+    StoreCoordinator::new(store, cfg, io.clone(), None).expect("coordinator")
 }
 
 #[test]

@@ -4,68 +4,6 @@
 //! statically composed collector stack when the chain is built. The same
 //! parts can assemble any number of identical chains (one per pipeline
 //! thread) through [`ChainFactory`].
-//!
-//! # Owned vs borrowed record families
-//!
-//! For owned families ([`Owned<T>`](crate::deser::Owned)) the builder
-//! offers [`ChainBuilder::map`] / [`ChainBuilder::try_map`] with plain
-//! closure bounds; bare closures infer. For **borrowing** families a
-//! `rustc` limitation (E0582: a higher-ranked lifetime may not appear only
-//! in associated-type positions) rules out `FnMut`-with-projection-output
-//! bounds at the definition site; use [`ChainBuilder::map_rec`] /
-//! [`ChainBuilder::try_map_rec`] and pass **`fn` items**, which are
-//! naturally higher-ranked:
-//!
-//! ```ignore
-//! fn shrink<'a>(e: LogEvent<'a>) -> Compact<'a> { /* ... */ }
-//! chain(log_deser).map_rec::<CompactF, _>(shrink)
-//! ```
-//!
-//! [`ChainBuilder::filter`], [`ChainBuilder::inspect`], and
-//! [`ChainBuilder::flat_map`] have no output binding, so a single generic
-//! method serves both kinds of family.
-//!
-//! ```
-//! use spate_core::backpressure::InflightBudget;
-//! use spate_core::deser::{BytesPassthrough, Owned};
-//! use spate_core::error::ErrorPolicy;
-//! use spate_core::ops::{ChunkConfig, chain};
-//! use spate_core::record::Record;
-//! use spate_core::sink::{KeyHashRouter, RowEncoder, shard_queues};
-//! use std::sync::Arc;
-//!
-//! // A trivial encoder writing `<u32 len><bytes>` rows.
-//! #[derive(Clone)]
-//! struct LenPrefix;
-//! impl RowEncoder<Owned<Vec<u8>>> for LenPrefix {
-//!     fn encode<'buf>(
-//!         &mut self,
-//!         rec: &Record<Vec<u8>>,
-//!         buf: &mut bytes::BytesMut,
-//!     ) -> Result<(), spate_core::error::SinkError> {
-//!         buf.extend_from_slice(&(rec.payload.len() as u32).to_le_bytes());
-//!         buf.extend_from_slice(&rec.payload);
-//!         Ok(())
-//!     }
-//! }
-//!
-//! let (queues, _rx) = shard_queues(2, 64);
-//! let budget = Arc::new(InflightBudget::new());
-//!
-//! let mut pipeline_chain = chain(BytesPassthrough)
-//!     .map(|mut bytes: Vec<u8>| {
-//!         bytes.make_ascii_uppercase();
-//!         bytes
-//!     })
-//!     .filter(|bytes: &Vec<u8>| !bytes.is_empty())
-//!     .try_map(
-//!         |bytes: Vec<u8>| String::from_utf8(bytes).map(String::into_bytes),
-//!         ErrorPolicy::Skip,
-//!     )
-//!     .sink(LenPrefix, KeyHashRouter, ChunkConfig::default(), queues, budget)
-//!     .build();
-//! # let _ = &mut pipeline_chain;
-//! ```
 
 use super::chain::{
     FatalSlot, Filter, FlatMap, Inspect, Map, OpMeter, OpMeterSlot, StageLifecycle, TryMap,
@@ -84,12 +22,74 @@ use std::sync::Arc;
 
 /// A record-to-record transform between families. Implemented for every
 /// `FnMut(In) -> Out`; expressed as an independent two-parameter trait so
-/// higher-ranked builder bounds stay legal for borrowing families (see the
-/// module docs on E0582). `fn` items satisfy it at every lifetime.
+/// higher-ranked builder bounds stay legal for borrowing families (see
+/// [the module docs](crate::ops) on E0582). `fn` items satisfy it at
+/// every lifetime.
+///
+/// Name the bound to write a helper generic over one stage.
+///
+/// ```
+/// use spate_core::deser::RecFamily;
+/// use spate_core::ops::MapFn;
+///
+/// struct LogEvent<'buf> {
+///     line: &'buf str,
+/// }
+/// struct LogF;
+/// impl RecFamily for LogF {
+///     type Rec<'buf> = LogEvent<'buf>;
+/// }
+///
+/// fn first_word<'a>(ev: LogEvent<'a>) -> LogEvent<'a> {
+///     LogEvent {
+///         line: ev.line.split(' ').next().unwrap_or(""),
+///     }
+/// }
+///
+/// fn stage<F, G>(g: G) -> G
+/// where
+///     F: RecFamily,
+///     G: for<'buf> MapFn<F::Rec<'buf>, F::Rec<'buf>>,
+/// {
+///     g
+/// }
+///
+/// let _ = stage::<LogF, _>(first_word);
+/// ```
 pub trait MapFn<In, Out>: FnMut(In) -> Out {}
 impl<G, In, Out> MapFn<In, Out> for G where G: FnMut(In) -> Out {}
 
-/// Fallible variant of [`MapFn`].
+/// Fallible variant of [`MapFn`], with the error type as a third parameter.
+///
+/// ```
+/// use spate_core::deser::RecFamily;
+/// use spate_core::ops::TryMapFn;
+/// use std::num::ParseIntError;
+///
+/// struct LogEvent<'buf> {
+///     line: &'buf str,
+/// }
+/// struct LogF;
+/// impl RecFamily for LogF {
+///     type Rec<'buf> = LogEvent<'buf>;
+/// }
+///
+/// fn numeric_only<'a>(ev: LogEvent<'a>) -> Result<LogEvent<'a>, ParseIntError> {
+///     ev.line.parse::<u32>()?;
+///     Ok(ev)
+/// }
+///
+/// fn try_stage<F, G, E>(g: G) -> G
+/// where
+///     F: RecFamily,
+///     G: for<'buf> TryMapFn<F::Rec<'buf>, F::Rec<'buf>, E>,
+///     E: std::fmt::Display,
+/// {
+///     g
+/// }
+///
+/// let _ = try_stage::<LogF, _, ParseIntError>(numeric_only);
+/// ```
 pub trait TryMapFn<In, Out, Err>: FnMut(In) -> Result<Out, Err> {}
 impl<G, In, Out, Err> TryMapFn<In, Out, Err> for G where G: FnMut(In) -> Result<Out, Err> {}
 
@@ -329,7 +329,7 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
     }
 
     /// Transform each record into family `NF`. For borrowing families pass
-    /// a `fn` item (see the module docs); for owned payloads
+    /// a `fn` item (see [the module docs](crate::ops)); for owned payloads
     /// [`ChainBuilder::map`] is more ergonomic.
     #[must_use]
     pub fn map_rec<NF, G>(self, f: G) -> ChainBuilder<DF, NF, D, MapPart<P, G>>

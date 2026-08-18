@@ -7,6 +7,72 @@
 //! (deserialized) and die (encoded into shard frames, filtered, or skipped)
 //! inside a single `push_batch` call, so borrowed payloads never cross or
 //! outlive the boundary (ADR-0013).
+//!
+//! # Owned vs borrowed record families
+//!
+//! For owned families ([`Owned<T>`](crate::deser::Owned)) the builder
+//! offers [`ChainBuilder::map`] / [`ChainBuilder::try_map`] with plain
+//! closure bounds; bare closures infer. For **borrowing** families a
+//! `rustc` limitation (E0582: a higher-ranked lifetime may not appear only
+//! in associated-type positions) rules out `FnMut`-with-projection-output
+//! bounds at the definition site; use [`ChainBuilder::map_rec`] /
+//! [`ChainBuilder::try_map_rec`], whose bound goes through [`MapFn`] /
+//! [`TryMapFn`]. Pass a **`fn` item** where you can: it satisfies a
+//! higher-ranked bound by construction, where a closure satisfies it only
+//! when the compiler infers a higher-ranked signature for it.
+//!
+//! A stage over a borrowing family, written as a `fn` item:
+//!
+//! ```ignore
+//! fn shrink<'a>(e: LogEvent<'a>) -> Compact<'a> { /* ... */ }
+//! chain(log_deser).map_rec::<CompactF, _>(shrink)
+//! ```
+//!
+//! [`ChainBuilder::filter`], [`ChainBuilder::inspect`], and
+//! [`ChainBuilder::flat_map`] have no output binding, so a single generic
+//! method serves both kinds of family.
+//!
+//! ```
+//! use spate_core::backpressure::InflightBudget;
+//! use spate_core::deser::{BytesPassthrough, Owned};
+//! use spate_core::error::ErrorPolicy;
+//! use spate_core::ops::{ChunkConfig, chain};
+//! use spate_core::record::Record;
+//! use spate_core::sink::{KeyHashRouter, RowEncoder, shard_queues};
+//! use std::sync::Arc;
+//!
+//! // A trivial encoder writing `<u32 len><bytes>` rows.
+//! #[derive(Clone)]
+//! struct LenPrefix;
+//! impl RowEncoder<Owned<Vec<u8>>> for LenPrefix {
+//!     fn encode<'buf>(
+//!         &mut self,
+//!         rec: &Record<Vec<u8>>,
+//!         buf: &mut bytes::BytesMut,
+//!     ) -> Result<(), spate_core::error::SinkError> {
+//!         buf.extend_from_slice(&(rec.payload.len() as u32).to_le_bytes());
+//!         buf.extend_from_slice(&rec.payload);
+//!         Ok(())
+//!     }
+//! }
+//!
+//! let (queues, _rx) = shard_queues(2, 64);
+//! let budget = Arc::new(InflightBudget::new());
+//!
+//! let mut pipeline_chain = chain(BytesPassthrough)
+//!     .map(|mut bytes: Vec<u8>| {
+//!         bytes.make_ascii_uppercase();
+//!         bytes
+//!     })
+//!     .filter(|bytes: &Vec<u8>| !bytes.is_empty())
+//!     .try_map(
+//!         |bytes: Vec<u8>| String::from_utf8(bytes).map(String::into_bytes),
+//!         ErrorPolicy::Skip,
+//!     )
+//!     .sink(LenPrefix, KeyHashRouter, ChunkConfig::default(), queues, budget)
+//!     .build();
+//! # let _ = &mut pipeline_chain;
+//! ```
 
 mod builder;
 mod chain;
@@ -16,8 +82,8 @@ mod split;
 mod tests;
 
 pub use builder::{
-    Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapPart, Root,
-    RoutedSplit, SinkedChain, SplitBuilder, TryMapPart, chain, chain_owned,
+    Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapFn, MapPart,
+    Root, RoutedSplit, SinkedChain, SplitBuilder, TryMapFn, TryMapPart, chain, chain_owned,
 };
 pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, TypedChain};
 pub use handoff::{ChunkConfig, SinkHandoff};

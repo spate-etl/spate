@@ -80,14 +80,16 @@ is rejected at its own definition site, not at yours:
 `for<'buf> FnMut(CurF::Rec<'buf>) -> NF::Rec<'buf>`
 desugars to `FnMut<(CurF::Rec<'buf>,), Output = NF::Rec<'buf>>`, leaving
 `'buf` mentioned only inside associated types, which is E0582. Reach for
-`map_rec`/`try_map_rec` on a borrowing family; their bound routes through a
-helper trait whose input and output are ordinary type parameters rather
-than an associated-type binding, so it can be written. Pass a `fn` item
-where you can: it satisfies a higher-ranked bound by construction, where a
-closure satisfies it only when the compiler infers a higher-ranked
-signature for it. `filter`, `inspect` and `flat_map` bind no output type in
-an `Output` position; `flat_map`'s output family sits in an argument type,
-the emitter it writes through. One method therefore serves both kinds, and
+`map_rec`/`try_map_rec` on a borrowing family; their bound routes through
+`spate::ops::MapFn` (`spate::ops::TryMapFn` for the fallible one), whose
+input and output are ordinary type parameters rather than an
+associated-type binding, so it can be written. Name that bound to write a
+helper generic over one stage. Pass a `fn` item where you can: it
+satisfies a higher-ranked bound by construction, where a closure satisfies
+it only when the compiler infers a higher-ranked signature for it.
+`filter`, `inspect` and `flat_map` bind no output type in an `Output`
+position; `flat_map`'s output family sits in an argument type, the emitter
+it writes through. One method therefore serves both kinds, and
 owned-record chains like the one above infer everywhere. The example's
 second chain runs a borrowing family end to end.
 :::

@@ -193,11 +193,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // borrowck: the bound cannot be written.
     //
     // A borrowing family transforms through `map_rec`/`try_map_rec`
-    // instead, whose bound goes through the helper trait `MapFn<In, Out>`
-    // visible in `map_rec`'s signature: `In` and `Out` are ordinary trait
-    // parameters rather than an associated-type binding, so `for<'buf>`
-    // over them is legal. Same transformation, a bound the compiler
-    // accepts.
+    // instead, whose bound goes through the helper trait
+    // `spate::ops::MapFn<In, Out>` (`spate::ops::TryMapFn<In, Out, Err>`
+    // for the fallible one): `In` and `Out` are ordinary trait parameters
+    // rather than an associated-type binding, so `for<'buf>` over them is
+    // legal. Same transformation, a bound the compiler accepts.
     //
     // Pass a `fn` item, as the builder's docs advise: it is higher-ranked
     // by construction and satisfies the bound at every lifetime, where a

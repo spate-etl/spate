@@ -86,10 +86,71 @@ use std::sync::Arc;
 /// `FnMut(In) -> Out`; expressed as an independent two-parameter trait so
 /// higher-ranked builder bounds stay legal for borrowing families (see the
 /// module docs on E0582). `fn` items satisfy it at every lifetime.
+///
+/// Name the bound to write a helper generic over one stage.
+///
+/// ```
+/// use spate_core::deser::RecFamily;
+/// use spate_core::ops::MapFn;
+///
+/// struct LogEvent<'buf> {
+///     line: &'buf str,
+/// }
+/// struct LogF;
+/// impl RecFamily for LogF {
+///     type Rec<'buf> = LogEvent<'buf>;
+/// }
+///
+/// fn first_word<'a>(ev: LogEvent<'a>) -> LogEvent<'a> {
+///     LogEvent {
+///         line: ev.line.split(' ').next().unwrap_or(""),
+///     }
+/// }
+///
+/// fn stage<F, G>(g: G) -> G
+/// where
+///     F: RecFamily,
+///     G: for<'buf> MapFn<F::Rec<'buf>, F::Rec<'buf>>,
+/// {
+///     g
+/// }
+///
+/// let _ = stage::<LogF, _>(first_word);
+/// ```
 pub trait MapFn<In, Out>: FnMut(In) -> Out {}
 impl<G, In, Out> MapFn<In, Out> for G where G: FnMut(In) -> Out {}
 
-/// Fallible variant of [`MapFn`].
+/// Fallible variant of [`MapFn`], with the error type as a third parameter.
+///
+/// ```
+/// use spate_core::deser::RecFamily;
+/// use spate_core::ops::TryMapFn;
+/// use std::num::ParseIntError;
+///
+/// struct LogEvent<'buf> {
+///     line: &'buf str,
+/// }
+/// struct LogF;
+/// impl RecFamily for LogF {
+///     type Rec<'buf> = LogEvent<'buf>;
+/// }
+///
+/// fn numeric_only<'a>(ev: LogEvent<'a>) -> Result<LogEvent<'a>, ParseIntError> {
+///     ev.line.parse::<u32>()?;
+///     Ok(ev)
+/// }
+///
+/// fn try_stage<F, G, E>(g: G) -> G
+/// where
+///     F: RecFamily,
+///     G: for<'buf> TryMapFn<F::Rec<'buf>, F::Rec<'buf>, E>,
+///     E: std::fmt::Display,
+/// {
+///     g
+/// }
+///
+/// let _ = try_stage::<LogF, _, ParseIntError>(numeric_only);
+/// ```
 pub trait TryMapFn<In, Out, Err>: FnMut(In) -> Result<Out, Err> {}
 impl<G, In, Out, Err> TryMapFn<In, Out, Err> for G where G: FnMut(In) -> Result<Out, Err> {}
 

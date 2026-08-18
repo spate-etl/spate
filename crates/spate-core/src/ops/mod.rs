@@ -16,8 +16,8 @@ mod split;
 mod tests;
 
 pub use builder::{
-    Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapPart, Root,
-    RoutedSplit, SinkedChain, SplitBuilder, TryMapPart, chain, chain_owned,
+    Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapFn, MapPart,
+    Root, RoutedSplit, SinkedChain, SplitBuilder, TryMapFn, TryMapPart, chain, chain_owned,
 };
 pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, TypedChain};
 pub use handoff::{ChunkConfig, SinkHandoff};

@@ -86,14 +86,14 @@ a larger terminal-stage chunk target (the sink's YAML
 `batch.max_bytes` per insert.
 
 :::warning
-The Native writer emits the raw little-endian `Int64` and does not rescale
-to the column's declared precision, so a `DateTime64(6)` column fed
-milli-scaled values silently lands wrong timestamps. Declare the scale
-through the wrapper (`DateTime64Millis`, …) and set `validate_schema:
-full`: a wrapper whose scale disagrees with the table's declared precision
-then fails fatally on the first record, before anything is inserted. A
-plain `i64` field declares no scale, so nothing can validate it and the
-mismatch stays silent.
+The Native writer emits the raw little-endian integer and does not rescale
+it, so a `DateTime64(6)` column fed milli-scaled values silently lands wrong
+timestamps, and a `Decimal(18, 2)` column fed a `Decimal64<4>` value lands
+every row 100× too large. Declare the scale through the wrapper
+(`DateTime64Millis`, `Decimal64<2>`, …) and set `validate_schema: full`. A
+wrapper whose scale disagrees with the column then fails fatally on the
+first record, before anything is inserted. A plain `i64` field declares no
+scale, so nothing can validate it and the mismatch stays silent.
 :::
 
 ## Semantics that do **not** change

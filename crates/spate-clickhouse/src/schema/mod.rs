@@ -16,9 +16,10 @@
 //!   RowBinary's [`crate::ClickHouseEncoder::with_schema`] and the Native
 //!   encoder whenever its schema was fetched): the row struct's probed
 //!   field names, order, and, in `full` mode, type classes against the
-//!   configured columns, including wire-wrapper scale vs the column's
-//!   declared precision (`DateTime64Millis` into `DateTime64(6)` fails
-//!   here). This is where the positional wire contract is enforced.
+//!   configured columns, including wire-wrapper scale against the column's
+//!   declared parameters (`DateTime64Millis` into `DateTime64(6)`, or
+//!   `Decimal64<4>` into `Decimal(18, 2)`, fail here). This is where the
+//!   positional wire contract is enforced.
 
 pub(crate) mod probe;
 pub(crate) mod typeparse;

@@ -23,9 +23,46 @@
 //!
 //! A stage over a borrowing family, written as a `fn` item:
 //!
-//! ```ignore
-//! fn shrink<'a>(e: LogEvent<'a>) -> Compact<'a> { /* ... */ }
-//! chain(log_deser).map_rec::<CompactF, _>(shrink)
+//! ```
+//! # use spate_core::checkpoint::AckRef;
+//! # use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
+//! # use spate_core::error::DeserError;
+//! # use spate_core::ops::chain;
+//! # use spate_core::record::RawPayload;
+//! # struct LogEvent<'buf> {
+//! #     key: &'buf str,
+//! # }
+//! # struct LogF;
+//! # impl RecFamily for LogF {
+//! #     type Rec<'buf> = LogEvent<'buf>;
+//! # }
+//! # #[derive(Clone, Default)]
+//! # struct LogDeser;
+//! # impl Deserializer<LogF> for LogDeser {
+//! #     fn deserialize<'buf>(
+//! #         &mut self,
+//! #         raw: &RawPayload<'buf>,
+//! #         ack: &AckRef,
+//! #         out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
+//! #     ) -> Result<(), DeserError> {
+//! #         let _ = (raw, ack, out);
+//! #         Ok(())
+//! #     }
+//! # }
+//! # let log_deser = LogDeser;
+//! struct Compact<'buf> {
+//!     key: &'buf str,
+//! }
+//! struct CompactF;
+//! impl RecFamily for CompactF {
+//!     type Rec<'buf> = Compact<'buf>;
+//! }
+//!
+//! fn shrink<'a>(e: LogEvent<'a>) -> Compact<'a> {
+//!     Compact { key: e.key }
+//! }
+//! let stage = chain(log_deser).map_rec::<CompactF, _>(shrink);
+//! # let _ = stage;
 //! ```
 //!
 //! [`ChainBuilder::filter`], [`ChainBuilder::inspect`], and

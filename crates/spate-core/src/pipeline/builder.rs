@@ -199,10 +199,34 @@ impl ChainCtx {
     /// single-sink counterpart to [`queues`](Self::queues), fed straight to the
     /// chain's [`.sink(...)`](crate::ops::ChainBuilder::sink) terminal:
     ///
-    /// ```ignore
+    /// ```
+    /// # use spate_core::deser::{BytesPassthrough, Owned};
+    /// # use spate_core::error::SinkError;
+    /// # use spate_core::ops::chain;
+    /// # use spate_core::pipeline::ChainCtx;
+    /// # use spate_core::record::Record;
+    /// # use spate_core::sink::{KeyHashRouter, RowEncoder};
+    /// # #[derive(Clone)]
+    /// # struct RowBytes;
+    /// # impl RowEncoder<Owned<Vec<u8>>> for RowBytes {
+    /// #     fn encode<'buf>(
+    /// #         &mut self,
+    /// #         rec: &Record<Vec<u8>>,
+    /// #         buf: &mut bytes::BytesMut,
+    /// #     ) -> Result<(), SinkError> {
+    /// #         buf.extend_from_slice(&rec.payload);
+    /// #         Ok(())
+    /// #     }
+    /// # }
+    /// # fn wire(ctx: ChainCtx) {
+    /// # let encoder = RowBytes;
     /// let chunk_cfg = ctx.chunk(); // bind before `with_metrics` moves `ctx.pipeline`
-    /// // ...
-    /// .sink(encoder, KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
+    /// let orders = chain(BytesPassthrough)
+    ///     .with_metrics(ctx.pipeline, "orders")
+    ///     .sink(encoder, KeyHashRouter, chunk_cfg, ctx.queues, ctx.budget)
+    ///     .build();
+    /// # let _ = orders;
+    /// # }
     /// ```
     ///
     /// It resolves the per-sink YAML `chunk:` block (or `SinkOptions::with_chunk`,

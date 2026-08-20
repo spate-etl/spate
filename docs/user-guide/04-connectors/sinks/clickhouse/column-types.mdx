@@ -65,7 +65,7 @@ is in the `rowbinary` module of the
 | `Polygon` | yes | yes | |
 | `MultiLineString` | yes | yes | |
 | `MultiPolygon` | yes | yes | |
-| `Nested(…)` | no | no | Under `flatten_nested = 1` the table exposes `outer.inner` columns, and `columns:` rejects a name containing `.`. Under `flatten_nested = 0` the column stays one unflattened value that nothing in the crate covers |
+| `Nested(…)` | yes | yes | Listed in `columns:` as the flattened `outer.inner` names the server reports under `flatten_nested = 1`, each an `Array(T)` the row takes as a `Vec<T>`. A Rust field cannot carry the dot, so `#[serde(rename = "outer.inner")]` supplies the name the first-record check compares. Under `flatten_nested = 0` the column stays one unflattened value that nothing in the crate covers |
 | `JSON` | yes | no | A `String` of JSON text, with `input_format_binary_read_json_as_string: "1"` under `settings:` |
 | `Variant(…)` | manual | no | The discriminant byte follows the Rust enum's declaration order and the server orders member types by name, so the row declares its variants in the server's order; `Nullable(Variant)` has no representation |
 | `Dynamic` | no | no | |

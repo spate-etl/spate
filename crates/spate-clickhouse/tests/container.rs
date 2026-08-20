@@ -328,6 +328,8 @@ mod multi_table;
 mod native_e2e;
 #[path = "container/native_edges.rs"]
 mod native_edges;
+#[path = "container/nested_flat.rs"]
+mod nested_flat;
 #[path = "container/partition_dedup.rs"]
 mod partition_dedup;
 #[path = "container/schema.rs"]

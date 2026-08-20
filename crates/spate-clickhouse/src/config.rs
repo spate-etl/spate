@@ -664,8 +664,10 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     }
     let mut seen = std::collections::HashSet::with_capacity(cfg.columns.len());
     for col in &cfg.columns {
-        if !is_identifier(col) {
-            return fail(format!("column `{col}` is not a valid identifier"));
+        if !is_column_name(col) {
+            return fail(format!(
+                "column `{col}` is not a valid identifier (or dotted `outer.inner` name)"
+            ));
         }
         // Duplicate columns emit e.g. `INSERT INTO t (`id`, `id`)`, which
         // ClickHouse rejects with DUPLICATE_COLUMN, a code the writer
@@ -789,6 +791,14 @@ fn is_identifier(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// A column name: one or more `is_identifier` segments joined by `.`.
+/// ClickHouse names a flattened `Nested` column `outer.inner`, and the
+/// whole name is backtick-quoted as a single identifier, so no escaping
+/// is needed.
+fn is_column_name(s: &str) -> bool {
+    s.split('.').all(is_identifier)
+}
+
 fn insert_statement(table: &str, columns: &[String], format: Format) -> String {
     let table = table
         .split('.')
@@ -896,6 +906,22 @@ settings: { insert_quorum: "auto" }
                 "table: orders\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\nsettings: {insert_deduplication_token: \"x\"}",
                 "managed by the sink",
             ),
+            (
+                "table: t\ncolumns: [\"tags.\"]\nshards: [{replicas: [\"http://a\"]}]",
+                "identifier",
+            ),
+            (
+                "table: t\ncolumns: [\".key\"]\nshards: [{replicas: [\"http://a\"]}]",
+                "identifier",
+            ),
+            (
+                "table: t\ncolumns: [\"a..b\"]\nshards: [{replicas: [\"http://a\"]}]",
+                "identifier",
+            ),
+            (
+                "table: t\ncolumns: [\"tags.k ey\"]\nshards: [{replicas: [\"http://a\"]}]",
+                "identifier",
+            ),
         ];
         for (yaml, needle) in cases {
             let err = from_component_config(&component(yaml)).unwrap_err();
@@ -905,6 +931,18 @@ settings: { insert_quorum: "auto" }
                 "expected `{needle}` in error for {yaml}: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn a_flattened_nested_column_is_accepted_and_quoted_as_one_identifier() {
+        let sink = from_component_config(&component(
+        "table: events\ncolumns: [id, \"tags.key\", \"tags.value\"]\nshards: [{replicas: [\"http://a\"]}]",
+    ))
+    .expect("dotted column names load");
+        assert_eq!(
+            sink.writer.insert_sql(),
+            "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) FORMAT RowBinary"
+        );
     }
 
     #[test]

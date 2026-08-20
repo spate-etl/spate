@@ -1,0 +1,7 @@
+{
+  // Every Makefile target builds with `--all-features`, and several targets
+  // and test modules sit behind an optional feature (`spate-clickhouse` has
+  // no default features at all). Matching that here keeps rust-analyzer from
+  // greying out code the gates compile.
+  "rust-analyzer.cargo.features": "all"
+}

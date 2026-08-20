@@ -10,7 +10,7 @@
 
 use super::typeparse::ChType;
 use serde::ser::{self, Serialize};
-use std::fmt;
+use std::{fmt, ops::RangeInclusive};
 
 /// What the RowBinary serializer would write for one value.
 #[derive(Clone, Debug, PartialEq)]
@@ -435,6 +435,10 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
     // Wire wrapper newtypes carry their intended column class in the
     // name; unknown newtype names are transparent.
     if let Shape::Newtype(name, inner) = shape {
+        if let Some((precision, scale)) = decimal_wrapper(name) {
+            return matches!(ty, ChType::Decimal { precision: p, scale: s }
+                if precision.contains(p) && *s == scale);
+        }
         return match newtype_rule(name) {
             Some(rule) => rule(ty),
             None => compatible(inner, ty),
@@ -454,7 +458,7 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
         Shape::I16 => is_named(ty, &["Int16"]) || *ty == ChType::Enum16,
         Shape::I32 => {
             is_named(ty, &["Int32", "Date32", "Time"])
-                || matches!(ty, ChType::Decimal { precision, .. } if *precision <= 9)
+                || matches!(ty, ChType::Decimal { precision, .. } if (1..=9).contains(precision))
         }
         Shape::I64 => {
             is_named(ty, &["Int64"])
@@ -571,8 +575,10 @@ fn geo_equiv(name: &str) -> Option<ChType> {
 
 /// The registration table mapping this crate's wire wrapper names (as
 /// written by their `serialize_newtype_struct` calls) to the column
-/// classes they intend. New wrappers in `types.rs` register here; unknown
-/// names stay transparent, so user-defined newtypes keep working.
+/// classes they intend. New wrappers in `types.rs` register here, apart
+/// from the decimal wrappers, whose names carry a scale and are matched
+/// by [`decimal_wrapper`]. Unknown names stay transparent, so
+/// user-defined newtypes keep working.
 fn newtype_rule(name: &str) -> Option<fn(&ChType) -> bool> {
     Some(match name {
         "DateDays" => |ty| is_named(ty, &["Date", "UInt16"]),
@@ -605,24 +611,31 @@ fn newtype_rule(name: &str) -> Option<fn(&ChType) -> bool> {
         "Time64Nanos" => {
             |ty| is_named(ty, &["Int64"]) || matches!(ty, ChType::Time64 { precision: 9 })
         }
-        "Decimal32" => |ty| matches!(ty, ChType::Decimal { precision, .. } if *precision <= 9),
-        "Decimal64" => {
-            |ty| matches!(ty, ChType::Decimal { precision, .. } if (10..=18).contains(precision))
-        }
-        "Decimal128" => {
-            |ty| matches!(ty, ChType::Decimal { precision, .. } if (19..=38).contains(precision))
-        }
         "Int256" => |ty| is_named(ty, &["Int256"]),
         "UInt256" => |ty| is_named(ty, &["UInt256"]),
         _ => return None,
     })
 }
 
+/// A decimal wrapper's name carries its scale (`Decimal64<4>`): the backing
+/// integer's precision band, and the scale the field declares.
+fn decimal_wrapper(name: &str) -> Option<(RangeInclusive<u8>, u8)> {
+    let (base, rest) = name.split_once('<')?;
+    let scale: u8 = rest.strip_suffix('>')?.parse().ok()?;
+    let precision = match base {
+        "Decimal32" => 1..=9,
+        "Decimal64" => 10..=18,
+        "Decimal128" => 19..=38,
+        _ => return None,
+    };
+    Some((precision, scale))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::typeparse::parse;
     use super::*;
-    use crate::types::{DateTime64Millis, Decimal64, Int256, UInt256};
+    use crate::types::{DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256, UInt256};
     use serde::Serialize;
 
     fn ok(shape: &Shape, ty: &str) -> bool {
@@ -844,6 +857,46 @@ mod tests {
         let fields = probe_row(&R2 { w: MyWrapper(1) }).unwrap();
         assert!(compatible(&fields[0].shape, &parse("UInt32")));
         assert!(compatible(&fields[0].shape, &parse("DateTime")));
+    }
+
+    #[test]
+    fn decimal_wrapper_scale_must_match_the_column() {
+        #[derive(Serialize)]
+        struct D {
+            small: Decimal32<2>,
+            medium: Decimal64<4>,
+            large: Decimal128<10>,
+        }
+        let fields = probe_row(&D {
+            small: Decimal32::<2>(1),
+            medium: Decimal64::<4>(1),
+            large: Decimal128::<10>(1),
+        })
+        .unwrap();
+
+        assert!(compatible(&fields[1].shape, &parse("Decimal(18, 4)")));
+        assert!(
+            !compatible(&fields[1].shape, &parse("Decimal(18, 2)")),
+            "the scale must agree, not just the width"
+        );
+
+        // The Decimal64(S) sugar carries the same precision.
+        assert!(compatible(&fields[1].shape, &parse("Decimal64(4)")));
+        assert!(!compatible(&fields[1].shape, &parse("Decimal64(2)")));
+
+        assert!(compatible(&fields[0].shape, &parse("Decimal(9, 2)")));
+        assert!(
+            !compatible(&fields[0].shape, &parse("Decimal(18, 2)")),
+            "Decimal32 is Int32-wide"
+        );
+        assert!(
+            compatible(&fields[2].shape, &parse("Decimal(38, 10)")),
+            "a two-digit scale survives the name"
+        );
+        assert!(
+            !compatible(&fields[1].shape, &parse("Nullable(Decimal(18, 4))")),
+            "the Nullable prefix byte needs an Option field"
+        );
     }
 
     #[test]

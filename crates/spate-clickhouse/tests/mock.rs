@@ -415,6 +415,111 @@ validate_schema: {mode}
 }
 
 #[tokio::test]
+async fn full_mode_checks_decimal_scale_against_the_fetched_column() {
+    use spate_clickhouse::{ClickHouseEncoder, Decimal64, NativeEncoder};
+    use spate_core::sink::RowEncoder;
+
+    #[derive(Clone, Serialize)]
+    struct PriceRow {
+        id: u64,
+        amount: Decimal64<4>,
+    }
+    let row = PriceRow {
+        id: 1,
+        amount: Decimal64::<4>(15_000),
+    };
+
+    fn price_sink(url: &str, mode: &str, format: &str) -> config::ClickHouseSink {
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+            r#"
+table: events
+columns: [id, amount]
+format: {format}
+compression: off
+shards:
+  - replicas: ["{url}"]
+validate_schema: {mode}
+"#
+        ))
+        .expect("config yaml");
+        config::build(cfg).expect("valid sink config")
+    }
+
+    fn assert_fatal_scale_mismatch(err: SinkError) {
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                assert!(
+                    reason.contains("Decimal64<4>") && reason.contains("Decimal(18, 2)"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+    }
+
+    fn mismatched_columns() -> Vec<SysColumn> {
+        vec![
+            sys_col("id", "UInt64", ""),
+            sys_col("amount", "Decimal(18, 2)", ""),
+        ]
+    }
+
+    // The live column is scale 2 and the struct declares scale 4, so the
+    // raw values are 100x the column's. RowBinary rejects the first
+    // record, before any frame is written.
+    let mock = Mock::new();
+    mock.add(handlers::provide::<SysColumn>(mismatched_columns()));
+    let schema = price_sink(mock.url(), "full", "rowbinary")
+        .validate_schema()
+        .await
+        .expect("startup validation passes")
+        .expect("full mode returns a schema");
+    let err = ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
+        .encode(&record(row.clone()), &mut BytesMut::new())
+        .expect_err("full mode rejects the scale mismatch");
+    assert_fatal_scale_mismatch(err);
+
+    // Native reaches the same check through its own fetched schema.
+    let mock = Mock::new();
+    mock.add(handlers::provide::<SysColumn>(mismatched_columns()));
+    let schema = price_sink(mock.url(), "full", "native")
+        .native_schema()
+        .await
+        .expect("fetch native schema");
+    let err = NativeEncoder::<Owned<PriceRow>>::new(schema)
+        .encode(&record(row.clone()), &mut BytesMut::new())
+        .expect_err("full mode rejects the scale mismatch");
+    assert_fatal_scale_mismatch(err);
+
+    // An agreeing scale encodes, and `names` stays permissive by design.
+    for (mode, col_type) in [("full", "Decimal(18, 4)"), ("names", "Decimal(18, 2)")] {
+        let columns = vec![sys_col("id", "UInt64", ""), sys_col("amount", col_type, "")];
+
+        let mock = Mock::new();
+        mock.add(handlers::provide::<SysColumn>(columns.clone()));
+        let schema = price_sink(mock.url(), mode, "rowbinary")
+            .validate_schema()
+            .await
+            .expect("startup validation passes")
+            .expect("both modes return a schema");
+        ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
+            .encode(&record(row.clone()), &mut BytesMut::new())
+            .unwrap_or_else(|e| panic!("rowbinary {mode} against {col_type} must encode: {e:?}"));
+
+        let mock = Mock::new();
+        mock.add(handlers::provide::<SysColumn>(columns));
+        let schema = price_sink(mock.url(), mode, "native")
+            .native_schema()
+            .await
+            .expect("fetch native schema");
+        NativeEncoder::<Owned<PriceRow>>::new(schema)
+            .encode(&record(row.clone()), &mut BytesMut::new())
+            .unwrap_or_else(|e| panic!("native {mode} against {col_type} must encode: {e:?}"));
+    }
+}
+
+#[tokio::test]
 async fn missing_and_materialized_columns_fail_startup() {
     let mock = Mock::new();
     mock.add(handlers::provide::<SysColumn>(vec![

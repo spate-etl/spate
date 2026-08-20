@@ -6,6 +6,8 @@
 //! transparently the inner value, written through
 //! `serialize_newtype_struct` so the wrapper's name stays observable to
 //! schema validation (see the crate's `schema` support) at zero wire cost.
+//! A decimal wrapper's name carries its scale, `Decimal64<4>`, so schema
+//! validation can check it against the column's.
 //!
 //! For `uuid`/`chrono`/`time` ecosystem types, use the field-attribute
 //! modules under [`crate::serde`] instead.
@@ -135,14 +137,34 @@ macro_rules! decimal_newtype {
                 );
                 SCALE
             };
+
+            const NAME_BUF: ([u8; stringify!($name).len() + 4], usize) = {
+                // Reading `Self::SCALE` rather than the `SCALE` parameter is what
+                // makes an out-of-range scale a compiler error, at monomorphization.
+                let scale = Self::SCALE;
+                let mut buf = [0u8; stringify!($name).len() + 4];
+                let base = stringify!($name).as_bytes();
+                let mut i = 0;
+                while i < base.len() { buf[i] = base[i]; i += 1; }
+                buf[i] = b'<'; i += 1;
+                if scale >= 10 { buf[i] = b'0' + (scale / 10) as u8; i += 1; }
+                buf[i] = b'0' + (scale % 10) as u8; i += 1;
+                buf[i] = b'>'; i += 1;
+                (buf, i)
+            };
+
+            const NAME: &'static str = {
+                let (buf, len) = &Self::NAME_BUF;
+                match core::str::from_utf8(buf.split_at(*len).0) {
+                    Ok(s) => s,
+                    Err(_) => panic!("the name is ASCII"),
+                }
+            };
         }
 
         impl<const SCALE: u32> Serialize for $name<SCALE> {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                // Fails compilation (at monomorphization) for scales the
-                // column type cannot represent.
-                let _ = Self::SCALE;
-                serializer.serialize_newtype_struct(stringify!($name), &self.0)
+                serializer.serialize_newtype_struct(Self::NAME, &self.0)
             }
         }
 
@@ -403,6 +425,14 @@ mod tests {
         // Scale bounds are compile-time: Decimal32::<10> fails to build
         // (post-monomorphization const assert), so there is no runtime case
         // to test here.
+    }
+
+    #[test]
+    fn decimal_names_carry_the_scale() {
+        assert_eq!(Decimal32::<0>::NAME, "Decimal32<0>");
+        assert_eq!(Decimal64::<4>::NAME, "Decimal64<4>");
+        assert_eq!(Decimal64::<18>::NAME, "Decimal64<18>");
+        assert_eq!(Decimal128::<10>::NAME, "Decimal128<10>");
     }
 
     #[test]

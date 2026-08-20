@@ -84,6 +84,8 @@ async fn schema_validation_first_record_scenarios() {
         "CREATE TABLE plain_s (id UInt64, s String) ENGINE = MergeTree ORDER BY id",
         "CREATE TABLE lowcard (id UInt64, lc LowCardinality(String)) \
          ENGINE = MergeTree ORDER BY id",
+        "CREATE TABLE dec_col (id UInt64, amount Decimal(18, 2)) \
+         ENGINE = MergeTree ORDER BY id",
     ] {
         srv.admin.query(ddl).execute().await.expect("ddl");
     }
@@ -257,4 +259,83 @@ async fn schema_validation_first_record_scenarios() {
         .await
         .expect("read back");
     assert_eq!(lc, "tag");
+
+    // A decimal wrapper's scale against the column's declared scale. Both
+    // rows below mean 1.5; the wrapper's scale decides what the server
+    // stores.
+    #[derive(Clone, Serialize)]
+    struct Scale4 {
+        id: u64,
+        amount: spate_clickhouse::Decimal64<4>,
+    }
+    #[derive(Clone, Serialize)]
+    struct Scale2 {
+        id: u64,
+        amount: spate_clickhouse::Decimal64<2>,
+    }
+    let read_amount = async |id: u64| -> String {
+        srv.admin
+            .query("SELECT toString(amount) FROM dec_col WHERE id = ?")
+            .bind(id)
+            .fetch_one()
+            .await
+            .expect("read back")
+    };
+
+    let sink = sink_with(&srv.url, "dec_col", &["id", "amount"], "full", "");
+    let schema = sink.validate_schema().await.unwrap().unwrap();
+    let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Scale4>>::with_schema(schema);
+    let err = encode_batch(
+        &mut encoder,
+        vec![Scale4 {
+            id: 1,
+            amount: spate_clickhouse::Decimal64::<4>(15_000),
+        }],
+        "dec-1",
+    )
+    .expect_err("scale 4 vs a scale 2 column");
+    let reason = fatal(err);
+    assert!(
+        reason.contains("Decimal64<4>") && reason.contains("Decimal(18, 2)"),
+        "{reason}"
+    );
+
+    // What full mode prevents: names mode accepts the same row, the insert
+    // succeeds, and the server reads the raw integer at its own scale.
+    let sink = sink_with(&srv.url, "dec_col", &["id", "amount"], "names", "");
+    let schema = sink.validate_schema().await.unwrap().unwrap();
+    let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Scale4>>::with_schema(schema);
+    let batch = encode_batch(
+        &mut encoder,
+        vec![Scale4 {
+            id: 2,
+            amount: spate_clickhouse::Decimal64::<4>(15_000),
+        }],
+        "dec-2",
+    )
+    .expect("names mode skips type classes");
+    sink.writer
+        .write_batch(&sink.endpoints[0][0], &batch)
+        .await
+        .expect("write");
+    assert_eq!(read_amount(2).await, "150", "1.5 stored 100x too large");
+
+    // The agreeing scale encodes in full mode and stores the value.
+    let sink = sink_with(&srv.url, "dec_col", &["id", "amount"], "full", "");
+    let schema = sink.validate_schema().await.unwrap().unwrap();
+    let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Scale2>>::with_schema(schema);
+    let batch = encode_batch(
+        &mut encoder,
+        vec![Scale2 {
+            id: 3,
+            amount: spate_clickhouse::Decimal64::<2>(150),
+        }],
+        "dec-3",
+    )
+    .expect("scale 2 matches the column");
+    sink.writer
+        .write_batch(&sink.endpoints[0][0], &batch)
+        .await
+        .expect("write");
+    assert_eq!(read_amount(3).await, "1.5");
 }

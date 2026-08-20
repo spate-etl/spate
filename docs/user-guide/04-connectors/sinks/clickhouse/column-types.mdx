@@ -44,7 +44,7 @@ is in the `rowbinary` module of the
 | `DateTime64(P)` | yes | yes | Native emits the raw `Int64` without rescaling; see the scale warning on [Native format](./native-format.mdx) |
 | `Time` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
 | `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
-| `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38 |
+| `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38. `validate_schema: full` checks the wrapper's declared scale against `S` |
 | `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. `validate_schema: full` rejects that field against such a column, and the mode is sink-wide, so the whole sink drops to `names` and loses type checking on every column |
 | `Decimal256(S)` | manual | no | Parses as a `Decimal` of precision 76, so the row above applies |
 | `Enum8` | yes | yes | |
@@ -93,6 +93,6 @@ Startup validation refuses such a column and names that pattern, under
 - [ClickHouse sink](./README.mdx) — the full sink configuration, including the
   `format` key.
 - [Native format](./native-format.mdx) — what the columnar encoder buys, and
-  the `DateTime64` scale rule.
+  the wrapper scale rule.
 - [Schema validation](./schema-validation.mdx) — the `validate_schema` modes
   that decide which of the checks above run.

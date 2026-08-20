@@ -53,7 +53,7 @@ sink:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `table` | string | `required` | Target table, optionally `database.table`-qualified. |
-| `columns` | string list | `required` | Insert column list. **Order is the wire contract** — must match the row struct's field declaration order. Duplicates rejected at load. |
+| `columns` | string list | `required` | Insert column list. A flattened `Nested` column is named `outer.inner`; [Column types](./column-types.mdx) has the detail. **Order is the wire contract** — must match the row struct's field declaration order. Duplicates rejected at load. |
 | `shards` | list of `{ replicas: [url], weight }` | `required` | One entry per shard, each with its replica HTTP(S) URLs. |
 | `shards[].weight` | integer | `1` | Distributed-parity weight: must equal this shard's `<weight>` in the cluster's `remote_servers` entry. Rejected at load if zero. Consumed by the router — see [Distributed parity](./distributed-parity.mdx). |
 | `database` | string | `none` | Default database for unqualified tables. |

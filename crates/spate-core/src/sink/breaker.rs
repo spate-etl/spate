@@ -379,24 +379,6 @@ impl BreakerSet {
             ShardHealthTransition::AllQuarantined
         })
     }
-
-    /// Just the replica index, for the assertions that do not care whether the
-    /// pick consumed a probe slot. Assertions on `Pick::probe` call
-    /// [`next_replica`](Self::next_replica) instead.
-    #[cfg(test)]
-    fn next_replica_idx(&mut self, now: Instant) -> Option<usize> {
-        self.next_replica(now).map(|p| p.replica)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_open(&self, replica: usize) -> bool {
-        matches!(self.states[replica], State::Open { .. })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shard_healthy(&self) -> bool {
-        self.shard_healthy
-    }
 }
 
 /// A shard-health edge reported by [`BreakerSet`], logged by the write task
@@ -433,7 +415,7 @@ mod tests {
     /// A component name unique to each `set()` call. `SinkShardMetrics` owns
     /// its gauge series (one live owner per process); these tests run
     /// concurrently under `cargo test`, and while most read only the cached
-    /// `shard_healthy()` bool, which shadowing does not affect, the
+    /// `shard_healthy` bool, which shadowing does not affect, the
     /// level-drive test below reads the rendered gauge, so it must own the
     /// series it inspects.
     fn breaker_component() -> String {
@@ -463,14 +445,21 @@ mod tests {
         )
     }
 
+    /// Just the replica index, for the assertions that do not care whether the
+    /// pick consumed a probe slot. Assertions on `Pick::probe` call
+    /// [`BreakerSet::next_replica`] instead.
+    fn pick(b: &mut BreakerSet, now: Instant) -> Option<usize> {
+        b.next_replica(now).map(|p| p.replica)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rotates_round_robin_over_healthy_replicas() {
         let mut b = set(3, 3);
         let now = Instant::now();
-        assert_eq!(b.next_replica_idx(now), Some(0));
-        assert_eq!(b.next_replica_idx(now), Some(1));
-        assert_eq!(b.next_replica_idx(now), Some(2));
-        assert_eq!(b.next_replica_idx(now), Some(0));
+        assert_eq!(pick(&mut b, now), Some(0));
+        assert_eq!(pick(&mut b, now), Some(1));
+        assert_eq!(pick(&mut b, now), Some(2));
+        assert_eq!(pick(&mut b, now), Some(0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -478,12 +467,15 @@ mod tests {
         let mut b = set(2, 2);
         let now = Instant::now();
         b.on_failure(0, now);
-        assert!(!b.is_open(0), "below threshold");
+        assert!(
+            !matches!(b.states[0], State::Open { .. }),
+            "below threshold"
+        );
         b.on_failure(0, now);
-        assert!(b.is_open(0));
+        assert!(matches!(b.states[0], State::Open { .. }));
         // Rotation only yields replica 1 while 0 is open.
-        assert_eq!(b.next_replica_idx(now), Some(1));
-        assert_eq!(b.next_replica_idx(now), Some(1));
+        assert_eq!(pick(&mut b, now), Some(1));
+        assert_eq!(pick(&mut b, now), Some(1));
     }
 
     #[tokio::test(start_paused = true)]
@@ -495,7 +487,10 @@ mod tests {
         b.on_success(0);
         b.on_failure(0, now);
         b.on_failure(0, now);
-        assert!(!b.is_open(0), "streak was reset by the success");
+        assert!(
+            !matches!(b.states[0], State::Open { .. }),
+            "streak was reset by the success"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -503,22 +498,22 @@ mod tests {
         let mut b = set(1, 1);
         let t0 = Instant::now();
         b.on_failure(0, t0);
-        assert!(b.is_open(0));
-        assert_eq!(b.next_replica_idx(t0), None, "open: no replica");
+        assert!(matches!(b.states[0], State::Open { .. }));
+        assert_eq!(pick(&mut b, t0), None, "open: no replica");
         assert_eq!(b.next_probe_at(t0), Some(t0 + Duration::from_secs(5)));
 
         // Past the deadline: half-open allows exactly one probe.
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
-        assert_eq!(b.next_replica_idx(t1), None, "probe budget exhausted");
+        assert_eq!(pick(&mut b, t1), Some(0));
+        assert_eq!(pick(&mut b, t1), None, "probe budget exhausted");
 
         // Probe failure re-opens; probe success closes.
         b.on_failure(0, t1);
-        assert!(b.is_open(0));
+        assert!(matches!(b.states[0], State::Open { .. }));
         let t2 = t1 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t2), Some(0));
+        assert_eq!(pick(&mut b, t2), Some(0));
         b.on_success(0);
-        assert_eq!(b.next_replica_idx(t2), Some(0), "closed again");
+        assert_eq!(pick(&mut b, t2), Some(0), "closed again");
     }
 
     /// Once every replica is half-open with its probe budget spent, *both*
@@ -535,9 +530,9 @@ mod tests {
         // Past both deadlines: each replica yields its single probe, and the
         // set is then entirely half-open with nothing left to hand out.
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
-        assert_eq!(b.next_replica_idx(t1), Some(1));
-        assert_eq!(b.next_replica_idx(t1), None, "both probe budgets spent");
+        assert_eq!(pick(&mut b, t1), Some(0));
+        assert_eq!(pick(&mut b, t1), Some(1));
+        assert_eq!(pick(&mut b, t1), None, "both probe budgets spent");
         assert_eq!(
             b.next_probe_at(t1),
             None,
@@ -582,11 +577,11 @@ mod tests {
         b.on_failure(0, t0);
         let t1 = t0 + Duration::from_secs(6);
         let episode = b.next_replica(t1).expect("probe").probe.expect("budgeted");
-        assert_eq!(b.next_replica_idx(t1), None, "budget spent");
+        assert_eq!(pick(&mut b, t1), None, "budget spent");
 
         b.release_probe(0, episode);
         assert_eq!(
-            b.next_replica_idx(t1),
+            pick(&mut b, t1),
             Some(0),
             "the probe never happened, so the next caller may take it"
         );
@@ -611,17 +606,20 @@ mod tests {
         let t1 = t0 + Duration::from_secs(6);
         let stale = b.next_replica(t1).expect("probe").probe.expect("budgeted");
         b.on_failure(0, t1);
-        assert!(b.is_open(0), "re-opened under X");
+        assert!(
+            matches!(b.states[0], State::Open { .. }),
+            "re-opened under X"
+        );
 
         // Run two: C takes its only probe, and the budget is spent.
         let t2 = t1 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t2), Some(0));
-        assert_eq!(b.next_replica_idx(t2), None, "run two's budget is spent");
+        assert_eq!(pick(&mut b, t2), Some(0));
+        assert_eq!(pick(&mut b, t2), None, "run two's budget is spent");
 
         // X finally dies and hands back a slot belonging to run one.
         b.release_probe(0, stale);
         assert_eq!(
-            b.next_replica_idx(t2),
+            pick(&mut b, t2),
             None,
             "a slot from an ended run must not become a second concurrent \
              probe in the current one"
@@ -651,8 +649,8 @@ mod tests {
         // inflated by the stale release.
         b.on_failure(0, t1);
         let t2 = t1 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t2), Some(0));
-        assert_eq!(b.next_replica_idx(t2), None, "still exactly one probe");
+        assert_eq!(pick(&mut b, t2), Some(0));
+        assert_eq!(pick(&mut b, t2), None, "still exactly one probe");
     }
 
     /// `half_open_probes: 0` is expressible (`BreakerConfig` has no validator)
@@ -684,7 +682,7 @@ mod tests {
 
         b.release_probe(0, episode);
         assert_eq!(
-            b.next_replica_idx(t1),
+            pick(&mut b, t1),
             Some(0),
             "a released slot must be re-takeable, or the replica is shut for \
              the life of the process"
@@ -713,7 +711,7 @@ mod tests {
         );
         let t0 = Instant::now();
         b.on_failure(0, t0);
-        assert!(b.is_open(0));
+        assert!(matches!(b.states[0], State::Open { .. }));
         assert!(
             b.next_probe_at(t0).is_some(),
             "an open breaker still names a deadline, however distant"
@@ -724,18 +722,18 @@ mod tests {
     async fn shard_healthy_until_the_last_replica_opens() {
         let mut b = set(2, 1);
         let now = Instant::now();
-        assert!(b.shard_healthy(), "all replicas start closed");
+        assert!(b.shard_healthy, "all replicas start closed");
         // One replica quarantined: the shard still has a healthy replica.
         assert_eq!(b.on_failure(0, now), None, "no shard-level transition");
-        assert!(b.is_open(0));
-        assert!(b.shard_healthy(), "replica 1 is still closed");
+        assert!(matches!(b.states[0], State::Open { .. }));
+        assert!(b.shard_healthy, "replica 1 is still closed");
         // Both replicas quarantined: the shard is fully unhealthy.
         assert_eq!(
             b.on_failure(1, now),
             Some(ShardHealthTransition::AllQuarantined)
         );
-        assert!(b.is_open(1));
-        assert!(!b.shard_healthy(), "every replica is open");
+        assert!(matches!(b.states[1], State::Open { .. }));
+        assert!(!b.shard_healthy, "every replica is open");
     }
 
     #[tokio::test(start_paused = true)]
@@ -746,16 +744,16 @@ mod tests {
             b.on_failure(0, t0),
             Some(ShardHealthTransition::AllQuarantined)
         );
-        assert!(!b.shard_healthy(), "the only replica is open");
+        assert!(!b.shard_healthy, "the only replica is open");
 
         // A half-open probe does not restore shard health by itself; the
         // probed replica is HalfOpen, not Closed.
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
-        assert!(!b.shard_healthy(), "probing, not yet confirmed healthy");
+        assert_eq!(pick(&mut b, t1), Some(0));
+        assert!(!b.shard_healthy, "probing, not yet confirmed healthy");
         // Only a successful probe (→ Closed) flips it back.
         assert_eq!(b.on_success(0), Some(ShardHealthTransition::Recovered));
-        assert!(b.shard_healthy(), "probe closed the breaker");
+        assert!(b.shard_healthy, "probe closed the breaker");
     }
 
     #[tokio::test(start_paused = true)]
@@ -766,19 +764,19 @@ mod tests {
             b.on_failure(0, t0),
             Some(ShardHealthTransition::AllQuarantined)
         );
-        assert!(!b.shard_healthy());
+        assert!(!b.shard_healthy);
         // Probe, fail, probe, fail: the shard must stay unhealthy throughout,
         // with no spurious "recovered" transition on each half-open cycle.
         let t1 = t0 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t1), Some(0));
-        assert!(!b.shard_healthy());
+        assert_eq!(pick(&mut b, t1), Some(0));
+        assert!(!b.shard_healthy);
         assert_eq!(b.on_failure(0, t1), None, "re-open is not a transition");
-        assert!(!b.shard_healthy());
+        assert!(!b.shard_healthy);
         let t2 = t1 + Duration::from_secs(6);
-        assert_eq!(b.next_replica_idx(t2), Some(0));
-        assert!(!b.shard_healthy());
+        assert_eq!(pick(&mut b, t2), Some(0));
+        assert!(!b.shard_healthy);
         assert_eq!(b.on_failure(0, t2), None, "still quarantined, no edge");
-        assert!(!b.shard_healthy());
+        assert!(!b.shard_healthy);
     }
 
     /// The health gauges are level-driven. Every write outcome republishes
@@ -831,7 +829,7 @@ mod tests {
             // Quarantine both replicas: the shard is down and stays down.
             b.on_failure(0, Instant::now());
             b.on_failure(1, Instant::now());
-            assert!(!b.shard_healthy());
+            assert!(!b.shard_healthy);
             assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(0.0));
             assert_eq!(gauge(names::SINK_REPLICA_HEALTHY), Some(0.0));
 

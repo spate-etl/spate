@@ -180,16 +180,12 @@ place of the single sink. The optional sections start from `default()`, a
 component body comes from `ComponentConfig::new`, and a deserializer comes from
 `with_deserializer` on the config the constructor returned.
 
-```rust
-// A fragment illustrating the shape. The worked form, with the components and
-// both sink shapes, is in the `PipelineConfig::new` rustdoc.
-let mut pipeline = PipelineSection::new("orders");
-pipeline.io_threads = 4;
-```
+[`config_in_code.rs`](repo:crates/spate/examples/config_in_code.rs) builds a
+whole configuration this way and runs a pipeline on it. Run it with
+`cargo run -p spate --example config_in_code`.
 
-Call `validate` on the result before you build the pipeline.
-`Pipeline::from_config` does not call it, so that a minimal fixture still
-assembles. Nothing else checks a config you built yourself.
+```rust file=crates/spate/examples/config_in_code.rs region=config
+```
 
 ## No hot reload
 

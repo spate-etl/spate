@@ -322,7 +322,7 @@ impl Source for S3Source {
 
     // `flush_commits` keeps the trait's no-op default: an Ok fenced commit
     // is already store-durable, and a Retryable one is driver-cached and
-    // recommitted on the next tick.
+    // carried on this split's next commit.
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         if let State::Open(open) = &self.state {

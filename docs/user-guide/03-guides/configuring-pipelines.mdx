@@ -164,6 +164,33 @@ equivalence) are tabulated in the
 [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) for the
 connector end-to-end.
 
+## Building a config in code
+
+Embedding the framework without a configuration file means building a
+`PipelineConfig` yourself and handing it to `Pipeline::from_config`.
+`PipelineConfig` and every section it holds are `#[non_exhaustive]`, so you
+cannot write a struct literal for one. Start from a constructor and assign the
+fields you are setting, and a key added in a later release reaches you as a new
+default rather than as a compile error.
+
+`PipelineSection::new(name)` takes the pipeline name, the one field with no
+default. `PipelineConfig::new(pipeline, source, sink)` takes the sections every
+pipeline needs, and `PipelineConfig::new_multi_sink` takes a `sinks:` map in
+place of the single sink. The optional sections start from `default()`, a
+component body comes from `ComponentConfig::new`, and a deserializer comes from
+`with_deserializer` on the config the constructor returned.
+
+```rust
+// A fragment illustrating the shape. The worked form, with the components and
+// both sink shapes, is in the `PipelineConfig::new` rustdoc.
+let mut pipeline = PipelineSection::new("orders");
+pipeline.io_threads = 4;
+```
+
+Call `validate` on the result before you build the pipeline.
+`Pipeline::from_config` does not call it, so that a minimal fixture still
+assembles. Nothing else checks a config you built yourself.
+
 ## No hot reload
 
 Configuration is loaded once at startup. There is deliberately no hot

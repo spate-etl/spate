@@ -25,20 +25,29 @@
 //!
 //! | ClickHouse type | Rust field |
 //! |---|---|
-//! | `Date` / `Date32` | [`DateDays`](crate::DateDays) / [`Date32Days`](crate::Date32Days), or `chrono::NaiveDate` / `time::Date` via [`crate::serde`] (feature-gated) |
-//! | `DateTime` | [`DateTimeSeconds`], or `chrono::DateTime<Utc>` / `time::OffsetDateTime` via [`crate::serde`] |
-//! | `DateTime64(0/3/6/9)` | [`DateTime64Secs`](crate::DateTime64Secs) / [`DateTime64Millis`] / [`DateTime64Micros`](crate::DateTime64Micros) / [`DateTime64Nanos`](crate::DateTime64Nanos), or the `datetime64::*` serde modules |
-//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or the `time`/`time64::*` serde modules (server ≥ 25.6, `enable_time_time64_type=1`) |
-//! | `UUID` | `uuid::Uuid` with `#[serde(with = "spate_clickhouse::serde::uuid")]` (feature `uuid`). ⚠ `Uuid`'s default impl writes a LEB128-prefixed 16-byte string — silently wrong |
-//! | `IPv4` | `std::net::Ipv4Addr` with `#[serde(with = "spate_clickhouse::serde::ipv4")]`. ⚠ the default impl writes big-endian octets — silently wrong |
+//! | `Date` / `Date32` | [`DateDays`](crate::DateDays) / [`Date32Days`](crate::Date32Days), or [⚠](crate::serde) `chrono::NaiveDate` / `time::Date` via [`crate::serde`] (feature-gated) |
+//! | `DateTime` | [`DateTimeSeconds`], or [⚠](crate::serde) `chrono::DateTime<Utc>` / `time::OffsetDateTime` via [`crate::serde`] |
+//! | `DateTime64(0/3/6/9)` | [`DateTime64Secs`](crate::DateTime64Secs) / [`DateTime64Millis`] / [`DateTime64Micros`](crate::DateTime64Micros) / [`DateTime64Nanos`](crate::DateTime64Nanos), or [⚠](crate::serde) the `datetime64::*` serde modules |
+//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or [⚠](crate::serde) the `time`/`time64::*` serde modules (server ≥ 25.6, `enable_time_time64_type=1`) |
+//! | `UUID` | [⚠](crate::serde) `uuid::Uuid` with `#[serde(with = "spate_clickhouse::serde::uuid")]` (feature `uuid`) |
+//! | `IPv4` | [⚠](crate::serde) `std::net::Ipv4Addr` with `#[serde(with = "spate_clickhouse::serde::ipv4")]` |
 //! | `IPv6` | `std::net::Ipv6Addr` bare (its default impl — 16 network-order bytes — is correct) |
 //! | `Enum8` / `Enum16` | `serde_repr` enums: `#[derive(Serialize_repr)] #[repr(i8)]` (or `i16`) |
-//! | `Decimal(P, S)` | [`Decimal32<S>`](crate::Decimal32) / [`Decimal64<S>`](crate::Decimal64) / [`Decimal128<S>`](crate::Decimal128) pre-scaled wrappers (or raw ints); `rust_decimal` conversions behind the `rust_decimal` feature |
+//! | `Decimal(P, S)` | [`Decimal32<S>`](crate::Decimal32) for precision 9 and below, [`Decimal64<S>`](crate::Decimal64) for 10 through 18, [`Decimal128<S>`](crate::Decimal128) for 19 through 38 (or the matching raw int); `rust_decimal` conversions behind the `rust_decimal` feature |
 //! | `Int256` / `UInt256` | [`Int256`](crate::Int256) / [`UInt256`](crate::UInt256) (32 raw LE bytes) |
 //! | `JSON` | a `String` of JSON text **plus** the per-insert setting `input_format_binary_read_json_as_string: "1"` (see the crate docs' wiring example) |
 //! | `LowCardinality(T)` | the plain `T` — transparent on insert; the server builds the dictionary |
 //! | Geo (`Point`, `Ring`, `LineString`, `Polygon`, ...) | the [`Point`](crate::Point)/[`Ring`](crate::Ring)/... aliases (tuples and `Vec`s of `Float64`) |
 //! | `Dynamic`, `AggregateFunction(...)`, `Decimal256` | **unsupported** — no serde shape maps to them (`Decimal256`: scale manually into an [`Int256`](crate::Int256)) |
+//!
+//! ⚠ marks a field type whose bare `Serialize` impl encodes successfully
+//! into bytes the column cannot read. [`crate::serde`] lists them and the
+//! attribute each one needs.
+//!
+//! A `Decimal(P, S)` column's precision picks its wire width, so each
+//! wrapper covers a band rather than an upper bound. A `Decimal(9, 2)`
+//! column is four bytes wide and takes `Decimal32<2>`, where `Decimal64<2>`
+//! writes eight and shifts every following column.
 //!
 //! ## The wire contract is field order
 //!

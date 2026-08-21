@@ -422,9 +422,9 @@ pub enum CoordinationErrorKind {
     /// [`CoordinationEvent::Lost`] follows from
     /// [`poll`](SplitCoordinator::poll)).
     Fenced,
-    /// Transient backend failure; the operation may succeed if retried on
-    /// the caller's next tick. Backends keep renewing owned leases through
-    /// caller-visible retryable failures.
+    /// Transient backend failure; the operation may succeed if retried.
+    /// Backends keep renewing owned leases through caller-visible
+    /// retryable failures.
     Retryable,
     /// Unrecoverable: backend misconfiguration, a store without the
     /// required atomic primitives, a corrupt or incompatible record, a
@@ -622,8 +622,8 @@ pub trait SplitCoordinator: Send {
     /// durable. [`Fenced`](CoordinationErrorKind::Fenced) means the split
     /// is no longer owned and **nothing was written**; stop the split and
     /// do not retry the write. [`Retryable`](CoordinationErrorKind::Retryable)
-    /// leaves the previous committed state authoritative; re-committing
-    /// the merged progress on the next tick is idempotent.
+    /// leaves the previous committed state authoritative, and
+    /// re-committing the merged progress later is idempotent.
     ///
     /// A commit on a split this instance no longer holds (including one
     /// it already committed `completed`) returns `Fenced` without a

@@ -928,8 +928,13 @@ impl CoordinationDriver {
             // Fenced: already retired inside `try_commit`.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
-                // The resume cache still advances: the watermark is acked
-                // (sink-durable), so respawning past it cannot lose data.
+                // Nothing goes out again on a bare tick, since `commit`
+                // issues only the watermarks it is handed. This progress
+                // rides the split's next commit, which merges past it, or
+                // the terminal progress `sweep` returns if no watermark
+                // follows. The resume cache still advances: the watermark
+                // is acked (sink-durable), so respawning past it cannot
+                // lose data.
                 let tenancy = self.tenancies.get_mut(&partition).expect("live tenancy");
                 tenancy.progress = Some(progress);
             }
@@ -1005,8 +1010,9 @@ enum CommitDisposition {
     /// Fenced: nothing written, the split belongs to a peer; the tenancy
     /// has already been retired with the fence flag.
     Fenced,
-    /// Retryable: the previous durable state stays authoritative and the
-    /// caller recommits the merged progress next tick.
+    /// Retryable: nothing was written, the previous durable state stays
+    /// authoritative, and each caller decides when the progress goes out
+    /// again.
     Deferred,
 }
 
@@ -1680,7 +1686,12 @@ mod tests {
         d.commit(&mut s, &[(partition, 10)]).unwrap();
         assert!(script.commits().is_empty(), "deferred, not written");
 
-        // Next tick recommits the merged progress and succeeds.
+        // A bare tick re-issues nothing: the driver commits the watermarks
+        // it is handed and no others.
+        poll(&mut d, &mut s);
+        assert!(script.commits().is_empty(), "a tick recommitted nothing");
+
+        // The split's next commit carries the merged progress and lands.
         d.commit(&mut s, &[(partition, 12)]).unwrap();
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].1.watermark, 12);

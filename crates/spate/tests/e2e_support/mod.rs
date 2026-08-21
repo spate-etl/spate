@@ -616,6 +616,16 @@ pub fn metric_sum(body: &str, family: &str) -> f64 {
         .sum()
 }
 
+/// Sum every sample of a metric family whose label set contains `label`, for
+/// example `reason="unrouted"`. [`metric_sum`] takes the family total; this
+/// takes one slice of it.
+pub fn metric_sum_where(body: &str, family: &str, label: &str) -> f64 {
+    body.lines()
+        .filter(|l| l.starts_with(&format!("{family}{{")) && l.contains(label))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
 /// Poll a condition until it holds or a timeout elapses; shared with the
 /// `spate-test` crate so scenarios and framework users use one helper.
 pub use spate_test::wait_until;

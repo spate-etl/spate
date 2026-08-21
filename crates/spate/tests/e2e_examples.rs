@@ -40,10 +40,11 @@ use apache_avro::{Schema, to_avro_datum};
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use support::{CH_PASSWORD, Harness};
+use support::{CH_PASSWORD, Harness, http_get, metric_sum_where};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -120,21 +121,52 @@ fn example_bin(name: &str) -> PathBuf {
     bin
 }
 
+/// A rendered config and the admin address it names.
+struct Rendered {
+    path: PathBuf,
+    /// `None` where the file asks for no server, as `clickhouse_aggregating_mv`
+    /// does with `listen: none`.
+    admin: Option<SocketAddr>,
+}
+
+/// Take a free loopback port from the kernel and give it straight back, so a
+/// rendered config can name it as a literal.
+///
+/// Nothing holds the port between here and the example's own bind. A lost race
+/// fails as `StartError::AdminBind` naming the address, which is louder than a
+/// fixed port shared across concurrent runs.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local_addr")
+        .port()
+}
+
 /// Copy an example's shipped YAML into `CARGO_TARGET_TMPDIR`, rebinding the
-/// admin server to an ephemeral loopback port.
+/// admin server to a free loopback port.
 ///
 /// The listen address is the only edit. Endpoints are left alone: they
 /// interpolate from the environment. Every shipped file states `admin.listen`
 /// as a literal, and the ones naming a port all name the same `0.0.0.0:9090`,
 /// so concurrent runs would contend for one host port. A file asking for no
 /// server needs no rebinding and gets none.
-fn render_config(name: &str) -> PathBuf {
+///
+/// The port comes from [`free_port`] rather than staying `0`, so a caller can
+/// scrape the example's `/metrics` at the returned address.
+fn render_config(name: &str) -> Rendered {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join(format!("{name}.yaml"));
     let shipped =
         std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-    let rendered = shipped.replace("0.0.0.0:9090", "127.0.0.1:0");
+    let admin = shipped
+        .contains("0.0.0.0:9090")
+        .then(|| SocketAddr::from(([127, 0, 0, 1], free_port())));
+    let rendered = match admin {
+        Some(addr) => shipped.replace("0.0.0.0:9090", &addr.to_string()),
+        None => shipped,
+    };
     // Assert the section exists before asserting what it says: matching only a
     // loopback literal would pass a file that declares no `admin:` at all and
     // then takes the shared default from somewhere else in the document.
@@ -142,14 +174,18 @@ fn render_config(name: &str) -> PathBuf {
         rendered.contains("admin:"),
         "{name}.yaml: declares no `admin:` section, so it would take the default port"
     );
+    // Match the whole default address, not the port alone: an ephemeral port
+    // can itself contain `9090`.
     assert!(
-        (rendered.contains("127.0.0.1:0") || rendered.contains("listen: none"))
-            && !rendered.contains("9090"),
+        match admin {
+            Some(addr) => rendered.contains(&addr.to_string()),
+            None => rendered.contains("listen: none"),
+        } && !rendered.contains("0.0.0.0:9090"),
         "{name}.yaml: could not rebind the admin server off the shared default port"
     );
     let dst = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.yaml"));
     std::fs::write(&dst, rendered).expect("write rendered config");
-    dst
+    Rendered { path: dst, admin }
 }
 
 /// One example under test: the child process plus where its output went.
@@ -454,7 +490,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     produce_raw(&h.brokers, "orders", &payloads);
 
     let config = render_config("kafka_avro_to_clickhouse");
-    let mut example = spawn("kafka_avro_to_clickhouse", Some(&config), &env);
+    let mut example = spawn("kafka_avro_to_clickhouse", Some(&config.path), &env);
     example.wait_for("every order row", || {
         h.count("orders") >= u64::try_from(orders).expect("orders")
     });
@@ -542,7 +578,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
 
     let rows = u64::try_from(placed * per_order).expect("line rows");
     let config = render_config("kafka_avro_flatmap_clickhouse");
-    let mut example = spawn("kafka_avro_flatmap_clickhouse", Some(&config), &env);
+    let mut example = spawn("kafka_avro_flatmap_clickhouse", Some(&config.path), &env);
     example.wait_for("every exploded order line", || {
         h.count("order_lines") >= rows
     });
@@ -643,9 +679,22 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
 
     let per_table = u64::try_from(settled).expect("settled rows");
     let config = render_config("multi_table_split");
-    let mut example = spawn("multi_table_split", Some(&config), &env);
+    let mut example = spawn("multi_table_split", Some(&config.path), &env);
     example.wait_for("both split branches", || {
         h.count("payments") >= per_table && h.count("refunds") >= per_table
+    });
+    // INV-7's second half: an unroutable record is dropped and counted. Scraped
+    // before SIGTERM, while the admin server is still up. A floor rather than an
+    // equality, because at-least-once means a replayed record is dropped again.
+    let admin = config.admin.expect("the example names an admin address");
+    example.wait_for("the unrouted drops to be counted", || {
+        let (status, body) = http_get(admin, "/metrics");
+        status == 200
+            && metric_sum_where(
+                &body,
+                "spate_operator_records_dropped_total",
+                r#"reason="unrouted""#,
+            ) >= per_table as f64
     });
     let log = example.terminate();
     // The placed orders must reach the split and be dropped there as
@@ -739,12 +788,25 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
 
     let config = render_config("kafka_to_kafka_split");
     let env = vec![("KAFKA_BROKERS", h.brokers.clone())];
-    let mut example = spawn("kafka_to_kafka_split", Some(&config), &env);
+    let mut example = spawn("kafka_to_kafka_split", Some(&config.path), &env);
     // Two sub-regions land on each destination topic.
     let per_topic = per_region * 2;
     example.wait_for("both region topics", || {
         topic_count(&h.brokers, "orders-eu") >= per_topic
             && topic_count(&h.brokers, "orders-us") >= per_topic
+    });
+    // INV-7's second half: an unroutable record is dropped and counted. Scraped
+    // before SIGTERM, while the admin server is still up. A floor rather than an
+    // equality, because at-least-once means a replayed record is dropped again.
+    let admin = config.admin.expect("the example names an admin address");
+    example.wait_for("the unrouted drops to be counted", || {
+        let (status, body) = http_get(admin, "/metrics");
+        status == 200
+            && metric_sum_where(
+                &body,
+                "spate_operator_records_dropped_total",
+                r#"reason="unrouted""#,
+            ) >= per_region as f64
     });
     example.terminate();
     // Equal fifths were produced, one fifth of them unroutable. Both
@@ -816,7 +878,7 @@ fn clickhouse_aggregating_mv_example_builds_states() {
         ("CLICKHOUSE_URL", h.ch_url.clone()),
         ("CLICKHOUSE_PASSWORD", CH_PASSWORD.to_string()),
     ];
-    spawn("clickhouse_aggregating_mv", Some(&config), &env).wait_exit(OUTPUT_DEADLINE);
+    spawn("clickhouse_aggregating_mv", Some(&config.path), &env).wait_exit(OUTPUT_DEADLINE);
 
     // The view aggregated the five demo orders into their two regions, and
     // the states finalize to the values those orders carry.

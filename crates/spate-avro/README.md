@@ -13,7 +13,7 @@ schema lands. Unresolvable ids are negatively cached with a TTL and then
 follow the deserializer's error policy like any poison payload.
 
 Schema evolution follows Avro resolution rules via an optional
-`reader_schema` (field reordering, defaults, promotions, aliases).
+`reader_schema` (field reordering, defaults, promotions).
 
 Key types: `AvroDeserializerBuilder` (from the
 `deserializer: { avro: ... }` section), `AvroDatumDeserializer<F>`

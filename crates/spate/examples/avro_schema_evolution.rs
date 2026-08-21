@@ -37,7 +37,7 @@
 //!   payload with `Missing field in record`, which under the default Skip
 //!   policy drops and acks the whole stream. § 2 asserts that failure rather
 //!   than describing it, and renames on the Rust side with `#[serde(alias)]`,
-//!   which does work. Tracked as spate issue #74.
+//!   which does work.
 //! - `int`→`long` promotion resolves. Works; § 3 asserts it. The reverse is
 //!   not a promotion, and a `long` too large for the reader's `int` fails the
 //!   record; § 3 asserts that too. A `double` narrowed to a `float` is not
@@ -341,9 +341,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // under the default Skip policy would drop and ack 100% of the stream,
     // counted on `spate_deser_records_dropped_total`. A dependency bump that
     // fixes it fails this assertion.
-    let err = resolve(WRITER_V1, READER_FIELD_ALIAS, &datum)
-        .expect_err("a reader field alias is documented to resolve, and does not");
-    assert!(err.to_string().contains("item_code"), "{err}");
+    let alias_err = resolve(WRITER_V1, READER_FIELD_ALIAS, &datum)
+        .expect_err("a reader field alias resolves after all");
+    assert!(alias_err.to_string().contains("item_code"), "{alias_err}");
 
     // ── § 3, the promotion's forbidden direction ────────────────────────
     // Avro permits `int`→`long` and not the reverse. A value too large for
@@ -364,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\npipeline exit: {:?}", report.state);
     println!("final watermarks: {:?}", report.final_watermarks);
     println!("rows written ({}): {rows:?}", rows.len());
-    println!("reader field alias: {err}");
+    println!("reader field alias: {alias_err}");
     Ok(())
 }
 

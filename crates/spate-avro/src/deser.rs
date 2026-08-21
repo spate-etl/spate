@@ -110,7 +110,7 @@ pub(crate) struct DecoderCore {
     pub(crate) mode: SchemaSourceMode,
     /// Optional reader schema: pins the shape records are resolved into
     /// (Avro schema-resolution rules: field reordering, defaults, type
-    /// promotions, aliases).
+    /// promotions).
     pub(crate) reader_schema: Option<Arc<Schema>>,
     /// Readers by writer schema id, holding each id's resolved named types
     /// across payloads. At most [`MAX_HELD_READERS`] entries; at the ceiling an
@@ -278,9 +278,9 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 /// This path decodes each record **twice**, once into an intermediate
 /// [`AvroValue`] and then again into `T` via `from_value`, roughly
 /// doubling the per-record allocations and CPU of the dynamically-typed
-/// path. Choose it when you need Avro's full
-/// schema-resolution rules (a configured `reader_schema`: field
-/// reordering, type promotions, defaults, aliases). When you don't,
+/// path. Choose it when you need Avro's schema-resolution rules (a
+/// configured `reader_schema`: field reordering, type promotions,
+/// defaults). When you don't,
 /// [`crate::AvroDatumDeserializer`] decodes the same `T` in a single pass
 /// and is substantially cheaper.
 pub struct AvroSerdeDeserializer<T> {

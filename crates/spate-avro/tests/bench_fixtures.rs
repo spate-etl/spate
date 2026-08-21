@@ -13,8 +13,8 @@
 //! hand-framed map and the reader schemas get the same treatment: each is
 //! decoded through the public API and checked against what the schema says,
 //! so neither the framing nor a resolution rule can silently stop doing what
-//! its case is named for, including the alias rule, which does not work at
-//! all and is pinned as such.
+//! its case is named for, including the field-alias rule, which does not
+//! work and is pinned as such.
 
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 
@@ -595,10 +595,10 @@ fn each_reader_schema_resolves_its_rule() {
 /// during resolution. A reader that renames a field and carries the old name
 /// as an alias therefore rejects every payload, rather than resolving it.
 ///
-/// This is pinned rather than worked around because the crate's own
-/// documentation lists aliases among the resolution rules a `reader_schema`
-/// applies (issue #74). If the dependency starts honoring them, this test
-/// fails, and the bench gains the case it is missing.
+/// This is pinned rather than worked around so that a dependency bump which
+/// starts honoring a field alias fails this test instead of passing silently.
+/// When one does, the bench gains the case it is missing and the crate's
+/// documentation gains the rule.
 #[test]
 fn a_reader_field_alias_does_not_resolve() {
     let rt = runtime();

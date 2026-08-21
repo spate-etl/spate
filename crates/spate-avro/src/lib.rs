@@ -24,8 +24,14 @@
 //! Writer schemas come from the payload (registry id or fingerprint) or
 //! configuration; an optional `reader_schema` pins the shape records are
 //! resolved into, using Avro's schema-resolution rules (field reordering,
-//! defaults, promotions, aliases). Registry schemas using references are
-//! not supported yet and are surfaced as unavailable.
+//! defaults, promotions). Registry schemas using references are not
+//! supported yet and are surfaced as unavailable.
+//!
+//! A reader **field** alias is not applied. A reader field that renames a
+//! writer's field and lists the old name in `aliases` fails every payload;
+//! rename with `#[serde(alias)]` on the record type instead. Record names
+//! are not compared during resolution, so a record-level alias has no
+//! effect either way.
 
 mod cache;
 mod config;

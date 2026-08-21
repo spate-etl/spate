@@ -178,20 +178,23 @@ macro_rules! decimal_newtype {
 }
 
 decimal_newtype! {
-    /// A pre-scaled `Decimal32(S)` / `Decimal(P ≤ 9, S)` value: the inner
-    /// `i32` is `value × 10^SCALE`, written little-endian.
+    /// A pre-scaled `Decimal32(S)` / `Decimal(P, S)` value for precision 9
+    /// and below: the inner `i32` is `value × 10^SCALE`, written
+    /// little-endian.
     Decimal32(i32), max_scale = 9
 }
 
 decimal_newtype! {
-    /// A pre-scaled `Decimal64(S)` / `Decimal(P ≤ 18, S)` value: the inner
-    /// `i64` is `value × 10^SCALE`, written little-endian.
+    /// A pre-scaled `Decimal64(S)` / `Decimal(P, S)` value for precision 10
+    /// through 18: the inner `i64` is `value × 10^SCALE`, written
+    /// little-endian.
     Decimal64(i64), max_scale = 18
 }
 
 decimal_newtype! {
-    /// A pre-scaled `Decimal128(S)` / `Decimal(P ≤ 38, S)` value: the
-    /// inner `i128` is `value × 10^SCALE`, written little-endian.
+    /// A pre-scaled `Decimal128(S)` / `Decimal(P, S)` value for precision 19
+    /// through 38: the inner `i128` is `value × 10^SCALE`, written
+    /// little-endian.
     Decimal128(i128), max_scale = 38
 }
 

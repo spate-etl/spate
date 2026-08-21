@@ -138,8 +138,8 @@ outside the identifier or dotted `outer.inner` shape.
 
 ## More information
 
-- Landed in the pull request removing `columns` from the ClickHouse sink
-  configuration.
+- Landed in #281. The implementation is tracked by #282, and the record
+  precedes it.
 - [ADR-0011](0011-msrv-and-dependency-policy.md) — the no-0.x-types-in-bounds
   rule that decides the derive question.
 - [ADR-0009](0009-yaml-configuration-with-opaque-passthrough.md) — the

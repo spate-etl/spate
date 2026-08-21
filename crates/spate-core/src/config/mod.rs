@@ -36,6 +36,12 @@
 //! `interpolate_with` for the exact semantics of `${VAR}`,
 //! `${VAR:-default}`, `${VAR:?message}`, and `$$`.
 //!
+//! Every framework section here is `#[non_exhaustive]`. Build a config with
+//! [`PipelineConfig::new`] or [`PipelineConfig::new_multi_sink`], a
+//! [`PipelineSection`] with [`PipelineSection::new`], and the optional
+//! sections with `default()`, then assign the fields you are setting; a key
+//! added later arrives as a new default and existing code keeps compiling.
+//!
 //! # Example
 //!
 //! ```
@@ -82,8 +88,14 @@ use std::time::Duration;
 /// Root of a pipeline's configuration file.
 ///
 /// One process runs one pipeline; one file configures one process.
+///
+/// Construct with [`PipelineConfig::new`], or
+/// [`PipelineConfig::new_multi_sink`] for a `sinks:` map, and set the optional
+/// fields. The struct is `#[non_exhaustive]` so new sections can be added
+/// without breaking callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PipelineConfig {
     /// Identity and thread budget.
     pub pipeline: PipelineSection,
@@ -118,8 +130,13 @@ pub struct PipelineConfig {
 }
 
 /// Identity and thread budget (`pipeline:`).
+///
+/// Construct with [`PipelineSection::new`] and set the optional fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PipelineSection {
     /// Pipeline name; the `pipeline` label on every metric.
     pub name: String,
@@ -136,6 +153,29 @@ pub struct PipelineSection {
     pub pinning: PinningMode,
 }
 
+impl PipelineSection {
+    /// A section named `name`. Every other field starts at its YAML default.
+    ///
+    /// ```
+    /// use spate_core::config::PipelineSection;
+    ///
+    /// let mut pipeline = PipelineSection::new("orders");
+    /// pipeline.io_threads = 4;
+    ///
+    /// assert_eq!(pipeline.name, "orders");
+    /// assert_eq!(pipeline.threads, None);
+    /// ```
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> PipelineSection {
+        PipelineSection {
+            name: name.into(),
+            threads: None,
+            io_threads: defaults::io_threads(),
+            pinning: PinningMode::default(),
+        }
+    }
+}
+
 /// How pipeline threads are pinned to cores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -150,8 +190,13 @@ pub enum PinningMode {
 }
 
 /// Watermark commit policy (`checkpoint:`).
+///
+/// Construct with [`CheckpointSection::default`] and set the fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CheckpointSection {
     /// How often committable watermarks are flushed to the source.
     #[serde(with = "humantime_serde")]
@@ -189,8 +234,13 @@ impl Default for CheckpointSection {
 }
 
 /// In-flight budget and hysteresis (`backpressure:`).
+///
+/// Construct with [`BackpressureSection::default`] and set the fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct BackpressureSection {
     /// Global cap on bytes admitted into the pipeline but not yet durably
     /// written.
@@ -223,8 +273,12 @@ impl Default for BackpressureSection {
 /// pipeline's own handle renders an exposition. `exporter: none` leaves it a
 /// 404, and so does a recorder another library installed first, which this
 /// pipeline records into but cannot render.
+///
+/// Construct with [`AdminSection::default`] and set the fields. The struct is
+/// `#[non_exhaustive]` so new knobs can be added without breaking callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct AdminSection {
     /// Bind address, or `none` for no server at all.
     ///
@@ -279,8 +333,12 @@ where
 }
 
 /// Exporter selection and observability knobs (`metrics:`).
+///
+/// Construct with [`MetricsSection::default`] and set the fields. The struct
+/// is `#[non_exhaustive]` so new knobs can be added without breaking callers.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct MetricsSection {
     /// Which exporter to install.
     pub exporter: MetricsExporter,
@@ -332,7 +390,131 @@ mod defaults {
     }
 }
 
+/// Tag a component with the section it sits in, so its error paths read the
+/// same whether the config was parsed or built in code.
+fn labelled(mut component: ComponentConfig, section: &'static str) -> ComponentConfig {
+    component.set_section(section);
+    component
+}
+
 impl PipelineConfig {
+    /// A config for one source and one sink, the `sink:` form. Every optional
+    /// section starts at its YAML default, and the sink is addressed as
+    /// `"default"` by [`sink_config`](Self::sink_config).
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, PipelineConfig, PipelineSection, YamlValue};
+    /// use std::time::Duration;
+    ///
+    /// let mut pipeline = PipelineSection::new("orders");
+    /// pipeline.io_threads = 4;
+    ///
+    /// let mut cfg = PipelineConfig::new(
+    ///     pipeline,
+    ///     ComponentConfig::new("memory", YamlValue::Mapping(Default::default())),
+    ///     ComponentConfig::new("memory", YamlValue::Mapping(Default::default())),
+    /// );
+    /// cfg.checkpoint.interval = Duration::from_secs(10);
+    /// cfg.validate()?;
+    ///
+    /// assert_eq!(cfg.sink_config("default")?.type_tag(), "memory");
+    /// # Ok::<(), spate_core::config::ConfigError>(())
+    /// ```
+    #[must_use]
+    pub fn new(
+        pipeline: PipelineSection,
+        source: ComponentConfig,
+        sink: ComponentConfig,
+    ) -> PipelineConfig {
+        Self::assemble(pipeline, source, Some(labelled(sink, "sink")), None)
+    }
+
+    /// A config for one source and a map of named sinks, the `sinks:` form.
+    /// Every optional section starts at its YAML default, and each name
+    /// addresses its sink through [`sink_config`](Self::sink_config).
+    ///
+    /// The map is not checked here. [`validate`](Self::validate) rejects an
+    /// empty map, an empty name, and the reserved name `"sink"`.
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, PipelineConfig, PipelineSection, YamlValue};
+    /// use std::collections::BTreeMap;
+    ///
+    /// let body = || YamlValue::Mapping(Default::default());
+    /// let sinks = BTreeMap::from([
+    ///     ("eu".to_owned(), ComponentConfig::new("memory", body())),
+    ///     ("us".to_owned(), ComponentConfig::new("memory", body())),
+    /// ]);
+    ///
+    /// let cfg = PipelineConfig::new_multi_sink(
+    ///     PipelineSection::new("orders"),
+    ///     ComponentConfig::new("memory", body()),
+    ///     sinks,
+    /// );
+    /// cfg.validate()?;
+    ///
+    /// assert_eq!(cfg.sink_names(), ["eu", "us"]);
+    /// # Ok::<(), spate_core::config::ConfigError>(())
+    /// ```
+    #[must_use]
+    pub fn new_multi_sink(
+        pipeline: PipelineSection,
+        source: ComponentConfig,
+        sinks: BTreeMap<String, ComponentConfig>,
+    ) -> PipelineConfig {
+        let sinks = sinks
+            .into_iter()
+            .map(|(name, sink)| (name, labelled(sink, "sink")))
+            .collect();
+        Self::assemble(pipeline, source, None, Some(sinks))
+    }
+
+    /// The same config with a deserializer component, tagged with its
+    /// section the way the constructors tag the source and the sink.
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, PipelineConfig, PipelineSection, YamlValue};
+    ///
+    /// let body = || YamlValue::Mapping(Default::default());
+    /// let cfg = PipelineConfig::new(
+    ///     PipelineSection::new("orders"),
+    ///     ComponentConfig::new("memory", body()),
+    ///     ComponentConfig::new("memory", body()),
+    /// )
+    /// .with_deserializer(ComponentConfig::new("json", body()));
+    ///
+    /// assert_eq!(
+    ///     cfg.deserializer.as_ref().map(ComponentConfig::type_tag),
+    ///     Some("json")
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_deserializer(mut self, deserializer: ComponentConfig) -> PipelineConfig {
+        self.deserializer = Some(labelled(deserializer, "deserializer"));
+        self
+    }
+
+    /// The one place the field list lives, so a section added later reaches
+    /// both constructors. Callers pass exactly one of `sink`/`sinks`.
+    fn assemble(
+        pipeline: PipelineSection,
+        source: ComponentConfig,
+        sink: Option<ComponentConfig>,
+        sinks: Option<BTreeMap<String, ComponentConfig>>,
+    ) -> PipelineConfig {
+        PipelineConfig {
+            pipeline,
+            admin: AdminSection::default(),
+            backpressure: BackpressureSection::default(),
+            checkpoint: CheckpointSection::default(),
+            metrics: MetricsSection::default(),
+            source: labelled(source, "source"),
+            deserializer: None,
+            sink,
+            sinks,
+        }
+    }
+
     /// Load from YAML text: interpolate `${VAR}` forms against the process
     /// environment, parse, and validate.
     // An inherent `from_str` (rather than `std::str::FromStr`) keeps the
@@ -581,6 +763,92 @@ sink: { memory: {} }
             Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
         );
         assert!(cfg.deserializer.is_none());
+    }
+
+    /// `new` and the YAML defaults are two spellings of one config, so a
+    /// section added to the struct has to reach both.
+    #[test]
+    fn new_matches_the_yaml_defaults() {
+        let body = || YamlValue::Mapping(Default::default());
+        assert_eq!(
+            PipelineConfig::new(
+                PipelineSection::new("demo"),
+                ComponentConfig::new("memory", body()),
+                ComponentConfig::new("memory", body()),
+            ),
+            PipelineConfig::from_str(MINIMAL).unwrap()
+        );
+    }
+
+    /// `new_multi_sink` and the YAML defaults are two spellings of one config,
+    /// so a section added to the struct has to reach both.
+    #[test]
+    fn new_multi_sink_matches_the_yaml_defaults() {
+        let body = || YamlValue::Mapping(Default::default());
+        let sinks = BTreeMap::from([
+            ("eu".to_owned(), ComponentConfig::new("memory", body())),
+            ("us".to_owned(), ComponentConfig::new("memory", body())),
+        ]);
+        let yaml = "
+pipeline: { name: demo }
+source: { memory: {} }
+sinks:
+  eu: { memory: {} }
+  us: { memory: {} }
+";
+        assert_eq!(
+            PipelineConfig::new_multi_sink(
+                PipelineSection::new("demo"),
+                ComponentConfig::new("memory", body()),
+                sinks,
+            ),
+            PipelineConfig::from_str(yaml).unwrap()
+        );
+    }
+
+    /// A deserializer added through `with_deserializer` carries the section
+    /// tag the loader gives one, so the two spellings report the same error
+    /// paths.
+    #[test]
+    fn with_deserializer_matches_the_yaml_form() {
+        let body = || YamlValue::Mapping(Default::default());
+        let yaml = "
+pipeline: { name: demo }
+source: { memory: {} }
+deserializer: { json: {} }
+sink: { memory: {} }
+";
+        assert_eq!(
+            PipelineConfig::new(
+                PipelineSection::new("demo"),
+                ComponentConfig::new("memory", body()),
+                ComponentConfig::new("memory", body()),
+            )
+            .with_deserializer(ComponentConfig::new("json", body())),
+            PipelineConfig::from_str(yaml).unwrap()
+        );
+    }
+
+    /// A constructed config passes the validation the loaders run, so `new`
+    /// cannot produce one `from_str` would have rejected.
+    #[test]
+    fn a_constructed_config_validates() {
+        let body = || YamlValue::Mapping(Default::default());
+        PipelineConfig::new(
+            PipelineSection::new("demo"),
+            ComponentConfig::new("memory", body()),
+            ComponentConfig::new("memory", body()),
+        )
+        .validate()
+        .expect("the single-sink form validates");
+
+        PipelineConfig::new_multi_sink(
+            PipelineSection::new("demo"),
+            ComponentConfig::new("memory", body()),
+            BTreeMap::from([("eu".to_owned(), ComponentConfig::new("memory", body()))]),
+        )
+        .validate()
+        .expect("the multi-sink form validates");
     }
 
     #[test]

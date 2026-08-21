@@ -45,7 +45,7 @@ use std::marker::PhantomData;
 /// `reader_schema` at build time. Additive evolution still works through
 /// serde: `#[serde(default)]` covers fields newer readers expect and old
 /// writers lack, `#[serde(alias)]` covers renames, and unknown fields are
-/// skipped structurally. If you need Avro's full resolution rules (field
+/// skipped structurally. If you need Avro's resolution rules (field
 /// reordering by name, type promotions, defaults from the schema), use
 /// [`crate::AvroDeserializerBuilder::build_serde`] instead.
 ///

@@ -98,8 +98,8 @@ The builder hands out these deserializer flavors:
   below.
 - `build_serde::<T>()` — decodes each datum into a
   `T: serde::de::DeserializeOwned` struct via an intermediate `AvroValue`,
-  applying Avro's full schema-resolution rules when a `reader_schema` is
-  configured (field reordering, type promotions, defaults, aliases).
+  applying Avro's schema-resolution rules when a `reader_schema` is
+  configured (field reordering, type promotions, defaults).
   This is the flavor the construction snippet above builds.
 - `build_value()` — decodes into dynamically-typed `AvroValue` records, for
   pipelines that inspect or route on structure not known at compile time.
@@ -138,9 +138,20 @@ below.
 Writer schemas come from the payload (registry id or fingerprint) or
 configuration; an optional `reader_schema` pins the shape records resolve
 into, using Avro's standard schema-resolution rules: field reordering,
-defaults for missing fields, type promotions, aliases. Pin a reader schema to
-keep a struct stable while producers evolve. Registry schemas using schema
-references are not supported and surface as unavailable.
+defaults for missing fields, type promotions. Pin a reader schema to keep a
+struct stable while producers evolve. Registry schemas using schema references
+are not supported and surface as unavailable.
+
+A reader **field** alias is not applied. A reader field that renames a writer's
+field and lists the old name in `aliases` reports that field missing on every
+payload, and the record then takes the deserializer's `ErrorPolicy`, so the
+default Skip policy drops the entire stream. Rename on the Rust side with
+`#[serde(alias)]` instead, which both typed paths support.
+
+A record-level alias is a different rule. Resolution never compares record
+names, so a payload resolves against any structurally compatible reader record
+whatever it is named. Keep the alias in the schema, which the Avro
+specification and a registry's compatibility check both read.
 
 Promotion runs one way. A reader may widen a field an `int` was written as
 to a `long`, and a `float` to a `double`; the reverse is not a promotion.
@@ -167,3 +178,5 @@ which is neither an error nor backpressure. See [Metrics](../../../../METRICS.md
   undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.
+- [`avro_schema_evolution.rs`](repo:crates/spate/examples/avro_schema_evolution.rs)
+  — the resolution rules above, asserted end to end in one program.

@@ -189,7 +189,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `getrandom` | 0.3.4 | `MIT` |
 | `getrandom` | 0.4.3 | `MIT` |
 | `glob` | 0.3.3 | `MIT` |
-| `h2` | 0.4.15 | `MIT` |
+| `h2` | 0.4.16 | `MIT` |
 | `halfbrown` | 0.4.0 | `MIT` |
 | `hashbag` | 0.1.13 | `MIT` |
 | `hashbrown` | 0.14.5 | `MIT` |

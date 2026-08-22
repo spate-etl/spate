@@ -66,6 +66,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The moment the member lost its last partitions, and what took them.
+struct AssignmentLoss {
+    at: Instant,
+    cause: String,
+}
+
 /// Kafka source: one consumer-group member per process, partitions split
 /// into per-lane queues polled by pipeline threads. Constructed from
 /// config ([`KafkaSource::new`]) or a pipeline component section
@@ -101,6 +107,10 @@ pub struct KafkaSource {
     /// finished draining the revoked lanes. The callback already released
     /// ownership with `unassign`, so no completion step remains.
     pending_error: Option<rdkafka::error::RDKafkaErrorCode>,
+    /// Set while the member holds no partitions after having held some.
+    /// `assignment_timeout` is measured from `at`; an accepted assignment,
+    /// empty or not, clears it.
+    assignment_loss: Option<AssignmentLoss>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
 }
@@ -132,6 +142,7 @@ impl KafkaSource {
             saw_first_assignment: false,
             pending_unassign: false,
             pending_error: None,
+            assignment_loss: None,
             main_queue_rewinds: 0,
         }
     }
@@ -252,12 +263,28 @@ impl KafkaSource {
             .resume(tpl)
             .map_err(fatal("resume new assignment"))?;
         self.saw_first_assignment = true;
+        self.assignment_loss = None;
         tracing::info!(
             partitions = lanes.len(),
             topic = %self.config.topic,
             "accepted assignment"
         );
         Ok(lanes)
+    }
+
+    /// Arm the post-assignment deadline, or update its cause if it is
+    /// already armed. The instant is the first loss, so a run of rebalance
+    /// events with no assignment between them does not extend the deadline.
+    fn note_assignment_loss(&mut self, cause: String) {
+        match &mut self.assignment_loss {
+            Some(loss) => loss.cause = cause,
+            None => {
+                self.assignment_loss = Some(AssignmentLoss {
+                    at: Instant::now(),
+                    cause,
+                })
+            }
+        }
     }
 
     /// Feed the latest librdkafka statistics into the framework lag metrics
@@ -326,6 +353,32 @@ fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: 
     }
 }
 // ANCHOR_END: lag
+
+/// The fatal error for a member that has held no partitions for `waited`,
+/// after `cause` took its last ones. `None` while the member is still
+/// inside `assignment_timeout`, and whenever that timeout is zero, which
+/// disables the deadline.
+///
+/// Free function taking the elapsed time rather than a method reading the
+/// clock, so a unit test pins the boundary and the message directly. The
+/// same reason `publish_lag` is one.
+fn assignment_deadline_error(
+    config: &KafkaSourceConfig,
+    waited: Duration,
+    cause: &str,
+) -> Option<SourceError> {
+    if config.assignment_timeout.is_zero() || waited <= config.assignment_timeout {
+        return None;
+    }
+    Some(SourceError::Client {
+        class: ErrorClass::Fatal,
+        reason: format!(
+            "no partition assignment for {waited:?} after {cause} \
+             (group {:?}, topic {:?})",
+            config.group_id, config.topic
+        ),
+    })
+}
 
 fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceError {
     move |e| SourceError::Client {
@@ -415,6 +468,14 @@ impl Source for KafkaSource {
             });
         }
 
+        // The post-startup deadline: ownership was released and no assignment
+        // has replaced it.
+        if let Some(loss) = &self.assignment_loss
+            && let Some(e) = assignment_deadline_error(&self.config, loss.at.elapsed(), &loss.cause)
+        {
+            return Err(e);
+        }
+
         // Complete a deferred revocation first: the runtime has finished
         // draining and committing by the time it calls poll_events again.
         if self.pending_unassign {
@@ -426,6 +487,9 @@ impl Source for KafkaSource {
             // The revoked partitions are now released; any late commit for
             // them must be refused again.
             self.revoking.clear();
+            if self.assignment.is_empty() {
+                self.note_assignment_loss("a revocation".to_owned());
+            }
         }
 
         // A rebalance error whose lanes were surfaced as revoked on the
@@ -517,6 +581,7 @@ impl Source for KafkaSource {
                         let consumer = Arc::clone(self.consumer()?);
                         consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
+                        self.assignment_loss = None;
                         self.prune_lag_series();
                         return Ok(SourceEvent::Idle);
                     }
@@ -572,6 +637,7 @@ impl Source for KafkaSource {
                     // stays at-least-once.
                     let lanes: Vec<LaneId> = self.assignment.keys().copied().collect();
                     self.assignment.clear();
+                    self.note_assignment_loss(format!("rebalance error: {code}"));
                     self.revoking.clear();
                     self.prune_lag_series();
                     if lanes.is_empty() {
@@ -705,6 +771,8 @@ impl Drop for KafkaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdkafka::error::RDKafkaErrorCode;
+    use spate_core::checkpoint::Checkpointer;
 
     fn test_config() -> KafkaSourceConfig {
         KafkaSourceConfig {
@@ -713,6 +781,7 @@ mod tests {
             group_id: "test".into(),
             commit_interval: Duration::from_secs(5),
             startup_timeout: Duration::from_secs(30),
+            assignment_timeout: Duration::from_mins(5),
             statistics_interval: Duration::ZERO,
             rdkafka: std::collections::BTreeMap::new(),
         }
@@ -788,53 +857,60 @@ mod tests {
         assert_eq!(owned, vec![0, 1]);
     }
 
+    /// An opened source against an unreachable broker (open never contacts
+    /// one), with `lanes` pre-seeded into the assignment map.
+    fn opened_source(lanes: &[(u32, i32)]) -> KafkaSource {
+        opened_source_with(test_config(), lanes)
+    }
+
+    /// [`opened_source`] with a configuration of the test's own. The brokers
+    /// are unreachable either way.
+    fn opened_source_with(mut cfg: KafkaSourceConfig, lanes: &[(u32, i32)]) -> KafkaSource {
+        cfg.brokers = "127.0.0.1:1".into();
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        source.saw_first_assignment = true;
+        for &(lane, part) in lanes {
+            source.assignment.insert(LaneId(lane), part);
+        }
+        source
+    }
+
+    /// Queue a rebalance intent for `poll_events`, as the callback does.
+    fn push_intent(source: &KafkaSource, intent: Intent) {
+        source
+            .consumer
+            .as_ref()
+            .expect("opened")
+            .context()
+            .intents
+            .lock()
+            .expect("intent lock")
+            .push_back(intent);
+    }
+
+    fn push_error(source: &KafkaSource, code: RDKafkaErrorCode) {
+        push_intent(source, Intent::Error(code));
+    }
+
+    /// Drive `poll_events` past transient transport noise (the broker is
+    /// unreachable) until it yields something other than `Idle` or a
+    /// `consumer poll` error.
+    fn next_outcome(source: &mut KafkaSource) -> Result<SourceEvent<KafkaLane>, SourceError> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no outcome within deadline");
+            match source.poll_events(Duration::from_millis(50)) {
+                Ok(SourceEvent::Idle) => continue,
+                Err(e) if e.to_string().contains("consumer poll") => continue,
+                other => return other,
+            }
+        }
+    }
+
     mod rebalance_error {
         use super::*;
-        use crate::context::Intent;
-        use rdkafka::error::RDKafkaErrorCode;
-        use spate_core::checkpoint::Checkpointer;
-
-        /// An opened source against an unreachable broker (open never
-        /// contacts one), with `lanes` pre-seeded into the assignment map.
-        fn opened_source(lanes: &[(u32, i32)]) -> KafkaSource {
-            let mut cfg = test_config();
-            cfg.brokers = "127.0.0.1:1".into();
-            let mut source = KafkaSource::new(cfg);
-            let cp = Checkpointer::new();
-            source.open(SourceCtx::new(cp.handle())).expect("open");
-            source.saw_first_assignment = true;
-            for &(lane, part) in lanes {
-                source.assignment.insert(LaneId(lane), part);
-            }
-            source
-        }
-
-        fn push_error(source: &KafkaSource, code: RDKafkaErrorCode) {
-            source
-                .consumer
-                .as_ref()
-                .expect("opened")
-                .context()
-                .intents
-                .lock()
-                .expect("intent lock")
-                .push_back(Intent::Error(code));
-        }
-
-        /// Drive `poll_events` past transient transport noise (the broker is
-        /// unreachable) until it yields something other than `Idle` or a
-        /// `consumer poll` error.
-        fn next_outcome(source: &mut KafkaSource) -> Result<SourceEvent<KafkaLane>, SourceError> {
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                assert!(Instant::now() < deadline, "no outcome within deadline");
-                match source.poll_events(Duration::from_millis(50)) {
-                    Ok(SourceEvent::Idle) => continue,
-                    Err(e) if e.to_string().contains("consumer poll") => continue,
-                    other => return other,
-                }
-            }
-        }
 
         /// A rebalance error with live lanes surfaces their revocation
         /// first, so the runtime drains them, and reports the classified
@@ -883,6 +959,165 @@ mod tests {
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
             }
+        }
+    }
+
+    mod assignment_deadline {
+        use super::*;
+
+        /// Drive `poll_events` until the deadline is armed; returns its
+        /// cause. Every caller runs with the default `assignment_timeout`,
+        /// so no discarded result here can be the deadline error.
+        fn poll_until_armed(source: &mut KafkaSource) -> String {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(loss) = &source.assignment_loss {
+                    return loss.cause.clone();
+                }
+                assert!(Instant::now() < deadline, "the deadline was never armed");
+                let _ = source.poll_events(Duration::from_millis(50));
+            }
+        }
+
+        /// Drive `poll_events` until the deadline is cleared. Same
+        /// `assignment_timeout` note as [`poll_until_armed`].
+        fn poll_until_cleared(source: &mut KafkaSource) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while source.assignment_loss.is_some() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the assignment never cleared the deadline"
+                );
+                let _ = source.poll_events(Duration::from_millis(50));
+            }
+        }
+
+        /// Past the deadline the member reports a fatal error, naming the
+        /// group, the last rebalance event and how long it has held nothing.
+        #[test]
+        fn an_expired_deadline_is_fatal_and_names_the_group() {
+            let mut cfg = test_config();
+            cfg.assignment_timeout = Duration::from_secs(300);
+
+            let error = assignment_deadline_error(
+                &cfg,
+                Duration::from_secs(301),
+                "rebalance error: Broker: Not coordinator",
+            )
+            .expect("the deadline has passed");
+
+            match error {
+                SourceError::Client { class, reason } => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(
+                        reason.contains("no partition assignment for 301s"),
+                        "{reason}"
+                    );
+                    assert!(
+                        reason.contains("rebalance error: Broker: Not coordinator"),
+                        "names the last rebalance event: {reason}"
+                    );
+                    assert!(
+                        reason.contains(r#"group "test""#),
+                        "names the group: {reason}"
+                    );
+                }
+                other => panic!("expected a client error, got {other:?}"),
+            }
+        }
+
+        /// A member inside the deadline keeps running, and the deadline
+        /// itself is exclusive: waiting exactly `assignment_timeout` is
+        /// still inside it.
+        #[test]
+        fn a_member_inside_the_deadline_keeps_running() {
+            let mut cfg = test_config();
+            cfg.assignment_timeout = Duration::from_secs(300);
+
+            assert!(
+                assignment_deadline_error(&cfg, Duration::from_secs(299), "a revocation").is_none()
+            );
+            assert!(
+                assignment_deadline_error(&cfg, Duration::from_secs(300), "a revocation").is_none(),
+                "the deadline is exclusive"
+            );
+        }
+
+        /// A zero `assignment_timeout` disables the deadline, however long
+        /// the member has held nothing.
+        #[test]
+        fn a_zero_timeout_disables_the_deadline() {
+            let mut cfg = test_config();
+            cfg.assignment_timeout = Duration::ZERO;
+
+            assert!(
+                assignment_deadline_error(&cfg, Duration::from_secs(86_400), "a revocation")
+                    .is_none()
+            );
+        }
+
+        /// `poll_events` reports the deadline error itself, ahead of the
+        /// consumer poll: with brokers it cannot reach, every poll below
+        /// returns a transport error and returns early, so a deadline
+        /// checked after it would never fire on the member that needs it.
+        #[test]
+        fn poll_events_reports_an_expired_deadline() {
+            let mut cfg = test_config();
+            cfg.assignment_timeout = Duration::from_millis(1);
+            let mut source = opened_source_with(cfg, &[]);
+            source.note_assignment_loss("a revocation".to_owned());
+
+            match next_outcome(&mut source) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("no partition assignment for"), "{reason}");
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// The revocation that releases a member's last partitions arms the
+        /// deadline, once `unassign` completes it on the following call.
+        /// This is the path every eager rebalance takes.
+        #[test]
+        fn a_revocation_arms_the_deadline() {
+            let mut source = opened_source(&[(0, 0)]);
+            push_intent(&source, Intent::Revoke(source.tpl_for([0])));
+
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
+                    assert_eq!(lanes, vec![LaneId(0)]);
+                    barrier.arrive(); // the driver drained
+                }
+                other => panic!("expected LanesRevoked, got {other:?}"),
+            }
+
+            assert_eq!(poll_until_armed(&mut source), "a revocation");
+        }
+
+        /// An assignment clears the deadline even when it is empty. A group
+        /// with more members than partitions hands some member nothing, and
+        /// that member keeps running: it is in the group, and the next
+        /// rebalance can give it partitions.
+        #[test]
+        fn an_accepted_empty_assignment_clears_the_deadline() {
+            let mut source = opened_source(&[]);
+            push_error(&source, RDKafkaErrorCode::RebalanceInProgress);
+
+            match next_outcome(&mut source) {
+                Err(SourceError::Client { reason, .. }) => {
+                    assert!(reason.contains("rebalance error"), "{reason}");
+                }
+                other => panic!("expected the classified error, got {other:?}"),
+            }
+            let cause = poll_until_armed(&mut source);
+            assert!(
+                cause.starts_with("rebalance error:"),
+                "the error arms the deadline and names itself: {cause}"
+            );
+
+            push_intent(&source, Intent::Assign(TopicPartitionList::new()));
+            poll_until_cleared(&mut source);
         }
     }
 

@@ -284,12 +284,13 @@ jobs:
           </html>
           EOF
 
+      # The script filters the first-party crates and generates
+      # THIRD-PARTY.md the same way, so the page and the inventory agree.
       - name: Build third-party license texts
         run: |
           rm -rf website/static/licenses
           mkdir -p website/static/licenses
-          cargo about generate --workspace --all-features --locked --fail \
-            -o website/static/licenses/index.html about/html.hbs
+          ./scripts/attribution.sh --html website/static/licenses/index.html
 
       - name: Install dependencies
         working-directory: website

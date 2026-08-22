@@ -104,6 +104,8 @@ jobs:
       id-token: write
       # `gh workflow run` for the docs deploy at the end.
       actions: write
+      # The provenance attestation on the packaged crates.
+      attestations: write
     environment:
       name: crates-io
       url: https://crates.io/crates/spate
@@ -115,12 +117,22 @@ jobs:
       # No shared-key: a release job restores nothing a pull request can
       # write. The verify build runs before the token exists.
       - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-cyclonedx@0.5.9
 
       - name: Prepare
         id: prepare
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: ./scripts/release.sh prepare
+
+      # Covers target/package/*.crate exactly as `prepare` packaged them;
+      # `finish` requires the registry's cksum to equal these files' sha256.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
+        if: steps.prepare.outputs.pending != '0'
+        with:
+          subject-path: target/package/*.crate
 
       # Minted after all packaging work: the exchanged token lives 30
       # minutes, fixed, and everything before this point needs none.
@@ -151,4 +163,5 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DISPATCH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: ./scripts/release.sh finish

@@ -72,14 +72,17 @@ so a re-run excludes what already landed; any crate already at the version
 must have been published from this commit, read back from `trustpub_data`;
 the metadata the dry run cannot check (`description`, `license`) is checked
 explicitly; every pending crate is packaged and verify-built with no
-credential in the job; only then is the 30-minute Trusted Publishing token
-minted and the upload run with `--no-verify`, so none of the token's fixed
-budget is spent compiling. After the upload, `trustpub_data` is read back for
-all ten crates and must name the release commit; a scratch project resolves
-`spate` at the exact version from the registry; the commit is tagged; the
-GitHub release opens with the changelog section; and the docs deploy is
-dispatched, after the crates are live so the install snippets are true the
-moment the site serves them.
+credential in the job; the packaged `.crate` files are attested
+(`actions/attest-build-provenance`); only then is the 30-minute Trusted
+Publishing token minted and the upload run with `--no-verify`, so none of the
+token's fixed budget is spent compiling. After the upload, `trustpub_data` is
+read back for all ten crates and must name the release commit; each packaged
+crate's sha256 must equal the index's `cksum`, so the attestation provably
+covers the bytes the registry serves; a scratch project resolves `spate` at
+the exact version from the registry; the commit is tagged; the GitHub release
+opens with the changelog section, the per-crate SBOMs and the provenance
+bundle as assets; and the docs deploy is dispatched, after the crates are
+live so the install snippets are true the moment the site serves them.
 
 ## Rehearse it first
 
@@ -89,11 +92,12 @@ make release-dry-run VERSION=0.3.0
 
 This runs the same `assemble` and the credential-free half of the publish in
 a throwaway git worktree: the real release commit, built for diffing, and
-every pending crate packaged and verify-built. It stops where the registry
-token would be minted and prints what a real run would do next. It needs
-`gh` authenticated, `jq`, and `cargo-about` at exactly 0.9.1; the preflight
-names anything missing. The worktree is kept for inspection and the run
-prints the command that removes it.
+every pending crate packaged and verify-built, and the SBOMs generated. It
+stops where the registry token would be minted and prints what a real run
+would do next. It needs `gh` authenticated, `jq`, `cargo-about` at exactly
+0.9.1 and `cargo-cyclonedx` at 0.5.9; the preflight names anything missing.
+The worktree is kept for inspection and the run prints the command that
+removes it.
 
 Read a green dry run as "this assembles and packages". It cannot prove the
 registry's acceptance rules (a verified email address, the rate limits), the
@@ -131,6 +135,33 @@ gh release view vX.Y.Z
 The site serves the new install snippets once the dispatched deploy
 finishes. docs.rs builds asynchronously and lags the publish; check it later
 rather than waiting on it.
+
+## Provenance and the SBOM
+
+crates.io records and displays its own provenance for every Trusted
+Publishing upload: the repository, workflow and run, in `trustpub_data`. The
+release attaches two more artifacts on top of that. A SLSA provenance bundle
+covers the packaged `.crate` files and verifies offline:
+
+```sh
+gh attestation verify spate-0.3.0.crate --repo spate-etl/spate
+```
+
+And one CycloneDX SBOM per crate, generated from the release commit's
+`Cargo.lock` by `cargo-cyclonedx` (0.5.9, spec 1.5), describes exactly the
+tree that was published, which is what a supply-chain review asks for. Both
+land among the release assets, where OpenSSF Scorecard's Signed-Releases
+check looks.
+
+The attestation only means something because the release is one commit and
+the cksum check ties the attested bytes to what the registry serves. The
+sha256 in the sparse index is the served `.crate`'s checksum, and the publish
+fails if it differs from the file the attestation covers.
+
+One operational trap: `actions/attest-build-provenance`, and anything it
+calls internally, has to be on the organisation's Actions allowlist. A
+refused action does not fail the job; the run never starts and reports
+`startup_failure` with nothing naming the action.
 
 ## When it breaks
 

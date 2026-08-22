@@ -29,10 +29,12 @@ attribution. Build-dependencies are included, since a build script can
 contribute generated code to the shipped artifact, as can a proc-macro, so
 compile-time-only crates are listed.
 
-Spate's **own** crates (`spate`, `spate-core`, …) appear in the table too, each
-under Apache-2.0. `cargo-about` only omits workspace members that are
-unpublished. Every crate you receive from this project carries the same terms as
-the repository.
+Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
+first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
+`scripts/attribution.sh` filters them out of what `cargo-about` emits, which
+includes every publishable workspace member. With them gone, this file changes
+only when a real dependency changes, which is what the nightly drift check
+exists to detect.
 
 
 ## Summary

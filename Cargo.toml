@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -26,16 +26,16 @@ keywords = ["etl", "pipeline", "streaming", "kafka", "clickhouse"]
 categories = ["asynchronous", "data-structures"]
 
 [workspace.dependencies]
-spate-core = { version = "=0.1.0", path = "crates/spate-core" }
-spate-avro = { version = "=0.1.0", path = "crates/spate-avro" }
-spate-json = { version = "=0.1.0", path = "crates/spate-json" }
-spate-kafka = { version = "=0.1.0", path = "crates/spate-kafka" }
-spate-clickhouse = { version = "=0.1.0", path = "crates/spate-clickhouse" }
+spate-core = { version = "=0.2.0", path = "crates/spate-core" }
+spate-avro = { version = "=0.2.0", path = "crates/spate-avro" }
+spate-json = { version = "=0.2.0", path = "crates/spate-json" }
+spate-kafka = { version = "=0.2.0", path = "crates/spate-kafka" }
+spate-clickhouse = { version = "=0.2.0", path = "crates/spate-clickhouse" }
 # Defaults off keeps async-nats out of a memory-only embedding.
-spate-coordination = { version = "=0.1.0", path = "crates/spate-coordination", default-features = false }
-spate-datagen = { version = "=0.1.0", path = "crates/spate-datagen" }
-spate-s3 = { version = "=0.1.0", path = "crates/spate-s3" }
-spate-test = { version = "=0.1.0", path = "crates/spate-test" }
+spate-coordination = { version = "=0.2.0", path = "crates/spate-coordination", default-features = false }
+spate-datagen = { version = "=0.2.0", path = "crates/spate-datagen" }
+spate-s3 = { version = "=0.2.0", path = "crates/spate-s3" }
+spate-test = { version = "=0.2.0", path = "crates/spate-test" }
 # Versionless: cargo strips a versionless path dev-dependency at package time,
 # letting a published crate dev-depend on this unpublished harness.
 spate-bench = { path = "bench" }

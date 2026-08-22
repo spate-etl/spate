@@ -77,7 +77,7 @@ and health probes ship on the admin server.
 
 ```toml
 [dependencies]
-spate = { version = "0.1", features = ["kafka", "clickhouse", "avro"] }
+spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }
 ```
 
 Nothing is enabled by default. A pipeline that only writes to ClickHouse never

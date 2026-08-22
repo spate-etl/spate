@@ -29,10 +29,12 @@ attribution. Build-dependencies are included, since a build script can
 contribute generated code to the shipped artifact, as can a proc-macro, so
 compile-time-only crates are listed.
 
-Spate's **own** crates (`spate`, `spate-core`, …) appear in the table too, each
-under Apache-2.0. `cargo-about` only omits workspace members that are
-unpublished. Every crate you receive from this project carries the same terms as
-the repository.
+Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
+first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
+`scripts/attribution.sh` filters them out of what `cargo-about` emits, which
+includes every publishable workspace member. With them gone, this file changes
+only when a real dependency changes, which is what the nightly drift check
+exists to detect.
 
 
 ## Summary
@@ -40,8 +42,8 @@ the repository.
 | License | Crates |
 |---|---|
 | `MIT` | 308 |
-| `Apache-2.0` | 23 |
 | `Unicode-3.0` | 19 |
+| `Apache-2.0` | 13 |
 | `ISC` | 6 |
 | `BSD-3-Clause` | 5 |
 | `CDLA-Permissive-2.0` | 2 |
@@ -76,16 +78,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `ring` | 0.17.14 | `Apache-2.0` |
 | `ryu` | 1.0.23 | `Apache-2.0` |
 | `sketches-ddsketch` | 0.3.1 | `Apache-2.0` |
-| `spate` | 0.2.0 | `Apache-2.0` |
-| `spate-avro` | 0.2.0 | `Apache-2.0` |
-| `spate-clickhouse` | 0.2.0 | `Apache-2.0` |
-| `spate-coordination` | 0.2.0 | `Apache-2.0` |
-| `spate-core` | 0.2.0 | `Apache-2.0` |
-| `spate-datagen` | 0.2.0 | `Apache-2.0` |
-| `spate-json` | 0.2.0 | `Apache-2.0` |
-| `spate-kafka` | 0.2.0 | `Apache-2.0` |
-| `spate-s3` | 0.2.0 | `Apache-2.0` |
-| `spate-test` | 0.2.0 | `Apache-2.0` |
 | `sync_wrapper` | 1.0.2 | `Apache-2.0` |
 | `aws-lc-sys` | 0.42.0 | `BSD-3-Clause` |
 | `bindgen` | 0.72.1 | `BSD-3-Clause` |

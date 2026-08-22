@@ -9,7 +9,7 @@ Prometheus metrics.
 
 ```toml
 [dependencies]
-spate = { version = "0.1", features = ["full"] }
+spate = { version = "0.2", features = ["full"] }
 ```
 
 This crate re-exports the engine and every connector behind a feature flag, so

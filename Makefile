@@ -15,6 +15,7 @@
         check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
+        check-release-version \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -175,11 +176,14 @@ check-changelog: ## A user-visible change carries a changelog fragment
 changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-description
 	./scripts/changelog.sh --new "$(TYPE)" "$(SLUG)"
 
+check-release-version: ## Every literal version is one the release rewrites
+	./scripts/release-version.sh --check
+
 # Accept an examples-index change (the `test` target checks it):
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-release-version ## Every repository-metadata check
 
 ##@ Docs
 

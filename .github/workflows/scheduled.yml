@@ -11,10 +11,13 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: Which tier to run.
+        description: >-
+          Which tier to run. `docs` builds and deploys the site alone; the
+          release dispatches it after a publish so the install snippets go
+          live without dragging the whole nightly tier along.
         type: choice
         default: nightly
-        options: [nightly, weekly, both]
+        options: [nightly, weekly, both, docs]
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,6 +42,7 @@ jobs:
     outputs:
       nightly: ${{ steps.select.outputs.nightly }}
       weekly: ${{ steps.select.outputs.weekly }}
+      docs: ${{ steps.select.outputs.docs }}
     steps:
       - id: select
         env:
@@ -47,6 +51,7 @@ jobs:
         run: |
           nightly=false
           weekly=false
+          docs=false
           case "${SCHEDULE:-}" in
             "17 3 * * *") nightly=true ;;
             "43 4 * * 1") weekly=true ;;
@@ -55,16 +60,17 @@ jobs:
             nightly) nightly=true ;;
             weekly)  weekly=true ;;
             both)    nightly=true; weekly=true ;;
+            docs)    docs=true ;;
           esac
           # These cron strings are duplicated from `on: schedule:`. Editing one
           # copy and not the other selects no tier: every job skips and the run
           # reports green.
-          if [ "$nightly" = false ] && [ "$weekly" = false ]; then
+          if [ "$nightly" = false ] && [ "$weekly" = false ] && [ "$docs" = false ]; then
             echo "::error::No tier selected (schedule='${SCHEDULE:-}', tier='${TIER:-}')."
             echo "::error::The cron strings here must match the ones in 'on: schedule:'."
             exit 1
           fi
-          { echo "nightly=$nightly"; echo "weekly=$weekly"; } | tee -a "$GITHUB_OUTPUT"
+          { echo "nightly=$nightly"; echo "weekly=$weekly"; echo "docs=$docs"; } | tee -a "$GITHUB_OUTPUT"
 
   # ===========================================================================
   # NIGHTLY
@@ -411,7 +417,7 @@ jobs:
     name: Build site for deploy
     runs-on: ubuntu-latest
     needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true'
     timeout-minutes: 30
     # The full build, with rustdoc and every dependency's license text on top.
     # This produces what ships.
@@ -507,7 +513,9 @@ jobs:
     name: Deploy to Cloudflare Pages
     runs-on: ubuntu-latest
     needs: [plan, docs-build]
-    if: needs.plan.outputs.nightly == 'true' && github.ref == 'refs/heads/main'
+    if: >-
+      (needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true') &&
+      github.ref == 'refs/heads/main'
     timeout-minutes: 20
     permissions:
       contents: read

@@ -473,6 +473,112 @@ fn empty_assignment_completes_rebalance_protocol() {
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
 
+/// Regression: a member the group assigns nothing keeps running, past
+/// `assignment_timeout` and for as long as the group holds that shape.
+/// Two same-group members share a single partition, so one settles empty.
+///
+/// The deadline counts from losing partitions, and any accepted
+/// assignment clears it, an empty one included. A deadline that counted
+/// "this member owns no partitions" would fail this member every
+/// `assignment_timeout` and restart it into the same state, for as long as
+/// the deployment ran more members than partitions. The arm-then-clear
+/// ordering is pinned by the unit tests; the member here may join straight
+/// into its empty assignment and never have owned anything at all.
+///
+/// `DEADLINE` sits above the mock broker's rebalance pacing
+/// (`session.timeout.ms - 1000`, so 5s with the 6000 this file's `config`
+/// sets), since the gap between a revoke and the assignment that follows it
+/// is time the member legitimately holds nothing.
+#[test]
+fn an_empty_member_survives_the_assignment_deadline() {
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let member = |group: &str| {
+        let mut cfg = config(&brokers, group);
+        cfg.assignment_timeout = DEADLINE;
+        KafkaSource::new(cfg)
+    };
+    let mut cp_a = Checkpointer::new();
+    let mut cp_b = Checkpointer::new();
+    let mut a = member("empty-deadline");
+    let mut b = member("empty-deadline");
+    a.open(SourceCtx::new(cp_a.handle())).expect("open a");
+    b.open(SourceCtx::new(cp_b.handle())).expect("open b");
+
+    let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
+    let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
+    let (mut a_ep, mut b_ep) = (0u32, 0u32);
+    let (mut a_count, mut b_count) = (0usize, 0usize);
+
+    // Settle the group with one owner and one empty member, on the
+    // conditions `empty_assignment_completes_rebalance_protocol` documents.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut quiet = 0;
+    while !(quiet >= 25 && a_count + b_count == 1) {
+        assert!(
+            Instant::now() < deadline,
+            "the group never settled: quiet={quiet}, a={a_count}, b={b_count} \
+             (want one owner, one empty member, stable for 25 ticks)"
+        );
+        let sa = drive_step(
+            &mut a,
+            &mut a_lanes,
+            &mut cp_a,
+            &mut a_ep,
+            Duration::from_millis(100),
+        );
+        let sb = drive_step(
+            &mut b,
+            &mut b_lanes,
+            &mut cp_b,
+            &mut b_ep,
+            Duration::from_millis(100),
+        );
+        if let Some(n) = sa {
+            a_count = n;
+        }
+        if let Some(n) = sb {
+            b_count = n;
+        }
+        if sa.is_none() && sb.is_none() {
+            quiet += 1;
+        } else {
+            quiet = 0;
+        }
+    }
+
+    // Drive both past the deadline, keeping the owner in the group so the
+    // empty member stays empty, and hold the empty one to `Ok`.
+    let (mut empty, mut owner, mut owner_lanes, mut owner_cp, mut owner_ep) = if a_count == 0 {
+        (a, b, b_lanes, cp_b, b_ep)
+    } else {
+        (b, a, a_lanes, cp_a, a_ep)
+    };
+    let until = Instant::now() + DEADLINE + Duration::from_secs(2);
+    while Instant::now() < until {
+        drive_step(
+            &mut owner,
+            &mut owner_lanes,
+            &mut owner_cp,
+            &mut owner_ep,
+            Duration::from_millis(50),
+        );
+        match empty.poll_events(Duration::from_millis(50)) {
+            Ok(SourceEvent::LanesAssigned(lanes)) => panic!(
+                "the empty member took {} partitions, so the group moved and \
+                 the deadline was never exercised",
+                lanes.len()
+            ),
+            Ok(_) => {}
+            Err(e) => panic!("an empty member must keep running: {e}"),
+        }
+    }
+}
+
 #[test]
 fn statistics_populate_kafka_source_metrics() {
     let cluster = MockCluster::new(1).expect("mock cluster");

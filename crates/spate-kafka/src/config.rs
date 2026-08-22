@@ -77,6 +77,10 @@ fn default_startup_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
+fn default_assignment_timeout() -> Duration {
+    Duration::from_mins(5)
+}
+
 fn default_statistics_interval() -> Duration {
     Duration::from_secs(5)
 }
@@ -107,6 +111,12 @@ pub struct KafkaSourceConfig {
     /// source reports a fatal startup error.
     #[serde(with = "humantime_serde", default = "default_startup_timeout")]
     pub startup_timeout: Duration,
+    /// How long the source may run with no assignment, after having one,
+    /// before it reports a fatal error. Measured from the moment ownership is
+    /// released, cleared by the next accepted assignment, including an empty
+    /// one. Zero disables the deadline.
+    #[serde(with = "humantime_serde", default = "default_assignment_timeout")]
+    pub assignment_timeout: Duration,
     /// librdkafka statistics emission interval, feeding the lag metrics and
     /// the connector's `spate_kafka_source_*` families (broker health,
     /// latency, queue saturation, group stability). Zero disables statistics
@@ -154,6 +164,7 @@ impl KafkaSourceConfig {
             group_id: group_id.into(),
             commit_interval: default_commit_interval(),
             startup_timeout: default_startup_timeout(),
+            assignment_timeout: default_assignment_timeout(),
             statistics_interval: default_statistics_interval(),
             rdkafka: BTreeMap::new(),
         }
@@ -267,6 +278,7 @@ mod tests {
         let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
         assert_eq!(cfg.commit_interval, Duration::from_secs(5));
         assert_eq!(cfg.startup_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.assignment_timeout, Duration::from_mins(5));
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
         assert!(cfg.rdkafka.is_empty());
     }

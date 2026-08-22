@@ -1,8 +1,9 @@
 name: Release
 
-# `release-pr` keeps a version-bump pull request open; `release` publishes and
-# tags once the tree is ahead of the registry, which holds after that pull
-# request merges. `release_always = false` is what makes the other no-ops safe.
+# `release-pr` keeps a version-bump pull request open, through release-plz.
+# `release` publishes, tags and opens the GitHub release, through cargo. The two
+# are independent: `release` reads the registry to decide what is missing and
+# needs nothing from the job above it.
 on:
   push:
     branches: [main]
@@ -63,19 +64,20 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # `release_always = false` already stops the publish; this stops the *run*.
-    # Without it every merge mints an unused App token and writes a `crates-io`
-    # deployment record. The subject is matched rather than the tag, since this
-    # job creates the tag; `pr_name` in release-plz.toml pins the other side.
+    # The only gate on the publish. Without it every merge mints an unused App
+    # token and writes a `crates-io` deployment record. The subject is matched
+    # rather than the tag, since this job creates the tag; `pr_name` in
+    # release-plz.toml pins the other side.
     if: >-
       vars.RELEASE_APP_ID != '' &&
       (github.event_name == 'workflow_dispatch' ||
        startsWith(github.event.head_commit.message, 'chore: release v'))
     permissions:
       contents: read
-      # Trusted Publishing: release-plz exchanges this for a short-lived registry
-      # token, so no CARGO_REGISTRY_TOKEN exists in this repository and crates.io
-      # refuses token-authenticated publishes for these crates.
+      # Trusted Publishing: crates-io-auth-action exchanges this for a
+      # short-lived registry token, so no CARGO_REGISTRY_TOKEN exists in this
+      # repository and crates.io refuses token-authenticated publishes for
+      # these crates.
       id-token: write
     environment:
       name: crates-io
@@ -99,8 +101,91 @@ jobs:
         with:
           shared-key: release
 
-      - uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
-        with:
-          command: release
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+
+      # Any crate already on the registry at this version is excluded, so a run
+      # that failed part way can be repeated without publishing anything twice.
+      # A published version can never be replaced and `cargo publish` has no
+      # "already there" flag, so `--exclude` is the only lever and the set is
+      # computed rather than written down.
+      - name: Select the crates still to publish
+        id: select
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          UA: spate-release (github.com/spate-etl/spate)
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "spate") | .version')
+          [ -n "$version" ] || { echo "::error::no version for the spate package"; exit 1; }
+
+          excludes=""
+          pending=0
+          for crate in $(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name'); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -H "User-Agent: $UA" \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            case "$code" in
+            200)
+              echo "already published, excluding: $crate $version"
+              excludes="$excludes --exclude $crate"
+              ;;
+            404)
+              echo "to publish: $crate $version"
+              pending=$((pending + 1))
+              ;;
+            *)
+              echo "::error::crates.io answered $code for $crate $version."
+              echo "::error::Refusing to publish against a registry it cannot read."
+              exit 1
+              ;;
+            esac
+          done
+
+          {
+            echo "version=$version"
+            echo "excludes=$excludes"
+            echo "pending=$pending"
+          } >> "$GITHUB_OUTPUT"
+
+      # Packaging and compiling every crate before anything uploads. Without
+      # this a packaging failure leaves the crates before it already published,
+      # which is the one failure that cannot be undone.
+      - name: Dry run
+        if: steps.select.outputs.pending != '0'
+        env:
+          EXCLUDES: ${{ steps.select.outputs.excludes }}
+        run: |
+          read -ra excludes <<<"$EXCLUDES"
+          cargo publish --workspace --locked --dry-run "${excludes[@]}"
+
+      - name: Publish
+        if: steps.select.outputs.pending != '0'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          EXCLUDES: ${{ steps.select.outputs.excludes }}
+        run: |
+          read -ra excludes <<<"$EXCLUDES"
+          cargo publish --workspace --locked "${excludes[@]}"
+
+      # After the publish, so the tag names what the registry actually holds. A
+      # tag pushed first would name a release that then failed to upload.
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.select.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "v${VERSION} is already tagged; leaving it alone."
+            exit 0
+          fi
+          git config user.name 'spate-release[bot]'
+          git config user.email 'spate-release[bot]@users.noreply.github.com'
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/v${VERSION}"
+          cat > /tmp/release-notes.md <<'NOTES'
+          [CHANGELOG.md](https://github.com/spate-etl/spate/blob/main/CHANGELOG.md) has what changed and why.
+
+          All crates release together at this version.
+          NOTES
+          gh release create "v${VERSION}" --title "v${VERSION}" --notes-file /tmp/release-notes.md

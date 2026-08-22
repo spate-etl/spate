@@ -617,13 +617,22 @@ fragment_reference() {
 
     # Merged pull requests only, and the first of them. A commit can also be
     # associated with one that never landed.
+    #
+    # The answer is used only when it is a number: on an HTTP error `gh api`
+    # prints the response body to stdout, so `|| true` alone would splice a
+    # JSON error object into the assembled changelog as the reference. A
+    # commit the API cannot resolve (assembled locally, never pushed) links
+    # to itself below.
     if command -v gh >/dev/null 2>&1; then
         pr=$(gh api "repos/${repo_url#https://github.com/}/commits/$sha/pulls" \
             --jq 'map(select(.merged_at)) | first | .number // empty' 2>/dev/null || true)
-        if [ -n "$pr" ]; then
+        case "$pr" in
+        '' | *[!0-9]*) ;;
+        *)
             printf 'pr %s\n' "$pr"
             return 0
-        fi
+            ;;
+        esac
     fi
 
     printf 'commit %s\n' "$sha"

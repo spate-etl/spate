@@ -1,11 +1,11 @@
 # cargo-about: generates the dependency attribution artifacts.
 #
-#   ./scripts/attribution.sh                  # THIRD-PARTY.md
-#   cargo about generate --workspace --all-features --locked --fail \
-#     -o website/static/licenses/index.html about/html.hbs   # docs site
+#   ./scripts/attribution.sh                              # THIRD-PARTY.md
+#   ./scripts/attribution.sh --html <output-file>         # docs site
 #
-# Generate the committed inventory through the script; it canonicalises the row
-# order cargo-about leaves machine-dependent.
+# Both artifacts go through the script: it canonicalises the row order
+# cargo-about leaves machine-dependent, and it filters the first-party crates,
+# which `private = { ignore }` below cannot reach because they are published.
 
 # Priority-ordered, where deny.toml's `allow` is a set: for a dual-licensed
 # `MIT OR Apache-2.0` crate the first satisfiable entry is the one we comply

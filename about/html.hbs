@@ -56,16 +56,17 @@
   This is the <strong>union across every optional feature</strong>. A default
   build links a strict subset; the extra crates come from opt-in features such as
   <code>kafka-tls</code>, <code>coordination-nats</code> and <code>json-simd</code>.
-  Dev-dependencies are excluded; they are never distributed. Spate's own
-  crates appear alongside the third-party ones, each under Apache-2.0. A compact,
-  text-free inventory lives in <code>THIRD-PARTY.md</code> in the repository.
+  Dev-dependencies are excluded; they are never distributed. Spate's own crates
+  are not listed either: they are first-party, Apache-2.0, covered by the
+  repository's LICENSE. A compact, text-free inventory lives in
+  <code>THIRD-PARTY.md</code> in the repository.
 </p>
 
 <div class="toc">
   <strong>Licenses in this build</strong>
   <ul>
   {{#each overview}}
-    <li>{{name}} <code>({{id}})</code> — {{count}} crate(s)</li>
+    <li data-license-id="{{id}}">{{name}} <code>({{id}})</code> — {{count}} crates</li>
   {{/each}}
   </ul>
 </div>
@@ -77,12 +78,17 @@
   require.
 </p>
 
+{{! One sentinel pair per section and one chip line per crate: the anchors
+    scripts/attribution.sh needs to drop first-party chips and any section
+    they empty. `text` is HTML-escaped, so a license text cannot fake either. }}
 {{#each licenses}}
+<!-- BEGIN-LICENSE {{id}} -->
 <h2 id="lic-{{@index}}">
-  {{#each used_by}}<code>{{crate.name}} {{crate.version}}</code>{{/each}}
-  — {{name}} <code>({{id}})</code>
+{{#each used_by}}  <code data-crate="{{crate.name}}">{{crate.name}} {{crate.version}}</code>
+{{/each}}  — {{name}} <code>({{id}})</code>
 </h2>
 <pre>{{text}}</pre>
+<!-- END-LICENSE -->
 {{/each}}
 </main>
 </body>

@@ -114,6 +114,8 @@ jobs:
 
       - run: make check-transclusions
 
+      - run: make check-release-version
+
   deny:
     name: Licenses and advisories
     runs-on: ubuntu-latest

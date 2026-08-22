@@ -233,6 +233,70 @@ jobs:
               'is a promise to consumers, and a green run is what makes it true.'
           )"
 
+  publish-dry-run:
+    name: Publish dry run
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    # The backstop for the manifest-selected gate in ci.yml: a packaging
+    # break can arrive with nothing in this repository changing (a yank, a
+    # toolchain release).
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: publish
+
+      - name: Bump to the next patch and commit it locally
+        id: bump
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          next="${version%.*}.$(( ${version##*.} + 1 ))"
+          ./scripts/release-version.sh --bump "$next"
+          git config user.name 'spate-release[bot]'
+          git config user.email 'spate-release[bot]@users.noreply.github.com'
+          git commit --all --quiet --message "chore: simulate the release bump to $next"
+
+      - id: dry-run
+        run: cargo publish --workspace --locked --dry-run
+
+      # Gated on the two real steps, not `failure()`: a checkout failure would
+      # file an issue asserting the workspace no longer packages.
+      - name: Report the failure as an issue
+        if: failure() && (steps.bump.conclusion == 'failure' || steps.dry-run.conclusion == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='The workspace no longer packages'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          # Single quotes: the body's backticks must reach GitHub rather than
+          # run as command substitutions.
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              '`cargo publish --workspace --locked --dry-run` failed on the nightly' \
+              'run, at a simulated next-patch version.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'A release cannot upload until this is green, and a failure that' \
+              'first appears on release day has already published whatever came' \
+              'before it in the order. Fix it before cutting one.'
+          )"
+
   docs-build:
     name: Build site for deploy
     runs-on: ubuntu-latest

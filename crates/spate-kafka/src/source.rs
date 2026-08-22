@@ -66,10 +66,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The moment the member lost its last partitions, and what took them.
-struct AssignmentLoss {
-    at: Instant,
-    cause: String,
+/// Since when the member has been without an assignment, and what took the
+/// last one. `cause` is `None` before the first assignment, the window
+/// `startup_timeout` governs; after it, `assignment_timeout` does.
+struct AssignmentWait {
+    since: Instant,
+    cause: Option<String>,
 }
 
 /// Kafka source: one consumer-group member per process, partitions split
@@ -97,7 +99,6 @@ pub struct KafkaSource {
     /// when `unassign` completes the revocation.
     revoking: HashMap<LaneId, i32>,
     next_lane: u32,
-    opened_at: Option<Instant>,
     saw_first_assignment: bool,
     /// A revocation was surfaced; `unassign` completes it on the next
     /// `poll_events` call (after the runtime finished drain + commit).
@@ -107,10 +108,10 @@ pub struct KafkaSource {
     /// finished draining the revoked lanes. The callback already released
     /// ownership with `unassign`, so no completion step remains.
     pending_error: Option<rdkafka::error::RDKafkaErrorCode>,
-    /// Set while the member holds no partitions after having held some.
-    /// `assignment_timeout` is measured from `at`; an accepted assignment,
-    /// empty or not, clears it.
-    assignment_loss: Option<AssignmentLoss>,
+    /// Set while the member holds no partitions: from `open` until the first
+    /// assignment, and from every later loss of the last one. The deadline is
+    /// measured from `since`; an accepted assignment, empty or not, clears it.
+    assignment_wait: Option<AssignmentWait>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
 }
@@ -138,11 +139,10 @@ impl KafkaSource {
             assignment: HashMap::new(),
             revoking: HashMap::new(),
             next_lane: 0,
-            opened_at: None,
             saw_first_assignment: false,
             pending_unassign: false,
             pending_error: None,
-            assignment_loss: None,
+            assignment_wait: None,
             main_queue_rewinds: 0,
         }
     }
@@ -263,7 +263,7 @@ impl KafkaSource {
             .resume(tpl)
             .map_err(fatal("resume new assignment"))?;
         self.saw_first_assignment = true;
-        self.assignment_loss = None;
+        self.assignment_wait = None;
         tracing::info!(
             partitions = lanes.len(),
             topic = %self.config.topic,
@@ -272,16 +272,26 @@ impl KafkaSource {
         Ok(lanes)
     }
 
-    /// Arm the post-assignment deadline, or update its cause if it is
-    /// already armed. The instant is the first loss, so a run of rebalance
-    /// events with no assignment between them does not extend the deadline.
+    /// Record the loss of the member's last partitions, opening the window
+    /// `assignment_timeout` governs, or naming the latest event when that
+    /// window is already open. The instant is the first loss, so a run of
+    /// rebalance events with no assignment between them does not extend the
+    /// deadline.
+    ///
+    /// Before the first assignment the wait already runs from `open` under
+    /// `startup_timeout`, and a loss there leaves it alone: a member that
+    /// has never been assigned anything is starting up, whatever the group
+    /// reports in the meantime.
     fn note_assignment_loss(&mut self, cause: String) {
-        match &mut self.assignment_loss {
-            Some(loss) => loss.cause = cause,
+        if !self.saw_first_assignment {
+            return;
+        }
+        match &mut self.assignment_wait {
+            Some(wait) => wait.cause = Some(cause),
             None => {
-                self.assignment_loss = Some(AssignmentLoss {
-                    at: Instant::now(),
-                    cause,
+                self.assignment_wait = Some(AssignmentWait {
+                    since: Instant::now(),
+                    cause: Some(cause),
                 })
             }
         }
@@ -354,29 +364,47 @@ fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: 
 }
 // ANCHOR_END: lag
 
-/// The fatal error for a member that has held no partitions for `waited`,
-/// after `cause` took its last ones. `None` while the member is still
-/// inside `assignment_timeout`, and whenever that timeout is zero, which
-/// disables the deadline.
+/// The fatal error for a member that has held no partitions for `waited`.
+/// `None` while it is still inside the deadline, and whenever that deadline
+/// is zero, which disables it.
+///
+/// `cause` selects the window. `None` is the member's first assignment,
+/// which `startup_timeout` bounds and whose error names the topic and the
+/// brokers, the two things a pipeline that never joins usually has wrong.
+/// `Some` is a member that had partitions and lost them, which
+/// `assignment_timeout` bounds and whose error names the group and the
+/// event that took them.
 ///
 /// Free function taking the elapsed time rather than a method reading the
-/// clock, so a unit test pins the boundary and the message directly. The
+/// clock, so a unit test pins the boundaries and the messages directly. The
 /// same reason `publish_lag` is one.
 fn assignment_deadline_error(
     config: &KafkaSourceConfig,
     waited: Duration,
-    cause: &str,
+    cause: Option<&str>,
 ) -> Option<SourceError> {
-    if config.assignment_timeout.is_zero() || waited <= config.assignment_timeout {
+    let deadline = match cause {
+        None => config.startup_timeout,
+        Some(_) => config.assignment_timeout,
+    };
+    if deadline.is_zero() || waited <= deadline {
         return None;
     }
-    Some(SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!(
+    let reason = match cause {
+        None => format!(
+            "no partition assignment within {waited:?} \
+             (topic {:?}, brokers {:?})",
+            config.topic, config.brokers
+        ),
+        Some(cause) => format!(
             "no partition assignment for {waited:?} after {cause} \
              (group {:?}, topic {:?})",
             config.group_id, config.topic
         ),
+    };
+    Some(SourceError::Client {
+        class: ErrorClass::Fatal,
+        reason,
     })
 }
 
@@ -446,32 +474,23 @@ impl Source for KafkaSource {
             .map_err(fatal("subscribe"))?;
         self.consumer = Some(Arc::new(consumer));
         self.issuer = Some(ctx.issuer);
-        self.opened_at = Some(Instant::now());
+        // The startup window opens here: no assignment yet, so
+        // `startup_timeout` governs until the first one arrives.
+        self.assignment_wait = Some(AssignmentWait {
+            since: Instant::now(),
+            cause: None,
+        });
         Ok(())
     }
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<KafkaLane>, SourceError> {
-        // Startup deadline first: with unreachable brokers every poll below
-        // surfaces a Retryable transport error and returns early. Checked
-        // last, this deadline would never fire and a misconfigured pipeline
-        // would retry forever instead of failing fast.
-        if !self.saw_first_assignment
-            && let Some(at) = self.opened_at
-            && at.elapsed() > self.config.startup_timeout
-        {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "no partition assignment within {:?} (topic {:?}, brokers {:?})",
-                    self.config.startup_timeout, self.config.topic, self.config.brokers
-                ),
-            });
-        }
-
-        // The post-startup deadline: ownership was released and no assignment
-        // has replaced it.
-        if let Some(loss) = &self.assignment_loss
-            && let Some(e) = assignment_deadline_error(&self.config, loss.at.elapsed(), &loss.cause)
+        // The assignment deadline first: with unreachable brokers every poll
+        // below surfaces a Retryable transport error and returns early.
+        // Checked last, this deadline would never fire and a misconfigured
+        // pipeline would retry forever instead of failing fast.
+        if let Some(wait) = &self.assignment_wait
+            && let Some(e) =
+                assignment_deadline_error(&self.config, wait.since.elapsed(), wait.cause.as_deref())
         {
             return Err(e);
         }
@@ -581,7 +600,7 @@ impl Source for KafkaSource {
                         let consumer = Arc::clone(self.consumer()?);
                         consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
-                        self.assignment_loss = None;
+                        self.assignment_wait = None;
                         self.prune_lag_series();
                         return Ok(SourceEvent::Idle);
                     }
@@ -870,7 +889,10 @@ mod tests {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
+        // A member that has had an assignment: past the startup window, so
+        // `assignment_timeout` governs what follows.
         source.saw_first_assignment = true;
+        source.assignment_wait = None;
         for &(lane, part) in lanes {
             source.assignment.insert(LaneId(lane), part);
         }
@@ -965,14 +987,15 @@ mod tests {
     mod assignment_deadline {
         use super::*;
 
-        /// Drive `poll_events` until the deadline is armed; returns its
-        /// cause. Every caller runs with the default `assignment_timeout`,
-        /// so no discarded result here can be the deadline error.
+        /// Drive `poll_events` until the deadline is armed; returns the
+        /// cause it names. Every caller runs with the default
+        /// `assignment_timeout`, so no discarded result here can be the
+        /// deadline error.
         fn poll_until_armed(source: &mut KafkaSource) -> String {
             let deadline = Instant::now() + Duration::from_secs(20);
             loop {
-                if let Some(loss) = &source.assignment_loss {
-                    return loss.cause.clone();
+                if let Some(wait) = &source.assignment_wait {
+                    return wait.cause.clone().expect("a loss names its cause");
                 }
                 assert!(Instant::now() < deadline, "the deadline was never armed");
                 let _ = source.poll_events(Duration::from_millis(50));
@@ -983,7 +1006,7 @@ mod tests {
         /// `assignment_timeout` note as [`poll_until_armed`].
         fn poll_until_cleared(source: &mut KafkaSource) {
             let deadline = Instant::now() + Duration::from_secs(20);
-            while source.assignment_loss.is_some() {
+            while source.assignment_wait.is_some() {
                 assert!(
                     Instant::now() < deadline,
                     "the assignment never cleared the deadline"
@@ -1002,7 +1025,7 @@ mod tests {
             let error = assignment_deadline_error(
                 &cfg,
                 Duration::from_secs(301),
-                "rebalance error: Broker: Not coordinator",
+                Some("rebalance error: Broker: Not coordinator"),
             )
             .expect("the deadline has passed");
 
@@ -1035,25 +1058,90 @@ mod tests {
             cfg.assignment_timeout = Duration::from_secs(300);
 
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(299), "a revocation").is_none()
+                assignment_deadline_error(&cfg, Duration::from_secs(299), Some("a revocation"))
+                    .is_none()
             );
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(300), "a revocation").is_none(),
+                assignment_deadline_error(&cfg, Duration::from_secs(300), Some("a revocation"))
+                    .is_none(),
                 "the deadline is exclusive"
             );
         }
 
-        /// A zero `assignment_timeout` disables the deadline, however long
-        /// the member has held nothing.
+        /// A zero timeout disables the deadline in either window, however
+        /// long the member has held nothing.
         #[test]
         fn a_zero_timeout_disables_the_deadline() {
             let mut cfg = test_config();
             cfg.assignment_timeout = Duration::ZERO;
+            cfg.startup_timeout = Duration::ZERO;
+            let a_day = Duration::from_secs(86_400);
+
+            assert!(assignment_deadline_error(&cfg, a_day, Some("a revocation")).is_none());
+            assert!(
+                assignment_deadline_error(&cfg, a_day, None).is_none(),
+                "a member still waiting for its first assignment"
+            );
+        }
+
+        /// Before the first assignment `startup_timeout` is the deadline,
+        /// and its error names the topic and the brokers, which is what a
+        /// pipeline that never joins usually has wrong. The much longer
+        /// `assignment_timeout` does not govern that window.
+        #[test]
+        fn the_startup_window_has_its_own_deadline_and_message() {
+            let mut cfg = test_config();
+            cfg.startup_timeout = Duration::from_secs(30);
+            cfg.assignment_timeout = Duration::from_secs(300);
 
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(86_400), "a revocation")
-                    .is_none()
+                assignment_deadline_error(&cfg, Duration::from_secs(30), None).is_none(),
+                "the deadline is exclusive"
             );
+            let error = assignment_deadline_error(&cfg, Duration::from_secs(31), None)
+                .expect("the startup deadline has passed");
+
+            match error {
+                SourceError::Client { class, reason } => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(
+                        reason.contains("no partition assignment within 31s"),
+                        "{reason}"
+                    );
+                    assert!(
+                        reason.contains(r#"topic "orders""#),
+                        "names the topic: {reason}"
+                    );
+                    assert!(
+                        reason.contains(r#"brokers "localhost:9092""#),
+                        "names the brokers: {reason}"
+                    );
+                }
+                other => panic!("expected a client error, got {other:?}"),
+            }
+        }
+
+        /// `open` opens the startup window, and a loss before the first
+        /// assignment leaves it alone: the member is still starting up, so
+        /// `startup_timeout` keeps governing and the wait keeps running from
+        /// `open` rather than from the event.
+        #[test]
+        fn a_loss_before_the_first_assignment_stays_in_the_startup_window() {
+            let mut source = KafkaSource::new(test_config());
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+
+            let opened_at = source
+                .assignment_wait
+                .as_ref()
+                .expect("open arms the startup wait")
+                .since;
+
+            source.note_assignment_loss("a revocation".to_owned());
+
+            let wait = source.assignment_wait.as_ref().expect("still waiting");
+            assert!(wait.cause.is_none(), "the startup window still governs");
+            assert_eq!(wait.since, opened_at, "the wait still runs from open");
         }
 
         /// `poll_events` reports the deadline error itself, ahead of the

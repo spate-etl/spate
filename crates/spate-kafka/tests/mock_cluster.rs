@@ -488,10 +488,12 @@ fn empty_assignment_completes_rebalance_protocol() {
 /// `DEADLINE` sits above the mock broker's rebalance pacing
 /// (`session.timeout.ms - 1000`, so 5s with the 6000 this file's `config`
 /// sets), since the gap between a revoke and the assignment that follows it
-/// is time the member legitimately holds nothing.
+/// is time the member legitimately holds nothing. The test costs the
+/// deadline plus the settle, so the margin over that 5s is what it can
+/// afford to trade for wall-clock.
 #[test]
 fn an_empty_member_survives_the_assignment_deadline() {
-    const DEADLINE: Duration = Duration::from_secs(10);
+    const DEADLINE: Duration = Duration::from_secs(8);
 
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");

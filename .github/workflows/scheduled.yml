@@ -94,8 +94,10 @@ jobs:
       - id: drift
         run: git diff --exit-code THIRD-PARTY.md
 
+      # Both named steps: the regeneration itself can fail loud, on a
+      # first-party crate the filter no longer finds among them.
       - name: Report the drift as an issue
-        if: failure() && steps.drift.conclusion == 'failure'
+        if: failure() && (steps.regen.conclusion == 'failure' || steps.drift.conclusion == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -111,7 +113,7 @@ jobs:
           # shellcheck disable=SC2016
           gh issue create --title "$title" --body "$(
             printf '%s\n' \
-              'The committed attribution inventory no longer matches `Cargo.lock`.' \
+              '`make attribution` failed, or the committed inventory no longer matches `Cargo.lock`.' \
               '' \
               "Run: ${RUN_URL}" \
               '' \
@@ -284,12 +286,13 @@ jobs:
           </html>
           EOF
 
+      # The script filters the first-party crates and generates
+      # THIRD-PARTY.md the same way, so the page and the inventory agree.
       - name: Build third-party license texts
         run: |
           rm -rf website/static/licenses
           mkdir -p website/static/licenses
-          cargo about generate --workspace --all-features --locked --fail \
-            -o website/static/licenses/index.html about/html.hbs
+          ./scripts/attribution.sh --html website/static/licenses/index.html
 
       - name: Install dependencies
         working-directory: website

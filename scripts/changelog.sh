@@ -812,12 +812,40 @@ fragment_reference() {
 
     # Merged pull requests only, and the first of them. A commit can also be
     # associated with one that never landed.
+    #
+    # On an HTTP error `gh api` exits non-zero and prints the response body
+    # to stdout, so the answer is used only when the call succeeded and it is
+    # a number. A commit the API does not know (assembled locally, never
+    # pushed) takes the commit link below; any other failure aborts, because
+    # --build runs unattended and a bad token here would otherwise turn every
+    # derived reference into a commit link with nothing saying so.
     if command -v gh >/dev/null 2>&1; then
+        local status=0
         pr=$(gh api "repos/${repo_url#https://github.com/}/commits/$sha/pulls" \
-            --jq 'map(select(.merged_at)) | first | .number // empty' 2>/dev/null || true)
-        if [ -n "$pr" ]; then
-            printf 'pr %s\n' "$pr"
-            return 0
+            --jq 'map(select(.merged_at)) | first | .number // empty' \
+            2>"$scratch/gh-stderr") || status=$?
+        if [ "$status" -eq 0 ]; then
+            case "$pr" in
+            '') ;;
+            *[!0-9]*)
+                fail "the pull-request lookup for ${sha:0:12} answered with something that is
+  not a number: $pr"
+                ;;
+            *)
+                printf 'pr %s\n' "$pr"
+                return 0
+                ;;
+            esac
+        else
+            case "$pr" in
+            *'No commit found'* | *'"status": "422"'* | *'"status":"422"'*) ;;
+            *)
+                fail "the pull-request lookup for ${sha:0:12} failed rather than answering:
+  $pr $(cat "$scratch/gh-stderr" 2>/dev/null)
+  Fix the token or the network and run --build again; falling back to a
+  commit link here would look identical to a commit that has no pull request."
+                ;;
+            esac
         fi
     fi
 

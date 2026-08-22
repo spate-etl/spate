@@ -32,7 +32,9 @@
 #   finish    VERSION, EXPECTED_SHA, GH_TOKEN (App token: tag and release),
 #             DISPATCH_TOKEN (github.token: the docs deploy;
 #             workflow_dispatch is the documented exception to the rule that
-#             GITHUB_TOKEN events trigger nothing), GITHUB_REPOSITORY
+#             GITHUB_TOKEN events trigger nothing), BUNDLE_PATH (the
+#             attestation bundle from actions/attest-build-provenance; empty
+#             when nothing was packaged), GITHUB_REPOSITORY
 #
 # Targets `bash` 3.2, the version stock macOS ships as /bin/bash: no
 # associative arrays, no `mapfile`, and every array expansion guarded.
@@ -168,6 +170,52 @@ preflight() {
 
     [ -z "$(git status --porcelain)" ] ||
         fail "the working tree is not clean; a release is assembled from committed state only"
+}
+
+# The SBOM generator, needed by the local rehearsal alone: in CI, `assemble`
+# never generates one and the publish job installs the tool itself.
+# Suffix-matched because the tool reports itself as `cargo-cyclonedx-cyclonedx`.
+preflight_sbom_tool() {
+    local cyclonedx
+    cyclonedx=$(cargo cyclonedx --version 2>/dev/null || true)
+    case "$cyclonedx" in
+    *' 0.5.9') ;;
+    *) fail "cargo-cyclonedx 0.5.9 is required, found '${cyclonedx:-none}'. Install it with:
+  cargo install cargo-cyclonedx --locked --version 0.5.9" ;;
+    esac
+}
+
+# SBOMs for the publishable crates, collected into one directory as
+# <crate>-<version>.cdx.json. The tool writes each file next to its
+# Cargo.toml, located here through the workspace metadata rather than an
+# assumed layout, so this runs only after everything that needs a clean
+# tree. SOURCE_DATE_EPOCH makes the output a property of the release commit
+# rather than the wall clock.
+generate_sboms() {
+    local version=$1 outdir=$2 crate dir epoch
+    epoch=$(git log -1 --format=%ct)
+    SOURCE_DATE_EPOCH="$epoch" cargo cyclonedx -f json --describe crate \
+        --all-features --target all --spec-version 1.5 -q
+    while IFS=$'\t' read -r crate dir; do
+        [ -f "$dir/$crate.cdx.json" ] ||
+            fail "cargo cyclonedx wrote no SBOM for $crate"
+        mv "$dir/$crate.cdx.json" "$outdir/$crate-$version.cdx.json"
+    done < <(cargo metadata --no-deps --format-version 1 |
+        jq -r '.packages[] | select(.publish != []) |
+               [.name, (.manifest_path | rtrimstr("/Cargo.toml"))] | @tsv')
+    # Unpublished members get one too; nothing distributes those.
+    find . -name '*.cdx.json' -not -path './target/*' -delete
+    echo "collected $(find "$outdir" -name '*.cdx.json' | wc -l | tr -d ' ') SBOMs into $outdir"
+}
+
+# The sha256 of one file, portably: ubuntu runners carry sha256sum, macOS
+# carries shasum.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -371,12 +419,21 @@ prepare() {
     fi
 
     if [ "$dry" = "yes" ]; then
+        group "SBOMs generate"
+        preflight_sbom_tool
+        local sbomdir
+        sbomdir=$(mktemp -d)
+        generate_sboms "$version" "$sbomdir"
+        endgroup
         group "What a real run would do next"
+        echo "would attest target/package/*.crate (actions/attest-build-provenance)"
         echo "would mint the 30-minute registry token (crates-io-auth-action, environment crates-io)"
         echo "would run: cargo publish --workspace --locked --no-verify$excludes"
         echo "would read back trustpub_data for every crate and require the release commit"
+        echo "would compare each packaged crate's sha256 against the index cksum"
         echo "would resolve a scratch project against the registry (the smoke test)"
-        echo "would tag v$version, open the GitHub release with the CHANGELOG section, and deploy the docs"
+        echo "would tag v$version, open the GitHub release with the CHANGELOG section and the"
+        echo "  SBOMs and provenance bundle as assets, and deploy the docs"
         endgroup
     fi
 }
@@ -405,6 +462,7 @@ upload() {
 # ---------------------------------------------------------------------------
 finish() {
     local version=${VERSION:-} crate sha tags peeled notes attempt resolved dir
+    local checked cksum_want cksum_got sbomdir
 
     [ -n "$version" ] || fail "finish needs VERSION"
     [ -n "${EXPECTED_SHA:-}" ] || fail "finish needs EXPECTED_SHA"
@@ -423,6 +481,39 @@ finish() {
         echo "verified: $crate $version"
         sleep 1 # the API's documented limit is one request per second
     done
+    endgroup
+
+    group "The registry serves the bytes this run packaged"
+    # The index's cksum is the sha256 of the served `.crate`, and it must
+    # equal the local file the attestation covers. Only crates packaged in
+    # this run have a local file; a resume that packaged nothing has nothing
+    # to compare.
+    checked=0
+    for crate in $(publishable); do
+        [ -f "target/package/$crate-$version.crate" ] || continue
+        # The index is CDN-fronted and this runner primed its cache before
+        # the upload, so absence right after publishing is lag, not loss;
+        # retried on the same schedule as the smoke test below.
+        cksum_want=""
+        for attempt in 1 2 3 4 5; do
+            cksum_want=$(curl -fsS --retry 3 --max-time 30 -H "User-Agent: $UA" \
+                "$INDEX/$(index_path "$crate")" |
+                jq -r --arg v "$version" 'select(.vers == $v) | .cksum')
+            [ -n "$cksum_want" ] && break
+            echo "attempt $attempt: the index has no entry for $crate $version yet; waiting 30s"
+            sleep 30
+        done
+        [ -n "$cksum_want" ] || fail "the index never served $crate $version; the upload reported
+  success, so this is the index lagging beyond patience or the publish being
+  lost. Re-run the failed jobs once the index answers."
+        cksum_got=$(sha256_of "target/package/$crate-$version.crate")
+        [ "$cksum_want" = "$cksum_got" ] ||
+            fail "$crate $version: the registry serves $cksum_want but this run packaged
+  $cksum_got. The attestation would cover bytes the registry does not hold."
+        echo "cksum verified: $crate $version"
+        checked=$((checked + 1))
+    done
+    [ "$checked" -gt 0 ] || echo "nothing was packaged in this run; nothing to compare."
     endgroup
 
     group "A consumer resolves the release"
@@ -500,6 +591,35 @@ SMOKE
     fi
     endgroup
 
+    group "SBOMs and provenance on the release"
+    # Generated from the release commit's lockfile, after the upload so the
+    # in-tree files the tool writes cannot dirty the tree anything else
+    # reads. `--clobber` for the SBOMs: regeneration is byte-stable, so a
+    # resumed run completes the set. Not for the bundle: attempts only shrink
+    # the pending set, so an earlier attempt's bundle covers at least as many
+    # crates and the first upload wins.
+    sbomdir=$(mktemp -d)
+    generate_sboms "$version" "$sbomdir"
+    gh release upload "v$version" --clobber "$sbomdir"/*.cdx.json
+    if [ -n "${BUNDLE_PATH:-}" ] && [ -f "${BUNDLE_PATH:-}" ]; then
+        cp "$BUNDLE_PATH" "$sbomdir/spate-v$version-provenance.intoto.jsonl"
+        gh release upload "v$version" "$sbomdir/spate-v$version-provenance.intoto.jsonl" ||
+            echo "an attestation bundle is already attached; keeping it."
+    fi
+    # The bundle lives only on the runner that attested, so a run that died
+    # between attesting and uploading has lost its copy for good; the
+    # attestation store still holds it, and silence here would read as a
+    # release that was never attested.
+    if ! gh release view "v$version" --json assets \
+        --jq '.assets[].name' | grep -q '\.intoto\.jsonl$'; then
+        fail "the release carries no provenance bundle. Recover it from the attestation
+  store: download any published .crate of this version from
+  https://static.crates.io/crates/<name>/<name>-$version.crate, run
+  'gh attestation download <file> --repo $GITHUB_REPOSITORY', and upload the
+  bundle as spate-v$version-provenance.intoto.jsonl."
+    fi
+    endgroup
+
     group "Deploy the documentation"
     # The site carries the install snippets, so until this deploy it
     # advertises the previous version; the deploy runs after the crates are
@@ -517,6 +637,7 @@ SMOKE
 dry_run() {
     local version=$1 root tree
     preflight
+    preflight_sbom_tool
     root=$(mktemp -d "${TMPDIR:-/tmp}/spate-release-dry-run.XXXXXX")
     tree="$root/v$version"
     git worktree add --detach "$tree" HEAD >/dev/null

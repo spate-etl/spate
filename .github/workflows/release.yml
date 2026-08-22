@@ -1,39 +1,54 @@
 name: Release
 
-# `release-pr` keeps a version-bump pull request open, through release-plz.
-# `release` publishes, tags and opens the GitHub release, through cargo. The two
-# are independent: `release` reads the registry to decide what is missing and
-# needs nothing from the job above it.
+# Two phases handing off through a squash merge. `assemble` runs on the
+# workflow_dispatch carrying the version, builds the single release commit and
+# opens an auto-merging pull request; `publish` runs on the push that merge
+# produces and does everything that touches the registry. The sequence lives
+# in scripts/release.sh and `make release-dry-run` runs it locally; this file
+# adds the credentials and the OIDC exchange. RELEASING.md is the account of
+# the whole process.
+#
+# The crates.io trusted publisher is bound to this repository, this filename
+# and the `crates-io` environment name. Renaming any of the three breaks the
+# OIDC exchange until the publisher configuration is updated to match.
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          The version to release, as X.Y.Z. Checked against the derivation
+          from history: any breaking marker since the last tag means a minor
+          bump, anything else a patch. The run fails when the two disagree.
+        required: true
+        type: string
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
-
-# A second run started mid-publish could tag a version the first is still
-# uploading; `cancel-in-progress` stays false so a publish finishes.
-concurrency:
-  group: release
-  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release-pr:
-    name: Release pull request
+  assemble:
+    name: Assemble the release
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skipped when the release app is not configured, as in every fork. Keyed on
-    # the variable because `secrets` is unavailable in a job-level `if:` and
-    # `vars` is; the two are configured together.
-    if: vars.RELEASE_APP_ID != ''
+    # Dispatch only, from main only. Skipped when the release app is not
+    # configured, as in every fork; keyed on the variable because `secrets`
+    # is unavailable in a job-level `if:` and `vars` is.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      vars.RELEASE_APP_ID != ''
+    concurrency:
+      group: release-assemble
+      cancel-in-progress: false
     steps:
-      # Events raised by GITHUB_TOKEN do not trigger workflows, so a release pull
-      # request opened with it never runs CI and `ci-gate`, a required check,
-      # leaves it permanently unmergeable.
+      # Events raised by GITHUB_TOKEN do not trigger workflows, so a release
+      # pull request opened with it never runs CI and `CI gate`, a required
+      # check, leaves it permanently unmergeable.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
@@ -43,35 +58,43 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      # Full history: release-plz reads the commits since the last release to
-      # decide the bump, and a shallow clone would silently under-report it.
+      # Full history: the bump derivation reads every commit since the last
+      # tag, and a shallow clone would silently under-report it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
+      # No shared-key: this job pushes a commit other people merge, and
+      # restores nothing a pull request can write.
       - uses: ./.github/actions/setup-rust
         with:
-          shared-key: release
+          tools: cargo-about@0.9.1
 
-      - uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
-        with:
-          command: release-pr
+      - name: Assemble and open the release pull request
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: ./scripts/release.sh assemble --version "$VERSION"
 
-  release:
+  publish:
     name: Publish
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # The only gate on the publish. Without it every merge mints an unused App
-    # token and writes a `crates-io` deployment record. The subject is matched
-    # rather than the tag, since this job creates the tag; `pr_name` in
-    # release-plz.toml pins the other side.
+    # The subject is matched rather than a tag, since this job creates the
+    # tag. Skipped rather than run-and-no-op: entering the `crates-io`
+    # environment writes a deployment record, one per push to main otherwise.
     if: >-
-      vars.RELEASE_APP_ID != '' &&
-      (github.event_name == 'workflow_dispatch' ||
-       startsWith(github.event.head_commit.message, 'chore: release v'))
+      github.event_name == 'push' &&
+      startsWith(github.event.head_commit.message, 'chore: release v') &&
+      vars.RELEASE_APP_ID != ''
+    # A second run started mid-publish could tag a version the first is still
+    # uploading; `cancel-in-progress` stays false so a publish finishes. The
+    # group sits on the job: skipped jobs never enter it, where a pending
+    # workflow-level slot is replaced by the next push to `main`.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: read
       # Trusted Publishing: crates-io-auth-action exchanges this for a
@@ -79,113 +102,53 @@ jobs:
       # repository and crates.io refuses token-authenticated publishes for
       # these crates.
       id-token: write
+      # `gh workflow run` for the docs deploy at the end.
+      actions: write
     environment:
       name: crates-io
       url: https://crates.io/crates/spate
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No shared-key: a release job restores nothing a pull request can
+      # write. The verify build runs before the token exists.
+      - uses: ./.github/actions/setup-rust
+
+      - name: Prepare
+        id: prepare
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: ./scripts/release.sh prepare
+
+      # Minted after all packaging work: the exchanged token lives 30
+      # minutes, fixed, and everything before this point needs none.
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+        if: steps.prepare.outputs.pending != '0'
+
+      - name: Upload
+        if: steps.prepare.outputs.pending != '0'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          EXCLUDES: ${{ steps.prepare.outputs.excludes }}
+          PENDING: ${{ steps.prepare.outputs.pending }}
+        run: ./scripts/release.sh upload
+
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Tags and opens the GitHub release; it only reads pull requests.
+          # Tags and opens the GitHub release; that is all it may do.
           permission-contents: write
-          permission-pull-requests: read
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-rust
-        with:
-          shared-key: release
-
-      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-        id: auth
-
-      # Any crate already on the registry at this version is excluded, so a run
-      # that failed part way can be repeated without publishing anything twice.
-      # A published version can never be replaced and `cargo publish` has no
-      # "already there" flag, so `--exclude` is the only lever and the set is
-      # computed rather than written down.
-      - name: Select the crates still to publish
-        id: select
+      - name: Finish
         env:
-          UA: spate-release (github.com/spate-etl/spate)
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "spate") | .version')
-          [ -n "$version" ] || { echo "::error::no version for the spate package"; exit 1; }
-
-          excludes=""
-          pending=0
-          for crate in $(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.publish != []) | .name'); do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' -H "User-Agent: $UA" \
-              "https://crates.io/api/v1/crates/$crate/$version")
-            case "$code" in
-            200)
-              echo "already published, excluding: $crate $version"
-              excludes="$excludes --exclude $crate"
-              ;;
-            404)
-              echo "to publish: $crate $version"
-              pending=$((pending + 1))
-              ;;
-            *)
-              echo "::error::crates.io answered $code for $crate $version."
-              echo "::error::Refusing to publish against a registry it cannot read."
-              exit 1
-              ;;
-            esac
-          done
-
-          {
-            echo "version=$version"
-            echo "excludes=$excludes"
-            echo "pending=$pending"
-          } >> "$GITHUB_OUTPUT"
-
-      # Packaging and compiling every crate before anything uploads. Without
-      # this a packaging failure leaves the crates before it already published,
-      # which is the one failure that cannot be undone.
-      - name: Dry run
-        if: steps.select.outputs.pending != '0'
-        env:
-          EXCLUDES: ${{ steps.select.outputs.excludes }}
-        run: |
-          read -ra excludes <<<"$EXCLUDES"
-          cargo publish --workspace --locked --dry-run "${excludes[@]}"
-
-      - name: Publish
-        if: steps.select.outputs.pending != '0'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          EXCLUDES: ${{ steps.select.outputs.excludes }}
-        run: |
-          read -ra excludes <<<"$EXCLUDES"
-          cargo publish --workspace --locked "${excludes[@]}"
-
-      # After the publish, so the tag names what the registry actually holds. A
-      # tag pushed first would name a release that then failed to upload.
-      - name: Tag and release
-        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+          PENDING: ${{ steps.prepare.outputs.pending }}
+          EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ steps.select.outputs.version }}
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
-            echo "v${VERSION} is already tagged; leaving it alone."
-            exit 0
-          fi
-          git config user.name 'spate-release[bot]'
-          git config user.email 'spate-release[bot]@users.noreply.github.com'
-          git tag -a "v${VERSION}" -m "v${VERSION}"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "refs/tags/v${VERSION}"
-          cat > /tmp/release-notes.md <<'NOTES'
-          [CHANGELOG.md](https://github.com/spate-etl/spate/blob/main/CHANGELOG.md) has what changed and why.
-
-          All crates release together at this version.
-          NOTES
-          gh release create "v${VERSION}" --title "v${VERSION}" --notes-file /tmp/release-notes.md
+          DISPATCH_TOKEN: ${{ github.token }}
+        run: ./scripts/release.sh finish

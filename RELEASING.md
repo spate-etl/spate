@@ -1,110 +1,171 @@
 # Releasing
 
-Maintainer reference. Contributors want [CONTRIBUTING.md](CONTRIBUTING.md)
-instead, or [DEVELOPING.md](DEVELOPING.md) for the build and benchmark mechanics.
+How a Spate release works and how to run one. This is a maintainer reference;
+contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md) and the changelog
+conventions in [`changelog.d/README.md`](changelog.d/README.md), not this
+page.
 
-## The normal case
+The process itself lives in [`scripts/release.sh`](scripts/release.sh), and
+[`release.yml`](.github/workflows/release.yml) runs those entry points with
+credentials where a step needs one. That split is deliberate: the same code
+path runs locally as a dry run, so what you rehearse is what CI executes.
 
-Everything a release needs from a human lands on `main` **before** the release
-pull request merges, and nothing is ever committed onto that branch. release-plz
-**closes and replaces** a release pull request that gains a non-bot commit, so a
-commit made there is lost the next time anything lands on `main`. The failure is
-silent: what comes back is a fresh pull request that looks right. Steps 1 and 2
-are in that order for this reason.
+## What a release is
 
-1. **Decide the version, from release-plz rather than by hand.** Open the release
-   pull request it keeps against `main`: its title is `chore: release vX.Y.Z` and
-   its body lists every crate's bump with the `cargo-semver-checks` verdict.
-   Review that bump: it is derived from conventional-commit types, and a `feat`
-   that should have been a `fix` shows up here as a version one step too high.
+The ten publishable crates move together at one version. They inherit
+`version` from `[workspace.package]`, and `[workspace.dependencies]` pins each
+sibling with `=`, so the workspace version is the only number. One tag
+`vX.Y.Z`, one GitHub release, and `git show vX.Y.Z` is the whole release: a
+single commit carrying every generated artefact.
 
-   Use the number from that pull request in the next step. Nothing reconciles the
-   two automatically, and a mismatch ships a changelog headed `## [X.Y.Z]` whose
-   tag link points at a tag that never gets created.
+Pre-1.0, **a breaking change ships in a minor bump**. Cargo treats `0.x`
+minors as incompatible, so `0.2 -> 0.3` is the breaking step and `0.2.0 ->
+0.2.1` must not be. An MSRV move is a minor bump for the same reason: the
+Cargo book calls raising `rust-version` a minor incompatibility. Only the
+newest `0.x` minor is supported.
 
-2. **Assemble the changelog and regenerate the inventory, both on `main`:**
+## The one decision
 
-   ```sh
-   ./scripts/changelog.sh --build X.Y.Z
+A release starts with the version, and that is the only judgement a human
+supplies:
 
-   cargo install cargo-about --locked --features cli --version 0.9.1
-   ./scripts/attribution.sh
-   ```
+```sh
+gh workflow run release.yml -f version=0.3.0
+```
 
-   The first groups everything in [`changelog.d/`](changelog.d) under a new
-   version heading, resolves each entry's pull request link, adds the
-   contributors, and deletes the fragments it consumed. **Read what it wrote
-   before committing it**: the assembly is mechanical, and this is the last point
-   at which a badly worded entry is cheap to fix.
+The workflow derives the version independently and fails when the two
+disagree: any commit since the last tag whose subject carries the breaking
+`!`, or a `BREAKING CHANGE` footer, or a `rust-version` move, means a minor
+bump; anything else means a patch. `./scripts/release-version.sh --derive`
+prints the same answer locally.
 
-   The second is `THIRD-PARTY.md`. It is not gated on ordinary pull requests,
-   since that would fail every dependency bump and Dependabot cannot regenerate
-   it, so by release time it is stale by however many bumps have landed. This is
-   the point at which it has to be exact. The nightly `attribution` job will have
-   said so already if it drifted.
+Everything after the input runs unattended. The release pull request
+auto-merges when `CI gate` passes, and its merge is not a review gate:
+approving a diff of generated files that nobody reads protects nothing. The
+controls are the version input, the derivation check, and the gates every
+pull request already passes. What is worth reading on that pull request is
+the assembled `CHANGELOG.md` section, which is the release notes.
 
-   Cross-check what the fragments cover against what landed:
+## What the automation does
 
-   ```sh
-   git log --no-merges --format='%s' vX.Y.Z-previous..main
-   ```
+**Assemble**, on the dispatch: guards first (the tree matches the last tag,
+the tag is free, the derivation agrees), then every artefact is generated
+from the version input, in one commit on `release/vX.Y.Z`:
 
-   Anything user-visible there without an entry is a fragment somebody owed and
-   the gate did not catch.
+| Artefact | Produced by |
+|---|---|
+| `[workspace.package] version` and the nine `=` pins | `scripts/release-version.sh --bump` |
+| `Cargo.lock` | `cargo update --workspace`, inside the bump |
+| The five install snippets at `X.Y` | the same bump; `--check` holds the set closed |
+| `CHANGELOG.md`, fragments consumed | `scripts/changelog.sh --build` |
+| `THIRD-PARTY.md` | `scripts/attribution.sh`, as a drift backstop |
 
-   Both go to `main` through a pull request like anything else: the branch
-   ruleset requires one and carries no bypass actors, so there is no direct push.
+The pull request it opens is titled `chore: release vX.Y.Z`, labeled
+`release`, and set to auto-merge. Re-dispatching the same version refreshes
+it, which is the path for a fragment that landed after the first dispatch; a
+dispatch at a different version supersedes and closes it.
 
-3. **Merge the release pull request.** It rebases onto the `main` you just
-   updated, and the `release` job publishes every crate in dependency order,
-   tags `vX.Y.Z`, and opens the GitHub release.
+**Publish**, on the squash merge: the commit subject is the trigger, since
+the tag does not exist yet. In order: the subject and `Cargo.toml` must name
+the same version; the set still to publish is computed from the sparse index,
+so a re-run excludes what already landed; any crate already at the version
+must have been published from this commit, read back from `trustpub_data`;
+the metadata the dry run cannot check (`description`, `license`) is checked
+explicitly; every pending crate is packaged and verify-built with no
+credential in the job; only then is the 30-minute Trusted Publishing token
+minted and the upload run with `--no-verify`, so none of the token's fixed
+budget is spent compiling. After the upload, `trustpub_data` is read back for
+all ten crates and must name the release commit; a scratch project resolves
+`spate` at the exact version from the registry; the commit is tagged; the
+GitHub release opens with the changelog section; and the docs deploy is
+dispatched, after the crates are live so the install snippets are true the
+moment the site serves them.
 
-   Between step 2 landing and this merge, `CHANGELOG.md` on `main` carries a
-   version heading whose tag link 404s. That window closes on merge.
+## Rehearse it first
 
-   If the merge slips past the day step 2 ran, correct the date on the version
-   heading by hand before merging. `--build` stamps `date -u` at assembly, and
-   it will not re-run for a version the changelog already has.
+```sh
+make release-dry-run VERSION=0.3.0
+```
 
-Nothing releases without a human merging something. `release_always = false`
-is what guarantees that.
+This runs the same `assemble` and the credential-free half of the publish in
+a throwaway git worktree: the real release commit, built for diffing, and
+every pending crate packaged and verify-built. It stops where the registry
+token would be minted and prints what a real run would do next. It needs
+`gh` authenticated, `jq`, and `cargo-about` at exactly 0.9.1; the preflight
+names anything missing. The worktree is kept for inspection and the run
+prints the command that removes it.
 
-The `release` job is *skipped* on ordinary merges rather than allowed to run and
-no-op: it enters the `crates-io` environment and would otherwise write a
-deployment record for every commit reaching `main`. It recognizes a release by
-the commit subject, so `pr_name` is pinned in `release-plz.toml` and the
-repository squashes with the pull request title as the subject. To force it, the
-workflow takes a `workflow_dispatch`.
+Read a green dry run as "this assembles and packages". It cannot prove the
+registry's acceptance rules (a verified email address, the rate limits), the
+OIDC exchange, the environment's branch policy, or the consumer smoke test,
+which needs the version to actually exist. The first three are configuration
+that a previous release exercised; the last runs inside the real publish.
 
-## Versioning
+The same packaging proof also runs continuously: `ci.yml` runs a
+simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
+manifest, and `scheduled.yml` repeats it nightly, so release day is not when
+a packaging problem first appears.
 
-The crates move together, and this needs no configuration: they inherit
-`version` from `[workspace.package]`, release-plz takes the highest next
-version across the workspace and writes that back, and it preserves the `=`
-operator so `[workspace.dependencies]` follows.
+## Judging a release
 
-Pre-1.0, **a breaking change is a minor bump**. Cargo treats `0.x` minors as
-incompatible, so `0.1 → 0.2` is the breaking step and `0.1.0 → 0.1.1` must not
-be. `cargo-semver-checks` runs in the release pull request and will say so.
+Judge by the registry and the tag, never by the workflow reporting success;
+the two diverge exactly when it matters. The publish already enforces the
+mechanical half: every crate's `trustpub_data` names the tagged commit, and a
+scratch project resolves the release. To check by hand:
 
-**Only the newest `0.x` minor is supported.** No maintenance branches, no
-backports by default. If someone needs one, cut `release/0.1.x` from its tag at
-that point, on demand and never pre-announced.
+```sh
+# Every crate at the new version.
+for c in $(cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.publish != []) | .name'); do
+  printf '%-20s %s\n' "$c" \
+    "$(curl -s "https://crates.io/api/v1/crates/$c" \
+       -H 'User-Agent: spate-release (github.com/spate-etl/spate)' \
+       | jq -r '.crate.max_version')"
+done
 
-## The first publish of a crate is manual
+# The tag and the release exist.
+git ls-remote --tags origin "refs/tags/vX.Y.Z"
+gh release view vX.Y.Z
+```
 
-**Trusted Publishing cannot create a crate that does not exist.** crates.io has
-nothing to attach a trusted publisher to until the name is claimed, so the
-first version of each crate was published by hand with a short-lived,
-`publish-new`-scoped API token, which was revoked immediately afterwards.
+The site serves the new install snippets once the dispatched deploy
+finishes. docs.rs builds asynchronously and lags the publish; check it later
+rather than waiting on it.
 
-Everything since goes through OIDC. There is no `CARGO_REGISTRY_TOKEN` secret
-in this repository, and crates.io is configured to **refuse token-authenticated
-publishes** for these crates.
+## When it breaks
 
-The same applies to any crate added later: publish it by hand once, configure
-its trusted publisher, disable token publishing, then let the automation take
-over.
+**A published version is permanent.** It can never be replaced. `cargo yank`
+hides a version from new resolution, does not free the number, and does not
+allow a re-upload; a yanked version also reads to a user as "this was
+broken", so yank only what is actually broken for consumers.
+
+**A publish that failed part way is resumed by re-running its failed jobs on
+the same workflow run.** The re-run reuses the same push event and the same
+commit, which is what pins the resume to the release tree, and the exclude
+set skips whatever already landed. Never re-dispatch a version whose pull
+request has merged. The sparse index can lag a publish by a few minutes, so
+wait before re-running, or the selection will try a crate the registry
+already holds and stop on its own.
+
+**A split tree is a stop, not a repair.** If a crate carries the target
+version from a different commit, or from a manual token publish with no
+`trustpub_data` at all, the guard fails the run before anything else
+uploads. The `=` pins make a part-published version unusable anyway, so
+abandon the number and release the next patch from one commit.
+
+**If the changelog date slips**, because the assembly ran on one day and the
+merge landed on another: re-dispatch the version before the merge, which
+rebuilds the section with today's date, or fix the date with an ordinary
+pull request afterwards. `--build` will not re-run for a version the
+changelog already carries.
+
+**If the OIDC exchange itself is broken**, the fallback is a manual publish:
+enable token publishing for the crates on crates.io, run
+`cargo publish --workspace --locked` from the release commit with a token,
+and disable token publishing again immediately. The read-back check will
+fail on the next automated run that sees those versions, since a token
+publish records no `trustpub_data`; that is expected, and the next release
+proceeds normally at the next version.
 
 ## Rate limits
 
@@ -112,84 +173,66 @@ From crates.io's own limiter:
 
 | Action | Burst | Refill |
 |---|---|---|
-| Publishing a **new** crate | 5 | 1 per 10 minutes |
-| Publishing a **version** of an existing crate | 30 | 1 per minute |
+| Publishing a version of an existing crate | 30 | 1 per minute |
+| Publishing a new crate | 5 | 1 per 10 minutes |
 
-Nine new crates therefore cost about 45 minutes of waiting, once. Every release
-after that publishes one *version* per crate, which fits inside a burst of 30
-with no waiting.
+Ten versions of existing crates fit in one burst with no waiting. The API is
+separate and allows one request per second, which is why the selection reads
+the sparse index instead and the read-back sleeps between calls.
 
-## The release workflow's GitHub App
+## Adding a crate
 
-Events raised by `GITHUB_TOKEN` do not trigger workflows. A release pull
-request opened with it would never run CI, and since `ci-gate` is a required
-check that pull request would be permanently unmergeable.
+Trusted Publishing cannot create a crate: crates.io has nothing to attach a
+publisher to until the name is claimed. Before the first release that
+includes a new crate:
 
-`release.yml` mints a token from a minimal GitHub App (contents and pull
-requests, read-write, on this repository only). It needs:
+1. Publish it once by hand, with a token, at the current workspace version,
+   so the automation's next target version never has a manual publish behind
+   it.
+2. Configure its trusted publisher: this repository, workflow `release.yml`,
+   environment `crates-io`.
+3. Disable token publishing for it.
+4. Give it a version through `[workspace.dependencies]` only if something
+   depends on it, and never give `spate-core` a versioned dev-dependency on
+   `spate-test`: dev-dependency edges with versions are part of the publish
+   order, and that one closes a cycle no order can satisfy (cargo issue
+   4242). The publish dry-run gate catches this.
+5. Run `./scripts/ci-changes.sh --self-test`, which pins the container map to
+   the crate graph.
+6. If it carries an install snippet anywhere, add the file to
+   `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the
+   snippet is in the rewritten set.
 
-- repository variable `RELEASE_APP_ID`
-- repository secret `RELEASE_APP_PRIVATE_KEY`
+The pull-request semver gate starts diffing a new crate once it exists on
+both sides of a merge base; the nightly comparison against the registry
+skips it, and says so, until the name is claimed.
 
-The app is owned by the organisation rather than by a person, so it survives an
-account change.
+## What the release rests on
 
-## If it breaks mid-release
+Configuration that lives outside this repository, verified when it changes
+rather than on each release:
 
-The failure that matters is a partial publish: some crates on the registry, the
-rest not. **A published version can never be replaced.** `cargo yank` hides a
-version from new resolution but does not free the number, and does not let you
-re-upload it.
+- **The GitHub App**: repository variable `RELEASE_APP_ID` and secret
+  `RELEASE_APP_PRIVATE_KEY`. The App is owned by the organisation, so it
+  survives an account change, and the workflow narrows each minted token to
+  the permissions the step needs. It exists because events raised by
+  `GITHUB_TOKEN` trigger no workflows: a release pull request opened with one
+  would never run `CI gate` and could never merge.
+- **The `crates-io` environment's deployment branch policy, restricted to
+  `main`.** Trusted Publishing matches the repository, the workflow filename
+  and the environment name, and discards the git ref from the OIDC claim, so
+  this policy is the only thing keeping another ref from publishing. Removing
+  it removes the protection silently.
+- **The trusted publisher binding**: this repository, filename `release.yml`,
+  environment `crates-io`. Renaming any of the three breaks the exchange
+  until the publisher configuration is updated to match.
+- **The `main` ruleset and merge settings**: pull requests only, no bypass
+  actors, squash as the only merge method with the pull request title as the
+  subject, and auto-merge enabled. The publish trigger reads the squash
+  subject, so the merge-method setting is load-bearing.
+- **No required reviewer on the `crates-io` environment.** Adding one pauses
+  a publish part way with nothing in the workflow explaining it.
 
-Do not re-run the same version. Fix the cause, let release-plz cut the next
-patch, and yank the partial set only if it is broken for consumers. A
-half-published workspace usually fails to resolve, loudly and harmlessly.
-
-Publishing by hand, if the automation is the thing that is broken, in this
-order:
-
-```
-spate-core → spate-test → spate-avro → spate-clickhouse → spate-coordination
-           → spate-datagen → spate-json → spate-kafka → spate-s3 → spate
-```
-
-Prefer `cargo publish --workspace --locked`, which derives that order from the
-manifests rather than trusting the list above; the list is for the case where
-you are publishing one crate at a time because something went wrong mid-run.
-Regenerate it if the graph has changed since:
-
-```sh
-cargo metadata --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.publish != []) | .name'
-```
-
-### What `--dry-run` does not check
-
-It packages and compiles, then stops before the upload request, so it never
-reaches the endpoint that enforces the registry's *acceptance* rules. Both of
-these were discovered only by the real run:
-
-- **A verified email address is required.** An unverified one fails the first
-  upload with `400 Bad Request` and publishes nothing.
-- **Rate limits.** See the table above. A dry run of the whole workspace
-  completes in minutes; the real thing takes about forty-five.
-
-Neither is a reason to skip the dry run: it catches missing metadata, oversized
-payloads and compilation failures. Do not read "the dry run was green" as "the
-publish will succeed".
-
-`cargo publish --dry-run --locked -p <crate>` first, every time. A manual publish
-needs a token, and token publishing is disabled on these crates; re-enable it for
-the publish and turn it off again afterwards.
-
-## Checklist for a crate added to the workspace
-
-- [ ] `publish` is not set to `false` unless it should not ship
-- [ ] It inherits `version`, `repository`, `homepage`, `license` and `authors`
-      from `[workspace.package]`
-- [ ] It has a `description`; crates.io rejects the upload without one
-- [ ] It has a `README.md`; cargo finds it without a `readme` key
-- [ ] `./scripts/ci-changes.sh --self-test` passes; the container-suite map is
-      hand-written and this checks it against the crate graph
-- [ ] Published by hand once, then its trusted publisher configured and token
-      publishing disabled
+Unless a step failed and this page says otherwise, the workflow run and the
+registry are the record of a release; there is nothing to write down and no
+step to do by hand.

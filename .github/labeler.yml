@@ -103,5 +103,3 @@
       - any-glob-to-any-file:
           - Cargo.toml
           - Cargo.lock
-          - release-plz.toml
-          - cliff.toml

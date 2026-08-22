@@ -10,6 +10,7 @@
 #   ./scripts/changelog.sh --check              # the gate (reads env, see below)
 #   ./scripts/changelog.sh --new <type> <slug>  # scaffold a fragment
 #   ./scripts/changelog.sh --build <version>    # assemble, at release
+#   ./scripts/changelog.sh --notes <version>    # one version's section, on stdout
 #   ./scripts/changelog.sh --self-test          # the classifier, alone
 #
 # Environment (--check only; all optional, all set by ci.yml):
@@ -127,7 +128,7 @@ needs_entry() {
 # Self-test. Runs inline on every invocation as well as under --self-test.
 # ---------------------------------------------------------------------------
 self_test() {
-    local failures=0 subject want got crate scope n=0 sample extracted probe
+    local failures=0 subject want got crate scope n=0 sample extracted probe probe_dir
 
     while IFS='|' read -r subject want; do
         case "$subject" in '' | '#'*) continue ;; esac
@@ -294,6 +295,68 @@ TABLE
     fi
     rm -rf "$(dirname "$probe")"
 
+    # The section extractor behind --notes, against the two boundaries that
+    # exist: a following heading, and the link foot that ends the last section
+    # instead of one. The subshells keep a `fail` inside the extractor from
+    # ending the self-test instead of counting.
+    probe_dir=$(mktemp -d)
+    cat >"$probe_dir/changelog.md" <<'FIXTURE'
+# Changelog
+
+## [Unreleased]
+
+## [0.3.0] — 2026-09-01
+
+### Added
+
+- **A thing** (`spate-core`) — what it means.
+  ([#301])
+
+[#301]: https://github.com/spate-etl/spate/pull/301
+
+## [0.2.0] — 2026-08-22
+
+### Fixed
+
+- An older thing.
+
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/spate-etl/spate/releases/tag/v0.3.0
+[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
+FIXTURE
+    cat >"$probe_dir/want" <<'FIXTURE'
+### Added
+
+- **A thing** (`spate-core`) — what it means.
+  ([#301])
+
+[#301]: https://github.com/spate-etl/spate/pull/301
+FIXTURE
+    if ! (section_notes "$probe_dir/changelog.md" "0.3.0" >"$probe_dir/got" 2>/dev/null); then
+        echo "changelog.sh: section_notes refused the 0.3.0 fixture" >&2
+        failures=$((failures + 1))
+    elif ! diff -u "$probe_dir/want" "$probe_dir/got" >&2; then
+        echo "changelog.sh: the 0.3.0 notes drifted from the expected output above" >&2
+        failures=$((failures + 1))
+    fi
+    cat >"$probe_dir/want" <<'FIXTURE'
+### Fixed
+
+- An older thing.
+FIXTURE
+    if ! (section_notes "$probe_dir/changelog.md" "0.2.0" >"$probe_dir/got" 2>/dev/null); then
+        echo "changelog.sh: section_notes refused the last section" >&2
+        failures=$((failures + 1))
+    elif ! diff -u "$probe_dir/want" "$probe_dir/got" >&2; then
+        echo "changelog.sh: the last section leaked the link foot into the notes; diff above" >&2
+        failures=$((failures + 1))
+    fi
+    if (section_notes "$probe_dir/changelog.md" "9.9.9" >/dev/null 2>&1); then
+        echo "changelog.sh: section_notes invented notes for a version the file lacks" >&2
+        failures=$((failures + 1))
+    fi
+    rm -rf "$probe_dir"
+
     [ "$failures" -eq 0 ] || fail "$failures self-test failure(s). This script is wrong, not your change"
 }
 
@@ -345,6 +408,27 @@ has_changelog_none() {
             git interpret-trailers --parse 2>/dev/null || true)
     fi
     printf '%s\n' "$parsed" | grep -qiE '^Changelog:[[:space:]]*none[[:space:]]*$'
+}
+
+# The body of one release's section: everything between its heading and the
+# next one, the heading itself excluded. The slice is self-contained because
+# `--build` writes each section's `[#N]` definitions inside it; the
+# definitions at the foot of the file belong to the headings, which the slice
+# drops. The last section is followed by that foot rather than a heading, so
+# the `[Unreleased]:` line terminates a section too.
+section_notes() {
+    local file=$1 version=$2 body
+    grep -qF "## [$version] " "$file" ||
+        fail "no '## [$version]' section in $file. --notes reads what --build wrote, so the
+  release is assembled first."
+    body=$(awk -v heading="## [$version] " '
+        index($0, heading) == 1 { in_section = 1; next }
+        in_section && (/^## / || /^\[Unreleased\]: /) { exit }
+        in_section { print }
+    ' "$file")
+    body=$(printf '%s\n' "$body" | sed -e '/./,$!d')
+    [ -n "$body" ] || fail "the '## [$version]' section in $file is empty"
+    printf '%s\n' "$body"
 }
 
 # ---------------------------------------------------------------------------
@@ -828,6 +912,18 @@ cmd_build() {
 }
 
 # ---------------------------------------------------------------------------
+# --notes
+# ---------------------------------------------------------------------------
+# One version's section on stdout, for the GitHub release body. The heading is
+# dropped because the release title already carries the version.
+cmd_notes() {
+    local version=${1:-}
+    [ -n "$version" ] || fail "usage: ./scripts/changelog.sh --notes <version>"
+    [ -f "$changelog" ] || fail "$changelog not found"
+    section_notes "$changelog" "$version"
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch.
 # ---------------------------------------------------------------------------
 self_test
@@ -846,7 +942,11 @@ case "${1:-}" in
     shift
     cmd_build "$@"
     ;;
+--notes)
+    shift
+    cmd_notes "$@"
+    ;;
 *)
-    fail "usage: ./scripts/changelog.sh --check | --new <type> <slug> | --build <version> | --self-test"
+    fail "usage: ./scripts/changelog.sh --check | --new <type> <slug> | --build <version> | --notes <version> | --self-test"
     ;;
 esac

@@ -179,6 +179,69 @@ jobs:
               'Closing this issue without doing one of them just reopens it tomorrow.'
           )"
 
+  semver:
+    name: Semver against the registry
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    # The published baseline moves only at a release, so the pull-request
+    # gate diffs against its merge base and this run covers the gap: a break
+    # on `main` whose subject carries no marker. The release derivation
+    # reads subjects, so that break would under-bump the next version.
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The marker scan reads every subject since the last tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-semver-checks@0.50.0
+          # `cache-save` stays auto: this nightly run is what writes the
+          # `semver` key the pull-request job in ci.yml restores.
+          shared-key: semver
+
+      - id: check
+        run: ./scripts/semver-checks.sh --against-registry
+
+      # Gated on the check step, not `failure()`: a checkout failure would
+      # file an issue asserting an unmarked break exists.
+      - name: Report the failure as an issue
+        if: failure() && steps.check.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='A breaking API change landed without its marker'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          # Single quotes: the body's backticks must reach GitHub rather than
+          # run as command substitutions.
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              'The nightly semver check found the tree breaking against the' \
+              'published baseline, with no breaking marker in any commit since' \
+              'the last tag. The release derivation reads subjects, so the' \
+              'next release would ship an API break in a patch bump.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'The run log names the crates. Land a commit whose subject' \
+              'carries the `!` marker and a changelog fragment opening with' \
+              '**Breaking:**; history is immutable, so the marker has to' \
+              'arrive on a new commit.'
+          )"
+
   minimal-versions:
     name: Declared version floors build
     runs-on: ubuntu-latest

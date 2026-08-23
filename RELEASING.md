@@ -35,9 +35,10 @@ gh workflow run release.yml -f version=0.3.0
 
 The workflow derives the version independently and fails when the two
 disagree: any commit since the last tag whose subject carries the breaking
-`!`, or a `BREAKING CHANGE` footer, or a `rust-version` move, means a minor
-bump; anything else means a patch. `./scripts/release-version.sh --derive`
-prints the same answer locally.
+`!`, or a `rust-version` move, means a minor bump; anything else means a
+patch. The `!` is the only marker the derivation reads, so a
+`BREAKING CHANGE` footer on its own derives a patch.
+`./scripts/release-version.sh --derive` prints the same answer locally.
 
 Everything after the input runs unattended. The release pull request
 auto-merges when `CI gate` passes, and nobody approves the diff. The controls
@@ -201,9 +202,8 @@ includes a new crate:
    `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the
    snippet is in the rewritten set.
 
-The pull-request semver gate starts diffing a new crate once it exists on
-both sides of a merge base; the nightly comparison against the registry
-skips it, and says so, until the name is claimed.
+The semver gate compares each crate against its published release, so it
+skips a new crate, and says so, until the name is claimed.
 
 ## What the release rests on
 

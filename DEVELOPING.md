@@ -31,6 +31,7 @@ These sit outside `gates`, by cost or by dependency:
 | `make bench-gungraun-check` | Proves only that the benches build, not what they count |
 | `make bench-ab`, `make bench-arms`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
 | `make attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
+| `make fuzz-build`, `make fuzz` | Needs a nightly toolchain; the nightly tier fuzzes |
 
 Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
@@ -133,40 +134,26 @@ at all.
 ## Fuzzing
 
 `fuzz/` is a [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html)
-crate holding one libFuzzer target per decoder that reads bytes the process did
-not write: the wire framings, the object-store split identifiers a listing
-returns, and the configuration parser. Malformed input reaches those from
-outside the process. A panic there is a bug in the decoder rather than a
-rejected record, and a target asserts that by running to completion.
-`cargo +nightly fuzz list` prints the current set. The crate sits outside the
-workspace, so no `--workspace` target compiles it.
+crate with one libFuzzer target per boundary where the pipeline turns bytes
+into records or records into bytes. Each target asserts a property rather
+than only the absence of a panic. The crate sits outside the workspace, so no
+`--workspace` target compiles it.
 
 ```sh
-cargo install cargo-fuzz --locked --version 0.13.2
-cargo +nightly fuzz list
-cargo +nightly fuzz run <target> -- -max_total_time=60
+make fuzz-install
+make fuzz-build
+make fuzz TARGET=avro_wire_confluent SECS=60
 ```
 
-The instrumentation libFuzzer needs is nightly-only, so a stable toolchain fails
-before the build starts. Write `cargo +nightly` whatever your default toolchain
-is.
+`cargo +nightly fuzz list` prints the set. libFuzzer's instrumentation is
+nightly-only, which is why every target carries `+nightly`.
 
-CI builds the crate on a pull request and fuzzes it nightly. A pull request
-touching `fuzz/`, `ci.yml`, `.github/actions/` or `scripts/ci-changes.sh` builds
-every target and runs none of them, so the harness is held to compiling. The
-nightly tier in `scheduled.yml` runs each target for five minutes and carries
-`fuzz/corpus` between nights in a cache entry, so coverage accumulates across
-runs. A crate change that breaks the harness without touching `fuzz/` is caught
-there rather than on the pull request that made it.
-
-A crash on the nightly run uploads the input as the `fuzz-artifacts` artifact
-and opens an issue titled *A fuzz target found a crashing input*; a repeat
-comments on the open one. To act on it, download the artifact and reproduce with
-`cargo +nightly fuzz run <target> <path-to-the-input>`, shrinking a large input
-first with `cargo +nightly fuzz tmin <target> <path-to-the-input>`. Fix the
-decoder, keep the input under `fuzz/corpus/<target>/`, and cover the case with a
-unit test in the crate that owns the decoder. That unit test is what a later
-pull request is gated on.
+A pull request touching `fuzz/`, `ci.yml`, `.github/actions/` or
+`scripts/ci-changes.sh` builds every target and runs none of them. The nightly
+tier in `scheduled.yml` fuzzes each for five minutes, set by `MAX_TOTAL_TIME`,
+and carries `fuzz/corpus` between nights in a cache entry. A crash uploads the
+input as the `fuzz-artifacts` artifact and opens an issue titled
+`A fuzz target found a crashing input`.
 
 ## Benchmarks
 

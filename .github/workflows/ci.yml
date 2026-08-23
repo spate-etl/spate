@@ -494,27 +494,23 @@ jobs:
           # and shares nothing with the dev-profile trees the other jobs cache.
           shared-key: fuzz
 
-      # Built from source, and version-pinned: install-action carries no
-      # manifest for cargo-fuzz and falls back to cargo-binstall, which
-      # resolves a release binary this repository has not checksummed.
-      - run: cargo install cargo-fuzz --locked --version 0.13.2
+      # install-action carries no manifest for cargo-fuzz and falls back to
+      # cargo-binstall, which resolves a release binary nothing here checksums.
+      - run: make fuzz-install
 
       - name: Build every fuzz target
         run: |
           set -euo pipefail
-          # Materialised and counted: `cargo fuzz build` over an empty target
-          # set exits 0 having built nothing.
           cargo +nightly fuzz list >targets.txt
-          # `|| true`: grep exits 1 on an empty file, and under `set -e` that
-          # aborts the assignment before the check below can name the problem.
+          # `|| true`: grep exits 1 on an empty file, and `set -e` would abort
+          # the assignment before the check below can name the problem.
           targets=$(grep -c '' targets.txt || true)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this job built nothing"
             exit 1
           fi
           echo "building $targets target(s)"
-          # `cargo fuzz build` accepts no `--locked` passthrough.
-          cargo +nightly fuzz build
+          make fuzz-build
 
   # The instruction-count tier: one shard per (package, feature arm). gungraun's
   # summary path carries no feature component, so two feature builds of one bench

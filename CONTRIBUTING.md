@@ -34,10 +34,8 @@ checks. CI calls those same targets, so a target that passes here is what runs
 there. It is necessary and not sufficient: other jobs spell out invocations of
 their own.
 
-Containers, benchmarks, nextest profiles and the opt-in suites are in
-[`DEVELOPING.md`](DEVELOPING.md), along with the fuzz targets. A decoder that
-reads bytes from outside the process wants one, and the nightly run is what
-exercises them.
+Containers, benchmarks, nextest profiles, fuzzing and the opt-in suites are in
+[`DEVELOPING.md`](DEVELOPING.md).
 
 ## Adding a connector
 

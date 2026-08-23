@@ -741,6 +741,10 @@ if len(set(keys)) != len(keys):
         scripts/ci-changes.sh
     check_flags true true true "the workflow that runs the fuzz job selects it" \
         .github/workflows/ci.yml
+    # A Makefile include: the fuzz job runs `make fuzz-install`, so the pinned
+    # version reaches it.
+    check_flags true true true "the pinned tool versions select the fuzz job" \
+        versions.mk
 
     # The manifest gate's selection, asserted the same way. Source changes do
     # not select it: the nightly backstop covers packaging breaks a manifest
@@ -961,7 +965,8 @@ else
         # the workflows, the composite action, the Makefile the workflow steps
         # call, or this script: the last one decides what runs at all.
         Cargo.lock | Cargo.toml | deny.toml | rust-toolchain.toml | .config/* | \
-            .github/workflows/* | .github/actions/* | scripts/* | Makefile)
+            .github/workflows/* | .github/actions/* | scripts/* | Makefile | \
+            versions.mk)
             suites="$suites $CONTAINER_PKGS"
             site=true
             ;;
@@ -1016,10 +1021,12 @@ else
         esac
 
         # The fuzz job's own apparatus: the workflow that runs it, the composite
-        # action that gives it a nightly toolchain, and this selector, which
-        # decides whether it runs at all.
+        # action that gives it a nightly toolchain, the make targets it calls
+        # and the version they install, and this selector, which decides
+        # whether it runs at all.
         case "$file" in
-        scripts/ci-changes.sh | .github/workflows/ci.yml | .github/actions/*)
+        scripts/ci-changes.sh | .github/workflows/ci.yml | .github/actions/* | \
+            Makefile | versions.mk)
             fuzz=true
             ;;
         esac

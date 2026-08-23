@@ -1,0 +1,82 @@
+# Its own workspace root, so the crate stays outside the root workspace's
+# explicit member list and every stable-toolchain gate keeps ignoring it.
+[workspace]
+
+[package]
+name = "spate-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Every dependency is one inline table on one line. `scripts/release-version.sh
+# --check` reads a `{` at end of line anywhere in a tracked `.toml` as an
+# install snippet and fails.
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+spate-avro = { path = "../crates/spate-avro" }
+spate-clickhouse = { path = "../crates/spate-clickhouse" }
+spate-core = { path = "../crates/spate-core" }
+spate-json = { path = "../crates/spate-json" }
+spate-s3 = { path = "../crates/spate-s3" }
+
+[[bin]]
+name = "avro_wire_confluent"
+path = "fuzz_targets/avro_wire_confluent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "avro_wire_single_object"
+path = "fuzz_targets/avro_wire_single_object.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clickhouse_native_schema"
+path = "fuzz_targets/clickhouse_native_schema.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clickhouse_rowbinary"
+path = "fuzz_targets/clickhouse_rowbinary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_ndjson_framing"
+path = "fuzz_targets/json_ndjson_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3_split_descriptor"
+path = "fuzz_targets/s3_split_descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3_split_id"
+path = "fuzz_targets/s3_split_id.rs"
+test = false
+doc = false
+bench = false

@@ -7,8 +7,8 @@ page.
 
 The process itself lives in [`scripts/release.sh`](scripts/release.sh), and
 [`release.yml`](.github/workflows/release.yml) runs those entry points with
-credentials where a step needs one. That split is deliberate: the same code
-path runs locally as a dry run, so what you rehearse is what CI executes.
+credentials where a step needs one. The same code path runs locally as a dry
+run, so what you rehearse is what CI executes.
 
 ## What a release is
 
@@ -16,7 +16,7 @@ The publishable crates move together at one version. They inherit
 `version` from `[workspace.package]`, and `[workspace.dependencies]` pins each
 sibling with `=`, so the workspace version is the only number. One tag
 `vX.Y.Z`, one GitHub release, and `git show vX.Y.Z` is the whole release: a
-single commit carrying every generated artefact.
+single commit carrying every generated artifact.
 
 Pre-1.0, **a breaking change ships in a minor bump**. Cargo treats `0.x`
 minors as incompatible, so `0.2 -> 0.3` is the breaking step and `0.2.0 ->
@@ -40,19 +40,18 @@ bump; anything else means a patch. `./scripts/release-version.sh --derive`
 prints the same answer locally.
 
 Everything after the input runs unattended. The release pull request
-auto-merges when `CI gate` passes, and its merge is not a review gate:
-approving a diff of generated files that nobody reads protects nothing. The
-controls are the version input, the derivation check, and the gates every
-pull request already passes. What is worth reading on that pull request is
-the assembled `CHANGELOG.md` section, which is the release notes.
+auto-merges when `CI gate` passes, and nobody approves the diff. The controls
+are the version input, the derivation check, and the gates every pull request
+already passes. What is worth reading on that pull request is the assembled
+`CHANGELOG.md` section, which is the release notes.
 
 ## What the automation does
 
 **Assemble**, on the dispatch: guards first (the tree matches the last tag,
-the tag is free, the derivation agrees), then every artefact is generated
+the tag is free, the derivation agrees), then every artifact is generated
 from the version input, in one commit on `release/vX.Y.Z`:
 
-| Artefact | Produced by |
+| Artifact | Produced by |
 |---|---|
 | `[workspace.package] version` and the `=` pins | `scripts/release-version.sh --bump` |
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
@@ -65,21 +64,29 @@ The pull request it opens is titled `chore: release vX.Y.Z`, labeled
 it, which is the path for a fragment that landed after the first dispatch; a
 dispatch at a different version supersedes and closes it.
 
-**Publish**, on the squash merge: the commit subject is the trigger, since
-the tag does not exist yet. In order: the subject and `Cargo.toml` must name
-the same version; the set still to publish is computed from the sparse index,
-so a re-run excludes what already landed; any crate already at the version
-must have been published from this commit, read back from `trustpub_data`;
-the metadata the dry run cannot check (`description`, `license`) is checked
-explicitly; every pending crate is packaged and verify-built with no
-credential in the job; only then is the 30-minute Trusted Publishing token
-minted and the upload run with `--no-verify`, so none of the token's fixed
-budget is spent compiling. After the upload, `trustpub_data` is read back for
-every crate and must name the release commit; a scratch project resolves
-`spate` at the exact version from the registry; the commit is tagged; the
-GitHub release opens with the changelog section; and the docs deploy is
-dispatched, after the crates are live so the install snippets are true the
-moment the site serves them.
+**Publish**, on the squash merge. The commit subject is the trigger, since
+the tag does not exist yet.
+
+The run guards before it packages. The subject and `Cargo.toml` must name the
+same version. The set still to publish is computed from the sparse index, so a
+re-run excludes what already landed. Any crate already at the version must
+have been published from this commit, read back from `trustpub_data`. The
+metadata the dry run cannot check is checked explicitly.
+
+Then it packages. Every pending crate is packaged and verify-built with no
+credential in the job, and the packaged `.crate` files are attested with
+`actions/attest-build-provenance`. Only then is the Trusted Publishing token
+minted, and the upload runs with `--no-verify`, so none of the token's fixed
+30-minute budget is spent compiling.
+
+After the upload it checks what landed. `trustpub_data` is read back for every
+crate and must name the release commit. Each packaged crate's sha256 must
+equal the index's `cksum`, so the attestation provably covers the bytes the
+registry serves. A scratch project resolves `spate` at the exact version from
+the registry. The commit is then tagged, the GitHub release opens with the
+changelog section, the per-crate SBOMs and the provenance bundle as assets,
+and the docs deploy is dispatched. The deploy is dispatched after the crates
+are live, so the install snippets are true the moment the site serves them.
 
 ## Rehearse it first
 
@@ -89,11 +96,12 @@ make release-dry-run VERSION=0.3.0
 
 This runs the same `assemble` and the credential-free half of the publish in
 a throwaway git worktree: the real release commit, built for diffing, and
-every pending crate packaged and verify-built. It stops where the registry
-token would be minted and prints what a real run would do next. It needs
-`gh` authenticated, `jq`, and `cargo-about` at exactly 0.9.1; the preflight
-names anything missing. The worktree is kept for inspection and the run
-prints the command that removes it.
+every pending crate packaged and verify-built, and the SBOMs generated. It
+stops where the registry token would be minted and prints what a real run
+would do next. It needs `gh` authenticated, and `jq`, `curl`, `cargo-about`
+and `cargo-cyclonedx` on the path at the versions `scripts/release.sh` pins;
+the preflight names anything missing, and the version it wants. The worktree
+is kept for inspection and the run prints the command that removes it.
 
 Read a green dry run as "this assembles and packages". It cannot prove the
 registry's acceptance rules (a verified email address, the rate limits), the
@@ -103,15 +111,15 @@ that a previous release exercised; the last runs inside the real publish.
 
 The same packaging proof also runs continuously: `ci.yml` runs a
 simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
-manifest, and `scheduled.yml` repeats it nightly, so release day is not when
-a packaging problem first appears.
+manifest, and `scheduled.yml` repeats it nightly, so a packaging problem
+surfaces before release day.
 
 ## Judging a release
 
-Judge by the registry and the tag, never by the workflow reporting success;
-the two diverge exactly when it matters. The publish already enforces the
-mechanical half: every crate's `trustpub_data` names the tagged commit, and a
-scratch project resolves the release. To check by hand:
+Judge by the registry and the tag, never by the workflow reporting success.
+The publish already enforces the mechanical half: every crate's
+`trustpub_data` names the tagged commit, and a scratch project resolves the
+release. To check by hand:
 
 ```sh
 # Every crate at the new version.
@@ -136,6 +144,39 @@ The dispatched deploy is fire-and-forget: `finish` reports it started, not
 that it landed, which is why the check above exists. docs.rs builds
 asynchronously and lags the publish; check it later rather than waiting on
 it.
+
+## Provenance and the SBOM
+
+crates.io records and displays its own provenance for every Trusted
+Publishing upload: the repository, workflow and run, in `trustpub_data`. The
+release attaches its own artifacts on top of that. A SLSA provenance bundle
+covers the `.crate` files the run packaged; a consumer verifies one against
+the GitHub attestation store by fetching the served artifact first:
+
+```sh
+curl -fLO https://static.crates.io/crates/spate/spate-X.Y.Z.crate
+gh attestation verify spate-X.Y.Z.crate --repo spate-etl/spate
+```
+
+That lookup needs the network; fully offline verification passes the release
+asset to `--bundle` instead. The run also generates one CycloneDX SBOM per
+crate (spec 1.5) from the release commit's `Cargo.lock`, so each one describes
+exactly the tree that was published. All of it lands among the release assets,
+and the provenance bundle is what OpenSSF Scorecard's Signed-Releases check
+reads, by its `.intoto.jsonl` suffix.
+
+The release is one commit, and the cksum check ties the attested bytes to
+what the registry serves. The sha256 in the sparse index is the served
+`.crate`'s checksum, and the publish fails when it differs from a file the run
+packaged. On a resumed run the check covers only what that run packaged;
+crates published by an earlier attempt were checked, and attested, by the
+attempt that uploaded them, and the store keeps every attestation even when a
+bundle asset is lost.
+
+`actions/attest-build-provenance`, and anything it calls internally, has to be
+on the organisation's Actions allowlist. A refused action does not fail the
+job; the run never starts and reports `startup_failure` with nothing naming
+the action.
 
 ## Adding a crate
 

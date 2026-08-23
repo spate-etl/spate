@@ -320,6 +320,93 @@ jobs:
               'is a promise to consumers, and a green run is what makes it true.'
           )"
 
+  publish-dry-run:
+    name: Publish dry run
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    # The backstop for the manifest-selected gate in ci.yml: a packaging
+    # break can arrive with nothing in this repository changing (a yank, a
+    # toolchain release).
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: publish
+
+      - name: Bump to the next patch and commit it locally
+        id: bump
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          next="${version%.*}.$(( ${version##*.} + 1 ))"
+          ./scripts/release-version.sh --bump "$next"
+          git config user.name 'spate-release[bot]'
+          git config user.email 'spate-release[bot]@users.noreply.github.com'
+          git commit --all --quiet --message "chore: simulate the release bump to $next"
+
+      # The dry run cannot see these: it packages a crate with no description
+      # or license with a warning and exit 0, while the upload rejects it
+      # (cargo issue 14249).
+      - id: metadata
+        run: ./scripts/release-version.sh --check-publish-metadata
+
+      - id: dry-run
+        run: cargo publish --workspace --locked --dry-run
+
+      # Gated on the named steps, not `failure()`: a checkout failure would
+      # file an issue asserting the workspace no longer packages. The bump
+      # step gets the neutral title: it runs sed, the rewriters and
+      # `cargo update`, so its failures are the tooling or the network, and
+      # filing them as a packaging break would be wrong twice a year.
+      - name: Report the failure as an issue
+        if: >-
+          failure() &&
+          (steps.bump.conclusion == 'failure' ||
+           steps.metadata.conclusion == 'failure' ||
+           steps.dry-run.conclusion == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUMP_FAILED: ${{ steps.bump.conclusion == 'failure' }}
+        run: |
+          set -euo pipefail
+          # Single quotes throughout: the body's backticks must reach GitHub
+          # rather than run as command substitutions.
+          # shellcheck disable=SC2016
+          if [ "$BUMP_FAILED" = "true" ]; then
+            title='Nightly publish rehearsal could not run'
+            body_head='The simulated version bump failed before anything was packaged, so'
+            body_head2='this says nothing about whether the workspace packages. Read the run.'
+          else
+            title='The workspace no longer packages'
+            body_head='`cargo publish --workspace --locked --dry-run` or the upload-metadata'
+            body_head2='check failed on the nightly run, at a simulated next-patch version.'
+          fi
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              "$body_head" \
+              "$body_head2" \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'A release cannot upload until this is green, and a failure that' \
+              'first appears on release day has already published whatever came' \
+              'before it in the order. Fix it before cutting one.'
+          )"
+
   docs-build:
     name: Build site for deploy
     runs-on: ubuntu-latest

@@ -147,8 +147,9 @@ zizmor: ## Audit the workflows
 shellcheck: ## Lint the shell scripts
 	shellcheck scripts/*.sh
 
-self-test: ## The CI change classifier still matches the crate graph
+self-test: ## The CI classifiers still match the crate graph
 	./scripts/ci-changes.sh --self-test
+	./scripts/semver-checks.sh --self-test
 
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test

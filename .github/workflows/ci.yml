@@ -40,6 +40,8 @@ jobs:
       site: ${{ steps.classify.outputs.site }}
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
+      semver: ${{ steps.classify.outputs.semver }}
+      semver-pkgs: ${{ steps.classify.outputs.semver-pkgs }}
       loom: ${{ steps.classify.outputs.loom }}
       bench: ${{ steps.classify.outputs.bench }}
       manifests: ${{ steps.classify.outputs.manifests }}
@@ -162,19 +164,23 @@ jobs:
 
   # Tier 2: gated on tier 1, scoped to what changed.
 
-  # Each publishable crate's API against the pull request's base tip, so a
-  # finding is a break this pull request introduces. A finding passes with a
+  # The API of the crates this pull request can move, against its base tip, so
+  # a finding is a break this pull request introduces. A finding passes with a
   # notice when the title already carries the `!` marker — the squash subject
   # is the title, and the marker there is what the release derivation reads —
   # and `edited` in this workflow's triggers re-runs the gate on a retitle.
   # The comparison against the published baseline runs nightly in
   # scheduled.yml instead: an intentional break that has already landed would
   # fail every later pull request here until the release ships.
+  #
+  # The set comes from ci-changes.sh's reverse-dependency closure over the
+  # changed crates, which is why a change confined to one connector no longer
+  # rebuilds every crate's rustdoc on both sides.
   semver:
     name: Semver (cargo-semver-checks)
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.semver == 'true'
     timeout-minutes: 45
     steps:
       # The tool builds a rustdoc tree per crate per side and shares nothing
@@ -202,7 +208,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: ./scripts/semver-checks.sh --against-merge-base
+          # Crate names this workflow computed, not event data. The script
+          # rejects anything that is not a directory under crates/.
+          SEMVER_PKGS: ${{ needs.changes.outputs.semver-pkgs }}
+        run: ./scripts/semver-checks.sh --against-merge-base --packages "$SEMVER_PKGS"
 
   # Packages and verify-builds every crate at a simulated next version. At
   # the version already on the registry every sibling resolves from there, so

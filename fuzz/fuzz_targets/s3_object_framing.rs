@@ -11,8 +11,10 @@
 //! independently of the policy and the key, so a well-formed stream in one
 //! codec also reaches the decoder for the other.
 //!
-//! The framer digests the decoded bytes and emits no record, so an object
-//! that decompresses to hundreds of megabytes is framed in constant memory.
+//! The framer is `spate-json`'s NDJSON framer under a fuzzer-chosen record
+//! cap, so the run reaches the record cap, the tail drain and `pop_record`.
+//! `frame_object` drops each record as it pops it, so an object that
+//! decompresses to hundreds of megabytes is framed within the cap.
 
 #![no_main]
 
@@ -21,6 +23,7 @@ use flate2::Compression as GzLevel;
 use flate2::write::GzEncoder;
 use libfuzzer_sys::fuzz_target;
 use spate_core::framing::RecordFramer;
+use spate_json::NdjsonFramer;
 use spate_s3::Compression;
 use spate_s3::fuzz_seams::frame_object;
 use std::io::{self, Write};
@@ -36,22 +39,24 @@ struct Input {
     policy: u8,
     /// Index into the three encodings the object's bytes are supplied in.
     encoding: u8,
+    /// One below the framer's `max_record_bytes`, so the cap is at least 1.
+    cap_minus_one: u16,
     object: Vec<u8>,
     /// Offsets into the encoded object, taken modulo its length plus one.
     cuts: Vec<u16>,
 }
 
-/// A record framer that digests the decoded bytes and emits no record.
-/// Nothing accumulates between the decompressor and the target, whatever the
-/// object decompresses to.
-struct Digest {
+/// `NdjsonFramer` with the bytes the decompressor delivered folded into a
+/// digest before the framer sees them.
+struct Recording {
+    inner: NdjsonFramer,
     /// FNV-1a over the decoded stream, shared with the target because the
     /// framer is built inside the framing run.
     hash: Arc<AtomicU64>,
     bytes: Arc<AtomicU64>,
 }
 
-impl RecordFramer for Digest {
+impl RecordFramer for Recording {
     fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
         // FNV-1a: order-sensitive, so two runs agree only if the decoder
         // delivered the same bytes in the same order.
@@ -62,37 +67,44 @@ impl RecordFramer for Digest {
         }
         self.hash.store(hash, Ordering::Relaxed);
         self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        Ok(())
+        self.inner.push(bytes)
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        Ok(())
+        self.inner.finish()
     }
 
     fn pop(&mut self) -> Option<Vec<u8>> {
-        None
+        self.inner.pop()
     }
 
     fn decoded_bytes(&self) -> u64 {
-        self.bytes.load(Ordering::Relaxed)
+        self.inner.decoded_bytes()
     }
 }
 
-/// Frame `chunks` as one object and report whether it framed, the digest of
-/// the bytes the decompressor delivered, and how many there were.
-fn frame(policy: Compression, key: &str, chunks: &[&[u8]]) -> (bool, u64, u64) {
+/// Frame `chunks` as one object and report how many records it produced,
+/// `None` when it failed, with the digest of the bytes the decompressor
+/// delivered and how many there were.
+fn frame(
+    policy: Compression,
+    key: &str,
+    cap: usize,
+    chunks: &[&[u8]],
+) -> (Option<usize>, u64, u64) {
     let hash = Arc::new(AtomicU64::new(0xcbf2_9ce4_8422_2325));
     let bytes = Arc::new(AtomicU64::new(0));
     let (hash_out, bytes_out) = (Arc::clone(&hash), Arc::clone(&bytes));
-    let framed = frame_object(policy, key, chunks, move || {
-        Box::new(Digest {
+    let records = frame_object(policy, key, chunks, move || {
+        Box::new(Recording {
+            inner: NdjsonFramer::new(cap),
             hash: Arc::clone(&hash),
             bytes: Arc::clone(&bytes),
         })
     })
-    .is_ok();
+    .ok();
     (
-        framed,
+        records,
         hash_out.load(Ordering::Relaxed),
         bytes_out.load(Ordering::Relaxed),
     )
@@ -132,22 +144,26 @@ fuzz_target!(|input: Input| {
     }
     chunks.push(&encoded[start..]);
 
-    let whole = frame(policy, &input.key, &[&encoded]);
-    let split = frame(policy, &input.key, &chunks);
+    let cap = usize::from(input.cap_minus_one) + 1;
+    let whole = frame(policy, &input.key, cap, &[&encoded]);
+    let split = frame(policy, &input.key, cap, &chunks);
     assert_eq!(
-        whole.0,
-        split.0,
-        "framing {} bytes under {policy:?} at key {:?} succeeded under one chunking and \
-         failed under the other",
+        whole.0.is_some(),
+        split.0.is_some(),
+        "framing {} bytes under {policy:?} at key {:?} under a {cap}-byte cap succeeded \
+         under one chunking and failed under the other",
         encoded.len(),
         input.key
     );
-    if whole.0 {
+    // Only on the success path. A run that fails mid-chunk strands a record
+    // the concrete framer had already completed, so the two chunkings can
+    // legitimately differ on what they delivered before the error.
+    if whole.0.is_some() {
         assert_eq!(
-            (whole.1, whole.2),
-            (split.1, split.2),
-            "framing {} bytes under {policy:?} at key {:?} decoded differently under two \
-             chunkings",
+            whole,
+            split,
+            "framing {} bytes under {policy:?} at key {:?} under a {cap}-byte cap decoded \
+             differently under two chunkings",
             encoded.len(),
             input.key
         );

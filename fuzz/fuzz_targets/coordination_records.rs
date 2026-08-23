@@ -56,6 +56,10 @@ struct Fields {
     attempts: u32,
     /// The committed watermark, resume state and terminal flag.
     progress: Option<(i64, Vec<u8>, bool)>,
+    /// Overrides the status the way the attempt cap does.
+    quarantined: bool,
+    written_at_ms: i64,
+    updated_at_ms: i64,
     is_final: bool,
     planned: u64,
     planner_state: Option<Vec<u8>>,
@@ -157,59 +161,70 @@ fuzz_target!(|input: Input| {
         .progress
         .as_ref()
         .map(|(watermark, state, completed)| (*watermark, state.as_slice(), *completed));
-    let spec = encode_spec_record(
-        &fields.id,
-        fp,
-        fields.generation,
-        fields.weight,
-        &fields.descriptor,
-    );
-    let split = encode_progress_record(
-        &fields.id,
-        fp,
-        fields.epoch,
-        fields.owner.as_deref(),
-        fields.attempts,
-        progress,
-    );
     let plan = encode_plan_record(
         &fields.fingerprint,
         fields.generation,
         fields.is_final,
         fields.planned,
+        fields.updated_at_ms,
         fields.planner_state.as_deref(),
-    );
-
-    let spec_key = format!("spec.{}", fields.id);
-    let split_key = format!("split.{}", fields.id);
-    assert!(
-        parse_spec_record(&spec_key, &spec, fp).is_some(),
-        "a spec record this build wrote does not parse at {spec_key:?}"
-    );
-    assert!(
-        parse_progress_record(&split_key, &split, fp).is_some(),
-        "a split record this build wrote does not parse at {split_key:?}"
     );
     assert!(
         parse_plan_record(&plan, &fields.fingerprint).is_some(),
         "a plan record this build wrote does not parse"
     );
 
-    let candidates: Vec<Vec<u8>> = [&spec, &split, &plan]
-        .into_iter()
+    // A leader writes a spec and a split record only under a valid split id,
+    // so an invalid one reaches the parsers through the splice arms alone.
+    let keys = split_keys(&fields.id);
+    let mut written: Vec<Vec<u8>> = Vec::new();
+    if let Some([split_key, spec_key]) = keys.as_ref() {
+        let spec = encode_spec_record(
+            &fields.id,
+            fp,
+            fields.generation,
+            fields.weight,
+            &fields.descriptor,
+        )
+        .expect("a valid split id encodes a spec record");
+        let split = encode_progress_record(
+            &fields.id,
+            fp,
+            (fields.epoch, fields.owner.as_deref(), fields.attempts),
+            fields.quarantined,
+            fields.written_at_ms,
+            progress,
+        )
+        .expect("a valid split id encodes a split record");
+        assert!(
+            parse_spec_record(spec_key, &spec, fp).is_some(),
+            "a spec record this build wrote does not parse at {spec_key:?}"
+        );
+        assert!(
+            parse_progress_record(split_key, &split, fp).is_some(),
+            "a split record this build wrote does not parse at {split_key:?}"
+        );
+        written.push(spec);
+        written.push(split);
+    }
+
+    let (split_key, spec_key) = match keys.as_ref() {
+        Some([split_key, spec_key]) => (split_key.as_str(), spec_key.as_str()),
+        None => (fields.id.as_str(), fields.id.as_str()),
+    };
+    let mut records: Vec<&[u8]> = vec![plan.as_slice(), splice.as_slice()];
+    records.extend(written.iter().map(Vec::as_slice));
+    let candidates: Vec<Vec<u8>> = records
+        .iter()
         .map(|record| spliced(record, &splice, splice_at))
         .collect();
-    for bytes in [
-        spec.as_slice(),
-        split.as_slice(),
-        plan.as_slice(),
-        splice.as_slice(),
-    ]
-    .into_iter()
-    .chain(candidates.iter().map(Vec::as_slice))
+    for bytes in records
+        .iter()
+        .copied()
+        .chain(candidates.iter().map(Vec::as_slice))
     {
-        spec_arm(&spec_key, bytes, fp);
-        progress_arm(&split_key, bytes, fp);
+        spec_arm(spec_key, bytes, fp);
+        progress_arm(split_key, bytes, fp);
         plan_arm(bytes, &fields.fingerprint);
     }
 

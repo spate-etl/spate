@@ -12,9 +12,10 @@
 use crate::records::{
     self, PlanFinalityRepr, PlanRecord, SplitProgressRecord, SplitSpecRecord, SplitStatus,
 };
-use spate_core::coordination::SplitId;
+use spate_core::coordination::{SplitId, SplitProgress, SplitSpec};
 
 /// Encode the `spec.{id}` record the leader writes once at planning time.
+/// `None` when `id` is not a valid split id, which the leader cannot reach.
 #[must_use]
 pub fn encode_spec_record(
     id: &str,
@@ -22,76 +23,73 @@ pub fn encode_spec_record(
     generation: u64,
     weight: u64,
     descriptor: &[u8],
-) -> Vec<u8> {
-    SplitSpecRecord {
-        schema: records::SCHEMA,
-        id: id.to_string(),
-        fp,
-        generation,
-        weight,
-        descriptor: records::b64_encode(descriptor),
-    }
-    .encode()
+) -> Option<Vec<u8>> {
+    let spec =
+        SplitSpec::new(SplitId::new(id.to_string()).ok()?, descriptor.to_vec()).with_weight(weight);
+    Some(SplitSpecRecord::planned(&spec, fp, generation).encode())
 }
 
 /// Encode the `split.{id}` record a claim, a fence or a commit writes.
+/// `None` when `id` is not a valid split id.
 ///
-/// `progress` is the committed watermark, resume state and terminal flag, or
-/// `None` for a record nothing has committed to. The status follows the
-/// terminal flag, as it does on the record a commit writes.
+/// `lease` is the fencing epoch, the owner and the attempt count a claim
+/// sets. `progress` is the committed watermark, resume state and terminal
+/// flag, or `None` for a record nothing has committed to. `quarantined`
+/// overrides the status the way the attempt cap does, leaving the watermark
+/// in place. `written_at_ms` is the advisory stamp, taken from the caller so
+/// the same fields always produce the same bytes.
 #[must_use]
 pub fn encode_progress_record(
     id: &str,
     fp: u64,
-    epoch: u64,
-    owner: Option<&str>,
-    attempts: u32,
+    lease: (u64, Option<&str>, u32),
+    quarantined: bool,
+    written_at_ms: i64,
     progress: Option<(i64, &[u8], bool)>,
-) -> Vec<u8> {
-    let completed = progress.is_some_and(|(_, _, completed)| completed);
-    SplitProgressRecord {
-        schema: records::SCHEMA,
-        id: id.to_string(),
-        fp,
-        epoch,
-        status: if completed {
-            SplitStatus::Completed
+) -> Option<Vec<u8>> {
+    let (epoch, owner, attempts) = lease;
+    let split_id = SplitId::new(id.to_string()).ok()?;
+    let seed = progress.map(|(watermark, state, completed)| {
+        if completed {
+            SplitProgress::completed(watermark, state.to_vec())
         } else {
-            SplitStatus::Runnable
-        },
-        owner: owner.map(str::to_string),
-        attempts,
-        watermark: progress.map(|(watermark, _, _)| watermark),
-        state: progress.map(|(_, state, _)| records::b64_encode(state)),
-        completed,
-        written_at_ms: 0,
+            SplitProgress::new(watermark, state.to_vec())
+        }
+    });
+    let mut record = SplitProgressRecord::planned(&split_id, fp, seed.as_ref());
+    record.epoch = epoch;
+    record.owner = owner.map(str::to_string);
+    record.attempts = attempts;
+    if quarantined {
+        record.status = SplitStatus::Quarantined;
     }
-    .encode()
+    record.written_at_ms = written_at_ms;
+    Some(record.encode())
 }
 
-/// Encode the `plan` record a leader publishes.
+/// Encode the `plan` record a leader publishes. `updated_at_ms` is the
+/// advisory stamp, taken from the caller so the same fields always produce
+/// the same bytes.
 #[must_use]
 pub fn encode_plan_record(
     fingerprint: &str,
     generation: u64,
     is_final: bool,
     planned: u64,
+    updated_at_ms: i64,
     planner_state: Option<&[u8]>,
 ) -> Vec<u8> {
-    PlanRecord {
-        schema: records::SCHEMA,
-        fingerprint: fingerprint.to_string(),
-        generation,
-        finality: if is_final {
-            PlanFinalityRepr::Final
-        } else {
-            PlanFinalityRepr::Open
-        },
-        planned,
-        planner_state: planner_state.map(records::b64_encode),
-        updated_at_ms: 0,
-    }
-    .encode()
+    let mut record = PlanRecord::new(fingerprint.to_string());
+    record.generation = generation;
+    record.finality = if is_final {
+        PlanFinalityRepr::Final
+    } else {
+        PlanFinalityRepr::Open
+    };
+    record.planned = planned;
+    record.planner_state = planner_state.map(records::b64_encode);
+    record.updated_at_ms = updated_at_ms;
+    record.encode()
 }
 
 /// Parse the `spec.{id}` record stored at `key` under the job fingerprint

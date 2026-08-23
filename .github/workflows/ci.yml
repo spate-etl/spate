@@ -164,18 +164,27 @@ jobs:
 
   # Tier 2: gated on tier 1, scoped to what changed.
 
-  # The API of the crates this pull request can move, against its base tip, so
-  # a finding is a break this pull request introduces. A finding passes with a
-  # notice when the title already carries the `!` marker — the squash subject
-  # is the title, and the marker there is what the release derivation reads —
-  # and `edited` in this workflow's triggers re-runs the gate on a retitle.
-  # The comparison against the published baseline runs nightly in
-  # scheduled.yml instead: an intentional break that has already landed would
-  # fail every later pull request here until the release ships.
+  # The API of the crates this pull request can move, against the published
+  # release. That baseline is what the version number is a claim about, and it
+  # moves only at a release, which is what tokio, hyper, diesel and rustls all
+  # compare against.
+  #
+  # A finding passes with a notice when the title carries the `!` marker. The
+  # squash subject is the title, and the marker there is what the release
+  # derivation reads, so `edited` in this workflow's triggers re-runs the gate
+  # on a retitle. A finding also passes when a commit since the last tag
+  # already carries a marker, because the break it names has already landed
+  # and is already announced.
+  #
+  # That second excuse is workspace-wide. After the first announced break of a
+  # release cycle, a later pull request breaking a different crate passes here
+  # without a marker of its own; the version still derives as a minor and the
+  # fragment for that second break is what goes missing. This is the trade the
+  # published baseline carries and it is taken deliberately.
   #
   # The set comes from ci-changes.sh's reverse-dependency closure over the
   # changed crates, which is why a change confined to one connector no longer
-  # rebuilds every crate's rustdoc on both sides.
+  # rebuilds every crate's rustdoc.
   semver:
     name: Semver (cargo-semver-checks)
     runs-on: ubuntu-latest
@@ -192,26 +201,26 @@ jobs:
           df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The base tip has to be present as an object.
+          # The tags and every commit since the newest one: the marker scan
+          # reads that range, and the base tip ends it.
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-semver-checks@0.50.0
-          # Reads the lint cache for the current side. The baseline side
-          # rebuilds under target/semver-checks per baseline revision, and no
-          # key would hold that.
+          # Reads the lint cache for the tree's side. The published baselines
+          # rebuild under target/semver-checks each run; they are stable for a
+          # release cycle and nothing caches them yet.
           shared-key: dev-allfeatures
           cache-save: never
 
       - env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           # Crate names this workflow computed, not event data. The script
           # rejects anything that is not a directory under crates/.
           SEMVER_PKGS: ${{ needs.changes.outputs.semver-pkgs }}
-        run: ./scripts/semver-checks.sh --against-merge-base --packages "$SEMVER_PKGS"
+        run: ./scripts/semver-checks.sh --against-registry --packages "$SEMVER_PKGS"
 
   # Packages and verify-builds every crate at a simulated next version. At
   # the version already on the registry every sibling resolves from there, so

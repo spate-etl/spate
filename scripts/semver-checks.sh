@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# The cargo-semver-checks gates: two comparisons, two callers.
+# The cargo-semver-checks gate: one comparison, against the published release.
 #
-#   ./scripts/semver-checks.sh --against-merge-base --packages "spate spate-s3"
-#   ./scripts/semver-checks.sh --against-registry    # scheduled.yml, nightly
+#   ./scripts/semver-checks.sh --against-registry --packages "spate spate-s3"
+#   ./scripts/semver-checks.sh --against-registry    # every crate
 #   ./scripts/semver-checks.sh --self-test           # the classifiers, alone
 #
 # `--packages` restricts the comparison to a named set, which ci.yml fills from
@@ -11,26 +11,25 @@
 # touches. An empty set is an error rather than every crate: a workflow
 # expression that resolves to nothing must fail the gate, not silently widen it.
 #
-# The pull-request gate diffs each crate against the pull request's base, so
-# a finding is a break this pull request introduces. A finding whose pull
-# request title already carries the breaking marker passes with a notice:
-# pre-1.0 a breaking change ships in a minor bump and the gate's job is the
-# announcement, not the veto. A finding without the marker fails, and
-# retitling re-runs the gate, since ci.yml re-runs on `edited`. The registry
-# comparison cannot sit on pull requests: once an intentional break lands,
-# every later pull request would fail against the published baseline until
-# the release ships.
+# The published release is the baseline the version number is a claim about, so
+# it is what the gate compares against, and it moves only at a release. A break
+# is expected once an announced one has landed, so a finding passes when the
+# pull request title carries the marker, or when a commit since the last tag
+# already carries one.
 #
-# The nightly run diffs against the registry and catches what slipped past
-# the gate: a break on `main` with no marker anywhere in the log. The release
-# derivation reads the log for the marker, so an unmarked break would
-# under-bump the next version; the remedy is a follow-up commit carrying the
-# marker.
+# That second excuse is workspace-wide, so after the first announced break of a
+# release cycle a later pull request breaking a different crate passes without
+# a marker of its own. The version still derives as a minor, which is what the
+# number has to get right; what is given up is the fragment and the release-note
+# line for that second break. tokio, hyper and diesel accept the same trade.
 #
-# Environment (--against-merge-base only; set by ci.yml, and on a laptop the
-# baseline falls back to the merge base with origin/main):
-#   BASE_SHA  github.event.pull_request.base.sha
-#   HEAD_SHA  github.event.pull_request.head.sha
+# Pre-1.0 a breaking change ships in a minor bump, so the gate's job is the
+# announcement rather than the veto. A finding without a marker fails, and
+# retitling re-runs it, since ci.yml re-runs on `edited`.
+#
+# Environment (set by ci.yml on a pull request; both are absent elsewhere and
+# the marker scan then reads up to HEAD):
+#   BASE_SHA  github.event.pull_request.base.sha, the end of the marker scan
 #   PR_TITLE  github.event.pull_request.title; free text somebody typed,
 #             matched against, never evaluated
 set -euo pipefail
@@ -198,105 +197,55 @@ TABLE
     [ "$failures" -eq 0 ] || fail "$failures self-test failure(s). This script is wrong, not your change"
 }
 
-# ---------------------------------------------------------------------------
-# --against-merge-base: breaks this pull request introduces.
-# ---------------------------------------------------------------------------
-
-# The baseline revision. In CI the checkout is the pull request's merge
-# result against the base tip, so the base tip itself is the baseline:
-# everything already on `main`, an announced break included, sits on both
-# sides and is not attributed to this pull request. On a laptop the tree is
-# the branch itself, so the merge base with the obvious upstream plays the
-# same role.
-resolve_base() {
-    local ref candidate base
-    if [ -n "${BASE_SHA:-}" ]; then
-        git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null ||
-            fail "the base ${BASE_SHA:0:12} is not in this clone. A re-run of an old workflow run
-  replays its frozen payload; re-run from the newest run, or push the branch."
-        printf '%s\n' "$BASE_SHA"
-        return 0
-    fi
-    for ref in origin/main upstream/main main; do
-        if candidate=$(git rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) &&
-            base=$(git merge-base HEAD "$candidate" 2>/dev/null) && [ -n "$base" ]; then
-            printf '%s\n' "$base"
-            return 0
-        fi
-    done
-    fail "no baseline found. Set BASE_SHA, or fetch a main to compare against."
+# The newest release tag, which is the version the registry serves.
+last_tag() {
+    git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1
 }
 
-merge_base_mode() {
-    local base base_crates base_version crate packages=() removed="" status verdict=clean
+# One batched comparison over the named crates, with `--release-type $1` when
+# $1 is non-empty. Accumulates into CHECKED and BREAKING.
+#
+# A break re-runs the group one crate at a time to name which crates broke. The
+# findings are already on the log from the batch, so the re-run discards its
+# output and reads only the verdict.
+CHECKED=0
+BREAKING=""
+check_group() {
+    local rt=$1 status=0 pkg
+    shift
+    [ $# -gt 0 ] || return 0
+    local -a args=()
+    for pkg in "$@"; do args+=(--package "$pkg"); done
+    [ -z "$rt" ] || args+=(--release-type "$rt")
 
-    base=$(resolve_base)
-    if [ "$base" = "$(git rev-parse HEAD)" ]; then
-        echo "semver-checks.sh: the baseline is HEAD; nothing to diff."
-        return 0
-    fi
-
-    # A diff that moves the workspace version is a release pull request; the
-    # tool classifies a 0.x bump as major and drops every lint, so running it
-    # would print a pass that evaluated nothing.
-    base_version=$(git show "$base:Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p')
-    if [ -n "$base_version" ] && [ "$base_version" != "$(workspace_version)" ]; then
-        echo "semver-checks.sh: the workspace version moves in this diff ($base_version -> $(workspace_version));"
-        echo "  the classification drops every lint for a version bump, so there is nothing to run."
-        return 0
-    fi
-
-    # Only crates present on both sides are diffed. A crate this pull request
-    # adds has no baseline anywhere; one it removes is itself a breaking
-    # change and is judged with the tool's findings below.
-    base_crates=$(git ls-tree --name-only "$base:crates" 2>/dev/null | tr '\n' ' ') ||
-        fail "the baseline $base carries no crates/ tree"
-    for crate in $(selected_crates); do
-        case " $base_crates " in
-        *" $crate "*) packages+=(--package "$crate") ;;
-        *) echo "::notice::$crate is new in this pull request; there is no baseline to diff." ;;
-        esac
-    done
-    for crate in $base_crates; do
-        [ -n "$crate" ] || continue
-        [ -d "crates/$crate" ] || removed="$removed $crate"
-    done
-    if [ "${#packages[@]}" -eq 0 ] && [ -z "$removed" ]; then
-        echo "semver-checks.sh: every crate is new; nothing to diff."
-        return 0
-    fi
-
-    if [ "${#packages[@]}" -gt 0 ]; then
-        echo "semver-checks.sh: checking $((${#packages[@]} / 2)) crate(s) against baseline ${base:0:12}"
-        status=0
-        cargo semver-checks --baseline-rev "$base" "${packages[@]}" || status=$?
-        verdict=$(classify_exit "$status")
-        if [ "$verdict" = "error" ]; then
-            fail "cargo semver-checks exited $status without a verdict. That is the tool failing
-  to complete, not an API judgement; read its output above."
-        fi
-    fi
-    if [ -n "$removed" ]; then
-        echo "::notice::removed published crate(s):$removed"
-        verdict=breaking
-    fi
-
-    case "$verdict" in
+    echo "semver-checks.sh: checking $# crate(s) against their published baseline"
+    cargo semver-checks "${args[@]}" || status=$?
+    case "$(classify_exit "$status")" in
     clean)
-        echo "semver-checks.sh: every crate holds its API against the baseline."
+        CHECKED=$((CHECKED + $#))
         ;;
     breaking)
-        # The announcement is the requirement, and the squash subject is the
-        # pull request title, so the title carrying the marker is what makes
-        # the release derivation see this break.
-        if subject_is_breaking "${PR_TITLE:-}"; then
-            echo "semver-checks.sh: breaking, and the title already carries the marker; the next"
-            echo "  release derives as a minor."
-        else
-            echo "::error::This pull request introduces a breaking API change; the findings are above."
-            echo "::error::Pre-1.0 a breaking change ships in a minor bump. Carry \`!\` in the pull request title (retitling re-runs this gate), tick Breaking in the Semver section, and open the changelog fragment with **Breaking:**."
-            exit 1
-        fi
+        CHECKED=$((CHECKED + $#))
+        for pkg in "$@"; do
+            status=0
+            if [ -z "$rt" ]; then
+                cargo semver-checks --package "$pkg" >/dev/null 2>&1 || status=$?
+            else
+                cargo semver-checks --package "$pkg" --release-type "$rt" >/dev/null 2>&1 || status=$?
+            fi
+            case "$(classify_exit "$status")" in
+            breaking) BREAKING="$BREAKING $pkg" ;;
+            clean) ;;
+            error)
+                fail "cargo semver-checks exited $status for $pkg while attributing a break.
+  Read its output above; the batch already reported the findings."
+                ;;
+            esac
+        done
+        ;;
+    error)
+        fail "cargo semver-checks exited $status without a verdict. That is the
+  tool failing to complete, not an API judgement; read its output above."
         ;;
     esac
 }
@@ -305,12 +254,14 @@ merge_base_mode() {
 # --against-registry: the tree against what is published.
 # ---------------------------------------------------------------------------
 registry_mode() {
-    local crate reply code body latest current status checked=0 skipped=0 breaking="" args=()
+    local crate reply code body latest current checked=0 skipped=0 breaking=""
+    local -a plain=() pinned=()
+    CHECKED=0
+    BREAKING=""
 
     current=$(workspace_version)
-    for dir in crates/*/; do
-        [ -d "$dir" ] || continue
-        crate=$(basename "$dir")
+    while IFS= read -r crate; do
+        [ -n "$crate" ] || continue
 
         # The sparse index answers which versions are published, with no rate
         # limit. Only 200 and 404 are answers; a transport failure or any
@@ -338,35 +289,36 @@ registry_mode() {
         # lint; pinning the expectation to a minor keeps the major-breaking
         # lints running across that window.
         latest=$(printf '%s\n' "$body" | jq -r 'select(.yanked | not) | .vers' | tail -n 1)
-        args=()
         if [ -z "$latest" ]; then
             echo "::notice::every published version of $crate is yanked; nothing to diff against."
             skipped=$((skipped + 1))
             continue
         fi
         if [ "$latest" != "$current" ]; then
-            args=(--release-type minor)
+            pinned+=("$crate")
+        else
+            plain+=("$crate")
         fi
+    done < <(selected_crates)
 
-        echo "semver-checks.sh: checking $crate against its published baseline"
-        status=0
-        cargo semver-checks --package "$crate" ${args[@]+"${args[@]}"} || status=$?
-        case "$(classify_exit "$status")" in
-        clean)
-            checked=$((checked + 1))
-            ;;
-        breaking)
-            breaking="$breaking $crate"
-            checked=$((checked + 1))
-            ;;
-        error)
-            fail "cargo semver-checks exited $status for $crate without a verdict. That is the
-  tool failing to complete, not an API judgement; read its output above."
-            ;;
-        esac
+    # One invocation per group rather than one per crate: the tool shares a
+    # rustdoc build across the packages of a single run and shares nothing
+    # between runs.
+    check_group "" ${plain[@]+"${plain[@]}"}
+    check_group minor ${pinned[@]+"${pinned[@]}"}
+    checked=$CHECKED
+    breaking=$BREAKING
+
+    [ "$((checked + skipped))" -gt 0 ] ||
+        fail "the selection named no crate to check, so the check evaluated nothing"
+
+    # A crate published at the last tag and absent from the tree is a removal,
+    # which is breaking whatever the tool says about what remains. It needs no
+    # build, so it is judged over every crate rather than the selected set.
+    for crate in $(git ls-tree --name-only "$(last_tag):crates" 2>/dev/null); do
+        [ -n "$crate" ] || continue
+        [ -d "crates/$crate" ] || breaking="$breaking $crate(removed)"
     done
-
-    [ "$((checked + skipped))" -gt 0 ] || fail "no crates under crates/, so the check evaluated nothing"
 
     # A break against the registry is the expected state after an announced
     # breaking change lands, so the verdict comes from the log: the marker
@@ -374,9 +326,22 @@ registry_mode() {
     # No marker means a break slipped past the pull-request gate.
     if [ -n "$breaking" ]; then
         local last log
-        last=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+        last=$(last_tag)
         [ -n "$last" ] || fail "breaking changes found but no vX.Y.Z tag to scan for their markers"
-        log=$(git log --no-merges --format=%B "$last..HEAD")
+
+        # This pull request's own announcement is its title and nothing else:
+        # the squash subject is the title, and a constituent subject inside a
+        # squash body is not a subject the release derivation reads.
+        if subject_is_breaking "${PR_TITLE:-}"; then
+            echo "semver-checks.sh: breaking against the registry:$breaking"
+            echo "  The title carries the marker; the next release derives as a minor."
+            return 0
+        fi
+
+        # Everything already announced on the base. Scanning to HEAD instead
+        # would read this branch's own commit subjects, which squash into body
+        # lines the derivation classifies as plain.
+        log=$(git log --no-merges --format=%B "$last..${BASE_SHA:-HEAD}")
         if grep -qE "$MARKER_ERE" <<<"$log"; then
             echo "semver-checks.sh: breaking against the registry:$breaking"
             echo "  A marker since $last already announces it; the next release derives as a minor."
@@ -416,9 +381,6 @@ fi
 [ $# -eq 0 ] || fail "unexpected argument '$1'"
 
 case "$mode" in
---against-merge-base)
-    merge_base_mode
-    ;;
 --against-registry)
     registry_mode
     ;;
@@ -426,6 +388,6 @@ case "$mode" in
     echo "semver-checks.sh: self-test passed"
     ;;
 *)
-    fail "usage: [--against-merge-base | --against-registry] [--packages \"a b\"] | --self-test"
+    fail "usage: --against-registry [--packages \"a b\"] | --self-test"
     ;;
 esac

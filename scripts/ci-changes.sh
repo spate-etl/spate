@@ -365,7 +365,7 @@ for crate in sorted(names):
 
     # FUZZ_PKGS against the fuzz crate's own manifest. `fuzz/` is outside the
     # workspace, so cargo metadata does not reach it.
-    expected_fuzz=$(printf '%s\n' $FUZZ_PKGS | sort)
+    expected_fuzz=$(printf '%s' "$FUZZ_PKGS" | tr ' ' '\n' | sort)
     actual_fuzz=$(sed -n 's|^[a-z0-9-]* = { path = "\.\./crates/\([a-z0-9-]*\)".*|\1|p' \
         fuzz/Cargo.toml | sort)
     if [[ "$expected_fuzz" != "$actual_fuzz" ]]; then

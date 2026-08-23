@@ -1,10 +1,5 @@
 //! Coordination-store record and key parsing over arbitrary bytes.
 //!
-//! A worker reads its plan record, its split records and their spec records
-//! out of a shared key-value store, and acts on every one that parses: they
-//! carry the fencing epoch, the owner, and the watermark a resumed split
-//! reads from. Any process that reaches the prefix can write those bytes.
-//!
 //! The target builds each record from arbitrary fields, asserts a record this
 //! build wrote parses back, then writes the fuzzer's bytes over it at a
 //! fuzzer-chosen offset and runs every parser over the result. Each parser
@@ -23,8 +18,7 @@
 //! The key arm asserts the five prefixed keyspaces stay disjoint. At most one
 //! of them reads a name out of an arbitrary key, and a key built for a split
 //! id or an instance id is read back by exactly one of them, carrying the
-//! name it was built from. A key two keyspaces claim would put a lease and a
-//! progress record, or an assignment and a probe, on one entry.
+//! name it was built from.
 
 #![no_main]
 
@@ -201,8 +195,6 @@ fuzz_target!(|input: Input| {
         "a plan record this build wrote does not parse"
     );
 
-    // Every parser sees each record whole, each record with the fuzzer's
-    // bytes written over it, and the fuzzer's bytes on their own.
     let candidates: Vec<Vec<u8>> = [&spec, &split, &plan]
         .into_iter()
         .map(|record| spliced(record, &splice, splice_at))

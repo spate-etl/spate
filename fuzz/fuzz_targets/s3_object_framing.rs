@@ -1,11 +1,5 @@
 //! Object framing over adversarial compressed bytes.
 //!
-//! A lane resolves an object's codec from its key and feeds the object's
-//! chunks through the matching decompressor into a record framer. The bytes
-//! are the bucket's, so the gzip and zstd decoders read input this process
-//! did not produce: a truncated stream, a corrupt frame, or a key whose
-//! extension names a codec the bytes are not in.
-//!
 //! The framer is a pure function of the object's byte stream, so the target
 //! frames one stream twice, once as a single chunk and once split at
 //! fuzzer-chosen offsets, and asserts the two runs agree on the outcome and

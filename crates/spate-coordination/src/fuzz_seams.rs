@@ -1,23 +1,13 @@
-//! Entry points into the parsers that read what the store returns.
+//! Entry points into the parsers that read what the coordination store
+//! returns.
 //!
-//! A worker reads its plan record, its split records and their spec records
-//! out of the coordination store, and any process that reaches the prefix
-//! writes those bytes. A record that parses decides ownership, the fencing
-//! epoch, and where a resumed split reads from. The parsers are private to
-//! this crate, and `fuzz/` is a workspace of its own that reaches this
-//! crate's public API and nothing else.
-//!
-//! The seam holds to the rules [`bench_seams`](crate::bench_seams) states:
-//! behind the off-by-default `testing` feature and `#[doc(hidden)]`,
-//! exporting functions and the aliases they need rather than this crate's own
-//! types, and one whole unit of a stage's work per function.
+//! Follows the rules [`bench_seams`](crate::bench_seams) states.
 //!
 //! A parser reports its verdict as an [`Option`], dropping the message a
-//! rejection carries for the operator. Each record parser hands the record
-//! back re-encoded, so a caller can parse what this build wrote. The three
-//! encoders write a record the way the stage that owns it writes one, with
-//! the advisory wall-clock stamp fixed at zero, so the same fields always
-//! produce the same bytes.
+//! rejection carries. Each record parser hands the record back re-encoded, so
+//! a caller can parse what this build wrote. The encoders fix the advisory
+//! wall-clock stamp at zero, so the same fields always produce the same
+//! bytes.
 
 use crate::records::{
     self, PlanFinalityRepr, PlanRecord, SplitProgressRecord, SplitSpecRecord, SplitStatus,

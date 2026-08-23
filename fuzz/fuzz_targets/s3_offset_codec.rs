@@ -1,17 +1,11 @@
 //! The composite offset codec over arbitrary offsets and positions.
 //!
-//! A lane's `i64` offset packs an object ordinal and a record index, and a
-//! resume decodes the watermark a coordination store hands back. The store
-//! returns whatever it holds, so the decode arm takes an arbitrary
-//! non-negative `i64` and asserts it decodes to a position whose fields are
-//! both in range and which re-encodes to the offset it came from.
-//!
-//! The encode arm takes an arbitrary position and asserts it encodes exactly
-//! when both fields are in range, and that the offset decodes back to it.
-//!
-//! Decoding also has to order offsets the way the positions they carry are
-//! ordered, which is what keeps a partition's watermark rising across an
-//! object boundary. The decode arm asserts that over two arbitrary offsets.
+//! The decode arm takes an arbitrary non-negative `i64` and asserts it decodes
+//! to a position whose fields are both in range and which re-encodes to the
+//! offset it came from. The encode arm takes an arbitrary position and asserts
+//! it encodes exactly when both fields are in range, and that the offset
+//! decodes back to it. A third arm asserts two offsets order the way the
+//! positions they carry do.
 
 #![no_main]
 
@@ -28,9 +22,7 @@ struct Input {
 }
 
 fuzz_target!(|input: Input| {
-    // Every encoded position leaves the sign bit clear, and the tracker
-    // advances a watermark it decoded, so a negative offset never reaches
-    // `decode_position`.
+    // `decode_position` takes non-negative offsets only.
     let offsets = input.offsets.map(|offset| offset & i64::MAX);
 
     for offset in offsets {

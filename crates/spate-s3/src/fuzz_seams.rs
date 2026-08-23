@@ -1,15 +1,7 @@
-//! Entry points into the decoders that read bytes this process did not write.
+//! Entry points into two decoders that read bytes this process did not write,
+//! the composite offset codec and the object framer.
 //!
-//! The composite offset codec decodes the `i64` watermark a coordination
-//! store hands back on resume, and the object framer decodes an object's
-//! bytes as the bucket serves them, gzip and zstd streams included. Both are
-//! private to this crate, and `fuzz/` is a workspace of its own that reaches
-//! this crate's public API and nothing else.
-//!
-//! The seam holds to the rules [`bench_seams`](crate::bench_seams) states:
-//! behind the off-by-default `testing` feature and `#[doc(hidden)]`,
-//! exporting functions and the aliases they need rather than this crate's own
-//! types, and one whole unit of a stage's work per function.
+//! Follows the rules [`bench_seams`](crate::bench_seams) states.
 
 use crate::config::Compression;
 use crate::framer::{Codec, ObjectFramer};
@@ -48,8 +40,8 @@ pub fn decode_position(offset: i64) -> (u32, u64) {
 ///
 /// `chunks` is one object's bytes in delivery order, already compressed when
 /// the resolved codec says so. Each record is dropped as it is popped, so a
-/// stream that decompresses to far more than the framer holds costs the
-/// caller nothing per record.
+/// stream that decompresses to far more than the framer holds is framed in
+/// constant memory.
 ///
 /// # Errors
 ///
@@ -74,7 +66,6 @@ where
         }
     }
     framer.finish_object()?;
-    // The tail: `finish_object` completes an unterminated final record.
     while framer.pop_record().is_some() {
         records += 1;
     }

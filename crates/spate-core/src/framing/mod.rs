@@ -59,7 +59,11 @@ pub enum FramingContract {
 /// **must be a pure function of the byte stream**. The record sequence must
 /// not depend on how bytes are split across [`push`](Self::push) calls, so
 /// resume-by-record-index stays deterministic. Enforce any record-size bound
-/// inside `push` (return an error rather than buffer unboundedly).
+/// inside `push` (return an error rather than buffer unboundedly). A record
+/// completed before the byte that fails is queued for [`pop`](Self::pop)
+/// before the error returns, so a caller that drains after a failed
+/// [`push`](Self::push) or [`finish`](Self::finish) sees the same records
+/// whatever the chunking.
 pub trait RecordFramer: Send {
     /// Feed the next run of decoded bytes.
     fn push(&mut self, bytes: &[u8]) -> io::Result<()>;

@@ -1,0 +1,14 @@
+# Advisories OSV reports against `package-lock.json` that the site cannot clear.
+#
+# An entry stops applying on its `ignoreUntil` date, and osv-scanner reports the
+# advisory again from that day. The date is the review point.
+
+[[IgnoredVulns]]
+id = "GHSA-w3rx-r6r6-pgpr"
+ignoreUntil = 2027-02-23
+reason = "image-size reaches this tree as @docusaurus/mdx-loader -> image-size and runs only while the site builds, over images committed to this repository. The advisory range covers every published release up to and including 2.0.2, which is the newest, so no upgrade and no overrides entry clears it."
+
+[[IgnoredVulns]]
+id = "GHSA-5p2g-fcmc-qvqq"
+ignoreUntil = 2027-02-23
+reason = "Same package, same reach and same absence of a fixed release as GHSA-w3rx-r6r6-pgpr above."

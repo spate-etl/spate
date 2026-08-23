@@ -205,8 +205,13 @@ fuzz-build: ## Build every fuzz target
 
 SECS ?= 60
 
+# Order matters: libFuzzer writes new finds to the first corpus path and reads
+# the rest. The first sits under the ignored `target/`, so a local run leaves
+# the committed seeds alone.
 fuzz: ## Fuzz one target: make fuzz TARGET=avro_wire_confluent SECS=60
-	cargo +nightly fuzz run "$(TARGET)" -- -max_total_time="$(SECS)"
+	mkdir -p fuzz/corpus/$(TARGET) fuzz/target/corpus/$(TARGET)
+	cargo +nightly fuzz run "$(TARGET)" fuzz/target/corpus/$(TARGET) \
+	  fuzz/corpus/$(TARGET) -- -max_total_time="$(SECS)"
 
 ##@ Docs
 

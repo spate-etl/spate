@@ -1,0 +1,14 @@
+# Advisories OSV reports against `Cargo.lock` that this workspace cannot clear.
+#
+# An entry stops applying on its `ignoreUntil` date, and osv-scanner reports the
+# advisory again from that day. The date is the review point.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-02-23
+reason = "Unmaintained proc-macro reached as clickhouse -> polonius-the-crab -> higher-kinded-types -> paste. deny.toml carries this decision and the condition for re-checking it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0235"
+ignoreUntil = 2027-02-23
+reason = "rkyv 0.7.46 is an optional dependency of rust_decimal that no feature in this workspace enables, so it is never compiled. `cargo tree --workspace --all-features --locked --target all --invert rkyv` prints nothing. rust_decimal 1.42.1 is the newest release and still declares rkyv ^0.7.46, so there is no version to move to."

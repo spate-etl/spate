@@ -2,9 +2,14 @@
 #
 # The cargo-semver-checks gates: two comparisons, two callers.
 #
-#   ./scripts/semver-checks.sh --against-merge-base  # ci.yml, per pull request
+#   ./scripts/semver-checks.sh --against-merge-base --packages "spate spate-s3"
 #   ./scripts/semver-checks.sh --against-registry    # scheduled.yml, nightly
 #   ./scripts/semver-checks.sh --self-test           # the classifiers, alone
+#
+# `--packages` restricts the comparison to a named set, which ci.yml fills from
+# ci-changes.sh's reverse-dependency closure over the crates a pull request
+# touches. An empty set is an error rather than every crate: a workflow
+# expression that resolves to nothing must fail the gate, not silently widen it.
 #
 # The pull-request gate diffs each crate against the pull request's base, so
 # a finding is a break this pull request introduces. A finding whose pull
@@ -83,6 +88,38 @@ workspace_version() {
     sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml
 }
 
+# The crates this run compares: the set `--packages` named, or every crate.
+# Set by the dispatch below, after packages_valid has accepted it.
+REQUESTED_PKGS=""
+selected_crates() {
+    local -a names
+    if [ -n "$REQUESTED_PKGS" ]; then
+        # `read -a` splits on whitespace without globbing, so a name never
+        # reaches the shell as a pattern.
+        read -r -a names <<<"$REQUESTED_PKGS"
+        printf '%s\n' "${names[@]}"
+    else
+        crates_now
+    fi
+}
+
+# Is $1 a well-formed package list? Prints nothing; the answer is the exit
+# status. The value arrives from a workflow expression, so it is data: a name
+# is matched against a character class rather than used as a pattern, and a
+# name that is not a crate directory means the closure table went stale and
+# must fail rather than check nothing.
+packages_valid() {
+    local name
+    [ -n "${1// /}" ] || return 1
+    for name in $1; do
+        case "$name" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+        esac
+        [ -d "crates/$name" ] || return 1
+    done
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Self-test. Runs inline on every invocation as well as under --self-test.
 # ---------------------------------------------------------------------------
@@ -134,6 +171,28 @@ docs(workspace)!: migrate CLAUDE.md to AGENTS.md|breaking
 feat(spate-core): a windowed operator|plain
 chore: release v0.2.0|plain
 revert(spate-core): back out the windowed operator!|plain
+TABLE
+
+    # The --packages validator. A crate name here is data from a workflow
+    # expression, so the rejections matter as much as the acceptances: a glob
+    # must not expand and a path must not traverse.
+    while IFS='|' read -r line want; do
+        case "$line" in '#'*) continue ;; esac
+        if packages_valid "$line"; then got=ok; else got=reject; fi
+        if [ "$got" != "$want" ]; then
+            echo "semver-checks.sh: packages_valid '$line' -> '$got', expected '$want'" >&2
+            failures=$((failures + 1))
+        fi
+    done <<'TABLE'
+spate|ok
+spate spate-kafka|ok
+|reject
+ |reject
+spate-*|reject
+../etc|reject
+crates/spate|reject
+spate;rm -rf /|reject
+spate nonexistent-crate|reject
 TABLE
 
     [ "$failures" -eq 0 ] || fail "$failures self-test failure(s). This script is wrong, not your change"
@@ -192,7 +251,7 @@ merge_base_mode() {
     # change and is judged with the tool's findings below.
     base_crates=$(git ls-tree --name-only "$base:crates" 2>/dev/null | tr '\n' ' ') ||
         fail "the baseline $base carries no crates/ tree"
-    for crate in $(crates_now); do
+    for crate in $(selected_crates); do
         case " $base_crates " in
         *" $crate "*) packages+=(--package "$crate") ;;
         *) echo "::notice::$crate is new in this pull request; there is no baseline to diff." ;;
@@ -344,7 +403,19 @@ registry_mode() {
 # Dispatch.
 # ---------------------------------------------------------------------------
 self_test
-case "${1:-}" in
+mode="${1:-}"
+shift || true
+if [ "${1:-}" = "--packages" ]; then
+    packages_valid "${2:-}" ||
+        fail "--packages needs a space-separated list of crate directory names under crates/,
+  and got '${2:-}'. An empty or unrecognized value is a wiring fault in the
+  caller, and passing it would check the wrong set or nothing at all."
+    REQUESTED_PKGS="${2:-}"
+    shift 2
+fi
+[ $# -eq 0 ] || fail "unexpected argument '$1'"
+
+case "$mode" in
 --against-merge-base)
     merge_base_mode
     ;;
@@ -355,6 +426,6 @@ case "${1:-}" in
     echo "semver-checks.sh: self-test passed"
     ;;
 *)
-    fail "usage: --against-merge-base | --against-registry | --self-test"
+    fail "usage: [--against-merge-base | --against-registry] [--packages \"a b\"] | --self-test"
     ;;
 esac

@@ -65,6 +65,36 @@ container_suites_for() {
     esac
 }
 
+# Every publishable crate, in the order `crates_now` lists them. The semver
+# gate's whole-graph selection.
+SEMVER_PKGS="spate spate-avro spate-clickhouse spate-coordination spate-core\
+ spate-datagen spate-json spate-kafka spate-s3 spate-test"
+
+# Reverse-dependency closure over non-dev edges: given a changed crate, whose
+# published API can its change move? `--self-test` checks it against
+# `cargo metadata`.
+#
+# The edges differ from container_suites_for above, which follows dev-dependency
+# edges as well. A dev-dependency cannot reach a public signature, so
+# `spate-json` reaches `spate-s3` there and does not here.
+semver_closure_for() {
+    case "$1" in
+        spate-core) echo "$SEMVER_PKGS" ;;
+        spate-coordination) echo "spate spate-coordination spate-s3" ;;
+        spate-s3) echo "spate spate-s3" ;;
+        spate-avro) echo "spate spate-avro" ;;
+        spate-clickhouse) echo "spate spate-clickhouse" ;;
+        spate-datagen) echo "spate spate-datagen" ;;
+        spate-json) echo "spate spate-json" ;;
+        spate-kafka) echo "spate spate-kafka" ;;
+        # Nothing depends on spate-test outside dev-dependencies, so a change
+        # here moves its own published API and no other.
+        spate-test) echo "spate-test" ;;
+        spate) echo "spate" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Every crate that has a gungraun bench, discovered rather than listed.
 #
 # The cache has to be filled from the parent shell: `bench_pkgs_for` is called
@@ -324,6 +354,75 @@ for crate in sorted(names):
         echo "::error::container_suites_for() no longer matches the crate graph."
         echo "Update the table in scripts/ci-changes.sh. Table says (<) vs cargo metadata (>):"
         diff <(echo "$expected") <(echo "$actual") || true
+        exit 1
+    fi
+
+    # The same traversal over normal edges alone, against semver_closure_for().
+    # A dev-dependency reaches a bench or a test, never a public signature, so
+    # dropping those edges is what makes this table differ from the one above.
+    semver_expected=$(
+        while IFS= read -r crate; do
+            [[ -z "$crate" ]] && continue
+            sorted=$(semver_closure_for "$crate" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
+            printf '%s\t%s\n' "$crate" "${sorted% }"
+        done <<<"$crates"
+    )
+
+    # shellcheck disable=SC2016
+    semver_actual=$(echo "$metadata" | PUBLISHED="$SEMVER_PKGS" python3 -c '
+import json, os, sys
+
+PUBLISHED = set(os.environ["PUBLISHED"].split())
+meta = json.load(sys.stdin)
+names = {p["name"] for p in meta["packages"]}
+
+# Normal edges only: `kind` is null for a normal dependency, "dev" or "build"
+# otherwise. Self-edges are the `testing`-feature dev-dependencies and drop out
+# with the rest of the dev edges.
+deps = {
+    p["name"]: {d["name"] for d in p["dependencies"]
+                if d["name"] in names and d["name"] != p["name"]
+                and d.get("kind") is None}
+    for p in meta["packages"]
+}
+
+def dependents(target):
+    """Every package that transitively depends on target, plus target itself."""
+    seen, frontier = {target}, [target]
+    while frontier:
+        cur = frontier.pop()
+        for pkg, ds in deps.items():
+            if cur in ds and pkg not in seen:
+                seen.add(pkg)
+                frontier.append(pkg)
+    return seen
+
+for crate in sorted(names):
+    closure = " ".join(sorted(dependents(crate) & PUBLISHED))
+    print("{}\t{}".format(crate, closure))
+')
+    if [[ "$semver_expected" != "$semver_actual" ]]; then
+        echo "::error::semver_closure_for() no longer matches the crate graph."
+        echo "Update the table in scripts/ci-changes.sh. Table says (<) vs cargo metadata (>):"
+        diff <(echo "$semver_expected") <(echo "$semver_actual") || true
+        exit 1
+    fi
+
+    # SEMVER_PKGS is the whole-graph selection, so it must be exactly the
+    # publishable crates. A new crate that nothing selects is checked by nothing.
+    # shellcheck disable=SC2016
+    published_actual=$(echo "$metadata" | python3 -c '
+import json, sys
+meta = json.load(sys.stdin)
+print(" ".join(sorted(
+    p["name"] for p in meta["packages"]
+    if p.get("publish") != [] and "/crates/" in p["manifest_path"]
+)))')
+    published_expected=$(echo "$SEMVER_PKGS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
+    if [[ "${published_expected% }" != "$published_actual" ]]; then
+        echo "::error::SEMVER_PKGS is not the set of publishable crates."
+        echo "  SEMVER_PKGS: ${published_expected% }"
+        echo "  cargo says:  $published_actual"
         exit 1
     fi
     # What is checked is the shape of the three rules, each stated in prose
@@ -593,6 +692,21 @@ if len(set(keys)) != len(keys):
         fi
     }
 
+    check_semver() { # want_pkgs, desc, paths...
+        local want="$1" desc="$2"
+        shift 2
+        local out got
+        out=$(mktemp)
+        classify_into "$out" "$@"
+        got=$(sed -n 's/^semver-pkgs=//p' "$out")
+        rm -f "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected semver-pkgs='$want',"
+            echo "got '$got' for: $*"
+            path_case_failed=1
+        fi
+    }
+
     # Derived, not named: `classify_into` never stats a file, so a literal would
     # keep passing after the example it names is renamed away. Hence the
     # empty-set guard.
@@ -658,6 +772,25 @@ if len(set(keys)) != len(keys):
     check_manifests_env true "the zero SHA fails closed" "0000000000000000000000000000000000000000"
     check_manifests_env true "an unreachable before fails closed" "4242424242424242424242424242424242424242"
     check_manifests_env true "a missing before fails closed" ""
+    # The semver selection. `spate-test` is the row that fails if somebody
+    # folds the two closures into one: the container table reaches four suites
+    # from it through dev-dependencies, and no published API moves with them.
+    all_semver=$(echo "$SEMVER_PKGS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
+    all_semver="${all_semver% }"
+    check_semver "$all_semver" "a spate-core source file moves every published API" \
+        "crates/spate-core/src/lib.rs"
+    check_semver "spate spate-kafka" "a connector moves its own API and the facade" \
+        "crates/spate-kafka/src/lib.rs"
+    check_semver "spate-test" "spate-test has no non-dev dependents" \
+        "crates/spate-test/src/lib.rs"
+    check_semver "$all_semver" "a lockfile change reaches every public signature" \
+        "Cargo.lock"
+    check_semver "$all_semver" "the gate's own script decides what it checks" \
+        "scripts/semver-checks.sh"
+    check_semver "" "documentation moves no published API" \
+        "docs/INVARIANTS.md"
+    check_semver "" "the Makefile moves no published API" "Makefile"
+
     out=$(mktemp)
     env -u PR_LABELS EVENT_NAME=schedule GITHUB_OUTPUT="$out" "$0" >/dev/null
     if [[ "$(sed -n 's/^manifests=//p' "$out")" != "true" ]]; then
@@ -668,10 +801,11 @@ if len(set(keys)) != len(keys):
 
     [[ "$path_case_failed" == "0" ]] || exit 1
 
-    echo "container_suites_for() matches the crate graph, CONTAINER_PKGS matches the tree,"
-    echo "the label overrides are additive, bench selection follows what the benches"
-    echo "discover, every feature arm names a feature its package declares, and each"
-    echo "path arm selects the crates it claims to."
+    echo "container_suites_for() and semver_closure_for() match the crate graph,"
+    echo "CONTAINER_PKGS and SEMVER_PKGS match the tree, the label overrides are"
+    echo "additive, bench selection follows what the benches discover, every feature"
+    echo "arm names a feature its package declares, and each path arm selects the"
+    echo "crates it claims to."
     exit 0
 fi
 
@@ -738,6 +872,7 @@ site=false
 bench=false
 bench_pkgs=""
 suites=""
+semver_pkgs=""
 
 if [[ "$force_all" == "1" ]]; then
     rust=true
@@ -745,6 +880,7 @@ if [[ "$force_all" == "1" ]]; then
     bench=true
     bench_pkgs=$(all_bench_pkgs)
     suites="$CONTAINER_PKGS"
+    semver_pkgs="$SEMVER_PKGS"
 else
     # Fill the discovery cache in the parent shell; see discover_bench_pkgs.
     discover_bench_pkgs
@@ -805,6 +941,23 @@ else
             ;;
         esac
 
+        # Whose published API can this file move? A narrower question than the
+        # suites above: a lint or tooling change cannot move a signature.
+        case "$file" in
+        crates/*)
+            crate="${file#crates/}"
+            crate="${crate%%/*}"
+            semver_pkgs="$semver_pkgs $(semver_closure_for "$crate")"
+            ;;
+        # A dependency edge reaches every public signature that names a type
+        # from it. The gate's own apparatus selects everything for the same
+        # reason the suites do: it decides what the gate checks at all.
+        Cargo.lock | Cargo.toml | .github/workflows/ci.yml | .github/actions/* | \
+            scripts/ci-changes.sh | scripts/semver-checks.sh)
+            semver_pkgs="$semver_pkgs $SEMVER_PKGS"
+            ;;
+        esac
+
         # Which files can move an instruction count, and whose benches should
         # run? The unit is the whole crate, because codegen is crate-global.
         # A separate `case` from the one above: the two questions have different
@@ -856,6 +1009,13 @@ fi
 if [[ "${PR_AUTHOR:-}" == "spate-release[bot]" && "${EVENT_NAME:-}" == "pull_request" ]]; then
     echo "note: release pull request; container suites deferred to push-to-main."
     suites=""
+    # The semver gate skips it for the same reason and needs no backstop: the
+    # published API is a property of the source tree, and this tree already
+    # passed the gate as the `main` commit above. A Dependabot pull request is
+    # not the same trade, so it is absent here: nothing re-checks it later, and
+    # a bump can move a public signature that names a type from the bumped
+    # dependency.
+    semver_pkgs=""
 fi
 
 # Applied after the deferrals above, so labelling a Dependabot or release pull
@@ -892,6 +1052,14 @@ fi
 bench_shards=$(bench_shards_json "$bench_pkgs_out")
 if [[ "$bench_shards" == "[]" ]]; then
     bench=false
+fi
+
+# Deduplicate. The semver gate takes bare names: it probes the sparse index
+# per crate, so it needs the name, not a cargo flag.
+semver_pkgs_out=""
+if [[ -n "${semver_pkgs// /}" ]]; then
+    semver_pkgs_out=$(echo "$semver_pkgs" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    semver_pkgs_out="${semver_pkgs_out% }"
 fi
 
 # Deduplicate and render as cargo -p arguments.
@@ -963,6 +1131,8 @@ fi
     echo "site=$site"
     echo "containers=$([[ -n "$container_args" ]] && echo true || echo false)"
     echo "container-args=$container_args"
+    echo "semver=$([[ -n "$semver_pkgs_out" ]] && echo true || echo false)"
+    echo "semver-pkgs=$semver_pkgs_out"
     echo "loom=$loom"
     echo "bench=$bench"
     echo "manifests=$manifests"

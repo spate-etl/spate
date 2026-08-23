@@ -92,13 +92,16 @@ Settings → Privacy & Security → Developer Tools* to exempt it.
 CI picks the container suites from the paths a pull request changed. Which
 counted benches run is derived the same way, from the benches themselves: a crate
 with a bench selects its own, `spate-core` selects every benched crate because
-everything depends on it, and a crate without one selects nothing.
+everything depends on it, and a crate without one selects nothing. The semver
+gate follows a third closure over the same paths, this one over the non-dev
+dependency edges: a connector change checks that connector and the facade, and
+a `spate-core` change checks every published crate.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request
 `ci: docker`, `ci: loom` or `ci: bench`. They only ever add work; none can
-switch a suite off. `make self-test` checks the classifier against the crate
-graph.
+switch a suite off, and none reaches the semver gate, which follows the crate
+graph alone. `make self-test` checks each classifier against that graph.
 
 ## Testing conventions
 

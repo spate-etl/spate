@@ -31,10 +31,12 @@ These sit outside `gates`, by cost or by dependency:
 | `make bench-gungraun-check` | Proves only that the benches build, not what they count |
 | `make bench-ab`, `make bench-arms`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
 | `make attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
+| `make fuzz-build`, `make fuzz` | Needs a nightly toolchain; the nightly tier fuzzes |
 
-Two commands omit `--locked`, which everything else passes because CI does.
+Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
-build refuses; `cargo fmt` resolves nothing, reading only `.rs` files.
+build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
+`cargo fuzz` accepts no `--locked` passthrough.
 
 `make docs` sets `CI=true`. The client-redirects plugin only registers under it,
 so a plain `npm run build` skips redirect validation, and a redirect pointing at
@@ -128,6 +130,30 @@ target to its stanza, and `cargo check --workspace --all-targets` in
 `make check-features` is what builds them on the default feature set;
 `cargo hack --no-dev-deps` strips dev-dependencies and reaches no test target
 at all.
+
+## Fuzzing
+
+`fuzz/` is a [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html)
+crate with one libFuzzer target per boundary where the pipeline turns bytes
+into records or records into bytes. Each target asserts a property rather
+than only the absence of a panic. The crate sits outside the workspace, so no
+`--workspace` target compiles it.
+
+```sh
+make fuzz-install
+make fuzz-build
+make fuzz TARGET=avro_wire_confluent SECS=60
+```
+
+`cargo +nightly fuzz list` prints the set. libFuzzer's instrumentation is
+nightly-only, which is why every target carries `+nightly`.
+
+A pull request touching `fuzz/`, `ci.yml`, `.github/actions/` or
+`scripts/ci-changes.sh` builds every target and runs none of them. The nightly
+tier in `scheduled.yml` fuzzes each for five minutes, set by `MAX_TOTAL_TIME`,
+and carries `fuzz/corpus` between nights in a cache entry. A crash uploads the
+input as the `fuzz-artifacts` artifact and opens an issue titled
+`A fuzz target found a crashing input`.
 
 ## Benchmarks
 

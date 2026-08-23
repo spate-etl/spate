@@ -669,25 +669,28 @@ if len(set(keys)) != len(keys):
             "$apparatus"
     done
 
-    # The two coarse outputs, asserted together because one arm decides both
-    # and the regression worth catching turns off exactly one.
+    # The three coarse outputs, asserted together because one arm decides all
+    # of them and the regression worth catching turns off exactly one.
     #
     # `site` is the transclusion rule: a page's Rust snippets are regions of a
     # file under `crates/`. `rust` is asserted nowhere else, and an arm that
     # sets `site` and then `continue`s would turn off clippy and the test suite
-    # for an examples-only pull request.
-    check_flags() { # want_rust, want_site, desc, paths...
-        local want_rust="$1" want_site="$2" desc="$3"
-        shift 3
-        local out got_rust got_site
+    # for an examples-only pull request. `fuzz` selects the only job that
+    # compiles the fuzz harness.
+    check_flags() { # want_rust, want_site, want_fuzz, desc, paths...
+        local want_rust="$1" want_site="$2" want_fuzz="$3" desc="$4"
+        shift 4
+        local out got_rust got_site got_fuzz
         out=$(mktemp)
         classify_into "$out" "$@"
         got_rust=$(sed -n 's/^rust=//p' "$out")
         got_site=$(sed -n 's/^site=//p' "$out")
+        got_fuzz=$(sed -n 's/^fuzz=//p' "$out")
         rm -f "$out"
-        if [[ "$got_rust" != "$want_rust" || "$got_site" != "$want_site" ]]; then
-            echo "::error::$desc: expected rust=$want_rust site=$want_site,"
-            echo "got rust=$got_rust site=$got_site for: $*"
+        if [[ "$got_rust" != "$want_rust" || "$got_site" != "$want_site" ||
+            "$got_fuzz" != "$want_fuzz" ]]; then
+            echo "::error::$desc: expected rust=$want_rust site=$want_site fuzz=$want_fuzz,"
+            echo "got rust=$got_rust site=$got_site fuzz=$got_fuzz for: $*"
             path_case_failed=1
         fi
     }
@@ -715,17 +718,33 @@ if len(set(keys)) != len(keys):
         echo "::error::no example under crates/spate/examples; the case below asserts nothing."
         path_case_failed=1
     else
-        check_flags true true "an example builds Rust and rebuilds the site" \
+        check_flags true true false "an example builds Rust and rebuilds the site" \
             "$example_path"
     fi
-    check_flags true true "a crate source builds Rust and rebuilds the site" \
+    check_flags true true false "a crate source builds Rust and rebuilds the site" \
         crates/spate-core/src/lib.rs
-    check_flags false true "a docs page rebuilds the site and needs no Rust build" \
+    check_flags false true false "a docs page rebuilds the site and needs no Rust build" \
         docs/METRICS.md
-    check_flags false true "the site tree rebuilds the site and needs no Rust build" \
+    check_flags false true false "the site tree rebuilds the site and needs no Rust build" \
         website/docusaurus.config.ts
-    check_flags true false "a bench source builds Rust and does not rebuild the site" \
+    check_flags true false false "a bench source builds Rust and does not rebuild the site" \
         bench/src/lib.rs
+    # The fuzz crate is outside the workspace, so the stable tier compiles none
+    # of it and the `fuzz` job compiles all of it.
+    check_flags false false true "a fuzz source builds the fuzz targets alone" \
+        fuzz/Cargo.toml
+    # The `*.md` arm matches `/` as well, so without an arm of its own this
+    # file classifies as root-level prose and selects nothing.
+    check_flags false false true "the fuzz harness README selects the fuzz job" \
+        fuzz/README.md
+    check_flags true true true "the selector decides whether the fuzz job runs" \
+        scripts/ci-changes.sh
+    check_flags true true true "the workflow that runs the fuzz job selects it" \
+        .github/workflows/ci.yml
+    # A Makefile include: the fuzz job runs `make fuzz-install`, so the pinned
+    # version reaches it.
+    check_flags true true true "the pinned tool versions select the fuzz job" \
+        versions.mk
 
     # The manifest gate's selection, asserted the same way. Source changes do
     # not select it: the nightly backstop covers packaging breaks a manifest
@@ -869,6 +888,7 @@ esac
 # ---------------------------------------------------------------------------
 rust=false
 site=false
+fuzz=false
 bench=false
 bench_pkgs=""
 suites=""
@@ -877,6 +897,7 @@ semver_pkgs=""
 if [[ "$force_all" == "1" ]]; then
     rust=true
     site=true
+    fuzz=true
     bench=true
     bench_pkgs=$(all_bench_pkgs)
     suites="$CONTAINER_PKGS"
@@ -910,6 +931,15 @@ else
         .github/*)
             continue
             ;;
+        # The fuzz harness. Its crate sits outside the workspace, so no
+        # `--workspace` target compiles it and nothing under `crates/` depends
+        # on it; the `fuzz` job is the only thing that builds it. Its own arm
+        # ahead of the `*.md` one below, which would otherwise take
+        # fuzz/README.md.
+        fuzz/*)
+            fuzz=true
+            continue
+            ;;
         # --- documentation and site sources: no Rust build needed ------------
         docs/* | website/*)
             site=true
@@ -935,7 +965,8 @@ else
         # the workflows, the composite action, the Makefile the workflow steps
         # call, or this script: the last one decides what runs at all.
         Cargo.lock | Cargo.toml | deny.toml | rust-toolchain.toml | .config/* | \
-            .github/workflows/* | .github/actions/* | scripts/* | Makefile)
+            .github/workflows/* | .github/actions/* | scripts/* | Makefile | \
+            versions.mk)
             suites="$suites $CONTAINER_PKGS"
             site=true
             ;;
@@ -986,6 +1017,17 @@ else
             .github/workflows/ci.yml | .github/actions/*)
             bench=true
             bench_pkgs="$bench_pkgs $(all_bench_pkgs)"
+            ;;
+        esac
+
+        # The fuzz job's own apparatus: the workflow that runs it, the composite
+        # action that gives it a nightly toolchain, the make targets it calls
+        # and the version they install, and this selector, which decides
+        # whether it runs at all.
+        case "$file" in
+        scripts/ci-changes.sh | .github/workflows/ci.yml | .github/actions/* | \
+            Makefile | versions.mk)
+            fuzz=true
             ;;
         esac
     done <"$changed_file"
@@ -1129,6 +1171,7 @@ fi
 {
     echo "rust=$rust"
     echo "site=$site"
+    echo "fuzz=$fuzz"
     echo "containers=$([[ -n "$container_args" ]] && echo true || echo false)"
     echo "container-args=$container_args"
     echo "semver=$([[ -n "$semver_pkgs_out" ]] && echo true || echo false)"

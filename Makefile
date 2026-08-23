@@ -3,6 +3,8 @@
 # exit status and masks a failure. `--locked` wherever a dependency graph is
 # resolved.
 
+include versions.mk
+
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check clippy lint check test doctest doc test-docker \
@@ -16,6 +18,7 @@
         check-adr adr-new \
         check-changelog changelog-new \
         check-release-version release-dry-run \
+        fuzz fuzz-build fuzz-install \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -191,6 +194,24 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
 ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-release-version ## Every repository-metadata check
+
+##@ Fuzz
+
+fuzz-install: ## Install cargo-fuzz at the pinned version
+	cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)
+
+fuzz-build: ## Build every fuzz target
+	cargo +nightly fuzz build
+
+SECS ?= 60
+
+# Order matters: libFuzzer writes new finds to the first corpus path and reads
+# the rest. The first sits under the ignored `target/`, so a local run leaves
+# the committed seeds alone.
+fuzz: ## Fuzz one target: make fuzz TARGET=avro_wire_confluent SECS=60
+	mkdir -p fuzz/corpus/$(TARGET) fuzz/target/corpus/$(TARGET)
+	cargo +nightly fuzz run "$(TARGET)" fuzz/target/corpus/$(TARGET) \
+	  fuzz/corpus/$(TARGET) -- -max_total_time="$(SECS)"
 
 ##@ Docs
 

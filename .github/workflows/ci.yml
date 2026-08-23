@@ -38,6 +38,7 @@ jobs:
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
       site: ${{ steps.classify.outputs.site }}
+      fuzz: ${{ steps.classify.outputs.fuzz }}
       containers: ${{ steps.classify.outputs.containers }}
       container-args: ${{ steps.classify.outputs.container-args }}
       semver: ${{ steps.classify.outputs.semver }}
@@ -471,6 +472,46 @@ jobs:
           shared-key: release
       - run: cargo test -p spate-core --release --test chain_alloc --locked
 
+  # The fuzz crate sits outside the workspace, so no other job compiles it. This
+  # one builds every target and runs none of them; the nightly tier in
+  # scheduled.yml is what fuzzes, and is also the backstop for a crate change
+  # that breaks the harness without touching `fuzz/`.
+  fuzz:
+    name: Fuzz targets build
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.fuzz == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # libFuzzer's `-Z sanitizer` codegen is nightly-only.
+          toolchain: nightly
+          # Its own entry: every artefact here is an instrumented release build
+          # and shares nothing with the dev-profile trees the other jobs cache.
+          shared-key: fuzz
+
+      # install-action carries no manifest for cargo-fuzz and falls back to
+      # cargo-binstall, which resolves a release binary nothing here checksums.
+      - run: make fuzz-install
+
+      - name: Build every fuzz target
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz list >targets.txt
+          # `|| true`: grep exits 1 on an empty file, and `set -e` would abort
+          # the assignment before the check below can name the problem.
+          targets=$(grep -c '' targets.txt || true)
+          if [[ "$targets" -eq 0 ]]; then
+            echo "::error::the fuzz crate declares no target; this job built nothing"
+            exit 1
+          fi
+          echo "building $targets target(s)"
+          make fuzz-build
+
   # The instruction-count tier: one shard per (package, feature arm). gungraun's
   # summary path carries no feature component, so two feature builds of one bench
   # in one workspace overwrite each other's summary and baseline, silently.
@@ -892,7 +933,7 @@ jobs:
     # Without `always()` this job is itself skipped when a dependency fails, and
     # a skipped check reports as *success* to branch protection.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, test, doctests, features, msrv, containers, site, loom, alloc-assertions, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, test, doctests, features, msrv, containers, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

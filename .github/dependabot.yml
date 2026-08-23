@@ -36,6 +36,29 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # ----------------------------------------------- Cargo (fuzz harness) ----
+  - package-ecosystem: cargo
+    # `fuzz/` is its own workspace root and sits outside the root member list,
+    # so the `/` entry above never reaches its lockfile. Left out, the harness
+    # fuzzes the workspace's current sources against pinned third-party crates
+    # that drift further behind every week.
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "area: workspace"]
+    commit-message:
+      prefix: "chore(workspace)"
+    cooldown:
+      default-days: 7
+      semver-minor-days: 14
+      semver-major-days: 14
+    groups:
+      fuzz-compatible:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # ------------------------------------------------------- GitHub Actions ----
   - package-ecosystem: github-actions
     # `/` reaches `.github/workflows/` and nothing else. A composite action's

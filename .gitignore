@@ -6,6 +6,11 @@
 !/.claude/commands/
 !/.claude/skills/
 
+# cargo-fuzz run output. The seed corpora under fuzz/corpus/ are committed;
+# crash reproducers and coverage profiles are local to a run.
+fuzz/artifacts/
+fuzz/coverage/
+
 # Credentials. Nothing here has ever been committed and push protection is on,
 # but neither of those helps somebody who drops a local .env next to a compose
 # file and runs `git add -A`. This is the net under that.

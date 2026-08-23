@@ -15,7 +15,7 @@
         check-transclusions \
         check-adr adr-new \
         check-changelog changelog-new \
-        check-release-version \
+        check-release-version release-dry-run \
         ci-lint docs docs-serve gates
 
 ##@ Help
@@ -178,6 +178,12 @@ changelog-new: ## Scaffold a fragment: make changelog-new TYPE=fixed SLUG=short-
 
 check-release-version: ## Every literal version is one the release rewrites
 	./scripts/release-version.sh --check
+
+# The same scripts release.yml runs, in a throwaway worktree, stopping where
+# the registry token would be minted. RELEASING.md says what a green run
+# proves and what it cannot.
+release-dry-run: ## The whole release locally, nothing pushed or uploaded: make release-dry-run VERSION=X.Y.Z
+	./scripts/release.sh dry-run --version "$(VERSION)"
 
 # Accept an examples-index change (the `test` target checks it):
 #

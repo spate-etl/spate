@@ -847,8 +847,9 @@ if [[ "${PR_AUTHOR:-}" == "dependabot[bot]" && "${EVENT_NAME:-}" == "pull_reques
     suites=""
 fi
 
-# The release pull request release-plz keeps open is the same trade: its whole
-# diff is `Cargo.toml` and `Cargo.lock`, rewritten on every push to `main`.
+# The release pull request release.yml opens is the same trade: its diff is
+# generated artefacts only — the version rewrite, Cargo.lock, CHANGELOG.md,
+# THIRD-PARTY.md and the install snippets.
 #
 # Its source tree is byte-identical to the `main` commit that just ran the
 # container suites on push.

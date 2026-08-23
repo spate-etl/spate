@@ -34,7 +34,8 @@
 # Release surface: what gets published, under which version, and by which
 # credential. A change here can publish something, so it belongs on this list
 # for the same reason the workflows do.
-/release-plz.toml       @MarcusKainth
+/scripts/release.sh     @MarcusKainth
+/scripts/release-version.sh @MarcusKainth
 /RELEASING.md           @MarcusKainth
 
 # Published security claims. These have been wrong before — the nightly they

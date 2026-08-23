@@ -187,6 +187,150 @@ jobs:
               'Closing this issue without doing one of them just reopens it tomorrow.'
           )"
 
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    # MAX_TOTAL_TIME below times the number of targets, plus a cold instrumented
+    # build of all of them. The current eight targets at five minutes each come
+    # to 40 minutes of fuzzing and about 75 minutes of job.
+    timeout-minutes: 120
+    # A fuzz run reaches no point at which it is finished, so it runs on a
+    # schedule rather than as a gate. New inputs arrive with nothing in this
+    # repository changing.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # Seconds per target. The corpus carries between nights, so coverage
+      # accumulates across runs rather than restarting each one.
+      MAX_TOTAL_TIME: "300"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          # Same key as ci.yml's fuzz job, so whichever runs first warms the
+          # other.
+          shared-key: fuzz
+
+      # Built from source: install-action carries no manifest for cargo-fuzz.
+      - run: cargo install cargo-fuzz --locked --version 0.13.2
+
+      # BEFORE the run: a restore afterwards extracts a tar over `fuzz/corpus`
+      # and overwrites the inputs libFuzzer just found. The prefix restore-key
+      # is what carries the corpus between nights.
+      - name: Restore last night's corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Build every fuzz target
+        id: build
+        run: |
+          set -euo pipefail
+          # Materialised and counted: an empty target set fuzzes nothing and
+          # exits 0.
+          cargo +nightly fuzz list >targets.txt
+          # `|| true`: grep exits 1 on an empty file, and under `set -e` that
+          # aborts the assignment before the check below can name the problem.
+          targets=$(grep -c '' targets.txt || true)
+          if [[ "$targets" -eq 0 ]]; then
+            echo "::error::the fuzz crate declares no target; this run proved nothing"
+            exit 1
+          fi
+          echo "building $targets target(s)"
+          cargo +nightly fuzz build
+
+      - name: Fuzz every target
+        id: run
+        run: |
+          set -euo pipefail
+          targets=$(grep -c '' targets.txt || true)
+          echo "fuzzing $targets target(s) for ${MAX_TOTAL_TIME}s each"
+          fuzzed=0
+          crashed=""
+          while IFS= read -r target; do
+            [[ -n "$target" ]] || continue
+            echo "::group::$target"
+            if ! cargo +nightly fuzz run "$target" -- \
+              -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1; then
+              crashed="$crashed $target"
+            fi
+            echo "::endgroup::"
+            fuzzed=$((fuzzed + 1))
+          done <targets.txt
+          if [[ "$fuzzed" -ne "$targets" ]]; then
+            echo "::error::fuzzed $fuzzed of $targets target(s)"
+            exit 1
+          fi
+          if [[ -n "$crashed" ]]; then
+            echo "::error::a crashing input was found for:$crashed"
+            exit 1
+          fi
+
+      # actions/cache's post step saves on a green job alone. A night that found
+      # a crash still grew the corpus, and the crash can stand for several more
+      # nights, so the save is split out and runs under `always()`.
+      - name: Save this night's corpus
+        if: always() && steps.build.conclusion == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload the crashing inputs
+        if: failure() && steps.run.conclusion == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          # A target can also exit non-zero without writing one.
+          if-no-files-found: warn
+
+      # Gated on the run step, not `failure()`: a checkout or build failure
+      # would file an issue asserting a crashing input was found.
+      - name: Report the failure as an issue
+        if: failure() && steps.run.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='A fuzz target found a crashing input'
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          # Single quotes: the body's backticks must reach GitHub rather than
+          # run as command substitutions.
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              'A fuzz target exited non-zero on the nightly run. The input that' \
+              'did it is attached to the run as the `fuzz-artifacts` artifact,' \
+              'and the run log names the target.' \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'Reproduce it against the downloaded file:' \
+              '' \
+              '```sh' \
+              'cargo +nightly fuzz run <target> <path-to-the-input>' \
+              '```' \
+              '' \
+              'A panic on malformed bytes is a bug in the decoder, so the fix' \
+              'goes with a unit test in the crate that owns it. Keep the input' \
+              'under `fuzz/corpus/<target>/` so the case stays covered.'
+          )"
+
   minimal-versions:
     name: Declared version floors build
     runs-on: ubuntu-latest
@@ -676,8 +820,9 @@ jobs:
           fi
 
   # ===========================================================================
-  # Catch-all failure reporting. `advisories` and `minimal-versions` file their
-  # own issues and are absent from `needs` below so they are not reported twice.
+  # Catch-all failure reporting. `advisories`, `minimal-versions` and `fuzz`
+  # file their own issues and are absent from `needs` below so they are not
+  # reported twice.
   # ===========================================================================
   report:
     name: Report scheduled failures

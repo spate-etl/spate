@@ -19,7 +19,14 @@
 [![coverage](https://img.shields.io/codecov/c/github/spate-etl/spate?branch=main)](https://app.codecov.io/gh/spate-etl/spate)
 [![docs.rs](https://img.shields.io/docsrs/spate)](https://docs.rs/spate)
 [![MSRV](https://img.shields.io/crates/msrv/spate)](https://blog.rust-lang.org/)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/spate-etl/spate/badge)](https://scorecard.dev/viewer/?uri=github.com/spate-etl/spate)
+<!-- The score is read straight from api.scorecard.dev rather than through
+     api.scorecard.dev/projects/github.com/spate-etl/spate/badge, which
+     redirects to shields.io and is resolved there against
+     api.securityscorecards.dev. That host carries only the repositories
+     OpenSSF crawls itself, 404s on this one, and renders the badge as
+     "invalid repo path". Retry that endpoint once the crawl picks this
+     repository up. -->
+[![OpenSSF Scorecard](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fspate-etl%2Fspate&query=%24.score&label=openssf%20scorecard&suffix=%20%2F%2010&color=blue)](https://scorecard.dev/viewer/?uri=github.com/spate-etl/spate)
 
 [Documentation](https://spate.kainth.dev/) ·
 [Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart) ·

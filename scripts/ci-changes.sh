@@ -35,6 +35,12 @@ set -euo pipefail
 # derives this same set from the source tree and fails if the two disagree.
 CONTAINER_PKGS="spate spate-kafka spate-clickhouse spate-s3 spate-coordination"
 
+# The crates `fuzz/` depends on. That crate is outside the workspace, so no
+# `--workspace` target compiles it and a change to one of these can break
+# `cargo fuzz build` with every other gate green. --self-test holds the list to
+# fuzz/Cargo.toml.
+FUZZ_PKGS="spate-avro spate-clickhouse spate-coordination spate-core spate-json spate-s3"
+
 # Reverse-dependency closure: given a changed crate, which container suites can
 # its change possibly break? Derived from the path dependencies in each
 # crates/*/Cargo.toml; `--self-test` checks it against `cargo metadata`.
@@ -354,6 +360,18 @@ for crate in sorted(names):
         echo "::error::container_suites_for() no longer matches the crate graph."
         echo "Update the table in scripts/ci-changes.sh. Table says (<) vs cargo metadata (>):"
         diff <(echo "$expected") <(echo "$actual") || true
+        exit 1
+    fi
+
+    # FUZZ_PKGS against the fuzz crate's own manifest. `fuzz/` is outside the
+    # workspace, so cargo metadata does not reach it.
+    expected_fuzz=$(printf '%s' "$FUZZ_PKGS" | tr ' ' '\n' | sort)
+    actual_fuzz=$(sed -n 's|^[a-z0-9-]* = { path = "\.\./crates/\([a-z0-9-]*\)".*|\1|p' \
+        fuzz/Cargo.toml | sort)
+    if [[ "$expected_fuzz" != "$actual_fuzz" ]]; then
+        echo "::error::FUZZ_PKGS no longer matches fuzz/Cargo.toml."
+        echo "FUZZ_PKGS says (<) vs the manifest (>):"
+        diff <(echo "$expected_fuzz") <(echo "$actual_fuzz") || true
         exit 1
     fi
 
@@ -721,8 +739,11 @@ if len(set(keys)) != len(keys):
         check_flags true true false "an example builds Rust and rebuilds the site" \
             "$example_path"
     fi
-    check_flags true true false "a crate source builds Rust and rebuilds the site" \
+    check_flags true true true "a crate source builds Rust and rebuilds the site" \
         crates/spate-core/src/lib.rs
+    # A crate `fuzz/` does not depend on cannot break `cargo fuzz build`.
+    check_flags true true false "a crate outside the fuzz graph leaves it alone" \
+        crates/spate-kafka/src/lib.rs
     check_flags false true false "a docs page rebuilds the site and needs no Rust build" \
         docs/METRICS.md
     check_flags false true false "the site tree rebuilds the site and needs no Rust build" \
@@ -1028,6 +1049,13 @@ else
         scripts/ci-changes.sh | .github/workflows/ci.yml | .github/actions/* | \
             Makefile | versions.mk)
             fuzz=true
+            ;;
+        crates/*)
+            fuzz_crate="${file#crates/}"
+            fuzz_crate="${fuzz_crate%%/*}"
+            case " $FUZZ_PKGS " in
+            *" $fuzz_crate "*) fuzz=true ;;
+            esac
             ;;
         esac
     done <"$changed_file"

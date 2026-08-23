@@ -73,10 +73,11 @@
 //! off-by-default `testing` feature so tests can inject wrapped or
 //! fault-injecting stores without that type reaching a real consumer. The
 //! same feature carries `bench_seams`, which reaches the pure, synchronous
-//! parts an instruction-count bench cannot get to through an async surface.
-//! That module is `#[doc(hidden)]`, so a link to it dangles on docs.rs
-//! (where the feature is off) and renders as literal text in the published
-//! API reference (where it is on).
+//! parts an instruction-count bench cannot get to through an async surface,
+//! and `fuzz_seams`, which reaches the offset codec and the object framer for
+//! the fuzz harness. Both modules are `#[doc(hidden)]`, so a link to either
+//! dangles on docs.rs (where the feature is off) and renders as literal text
+//! in the published API reference (where it is on).
 
 #[cfg(feature = "testing")]
 #[doc(hidden)]
@@ -85,6 +86,9 @@ mod config;
 mod error;
 mod fetch;
 mod framer;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod fuzz_seams;
 mod lane;
 mod metrics;
 mod offset;

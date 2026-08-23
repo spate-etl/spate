@@ -28,9 +28,10 @@ pub mod store;
 
 // The `testing` feature also carries `bench_seams`, which reaches the pure,
 // synchronous decisions an instruction-count bench cannot get to through an
-// async surface. The module is `#[doc(hidden)]`, so a link to it dangles on
-// docs.rs (where the feature is off) and renders as literal text in the
-// published API reference (where it is on).
+// async surface, and `fuzz_seams`, which reaches the record and key parsers
+// for the fuzz harness. Both modules are `#[doc(hidden)]`, so a link to
+// either dangles on docs.rs (where the feature is off) and renders as literal
+// text in the published API reference (where it is on).
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod bench_seams;
@@ -43,6 +44,9 @@ pub mod bench_seams;
 pub mod clock;
 mod coordinator;
 mod error;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod fuzz_seams;
 mod leader;
 mod protocol;
 mod records;

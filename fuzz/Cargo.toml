@@ -18,12 +18,15 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 bytes = "1"
+flate2 = "1.1"
 serde = { version = "1", features = ["derive"] }
+zstd = "0.13"
 spate-avro = { path = "../crates/spate-avro" }
 spate-clickhouse = { path = "../crates/spate-clickhouse" }
+spate-coordination = { path = "../crates/spate-coordination", default-features = false, features = ["testing"] }
 spate-core = { path = "../crates/spate-core" }
 spate-json = { path = "../crates/spate-json" }
-spate-s3 = { path = "../crates/spate-s3" }
+spate-s3 = { path = "../crates/spate-s3", features = ["testing"] }
 
 [[bin]]
 name = "avro_wire_confluent"
@@ -61,8 +64,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "coordination_records"
+path = "fuzz_targets/coordination_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "json_ndjson_framing"
 path = "fuzz_targets/json_ndjson_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3_object_framing"
+path = "fuzz_targets/s3_object_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3_offset_codec"
+path = "fuzz_targets/s3_offset_codec.rs"
 test = false
 doc = false
 bench = false

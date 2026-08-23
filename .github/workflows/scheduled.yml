@@ -193,8 +193,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.nightly == 'true'
     # MAX_TOTAL_TIME below times the number of targets, plus a cold instrumented
-    # build of all of them. The current eight targets at five minutes each come
-    # to 40 minutes of fuzzing and about 75 minutes of job.
+    # build of all of them.
     timeout-minutes: 120
     # A fuzz run reaches no point at which it is finished, so it runs on a
     # schedule rather than as a gate. New inputs arrive with nothing in this
@@ -203,8 +202,7 @@ jobs:
       contents: read
       issues: write
     env:
-      # Seconds per target. The corpus carries between nights, so coverage
-      # accumulates across runs rather than restarting each one.
+      # Seconds per target.
       MAX_TOTAL_TIME: "300"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -213,11 +211,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
-          # Same key as ci.yml's fuzz job, so whichever runs first warms the
-          # other.
           shared-key: fuzz
 
-      # install-action carries no manifest for cargo-fuzz.
       - run: make fuzz-install
 
       # BEFORE the run: a restore afterwards extracts a tar over `fuzz/corpus`

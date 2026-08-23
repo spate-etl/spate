@@ -16,9 +16,10 @@ default = ["nats"]
 # The NATS JetStream KV store backend. Off leaves the store trait, the
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats"]
-# Test-only injection seam: `clock::TestClock` for the `tests/` binaries, and
-# `bench_seams` for the instruction-count benches. Off by default, not enabled
-# by the `spate` facade, and outside the semver surface.
+# Test-only injection seam: `clock::TestClock` for the `tests/` binaries,
+# `bench_seams` for the instruction-count benches, and `fuzz_seams` for the
+# fuzz harness. Off by default, not enabled by the `spate` facade, and outside
+# the semver surface.
 testing = []
 
 [dependencies]

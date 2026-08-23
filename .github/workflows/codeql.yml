@@ -7,10 +7,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    # Off the hour, and clear of the other two crons in this repository. A
-    # weekly run re-analyses an unchanged tree against updated queries.
-    - cron: "29 5 * * 1" # weekly, Monday
   workflow_dispatch:
 
 permissions:

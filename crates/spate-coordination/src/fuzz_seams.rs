@@ -14,6 +14,10 @@ use crate::records::{
 };
 use spate_core::coordination::{SplitId, SplitProgress, SplitSpec};
 
+/// The record schema this build reads. Every parser refuses a record at any
+/// other schema.
+pub const SCHEMA: u32 = records::SCHEMA;
+
 /// Encode the `spec.{id}` record the leader writes once at planning time.
 /// `None` when `id` is not a valid split id, which the leader cannot reach.
 #[must_use]

@@ -25,7 +25,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use spate_coordination::fuzz_seams::{
-    committed_progress, encode_plan_record, encode_progress_record, encode_spec_record,
+    SCHEMA, committed_progress, encode_plan_record, encode_progress_record, encode_spec_record,
     instance_keys, parse_keys, parse_plan_record, parse_progress_record, parse_spec_record,
     spec_payload, split_keys,
 };
@@ -74,6 +74,18 @@ fn spliced(record: &[u8], splice: &[u8], at: u16) -> Vec<u8> {
     out.extend_from_slice(splice);
     out.extend_from_slice(&record[(at + splice.len()).min(record.len())..]);
     out
+}
+
+/// `record` with its schema moved off the one this build reads, which is what
+/// a record written by another build of this software looks like.
+fn other_schema(record: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(record)
+        .replacen(
+            &format!("\"schema\":{SCHEMA}"),
+            &format!("\"schema\":{}", SCHEMA + 1),
+            1,
+        )
+        .into_bytes()
 }
 
 /// How many of the five keyspaces read a name out of `key`.
@@ -173,6 +185,10 @@ fuzz_target!(|input: Input| {
         parse_plan_record(&plan, &fields.fingerprint).is_some(),
         "a plan record this build wrote does not parse"
     );
+    assert!(
+        parse_plan_record(&other_schema(&plan), &fields.fingerprint).is_none(),
+        "a plan record at another schema parsed"
+    );
 
     // A leader writes a spec and a split record only under a valid split id,
     // so an invalid one reaches the parsers through the splice arms alone.
@@ -203,6 +219,26 @@ fuzz_target!(|input: Input| {
         assert!(
             parse_progress_record(split_key, &split, fp).is_some(),
             "a split record this build wrote does not parse at {split_key:?}"
+        );
+        assert!(
+            parse_spec_record(spec_key, &other_schema(&spec), fp).is_none(),
+            "a spec record at another schema parsed at {spec_key:?}"
+        );
+        assert!(
+            parse_progress_record(split_key, &other_schema(&split), fp).is_none(),
+            "a split record at another schema parsed at {split_key:?}"
+        );
+        // The payload arms compare against what was encoded, so a base64
+        // alphabet or a length that drifts is caught rather than reached.
+        assert_eq!(
+            spec_payload(spec_key, &spec, fp),
+            Some((fields.id.clone(), fields.descriptor.clone())),
+            "the spec record at {spec_key:?} reads back a different descriptor"
+        );
+        assert_eq!(
+            committed_progress(split_key, &split, fp),
+            progress.map(|(watermark, state, completed)| (watermark, state.to_vec(), completed)),
+            "the split record at {split_key:?} reads back different progress"
         );
         written.push(spec);
         written.push(split);

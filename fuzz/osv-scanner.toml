@@ -1,0 +1,11 @@
+# Advisories OSV reports against `fuzz/Cargo.lock` that the harness cannot
+# clear. osv-scanner reads this file because that lockfile sits beside it; the
+# configuration in the repository root does not reach this directory.
+#
+# An entry stops applying on its `ignoreUntil` date, and osv-scanner reports the
+# advisory again from that day. The date is the review point.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-02-23
+reason = "The harness reaches paste through spate-clickhouse, as the workspace does. The osv-scanner.toml in the repository root carries this decision, and deny.toml carries the condition for re-checking it."

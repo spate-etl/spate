@@ -4,6 +4,7 @@
 #
 #   ./scripts/semver-checks.sh --against-registry --packages "spate spate-s3"
 #   ./scripts/semver-checks.sh --against-registry    # every crate
+#   ./scripts/semver-checks.sh --cache-key           # the baseline cache key
 #   ./scripts/semver-checks.sh --self-test           # the classifiers, alone
 #
 # `--packages` restricts the comparison to a named set, which ci.yml fills from
@@ -362,6 +363,25 @@ registry_mode() {
 }
 
 # ---------------------------------------------------------------------------
+# --cache-key: the key for the parsed baselines under target/semver-checks/cache.
+# ---------------------------------------------------------------------------
+
+# What the cached rustdoc is a function of. The release tag names the versions
+# the registry serves, and the tool writes one file per crate per version. A
+# rustdoc format is tied to the compiler that emitted it, and the reader is
+# tied to the tool version, so both join the key rather than being left to
+# produce a hit the reader then rejects.
+cache_key() {
+    local tag rustc_id tool_id
+    tag=$(last_tag)
+    [ -n "$tag" ] || fail "no vX.Y.Z tag, so there is no published baseline to key on"
+    rustc_id=$(rustc -V | tr -c 'A-Za-z0-9.' '-')
+    tool_id=$(cargo semver-checks --version | tr -c 'A-Za-z0-9.' '-')
+    printf 'semver-baseline-%s-%s-%s-%s\n' \
+        "$(uname -s)" "$tag" "${rustc_id%-}" "${tool_id%-}"
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch.
 # ---------------------------------------------------------------------------
 self_test
@@ -381,10 +401,19 @@ case "$mode" in
 --against-registry)
     registry_mode
     ;;
+--cache-key)
+    key=$(cache_key)
+    echo "semver-checks.sh: $key" >&2
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        echo "key=$key" >>"$GITHUB_OUTPUT"
+    else
+        printf '%s\n' "$key"
+    fi
+    ;;
 --self-test)
     echo "semver-checks.sh: self-test passed"
     ;;
 *)
-    fail "usage: --against-registry [--packages \"a b\"] | --self-test"
+    fail "usage: --against-registry [--packages \"a b\"] | --cache-key | --self-test"
     ;;
 esac

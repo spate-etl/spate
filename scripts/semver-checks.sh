@@ -347,9 +347,6 @@ registry_mode() {
             echo "  A marker since $last already announces it; the next release derives as a minor."
             return 0
         fi
-        if [ -n "${GITHUB_OUTPUT:-}" ]; then
-            echo "unmarked-break=true" >>"$GITHUB_OUTPUT"
-        fi
         echo "::error::Breaking against the registry with no marker since $last:$breaking"
         echo "::error::The release derivation reads the log for the marker, so this break would under-bump the next version. Land a commit carrying \`!\` in its subject and a changelog fragment opening with **Breaking:**."
         exit 1

@@ -232,6 +232,11 @@ rather than on each release:
   actors, squash as the only merge method with the pull request title as the
   subject, and auto-merge enabled. The publish trigger reads the squash
   subject, so the merge-method setting is load-bearing.
+- **The `code-scanning` ruleset**, which requires CodeQL results on `main` and
+  names the `spate-release` App as its only bypass actor. The rule blocks a
+  merge while an analysis is pending, and the bypass is what lets the release
+  pull request merge without waiting for one. It sits in a ruleset of its own
+  so it reaches the code scanning rule and nothing the `main` ruleset holds.
 - **No required reviewer on the `crates-io` environment.** Adding one pauses
   a publish part way with nothing in the workflow explaining it.
 

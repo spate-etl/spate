@@ -1,0 +1,55 @@
+name: CodeQL
+
+# No `paths:` filter. The `code-scanning` ruleset blocks a merge while an
+# analysis is pending, so a run that never starts leaves the pull request
+# unmergeable.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # The Rust database dominates; `actions` finishes in under a minute.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Publishes the results as code scanning alerts.
+      security-events: write
+      actions: read
+    strategy:
+      # One language failing must not hide the other's results.
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: rust
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `build-mode: none` reads the sources directly, so no cargo build runs
+      # and the job needs no Rust toolchain.
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # `category` keeps each language's results in its own SARIF namespace, so
+      # one language's run does not retire the other's alerts.
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          category: "/language:${{ matrix.language }}"

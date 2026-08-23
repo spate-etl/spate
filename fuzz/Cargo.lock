@@ -2567,13 +2567,16 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "flate2",
  "libfuzzer-sys",
  "serde",
  "spate-avro",
  "spate-clickhouse",
+ "spate-coordination",
  "spate-core",
  "spate-json",
  "spate-s3",
+ "zstd",
 ]
 
 [[package]]

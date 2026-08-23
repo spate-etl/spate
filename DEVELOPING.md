@@ -139,6 +139,10 @@ into records or records into bytes. Each target asserts a property rather
 than only the absence of a panic. The crate sits outside the workspace, so no
 `--workspace` target compiles it.
 
+A decoder its crate keeps private is reached through that crate's
+off-by-default `testing` feature, in a `fuzz_seams` module. `fuzz/Cargo.toml`
+enables the feature on the crates whose targets need it.
+
 ```sh
 make fuzz-install
 make fuzz-build

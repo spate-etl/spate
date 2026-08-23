@@ -13,8 +13,8 @@ categories.workspace = true
 
 [features]
 # Development-only seams: `S3Source::with_store` for tests, `bench_seams` for
-# the instruction-count benches. Off by default and not enabled by the `spate`
-# facade.
+# the instruction-count benches, `fuzz_seams` for the fuzz harness. Off by
+# default and not enabled by the `spate` facade.
 testing = []
 
 [dependencies]

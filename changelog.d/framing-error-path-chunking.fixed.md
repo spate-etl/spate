@@ -1,8 +1,11 @@
-**Object framing stays chunking-independent when it fails** (`spate-s3`) — a
-record the framer completed before a chunk failed to decode reaches the source
-rather than being dropped with the error, so the records delivered before a
-corrupt or over-cap object is quarantined no longer depend on where the fetcher
-cut the object. The same drain runs when the end-of-object validation fails,
-which is where a compressed codec hands over an object's last records.
-At-least-once delivery was never affected, since the divergence added a
-duplicate record rather than losing one.
+**Object framing stays chunking-independent when it fails** (`spate-s3`,
+`spate-core`) — a record the framer completed before a chunk failed to decode
+is queued for the source rather than dropped with the error, and the same drain
+runs when the end-of-object validation fails, which is where a compressed codec
+hands over an object's last records. What a lane delivers is unchanged, since a
+failing object is quarantined and everything undelivered is discarded. This
+restores the framer's own property, that the record sequence it emits is a
+function of the object's byte stream, which is what a resume by record index
+replays against. `RecordFramer` states the obligation an implementer carries
+for that, bounding a record against the bytes accumulated so far so the framer
+fails at the same position however the stream was split.

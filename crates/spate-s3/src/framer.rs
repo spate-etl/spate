@@ -108,9 +108,7 @@ impl Sink {
     fn try_finish(&mut self) -> io::Result<()> {
         match self {
             Sink::Plain(_) => Ok(()),
-            // `try_finish` runs the same flush and CRC check as `finish` and
-            // borrows the decoder rather than consuming it, so the framer
-            // stays reachable when the check fails.
+            // `try_finish` runs the same flush and CRC check as `finish`.
             Sink::Gzip(d) => d.try_finish(),
             Sink::Zstd(w) => w.finish(),
         }
@@ -406,6 +404,19 @@ mod tests {
         let whole = frame_to_first_error(1, Codec::Plain, &[object]);
         let split = frame_to_first_error(1, Codec::Plain, &[&object[..2], &object[2..]]);
         assert_eq!(whole, (vec![b"a".to_vec()], true));
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    fn a_failing_gzip_object_frames_the_same_under_both_chunkings() {
+        // A compressed codec hands the framer an object's last records at the
+        // tail flush, so the cap error surfaces from `finish_object` rather
+        // than from a chunk.
+        let object = gzip(b"r1\nr2\nBBBB\n");
+        let mid = object.len() / 2;
+        let whole = frame_to_first_error(3, Codec::Gzip, &[&object]);
+        let split = frame_to_first_error(3, Codec::Gzip, &[&object[..mid], &object[mid..]]);
+        assert_eq!(whole, (vec![b"r1".to_vec(), b"r2".to_vec()], true));
         assert_eq!(split, whole);
     }
 

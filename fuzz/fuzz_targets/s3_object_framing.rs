@@ -2,8 +2,10 @@
 //!
 //! The framer is a pure function of the object's byte stream, so the target
 //! frames one stream twice, once as a single chunk and once split at
-//! fuzzer-chosen offsets, and asserts the two runs agree on the outcome and
-//! on the decoded bytes they delivered.
+//! fuzzer-chosen offsets, and asserts the two runs agree on the records they
+//! emitted and on the outcome. A run that fails emits the records the framer
+//! completed before the error, so that comparison covers both paths. The
+//! digest of the decoded bytes is compared on the success path alone.
 //!
 //! The object is either the fuzzer's bytes as they are, which is what reaches
 //! a decompressor with a malformed stream, or those bytes compressed here,
@@ -83,31 +85,37 @@ impl RecordFramer for Recording {
     }
 }
 
-/// Frame `chunks` as one object and report how many records it produced,
-/// `None` when it failed, with the digest of the bytes the decompressor
-/// delivered and how many there were.
-fn frame(
-    policy: Compression,
-    key: &str,
-    cap: usize,
-    chunks: &[&[u8]],
-) -> (Option<usize>, u64, u64) {
+/// One framing run.
+struct Run {
+    /// Records emitted, including the ones a failing run emitted before its
+    /// error.
+    records: usize,
+    /// Whether the run framed the object without an error.
+    ok: bool,
+    /// Digest of the bytes the decompressor delivered to the framer.
+    hash: u64,
+    /// How many of those bytes there were.
+    bytes: u64,
+}
+
+/// Frame `chunks` as one object under a `cap`-byte record cap.
+fn frame(policy: Compression, key: &str, cap: usize, chunks: &[&[u8]]) -> Run {
     let hash = Arc::new(AtomicU64::new(0xcbf2_9ce4_8422_2325));
     let bytes = Arc::new(AtomicU64::new(0));
     let (hash_out, bytes_out) = (Arc::clone(&hash), Arc::clone(&bytes));
-    let records = frame_object(policy, key, chunks, move || {
+    let (records, outcome) = frame_object(policy, key, chunks, move || {
         Box::new(Recording {
             inner: NdjsonFramer::new(cap),
             hash: Arc::clone(&hash),
             bytes: Arc::clone(&bytes),
         })
-    })
-    .ok();
-    (
+    });
+    Run {
         records,
-        hash_out.load(Ordering::Relaxed),
-        bytes_out.load(Ordering::Relaxed),
-    )
+        ok: outcome.is_ok(),
+        hash: hash_out.load(Ordering::Relaxed),
+        bytes: bytes_out.load(Ordering::Relaxed),
+    }
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -148,20 +156,20 @@ fuzz_target!(|input: Input| {
     let whole = frame(policy, &input.key, cap, &[&encoded]);
     let split = frame(policy, &input.key, cap, &chunks);
     assert_eq!(
-        whole.0.is_some(),
-        split.0.is_some(),
-        "framing {} bytes under {policy:?} at key {:?} under a {cap}-byte cap succeeded \
-         under one chunking and failed under the other",
+        (whole.records, whole.ok),
+        (split.records, split.ok),
+        "framing {} bytes under {policy:?} at key {:?} under a {cap}-byte cap emitted a \
+         different record count or outcome under two chunkings",
         encoded.len(),
         input.key
     );
-    // Only on the success path. A run that fails mid-chunk strands a record
-    // the concrete framer had already completed, so the two chunkings can
-    // legitimately differ on what they delivered before the error.
-    if whole.0.is_some() {
+    // The success path only. `Recording` folds a buffer into the digest
+    // before the framer refuses it, so what a failing run delivered depends
+    // on where the object was cut.
+    if whole.ok {
         assert_eq!(
-            whole,
-            split,
+            (whole.hash, whole.bytes),
+            (split.hash, split.bytes),
             "framing {} bytes under {policy:?} at key {:?} under a {cap}-byte cap decoded \
              differently under two chunkings",
             encoded.len(),

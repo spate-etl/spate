@@ -55,6 +55,12 @@ ignore:
   - "crates/spate-test/**" # the mock/test-harness crate shipped for users
   - "examples/**"
   - "bench/**" # the wall-clock harness: unpublished, run by hand
+  - "fuzz/**" # the libFuzzer harness: its own crate, outside the workspace
+  # The entry points those targets reach the private decoders through. They
+  # are exercised by the nightly fuzz tier, which needs a sanitizer build on
+  # nightly and cannot run under `cargo llvm-cov`, so coverage reads them as
+  # unreached however long they have been fuzzed.
+  - "**/fuzz_seams.rs"
 
 component_management:
   individual_components:

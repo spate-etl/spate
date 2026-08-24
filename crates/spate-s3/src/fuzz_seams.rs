@@ -36,38 +36,44 @@ pub fn decode_position(offset: i64) -> (u32, u64) {
 
 /// Frame one object's chunks into records, resolving the codec from `key`
 /// under `compression` and decompressing as a lane does. Returns how many
-/// records the object produced.
+/// records the object produced and what the run reported, stopping at the
+/// first error the way a lane does.
+///
+/// The count covers a failing run too, up to the records the framer had
+/// completed when the error surfaced. A run reports whatever the decompressor
+/// or the framer gave it: a truncated stream, a corrupt frame, or a record
+/// over the framer's cap.
 ///
 /// `chunks` is one object's bytes in delivery order, already compressed when
 /// the resolved codec says so. Each record is dropped as it is popped, so a
 /// stream that decompresses to far more than the framer holds is framed in
 /// constant memory.
-///
-/// # Errors
-///
-/// Whatever the decompressor or the framer reports: a truncated stream, a
-/// corrupt frame, or a record over the framer's cap.
 pub fn frame_object<M>(
     compression: Compression,
     key: &str,
     chunks: &[&[u8]],
     make_framer: M,
-) -> io::Result<usize>
+) -> (usize, io::Result<()>)
 where
     M: Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
 {
     let mut framer = ObjectFramer::new(Arc::new(make_framer));
     let mut records = 0;
-    framer.begin_object(Codec::resolve(compression, key))?;
+    let mut outcome = framer.begin_object(Codec::resolve(compression, key));
     for chunk in chunks {
-        framer.push_chunk(chunk)?;
+        if outcome.is_err() {
+            break;
+        }
+        outcome = framer.push_chunk(chunk);
         while framer.pop_record().is_some() {
             records += 1;
         }
     }
-    framer.finish_object()?;
-    while framer.pop_record().is_some() {
-        records += 1;
+    if outcome.is_ok() {
+        outcome = framer.finish_object();
+        while framer.pop_record().is_some() {
+            records += 1;
+        }
     }
-    Ok(records)
+    (records, outcome)
 }

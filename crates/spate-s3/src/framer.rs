@@ -99,16 +99,18 @@ impl Sink {
         }
     }
 
-    /// Validate end-of-stream (trailers, complete frames) and return the
-    /// framer writer for the final drain.
-    fn finish(self) -> io::Result<FramerWriter> {
+    /// Flush the codec's tail into the framer and validate end-of-stream
+    /// (trailers, complete frames).
+    ///
+    /// The sink is left intact, so [`framer_mut`](Self::framer_mut) reaches
+    /// the framer afterwards. The flush can complete a record and then fail
+    /// the validation, and that record belongs to the object's sequence.
+    fn try_finish(&mut self) -> io::Result<()> {
         match self {
-            Sink::Plain(w) => Ok(w),
-            Sink::Gzip(d) => d.finish(),
-            Sink::Zstd(mut w) => {
-                w.finish()?;
-                Ok(w.into_inner().0)
-            }
+            Sink::Plain(_) => Ok(()),
+            // `try_finish` runs the same flush and CRC check as `finish`.
+            Sink::Gzip(d) => d.try_finish(),
+            Sink::Zstd(w) => w.finish(),
         }
     }
 }
@@ -160,28 +162,37 @@ impl ObjectFramer {
     /// Feed the next chunk of the in-progress object.
     pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
         let sink = self.sink.as_mut().expect("push_chunk outside an object");
-        match sink {
-            Sink::Plain(w) => w.write_all(chunk)?,
-            Sink::Gzip(d) => d.write_all(chunk)?,
-            Sink::Zstd(w) => w.write_all(chunk)?,
-        }
+        let written = match sink {
+            Sink::Plain(w) => w.write_all(chunk),
+            Sink::Gzip(d) => d.write_all(chunk),
+            Sink::Zstd(w) => w.write_all(chunk),
+        };
+        // A framer queues each record as it completes it, so a chunk that
+        // fails part-way through can leave completed records behind. The
+        // drain runs before the write result is propagated. Moving it under a
+        // `?` makes the emitted sequence depend on where the fetcher cut the
+        // object.
         while let Some(record) = sink.framer_mut().pop() {
             self.ready.push_back(record);
         }
-        Ok(())
+        written
     }
 
     /// End of the object: validates the compressed stream ran to completion
-    /// and emits an unterminated final record.
+    /// and emits an unterminated final record. Records the flush completes
+    /// are emitted whether or not the validation fails.
     pub(crate) fn finish_object(&mut self) -> io::Result<()> {
-        let sink = self.sink.take().expect("finish_object outside an object");
-        let mut writer = sink.finish()?;
-        writer.framer_mut().finish()?;
-        while let Some(record) = writer.framer_mut().pop() {
+        let mut sink = self.sink.take().expect("finish_object outside an object");
+        let finished = sink.try_finish().and_then(|()| sink.framer_mut().finish());
+        // The codec's tail flush reaches the framer in the two calls above,
+        // so an object's last records are completed there. The drain runs
+        // before the outcome is propagated. Moving it under a `?` drops those
+        // records whenever the flush or the framer reports an error.
+        while let Some(record) = sink.framer_mut().pop() {
             self.ready.push_back(record);
         }
-        self.finished_decoded_bytes += writer.framer().decoded_bytes();
-        Ok(())
+        self.finished_decoded_bytes += sink.framer().decoded_bytes();
+        finished
     }
 
     /// The next completed record, in stream order.
@@ -243,6 +254,31 @@ mod tests {
             out.push(r);
         }
         Ok(out)
+    }
+
+    /// Drive the framer over `chunks` under a `cap`-byte record cap, stopping
+    /// at the first error the way a lane does. Returns the records emitted and
+    /// whether framing failed.
+    fn frame_to_first_error(cap: usize, codec: Codec, chunks: &[&[u8]]) -> (Vec<Vec<u8>>, bool) {
+        let mut framer = ObjectFramer::new(line_factory(cap));
+        let mut records = Vec::new();
+        let mut failed = framer.begin_object(codec).is_err();
+        for chunk in chunks {
+            if failed {
+                break;
+            }
+            failed = framer.push_chunk(chunk).is_err();
+            while let Some(record) = framer.pop_record() {
+                records.push(record);
+            }
+        }
+        if !failed {
+            failed = framer.finish_object().is_err();
+            while let Some(record) = framer.pop_record() {
+                records.push(record);
+            }
+        }
+        (records, failed)
     }
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -361,6 +397,30 @@ mod tests {
     }
 
     #[test]
+    fn framing_is_chunking_independent_on_the_error_path() {
+        // The second line is over the cap. Framed whole, the failure lands
+        // in the chunk that completed the first line.
+        let object = b"a\nbb";
+        let whole = frame_to_first_error(1, Codec::Plain, &[object]);
+        let split = frame_to_first_error(1, Codec::Plain, &[&object[..2], &object[2..]]);
+        assert_eq!(whole, (vec![b"a".to_vec()], true));
+        assert_eq!(split, whole);
+    }
+
+    #[test]
+    fn a_failing_gzip_object_frames_the_same_under_both_chunkings() {
+        // A compressed codec hands the framer an object's last records at the
+        // tail flush, so the cap error surfaces from `finish_object` rather
+        // than from a chunk.
+        let object = gzip(b"r1\nr2\nBBBB\n");
+        let mid = object.len() / 2;
+        let whole = frame_to_first_error(3, Codec::Gzip, &[&object]);
+        let split = frame_to_first_error(3, Codec::Gzip, &[&object[..mid], &object[mid..]]);
+        assert_eq!(whole, (vec![b"r1".to_vec(), b"r2".to_vec()], true));
+        assert_eq!(split, whole);
+    }
+
+    #[test]
     fn records_queue_across_objects_and_bytes_are_counted() {
         let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
         framer.begin_object(Codec::Plain).unwrap();
@@ -403,6 +463,23 @@ mod tests {
             })
     }
 
+    /// The object encoded under one of the three codecs, picked by index.
+    fn encode(codec_pick: usize, object: &[u8]) -> (Codec, Vec<u8>) {
+        match codec_pick {
+            0 => (Codec::Plain, object.to_vec()),
+            1 => (Codec::Gzip, gzip(object)),
+            _ => (Codec::Zstd, zstd::encode_all(object, 1).unwrap()),
+        }
+    }
+
+    /// Seed values folded into sorted, deduplicated offsets into `bytes`.
+    fn cuts(seeds: &[usize], bytes: &[u8]) -> Vec<usize> {
+        let mut cuts: Vec<usize> = seeds.iter().map(|s| s % (bytes.len() + 1)).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts
+    }
+
     fn chunked(bytes: &[u8], cuts: &[usize]) -> Vec<Vec<u8>> {
         let mut chunks = Vec::new();
         let mut prev = 0;
@@ -426,22 +503,32 @@ mod tests {
             seed_cuts in proptest::collection::vec(0..10_000usize, 0..8),
         ) {
             let expected = reference_frames(&object);
-            let (codec, encoded) = match codec_pick {
-                0 => (Codec::Plain, object.clone()),
-                1 => (Codec::Gzip, gzip(&object)),
-                _ => (Codec::Zstd, zstd::encode_all(&object[..], 1).unwrap()),
-            };
-            let cuts: Vec<usize> = {
-                let mut c: Vec<usize> =
-                    seed_cuts.iter().map(|s| s % (encoded.len() + 1)).collect();
-                c.sort_unstable();
-                c.dedup();
-                c
-            };
-            let chunks = chunked(&encoded, &cuts);
+            let (codec, encoded) = encode(codec_pick, &object);
+            let chunks = chunked(&encoded, &cuts(&seed_cuts, &encoded));
             let chunk_refs: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();
             let framed = frame_all(codec, &chunk_refs).unwrap();
             prop_assert_eq!(framed, expected);
+        }
+
+        /// The property holds under the framer's record cap, where a run can
+        /// fail part-way through. The records emitted before the error match
+        /// the ones the whole object emits. The cap is small enough that most
+        /// objects reach it, and the compressed codecs re-chunk what the
+        /// framer sees.
+        #[test]
+        fn framing_under_a_record_cap_is_chunking_independent(
+            object in arb_object(),
+            codec_pick in 0..3usize,
+            cap in 1..16usize,
+            seed_cuts in proptest::collection::vec(0..10_000usize, 0..8),
+        ) {
+            let (codec, encoded) = encode(codec_pick, &object);
+            let chunks = chunked(&encoded, &cuts(&seed_cuts, &encoded));
+            let chunk_refs: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();
+            prop_assert_eq!(
+                frame_to_first_error(cap, codec, &chunk_refs),
+                frame_to_first_error(cap, codec, &[&encoded]),
+            );
         }
     }
 }

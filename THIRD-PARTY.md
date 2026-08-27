@@ -120,7 +120,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `cexpr` | 0.6.0 | `MIT` |
 | `cfg-if` | 1.0.4 | `MIT` |
 | `cfg_aliases` | 0.2.1 | `MIT` |
-| `chacha20` | 0.10.1 | `MIT` |
+| `chacha20` | 0.10.2 | `MIT` |
 | `chrono` | 0.4.45 | `MIT` |
 | `cityhash-rs` | 1.0.1 | `MIT` |
 | `clap` | 4.6.1 | `MIT` |

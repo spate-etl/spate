@@ -208,12 +208,12 @@ Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | `spate_backpressure_paused` | gauge | | 1 while the source is paused by the watermark controller. |
 | `spate_backpressure_paused_seconds_total` | gauge (monotonic) | | Cumulative paused time. Exported as a gauge because the `metrics` facade's counter is integer-only; treat as a counter in queries (`rate()` works). |
 | `spate_backpressure_pause_events_total` | counter | | Pause transitions (flapping indicator when high). |
-| `spate_backpressure_inflight_bytes` | gauge | | Current in-flight byte budget usage. The budget is one counter per pipeline, and the series is published once per pipeline under `component="runtime"`, `component_type="pipeline"`. The other three series in this family carry one instance per pipeline thread (`component="driver-{i}"`), so this one is the family's only pipeline-wide reading. |
+| `spate_backpressure_inflight_bytes` | gauge | | Current in-flight byte budget usage. One series per pipeline, under `component="runtime"`, `component_type="pipeline"`, because the budget is one counter per pipeline. |
 
-The pause series are per pipeline thread, so `spate_backpressure_paused` is the
-count of currently paused threads once summed, and a pipeline whose threads
-pause independently reports a fraction rather than a flag. The budget gauge is
-the pipeline's, so `sum` and `max` over it both read the real usage.
+The other three series carry one instance per pipeline thread, labeled
+`component="driver-{i}"`. Summing `spate_backpressure_paused` gives the number
+of threads paused at that moment. The budget gauge is per pipeline, so `sum`
+and `max` over it both read the usage.
 
 ## Sink (`spate_sink_*`)
 

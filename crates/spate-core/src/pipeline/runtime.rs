@@ -218,9 +218,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             self.config.metrics.per_partition_detail,
         )
         .map_err(|e| StartError::Metrics(e.to_string()))?;
-        // The owner of the budget gauge. The budget is one counter per
-        // pipeline, so the series is too; the drivers' `BackpressureMetrics`
-        // carry their own per-thread pause series and not this one.
+        // The owner of the budget gauge. One series per pipeline; the
+        // drivers' `BackpressureMetrics` carry the pause series per thread.
         let budget_metrics = InflightBudgetMetrics::try_new(&runtime_labels)
             .map_err(|e| StartError::Metrics(e.to_string()))?;
         // The owner of the source series. It publishes active lanes, and its

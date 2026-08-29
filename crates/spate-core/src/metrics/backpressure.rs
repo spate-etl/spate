@@ -72,14 +72,12 @@ impl BackpressureMetrics {
 
 /// The in-flight byte budget's gauge (`spate_backpressure_inflight_bytes`).
 ///
-/// The budget is one counter per pipeline, shared by every driver and every
-/// sink, so this series is one per pipeline too.
+/// The budget is one counter per pipeline, so this series is one per pipeline.
 ///
-/// It is separate from [`BackpressureMetrics`] rather than a field on it, and
-/// must stay separate: a pipeline builds one of those per driver thread, so
-/// folding the gauge back in would publish the same pipeline-wide number under
-/// one label set per thread, and a `sum()` over the family would report the
-/// thread count times the real usage.
+/// Keep it separate from [`BackpressureMetrics`], which a pipeline builds once
+/// per driver thread. A field there would publish one pipeline-wide number
+/// under one label set per thread, and `sum()` over the family would report
+/// the thread count times the usage.
 #[derive(Debug)]
 pub(crate) struct InflightBudgetMetrics {
     inflight_bytes: Gauge,
@@ -95,9 +93,8 @@ impl InflightBudgetMetrics {
     ///
     /// [`MetricsError::DuplicateSeries`] on a collision.
     pub(crate) fn try_new(labels: &ComponentLabels) -> Result<Self, MetricsError> {
-        // The claim carries a `budget` segment, so a handle set on the labels a
-        // `BackpressureMetrics` already owns claims a separate key rather than
-        // shadowing against it.
+        // The `budget` segment keeps this key distinct from a
+        // `BackpressureMetrics` claim on the same labels.
         let claim = SeriesClaim::try_claim(series_key("backpressure", labels, "budget"))?;
         Ok(InflightBudgetMetrics {
             inflight_bytes: labels.gauge(names::BACKPRESSURE_INFLIGHT_BYTES),

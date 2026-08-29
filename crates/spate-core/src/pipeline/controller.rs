@@ -67,8 +67,7 @@ pub(crate) struct ControllerContext<S: Source> {
     /// The pipeline's in-flight byte budget, shared with every driver and
     /// sink. Read once per loop pass to publish `budget_metrics`.
     pub budget: Arc<InflightBudget>,
-    /// The budget gauge's single owner. One series per pipeline, because the
-    /// budget it reports is one counter per pipeline.
+    /// The budget gauge's single owner.
     pub budget_metrics: InflightBudgetMetrics,
     /// Shared with the source at `open` so it can publish consumer lag, which
     /// only the client can measure. The controller records everything else.
@@ -152,9 +151,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             break;
         }
 
-        // The budget's usage, sampled at control cadence. The drivers read it
-        // on the pause path but publish nothing, and this loop keeps sampling
-        // while every driver is paused, which is when the reading matters.
+        // Sampled once per pass. This loop runs while the drivers are paused.
         budget_metrics.set_inflight_bytes(budget.usage());
 
         // Harvest acknowledgments every pass, not only on the commit tick.

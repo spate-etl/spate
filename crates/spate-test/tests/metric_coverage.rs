@@ -1,13 +1,8 @@
-//! Which declared metrics a running pipeline actually writes.
+//! Which declared metrics a running pipeline writes.
 //!
-//! Its own test binary because it installs the process-global recorder, and it
-//! must be the recorder present before the pipeline builds: metric handles are
-//! pre-registered at build time (INV-8) and bind to whatever recorder exists
-//! then.
-//!
-//! `spate-core`'s own test binary already claims the global recorder, and its
-//! pipeline fakes are `#[cfg(test)]` and so invisible from outside the crate,
-//! which is why this lives here, on `spate-test`'s public mocks.
+//! Its own test binary. The witness must be the global recorder, installed
+//! before the pipeline builds, because handles are pre-registered at build
+//! time (INV-8).
 
 mod metric_witness;
 
@@ -35,9 +30,8 @@ sink: { capture: {} }
 
 /// What one scripted pipeline run wrote, split by phase.
 struct Coverage {
-    /// Written while the pipeline was being assembled. Several handle structs
-    /// publish an initial value in their constructor, and for a few series
-    /// that constructor is the only intended writer.
+    /// Written during assembly, which is where a handle struct's constructor
+    /// publishes an initial value.
     at_build: BTreeSet<String>,
     /// Written after assembly, with the pipeline running.
     while_running: BTreeSet<String>,
@@ -80,8 +74,7 @@ fn run_scenario() -> Coverage {
         .into_runtime(source)
         .expect("into_runtime");
 
-    // Assembly is over: every handle a constructor publishes has published.
-    // Clearing here makes the second reading mean "written while running".
+    // Assembly is over, so the next reading covers the run alone.
     let at_build = witness.written();
     witness.reset();
 
@@ -103,8 +96,7 @@ fn run_scenario() -> Coverage {
     let report = join.join().expect("join").expect("run");
     assert_eq!(report.exit_code(), 0, "clean drain");
 
-    // Records flowed, so the run is a real one and the witness describes a
-    // pipeline that did work.
+    // The run moved records, so the witness describes a working pipeline.
     let rows: Vec<Vec<u8>> = script
         .writes()
         .iter()
@@ -122,12 +114,8 @@ fn run_scenario() -> Coverage {
     }
 }
 
-/// The witness separates "something wrote this" from "this exists", which is
-/// the distinction a rendered exposition cannot express.
-///
-/// `spate_backpressure_inflight_bytes` is the worked example. Before the fix
-/// for #332 it was registered by every driver and written by nothing, and it
-/// rendered `0` exactly as an idle pipeline's would.
+/// The witness reports what was written, and sees the driver and controller
+/// threads.
 #[test]
 fn the_witness_separates_written_series_from_registered_ones() {
     let coverage = run_scenario();
@@ -150,8 +138,7 @@ fn the_witness_separates_written_series_from_registered_ones() {
         "the witness must see writes from the controller thread; wrote:\n{written:#?}"
     );
 
-    // Every written name was registered first, so the two sets are consistent
-    // and `written` is a subset rather than a separate accounting.
+    // `written` is a subset of `registered`.
     for name in written {
         assert!(
             registered.contains(name),
@@ -159,30 +146,23 @@ fn the_witness_separates_written_series_from_registered_ones() {
         );
     }
 
-    // Registration alone is not coverage: the scenario has no coordinator, so
-    // nothing in that family can have been written.
+    // The scenario runs no coordinator, so this family stays unwritten.
     assert!(
         !written.contains(names::COORDINATION_LEADER),
         "the scenario runs no coordinator, so this cannot have been written"
     );
 }
 
-/// Every framework series this scenario reaches is written while it runs.
+/// The framework series this scenario reaches while the pipeline runs.
 ///
 /// The scenario is one pipeline over `spate-test`'s mocks: a memory source, a
 /// passthrough chain and a capture sink, run to a clean drain. It has no
-/// coordinator, no Kafka consumer and no failures, so it exercises the stage
-/// roots on the happy path and nothing else. This list is what that path
-/// covers, and a name leaving it is the signal worth having: the series went
-/// quiet without the pipeline changing shape.
+/// coordinator, no Kafka consumer and no failures.
 ///
-/// It is deliberately not every declared metric. A list of everything would be
-/// mostly permanent exemptions — the coordination family alone is 22 names no
-/// core-scenario pipeline can write — and an exemption list nobody reads
-/// catches nothing. Series outside this path are covered where they happen:
-/// coordination in `crates/spate-coordination/tests/revocation_metrics.rs`,
-/// consumer lag in `crates/spate-kafka/tests/mock_cluster.rs`, failure and
-/// outage paths in the Docker-gated `crates/spate/tests/e2e_*.rs`.
+/// Series outside that path are asserted where they occur. Coordination is
+/// covered in `crates/spate-coordination/tests/revocation_metrics.rs`,
+/// consumer lag in `crates/spate-kafka/tests/mock_cluster.rs`, and the failure
+/// paths in the Docker-gated `crates/spate/tests/e2e_*.rs`.
 const EXERCISED_WHILE_RUNNING: &[&str] = &[
     names::BACKPRESSURE_INFLIGHT_BYTES,
     names::CHECKPOINT_COMMITS_TOTAL,
@@ -216,8 +196,7 @@ const EXERCISED_WHILE_RUNNING: &[&str] = &[
     names::SOURCE_RECORDS_TOTAL,
 ];
 
-/// A handle struct's constructor is the only intended writer for these, so
-/// they are published during assembly and never updated.
+/// Series whose only writer is a handle struct's constructor.
 const PUBLISHED_AT_BUILD: &[&str] = &[names::QUEUE_CAPACITY];
 
 #[test]
@@ -232,8 +211,7 @@ fn the_happy_path_writes_every_series_it_covers() {
     silent.sort_unstable();
     assert!(
         silent.is_empty(),
-        "declared, registered, and never written while the pipeline ran: {silent:?}\n\
-         Either the instrumentation went quiet or this scenario stopped reaching it."
+        "registered and never written while the pipeline ran: {silent:?}"
     );
 
     let mut missing: Vec<&str> = PUBLISHED_AT_BUILD
@@ -247,8 +225,8 @@ fn the_happy_path_writes_every_series_it_covers() {
         "expected to be published by a constructor during assembly: {missing:?}"
     );
 
-    // The list is a claim about this scenario, so an entry that stops being
-    // reachable has to be removed rather than left as a passing no-op.
+    // An entry the pipeline never registers has to be removed from the list,
+    // not left to pass as a no-op.
     for name in EXERCISED_WHILE_RUNNING.iter().chain(PUBLISHED_AT_BUILD) {
         assert!(
             coverage.witness.registered().contains(*name),

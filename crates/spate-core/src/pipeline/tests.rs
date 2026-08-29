@@ -40,10 +40,8 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
 }
 
 struct Harness {
-    /// The pipeline's in-flight budget. `start_with_options` moves its handle
-    /// into the runtime, so a test that wants to drive the budget needs this
-    /// clone; `InflightBudget` is a plain shared counter, so no sink is
-    /// involved in moving it.
+    /// The pipeline's in-flight budget, cloned before the runtime takes it.
+    /// A test charges it directly, with no sink involved.
     budget: Arc<crate::backpressure::InflightBudget>,
     shared: Arc<Mutex<SourceLog>>,
     script: Arc<Mutex<VecDeque<Script>>>,
@@ -983,19 +981,14 @@ fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
     );
 }
 
-/// Regression for #332: the in-flight budget's usage reaches the exposition,
-/// as exactly one series.
+/// The in-flight budget's usage reaches the exposition as exactly one series.
 ///
-/// `spate_backpressure_inflight_bytes` was registered by every driver's
-/// `BackpressureMetrics` and written by nothing, so it rendered `0` for the
-/// life of every process. `docs/METRICS.md` defines `0` on a registered series
-/// as "measured, and the budget is empty", so the reading an operator got
-/// while the budget was full was indistinguishable from an idle pipeline.
+/// Regression for #332.
 ///
-/// The budget is one counter per pipeline, so the count assertion is half the
-/// point: publishing it from each driver would give one series per thread,
-/// all carrying the same global number, and `sum()` over the family would
-/// report the thread count times the real usage.
+/// This asserts the number of series as well as the value. The budget is one
+/// counter per pipeline, so publishing it from each driver would give one
+/// series per thread, all carrying the same number, and `sum()` over the
+/// family would report the thread count times the usage.
 #[test]
 fn the_inflight_budget_reaches_the_exposition_as_one_series() {
     let mut cfg = test_config(4); // four drivers, so a per-driver regression shows up in the count
@@ -1018,8 +1011,7 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
         batches_seen: 0,
     });
 
-    // Charge the budget directly. The controller samples it once per loop
-    // pass, so the gauge follows without a sink in the way.
+    // The controller samples the budget once per loop pass.
     const CHARGED: usize = 7 << 20;
     h.budget.add(CHARGED);
 
@@ -1052,8 +1044,7 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
         "the budget publishes exactly one series, under the runtime's labels:\n{rendered}"
     );
 
-    // The budget draining is visible too, so the series is a live reading and
-    // not a value written once at startup.
+    // A drain is visible too, so the series tracks the budget.
     h.budget.sub(CHARGED);
     wait_for("the budget gauge drains", Duration::from_secs(5), || {
         series(&handle.render()).iter().any(|l| l.ends_with(" 0"))

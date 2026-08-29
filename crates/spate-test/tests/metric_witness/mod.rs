@@ -1,23 +1,13 @@
-//! A recorder that reports which metric names production code has written.
+//! A recorder that reports which metric names have been written.
 //!
-//! Wraps another [`Recorder`] and returns handles that delegate to it, marking
-//! the series as written on the way through. [`Witness::written`] is therefore
-//! the set of names something actually recorded, as distinct from
-//! [`Witness::registered`], the set that merely exists.
+//! [`WitnessRecorder`] wraps another recorder and returns handles that
+//! delegate to it. [`Witness::written`] lists the names something recorded.
+//! [`Witness::registered`] lists the names that exist. Resolving a gauge
+//! handle publishes the series, so the two sets differ.
 //!
-//! That distinction is the whole point. A framework metric handle is resolved
-//! at pipeline build time, and resolving a gauge publishes it, so every
-//! declared series renders `0` whether or not any code path writes it.
-//! "Present in the exposition" is not evidence, and neither is a value: a gauge
-//! may legitimately read `0`.
-//!
-//! `metrics_util::debugging::DebuggingRecorder` does not answer this. It tracks
-//! at registration, so its snapshot contains never-written series, and its
-//! snapshot consumes, swapping counters and gauges to zero as it reads.
-//!
-//! Install this globally, before the pipeline builds. Handles bind to whichever
-//! recorder exists when they are constructed, and `metrics::with_local_recorder`
-//! is thread-local, so it would miss every write from the driver and controller
+//! Install it globally before the pipeline builds. A handle binds to the
+//! recorder present when it is constructed, and `metrics::with_local_recorder`
+//! applies to one thread, so it does not see the driver or controller
 //! threads.
 
 use metrics::{
@@ -36,9 +26,9 @@ struct Site {
 
 /// The names registered and written since installation.
 ///
-/// Registration takes the lock and is cold; a write is a relaxed store on a
-/// flag the handle already holds, so instrumented hot paths stay lock-free.
-/// Reading does not consume, so a caller may sample repeatedly.
+/// A write is a relaxed store on a flag the handle already holds, so an
+/// instrumented hot path takes no lock. Reading leaves the flags in place, so
+/// a caller may sample repeatedly.
 #[derive(Clone, Default)]
 pub(crate) struct Witness(Arc<Mutex<Vec<Arc<Site>>>>);
 
@@ -62,12 +52,9 @@ impl Witness {
         self.collect(|_| true)
     }
 
-    /// Clear every write flag, keeping the registrations.
-    ///
-    /// A flag is monotonic, so a series written during build would otherwise
-    /// mask whether anything wrote it again later. Clearing between phases is
-    /// what makes "written while the pipeline ran" a separate reading from
-    /// "published by a constructor".
+    /// Clear every write flag, keeping the registrations. A later
+    /// [`written`](Self::written) reports only what was written after this
+    /// call.
     pub(crate) fn reset(&self) {
         for site in self.0.lock().expect("witness lock").iter() {
             site.written.store(false, Ordering::Relaxed);
@@ -135,8 +122,6 @@ impl HistogramFn for HistogramSpy {
         self.inner.record(value);
     }
 
-    /// Overridden rather than left to the default, which would loop over
-    /// [`record`](Self::record) and re-mark the same site.
     fn record_many(&self, value: f64, count: usize) {
         self.site.written.store(true, Ordering::Relaxed);
         self.inner.record_many(value, count);
@@ -157,8 +142,8 @@ impl<R: Recorder> WitnessRecorder<R> {
         }
     }
 
-    /// A handle to what this recorder has seen. Cloneable and cheap; the
-    /// recorder itself moves into the global slot on install.
+    /// A handle to what this recorder has seen. The recorder itself moves
+    /// into the global slot on install.
     pub(crate) fn witness(&self) -> Witness {
         self.witness.clone()
     }

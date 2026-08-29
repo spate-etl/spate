@@ -19,6 +19,8 @@ proptest = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 
 [features]

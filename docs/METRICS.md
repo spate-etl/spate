@@ -208,7 +208,7 @@ Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | `spate_backpressure_paused` | gauge | | 1 while the source is paused by the watermark controller. |
 | `spate_backpressure_paused_seconds_total` | gauge (monotonic) | | Cumulative paused time. Exported as a gauge because the `metrics` facade's counter is integer-only; treat as a counter in queries (`rate()` works). |
 | `spate_backpressure_pause_events_total` | counter | | Pause transitions (flapping indicator when high). |
-| `spate_backpressure_inflight_bytes` | gauge | | Current global in-flight byte budget usage. |
+| `spate_backpressure_inflight_bytes` | gauge | | Current in-flight byte budget usage. One series per pipeline, under `component="runtime"`, `component_type="pipeline"`, because the budget is one counter per pipeline. |
 
 ## Sink (`spate_sink_*`)
 

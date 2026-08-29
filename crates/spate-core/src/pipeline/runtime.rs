@@ -8,8 +8,9 @@ use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkControlle
 use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::metrics::{
-    self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter, Meter,
-    MetricRole, MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
+    InflightBudgetMetrics, Meter, MetricRole, MetricsHandle, MetricsSettings, PipelineMetrics,
+    PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
@@ -217,6 +218,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             self.config.metrics.per_partition_detail,
         )
         .map_err(|e| StartError::Metrics(e.to_string()))?;
+        // The owner of the budget gauge. One series per pipeline; the
+        // drivers' `BackpressureMetrics` carry the pause series per thread.
+        let budget_metrics = InflightBudgetMetrics::try_new(&runtime_labels)
+            .map_err(|e| StartError::Metrics(e.to_string()))?;
         // The owner of the source series. It publishes active lanes, and its
         // clone goes to the source, which is the only thing that can measure
         // lag. The per-thread instances are shadows of this one.
@@ -450,6 +455,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             event_poll_timeout: self.options.event_poll_timeout,
             stalled_fail_after: self.config.checkpoint.stalled_fail_after,
             checkpoint_metrics,
+            budget: Arc::clone(&self.budget),
+            budget_metrics,
             source_metrics: controller_source_metrics,
             source_meter,
             per_partition_detail: self.config.metrics.per_partition_detail,

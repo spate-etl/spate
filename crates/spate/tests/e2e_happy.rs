@@ -41,16 +41,19 @@ fn happy_path_delivers_exactly_and_commits() {
     assert_eq!(status, 200, "ready: assignment received, sinks probed");
     let (status, _) = http_get(pipeline.admin, "/metrics");
     assert_eq!(status, 200);
-    // Two instrumentation gaps are FLAGGED for hardening rather than
-    // asserted around here: (1) the driver never increments
-    // spate_source_records_total; (2) sink-shard metric handles are created
-    // before the runtime installs the recorder (flagship pattern), binding
-    // them to the noop recorder, so spate_sink_* families render empty. The
-    // chain's operator metrics are registered post-install and are live:
-    wait_until(Duration::from_secs(30), "operator counted records", || {
-        let (_, body) = http_get(pipeline.admin, "/metrics");
-        metric_sum(&body, "spate_operator_records_in_total") >= total as f64
-    });
+    // Every stage counts what it handled. `Pipeline::from_path` installs the
+    // exporter before a handle can exist, so the sink families publish rather
+    // than binding to the noop recorder.
+    wait_until(
+        Duration::from_secs(30),
+        "every stage counted records",
+        || {
+            let (_, body) = http_get(pipeline.admin, "/metrics");
+            metric_sum(&body, "spate_source_records_total") >= total as f64
+                && metric_sum(&body, "spate_operator_records_in_total") >= total as f64
+                && metric_sum(&body, "spate_sink_records_total") >= total as f64
+        },
+    );
 
     // Let a commit tick pass so watermarks reach Kafka, then drain.
     wait_until(Duration::from_secs(30), "watermarks committed", || {

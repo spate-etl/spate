@@ -59,6 +59,10 @@ mod sink;
 mod source;
 
 pub use backpressure::BackpressureMetrics;
+// The runtime resolves the only instance, under its own pipeline-scoped
+// labels. A second handle on those labels takes the claim and the runtime then
+// refuses to start, so this stays crate-internal.
+pub(crate) use backpressure::InflightBudgetMetrics;
 pub use checkpoint::CheckpointMetrics;
 pub use coordination::{
     AcquireReason, CoordinationMetrics, ReplanOutcome, RevocationOutcome, SplitLossReason, StoreOp,
@@ -397,7 +401,10 @@ mod tests {
             let bp = BackpressureMetrics::new(&labels("orders_kafka"));
             bp.pause_started();
             bp.pause_ended(Duration::from_millis(250));
-            bp.set_inflight_bytes(1 << 20);
+
+            let budget =
+                InflightBudgetMetrics::try_new(&labels("orders_kafka")).expect("free series");
+            budget.set_inflight_bytes(1 << 20);
 
             let shard = SinkShardMetrics::new(
                 &labels("orders_kafka"),
@@ -465,6 +472,7 @@ mod tests {
             r#"spate_operator_records_dropped_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="filtered"} 130"#,
             r#"spate_queue_capacity{pipeline="orders",component="orders_kafka",component_type="kafka",queue="chain->sink/0"} 4096"#,
             r#"spate_backpressure_pause_events_total{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,
+            r#"spate_backpressure_inflight_bytes{pipeline="orders",component="orders_kafka",component_type="kafka"} 1048576"#,
             r#"spate_sink_flushes_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",reason="rows"} 1"#,
             r#"spate_sink_replica_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 0"#,
             r#"spate_sink_replica_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 1"#,

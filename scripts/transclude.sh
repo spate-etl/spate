@@ -20,8 +20,8 @@
 #   ./scripts/transclude.sh --sources    # every source a page transcludes from
 #   ./scripts/transclude.sh --self-test  # the parsers, alone
 #
-# Targets `bash` 3.2 (stock macOS /bin/bash): no associative arrays, no
-# `mapfile`, no `${var,,}`, and every array expansion guarded under `set -u`.
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, no
+# `${var,,}`, and every array expansion guarded under `set -u`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

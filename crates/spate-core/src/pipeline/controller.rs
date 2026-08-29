@@ -7,9 +7,12 @@
 
 use super::{DriverEvent, ExitState, FatalErrorReport, ThreadControl};
 use crate::admin::HealthState;
+use crate::backpressure::InflightBudget;
 use crate::checkpoint::Checkpointer;
 use crate::error::{ErrorClass, FatalError, SourceError};
-use crate::metrics::{CheckpointMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics};
+use crate::metrics::{
+    CheckpointMetrics, InflightBudgetMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics,
+};
 use crate::record::PartitionId;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -61,6 +64,12 @@ pub(crate) struct ControllerContext<S: Source> {
     /// running forever, committing nothing for that partition).
     pub stalled_fail_after: Duration,
     pub checkpoint_metrics: CheckpointMetrics,
+    /// The pipeline's in-flight byte budget, shared with every driver and
+    /// sink. Read once per loop pass to publish `budget_metrics`.
+    pub budget: Arc<InflightBudget>,
+    /// The budget gauge's single owner. One series per pipeline, because the
+    /// budget it reports is one counter per pipeline.
+    pub budget_metrics: InflightBudgetMetrics,
     /// Shared with the source at `open` so it can publish consumer lag, which
     /// only the client can measure. The controller records everything else.
     pub source_metrics: Arc<SourceMetrics>,
@@ -89,6 +98,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         event_poll_timeout,
         stalled_fail_after,
         checkpoint_metrics,
+        budget,
+        budget_metrics,
         source_metrics,
         source_meter,
         per_partition_detail,
@@ -140,6 +151,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         if state.failure.is_some() {
             break;
         }
+
+        // The budget's usage, sampled at control cadence. The drivers read it
+        // on the pause path but publish nothing, and this loop keeps sampling
+        // while every driver is paused, which is when the reading matters.
+        budget_metrics.set_inflight_bytes(budget.usage());
 
         // Harvest acknowledgments every pass, not only on the commit tick.
         // Watermark advances retire batches from the drivers' pending-ceiling

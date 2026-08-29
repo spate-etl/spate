@@ -4,7 +4,7 @@ use super::MetricsError;
 use super::labels::{ComponentLabels, OwnedGauge};
 use super::names;
 use super::ownership::{SeriesClaim, series_key};
-use metrics::Counter;
+use metrics::{Counter, Gauge};
 use std::time::Duration;
 
 /// Backpressure handles (`spate_backpressure_*`).
@@ -13,7 +13,6 @@ pub struct BackpressureMetrics {
     paused: OwnedGauge,
     paused_seconds: OwnedGauge,
     pause_events: Counter,
-    inflight_bytes: OwnedGauge,
     _claim: Option<SeriesClaim>,
 }
 
@@ -52,10 +51,6 @@ impl BackpressureMetrics {
                 owned,
             ),
             pause_events: labels.counter(names::BACKPRESSURE_PAUSE_EVENTS_TOTAL),
-            inflight_bytes: OwnedGauge::new(
-                labels.gauge(names::BACKPRESSURE_INFLIGHT_BYTES),
-                owned,
-            ),
             _claim: claim,
         }
     }
@@ -73,10 +68,46 @@ impl BackpressureMetrics {
         // integer-only (see names.rs).
         self.paused_seconds.increment(paused_for.as_secs_f64());
     }
+}
 
-    /// Set the current in-flight byte budget usage.
+/// The in-flight byte budget's gauge (`spate_backpressure_inflight_bytes`).
+///
+/// The budget is one counter per pipeline, shared by every driver and every
+/// sink, so this series is one per pipeline too.
+///
+/// It is separate from [`BackpressureMetrics`] rather than a field on it, and
+/// must stay separate: a pipeline builds one of those per driver thread, so
+/// folding the gauge back in would publish the same pipeline-wide number under
+/// one label set per thread, and a `sum()` over the family would report the
+/// thread count times the real usage.
+#[derive(Debug)]
+pub(crate) struct InflightBudgetMetrics {
+    inflight_bytes: Gauge,
+    _claim: SeriesClaim,
+}
+
+impl InflightBudgetMetrics {
+    /// Resolve the budget gauge, failing when another live handle set already
+    /// owns the series. Every instance owns its series, so there is no
+    /// shadowing constructor.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::DuplicateSeries`] on a collision.
+    pub(crate) fn try_new(labels: &ComponentLabels) -> Result<Self, MetricsError> {
+        // The claim carries a `budget` segment, so a handle set on the labels a
+        // `BackpressureMetrics` already owns claims a separate key rather than
+        // shadowing against it.
+        let claim = SeriesClaim::try_claim(series_key("backpressure", labels, "budget"))?;
+        Ok(InflightBudgetMetrics {
+            inflight_bytes: labels.gauge(names::BACKPRESSURE_INFLIGHT_BYTES),
+            _claim: claim,
+        })
+    }
+
+    /// Publish the budget's current usage.
     #[inline]
-    pub fn set_inflight_bytes(&self, bytes: usize) {
+    pub(crate) fn set_inflight_bytes(&self, bytes: usize) {
         self.inflight_bytes.set(bytes as f64);
     }
 }

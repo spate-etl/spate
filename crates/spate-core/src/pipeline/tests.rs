@@ -7,6 +7,7 @@ use super::fakes::*;
 use super::*;
 use crate::config::PipelineConfig;
 use crate::error::{ErrorClass, SourceError};
+use crate::metrics::names;
 use crate::ops::RunnableChain;
 use crate::pipeline::runtime::PipelineRuntime;
 use crate::record::PartitionId;
@@ -39,6 +40,11 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
 }
 
 struct Harness {
+    /// The pipeline's in-flight budget. `start_with_options` moves its handle
+    /// into the runtime, so a test that wants to drive the budget needs this
+    /// clone; `InflightBudget` is a plain shared counter, so no sink is
+    /// involved in moving it.
+    budget: Arc<crate::backpressure::InflightBudget>,
     shared: Arc<Mutex<SourceLog>>,
     script: Arc<Mutex<VecDeque<Script>>>,
     chain: Arc<ChainShared>,
@@ -69,6 +75,7 @@ fn start_with_options(
     let chain_shared = Arc::new(ChainShared::default());
     let (sink, drained) = test_sink();
     let budget = Arc::new(crate::backpressure::InflightBudget::new());
+    let budget_for_test = Arc::clone(&budget);
     let cs = Arc::clone(&chain_shared);
     let log = Arc::clone(&shared);
     let runtime = PipelineRuntime::new(
@@ -84,6 +91,7 @@ fn start_with_options(
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
     Harness {
+        budget: budget_for_test,
         shared,
         script,
         chain: chain_shared,
@@ -973,4 +981,85 @@ fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
         "the source's lag must reach the exposition — the handle set the \
          source was given owns the series:\n{rendered}"
     );
+}
+
+/// Regression for #332: the in-flight budget's usage reaches the exposition,
+/// as exactly one series.
+///
+/// `spate_backpressure_inflight_bytes` was registered by every driver's
+/// `BackpressureMetrics` and written by nothing, so it rendered `0` for the
+/// life of every process. `docs/METRICS.md` defines `0` on a registered series
+/// as "measured, and the budget is empty", so the reading an operator got
+/// while the budget was full was indistinguishable from an idle pipeline.
+///
+/// The budget is one counter per pipeline, so the count assertion is half the
+/// point: publishing it from each driver would give one series per thread,
+/// all carrying the same global number, and `sum()` over the family would
+/// report the thread count times the real usage.
+#[test]
+fn the_inflight_budget_reaches_the_exposition_as_one_series() {
+    let mut cfg = test_config(4); // four drivers, so a per-driver regression shows up in the count
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    // Installed before the pipeline builds. Handles bind to the recorder
+    // present at construction, and `install` is idempotent, so the runtime
+    // reuses this one and renders through this handle.
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+
+    // Charge the budget directly. The controller samples it once per loop
+    // pass, so the gauge follows without a sink in the way.
+    const CHARGED: usize = 7 << 20;
+    h.budget.add(CHARGED);
+
+    let series = |rendered: &str| -> Vec<String> {
+        rendered
+            .lines()
+            .filter(|l| l.starts_with(names::BACKPRESSURE_INFLIGHT_BYTES))
+            .map(str::to_owned)
+            .collect()
+    };
+
+    wait_for(
+        "the budget gauge is published",
+        Duration::from_secs(5),
+        || {
+            series(&handle.render())
+                .iter()
+                .any(|l| l.ends_with(&format!(" {CHARGED}")))
+        },
+    );
+
+    let rendered = handle.render();
+    let published = series(&rendered);
+    assert_eq!(
+        published,
+        vec![format!(
+            r#"{}{{pipeline="{pipeline_name}",component="runtime",component_type="pipeline"}} {CHARGED}"#,
+            names::BACKPRESSURE_INFLIGHT_BYTES
+        )],
+        "the budget publishes exactly one series, under the runtime's labels:\n{rendered}"
+    );
+
+    // The budget draining is visible too, so the series is a live reading and
+    // not a value written once at startup.
+    h.budget.sub(CHARGED);
+    wait_for("the budget gauge drains", Duration::from_secs(5), || {
+        series(&handle.render()).iter().any(|l| l.ends_with(" 0"))
+    });
+
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
 }

@@ -1,3 +1,6 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// `loom` is never set in a published build, so its cfg carries no badge.
+#![cfg_attr(docsrs, doc(auto_cfg(hide(loom))))]
 //! High-performance, at-least-once ETL pipeline framework.
 //!
 //! `spate` is the facade crate for the Spate framework and the only crate

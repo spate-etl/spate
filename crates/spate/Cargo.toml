@@ -182,6 +182,7 @@ full = ["avro", "json", "kafka", "clickhouse", "coordination-nats", "s3"]
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

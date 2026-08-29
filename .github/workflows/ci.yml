@@ -438,6 +438,29 @@ jobs:
       - run: make doctest
       - run: make doc
 
+  docsrs:
+    name: Rustdoc as docs.rs builds it
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    # docs.rs builds each crate alone, on nightly, applying that crate's own
+    # `[package.metadata.docs.rs]`. `make doc` builds the workspace together on
+    # stable, which unifies features across members and leaves `docsrs` unset,
+    # so the `rustdoc-args` and the nightly rustdoc features gated on that cfg
+    # reach no other job.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          # Its own entry: a nightly rustdoc build shares no artefact with the
+          # stable dev-profile trees the other jobs cache.
+          shared-key: docsrs
+      - run: make docsrs
+
   features:
     name: Feature matrix (each feature)
     runs-on: ubuntu-latest
@@ -933,7 +956,7 @@ jobs:
     # Without `always()` this job is itself skipped when a dependency fails, and
     # a skipped check reports as *success* to branch protection.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, test, doctests, features, msrv, containers, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, test, doctests, docsrs, features, msrv, containers, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

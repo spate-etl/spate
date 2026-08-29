@@ -44,7 +44,12 @@ is process-wide:
   probe, `admin: { listen: none }` is the answer (no port at all), and
   `metrics: { exporter: none }` beside it leaves the process-global recorder
   free too. Where the test does read an endpoint, `admin: { listen:
-  "127.0.0.1:0" }` lets the kernel pick a free port instead.
+  "127.0.0.1:0" }` lets the kernel pick a free port instead. The start logs
+  the address it bound ([Monitoring](../05-deployment/monitoring.mdx)). A test
+  driving the pipeline as a subprocess reads the port off that line. In
+  process, reading it means installing a `tracing` subscriber that captures
+  the output, which is process-wide in turn, so such a test wants a binary of
+  its own.
 - **Metric series ownership.** A gauge series has one live owner per
   process, keyed on the pipeline and component labels, so two pipelines
   alive at once under the same `pipeline.name` fail to build rather than

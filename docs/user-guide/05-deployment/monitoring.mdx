@@ -53,6 +53,10 @@ Two pipelines on one host collide unless they name different addresses, or one
 of them names `none`. Left alone, both take the same default. Failing to take
 an address stops the start and names the address it wanted.
 
+A port of `0` asks the kernel to pick a free one. The start logs the address
+the server bound, at `INFO`, under the message `admin server listening`, so you
+can read the port back out of the log.
+
 Ordering is handled for you under the builder. Assembling by hand puts it back
 in your hands. See [Manual assembly](../03-guides/manual-assembly.mdx).
 

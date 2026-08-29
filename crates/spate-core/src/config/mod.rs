@@ -286,6 +286,12 @@ pub struct AdminSection {
     /// HTTP. The exposition is still readable in-process through
     /// [`Pipeline::metrics`](crate::pipeline::Pipeline::metrics), which is
     /// what an embedding program mounting it on its own server uses.
+    ///
+    /// A port of `0` asks the kernel to pick a free one, and the start logs
+    /// the address the server bound, at `INFO`. [Monitoring][mon] names the
+    /// message it goes out under.
+    ///
+    /// [mon]: https://spate.kainth.dev/docs/user-guide/deployment/monitoring
     #[serde(deserialize_with = "listen_or_none")]
     pub listen: Option<SocketAddr>,
 }

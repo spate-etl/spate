@@ -421,6 +421,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     }
                 };
                 let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
+                tracing::info!(addr = %admin.local_addr(), "admin server listening");
                 io.spawn(admin.run(admin_stop_rx));
                 Some(admin_stop_tx)
             }

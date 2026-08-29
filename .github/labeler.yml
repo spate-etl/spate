@@ -44,21 +44,20 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-test/**
 
+# The two match keys are ORed. `actions/labeler` wraps a bare `changed-files`
+# in `any`, and `checkAnyChangedFiles` returns on the first key that matches, so
+# an exclusion has to sit inside the key it applies to.
+#
+# CHANGELOG.md is assembled from changelog.d/ at release; THIRD-PARTY.md is
+# generated and carries the supply-chain label below. `all-globs-to-any-file`
+# requires one changed file to match every pattern in its list, so the two
+# negations exclude those files and leave any other root markdown counting as
+# documentation.
 "area: docs":
   - changed-files:
-      - any-glob-to-any-file:
-          - docs/**
+      - any-glob-to-any-file: docs/**
+      - all-globs-to-any-file:
           - "*.md"
-      # CHANGELOG.md is assembled from changelog.d/ at release; THIRD-PARTY.md
-      # is generated and carries the supply-chain label below.
-      #
-      # `all-globs-to-all-files` ANDs every pattern over *every* changed file,
-      # which is what stops a pull request whose only markdown is CHANGELOG.md
-      # from counting as documentation. An exclusion added here therefore
-      # strips `area: docs` from any pull request that touches the excluded
-      # path at all, and under `sync-labels: true` it removes a label already
-      # applied.
-      - all-globs-to-all-files:
           - "!CHANGELOG.md"
           - "!THIRD-PARTY.md"
 

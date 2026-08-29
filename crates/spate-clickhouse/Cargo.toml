@@ -65,5 +65,8 @@ harness = false
 name = "route_gungraun"
 harness = false
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true

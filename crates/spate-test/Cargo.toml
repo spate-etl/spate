@@ -30,5 +30,8 @@ default = []
 # layouts, source scripts, writer outcomes).
 proptest = ["dep:proptest"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true

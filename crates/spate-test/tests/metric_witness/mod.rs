@@ -62,6 +62,18 @@ impl Witness {
         self.collect(|_| true)
     }
 
+    /// Clear every write flag, keeping the registrations.
+    ///
+    /// A flag is monotonic, so a series written during build would otherwise
+    /// mask whether anything wrote it again later. Clearing between phases is
+    /// what makes "written while the pipeline ran" a separate reading from
+    /// "published by a constructor".
+    pub(crate) fn reset(&self) {
+        for site in self.0.lock().expect("witness lock").iter() {
+            site.written.store(false, Ordering::Relaxed);
+        }
+    }
+
     fn collect(&self, keep: impl Fn(&Site) -> bool) -> BTreeSet<String> {
         self.0
             .lock()

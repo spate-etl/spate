@@ -21,6 +21,7 @@ use spate_core::record::PartitionId;
 use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
 use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 const CONFIG: &str = r#"
@@ -32,8 +33,19 @@ source: { memory: {} }
 sink: { capture: {} }
 "#;
 
+/// What one scripted pipeline run wrote, split by phase.
+struct Coverage {
+    /// Written while the pipeline was being assembled. Several handle structs
+    /// publish an initial value in their constructor, and for a few series
+    /// that constructor is the only intended writer.
+    at_build: BTreeSet<String>,
+    /// Written after assembly, with the pipeline running.
+    while_running: BTreeSet<String>,
+    witness: Witness,
+}
+
 /// Run a scripted pipeline to a clean drain and report what it wrote.
-fn run_scenario() -> Witness {
+fn run_scenario() -> Coverage {
     // Installed before anything builds. `spate-core`'s own `install` then finds
     // the global slot taken, warns, and runs against this recorder with a
     // detached render handle.
@@ -68,6 +80,11 @@ fn run_scenario() -> Witness {
         .into_runtime(source)
         .expect("into_runtime");
 
+    // Assembly is over: every handle a constructor publishes has published.
+    // Clearing here makes the second reading mean "written while running".
+    let at_build = witness.written();
+    witness.reset();
+
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
 
@@ -98,7 +115,11 @@ fn run_scenario() -> Witness {
         vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]
     );
 
-    witness
+    Coverage {
+        at_build,
+        while_running: witness.written(),
+        witness,
+    }
 }
 
 /// The witness separates "something wrote this" from "this exists", which is
@@ -109,9 +130,9 @@ fn run_scenario() -> Witness {
 /// rendered `0` exactly as an idle pipeline's would.
 #[test]
 fn the_witness_separates_written_series_from_registered_ones() {
-    let witness = run_scenario();
-    let written = witness.written();
-    let registered = witness.registered();
+    let coverage = run_scenario();
+    let written = &coverage.while_running;
+    let registered = coverage.witness.registered();
 
     assert!(
         !written.is_empty(),
@@ -131,7 +152,7 @@ fn the_witness_separates_written_series_from_registered_ones() {
 
     // Every written name was registered first, so the two sets are consistent
     // and `written` is a subset rather than a separate accounting.
-    for name in &written {
+    for name in written {
         assert!(
             registered.contains(name),
             "`{name}` was written without being registered"
@@ -144,4 +165,94 @@ fn the_witness_separates_written_series_from_registered_ones() {
         !written.contains(names::COORDINATION_LEADER),
         "the scenario runs no coordinator, so this cannot have been written"
     );
+}
+
+/// Every framework series this scenario reaches is written while it runs.
+///
+/// The scenario is one pipeline over `spate-test`'s mocks: a memory source, a
+/// passthrough chain and a capture sink, run to a clean drain. It has no
+/// coordinator, no Kafka consumer and no failures, so it exercises the stage
+/// roots on the happy path and nothing else. This list is what that path
+/// covers, and a name leaving it is the signal worth having: the series went
+/// quiet without the pipeline changing shape.
+///
+/// It is deliberately not every declared metric. A list of everything would be
+/// mostly permanent exemptions — the coordination family alone is 22 names no
+/// core-scenario pipeline can write — and an exemption list nobody reads
+/// catches nothing. Series outside this path are covered where they happen:
+/// coordination in `crates/spate-coordination/tests/revocation_metrics.rs`,
+/// consumer lag in `crates/spate-kafka/tests/mock_cluster.rs`, failure and
+/// outage paths in the Docker-gated `crates/spate/tests/e2e_*.rs`.
+const EXERCISED_WHILE_RUNNING: &[&str] = &[
+    names::BACKPRESSURE_INFLIGHT_BYTES,
+    names::CHECKPOINT_COMMITS_TOTAL,
+    names::CHECKPOINT_COMMIT_DURATION_SECONDS,
+    names::CHECKPOINT_PENDING_BATCHES,
+    names::CHECKPOINT_WATERMARK_AGE_SECONDS,
+    names::DESER_BATCH_DURATION_SECONDS,
+    names::DESER_RECORDS_TOTAL,
+    names::E2E_LATENCY_SECONDS,
+    names::OPERATOR_BATCH_DURATION_SECONDS,
+    names::OPERATOR_RECORDS_IN_TOTAL,
+    names::OPERATOR_RECORDS_OUT_TOTAL,
+    names::PIPELINE_INFO,
+    names::PIPELINE_STATE,
+    names::PIPELINE_THREADS,
+    names::QUEUE_DEPTH,
+    names::SINK_BATCH_BYTES,
+    names::SINK_BATCH_ROWS,
+    names::SINK_BYTES_TOTAL,
+    names::SINK_FLUSHES_TOTAL,
+    names::SINK_FLUSH_DURATION_SECONDS,
+    names::SINK_INFLIGHT_BATCHES,
+    names::SINK_PERMIT_WAIT_DURATION_SECONDS,
+    names::SINK_RECORDS_TOTAL,
+    names::SINK_REPLICA_HEALTHY,
+    names::SINK_SHARD_HEALTHY,
+    names::SINK_WRITE_DURATION_SECONDS,
+    names::SOURCE_BYTES_TOTAL,
+    names::SOURCE_LANES_ACTIVE,
+    names::SOURCE_POLL_DURATION_SECONDS,
+    names::SOURCE_RECORDS_TOTAL,
+];
+
+/// A handle struct's constructor is the only intended writer for these, so
+/// they are published during assembly and never updated.
+const PUBLISHED_AT_BUILD: &[&str] = &[names::QUEUE_CAPACITY];
+
+#[test]
+fn the_happy_path_writes_every_series_it_covers() {
+    let coverage = run_scenario();
+
+    let mut silent: Vec<&str> = EXERCISED_WHILE_RUNNING
+        .iter()
+        .filter(|n| !coverage.while_running.contains(**n))
+        .copied()
+        .collect();
+    silent.sort_unstable();
+    assert!(
+        silent.is_empty(),
+        "declared, registered, and never written while the pipeline ran: {silent:?}\n\
+         Either the instrumentation went quiet or this scenario stopped reaching it."
+    );
+
+    let mut missing: Vec<&str> = PUBLISHED_AT_BUILD
+        .iter()
+        .filter(|n| !coverage.at_build.contains(**n))
+        .copied()
+        .collect();
+    missing.sort_unstable();
+    assert!(
+        missing.is_empty(),
+        "expected to be published by a constructor during assembly: {missing:?}"
+    );
+
+    // The list is a claim about this scenario, so an entry that stops being
+    // reachable has to be removed rather than left as a passing no-op.
+    for name in EXERCISED_WHILE_RUNNING.iter().chain(PUBLISHED_AT_BUILD) {
+        assert!(
+            coverage.witness.registered().contains(*name),
+            "`{name}` is listed here but the pipeline never registered it"
+        );
+    }
 }

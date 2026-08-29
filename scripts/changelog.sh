@@ -24,10 +24,9 @@
 # evaluated. A `pull_request` run executes the pull request's own copy of this
 # script. See the note in scripts/ci-changes.sh.
 #
-# Targets `bash` 3.2, the version stock macOS ships as /bin/bash: no
-# associative arrays, no `mapfile`, no `${var,,}`, and every array expansion
-# guarded, because `"${arr[@]}"` on an empty array is an unbound-variable error
-# under `set -u` there.
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, no
+# `${var,,}`, and every array expansion guarded, because `"${arr[@]}"` on an
+# empty array is an unbound-variable error under `set -u` there.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -756,9 +755,9 @@ cmd_new() {
     esac
 
     # `LC_ALL=C grep`, not a `case` glob. A bracket range in a glob is collated,
-    # and under bash 3.2, the version this targets and what stock macOS ships,
-    # `[!a-z0-9-]` in a UTF-8 locale accepts uppercase, so `BarUpper` passed
-    # there and was rejected everywhere else.
+    # and under bash 3.2, the oldest version this runs on, `[!a-z0-9-]` in a
+    # UTF-8 locale accepts uppercase, so `BarUpper` passed there and was
+    # rejected everywhere else.
     if ! printf '%s' "$slug" | LC_ALL=C grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
         fail "'$slug' should be lowercase letters, digits and hyphens, starting and ending
   with one of the first two. It becomes a filename."

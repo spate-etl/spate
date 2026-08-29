@@ -36,8 +36,8 @@
 #             attestation bundle from actions/attest-build-provenance; empty
 #             when nothing was packaged), GITHUB_REPOSITORY
 #
-# Targets `bash` 3.2, the version stock macOS ships as /bin/bash: no
-# associative arrays, no `mapfile`, and every array expansion guarded.
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, and
+# every array expansion guarded.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

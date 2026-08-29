@@ -117,7 +117,7 @@ libc = "0.2.183"
 gungraun = "0.19.4"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)", "cfg(loom)"] }
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
 missing_docs = "warn"

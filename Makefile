@@ -7,7 +7,7 @@ include versions.mk
 
 .DEFAULT_GOAL := help
 
-.PHONY: help fmt fmt-check clippy lint check test doctest doc test-docker \
+.PHONY: help fmt fmt-check clippy lint check test doctest doc docsrs test-docker \
         test-examples \
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-arms bench-compare loom \
@@ -55,6 +55,9 @@ doctest: ## Doc tests, which nextest does not run
 
 doc: ## Rustdoc as the site builds it, warnings denied
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+docsrs: ## Rustdoc as docs.rs builds it: per crate, on nightly (needs nightly)
+	./scripts/docsrs.sh
 
 test-examples: ## Just the examples, run as tests (subset of test)
 	cargo nextest run -p spate --all-features --locked -E 'kind(example)'

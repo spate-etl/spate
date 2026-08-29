@@ -23,10 +23,10 @@
 # cargo and jq: it checks the manifest fields crates.io rejects at upload
 # while `cargo publish --dry-run` warns and exits 0 (cargo issue 14249).
 #
-# Targets `bash` 3.2, the version stock macOS ships as /bin/bash: no
-# associative arrays, no `mapfile`, and every array expansion guarded. The
-# scan loops read from files rather than process substitutions, because 3.2
-# leaks a pipe descriptor per substitution and a tree-sized scan runs out.
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, and
+# every array expansion guarded. The scan loops read from files rather than
+# process substitutions, because 3.2 leaks a pipe descriptor per substitution
+# and a tree-sized scan runs out.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

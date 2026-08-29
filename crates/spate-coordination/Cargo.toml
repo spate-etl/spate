@@ -55,5 +55,8 @@ harness = false
 name = "claims_gungraun"
 harness = false
 
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

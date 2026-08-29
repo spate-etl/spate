@@ -1,3 +1,6 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// `loom` is never set in a published build, so its cfg carries no badge.
+#![cfg_attr(docsrs, doc(auto_cfg(hide(loom))))]
 //! Distributed work coordination for Spate sources.
 //!
 //! A leader-elected worker runs the source's

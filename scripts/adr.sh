@@ -14,8 +14,8 @@
 #   ./scripts/adr.sh --new <slug>    # scaffold the next record
 #   ./scripts/adr.sh --self-test     # the parsers, alone
 #
-# Targets `bash` 3.2 (stock macOS /bin/bash): no associative arrays, no
-# `mapfile`, no `${var,,}`, and every array expansion guarded under `set -u`.
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, no
+# `${var,,}`, and every array expansion guarded under `set -u`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

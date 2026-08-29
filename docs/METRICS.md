@@ -210,11 +210,6 @@ Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | `spate_backpressure_pause_events_total` | counter | | Pause transitions (flapping indicator when high). |
 | `spate_backpressure_inflight_bytes` | gauge | | Current in-flight byte budget usage. One series per pipeline, under `component="runtime"`, `component_type="pipeline"`, because the budget is one counter per pipeline. |
 
-The other three series carry one instance per pipeline thread, labeled
-`component="driver-{i}"`. Summing `spate_backpressure_paused` gives the number
-of threads paused at that moment. The budget gauge is per pipeline, so `sum`
-and `max` over it both read the usage.
-
 ## Sink (`spate_sink_*`)
 
 In a [multi-sink](user-guide/02-concepts/06-multi-sink.mdx) pipeline each sink's

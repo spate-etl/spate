@@ -19,8 +19,6 @@ proptest = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-# The metric-coverage gate wraps the recorder to observe writes. Dev-only: no
-# `metrics` type reaches this crate's public API.
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

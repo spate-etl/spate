@@ -100,7 +100,7 @@ semantics.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `listen` | socket address \| `none` | `0.0.0.0:9090` | Bind address. `none` runs no server: no probes, no scrape endpoint, and the port stays free. An address the process cannot take fails the start, naming that address. |
+| `listen` | socket address \| `none` | `0.0.0.0:9090` | Bind address. `none` runs no server: no probes, no scrape endpoint, and the port stays free. An address the process cannot take fails the start, naming that address. A port of `0` asks the kernel to pick a free one, and the start logs the address the server bound. |
 
 ## `metrics:`
 

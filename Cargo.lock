@@ -4206,6 +4206,7 @@ dependencies = [
  "proptest",
  "spate-core",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

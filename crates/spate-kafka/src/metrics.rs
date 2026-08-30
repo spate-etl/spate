@@ -156,22 +156,37 @@ impl BrokerHandles {
 }
 
 /// Per-partition series, gated by `metrics.per_partition_detail` and by
-/// ownership: the entry, and every gauge inside it, registers lazily on the
-/// first statistics window in which this member holds the partition. A
-/// partition another member holds has no entry and no series at all, since
-/// the snapshot carries every partition in the topic's metadata regardless of
-/// who holds it (`rd_kafka_stats_emit_all` walks the whole partition count).
-/// The lag gauge additionally waits for a known value before its first write:
-/// librdkafka reports `-1` while lag is unknown, and rendering `0` there
-/// would mask real lag. A release can still zero an already-known lag to `0`
+/// ownership (see [`is_owned`]): the entry, and every gauge inside it,
+/// registers lazily on the first statistics window in which this member
+/// holds the partition, so a partition another member holds has no entry and
+/// no series at all. The lag gauge additionally waits for a known value
+/// before its first write: librdkafka reports `-1` while lag is unknown, and
+/// rendering `0` there would mask real lag. A release can still zero an
+/// already-known lag to `0`
 /// (see [`retain_partitions`](KafkaStatsMetrics::retain_partitions)), the
 /// same trade `SourceMetrics::retain_partitions` makes for the framework's
 /// own lag family.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PartitionHandles {
-    fetch_queue_messages: Option<Gauge>,
+    fetch_queue_messages: Gauge,
     lag_stored: Option<Gauge>,
-    not_fetching: Option<Gauge>,
+    not_fetching: Gauge,
+}
+
+impl PartitionHandles {
+    fn new(meter: &Meter, partition: i32) -> Self {
+        PartitionHandles {
+            fetch_queue_messages: meter.gauge(
+                PARTITION_FETCH_QUEUE_MESSAGES,
+                &[(L_PARTITION, partition.to_string().into())],
+            ),
+            lag_stored: None,
+            not_fetching: meter.gauge(
+                PARTITION_NOT_FETCHING,
+                &[(L_PARTITION, partition.to_string().into())],
+            ),
+        }
+    }
 }
 
 /// A run of consecutive statistics windows in which a partition this member
@@ -217,17 +232,16 @@ impl KafkaStatsMetrics {
 
     /// Translate one statistics snapshot. Controller thread only.
     ///
-    /// `owned` is the member's live assignment. The snapshot carries every
-    /// partition the client holds metadata for, not only the ones this member
-    /// holds, so every per-partition series and the not-fetching log line
-    /// write only while the partition is in `owned`. A partition outside it is
-    /// left alone rather than written: its gauges and its not-fetching run
-    /// stay exactly as they were until
+    /// `owned` is the member's live assignment (see [`is_owned`] for why the
+    /// snapshot needs this filter). Every per-partition series and the
+    /// not-fetching log line write only while the partition is in `owned`.
+    /// Nothing is written for a partition outside it: its gauges and its
+    /// not-fetching run stay exactly as they were until
     /// [`retain_partitions`](Self::retain_partitions) zeroes the gauges and
     /// drops the run. `owned` reads empty for the whole of a rebalance in
     /// flight, since an eager revoke clears the member's assignment before
-    /// the new one lands, so a partition handed straight back is left alone
-    /// rather than written as absent in between.
+    /// the new one lands, so a partition handed straight back keeps its last
+    /// recorded value rather than being reset in between.
     pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
@@ -364,15 +378,12 @@ impl KafkaStatsMetrics {
                 if self.per_partition_detail {
                     seen.insert(*pid);
                     if held {
-                        let handles = self.partitions.entry(*pid).or_default();
+                        let handles = self
+                            .partitions
+                            .entry(*pid)
+                            .or_insert_with(|| PartitionHandles::new(meter, *pid));
                         handles
                             .fetch_queue_messages
-                            .get_or_insert_with(|| {
-                                meter.gauge(
-                                    PARTITION_FETCH_QUEUE_MESSAGES,
-                                    &[(L_PARTITION, pid.to_string().into())],
-                                )
-                            })
                             .set(to_u64(p.fetchq_cnt) as f64);
                         if p.consumer_lag_stored >= 0 {
                             handles
@@ -387,12 +398,6 @@ impl KafkaStatsMetrics {
                         }
                         handles
                             .not_fetching
-                            .get_or_insert_with(|| {
-                                meter.gauge(
-                                    PARTITION_NOT_FETCHING,
-                                    &[(L_PARTITION, pid.to_string().into())],
-                                )
-                            })
                             .set(if p.fetch_state == FETCH_STATE_ACTIVE {
                                 0.0
                             } else {
@@ -421,10 +426,9 @@ impl KafkaStatsMetrics {
     /// A partition outside `owned` has every per-partition gauge read 0, and
     /// its not-fetching run is dropped, so a partition handed back later
     /// starts a fresh run. `update` writes these gauges only while a
-    /// partition is held, so without this the last value written before the
-    /// partition moved would otherwise stand: the exporter has no deletion
-    /// and no idle timeout, and a series left unwritten renders the value
-    /// the last window that held it recorded for the life of the process.
+    /// partition is held. The exporter has no deletion and no idle timeout,
+    /// so without this a series left unwritten would render the value the
+    /// last window that held it recorded, for the life of the process.
     /// Absence is "never held", 0 is "held once, not now", the same meaning
     /// [`SourceMetrics::retain_partitions`](spate_core::metrics::SourceMetrics::retain_partitions)
     /// fixes for the lag family.
@@ -439,14 +443,9 @@ impl KafkaStatsMetrics {
             if is_owned(owned, *pid) {
                 continue;
             }
-            for gauge in [
-                handles.fetch_queue_messages.as_ref(),
-                handles.lag_stored.as_ref(),
-                handles.not_fetching.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            handles.fetch_queue_messages.set(0.0);
+            handles.not_fetching.set(0.0);
+            if let Some(gauge) = handles.lag_stored.as_ref() {
                 gauge.set(0.0);
             }
         }

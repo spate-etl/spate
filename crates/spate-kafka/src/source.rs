@@ -187,9 +187,9 @@ impl KafkaSource {
     }
 
     /// Zero and drop the per-partition series for partitions this member
-    /// lost in the rebalance that just completed: the lag family and the
-    /// connector's `partition_not_fetching` gauge, which carry the same
-    /// ownership meaning.
+    /// lost in the rebalance that just completed: the lag family and every
+    /// per-partition gauge the connector's own statistics translation
+    /// registers, which all carry the same ownership meaning.
     ///
     /// Called on `Intent::Assign`, once the new assignment is known, and
     /// on `Intent::Error`, where ownership is already released and no

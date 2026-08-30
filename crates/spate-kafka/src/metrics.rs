@@ -218,9 +218,9 @@ impl KafkaStatsMetrics {
     /// partition the client holds metadata for, not only the ones this member
     /// holds, so every per-partition series and the not-fetching log line
     /// write only while the partition is in `owned`. A partition outside it is
-    /// left alone rather than written: its gauges freeze at their last value
-    /// and its not-fetching run keeps accumulating, until
-    /// [`retain_partitions`](Self::retain_partitions) zeroes the gauge and
+    /// left alone rather than written: its gauges and its not-fetching run
+    /// stay exactly as they were until
+    /// [`retain_partitions`](Self::retain_partitions) zeroes the gauges and
     /// drops the run. `owned` reads as the assignment held before a
     /// rebalance for the whole of that rebalance, so a partition handed
     /// straight back is never written as absent in between.
@@ -414,12 +414,14 @@ impl KafkaStatsMetrics {
     /// Release the partitions this member lost in the rebalance that just
     /// completed. Controller thread only.
     ///
-    /// A partition outside `owned` reads 0 and its run is dropped, so a
-    /// partition handed back later starts a fresh run. The exporter has no
-    /// deletion and no idle timeout, so a series left unwritten renders the
-    /// value the last window that held it recorded for the life of the
-    /// process. Absence is "never held", 0 is "held once, not now", the same
-    /// meaning
+    /// A partition outside `owned` has every per-partition gauge read 0, and
+    /// its not-fetching run is dropped, so a partition handed back later
+    /// starts a fresh run. `update` writes these gauges only while a
+    /// partition is held, so without this the last value written before the
+    /// partition moved would otherwise stand: the exporter has no deletion
+    /// and no idle timeout, and a series left unwritten renders the value
+    /// the last window that held it recorded for the life of the process.
+    /// Absence is "never held", 0 is "held once, not now", the same meaning
     /// [`SourceMetrics::retain_partitions`](spate_core::metrics::SourceMetrics::retain_partitions)
     /// fixes for the lag family.
     ///
@@ -430,8 +432,16 @@ impl KafkaStatsMetrics {
     /// once the new assignment is known.
     pub(crate) fn retain_partitions(&mut self, owned: &[PartitionId]) {
         for (pid, handles) in &self.partitions {
-            if !is_owned(owned, *pid)
-                && let Some(gauge) = handles.not_fetching.as_ref()
+            if is_owned(owned, *pid) {
+                continue;
+            }
+            for gauge in [
+                handles.fetch_queue_messages.as_ref(),
+                handles.lag_stored.as_ref(),
+                handles.not_fetching.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 gauge.set(0.0);
             }
@@ -987,9 +997,8 @@ mod tests {
                 "a partition another member holds minted {family}:\n{rendered}"
             );
         }
-        // The aggregate stays a sum across the whole snapshot, unaffected by
-        // ownership: an unheld partition reports `fetchq_cnt=0`, so it already
-        // reflects reality.
+        // The aggregate sums every partition in the snapshot regardless of
+        // ownership: 10 (partition 0, held) + 20 (partition 2, not held).
         assert!(rendered.contains(&format!("spate_kafka_fetch_queue_messages{{{STD}}} 30")));
     }
 
@@ -1083,6 +1092,40 @@ mod tests {
                 r#"spate_kafka_partition_not_fetching{{{STD},partition="0"}} 0"#
             )),
             "a revoked partition kept reading as parked:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_revoked_partition_zeroes_its_other_gauges_too() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            let stats = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions("orders", &[(0, 20, 2_000, 7)]),
+                )]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders", &owned(&[0]));
+            // The rebalance hands partition 0 to another member. Its prefetch
+            // depth and stored lag must stop reading the values recorded
+            // while this member held it, the same way `not_fetching` already
+            // does: otherwise a reader summing across the group counts the
+            // partition twice, once frozen here and once live on the member
+            // that now holds it.
+            m.retain_partitions(&[]);
+        });
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 0"#
+            )),
+            "a revoked partition kept reading its last prefetch depth:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_lag_stored_records{{{STD},partition="0"}} 0"#
+            )),
+            "a revoked partition kept reading its last stored lag:\n{rendered}"
         );
     }
 

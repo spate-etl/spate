@@ -613,24 +613,34 @@ fn statistics_populate_kafka_source_metrics() {
         let _lanes = await_assignment(&mut source);
 
         // Poll past at least one statistics interval; stop as soon as the
-        // families appear.
+        // families appear. The not-fetching series is waited on by value
+        // rather than by presence, because the first snapshot after an
+        // assignment legitimately catches a partition at `offset-query`.
+        let needles = [
+            "spate_kafka_group_assignment_size".to_owned(),
+            "spate_kafka_rx_responses_total".to_owned(),
+            "spate_kafka_broker_up".to_owned(),
+            not_fetching(0),
+            not_fetching(1),
+        ];
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             source
                 .poll_events(Duration::from_millis(100))
                 .expect("poll_events");
             let rendered = handle.render();
-            if rendered.contains("spate_kafka_group_assignment_size")
-                && rendered.contains("spate_kafka_rx_responses_total")
-                && rendered.contains("spate_kafka_broker_up")
-                && rendered.contains(&not_fetching(0))
-                && rendered.contains(&not_fetching(1))
-            {
+            let missing: Vec<&str> = needles
+                .iter()
+                .filter(|n| !rendered.contains(n.as_str()))
+                .map(String::as_str)
+                .collect();
+            if missing.is_empty() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "statistics series did not appear within deadline:\n{rendered}"
+                "statistics series did not appear within deadline, \
+                 missing {missing:?}:\n{rendered}"
             );
         }
     });
@@ -648,19 +658,11 @@ fn statistics_populate_kafka_source_metrics() {
     ] {
         assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
     }
-    // Both assigned partitions are fetching. Real librdkafka fills
-    // `fetch_state` here, so this pins the field the source reads as well as
-    // the value a healthy assignment produces.
-    for partition in [0, 1] {
-        let needle = not_fetching(partition);
-        assert!(
-            rendered.contains(&needle),
-            "missing `{needle}`:\n{rendered}"
-        );
-    }
 }
 
-/// The exposition line for a partition that is fetching.
+/// The exposition line for a partition that is fetching. Real librdkafka
+/// fills `fetch_state`, so waiting on this pins the field the source reads
+/// as well as the value a healthy assignment produces.
 fn not_fetching(partition: i32) -> String {
     format!(
         r#"spate_kafka_partition_not_fetching{{pipeline="stats",component="source",component_type="kafka",partition="{partition}"}} 0"#

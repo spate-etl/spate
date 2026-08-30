@@ -155,30 +155,20 @@ impl BrokerHandles {
     }
 }
 
-/// Per-partition series, gated by `metrics.per_partition_detail`. The lag
-/// gauge registers lazily on the first known value: librdkafka reports `-1`
-/// while lag is unknown (e.g. right after assignment), and rendering `0`
-/// there would mask real lag. The not-fetching gauge registers lazily on the
-/// first window in which this member holds the partition, so a partition
-/// another member holds registers nothing at all.
-#[derive(Debug)]
+/// Per-partition series, gated by `metrics.per_partition_detail` and by
+/// ownership: each gauge registers lazily on the first statistics window in
+/// which this member holds the partition, so a partition another member
+/// holds registers nothing at all. The snapshot carries every partition in
+/// the topic's metadata regardless of who holds it
+/// (`rd_kafka_stats_emit_all` walks the whole partition count), which is what
+/// the ownership check is for. The lag gauge additionally waits for a known
+/// value: librdkafka reports `-1` while lag is unknown (e.g. right after
+/// assignment), and rendering `0` there would mask real lag.
+#[derive(Debug, Default)]
 struct PartitionHandles {
-    fetch_queue_messages: Gauge,
+    fetch_queue_messages: Option<Gauge>,
     lag_stored: Option<Gauge>,
     not_fetching: Option<Gauge>,
-}
-
-impl PartitionHandles {
-    fn new(meter: &Meter, partition: i32) -> Self {
-        PartitionHandles {
-            fetch_queue_messages: meter.gauge(
-                PARTITION_FETCH_QUEUE_MESSAGES,
-                &[(L_PARTITION, partition.to_string().into())],
-            ),
-            lag_stored: None,
-            not_fetching: None,
-        }
-    }
 }
 
 /// A run of consecutive statistics windows in which a partition this member
@@ -225,13 +215,15 @@ impl KafkaStatsMetrics {
     /// Translate one statistics snapshot. Controller thread only.
     ///
     /// `owned` is the member's live assignment. The snapshot carries every
-    /// partition the client holds metadata for, and a partition another member
-    /// holds reports no fetching of its own, so the series and the log line
-    /// that describe fetching are restricted to `owned`. A partition outside
-    /// it is left alone rather than written, and keeps its series and its run
-    /// until [`retain_partitions`](Self::retain_partitions) releases them: an
-    /// assignment is empty for the whole of a rebalance the member is about to
-    /// come out of holding the same partitions.
+    /// partition the client holds metadata for, not only the ones this member
+    /// holds, so every per-partition series and the not-fetching log line
+    /// write only while the partition is in `owned`. A partition outside it is
+    /// left alone rather than written: its gauges freeze at their last value
+    /// and its not-fetching run keeps accumulating, until
+    /// [`retain_partitions`](Self::retain_partitions) zeroes the gauge and
+    /// drops the run. `owned` reads as the assignment held before a
+    /// rebalance for the whole of that rebalance, so a partition handed
+    /// straight back is never written as absent in between.
     pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
@@ -367,25 +359,28 @@ impl KafkaStatsMetrics {
                 let held = is_owned(owned, *pid);
                 if self.per_partition_detail {
                     seen.insert(*pid);
-                    let handles = self
-                        .partitions
-                        .entry(*pid)
-                        .or_insert_with(|| PartitionHandles::new(meter, *pid));
-                    handles
-                        .fetch_queue_messages
-                        .set(to_u64(p.fetchq_cnt) as f64);
-                    if p.consumer_lag_stored >= 0 {
+                    let handles = self.partitions.entry(*pid).or_default();
+                    if held {
                         handles
-                            .lag_stored
+                            .fetch_queue_messages
                             .get_or_insert_with(|| {
                                 meter.gauge(
-                                    PARTITION_LAG_STORED_RECORDS,
+                                    PARTITION_FETCH_QUEUE_MESSAGES,
                                     &[(L_PARTITION, pid.to_string().into())],
                                 )
                             })
-                            .set(p.consumer_lag_stored as f64);
-                    }
-                    if held {
+                            .set(to_u64(p.fetchq_cnt) as f64);
+                        if p.consumer_lag_stored >= 0 {
+                            handles
+                                .lag_stored
+                                .get_or_insert_with(|| {
+                                    meter.gauge(
+                                        PARTITION_LAG_STORED_RECORDS,
+                                        &[(L_PARTITION, pid.to_string().into())],
+                                    )
+                                })
+                                .set(p.consumer_lag_stored as f64);
+                        }
                         handles
                             .not_fetching
                             .get_or_insert_with(|| {
@@ -961,6 +956,44 @@ mod tests {
     }
 
     #[test]
+    fn partition_series_are_scoped_to_the_live_assignment() {
+        // A two-member group on a two-partition topic: partition 2 is in the
+        // snapshot because librdkafka emits every partition in the topic's
+        // metadata, but the sibling member holds it.
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            let stats = Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    topic_with_partitions("orders", &[(0, 10, 1_000, 5), (2, 20, 2_000, 7)]),
+                )]),
+                ..Default::default()
+            };
+            m.update(&stats, "orders", &owned(&[0]));
+        });
+        assert!(rendered.contains(&format!(
+            r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 10"#
+        )));
+        assert!(rendered.contains(&format!(
+            r#"spate_kafka_partition_lag_stored_records{{{STD},partition="0"}} 5"#
+        )));
+        for family in [
+            "spate_kafka_partition_fetch_queue_messages",
+            "spate_kafka_partition_lag_stored_records",
+            "spate_kafka_partition_not_fetching",
+        ] {
+            assert!(
+                !rendered.contains(&format!(r#"{family}{{{STD},partition="2"}}"#)),
+                "a partition another member holds minted {family}:\n{rendered}"
+            );
+        }
+        // The aggregate stays a sum across the whole snapshot, unaffected by
+        // ownership: an unheld partition reports `fetchq_cnt=0`, so it already
+        // reflects reality.
+        assert!(rendered.contains(&format!("spate_kafka_fetch_queue_messages{{{STD}}} 30")));
+    }
+
+    #[test]
     fn revoked_partitions_stop_updating_after_retain() {
         let mut m_holder: Option<KafkaStatsMetrics> = None;
         let rendered = render(|| {
@@ -1016,20 +1049,19 @@ mod tests {
         )));
         // Partition 2 is in the snapshot because librdkafka emits every
         // partition in the topic's metadata, and it is another member's. A
-        // series for it would read as a stall in a healthy group.
-        assert!(
-            !rendered.contains(&format!(
-                r#"spate_kafka_partition_not_fetching{{{STD},partition="2"}}"#
-            )),
-            "a partition another member holds minted a fetching series:\n{rendered}"
-        );
+        // series for it would read as a stall in a healthy group, so every
+        // per-partition series stays scoped to the live assignment.
+        for family in [
+            "spate_kafka_partition_not_fetching",
+            "spate_kafka_partition_fetch_queue_messages",
+            "spate_kafka_partition_lag_stored_records",
+        ] {
+            assert!(
+                !rendered.contains(&format!(r#"{family}{{{STD},partition="2"}}"#)),
+                "a partition another member holds minted {family}:\n{rendered}"
+            );
+        }
         assert!(!rendered.contains(r#"partition="-1""#));
-        // The ownership filter is scoped to the not-fetching series. The two
-        // per-partition series beside it keep publishing for every partition
-        // in the snapshot, which is what they do today.
-        assert!(rendered.contains(&format!(
-            r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="2"}}"#
-        )));
     }
 
     #[test]

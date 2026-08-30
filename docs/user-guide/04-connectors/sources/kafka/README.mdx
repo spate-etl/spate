@@ -224,14 +224,16 @@ it.
 WARN assigned partition is not fetching partition=26 state=stopped windows=2 next_offset=-1001 query_offset=-1 hi_offset=1250000
 ```
 
-`windows` counts the statistics windows the partition has gone without
-fetching, so at the default `statistics_interval` each one is 5 seconds. The
-state names the cause. `stopped` or `none` is a partition this process stopped
-fetching, and `offset-query` or `offset-wait` is a leader or an offset lookup
-that has not answered; librdkafka retries a failed lookup by moving the
-partition between those two, so an episode of one cause reports both. An `INFO`
-line closes the episode when the partition resumes, so the log says whether it
-is still going.
+`windows` counts the statistics windows in which this member held the partition
+and it was not fetching, so at the default `statistics_interval` each one is 5
+seconds. A rebalance in flight leaves the member holding nothing, and those
+windows are not counted, so an episode spanning one lasted a little longer than
+`windows` says. The state names the cause. `stopped` or `none` is a partition
+this process stopped fetching, and `offset-query` or `offset-wait` is a leader
+or an offset lookup that has not answered; librdkafka retries a failed lookup by
+moving the partition between those two, so an episode of one cause reports both.
+An `INFO` line closes the episode when the partition resumes, so the log says
+whether it is still going.
 
 Consumer lag is a framework family (`spate_source_lag_records`) and is alerted
 on separately; see [Metrics](../../../../METRICS.md) for the taxonomy, the

@@ -212,9 +212,10 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
   after an assignment.
 
 A partition that is not fetching is logged as well as measured, whether or not
-`per_partition_detail` is on. The line is emitted once per episode rather than
-once per statistics window, and names the librdkafka fetch state and the
-partition's offsets.
+`per_partition_detail` is on. The line names the librdkafka fetch state and the
+partition's offsets, and is emitted once for each state an episode goes
+through rather than once per statistics window. An episode therefore carries at
+most six lines however long it lasts.
 
 ```text
 WARN assigned partition is not fetching partition=26 state=stopped windows=2 next_offset=-1001 query_offset=-1 hi_offset=1250000
@@ -222,10 +223,12 @@ WARN assigned partition is not fetching partition=26 state=stopped windows=2 nex
 
 `windows` counts the statistics windows the partition has gone without
 fetching, so at the default `statistics_interval` each one is 5 seconds. The
-state names the cause: `stopped` or `none` is a partition this process stopped
-fetching, and `offset-query` is a leader or an offset lookup that has not
-answered. An `INFO` line closes the episode when the partition resumes, so
-the log says whether it is still going.
+state names the cause. `stopped` or `none` is a partition this process stopped
+fetching, and `offset-query` or `offset-wait` is a leader or an offset lookup
+that has not answered; librdkafka retries a failed lookup by moving the
+partition between those two, so an episode of one cause reports both. An `INFO`
+line closes the episode when the partition resumes, so the log says whether it
+is still going.
 
 Consumer lag is a framework family (`spate_source_lag_records`) and is alerted
 on separately; see [Metrics](../../../../METRICS.md) for the taxonomy, the

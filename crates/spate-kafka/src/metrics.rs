@@ -180,13 +180,12 @@ impl PartitionHandles {
 /// holds reported a fetch state other than `active`.
 #[derive(Debug)]
 struct NotFetching {
-    /// The state reported in the most recent window of the run.
-    state: String,
     /// Windows the run has lasted, counting the current one.
     windows: u32,
-    /// Whether the run has been reported at `state`. A change of state clears
-    /// it, since `offset-query` and `stopped` are different diagnoses.
-    reported: bool,
+    /// The states already reported in this run, at most the six non-active
+    /// ones. `offset-query` and `stopped` are different diagnoses and each
+    /// earns a line, and a state already reported earns nothing.
+    reported: Vec<String>,
 }
 
 impl KafkaStatsMetrics {
@@ -425,21 +424,25 @@ fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
 /// position and purges the fetch queue without assigning `rktp_fetch_state`,
 /// so a run of non-active windows means the partition is not being consumed.
 ///
-/// The run is reported once it reaches `NOT_FETCHING_WARN_WINDOWS`, again
-/// whenever the state changes to a different non-active one, and closed by an
-/// info line naming how long it lasted. A run that never reached the threshold
-/// ends silently.
+/// The run is reported once it reaches `NOT_FETCHING_WARN_WINDOWS`, once more
+/// for each further state it goes through, and closed by an info line naming
+/// how long it lasted. A state already reported in the run is not reported
+/// again, which bounds a run at six lines however long it lasts: librdkafka
+/// retries a failed offset lookup by moving the partition between
+/// `offset-query` and `offset-wait`, so consecutive windows sample different
+/// non-active states for one stuck partition. A run that never reached the
+/// threshold ends silently.
 ///
 /// The state names the cause. `stopped` and `none` are a partition this
-/// process stopped fetching, and `offset-query` is a leader or an offset
-/// lookup that has not answered.
+/// process stopped fetching, and `offset-query` and `offset-wait` are a
+/// leader or an offset lookup that has not answered.
 ///
 /// Free function taking the run map so a unit test drives the state machine
 /// window by window, the same reason `publish_lag` is one.
 fn track_fetch_state(runs: &mut HashMap<i32, NotFetching>, pid: i32, p: &Partition) {
     if p.fetch_state == FETCH_STATE_ACTIVE {
         if let Some(run) = runs.remove(&pid)
-            && run.reported
+            && !run.reported.is_empty()
         {
             tracing::info!(
                 partition = pid,
@@ -450,22 +453,17 @@ fn track_fetch_state(runs: &mut HashMap<i32, NotFetching>, pid: i32, p: &Partiti
         return;
     }
     let run = runs.entry(pid).or_insert_with(|| NotFetching {
-        state: p.fetch_state.clone(),
         windows: 0,
-        reported: false,
+        reported: Vec::new(),
     });
     run.windows += 1;
-    if run.state != p.fetch_state {
-        p.fetch_state.clone_into(&mut run.state);
-        run.reported = false;
-    }
-    if run.reported || run.windows < NOT_FETCHING_WARN_WINDOWS {
+    if run.windows < NOT_FETCHING_WARN_WINDOWS || run.reported.contains(&p.fetch_state) {
         return;
     }
-    run.reported = true;
+    run.reported.push(p.fetch_state.clone());
     tracing::warn!(
         partition = pid,
-        state = %run.state,
+        state = %p.fetch_state,
         windows = run.windows,
         next_offset = p.next_offset,
         query_offset = p.query_offset,
@@ -988,6 +986,36 @@ mod tests {
         assert!(rendered.contains(&format!(
             r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="2"}}"#
         )));
+    }
+
+    #[test]
+    fn each_state_of_one_episode_is_reported_once() {
+        // librdkafka retries a failed offset lookup by moving the partition
+        // between `offset-query` and `offset-wait`, so consecutive windows
+        // sample different non-active states for one stuck partition.
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                let held = owned(&[0]);
+                for window in 0..10 {
+                    let state = if window % 2 == 0 {
+                        "offset-query"
+                    } else {
+                        "offset-wait"
+                    };
+                    m.update(&stats_with_states(&[(0, state)]), "orders", &held);
+                }
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(
+            warned.len(),
+            2,
+            "expected one line per state, got:\n{}",
+            lines.join("\n")
+        );
+        assert!(warned[0].contains("state=offset-wait"), "{}", warned[0]);
+        assert!(warned[1].contains("state=offset-query"), "{}", warned[1]);
     }
 
     #[test]

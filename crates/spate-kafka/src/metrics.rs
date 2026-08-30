@@ -62,7 +62,7 @@ const GROUP_ASSIGNMENT_SIZE: &str = "group_assignment_size";
 const GROUP_HEALTHY: &str = "group_healthy";
 const PARTITION_FETCH_QUEUE_MESSAGES: &str = "partition_fetch_queue_messages";
 const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
-const PARTITION_FETCHING: &str = "partition_fetching";
+const PARTITION_NOT_FETCHING: &str = "partition_not_fetching";
 const L_BROKER: &str = "broker";
 const L_PARTITION: &str = "partition";
 
@@ -153,14 +153,14 @@ impl BrokerHandles {
 /// Per-partition series, gated by `metrics.per_partition_detail`. The lag
 /// gauge registers lazily on the first known value: librdkafka reports `-1`
 /// while lag is unknown (e.g. right after assignment), and rendering `0`
-/// there would mask real lag. The fetching gauge registers lazily on the
+/// there would mask real lag. The not-fetching gauge registers lazily on the
 /// first window in which this member holds the partition, so a partition
-/// another member holds does not render a `0` that reads as a stall.
+/// another member holds registers nothing at all.
 #[derive(Debug)]
 struct PartitionHandles {
     fetch_queue_messages: Gauge,
     lag_stored: Option<Gauge>,
-    fetching: Option<Gauge>,
+    not_fetching: Option<Gauge>,
 }
 
 impl PartitionHandles {
@@ -171,7 +171,7 @@ impl PartitionHandles {
                 &[(L_PARTITION, partition.to_string().into())],
             ),
             lag_stored: None,
-            fetching: None,
+            not_fetching: None,
         }
     }
 }
@@ -377,18 +377,26 @@ impl KafkaStatsMetrics {
                     }
                     if held {
                         handles
-                            .fetching
+                            .not_fetching
                             .get_or_insert_with(|| {
                                 meter.gauge(
-                                    PARTITION_FETCHING,
+                                    PARTITION_NOT_FETCHING,
                                     &[(L_PARTITION, pid.to_string().into())],
                                 )
                             })
                             .set(if p.fetch_state == FETCH_STATE_ACTIVE {
-                                1.0
-                            } else {
                                 0.0
+                            } else {
+                                1.0
                             });
+                    } else if let Some(gauge) = handles.not_fetching.as_ref() {
+                        // A partition the member has lost reads 0. The
+                        // exporter has no deletion and no idle timeout, so a
+                        // series left unwritten renders the value the last
+                        // window that held it recorded, for the life of the
+                        // process. Absence is "never held", 0 is "held once,
+                        // not now".
+                        gauge.set(0.0);
                     }
                 }
                 // Ungated by `per_partition_detail`, so a deployment that
@@ -953,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn fetching_gauge_follows_the_fetch_state() {
+    fn not_fetching_gauge_follows_the_fetch_state() {
         let rendered = render(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let stats = stats_with_states(&[
@@ -965,27 +973,49 @@ mod tests {
             m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(rendered.contains(&format!(
-            r#"spate_kafka_partition_fetching{{{STD},partition="0"}} 1"#
+            r#"spate_kafka_partition_not_fetching{{{STD},partition="0"}} 0"#
         )));
         assert!(rendered.contains(&format!(
-            r#"spate_kafka_partition_fetching{{{STD},partition="1"}} 0"#
+            r#"spate_kafka_partition_not_fetching{{{STD},partition="1"}} 1"#
         )));
         // Partition 2 is in the snapshot because librdkafka emits every
         // partition in the topic's metadata, and it is another member's. A
         // series for it would read as a stall in a healthy group.
         assert!(
             !rendered.contains(&format!(
-                r#"spate_kafka_partition_fetching{{{STD},partition="2"}}"#
+                r#"spate_kafka_partition_not_fetching{{{STD},partition="2"}}"#
             )),
             "a partition another member holds minted a fetching series:\n{rendered}"
         );
         assert!(!rendered.contains(r#"partition="-1""#));
-        // The ownership filter is scoped to the fetching series. The two
+        // The ownership filter is scoped to the not-fetching series. The two
         // per-partition series beside it keep publishing for every partition
         // in the snapshot, which is what they do today.
         assert!(rendered.contains(&format!(
             r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="2"}}"#
         )));
+    }
+
+    #[test]
+    fn a_revoked_partition_reads_zero() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            m.update(
+                &stats_with_states(&[(0, "stopped")]),
+                "orders",
+                &owned(&[0]),
+            );
+            // The rebalance hands partition 0 to another member, which
+            // fetches it. The series has to stop reading 1 here: the exporter
+            // renders the last value written for the life of the process.
+            m.update(&stats_with_states(&[(0, "active")]), "orders", &[]);
+        });
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_not_fetching{{{STD},partition="0"}} 0"#
+            )),
+            "a revoked partition kept reading as parked:\n{rendered}"
+        );
     }
 
     #[test]

@@ -623,8 +623,8 @@ fn statistics_populate_kafka_source_metrics() {
             if rendered.contains("spate_kafka_group_assignment_size")
                 && rendered.contains("spate_kafka_rx_responses_total")
                 && rendered.contains("spate_kafka_broker_up")
-                && rendered.contains(&fetching(0))
-                && rendered.contains(&fetching(1))
+                && rendered.contains(&not_fetching(0))
+                && rendered.contains(&not_fetching(1))
             {
                 break;
             }
@@ -652,7 +652,7 @@ fn statistics_populate_kafka_source_metrics() {
     // `fetch_state` here, so this pins the field the source reads as well as
     // the value a healthy assignment produces.
     for partition in [0, 1] {
-        let needle = fetching(partition);
+        let needle = not_fetching(partition);
         assert!(
             rendered.contains(&needle),
             "missing `{needle}`:\n{rendered}"
@@ -661,9 +661,9 @@ fn statistics_populate_kafka_source_metrics() {
 }
 
 /// The exposition line for a partition that is fetching.
-fn fetching(partition: i32) -> String {
+fn not_fetching(partition: i32) -> String {
     format!(
-        r#"spate_kafka_partition_fetching{{pipeline="stats",component="source",component_type="kafka",partition="{partition}"}} 1"#
+        r#"spate_kafka_partition_not_fetching{{pipeline="stats",component="source",component_type="kafka",partition="{partition}"}} 0"#
     )
 }
 

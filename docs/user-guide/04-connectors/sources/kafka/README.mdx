@@ -214,8 +214,11 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
 A partition that is not fetching is logged as well as measured, whether or not
 `per_partition_detail` is on. The line names the librdkafka fetch state and the
 partition's offsets, and is emitted once for each state an episode goes
-through rather than once per statistics window. An episode therefore carries at
-most six lines however long it lasts.
+through rather than once per statistics window. Six of librdkafka's seven fetch
+states are not fetching, so that is at most six lines. A long episode is
+restated every 60 windows on top of those, which is 5 minutes at the default
+`statistics_interval`, so a log read part-way through an episode still carries
+it.
 
 ```text
 WARN assigned partition is not fetching partition=26 state=stopped windows=2 next_offset=-1001 query_offset=-1 hi_offset=1250000

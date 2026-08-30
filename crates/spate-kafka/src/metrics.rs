@@ -76,6 +76,11 @@ const FETCH_STATE_ACTIVE: &str = "active";
 /// librdkafka resolves the partition's offset.
 const NOT_FETCHING_WARN_WINDOWS: u32 = 2;
 
+/// Windows between restatements of a run already reported. At the default
+/// `statistics_interval` of 5s that is one line every 5 minutes, so a log
+/// read part-way through a run still carries it.
+const NOT_FETCHING_REPEAT_WINDOWS: u32 = 60;
+
 /// Handles for the librdkafka statistics families. Owned by `KafkaSource`
 /// and only touched from the controller thread, so the lazy maps need no
 /// locking.
@@ -184,7 +189,8 @@ struct NotFetching {
     windows: u32,
     /// The states already reported in this run, at most the six non-active
     /// ones. `offset-query` and `stopped` are different diagnoses and each
-    /// earns a line, and a state already reported earns nothing.
+    /// earns a line the first time it appears. A state already reported earns
+    /// one only on a restatement window.
     reported: Vec<String>,
 }
 
@@ -456,13 +462,14 @@ fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
 /// so a run of non-active windows means the partition is not being consumed.
 ///
 /// The run is reported once it reaches `NOT_FETCHING_WARN_WINDOWS`, once more
-/// for each further state it goes through, and closed by an info line naming
-/// how long it lasted. A state already reported in the run is not reported
-/// again, which bounds a run at six lines however long it lasts: librdkafka
-/// retries a failed offset lookup by moving the partition between
-/// `offset-query` and `offset-wait`, so consecutive windows sample different
-/// non-active states for one stuck partition. A run that never reached the
-/// threshold ends silently.
+/// for each further state it goes through, restated every
+/// `NOT_FETCHING_REPEAT_WINDOWS` windows, and closed by an info line naming
+/// how long it lasted. A state already reported in the run is otherwise not
+/// reported again: librdkafka retries a failed offset lookup by moving the
+/// partition between `offset-query` and `offset-wait`, so consecutive windows
+/// sample different non-active states for one stuck partition. A run
+/// therefore costs at most six lines plus one per restatement window, and a
+/// run that never reached the threshold ends silently.
 ///
 /// The state names the cause. `stopped` and `none` are a partition this
 /// process stopped fetching, and `offset-query` and `offset-wait` are a
@@ -488,10 +495,16 @@ fn track_fetch_state(runs: &mut HashMap<i32, NotFetching>, pid: i32, p: &Partiti
         reported: Vec::new(),
     });
     run.windows += 1;
-    if run.windows < NOT_FETCHING_WARN_WINDOWS || run.reported.contains(&p.fetch_state) {
+    if run.windows < NOT_FETCHING_WARN_WINDOWS {
         return;
     }
-    run.reported.push(p.fetch_state.clone());
+    let first = !run.reported.contains(&p.fetch_state);
+    if !first && !run.windows.is_multiple_of(NOT_FETCHING_REPEAT_WINDOWS) {
+        return;
+    }
+    if first {
+        run.reported.push(p.fetch_state.clone());
+    }
     tracing::warn!(
         partition = pid,
         state = %p.fetch_state,
@@ -1115,6 +1128,36 @@ mod tests {
         let warned = lines_with(&lines, NOT_FETCHING);
         assert_eq!(warned.len(), 2, "got:\n{}", lines.join("\n"));
         assert!(warned[1].contains("windows=2"), "{}", warned[1]);
+    }
+
+    #[test]
+    fn a_long_run_is_restated() {
+        // `per_partition_detail` defaults to off, so the log line is the
+        // whole signal for a run in progress. One line at the start of a
+        // twenty-minute run says nothing to a reader who arrives at minute
+        // ten.
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), false);
+                let held = owned(&[0]);
+                for _ in 0..(2 * NOT_FETCHING_REPEAT_WINDOWS) {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(warned.len(), 3, "got:\n{}", lines.join("\n"));
+        assert!(warned[0].contains("windows=2"), "{}", warned[0]);
+        assert!(
+            warned[1].contains(&format!("windows={NOT_FETCHING_REPEAT_WINDOWS}")),
+            "{}",
+            warned[1]
+        );
+        assert!(
+            warned[2].contains(&format!("windows={}", 2 * NOT_FETCHING_REPEAT_WINDOWS)),
+            "{}",
+            warned[2]
+        );
     }
 
     #[test]

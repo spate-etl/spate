@@ -221,7 +221,11 @@ impl KafkaStatsMetrics {
     /// `owned` is the member's live assignment. The snapshot carries every
     /// partition the client holds metadata for, and a partition another member
     /// holds reports no fetching of its own, so the series and the log line
-    /// that describe fetching are restricted to `owned`.
+    /// that describe fetching are restricted to `owned`. A partition outside
+    /// it is left alone rather than written, and keeps its series and its run
+    /// until [`retain_partitions`](Self::retain_partitions) releases them: an
+    /// assignment is empty for the whole of a rebalance the member is about to
+    /// come out of holding the same partitions.
     pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
@@ -389,14 +393,6 @@ impl KafkaStatsMetrics {
                             } else {
                                 1.0
                             });
-                    } else if let Some(gauge) = handles.not_fetching.as_ref() {
-                        // A partition the member has lost reads 0. The
-                        // exporter has no deletion and no idle timeout, so a
-                        // series left unwritten renders the value the last
-                        // window that held it recorded, for the life of the
-                        // process. Absence is "never held", 0 is "held once,
-                        // not now".
-                        gauge.set(0.0);
                     }
                 }
                 // Ungated by `per_partition_detail`, so a deployment that
@@ -411,6 +407,33 @@ impl KafkaStatsMetrics {
         self.fetch_queue_bytes.set(fetchq_bytes as f64);
         if self.per_partition_detail {
             self.partitions.retain(|pid, _| seen.contains(pid));
+        }
+    }
+
+    /// Release the partitions this member lost in the rebalance that just
+    /// completed. Controller thread only.
+    ///
+    /// A partition outside `owned` reads 0 and its run is dropped, so a
+    /// partition handed back later starts a fresh run. The exporter has no
+    /// deletion and no idle timeout, so a series left unwritten renders the
+    /// value the last window that held it recorded for the life of the
+    /// process. Absence is "never held", 0 is "held once, not now", the same
+    /// meaning
+    /// [`SourceMetrics::retain_partitions`](spate_core::metrics::SourceMetrics::retain_partitions)
+    /// fixes for the lag family.
+    ///
+    /// Separate from [`update`](Self::update) because the two run at
+    /// different points. `update` runs on every statistics window, including
+    /// the windows of a rebalance in flight, where the member holds nothing
+    /// and still owns everything it is about to be handed back. This runs
+    /// once the new assignment is known.
+    pub(crate) fn retain_partitions(&mut self, owned: &[PartitionId]) {
+        for (pid, handles) in &self.partitions {
+            if !is_owned(owned, *pid)
+                && let Some(gauge) = handles.not_fetching.as_ref()
+            {
+                gauge.set(0.0);
+            }
         }
         self.not_fetching.retain(|pid, _| is_owned(owned, *pid));
     }
@@ -1008,7 +1031,7 @@ mod tests {
             // The rebalance hands partition 0 to another member, which
             // fetches it. The series has to stop reading 1 here: the exporter
             // renders the last value written for the life of the process.
-            m.update(&stats_with_states(&[(0, "active")]), "orders", &[]);
+            m.retain_partitions(&[]);
         });
         assert!(
             rendered.contains(&format!(
@@ -1016,6 +1039,82 @@ mod tests {
             )),
             "a revoked partition kept reading as parked:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn a_rebalance_in_flight_holds_the_gauge() {
+        // `KafkaSource::retained_partition_ids` reads the live assignment,
+        // and an eager revoke empties it for every window until the new
+        // assignment lands. A parked partition reading 0 through that window
+        // resets the `for:` timer on the alert this gauge exists for.
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            m.update(
+                &stats_with_states(&[(0, "stopped")]),
+                "orders",
+                &owned(&[0]),
+            );
+            for _ in 0..3 {
+                m.update(&stats_with_states(&[(0, "stopped")]), "orders", &[]);
+            }
+        });
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_not_fetching{{{STD},partition="0"}} 1"#
+            )),
+            "a rebalance in flight cleared the gauge:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_rebalance_in_flight_holds_the_run() {
+        // The run outlives the windows of the rebalance, so a partition
+        // handed straight back is not reported a second time.
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                let held = owned(&[0]);
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+                for _ in 0..3 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &[]);
+                }
+                // The member comes out of the rebalance holding it again.
+                m.retain_partitions(&held);
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+            });
+        });
+        assert_eq!(
+            lines_with(&lines, NOT_FETCHING).len(),
+            1,
+            "got:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_lost_partition_starts_a_fresh_run() {
+        // `retain_partitions` drops the run, so the same state is a new
+        // diagnosis when the partition comes back.
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                let held = owned(&[0]);
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+                m.retain_partitions(&[]);
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(warned.len(), 2, "got:\n{}", lines.join("\n"));
+        assert!(warned[1].contains("windows=2"), "{}", warned[1]);
     }
 
     #[test]
@@ -1157,7 +1256,7 @@ mod tests {
                 }
                 // The rebalance that took the partition is logged where it
                 // happens; a resume line here would claim it started fetching.
-                m.update(&stats_with_states(&[(0, "stopped")]), "orders", &[]);
+                m.retain_partitions(&[]);
                 m.update(&stats_with_states(&[(0, "active")]), "orders", &[]);
             });
         });

@@ -33,8 +33,9 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
-use rdkafka::statistics::Statistics;
+use rdkafka::statistics::{Partition, Statistics};
 use spate_core::metrics::{Counter, Gauge, Meter};
+use spate_core::record::PartitionId;
 use std::collections::{HashMap, HashSet};
 
 const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
@@ -61,8 +62,19 @@ const GROUP_ASSIGNMENT_SIZE: &str = "group_assignment_size";
 const GROUP_HEALTHY: &str = "group_healthy";
 const PARTITION_FETCH_QUEUE_MESSAGES: &str = "partition_fetch_queue_messages";
 const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
+const PARTITION_FETCHING: &str = "partition_fetching";
 const L_BROKER: &str = "broker";
 const L_PARTITION: &str = "partition";
+
+/// The librdkafka fetch state in which a partition is being consumed. The
+/// others in `rd_kafka_fetch_states[]` are `none`, `stopping`, `stopped`,
+/// `offset-query`, `offset-wait` and `validate-epoch-wait`.
+const FETCH_STATE_ACTIVE: &str = "active";
+
+/// Windows a held partition must go without fetching before the run is
+/// reported. One window is ordinary right after an assignment, while
+/// librdkafka resolves the partition's offset.
+const NOT_FETCHING_WARN_WINDOWS: u32 = 2;
 
 /// Handles for the librdkafka statistics families. Owned by `KafkaSource`
 /// and only touched from the controller thread, so the lazy maps need no
@@ -89,6 +101,7 @@ pub(crate) struct KafkaStatsMetrics {
     group_healthy: Gauge,
     brokers: HashMap<String, BrokerHandles>,
     partitions: HashMap<i32, PartitionHandles>,
+    not_fetching: HashMap<i32, NotFetching>,
 }
 
 /// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
@@ -140,11 +153,14 @@ impl BrokerHandles {
 /// Per-partition series, gated by `metrics.per_partition_detail`. The lag
 /// gauge registers lazily on the first known value: librdkafka reports `-1`
 /// while lag is unknown (e.g. right after assignment), and rendering `0`
-/// there would mask real lag.
+/// there would mask real lag. The fetching gauge registers lazily on the
+/// first window in which this member holds the partition, so a partition
+/// another member holds does not render a `0` that reads as a stall.
 #[derive(Debug)]
 struct PartitionHandles {
     fetch_queue_messages: Gauge,
     lag_stored: Option<Gauge>,
+    fetching: Option<Gauge>,
 }
 
 impl PartitionHandles {
@@ -155,8 +171,22 @@ impl PartitionHandles {
                 &[(L_PARTITION, partition.to_string().into())],
             ),
             lag_stored: None,
+            fetching: None,
         }
     }
+}
+
+/// A run of consecutive statistics windows in which a partition this member
+/// holds reported a fetch state other than `active`.
+#[derive(Debug)]
+struct NotFetching {
+    /// The state reported in the most recent window of the run.
+    state: String,
+    /// Windows the run has lasted, counting the current one.
+    windows: u32,
+    /// Whether the run has been reported at `state`. A change of state clears
+    /// it, since `offset-query` and `stopped` are different diagnoses.
+    reported: bool,
 }
 
 impl KafkaStatsMetrics {
@@ -181,13 +211,19 @@ impl KafkaStatsMetrics {
             group_healthy: meter.gauge(GROUP_HEALTHY, &[]),
             brokers: HashMap::new(),
             partitions: HashMap::new(),
+            not_fetching: HashMap::new(),
             meter,
             per_partition_detail,
         }
     }
 
     /// Translate one statistics snapshot. Controller thread only.
-    pub(crate) fn update(&mut self, stats: &Statistics, topic: &str) {
+    ///
+    /// `owned` is the member's live assignment. The snapshot carries every
+    /// partition the client holds metadata for, and a partition another member
+    /// holds reports no fetching of its own, so the series and the log line
+    /// that describe fetching are restricted to `owned`.
+    pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
         self.rx_responses.absolute(to_u64(stats.rx));
@@ -197,7 +233,7 @@ impl KafkaStatsMetrics {
         self.reply_queue_depth.set(to_u64(stats.replyq) as f64);
 
         self.update_brokers(stats);
-        self.update_partitions(stats, topic);
+        self.update_partitions(stats, topic, owned);
 
         if let Some(cgrp) = &stats.cgrp {
             self.group_rebalances.absolute(to_u64(cgrp.rebalance_cnt));
@@ -306,7 +342,7 @@ impl KafkaStatsMetrics {
         self.brokers.retain(|name, _| seen.contains(name.as_str()));
     }
 
-    fn update_partitions(&mut self, stats: &Statistics, topic: &str) {
+    fn update_partitions(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         let mut fetchq_msgs: u64 = 0;
         let mut fetchq_bytes: u64 = 0;
         let mut seen: HashSet<i32> = HashSet::new();
@@ -319,6 +355,7 @@ impl KafkaStatsMetrics {
                 }
                 fetchq_msgs += to_u64(p.fetchq_cnt);
                 fetchq_bytes += p.fetchq_size;
+                let held = is_owned(owned, *pid);
                 if self.per_partition_detail {
                     seen.insert(*pid);
                     let handles = self
@@ -339,6 +376,27 @@ impl KafkaStatsMetrics {
                             })
                             .set(p.consumer_lag_stored as f64);
                     }
+                    if held {
+                        handles
+                            .fetching
+                            .get_or_insert_with(|| {
+                                meter.gauge(
+                                    PARTITION_FETCHING,
+                                    &[(L_PARTITION, pid.to_string().into())],
+                                )
+                            })
+                            .set(if p.fetch_state == FETCH_STATE_ACTIVE {
+                                1.0
+                            } else {
+                                0.0
+                            });
+                    }
+                }
+                // Ungated by `per_partition_detail`, so a deployment that
+                // leaves the cardinality knob at its default still gets the
+                // log line.
+                if held {
+                    track_fetch_state(&mut self.not_fetching, *pid, p);
                 }
             }
         }
@@ -347,7 +405,73 @@ impl KafkaStatsMetrics {
         if self.per_partition_detail {
             self.partitions.retain(|pid, _| seen.contains(pid));
         }
+        self.not_fetching.retain(|pid, _| is_owned(owned, *pid));
     }
+}
+
+/// Whether this member holds `pid`. The statistics snapshot carries every
+/// partition in the topic's metadata (`rd_kafka_stats_emit_all` walks the
+/// whole partition count), so in a group of several members the partitions
+/// the others hold arrive here reporting `none` or `stopped`.
+fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
+    u32::try_from(pid).is_ok_and(|p| owned.contains(&PartitionId(p)))
+}
+
+/// Follow one held partition's fetch state across statistics windows, and
+/// report a run of windows in which it is not fetching.
+///
+/// A partition paused by backpressure keeps reporting `active`.
+/// `rd_kafka_toppar_pause_resume` sets a pause flag, rewinds the fetch
+/// position and purges the fetch queue without assigning `rktp_fetch_state`,
+/// so a run of non-active windows means the partition is not being consumed.
+///
+/// The run is reported once it reaches `NOT_FETCHING_WARN_WINDOWS`, again
+/// whenever the state changes to a different non-active one, and closed by an
+/// info line naming how long it lasted. A run that never reached the threshold
+/// ends silently.
+///
+/// The state names the cause. `stopped` and `none` are a partition this
+/// process stopped fetching, and `offset-query` is a leader or an offset
+/// lookup that has not answered.
+///
+/// Free function taking the run map so a unit test drives the state machine
+/// window by window, the same reason `publish_lag` is one.
+fn track_fetch_state(runs: &mut HashMap<i32, NotFetching>, pid: i32, p: &Partition) {
+    if p.fetch_state == FETCH_STATE_ACTIVE {
+        if let Some(run) = runs.remove(&pid)
+            && run.reported
+        {
+            tracing::info!(
+                partition = pid,
+                windows = run.windows,
+                "assigned partition resumed fetching"
+            );
+        }
+        return;
+    }
+    let run = runs.entry(pid).or_insert_with(|| NotFetching {
+        state: p.fetch_state.clone(),
+        windows: 0,
+        reported: false,
+    });
+    run.windows += 1;
+    if run.state != p.fetch_state {
+        p.fetch_state.clone_into(&mut run.state);
+        run.reported = false;
+    }
+    if run.reported || run.windows < NOT_FETCHING_WARN_WINDOWS {
+        return;
+    }
+    run.reported = true;
+    tracing::warn!(
+        partition = pid,
+        state = %run.state,
+        windows = run.windows,
+        next_offset = p.next_offset,
+        query_offset = p.query_offset,
+        hi_offset = p.hi_offset,
+        "assigned partition is not fetching"
+    );
 }
 
 fn to_u64(v: i64) -> u64 {
@@ -365,7 +489,8 @@ fn ms_to_secs(v: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdkafka::statistics::{Broker, ConsumerGroup, Partition, Topic, Window};
+    use rdkafka::statistics::{Broker, ConsumerGroup, Topic, Window};
+    use std::sync::{Arc, Mutex};
 
     /// Run `f` against a local Prometheus recorder and return the rendered
     /// exposition. Handles must be resolved inside `f`.
@@ -385,6 +510,99 @@ mod tests {
     }
 
     const STD: &str = r#"pipeline="orders",component="orders_in",component_type="kafka""#;
+
+    /// An assignment, as `KafkaSource::retained_partition_ids` reports it.
+    fn owned(partitions: &[u32]) -> Vec<PartitionId> {
+        partitions.iter().copied().map(PartitionId).collect()
+    }
+
+    /// Everything the subscriber installed for one test has formatted.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
+
+    /// Run `f` under a subscriber at `info`, the level a deployment runs at,
+    /// and return the lines it formatted. The subscriber is thread-local
+    /// (`with_default`) rather than the process-wide `init()`, because
+    /// `cargo test` shares one process across a binary.
+    fn capture_logs(f: impl FnOnce()) -> Vec<String> {
+        let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::INFO)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8_lossy(&capture.0.lock().expect("capture"))
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Lines carrying `needle`, so an assertion counts what was reported
+    /// rather than testing for the absence of a phrase: a formatter that
+    /// stopped rendering fields this way produces that absence too.
+    fn lines_with<'a>(lines: &'a [String], needle: &str) -> Vec<&'a str> {
+        lines
+            .iter()
+            .filter(|l| l.contains(needle))
+            .map(String::as_str)
+            .collect()
+    }
+
+    const NOT_FETCHING: &str = "assigned partition is not fetching";
+    const RESUMED: &str = "assigned partition resumed fetching";
+
+    /// A snapshot in which each partition reports the given fetch state. The
+    /// offsets are the ones the warning carries, fixed so a test can read
+    /// them back.
+    fn stats_with_states(parts: &[(i32, &str)]) -> Statistics {
+        Statistics {
+            topics: HashMap::from([(
+                "orders".to_owned(),
+                Topic {
+                    topic: "orders".to_owned(),
+                    partitions: parts
+                        .iter()
+                        .map(|&(pid, state)| {
+                            (
+                                pid,
+                                Partition {
+                                    partition: pid,
+                                    fetch_state: state.to_owned(),
+                                    next_offset: 4_242,
+                                    query_offset: -1,
+                                    hi_offset: 1_250_000,
+                                    consumer_lag_stored: -1,
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }
+    }
 
     fn broker(name: &str, source: &str, nodeid: i32) -> Broker {
         Broker {
@@ -422,7 +640,7 @@ mod tests {
                 replyq: 3,
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         for needle in [
             &format!("spate_kafka_tx_requests_total{{{STD}}} 31") as &str,
@@ -448,7 +666,7 @@ mod tests {
                 brokers: HashMap::from([(b.name.clone(), b)]),
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         let label = format!(r#"{STD},broker="k1:9092/1""#);
         for needle in [
@@ -473,7 +691,7 @@ mod tests {
                 cgrp: None,
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(
             !rendered.contains("rtt_avg"),
@@ -510,7 +728,7 @@ mod tests {
                 ]),
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(
             rendered.contains(&format!("spate_kafka_broker_tx_retries_total{{{STD}}} 12")),
@@ -564,7 +782,7 @@ mod tests {
                 ]),
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(
             rendered.contains(&format!(
@@ -608,7 +826,7 @@ mod tests {
                     }),
                     ..Default::default()
                 };
-                m.update(&stats, "orders");
+                m.update(&stats, "orders", &owned(&[0, 1]));
             });
             let needle = format!("spate_kafka_group_healthy{{{STD}}}{expect}");
             assert!(
@@ -633,6 +851,7 @@ mod tests {
                             fetchq_cnt,
                             fetchq_size,
                             consumer_lag_stored: lag_stored,
+                            fetch_state: FETCH_STATE_ACTIVE.to_owned(),
                             ..Default::default()
                         },
                     )
@@ -657,7 +876,7 @@ mod tests {
                 )]),
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(rendered.contains(&format!("spate_kafka_fetch_queue_messages{{{STD}}} 30")));
         assert!(rendered.contains(&format!("spate_kafka_fetch_queue_bytes{{{STD}}} 3000")));
@@ -679,7 +898,7 @@ mod tests {
                 )]),
                 ..Default::default()
             };
-            m.update(&stats, "orders");
+            m.update(&stats, "orders", &owned(&[0, 1]));
         });
         assert!(rendered.contains(&format!(
             r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="0"}} 10"#
@@ -711,7 +930,7 @@ mod tests {
                 )]),
                 ..Default::default()
             };
-            m.update(&two, "orders");
+            m.update(&two, "orders", &owned(&[0, 1]));
             let one = Statistics {
                 topics: HashMap::from([(
                     "orders".to_owned(),
@@ -719,7 +938,7 @@ mod tests {
                 )]),
                 ..Default::default()
             };
-            m.update(&one, "orders");
+            m.update(&one, "orders", &owned(&[0]));
             m_holder = Some(m);
         });
         let m = m_holder.unwrap();
@@ -736,6 +955,163 @@ mod tests {
     }
 
     #[test]
+    fn fetching_gauge_follows_the_fetch_state() {
+        let rendered = render(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), true);
+            let stats = stats_with_states(&[
+                (0, "active"),
+                (1, "offset-query"),
+                (2, "stopped"),
+                (-1, "none"),
+            ]);
+            m.update(&stats, "orders", &owned(&[0, 1]));
+        });
+        assert!(rendered.contains(&format!(
+            r#"spate_kafka_partition_fetching{{{STD},partition="0"}} 1"#
+        )));
+        assert!(rendered.contains(&format!(
+            r#"spate_kafka_partition_fetching{{{STD},partition="1"}} 0"#
+        )));
+        // Partition 2 is in the snapshot because librdkafka emits every
+        // partition in the topic's metadata, and it is another member's. A
+        // series for it would read as a stall in a healthy group.
+        assert!(
+            !rendered.contains(&format!(
+                r#"spate_kafka_partition_fetching{{{STD},partition="2"}}"#
+            )),
+            "a partition another member holds minted a fetching series:\n{rendered}"
+        );
+        assert!(!rendered.contains(r#"partition="-1""#));
+        // The ownership filter is scoped to the fetching series. The two
+        // per-partition series beside it keep publishing for every partition
+        // in the snapshot, which is what they do today.
+        assert!(rendered.contains(&format!(
+            r#"spate_kafka_partition_fetch_queue_messages{{{STD},partition="2"}}"#
+        )));
+    }
+
+    #[test]
+    fn a_parked_partition_is_reported_once_per_episode() {
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                let held = owned(&[0]);
+                // Two windows stopped: the run crosses the threshold and is
+                // reported once. Five more at the same state add nothing.
+                for _ in 0..7 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+                // A different non-active state is a different diagnosis.
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "offset-query")]), "orders", &held);
+                }
+                m.update(&stats_with_states(&[(0, "active")]), "orders", &held);
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(
+            warned.len(),
+            2,
+            "expected one line per state, got:\n{}",
+            lines.join("\n")
+        );
+        assert!(warned[0].contains("state=stopped"), "{}", warned[0]);
+        assert!(warned[0].contains("windows=2"), "{}", warned[0]);
+        assert!(warned[0].contains("next_offset=4242"), "{}", warned[0]);
+        assert!(warned[0].contains("query_offset=-1"), "{}", warned[0]);
+        assert!(warned[0].contains("hi_offset=1250000"), "{}", warned[0]);
+        assert!(warned[1].contains("state=offset-query"), "{}", warned[1]);
+        assert!(warned[1].contains("windows=8"), "{}", warned[1]);
+
+        let resumed = lines_with(&lines, RESUMED);
+        assert_eq!(resumed.len(), 1, "{}", lines.join("\n"));
+        assert!(resumed[0].contains("windows=9"), "{}", resumed[0]);
+    }
+
+    #[test]
+    fn a_single_non_active_window_is_not_reported() {
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                let held = owned(&[0]);
+                // One window resolving an offset is ordinary right after an
+                // assignment, and the recovery closes a run nobody was told
+                // about.
+                m.update(&stats_with_states(&[(0, "offset-query")]), "orders", &held);
+                m.update(&stats_with_states(&[(0, "active")]), "orders", &held);
+            });
+        });
+        assert!(lines.is_empty(), "{}", lines.join("\n"));
+    }
+
+    #[test]
+    fn a_partition_another_member_holds_is_not_reported() {
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                for _ in 0..5 {
+                    m.update(
+                        &stats_with_states(&[(0, "active"), (1, "stopped")]),
+                        "orders",
+                        &owned(&[0]),
+                    );
+                }
+            });
+        });
+        assert!(lines.is_empty(), "{}", lines.join("\n"));
+    }
+
+    #[test]
+    fn partition_detail_off_still_reports_a_parked_partition() {
+        // The gauge is the alertable half and the log line is the diagnostic
+        // half. `per_partition_detail` defaults to off, so a deployment that
+        // never set it still has to be told.
+        let mut rendered = String::new();
+        let lines = capture_logs(|| {
+            rendered = render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), false);
+                let held = owned(&[0]);
+                for _ in 0..2 {
+                    m.update(&stats_with_states(&[(0, "stopped")]), "orders", &held);
+                }
+            });
+        });
+        assert!(
+            !rendered.contains("partition="),
+            "detail off must not mint partition series:\n{rendered}"
+        );
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(warned.len(), 1, "{}", lines.join("\n"));
+        assert!(warned[0].contains("partition=0"), "{}", warned[0]);
+    }
+
+    #[test]
+    fn a_revoked_partition_closes_its_run_silently() {
+        let lines = capture_logs(|| {
+            render(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), true);
+                for _ in 0..2 {
+                    m.update(
+                        &stats_with_states(&[(0, "stopped")]),
+                        "orders",
+                        &owned(&[0]),
+                    );
+                }
+                // The rebalance that took the partition is logged where it
+                // happens; a resume line here would claim it started fetching.
+                m.update(&stats_with_states(&[(0, "stopped")]), "orders", &[]);
+                m.update(&stats_with_states(&[(0, "active")]), "orders", &[]);
+            });
+        });
+        assert_eq!(lines_with(&lines, NOT_FETCHING).len(), 1);
+        assert!(
+            lines_with(&lines, RESUMED).is_empty(),
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract: a regressing upstream total
         // would flat-line, not dip. See the module docs.
@@ -745,12 +1121,12 @@ mod tests {
                 rxmsgs: 100,
                 ..Default::default()
             };
-            m.update(&high, "orders");
+            m.update(&high, "orders", &[]);
             let regressed = Statistics {
                 rxmsgs: 40,
                 ..Default::default()
             };
-            m.update(&regressed, "orders");
+            m.update(&regressed, "orders", &[]);
         });
         assert!(rendered.contains(&format!("spate_kafka_rx_messages_total{{{STD}}} 100")));
     }

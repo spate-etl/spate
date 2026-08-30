@@ -306,16 +306,12 @@ impl KafkaSource {
         let Some(stats) = consumer.context().stats.lock().expect("stats lock").take() else {
             return;
         };
+        let owned = self.retained_partition_ids();
         if let Some(metrics) = self.metrics.as_ref() {
-            publish_lag(
-                &stats,
-                &self.config.topic,
-                &self.retained_partition_ids(),
-                metrics,
-            );
+            publish_lag(&stats, &self.config.topic, &owned, metrics);
         }
         if let Some(stats_metrics) = self.stats_metrics.as_mut() {
-            stats_metrics.update(&stats, &self.config.topic);
+            stats_metrics.update(&stats, &self.config.topic, &owned);
         }
     }
 }

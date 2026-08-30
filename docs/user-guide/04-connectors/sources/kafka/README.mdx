@@ -189,6 +189,7 @@ them; extras, `broker` among them, are noted per family.
 | `spate_kafka_source_group_healthy` | gauge | | 1 while the member is settled (`up` + `steady`); 0 during joins/rebalances (state detail goes to debug logs). |
 | `spate_kafka_source_partition_fetch_queue_messages` | gauge | `partition` ⚠ | Per-partition prefetch queue depth. |
 | `spate_kafka_source_partition_lag_stored_records` | gauge | `partition` ⚠ | Lag against the **stored** (not yet committed) offset — reflects processing progress between commits; `spate_source_lag_records` is the committed-basis view. Unlike that one, this series *is* gated by `per_partition_detail`. |
+| `spate_kafka_source_partition_fetching` | gauge | `partition` ⚠ | 1 while librdkafka is fetching the partition, 0 in every other fetch state, and published only for the partitions this member holds. The state name goes to a log line rather than a label. Backpressure does not move the gauge, since librdkafka counts a paused partition as fetching. |
 
 Labels marked ⚠ are cardinality-sensitive and appear only under
 `metrics.per_partition_detail: true`.
@@ -204,6 +205,27 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
   by the `broker` label. On large clusters a broker the member currently needs
   no connection to also reads 0 (sparse connections), so alert on brokers the
   assignment depends on rather than on the cluster-wide sum.
+- `spate_kafka_source_partition_fetching == 0` — the member holds the partition
+  and is not consuming it. The pipeline then goes quiet with a full assignment,
+  a healthy group and no error anywhere. Give this one a `for:` window of a
+  minute or so, since a partition reads 0 while librdkafka resolves its offset
+  after an assignment.
+
+A partition that is not fetching is logged as well as measured, whether or not
+`per_partition_detail` is on. The line is emitted once per episode rather than
+once per statistics window, and names the librdkafka fetch state and the
+partition's offsets.
+
+```text
+WARN assigned partition is not fetching partition=26 state=stopped windows=2 next_offset=-1001 query_offset=-1 hi_offset=1250000
+```
+
+`windows` counts the statistics windows the partition has gone without
+fetching, so at the default `statistics_interval` each one is 5 seconds. The
+state names the cause: `stopped` or `none` is a partition this process stopped
+fetching, and `offset-query` is a leader or an offset lookup that has not
+answered. An `INFO` line closes the episode when the partition resumes, so
+the log says whether it is still going.
 
 Consumer lag is a framework family (`spate_source_lag_records`) and is alerted
 on separately; see [Metrics](../../../../METRICS.md) for the taxonomy, the

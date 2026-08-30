@@ -156,14 +156,17 @@ impl BrokerHandles {
 }
 
 /// Per-partition series, gated by `metrics.per_partition_detail` and by
-/// ownership: each gauge registers lazily on the first statistics window in
-/// which this member holds the partition, so a partition another member
-/// holds registers nothing at all. The snapshot carries every partition in
-/// the topic's metadata regardless of who holds it
-/// (`rd_kafka_stats_emit_all` walks the whole partition count), which is what
-/// the ownership check is for. The lag gauge additionally waits for a known
-/// value: librdkafka reports `-1` while lag is unknown (e.g. right after
-/// assignment), and rendering `0` there would mask real lag.
+/// ownership: the entry, and every gauge inside it, registers lazily on the
+/// first statistics window in which this member holds the partition. A
+/// partition another member holds has no entry and no series at all, since
+/// the snapshot carries every partition in the topic's metadata regardless of
+/// who holds it (`rd_kafka_stats_emit_all` walks the whole partition count).
+/// The lag gauge additionally waits for a known value before its first write:
+/// librdkafka reports `-1` while lag is unknown, and rendering `0` there
+/// would mask real lag. A release can still zero an already-known lag to `0`
+/// (see [`retain_partitions`](KafkaStatsMetrics::retain_partitions)), the
+/// same trade `SourceMetrics::retain_partitions` makes for the framework's
+/// own lag family.
 #[derive(Debug, Default)]
 struct PartitionHandles {
     fetch_queue_messages: Option<Gauge>,
@@ -221,9 +224,10 @@ impl KafkaStatsMetrics {
     /// left alone rather than written: its gauges and its not-fetching run
     /// stay exactly as they were until
     /// [`retain_partitions`](Self::retain_partitions) zeroes the gauges and
-    /// drops the run. `owned` reads as the assignment held before a
-    /// rebalance for the whole of that rebalance, so a partition handed
-    /// straight back is never written as absent in between.
+    /// drops the run. `owned` reads empty for the whole of a rebalance in
+    /// flight, since an eager revoke clears the member's assignment before
+    /// the new one lands, so a partition handed straight back is left alone
+    /// rather than written as absent in between.
     pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
@@ -359,8 +363,8 @@ impl KafkaStatsMetrics {
                 let held = is_owned(owned, *pid);
                 if self.per_partition_detail {
                     seen.insert(*pid);
-                    let handles = self.partitions.entry(*pid).or_default();
                     if held {
+                        let handles = self.partitions.entry(*pid).or_default();
                         handles
                             .fetch_queue_messages
                             .get_or_insert_with(|| {

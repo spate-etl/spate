@@ -186,8 +186,10 @@ impl KafkaSource {
             .collect()
     }
 
-    /// Zero and drop the lag series for partitions this member lost in the
-    /// rebalance that just completed.
+    /// Zero and drop the per-partition series for partitions this member
+    /// lost in the rebalance that just completed: the lag family and the
+    /// connector's `partition_not_fetching` gauge, which carry the same
+    /// ownership meaning.
     ///
     /// Called on `Intent::Assign`, once the new assignment is known, and
     /// on `Intent::Error`, where ownership is already released and no
@@ -198,9 +200,17 @@ impl KafkaSource {
     /// read as a phantom drain. It would also blank the partitions the
     /// runtime is still draining and committing. The error path has no
     /// such partitions, which is why pruning before its drain is sound.
-    fn prune_lag_series(&self) {
+    ///
+    /// This is the only place either family is released, so both hold their
+    /// values through a rebalance rather than following the empty
+    /// assignment `publish_stats` reads while one is in flight.
+    fn prune_partition_series(&mut self) {
+        let owned = self.retained_partition_ids();
         if let Some(m) = &self.metrics {
-            m.retain_partitions(&self.retained_partition_ids());
+            m.retain_partitions(&owned);
+        }
+        if let Some(stats_metrics) = self.stats_metrics.as_mut() {
+            stats_metrics.retain_partitions(&owned);
         }
     }
 
@@ -306,16 +316,12 @@ impl KafkaSource {
         let Some(stats) = consumer.context().stats.lock().expect("stats lock").take() else {
             return;
         };
+        let owned = self.retained_partition_ids();
         if let Some(metrics) = self.metrics.as_ref() {
-            publish_lag(
-                &stats,
-                &self.config.topic,
-                &self.retained_partition_ids(),
-                metrics,
-            );
+            publish_lag(&stats, &self.config.topic, &owned, metrics);
         }
         if let Some(stats_metrics) = self.stats_metrics.as_mut() {
-            stats_metrics.update(&stats, &self.config.topic);
+            stats_metrics.update(&stats, &self.config.topic, &owned);
         }
     }
 }
@@ -601,11 +607,11 @@ impl Source for KafkaSource {
                         consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
                         self.assignment_wait = None;
-                        self.prune_lag_series();
+                        self.prune_partition_series();
                         return Ok(SourceEvent::Idle);
                     }
                     let lanes = self.accept_assignment(&tpl)?;
-                    self.prune_lag_series();
+                    self.prune_partition_series();
                     return Ok(SourceEvent::LanesAssigned(lanes));
                 }
                 Intent::Revoke(tpl) => {
@@ -658,7 +664,7 @@ impl Source for KafkaSource {
                     self.assignment.clear();
                     self.note_assignment_loss(format!("rebalance error: {code}"));
                     self.revoking.clear();
-                    self.prune_lag_series();
+                    self.prune_partition_series();
                     if lanes.is_empty() {
                         return Err(self.rebalance_error(code));
                     }
@@ -1227,6 +1233,76 @@ mod tests {
             .collect();
         kept.sort_unstable();
         assert_eq!(kept, vec![0, 1], "revoked partition 2 is not retained");
+    }
+
+    /// The prune reaches the connector's per-partition series as well as the
+    /// lag family. `publish_stats` follows the live assignment, which an
+    /// eager revoke empties for every window until the new assignment lands,
+    /// so this is the only place `partition_not_fetching` is released.
+    #[test]
+    fn the_prune_releases_the_connector_partition_series() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let mut source = KafkaSource::new(test_config());
+            let meter =
+                spate_core::metrics::Meter::with_namespace("kafka", "prune", "source", "kafka");
+            source.stats_metrics = Some(crate::metrics::KafkaStatsMetrics::new(meter, true));
+            for (lane, part) in [(0u32, 0i32), (1, 1)] {
+                source.assignment.insert(LaneId(lane), part);
+            }
+            let stats = parked(&[0, 1]);
+            let owned = source.retained_partition_ids();
+            source
+                .stats_metrics
+                .as_mut()
+                .expect("stats metrics")
+                .update(&stats, "orders", &owned);
+
+            revoke_lanes(&mut source, &[1]);
+            source.prune_partition_series();
+        });
+        let rendered = handle.render();
+        let std = r#"pipeline="prune",component="source",component_type="kafka""#;
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_not_fetching{{{std},partition="1"}} 0"#
+            )),
+            "the lost partition was not released:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                r#"spate_kafka_partition_not_fetching{{{std},partition="0"}} 1"#
+            )),
+            "the retained partition lost its value:\n{rendered}"
+        );
+    }
+
+    /// A snapshot for `orders` in which each partition is stopped.
+    fn parked(partitions: &[i32]) -> Statistics {
+        Statistics {
+            topics: std::collections::HashMap::from([(
+                "orders".to_owned(),
+                rdkafka::statistics::Topic {
+                    topic: "orders".to_owned(),
+                    partitions: partitions
+                        .iter()
+                        .map(|&pid| {
+                            (
+                                pid,
+                                rdkafka::statistics::Partition {
+                                    partition: pid,
+                                    fetch_state: "stopped".to_owned(),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }
     }
 
     mod lag {

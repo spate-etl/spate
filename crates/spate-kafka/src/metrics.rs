@@ -361,6 +361,19 @@ impl KafkaStatsMetrics {
         self.brokers.retain(|name, _| seen.contains(name.as_str()));
     }
 
+    /// Translate the per-partition half of one snapshot.
+    ///
+    /// An entry is pruned once its partition id stops appearing in the
+    /// snapshot's own partition map. The snapshot carries every partition in
+    /// the topic's metadata, so an id leaves it only when the topic's
+    /// partition count shrinks or the topic itself goes, never when a
+    /// partition moves to another member. The pruned entry's series keeps the
+    /// last value it was given, since the exporter has no deletion and no idle
+    /// timeout (see `spate_core::metrics::configured_builder`). Zeroing it
+    /// first would claim the partition is caught up and fetching for a member
+    /// that still holds it, so a change of ownership is released by
+    /// [`retain_partitions`](Self::retain_partitions) and this path releases
+    /// nothing.
     fn update_partitions(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         let mut fetchq_msgs: u64 = 0;
         let mut fetchq_bytes: u64 = 0;

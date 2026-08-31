@@ -249,6 +249,16 @@ impl MetricsHandle {
 /// A Prometheus builder pre-configured with the bucket layout from
 /// [the metrics reference].
 ///
+/// No idle timeout is set, so a series renders for the life of the process
+/// once it is registered. `idle_timeout` takes one duration and a metric kind
+/// mask, and gauge write cadence here is not uniform. The source lag and
+/// per-partition families are rewritten every statistics tick, while the sink
+/// health and backoff gauges are written per write outcome and so follow
+/// traffic. A timeout covering gauges therefore removes an idle pipeline's
+/// shard health from the scrape output, which is the signal an operator reads
+/// when a pipeline goes quiet. A series is released by writing 0 instead; see
+/// `PartitionGauges::retain`.
+///
 /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
     PrometheusBuilder::new()

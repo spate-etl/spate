@@ -1,9 +1,14 @@
-//! A recorder that reports which metric names have been written.
+//! A recorder that reports which metric names and series have been written.
 //!
 //! [`WitnessRecorder`] wraps another recorder and returns handles that
 //! delegate to it. [`Witness::written`] lists the names something recorded.
 //! [`Witness::registered`] lists the names that exist. Resolving a gauge
 //! handle publishes the series, so the two sets differ.
+//!
+//! [`Witness::written_series`] reports the same writes keyed by name and
+//! labels together. A family that publishes both an aggregate and a labeled
+//! series carries one name, so a name alone cannot separate a family whose
+//! labeled half nothing writes from a complete one.
 //!
 //! Install it globally before the pipeline builds. A handle binds to the
 //! recorder present when it is constructed, and `metrics::with_local_recorder`
@@ -21,10 +26,25 @@ use std::sync::{Arc, Mutex};
 /// One registered series, and whether anything has written it.
 struct Site {
     name: String,
+    /// `name{k="v",…}` in the key's own label order, or the bare name when
+    /// the key carries no labels.
+    series: String,
     written: AtomicBool,
 }
 
-/// The names registered and written since installation.
+/// Render a key the way [`Site::series`] holds it.
+fn render_series(key: &Key) -> String {
+    let labels: Vec<String> = key
+        .labels()
+        .map(|l| format!(r#"{}="{}""#, l.key(), l.value()))
+        .collect();
+    if labels.is_empty() {
+        return key.name().to_owned();
+    }
+    format!("{}{{{}}}", key.name(), labels.join(","))
+}
+
+/// The names and series registered and written since installation.
 ///
 /// A write is a relaxed store on a flag the handle already holds, so an
 /// instrumented hot path takes no lock. Reading leaves the flags in place, so
@@ -33,9 +53,10 @@ struct Site {
 pub(crate) struct Witness(Arc<Mutex<Vec<Arc<Site>>>>);
 
 impl Witness {
-    fn site(&self, name: &str) -> Arc<Site> {
+    fn site(&self, key: &Key) -> Arc<Site> {
         let site = Arc::new(Site {
-            name: name.to_owned(),
+            name: key.name().to_owned(),
+            series: render_series(key),
             written: AtomicBool::new(false),
         });
         self.0.lock().expect("witness lock").push(Arc::clone(&site));
@@ -44,12 +65,17 @@ impl Witness {
 
     /// Every metric name something has written.
     pub(crate) fn written(&self) -> BTreeSet<String> {
-        self.collect(|s| s.written.load(Ordering::Relaxed))
+        self.collect(|s| s.written.load(Ordering::Relaxed), |s| &s.name)
+    }
+
+    /// Every series something has written, as `name{k="v",…}`.
+    pub(crate) fn written_series(&self) -> BTreeSet<String> {
+        self.collect(|s| s.written.load(Ordering::Relaxed), |s| &s.series)
     }
 
     /// Every metric name that has been registered, written or not.
     pub(crate) fn registered(&self) -> BTreeSet<String> {
-        self.collect(|_| true)
+        self.collect(|_| true, |s| &s.name)
     }
 
     /// Clear every write flag, keeping the registrations. A later
@@ -61,13 +87,17 @@ impl Witness {
         }
     }
 
-    fn collect(&self, keep: impl Fn(&Site) -> bool) -> BTreeSet<String> {
+    fn collect(
+        &self,
+        keep: impl Fn(&Site) -> bool,
+        of: impl Fn(&Site) -> &str,
+    ) -> BTreeSet<String> {
         self.0
             .lock()
             .expect("witness lock")
             .iter()
             .filter(|s| keep(s))
-            .map(|s| s.name.clone())
+            .map(|s| of(s).to_owned())
             .collect()
     }
 }
@@ -163,7 +193,7 @@ impl<R: Recorder> Recorder for WitnessRecorder<R> {
     }
 
     fn register_counter(&self, key: &Key, metadata: &Metadata<'_>) -> Counter {
-        let site = self.witness.site(key.name());
+        let site = self.witness.site(key);
         Counter::from_arc(Arc::new(CounterSpy {
             inner: self.inner.register_counter(key, metadata),
             site,
@@ -171,7 +201,7 @@ impl<R: Recorder> Recorder for WitnessRecorder<R> {
     }
 
     fn register_gauge(&self, key: &Key, metadata: &Metadata<'_>) -> Gauge {
-        let site = self.witness.site(key.name());
+        let site = self.witness.site(key);
         Gauge::from_arc(Arc::new(GaugeSpy {
             inner: self.inner.register_gauge(key, metadata),
             site,
@@ -179,7 +209,7 @@ impl<R: Recorder> Recorder for WitnessRecorder<R> {
     }
 
     fn register_histogram(&self, key: &Key, metadata: &Metadata<'_>) -> Histogram {
-        let site = self.witness.site(key.name());
+        let site = self.witness.site(key);
         Histogram::from_arc(Arc::new(HistogramSpy {
             inner: self.inner.register_histogram(key, metadata),
             site,

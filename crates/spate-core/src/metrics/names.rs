@@ -179,8 +179,10 @@ pub const SINK_DRAIN_OVERRUN_TOTAL: &str = "spate_sink_drain_overrun_total";
 
 // Checkpointing.
 
-/// Unacknowledged batches tracked; unlabeled series is the max across
-/// partitions.
+/// Unacknowledged batches tracked. The unlabeled series is the max across
+/// partitions; one series per tracked partition carries [`L_PARTITION`] when
+/// `per_partition_detail` is set, so a sum over the bare name adds the max to
+/// the partitions themselves.
 pub const CHECKPOINT_PENDING_BATCHES: &str = "spate_checkpoint_pending_batches";
 /// Source commit calls, by [`L_OUTCOME`].
 pub const CHECKPOINT_COMMITS_TOTAL: &str = "spate_checkpoint_commits_total";

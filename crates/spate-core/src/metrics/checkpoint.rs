@@ -85,6 +85,18 @@ impl CheckpointMetrics {
         self.pending_max.set(pending as f64);
     }
 
+    /// Whether this handle set publishes the per-partition series.
+    ///
+    /// False when `per_partition_detail` was not set, and false for a shadow,
+    /// which publishes no gauge.
+    /// [`set_partition_pending`](Self::set_partition_pending) and
+    /// [`retain_partitions`](Self::retain_partitions) no-op in both cases. A
+    /// caller reads this to skip gathering the counts at all.
+    #[must_use]
+    pub fn publishes_partition_detail(&self) -> bool {
+        self.partition_pending.as_ref().is_some_and(|pg| pg.owned)
+    }
+
     /// Set one partition's pending count. No-op unless
     /// `per_partition_detail`.
     pub fn set_partition_pending(&self, partition: PartitionId, pending: usize) {
@@ -94,6 +106,24 @@ impl CheckpointMetrics {
     }
 
     /// Drop per-partition series for revoked partitions.
+    ///
+    /// Two things differ from
+    /// [`SourceMetrics::retain_partitions`](super::SourceMetrics::retain_partitions),
+    /// and both follow from what this family counts.
+    ///
+    /// This takes the live set on every commit cycle rather than once a new
+    /// assignment is known. Zeroing a partition the runtime is about to be
+    /// handed back costs nothing, because the unlabeled series reads the same
+    /// `0` from the same empty tracker map in the same cycle. The lag family
+    /// has no aggregate to agree with, so it waits instead.
+    ///
+    /// This also zeroes a partition no other member will publish, where a lag
+    /// gauge holds its last value. `0` here is the count of what the
+    /// checkpointer tracks, and it tracks nothing for a partition it has
+    /// dropped, so the reading stays true. A lag of `0` instead claims the
+    /// partition is caught up, which is a claim about the world rather than
+    /// about the handle, and false for a partition still being consumed
+    /// somewhere.
     pub fn retain_partitions(&self, keep: &[PartitionId]) {
         if let Some(pg) = &self.partition_pending {
             pg.retain(keep);

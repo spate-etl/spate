@@ -321,7 +321,7 @@ way to reason about where a flush went, not an identity to compute.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked; unlabeled series is the max across partitions. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
+| `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked. The unlabeled series is the max across partitions; a labeled series is published for every partition the checkpointer tracks, including one with nothing unacknowledged. A partition that leaves the assignment is zeroed rather than deleted, on the first commit cycle after it goes, for the reason in [Absent, zero, and stale](#absent-zero-and-stale). Select the aggregate with `{partition=""}`. A `sum` over the bare name adds the max to the per-partition counts. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
 | `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |
@@ -389,10 +389,16 @@ recorded on two machines.
 Cardinality note: a coordinated source's checkpoint partitions are minted
 per split *tenancy* (monotonic), so per-partition series under
 `metrics.per_partition_detail: true` grow over a long, churny job; the
-default (off) is unaffected. `spate_source_lag_records` is ungated, so a source
-that both publishes lag and mints monotonic partition ids would grow without
-bound. No shipped source does (Kafka's partitions are bounded by the topic;
-the S3 source publishes no lag), but a new connector must not.
+default (off) is unaffected. A retired tenancy's checkpoint series is zeroed
+once the checkpointer stops tracking it, which keeps a `sum` over the family
+honest. Zeroing bounds nothing else. The exporter holds the series and its
+labels for the life of the process, so scrape size and memory both grow by one
+series per retired tenancy and never shrink, and the figure to budget against
+is the number of tenancies a job retires rather than the number it holds at
+once. `spate_source_lag_records` is ungated, so a source that both publishes
+lag and mints monotonic partition ids would grow without bound. No shipped
+source does (Kafka's partitions are bounded by the topic; the S3 source
+publishes no lag), but a new connector must not.
 
 ## End-to-end
 

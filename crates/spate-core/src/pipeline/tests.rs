@@ -1054,3 +1054,230 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
 }
+
+/// One pipeline's `spate_checkpoint_pending_batches` lines, sorted. The
+/// pipeline label keeps the assertion independent of any other pipeline a
+/// sibling test registered in this process.
+fn pending_series(rendered: &str, pipeline_name: &str) -> Vec<String> {
+    let mut out: Vec<String> = rendered
+        .lines()
+        .filter(|l| l.starts_with(&format!("{}{{", names::CHECKPOINT_PENDING_BATCHES)))
+        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out
+}
+
+/// The checkpoint labels a pipeline of this name publishes under.
+fn checkpoint_labels(pipeline_name: &str) -> String {
+    format!(r#"pipeline="{pipeline_name}",component="checkpoint",component_type="checkpoint""#)
+}
+
+/// `metrics.per_partition_detail: true` publishes the checkpointer's
+/// per-partition pending counts.
+///
+/// Regression for #334. `CheckpointMetrics::set_partition_pending` and
+/// `retain_partitions` had no caller outside the metrics module's own tests,
+/// so the flag bought a family that never gained a `partition`-labeled
+/// series.
+///
+/// A labeled gauge registers on its first published value, so a missing call
+/// leaves the series *absent* rather than `0`. Presence is what this asserts;
+/// both lines render `0` because the run completed with every batch
+/// acknowledged.
+#[test]
+fn per_partition_pending_reaches_the_exposition_when_detail_is_on() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.metrics.per_partition_detail = true;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+
+    // Published on the commit tick, so it is there while the run is live and
+    // not only on the final commit at shutdown.
+    wait_for(
+        "the per-partition series is published",
+        Duration::from_secs(5),
+        || {
+            pending_series(&handle.render(), &pipeline_name)
+                .iter()
+                .any(|l| l.contains(r#"partition="0""#))
+        },
+    );
+
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    let rendered = handle.render();
+    let labels = checkpoint_labels(&pipeline_name);
+    let mut expected = vec![
+        format!("{}{{{labels}}} 0", names::CHECKPOINT_PENDING_BATCHES),
+        format!(
+            r#"{}{{{labels},partition="0"}} 0"#,
+            names::CHECKPOINT_PENDING_BATCHES
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        pending_series(&rendered, &pipeline_name),
+        expected,
+        "the aggregate and the one assigned partition:\n{rendered}"
+    );
+}
+
+/// Each partition's series carries that partition's own count, and a
+/// partition that leaves the assignment is released.
+///
+/// These are the two assertions presence cannot make. A publisher writing a
+/// constant satisfies presence, and so does a `commit_cycle` that never calls
+/// `retain_partitions`. Both are caught here: the counts differ across the two
+/// partitions, and partition 1 leaves while its batch is still unacknowledged,
+/// so without the release its series freezes at `1` for the life of the
+/// process rather than reading `0`.
+#[test]
+fn per_partition_pending_counts_each_partition_and_zeroes_a_revoked_one() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.metrics.per_partition_detail = true;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        },
+        batches_seen: 0,
+    });
+
+    // Three withheld batches on partition 0 against one on partition 1, so
+    // the two series must differ and the aggregate must follow the larger.
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(&[0..10, 10..20, 20..30]),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+    ]));
+
+    let labels = checkpoint_labels(&pipeline_name);
+    let name = names::CHECKPOINT_PENDING_BATCHES;
+    let p0 = format!(r#"{name}{{{labels},partition="0"}} 3"#);
+    let p1 = format!(r#"{name}{{{labels},partition="1"}} 1"#);
+    let aggregate = format!("{name}{{{labels}}} 3");
+    wait_for(
+        "each partition publishes its own count",
+        Duration::from_secs(5),
+        || {
+            let rendered = handle.render();
+            rendered.contains(&p0) && rendered.contains(&p1) && rendered.contains(&aggregate)
+        },
+    );
+
+    // Partition 1 leaves with its batch still held, so the checkpointer drops
+    // a tracker whose count is non-zero.
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(1)]));
+    let p1_released = format!(r#"{name}{{{labels},partition="1"}} 0"#);
+    wait_for(
+        "the revoked partition is released and the remaining one is not",
+        Duration::from_secs(10),
+        || {
+            let rendered = handle.render();
+            rendered.contains(&p1_released) && rendered.contains(&p0)
+        },
+    );
+
+    // Releasing retires partition 0's batches so the drain can complete.
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    wait_for("partition 0 commits", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .committed
+            .get(&PartitionId(0))
+            .is_some_and(|&w| w >= 30)
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// With `per_partition_detail` off the family is the aggregate alone.
+///
+/// Asserting the whole list rather than the absence of a `partition=` line
+/// also catches a second publisher of the aggregate.
+#[test]
+fn per_partition_pending_is_absent_when_detail_is_off() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    assert!(!cfg.metrics.per_partition_detail, "the default is off");
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    let rendered = handle.render();
+    assert_eq!(
+        pending_series(&rendered, &pipeline_name),
+        vec![format!(
+            "{}{{{}}} 0",
+            names::CHECKPOINT_PENDING_BATCHES,
+            checkpoint_labels(&pipeline_name)
+        )],
+        "the aggregate alone:\n{rendered}"
+    );
+}

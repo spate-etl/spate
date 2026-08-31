@@ -1,17 +1,17 @@
-//! Reproduction: under sustained load, a split branch whose shard buffer
-//! stays below `ChunkConfig::target_bytes` never seals, so the `AckRef`
-//! clones it holds never resolve and the partition watermark cannot advance
-//! past the oldest record parked in it. Checkpoint pending batches then grow
-//! at the full batch-issuance rate while the hot branch delivers normally.
+//! A split branch whose shard buffer stays below `ChunkConfig::target_bytes`
+//! holds the `AckRef` clones of every record parked in it, and with them the
+//! partition watermark. Two flush paths seal such a partial buffer. The
+//! controller broadcasts `ThreadControl::FlushNow` on every commit tick, which
+//! bounds the hold to roughly one `checkpoint.interval`. The driver's
+//! `idle_flush` seals it too, but needs an *empty* poll plus an idle period,
+//! so it is unreachable while data flows.
 //!
-//! The only flush path for a partial buffer is `flush_terminal()` via the
-//! driver's `idle_flush`, which requires an *empty* poll plus an idle period
-//! and is unreachable while data flows. The first test models continuous
-//! ingest (a source under sustained load never polls empty) and asserts the
-//! healthy contract: the watermark passes a low-volume-branch record while
-//! load continues. The second test is the control: identical topology, but
-//! the load stops, `idle_flush` fires, and everything commits, showing the
-//! stall is load-gated rather than data loss or a slow sink.
+//! The first test models continuous ingest (a source under sustained load
+//! never polls empty) and holds the commit tick to that bound: the watermark
+//! passes a low-volume-branch record while load continues. The second test is
+//! the control: identical topology, but the load stops and `idle_flush` seals
+//! the buffer, showing the first test's bound is not standing in for data loss
+//! or a slow sink.
 
 // The sample table on stderr is the test's diagnostic payload on failure.
 #![allow(clippy::print_stderr)]
@@ -27,18 +27,12 @@ use spate_core::source::LaneId;
 use spate_test::{
     BytesPassthrough, CaptureSink, MemorySource, TestEncoder, capture_sink, memory_source,
 };
-use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-/// Fixed admin port for the sustained-load test. Only this test binds an
-/// admin listener (the control test asks for none), so `cargo test`'s
-/// in-process test concurrency cannot collide on it.
-const ADMIN: &str = "127.0.0.1:39184";
 
 const SUSTAINED_CONFIG: &str = r#"
 pipeline: { name: age-seal-repro, threads: 1, io_threads: 1 }
-admin: { listen: "127.0.0.1:39184" }
+admin: { listen: none }
 metrics: { exporter: prometheus }
 checkpoint: { interval: 200ms, max_pending_batches: 1000000, drain_timeout: 10s }
 source: { memory: {} }
@@ -58,43 +52,10 @@ sinks:
   rare: { capture: {} }
 "#;
 
-/// Blocking HTTP GET; `(0, "")` while the admin server is still binding.
-fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
-        return (0, String::new());
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    if write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: repro\r\nConnection: close\r\n\r\n"
-    )
-    .is_err()
-    {
-        return (0, String::new());
-    }
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return (0, String::new());
-    }
-    let status: u16 = response
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or_default();
-    (status, body)
-}
-
 /// Sum of every `spate_checkpoint_pending_batches` sample in the exposition.
-fn pending_gauge(addr: SocketAddr) -> f64 {
-    let (status, body) = http_get(addr, "/metrics");
-    if status != 200 {
-        return -1.0; // admin not up yet; distinguishable from a real 0
-    }
-    body.lines()
+fn pending_gauge(render: &dyn Fn() -> String) -> f64 {
+    render()
+        .lines()
         .filter(|l| !l.starts_with('#') && l.starts_with("spate_checkpoint_pending_batches"))
         .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
         .sum()
@@ -112,14 +73,21 @@ struct Sample {
 /// Assemble the two-branch split pipeline: first payload byte `h` → sink
 /// "hot", `r` → sink "rare". Mirrors a per-record-type split where one type
 /// is orders of magnitude colder than the rest.
+///
+/// Returns the exporter's render function alongside the runtime, so a caller
+/// reads the exposition in process. Serving it over an admin listener would
+/// need a port, and a fixed port is one a concurrent test can already hold.
 fn build_pipeline(
     config: &str,
     source: MemorySource,
     sink_hot: CaptureSink,
     sink_rare: CaptureSink,
     options: RuntimeOptions,
-) -> PipelineRuntime<MemorySource> {
-    Pipeline::from_config(PipelineConfig::from_str(config).expect("config"))
+) -> (
+    Arc<dyn Fn() -> String + Send + Sync>,
+    PipelineRuntime<MemorySource>,
+) {
+    let pipeline = Pipeline::from_config(PipelineConfig::from_str(config).expect("config"))
         .expect("builder")
         .add_sink("hot", sink_hot)
         .expect("sink hot")
@@ -141,24 +109,27 @@ fn build_pipeline(
                     _ => {}
                 })
                 .build()
-        })
+        });
+    let render = pipeline.metrics().render_fn();
+    let runtime = pipeline
         .runtime_options(options)
         .into_runtime(source)
-        .expect("into_runtime")
+        .expect("into_runtime");
+    (render, runtime)
 }
 
-/// The healthy contract this repro pins down: a record routed to a
-/// low-volume split branch must not hold the partition watermark for longer
-/// than a bounded interval **while ingest continues**. Today it is held
-/// until the branch's shard buffer reaches `target_bytes`, potentially
-/// forever, because nothing seals a partial buffer under sustained load.
+/// The contract this test pins down: a record routed to a low-volume split
+/// branch must not hold the partition watermark for longer than a bounded
+/// interval **while ingest continues**. The commit tick supplies that bound
+/// by sealing the branch's partial shard buffer before it reaches
+/// `target_bytes`.
 #[test]
 fn commits_advance_past_low_volume_branch_under_sustained_load() {
     let (source, handle) = memory_source();
     let (sink_hot, script_hot) = capture_sink(1, 1);
     let (sink_rare, script_rare) = capture_sink(1, 1);
 
-    let runtime = build_pipeline(
+    let (render, runtime) = build_pipeline(
         SUSTAINED_CONFIG,
         source,
         sink_hot,
@@ -166,18 +137,17 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
         RuntimeOptions {
             handle_signals: false,
             // Model continuous ingest: at production rates a lane poll never
-            // comes back empty, so the driver's idle-flush path (the only
-            // thing that seals a partial buffer) is never reached. A large
+            // comes back empty, so the driver's idle-flush path is never
+            // reached and only the commit tick seals a partial buffer. A large
             // value here removes scheduler-jitter flakiness without changing
-            // what is being tested; the fix must bound the hold time
-            // *without* relying on an idle lull.
+            // what is being tested; the bound below must hold *without* an
+            // idle lull.
             idle_flush: Duration::from_secs(30),
             ..RuntimeOptions::default()
         },
     );
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
-    let admin: SocketAddr = ADMIN.parse().expect("admin addr");
 
     let p = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), p)]);
@@ -210,7 +180,7 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
                 at: started.elapsed(),
                 pushed,
                 committed,
-                pending: pending_gauge(admin),
+                pending: pending_gauge(&*render),
                 hot_writes: script_hot.writes().len(),
                 rare_writes: script_rare.writes().len(),
             });
@@ -224,7 +194,7 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
         at: started.elapsed(),
         pushed,
         committed: handle.last_committed(p),
-        pending: pending_gauge(admin),
+        pending: pending_gauge(&*render),
         hot_writes: script_hot.writes().len(),
         rare_writes: script_rare.writes().len(),
     };
@@ -247,6 +217,12 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
     }
 
     let last = samples.last().expect("at least one sample");
+    // A startup failure stops the drivers, so every counter above reads zero
+    // and the assertions below would all report it as something it is not.
+    if join.is_finished() {
+        let outcome = join.join().expect("join");
+        panic!("the pipeline exited during the load window: {outcome:?}");
+    }
     // Delivery-health precondition: the hot branch flushed throughout, so a
     // failure below is an acknowledgment hold, not a wedged sink.
     assert!(
@@ -277,9 +253,9 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
          {:.1}s of sustained load: committed={:?} (needs > {rare0}), while \
          checkpoint pending batches grew to {:.0} and the hot branch \
          delivered {} writes ({} rows pushed). The cold branch flushed {} \
-         times — its shard buffer sat below the 64 KiB chunk target holding \
-         its acks, and nothing seals a partial buffer while polls keep \
-         returning data.",
+         times. Its shard buffer sits below the 64 KiB chunk target holding \
+         its acks, so the commit tick's flush is what has to seal it while \
+         polls keep returning data.",
         last.at.as_secs_f64(),
         last.committed,
         last.pending,
@@ -291,15 +267,17 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
 
 /// Control: the *same* topology and record mix commits completely once the
 /// load stops; the driver's idle flush seals the cold branch's partial
-/// buffer. Passing proves the sustained-load stall above is not data loss or
-/// sink slowness; the acks are held while ingest continues.
+/// buffer. Passing shows the bound the test above measures is a property of
+/// when the acks resolve, not of data loss or sink slowness.
 #[test]
 fn low_volume_branch_acks_resolve_once_load_stops() {
     let (source, handle) = memory_source();
     let (sink_hot, _script_hot) = capture_sink(1, 1);
     let (sink_rare, _script_rare) = capture_sink(1, 1);
 
-    let runtime = build_pipeline(
+    // This test asks for no exporter, so the render function has nothing to
+    // show and the assertion below reads the watermark from the source handle.
+    let (_render, runtime) = build_pipeline(
         CONTROL_CONFIG,
         source,
         sink_hot,

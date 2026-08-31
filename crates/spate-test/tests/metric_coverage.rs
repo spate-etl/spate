@@ -28,6 +28,17 @@ source: { memory: {} }
 sink: { capture: {} }
 "#;
 
+/// The same scenario with the cardinality knob on. Its own pipeline name, so
+/// a series it publishes cannot be confused with the default scenario's.
+const DETAIL_CONFIG: &str = r#"
+pipeline: { name: coverage-detail, threads: 2, io_threads: 1 }
+admin: { listen: "127.0.0.1:0" }
+metrics: { exporter: prometheus, per_partition_detail: true }
+checkpoint: { interval: 100ms }
+source: { memory: {} }
+sink: { capture: {} }
+"#;
+
 /// What one scripted pipeline run wrote, split by phase.
 struct Coverage {
     /// Written during assembly, which is where a handle struct's constructor
@@ -35,11 +46,13 @@ struct Coverage {
     at_build: BTreeSet<String>,
     /// Written after assembly, with the pipeline running.
     while_running: BTreeSet<String>,
+    /// The same writes as `while_running`, keyed by name and labels.
+    while_running_series: BTreeSet<String>,
     witness: Witness,
 }
 
 /// Run a scripted pipeline to a clean drain and report what it wrote.
-fn run_scenario() -> Coverage {
+fn run_scenario(config: &str) -> Coverage {
     // Installed before anything builds. `spate-core`'s own `install` then finds
     // the global slot taken, warns, and runs against this recorder with a
     // detached render handle.
@@ -50,7 +63,7 @@ fn run_scenario() -> Coverage {
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);
 
-    let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config"))
+    let runtime = Pipeline::from_config(PipelineConfig::from_str(config).expect("config"))
         .expect("builder")
         .sink(sink)
         .expect("sink")
@@ -110,6 +123,7 @@ fn run_scenario() -> Coverage {
     Coverage {
         at_build,
         while_running: witness.written(),
+        while_running_series: witness.written_series(),
         witness,
     }
 }
@@ -118,7 +132,7 @@ fn run_scenario() -> Coverage {
 /// threads.
 #[test]
 fn the_witness_separates_written_series_from_registered_ones() {
-    let coverage = run_scenario();
+    let coverage = run_scenario(CONFIG);
     let written = &coverage.while_running;
     let registered = coverage.witness.registered();
 
@@ -201,7 +215,7 @@ const PUBLISHED_AT_BUILD: &[&str] = &[names::QUEUE_CAPACITY];
 
 #[test]
 fn the_happy_path_writes_every_series_it_covers() {
-    let coverage = run_scenario();
+    let coverage = run_scenario(CONFIG);
 
     let mut silent: Vec<&str> = EXERCISED_WHILE_RUNNING
         .iter()
@@ -233,4 +247,51 @@ fn the_happy_path_writes_every_series_it_covers() {
             "`{name}` is listed here but the pipeline never registered it"
         );
     }
+}
+
+/// The `spate_checkpoint_pending_batches` series carrying a `partition` label.
+fn labeled_checkpoint_series(written: &BTreeSet<String>) -> Vec<&String> {
+    written
+        .iter()
+        .filter(|s| s.starts_with(&format!("{}{{", names::CHECKPOINT_PENDING_BATCHES)))
+        .filter(|s| s.contains(r#"partition=""#))
+        .collect()
+}
+
+/// `metrics.per_partition_detail: true` reaches the framework's own
+/// per-partition family.
+///
+/// Regression for #334, and for the shape of guardrail that missed it. One
+/// name covers both the unlabeled aggregate and the gated `partition`-labeled
+/// series, so `names::CHECKPOINT_PENDING_BATCHES` sat in
+/// `EXERCISED_WHILE_RUNNING` and passed on the aggregate write alone while
+/// nothing wrote the labeled half. A series-level reading separates them.
+#[test]
+fn per_partition_detail_writes_the_partition_labeled_checkpoint_series() {
+    let coverage = run_scenario(DETAIL_CONFIG);
+    let labeled = labeled_checkpoint_series(&coverage.while_running_series);
+    assert!(
+        !labeled.is_empty(),
+        "the flag is on, so the checkpointer's per-partition series must be \
+         written; wrote:\n{:#?}",
+        coverage.while_running_series
+    );
+}
+
+/// The default leaves that family as the aggregate alone.
+#[test]
+fn the_default_writes_no_partition_labeled_checkpoint_series() {
+    let coverage = run_scenario(CONFIG);
+    let labeled = labeled_checkpoint_series(&coverage.while_running_series);
+    assert!(
+        labeled.is_empty(),
+        "`per_partition_detail` defaults to off, so nothing may write these: \
+         {labeled:#?}"
+    );
+    assert!(
+        coverage
+            .while_running
+            .contains(names::CHECKPOINT_PENDING_BATCHES),
+        "the aggregate is written whatever the flag is set to"
+    );
 }

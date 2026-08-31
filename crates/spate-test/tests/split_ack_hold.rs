@@ -56,11 +56,17 @@ sinks:
   rare: { capture: {} }
 "#;
 
-/// Sum of every `spate_checkpoint_pending_batches` sample in the exposition.
+/// Sum of the unlabeled `spate_checkpoint_pending_batches` samples in the
+/// exposition.
+///
+/// The `partition`-labeled series share the name and carry one partition's
+/// count each, so summing them alongside the aggregate would add the max
+/// across partitions to the partitions themselves.
 fn pending_gauge(render: &dyn Fn() -> String) -> f64 {
     render()
         .lines()
         .filter(|l| !l.starts_with('#') && l.starts_with("spate_checkpoint_pending_batches"))
+        .filter(|l| !l.contains(r#"partition=""#))
         .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
         .sum()
 }

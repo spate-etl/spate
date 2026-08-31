@@ -406,6 +406,12 @@ impl PartitionGauges {
     /// Absence and `0` therefore mean different things for a per-partition
     /// series. Absent is "never measured"; `0` here is "measured, not ours".
     pub(crate) fn retain(&self, keep: &[PartitionId]) {
+        // Symmetric with `set`. A shadow's map is empty today, so this only
+        // guards against a future path that populates one, where zeroing here
+        // would write over the owner's series.
+        if !self.owned {
+            return;
+        }
         let mut gauges = self.gauges.lock().expect("partition gauge lock");
         gauges.retain(|p, gauge| {
             let kept = keep.iter().any(|k| k.0 == *p);

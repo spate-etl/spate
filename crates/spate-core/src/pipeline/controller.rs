@@ -556,7 +556,26 @@ fn commit_cycle<S: Source>(
 ) {
     harvest(checkpointer, state);
 
-    metrics.set_pending_max(checkpointer.max_pending());
+    let max_pending = checkpointer.max_pending();
+    metrics.set_pending_max(max_pending);
+    // Gathering the counts allocates, so the default configuration must not
+    // pay for it. The chase pass is skipped for the same reason. It runs at
+    // `FAST_COMMIT_POLL` for a whole `commit_interval` per hinted partition,
+    // and only a coordinated source reaches it, which is the assignment most
+    // likely to be large. The periodic tick still fires during a chase, so
+    // the detail trails the aggregate by at most one interval.
+    if only.is_none() && metrics.publishes_partition_detail() {
+        let pending = checkpointer.pending_by_partition();
+        for &(partition, n) in &pending {
+            metrics.set_partition_pending(partition, n);
+        }
+        // The tracker set is the live set. `begin_epoch` replaces it and
+        // `revoke` removes from it, so retaining against it needs no hook in
+        // the revocation paths.
+        let live: Vec<PartitionId> = pending.iter().map(|&(p, _)| p).collect();
+        metrics.retain_partitions(&live);
+    }
+
     let stalled = checkpointer.stalled_partitions();
     let age = stalled
         .iter()
@@ -564,7 +583,7 @@ fn commit_cycle<S: Source>(
         .max()
         .unwrap_or(Duration::ZERO);
     metrics.set_watermark_age(age);
-    health.report_watermark(age, checkpointer.max_pending() > 0);
+    health.report_watermark(age, max_pending > 0);
 
     if state.pending_commit.is_empty() {
         return;

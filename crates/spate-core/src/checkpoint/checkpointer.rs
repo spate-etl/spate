@@ -383,6 +383,23 @@ impl Checkpointer {
             .unwrap_or(0)
     }
 
+    /// Unadvanced batches for every tracked partition, sorted by partition.
+    ///
+    /// Every partition in the current epoch appears, including one with
+    /// nothing unacknowledged, so the result doubles as the live set. A
+    /// partition leaves it by being revoked or by a new epoch replacing it,
+    /// never by falling quiet.
+    #[must_use]
+    pub fn pending_by_partition(&self) -> Vec<(PartitionId, usize)> {
+        let mut out: Vec<_> = self
+            .trackers
+            .iter()
+            .map(|(&p, t)| (p, t.pending()))
+            .collect();
+        out.sort_unstable_by_key(|&(p, _)| p);
+        out
+    }
+
     /// Partitions whose watermark is permanently stalled behind a failed
     /// batch, with the stall start (health-probe input).
     #[must_use]
@@ -633,6 +650,35 @@ mod tests {
         cp.drain();
         let _ = cp.take_watermarks();
         assert_eq!(cp.max_pending(), 0);
+    }
+
+    /// Every partition in the epoch is listed, sorted, including an idle one
+    /// at zero. A caller publishing a per-partition series retains against
+    /// this list, so omitting an idle partition would drop and re-register
+    /// its series on every quiet cycle.
+    #[test]
+    fn pending_by_partition_lists_every_tracked_partition() {
+        let (mut cp, mut issuer) = checkpointer(&[P0, P1]);
+        let held: Vec<_> = (0..3).map(|i| issuer.issue(P0, i)).collect();
+        cp.drain();
+        assert_eq!(cp.pending_by_partition(), vec![(P0, 3), (P1, 0)]);
+        assert_eq!(
+            cp.max_pending(),
+            cp.pending_by_partition()
+                .iter()
+                .map(|&(_, n)| n)
+                .max()
+                .unwrap_or(0),
+            "the aggregate is the max of the per-partition counts"
+        );
+
+        // Revocation drops the partition from the list, which is what
+        // releases its series.
+        drop(held);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        cp.revoke(&[P0]);
+        assert_eq!(cp.pending_by_partition(), vec![(P1, 0)]);
     }
 
     #[test]

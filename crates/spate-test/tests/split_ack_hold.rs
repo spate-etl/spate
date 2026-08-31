@@ -2,16 +2,18 @@
 //! holds the `AckRef` clones of every record parked in it, and with them the
 //! partition watermark. Two flush paths seal such a partial buffer. The
 //! controller broadcasts `ThreadControl::FlushNow` on every commit tick, which
-//! bounds the hold to roughly one `checkpoint.interval`. The driver's
+//! seals the buffer within roughly one `checkpoint.interval`. The driver's
 //! `idle_flush` seals it too, but needs an *empty* poll plus an idle period,
-//! so it is unreachable while data flows.
+//! so it is unreachable while data flows. The acks a sealed chunk carries
+//! resolve once the sink writes it, so the watermark advances a sink linger
+//! after the seal.
 //!
 //! The first test models continuous ingest (a source under sustained load
 //! never polls empty) and holds the commit tick to that bound: the watermark
 //! passes a low-volume-branch record while load continues. The second test is
 //! the control: identical topology, but the load stops and `idle_flush` seals
-//! the buffer, showing the first test's bound is not standing in for data loss
-//! or a slow sink.
+//! the buffer. Every record reaches its sink there, so what the first test
+//! measures is when the held acks resolve.
 
 // The sample table on stderr is the test's diagnostic payload on failure.
 #![allow(clippy::print_stderr)]
@@ -30,6 +32,8 @@ use spate_test::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Keep `admin.listen` at `none`. A fixed port is one a concurrent test can
+// hold, and the exposition is read in process through `Pipeline::metrics()`.
 const SUSTAINED_CONFIG: &str = r#"
 pipeline: { name: age-seal-repro, threads: 1, io_threads: 1 }
 admin: { listen: none }
@@ -75,8 +79,7 @@ struct Sample {
 /// is orders of magnitude colder than the rest.
 ///
 /// Returns the exporter's render function alongside the runtime, so a caller
-/// reads the exposition in process. Serving it over an admin listener would
-/// need a port, and a fixed port is one a concurrent test can already hold.
+/// reads the exposition in process.
 fn build_pipeline(
     config: &str,
     source: MemorySource,
@@ -203,6 +206,15 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
     }
     samples.push(final_sample);
 
+    // A startup failure stops the drivers, so every sample above reads zero.
+    // Report it before the table, which has nothing to show for a pipeline
+    // that never ran, and before assertions that would describe it as
+    // something else.
+    if join.is_finished() {
+        let outcome = join.join().expect("join");
+        panic!("the pipeline exited during the load window: {outcome:?}");
+    }
+
     eprintln!("      t   pushed      committed  pending  hot_writes  rare_writes");
     for s in &samples {
         eprintln!(
@@ -217,12 +229,6 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
     }
 
     let last = samples.last().expect("at least one sample");
-    // A startup failure stops the drivers, so every counter above reads zero
-    // and the assertions below would all report it as something it is not.
-    if join.is_finished() {
-        let outcome = join.join().expect("join");
-        panic!("the pipeline exited during the load window: {outcome:?}");
-    }
     // Delivery-health precondition: the hot branch flushed throughout, so a
     // failure below is an acknowledgment hold, not a wedged sink.
     assert!(
@@ -267,16 +273,14 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
 
 /// Control: the *same* topology and record mix commits completely once the
 /// load stops; the driver's idle flush seals the cold branch's partial
-/// buffer. Passing shows the bound the test above measures is a property of
-/// when the acks resolve, not of data loss or sink slowness.
+/// buffer. Every record reaches its sink here, so what the test above
+/// measures is when the held acks resolve.
 #[test]
 fn low_volume_branch_acks_resolve_once_load_stops() {
     let (source, handle) = memory_source();
     let (sink_hot, _script_hot) = capture_sink(1, 1);
     let (sink_rare, _script_rare) = capture_sink(1, 1);
 
-    // This test asks for no exporter, so the render function has nothing to
-    // show and the assertion below reads the watermark from the source handle.
     let (_render, runtime) = build_pipeline(
         CONTROL_CONFIG,
         source,

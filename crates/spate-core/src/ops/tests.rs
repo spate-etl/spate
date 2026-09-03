@@ -888,6 +888,63 @@ fn flush_blocked_then_done_after_draining() {
     assert_eq!(drain_rows(&mut rxs[0]), vec![b"c".to_vec()]);
 }
 
+/// A payload that parks a chunk and latches an encoder fatal in the same pass
+/// reports the fatal.
+#[test]
+fn push_reports_a_fatal_latched_while_the_terminal_is_blocked() {
+    /// The outcome of one payload, and the rows that reached the shard queue.
+    fn run(third_row: &str) -> (PushOutcome, Vec<Vec<u8>>) {
+        // One shard at queue capacity 1 and a `target_bytes` of 1 seal a chunk
+        // per row, so the first row's chunk fills the queue and the second
+        // parks. Two rows are not enough, since a fatal row seals nothing and
+        // leaves the terminal unblocked.
+        let (queues, mut rxs) = shard_queues(1, 1);
+        let cfg = ChunkConfig {
+            target_bytes: 1,
+            ..ChunkConfig::default()
+        };
+        let mut c = chain(LogDeser)
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                cfg,
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let spec = format!("a:ok|ok|{third_row}");
+        let bufs = payloads(&[&spec]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        let outcome = c.push_batch(&mut batch, 0);
+        (outcome, drain_rows(&mut rxs[0]))
+    }
+
+    let (outcome, rows) = run("ok");
+    let PushOutcome::Blocked { resume_at, reason } = outcome else {
+        panic!("with no fatal the same payload reports backpressure, got {outcome:?}");
+    };
+    assert_eq!(resume_at, 1);
+    assert_eq!(reason, BlockReason::Capacity);
+    assert_eq!(
+        rows,
+        vec![b"ok".to_vec()],
+        "the queue took one chunk and the rest parked"
+    );
+
+    let (outcome, rows) = run("FATALROW");
+    let PushOutcome::Fatal(f) = outcome else {
+        panic!("expected the fatal, got {outcome:?}");
+    };
+    assert!(f.reason.contains("encoder broken"), "{}", f.reason);
+    assert_eq!(
+        rows,
+        vec![b"ok".to_vec()],
+        "the queue took one chunk and the rest parked"
+    );
+}
+
 /// A flush that parks a chunk and latches a `finish_chunk` fatal in the same
 /// pass returns the fatal.
 #[test]

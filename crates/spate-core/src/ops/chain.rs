@@ -632,6 +632,9 @@ where
             }
             Ok(()) => {}
         }
+        // Reporting the latched fatal ahead of backpressure is what fails the
+        // batch's ack; a `Backpressure` report fails nothing, so the batch
+        // resolves `Delivered` past the record the stage dropped.
         if let Some(fatal) = self.ops.take_fatal() {
             return Step::Fatal(fatal);
         }

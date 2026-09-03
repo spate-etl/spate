@@ -18,7 +18,11 @@ metrics. There are no dead-letter queues and no silent drops.
   delivered (so the watermark advances past it; an intentional drop must
   never stall commits), and continue.
 - **Fail**: stop the pipeline. The batch resolves as failed, the watermark
-  stalls, the process exits non-zero, and the data replays after restart.
+  stalls, the process exits non-zero, and the data replays after restart. The
+  operator stage that tripped counts one
+  `spate_operator_errors_total{error_type="fatal"}` under its own `component`
+  label, so the exposition names it. A deserializer counts
+  `spate_deser_records_total{outcome="error"}` either way.
 
 Defaults follow the likely blast radius: **deserializers default to Skip**
 (one poison record shouldn't take the pipeline down),
@@ -53,8 +57,8 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 | Metric | Labels | Description |
 |---|---|---|
 | `spate_deser_records_dropped_total` | `reason` (`skip_policy`) | Payloads dropped by the deserializer's Skip policy. |
-| `spate_operator_records_dropped_total` | `reason` (`filtered` or `skip_policy`) | Records removed by `filter` vs dropped by a Skip policy — distinguishable by design. |
-| `spate_operator_errors_total` | `error_type` | User-code errors by taxonomy class. |
+| `spate_operator_records_dropped_total` | `reason` (`filtered`, `skip_policy` or `unrouted`) | Records removed by `filter`, dropped by a Skip policy, or matching no split-sink branch. Each keeps its own reason. |
+| `spate_operator_errors_total` | `error_type` (`record_level` or `fatal`) | Errors by what the stage did with them: `record_level` for a record a Skip policy dropped, `fatal` for a failure that stopped the pipeline. No error here is retryable, since an operator stage carries no error class to retry on. |
 | `spate_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
 | `spate_deser_not_ready_total` | — | Deserialization deferred because an upstream dependency was not yet available. |
 

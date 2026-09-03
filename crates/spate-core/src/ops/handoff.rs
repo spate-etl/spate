@@ -155,6 +155,7 @@ where
         // and ship nothing. The shard's captured acks fail on teardown, so
         // the rows replay.
         if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
+            self.meter.0.fatal_error();
             self.fatal.0 = Some(FatalError {
                 component: self.component.to_string(),
                 reason: e.to_string(),
@@ -274,6 +275,7 @@ where
                         );
                     }
                     _ => {
+                        self.meter.0.fatal_error();
                         self.fatal.0 = Some(FatalError {
                             component: self.component.to_string(),
                             reason: e.to_string(),

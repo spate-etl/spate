@@ -7,6 +7,10 @@ use metrics::{Counter, Histogram};
 use std::time::Duration;
 
 /// Operator-stage handles (`spate_operator_*`).
+///
+/// `error_type` names what the stage did with an error. A stage carries no
+/// error class of its own, so the retryable class belongs to
+/// [`SinkShardMetrics`](super::SinkShardMetrics).
 #[derive(Debug)]
 pub struct OperatorMetrics {
     records_in: Counter,
@@ -14,7 +18,6 @@ pub struct OperatorMetrics {
     dropped_filtered: Counter,
     dropped_skip: Counter,
     dropped_unrouted: Counter,
-    err_retryable: Counter,
     err_record: Counter,
     err_fatal: Counter,
     batch_duration: Histogram,
@@ -40,11 +43,6 @@ impl OperatorMetrics {
                 names::OPERATOR_RECORDS_DROPPED_TOTAL,
                 names::L_REASON,
                 "unrouted",
-            ),
-            err_retryable: labels.counter1(
-                names::OPERATOR_ERRORS_TOTAL,
-                names::L_ERROR_TYPE,
-                ErrorClass::Retryable.label(),
             ),
             err_record: labels.counter1(
                 names::OPERATOR_ERRORS_TOTAL,
@@ -87,13 +85,15 @@ impl OperatorMetrics {
         self.dropped_unrouted.increment(n);
     }
 
-    /// Count user-code errors of one taxonomy class.
+    /// Count records whose failure the Skip error policy dropped.
     #[inline]
-    pub fn errors(&self, class: ErrorClass, n: u64) {
-        match class {
-            ErrorClass::Retryable => self.err_retryable.increment(n),
-            ErrorClass::RecordLevel => self.err_record.increment(n),
-            ErrorClass::Fatal => self.err_fatal.increment(n),
-        }
+    pub fn record_errors(&self, n: u64) {
+        self.err_record.increment(n);
+    }
+
+    /// Count one failure that stopped the pipeline.
+    #[inline]
+    pub fn fatal_error(&self) {
+        self.err_fatal.increment(1);
     }
 }

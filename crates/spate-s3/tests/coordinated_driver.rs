@@ -108,13 +108,12 @@ fn gains_stream_commits_carry_completion_and_all_complete_drains() {
 
 #[test]
 fn a_mid_flow_gain_folds_the_drain_commit_and_completes() {
-    // Regression (deep-review finding F1): gaining split B while split A
-    // flowed used to revoke A's lane and drop its context state, so the
-    // post-drain commit for A's acked watermark tripped the "unheld
-    // split" fatal and killed the pipeline. Gains are additive now: the
-    // commit must fold and both splits must complete. The 60s checkpoint
-    // interval doubles as the eager-commit check: completion can only
-    // arrive through the commit-ready chase, never the periodic tick.
+    // A gain is additive: taking split B while split A flows leaves A's
+    // lane and context state in place, so the post-drain commit for A's
+    // acked watermark folds and both splits complete. The 60s checkpoint
+    // interval doubles as the eager-commit check, since completion can
+    // only arrive through the commit-ready chase and never the periodic
+    // tick.
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     fs::create_dir_all(&data).unwrap();

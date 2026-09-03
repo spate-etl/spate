@@ -153,10 +153,11 @@ where
         // row formats, which already wrote every row in `encode`). A finalize
         // failure means a broken encoder, not a bad record: record it fatal
         // and ship nothing. The shard's captured acks fail on teardown, so
-        // the rows replay.
+        // the rows replay. A flush seals every shard after this one, so the
+        // latch keeps the first reason.
         if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
             self.meter.0.fatal_error();
-            self.fatal.0 = Some(FatalError {
+            self.fatal.0.get_or_insert_with(|| FatalError {
                 component: self.component.to_string(),
                 reason: e.to_string(),
             });
@@ -223,8 +224,8 @@ where
     fn push(&mut self, rec: Record<F::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
         // Records after a fatal are dropped until `take_fatal` drains the
-        // slot at the end of the payload. The latch below overwrites, so
-        // this return is what keeps the first reason.
+        // slot at the end of the payload. Nothing past this return reaches
+        // a shard buffer.
         if self.fatal.0.is_some() {
             return Flow::Continue;
         }
@@ -279,7 +280,7 @@ where
                     }
                     _ => {
                         self.meter.0.fatal_error();
-                        self.fatal.0 = Some(FatalError {
+                        self.fatal.0.get_or_insert_with(|| FatalError {
                             component: self.component.to_string(),
                             reason: e.to_string(),
                         });

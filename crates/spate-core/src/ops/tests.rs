@@ -212,24 +212,28 @@ impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
 
 /// Length-prefixed encoder whose `finish_chunk` fails after it has encoded a
 /// row ending `FATALFINISH`. Each shard owns its own clone, so row content
-/// picks the failing shard.
+/// picks the failing shard, and the reason names the row, so a reason
+/// identifies which shard raised it.
 #[derive(Clone, Default)]
 struct SelectiveFinishEncoder {
-    doomed: bool,
+    doomed: Option<String>,
 }
 
 impl RowEncoder<Owned<Vec<u8>>> for SelectiveFinishEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
-        self.doomed |= rec.payload.ends_with(b"FATALFINISH");
+        if rec.payload.ends_with(b"FATALFINISH") {
+            self.doomed
+                .get_or_insert_with(|| String::from_utf8_lossy(&rec.payload).into_owned());
+        }
         buf.extend_from_slice(&(u32::try_from(rec.payload.len()).unwrap()).to_le_bytes());
         buf.extend_from_slice(&rec.payload);
         Ok(())
     }
     fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
-        if self.doomed {
+        if let Some(row) = &self.doomed {
             return Err(SinkError::Client {
                 class: crate::error::ErrorClass::Fatal,
-                reason: "cannot finalize the block".into(),
+                reason: format!("cannot finalize the block after {row}"),
             });
         }
         Ok(())
@@ -268,6 +272,16 @@ impl Deserializer<Owned<Vec<u8>>> for OwnedPassthrough {
             ack: ack.clone(),
         });
         Ok(())
+    }
+}
+
+/// Route a row whose payload starts `s1:` to shard 1, every other row to
+/// shard 0.
+#[derive(Clone, Copy)]
+struct ByPrefix;
+impl RecordRouter<Owned<Vec<u8>>> for ByPrefix {
+    fn route_record<'buf>(&self, rec: &Record<Vec<u8>>, n: usize) -> usize {
+        usize::from(rec.payload.starts_with(b"s1:")) % n
     }
 }
 
@@ -728,6 +742,51 @@ fn a_try_map_reports_the_first_fatal_of_a_payload() {
     );
 }
 
+/// When two shards fail to finalize in one flush, the reported reason names the
+/// shard the seal loop reached first, whichever shard's row arrived first. A
+/// shard that finalizes cleanly after another has latched still ships its chunk.
+/// Regression for #361.
+#[test]
+fn a_flush_reports_the_first_shard_that_failed_to_finalize() {
+    /// The reason one flush reports, and the rows that reached shard 1.
+    fn run(rows: &[&str]) -> (String, Vec<Vec<u8>>) {
+        // The default 64KiB target holds every row until the flush, so both
+        // shards seal in the same `flush_terminal` pass.
+        let (queues, mut rxs) = shard_queues(2, 64);
+        let mut c = chain_owned(BytesPassthrough)
+            .sink(
+                SelectiveFinishEncoder::default(),
+                ByPrefix,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(rows);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        let PushOutcome::Fatal(f) = c.flush() else {
+            panic!("expected fatal");
+        };
+        (f.reason, drain_rows(&mut rxs[1]))
+    }
+
+    let (first, _) = run(&["s0:FATALFINISH", "s1:FATALFINISH"]);
+    assert!(first.contains("s0:"), "{first}");
+
+    let (reversed, _) = run(&["s1:FATALFINISH", "s0:FATALFINISH"]);
+    assert!(reversed.contains("s0:"), "{reversed}");
+
+    let (mixed, shipped) = run(&["s0:FATALFINISH", "s1:ok"]);
+    assert!(mixed.contains("s0:"), "{mixed}");
+    assert_eq!(
+        shipped,
+        vec![b"s1:ok".to_vec()],
+        "a shard that finalized cleanly must still ship its chunk"
+    );
+}
+
 // ---- backpressure / resume semantics ----------------------------------------
 
 #[test]
@@ -833,15 +892,6 @@ fn flush_blocked_then_done_after_draining() {
 /// pass returns the fatal.
 #[test]
 fn flush_reports_a_fatal_latched_while_the_terminal_is_blocked() {
-    /// Route a row whose payload starts `s1:` to shard 1.
-    #[derive(Clone, Copy)]
-    struct ByPrefix;
-    impl RecordRouter<Owned<Vec<u8>>> for ByPrefix {
-        fn route_record<'buf>(&self, rec: &Record<Vec<u8>>, n: usize) -> usize {
-            usize::from(rec.payload.starts_with(b"s1:")) % n
-        }
-    }
-
     // Two shards, queue capacity 1, the default 64KiB target so nothing seals
     // inline. The second flush seals shard 0 into a full queue, which parks
     // the chunk, and then fails to finalize shard 1.

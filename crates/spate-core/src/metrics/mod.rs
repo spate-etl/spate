@@ -402,7 +402,8 @@ mod tests {
             let op = OperatorMetrics::new(&labels("orders_kafka"));
             op.batch(510, 380, Duration::from_micros(600));
             op.filtered(130);
-            op.errors(ErrorClass::RecordLevel, 1);
+            op.record_errors(1);
+            op.fatal_error();
 
             let q = QueueMetrics::new(&labels("orders_kafka"), "chain->sink/0", 4096);
             q.set_depth(17);
@@ -480,6 +481,8 @@ mod tests {
             r#"partition="7""#,
             r#"spate_deser_records_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 510"#,
             r#"spate_operator_records_dropped_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="filtered"} 130"#,
+            r#"spate_operator_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",error_type="record_level"} 1"#,
+            r#"spate_operator_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",error_type="fatal"} 1"#,
             r#"spate_queue_capacity{pipeline="orders",component="orders_kafka",component_type="kafka",queue="chain->sink/0"} 4096"#,
             r#"spate_backpressure_pause_events_total{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,
             r#"spate_backpressure_inflight_bytes{pipeline="orders",component="orders_kafka",component_type="kafka"} 1048576"#,

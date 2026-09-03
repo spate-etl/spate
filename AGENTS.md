@@ -99,9 +99,8 @@ Replacing one with another is not a fix.
 
 ## Documentation
 
-`docs/STYLE.md` is normative; the `docs-review` skill
-(`.claude/skills/docs-review/SKILL.md`) is the procedure for applying it. Read or
-invoke it for any edit under `docs/`.
+`docs/STYLE.md` is normative. Read it for any edit under `docs/`, and check the
+claims a page makes against the source before its prose.
 
 The rules that break most often:
 

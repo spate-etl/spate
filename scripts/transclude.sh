@@ -13,7 +13,7 @@
 #
 # --check holds the mechanical half only: that a page's pointer resolves.
 # Whether the region is the right code for the paragraph around it is review's
-# job. See .claude/skills/docs-review/SKILL.md step 1.
+# job.
 #
 # Usage:
 #   ./scripts/transclude.sh --check      # the gate

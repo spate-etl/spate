@@ -187,6 +187,29 @@ impl RowEncoder<Owned<Vec<u8>>> for ColumnarEncoder {
     }
 }
 
+/// A columnar encoder that accepts every row and fails to finalize the block.
+#[derive(Clone, Default)]
+struct BrokenFinishEncoder;
+
+impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
+    fn encode<'buf>(
+        &mut self,
+        _rec: &Record<Vec<u8>>,
+        _buf: &mut BytesMut,
+    ) -> Result<(), SinkError> {
+        Ok(())
+    }
+    fn buffered_bytes(&self) -> usize {
+        1
+    }
+    fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
+        Err(SinkError::Client {
+            class: crate::error::ErrorClass::Fatal,
+            reason: "cannot finalize the block".into(),
+        })
+    }
+}
+
 /// Decode a [`ColumnarEncoder`] block: leading `u32` row count, then rows.
 fn decode_block(frame: &[u8]) -> Vec<Vec<u8>> {
     let count = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
@@ -1258,6 +1281,313 @@ fn stages_flush_batch_metrics() {
         rendered.contains(r#"component="main.1_flat_map""#),
         "flat_map stage present: {rendered}"
     );
+}
+
+/// Every `spate_operator_errors_total` series in `rendered`, sorted.
+fn error_series(rendered: &str) -> Vec<String> {
+    let mut out: Vec<String> = rendered
+        .lines()
+        .filter(|l| {
+            l.starts_with(&format!(
+                "{}{{",
+                crate::metrics::names::OPERATOR_ERRORS_TOTAL
+            ))
+        })
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out
+}
+
+/// The labels a stage of this index and kind publishes under.
+fn stage_labels(idx: usize, kind: &str) -> String {
+    format!(r#"pipeline="errtest",component="main.{idx}_{kind}",component_type="{kind}""#)
+}
+
+/// The labels a split branch's terminal publishes under.
+fn branch_labels(sink: &str) -> String {
+    format!(r#"pipeline="errtest",component="main.sink.{sink}",component_type="sink_handoff""#)
+}
+
+/// The `spate_operator_errors_total` series one stage publishes, in
+/// [`error_series`] order. Handles register eagerly, so a stage that has not
+/// erred still renders both values at `0`.
+fn stage_errors(labels: &str, record_level: u64, fatal: u64) -> Vec<String> {
+    let name = crate::metrics::names::OPERATOR_ERRORS_TOTAL;
+    vec![
+        format!(r#"{name}{{{labels},error_type="fatal"}} {fatal}"#),
+        format!(r#"{name}{{{labels},error_type="record_level"}} {record_level}"#),
+    ]
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// Render `f` against a recorder of its own.
+fn render(f: impl FnOnce()) -> String {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, f);
+    handle.render()
+}
+
+/// A `try_map` stopping the pipeline is counted on the stage that stopped it,
+/// and no stage carries a `retryable` series. Regression for #335.
+#[test]
+fn a_try_map_fail_trip_counts_a_fatal_on_its_own_stage() {
+    let rendered = render(|| {
+        let (queues, _rxs) = shard_queues(1, 64);
+        let mut c = chain_owned(OwnedPassthrough)
+            .with_metrics("errtest", "main")
+            .try_map(
+                |b: Vec<u8>| -> Result<Vec<u8>, &'static str> {
+                    if b == b"boom" { Err("kaboom") } else { Ok(b) }
+                },
+                ErrorPolicy::Fail,
+            )
+            .sink(
+                VecEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["fine", "boom", "after"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
+    });
+
+    let mut expected = stage_errors(&stage_labels(0, "try_map"), 0, 1);
+    expected.extend(stage_errors(&stage_labels(1, "sink_handoff"), 0, 0));
+    assert_eq!(
+        error_series(&rendered),
+        sorted(expected),
+        "the try_map stage is the only one that erred, and no stage carries a \
+         retryable series:\n{rendered}"
+    );
+}
+
+/// An encoder error counts under the `error_type` naming its disposition. A
+/// `Fatal` class overrides the Skip policy and counts as fatal.
+#[test]
+fn encoder_error_classes_land_on_their_own_error_type() {
+    let record_level = render(|| {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = chain(LogDeser)
+            .with_metrics("errtest", "main")
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+        let bufs = payloads(&["a:ok|BADROW"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        let _ = c.flush();
+        drain_rows(&mut rxs[0]);
+    });
+    let mut expected = stage_errors(&stage_labels(0, "flat_map"), 0, 0);
+    expected.extend(stage_errors(&stage_labels(1, "sink_handoff"), 1, 0));
+    assert_eq!(
+        error_series(&record_level),
+        sorted(expected),
+        "a skipped row is record-level:\n{record_level}"
+    );
+
+    let fatal = render(|| {
+        let (queues, _rxs) = shard_queues(1, 64);
+        let mut c = chain(LogDeser)
+            .with_metrics("errtest", "main")
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                ChunkConfig::default(), // encode_policy: Skip, which Fatal overrides
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+        let bufs = payloads(&["a:FATALROW|FATALROW|ok"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
+    });
+    let mut expected = stage_errors(&stage_labels(0, "flat_map"), 0, 0);
+    expected.extend(stage_errors(&stage_labels(1, "sink_handoff"), 0, 1));
+    assert_eq!(
+        error_series(&fatal),
+        sorted(expected),
+        "a Fatal-class encoder error overrides Skip and counts a fatal:\n{fatal}"
+    );
+}
+
+/// A record matching no split branch counts a fatal under `Fail`, and under
+/// `Skip` counts a drop and no error.
+#[test]
+fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
+    let fail = render(|| {
+        let (sub_q, _rx) = shard_queues(1, 64);
+        let mut split = chain(LogDeser)
+            .with_metrics("errtest", "main")
+            .split(ErrorPolicy::Fail);
+        let sub = split.add::<SubF, _, _>(
+            SubEncoder,
+            ToZero,
+            SinkCtx::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
+        );
+        let mut c = split
+            .route(move |e: LogEvent<'_>, out| {
+                if e.key.starts_with('a') {
+                    out.emit(sub, SubEvent { chunk: e.body });
+                }
+            })
+            .build();
+        let bufs = payloads(&["z9:nomatch"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
+    });
+    let mut expected = stage_errors(&stage_labels(0, "split"), 0, 1);
+    expected.extend(stage_errors(&branch_labels("sub"), 0, 0));
+    assert_eq!(
+        error_series(&fail),
+        sorted(expected),
+        "the split stage stopped the pipeline:\n{fail}"
+    );
+
+    let skip = render(|| {
+        let (sub_q, _rx) = shard_queues(1, 64);
+        let mut split = chain(LogDeser)
+            .with_metrics("errtest", "main")
+            .split(ErrorPolicy::Skip);
+        let sub = split.add::<SubF, _, _>(
+            SubEncoder,
+            ToZero,
+            SinkCtx::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
+        );
+        let mut c = split
+            .route(move |e: LogEvent<'_>, out| {
+                if e.key.starts_with('a') {
+                    out.emit(sub, SubEvent { chunk: e.body });
+                }
+            })
+            .build();
+        let bufs = payloads(&["z9:nomatch"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    });
+    let mut expected = stage_errors(&stage_labels(0, "split"), 0, 0);
+    expected.extend(stage_errors(&branch_labels("sub"), 0, 0));
+    assert_eq!(
+        error_series(&skip),
+        sorted(expected),
+        "an unrouted record under Skip is a drop, not an error:\n{skip}"
+    );
+    assert!(
+        skip.contains(r#"reason="unrouted""#),
+        "it is counted as a drop:\n{skip}"
+    );
+}
+
+/// A `finish_chunk` failure is returned by the `flush` that latched it and
+/// counts one fatal, however many times the stage is flushed afterwards.
+/// Regression for #351.
+#[test]
+fn a_finish_chunk_failure_counts_a_fatal_on_the_stage_that_raised_it() {
+    let rendered = render(|| {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = chain_owned(OwnedPassthrough)
+            .with_metrics("errtest", "main")
+            .sink(
+                BrokenFinishEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["row"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+        // The drain flushes again over the same rows.
+        let _ = c.flush();
+        let _ = c.flush();
+        assert!(
+            rxs[0].try_recv().is_err(),
+            "a chunk whose finalize failed must not be shipped"
+        );
+    });
+
+    assert_eq!(
+        error_series(&rendered),
+        stage_errors(&stage_labels(0, "sink_handoff"), 0, 1),
+        "a broken finalize is one fatal for the stage that raised it:\n{rendered}"
+    );
+}
+
+/// A record the Skip policy drops counts a record-level error and no fatal.
+#[test]
+fn a_skipped_record_counts_no_fatal() {
+    let rendered = render(|| {
+        let (queues, _rxs) = shard_queues(1, 64);
+        let mut c = chain_owned(OwnedPassthrough)
+            .with_metrics("errtest", "main")
+            .try_map(
+                |b: Vec<u8>| -> Result<Vec<u8>, &'static str> {
+                    if b == b"boom" { Err("kaboom") } else { Ok(b) }
+                },
+                ErrorPolicy::Skip,
+            )
+            .sink(
+                VecEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["fine", "boom"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    });
+
+    let mut expected = stage_errors(&stage_labels(0, "try_map"), 1, 0);
+    expected.extend(stage_errors(&stage_labels(1, "sink_handoff"), 0, 0));
+    assert_eq!(
+        error_series(&rendered),
+        sorted(expected),
+        "a Skip trip is record-level and stops nothing:\n{rendered}"
+    );
+}
+
+/// `ChainFactory` promises `Send + Sync` when its parts are, so no stage may
+/// hold a non-`Sync` field.
+#[test]
+fn a_chain_factory_of_sync_parts_is_sync() {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let (queues, _rxs) = shard_queues(1, 64);
+    let factory = chain_owned(OwnedPassthrough)
+        .try_map(
+            |b: Vec<u8>| -> Result<Vec<u8>, &'static str> { Ok(b) },
+            ErrorPolicy::Fail,
+        )
+        .sink(
+            VecEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        );
+    assert_send_sync(&factory);
 }
 
 // ---- teardown safety --------------------------------------------------------

@@ -374,6 +374,7 @@ where
                 ErrorPolicy::Skip => self.meter.0.unrouted(),
                 // The driver fails the batch's ack, stopping the pipeline.
                 _ => {
+                    self.meter.0.fatal_error();
                     self.fatal.0 = Some(FatalError {
                         component: self.component.to_string(),
                         reason: "record matched no split branch".into(),

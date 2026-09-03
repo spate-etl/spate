@@ -14,7 +14,9 @@ pub enum ErrorPolicy {
     /// Drop the record, count it in `spate_*_dropped_total{reason}`, and
     /// continue. Default for deserializers.
     Skip,
-    /// Fail the batch and stop the pipeline. Default for operators.
+    /// Fail the batch and stop the pipeline. An operator stage counts it in
+    /// `spate_operator_errors_total{error_type="fatal"}`. Default for
+    /// operators.
     #[default]
     Fail,
 }

@@ -11,18 +11,22 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 <!--
 `Closes #123.` on a line of its own first, if an issue tracks this.
 
-There is no need to repeat what that issue says. The diff shows the code and
-the issue states the problem, so use this space for what neither can tell a
-reviewer: the approach, the decisions that were not forced, and what someone
-using the framework sees differently.
-
-When no issue tracks this, state the problem here, in terms of what a user
-hits. "`ChunkWriter` drops the last frame" is a symptom of the implementation.
-"The final batch never reaches the sink on shutdown" is the user-visible
+Why before what. Open with the problem a user hits, then what the change does
+about it. "`ChunkWriter` drops the last frame" is a symptom of the
+implementation; "the final batch never reaches the sink on shutdown" is the
 problem.
+
+A few paragraphs, not the full account. The commit message carries the
+argument, dated and attached to the diff, so this space carries what a reviewer
+needs in order to decide: the approach, the decisions that were not forced, and
+what someone using the framework sees differently. An alternative earns a
+sentence here while the choice is still open. One the commit message has
+already settled does not.
 
 Say where this delivers less, more, or something other than the issue asked
 for. That comparison is the one a reviewer cannot make alone.
+
+Test evidence and deferred work go under `Anything else`.
 -->
 
 ## Invariants

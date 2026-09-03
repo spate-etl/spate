@@ -33,7 +33,9 @@ pub const L_OUTCOME: &str = "outcome";
 pub const L_OP: &str = "op";
 /// Rebalance event label (`assign`, `revoke`).
 pub const L_EVENT: &str = "event";
-/// Error taxonomy class label (`retryable`, `record_level`, `fatal`).
+/// Error class label. [`SINK_ERRORS_TOTAL`] carries the class the connector
+/// assigned (`retryable`, `record_level`, `fatal`); [`OPERATOR_ERRORS_TOTAL`]
+/// carries what the stage did with the error (`record_level`, `fatal`).
 pub const L_ERROR_TYPE: &str = "error_type";
 /// Queue edge label (`<upstream>-><downstream>`).
 pub const L_QUEUE: &str = "queue";

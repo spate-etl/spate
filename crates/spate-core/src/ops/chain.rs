@@ -16,7 +16,7 @@
 use super::{BlockReason, Collector, CollectorFor, PushOutcome, RunnableChain};
 use crate::checkpoint::AckRef;
 use crate::deser::{Deserializer, EmitRecord, RecFamily};
-use crate::error::{DeserError, ErrorClass, ErrorPolicy, FatalError};
+use crate::error::{DeserError, ErrorPolicy, FatalError};
 use crate::metrics::{DeserMetrics, OperatorMetrics};
 use crate::record::{Flow, RawPayload, Record, RecordMeta};
 use crate::source::PayloadBatch;
@@ -52,6 +52,10 @@ pub trait StageLifecycle {
 #[derive(Debug, Default)]
 pub(crate) struct OpMeter {
     handle: Option<Arc<OperatorMetrics>>,
+    /// Set by the first [`fatal_error`](Self::fatal_error) and never cleared,
+    /// so a stage counts one fatal however often it is re-entered. Atomic to
+    /// keep the stage structs `Sync`, which `ChainFactory` promises.
+    tripped: std::sync::atomic::AtomicBool,
     records_in: u64,
     records_out: u64,
     filtered: u64,
@@ -103,6 +107,21 @@ impl OpMeter {
         self.record_errors += 1;
     }
 
+    /// Counts the stage's first fatal and nothing after it. Writes straight to
+    /// the handle, since a fatal can be latched after the last `on_batch_end`
+    /// where an accumulated count would never flush.
+    pub(crate) fn fatal_error(&self) {
+        if self
+            .tripped
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if let Some(h) = &self.handle {
+            h.fatal_error();
+        }
+    }
+
     pub(crate) fn flush(&mut self, elapsed: Duration) {
         if let Some(h) = &self.handle {
             h.batch(self.records_in, self.records_out, elapsed);
@@ -116,7 +135,7 @@ impl OpMeter {
                 h.unrouted(self.unrouted);
             }
             if self.record_errors > 0 {
-                h.errors(ErrorClass::RecordLevel, self.record_errors);
+                h.record_errors(self.record_errors);
             }
         }
         self.records_in = 0;
@@ -268,6 +287,7 @@ where
                         );
                     }
                     _ => {
+                        self.meter.0.fatal_error();
                         self.fatal.0 = Some(FatalError {
                             component: self.component.to_string(),
                             reason: e.to_string(),
@@ -752,7 +772,13 @@ where
         if let Some(fatal) = self.ops.take_fatal() {
             return PushOutcome::Fatal(fatal);
         }
-        match self.ops.flush_terminal() {
+        let flow = self.ops.flush_terminal();
+        // Finalizing a chunk can latch a fatal of its own, and the shutdown
+        // drain makes no further call to surface it on.
+        if let Some(fatal) = self.ops.take_fatal() {
+            return PushOutcome::Fatal(fatal);
+        }
+        match flow {
             Flow::Continue => PushOutcome::Done,
             Flow::Blocked => PushOutcome::Blocked {
                 resume_at: self.cursor,

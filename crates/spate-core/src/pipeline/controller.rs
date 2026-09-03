@@ -361,6 +361,21 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         );
     }
 
+    // A driver's last flush can report a fatal, and the loop that reads
+    // `events_rx` has already been left to send `Shutdown`. Take what the
+    // drain produced, so a run that abandoned a batch exits non-zero. Only the
+    // failure: every driver has dropped its lanes by now, so a pause request
+    // queued behind it addresses an assignment nothing holds.
+    while let Ok(event) = events_rx.try_recv() {
+        if let DriverEvent::Fatal { thread, error } = event {
+            tracing::error!(thread, error = %error, "pipeline thread reported fatal");
+            state.failure.get_or_insert(error);
+        }
+    }
+    if state.failure.is_some() {
+        pipeline_metrics.set_state(PipelineState::Failed);
+    }
+
     // Hand over to main, which joins the driver threads (dropping
     // their chains closes the shard queues) and drains the sink.
     let _ = to_main.send(ControllerSignal::LanesDrained {

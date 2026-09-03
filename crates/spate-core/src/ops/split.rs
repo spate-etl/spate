@@ -350,7 +350,7 @@ where
 {
     fn push(&mut self, rec: Record<SrcF::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
-        // A latched fatal short-circuits the rest of the batch, just like
+        // A latched fatal short-circuits the rest of the payload, just like
         // `SinkHandoff`. The chain drains it via `take_fatal`.
         if self.fatal.0.is_some() {
             return Flow::Continue;

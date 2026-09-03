@@ -611,6 +611,123 @@ fn fatal_class_encoder_errors_override_the_skip_policy() {
     assert_eq!(drain_rows(&mut rxs[0]), vec![b"ok".to_vec()]);
 }
 
+/// When two records of one payload both fail fatally, the sink handoff reports
+/// the first, and the record between them never reaches a shard queue.
+/// Reversing the order reverses the reason, so this pins push order rather than
+/// a precedence between the two error classes.
+#[test]
+fn a_sink_handoff_reports_the_first_fatal_of_a_payload() {
+    /// The reason one payload reports, and the rows that reached shard 0.
+    fn run(payload: &str) -> (String, Vec<Vec<u8>>) {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        // `Fail` is what lets a record-level `BADROW` error write the slot;
+        // under `Skip` it is only counted. A `target_bytes` of 1 seals any
+        // row that does encode, so a row pushed after the fatal shows up in
+        // the returned rows.
+        let cfg = ChunkConfig {
+            target_bytes: 1,
+            encode_policy: ErrorPolicy::Fail,
+        };
+        let mut c = chain(LogDeser)
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                cfg,
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&[payload]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+            panic!("expected fatal");
+        };
+        (f.reason, drain_rows(&mut rxs[0]))
+    }
+
+    let (first, rows) = run("a:FATALROW|ok|BADROW");
+    assert!(first.contains("encoder broken"), "{first}");
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+
+    let (reversed, rows) = run("a:BADROW|ok|FATALROW");
+    assert!(reversed.contains("unencodable row"), "{reversed}");
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+}
+
+/// When two records of one payload both fail a `try_map` under `Fail`, the
+/// stage reports the first, and the record between them never reaches the
+/// sink. Reversing the order reverses the reason.
+#[test]
+fn a_try_map_reports_the_first_fatal_of_a_payload() {
+    /// Split each body at `|` into owned rows, which puts the chain on the
+    /// owned builder tier where `try_map` takes a plain closure.
+    fn split_body_owned(e: LogEvent<'_>, em: &mut Emitter<'_, Owned<Vec<u8>>>) {
+        for chunk in e.body.split(|&b| b == b'|') {
+            em.emit(chunk.to_vec());
+        }
+    }
+
+    /// The reason one payload reports, and the rows that reached shard 0.
+    fn run(payload: &str) -> (String, Vec<Vec<u8>>) {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = chain(LogDeser)
+            .flat_map::<Owned<Vec<u8>>, _>(split_body_owned)
+            .try_map(
+                |b: Vec<u8>| -> Result<Vec<u8>, &'static str> {
+                    match b.as_slice() {
+                        b"boom1" => Err("kaboom one"),
+                        b"boom2" => Err("kaboom two"),
+                        _ => Ok(b),
+                    }
+                },
+                ErrorPolicy::Fail,
+            )
+            .sink(
+                VecEncoder,
+                KeyHashRouter,
+                // A `target_bytes` of 1 seals any row that gets past the
+                // `try_map`, so a record pushed after the fatal shows up in
+                // the returned rows.
+                ChunkConfig {
+                    target_bytes: 1,
+                    ..ChunkConfig::default()
+                },
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&[payload]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+            panic!("expected fatal");
+        };
+        (f.reason, drain_rows(&mut rxs[0]))
+    }
+
+    let (first, rows) = run("a:boom1|ok|boom2");
+    assert!(first.contains("kaboom one"), "{first}");
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+
+    let (reversed, rows) = run("a:boom2|ok|boom1");
+    assert!(reversed.contains("kaboom two"), "{reversed}");
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+}
+
 // ---- backpressure / resume semantics ----------------------------------------
 
 #[test]

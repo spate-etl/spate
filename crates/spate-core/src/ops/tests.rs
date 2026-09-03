@@ -210,6 +210,32 @@ impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
     }
 }
 
+/// Length-prefixed encoder whose `finish_chunk` fails after it has encoded a
+/// row ending `FATALFINISH`. Each shard owns its own clone, so row content
+/// picks the failing shard.
+#[derive(Clone, Default)]
+struct SelectiveFinishEncoder {
+    doomed: bool,
+}
+
+impl RowEncoder<Owned<Vec<u8>>> for SelectiveFinishEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        self.doomed |= rec.payload.ends_with(b"FATALFINISH");
+        buf.extend_from_slice(&(u32::try_from(rec.payload.len()).unwrap()).to_le_bytes());
+        buf.extend_from_slice(&rec.payload);
+        Ok(())
+    }
+    fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
+        if self.doomed {
+            return Err(SinkError::Client {
+                class: crate::error::ErrorClass::Fatal,
+                reason: "cannot finalize the block".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Decode a [`ColumnarEncoder`] block: leading `u32` row count, then rows.
 fn decode_block(frame: &[u8]) -> Vec<Vec<u8>> {
     let count = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
@@ -684,6 +710,61 @@ fn flush_blocked_then_done_after_draining() {
     assert_eq!(first, vec![b"a".to_vec(), b"b".to_vec()]);
     assert!(matches!(c.flush(), PushOutcome::Done));
     assert_eq!(drain_rows(&mut rxs[0]), vec![b"c".to_vec()]);
+}
+
+/// A flush that parks a chunk and latches a `finish_chunk` fatal in the same
+/// pass returns the fatal.
+#[test]
+fn flush_reports_a_fatal_latched_while_the_terminal_is_blocked() {
+    /// Route a row whose payload starts `s1:` to shard 1.
+    #[derive(Clone, Copy)]
+    struct ByPrefix;
+    impl RecordRouter<Owned<Vec<u8>>> for ByPrefix {
+        fn route_record<'buf>(&self, rec: &Record<Vec<u8>>, n: usize) -> usize {
+            usize::from(rec.payload.starts_with(b"s1:")) % n
+        }
+    }
+
+    // Two shards, queue capacity 1, the default 64KiB target so nothing seals
+    // inline. The second flush seals shard 0 into a full queue, which parks
+    // the chunk, and then fails to finalize shard 1.
+    fn run(second_row: &str) -> PushOutcome {
+        let (queues, _rxs) = shard_queues(2, 1);
+        let mut c = chain_owned(BytesPassthrough)
+            .sink(
+                SelectiveFinishEncoder::default(),
+                ByPrefix,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["s0:a"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        // Fills shard 0's queue. Asserted rather than discarded, so that
+        // dropping `_rxs` fails here instead of parking this chunk and
+        // blocking the second flush for a different reason.
+        assert!(matches!(c.flush(), PushOutcome::Done));
+
+        let bufs2 = payloads(&["s0:b", second_row]);
+        let (mut batch2, _rx2) = TestBatch::new(&bufs2);
+        assert!(matches!(c.push_batch(&mut batch2, 0), PushOutcome::Done));
+        c.flush()
+    }
+
+    assert!(
+        matches!(
+            run("s1:ok"),
+            PushOutcome::Blocked {
+                reason: BlockReason::Capacity,
+                ..
+            }
+        ),
+        "with shard 1 finalizing cleanly the same flush reports backpressure"
+    );
+    assert!(matches!(run("s1:FATALFINISH"), PushOutcome::Fatal(_)));
 }
 
 // ---- handoff details ---------------------------------------------------------

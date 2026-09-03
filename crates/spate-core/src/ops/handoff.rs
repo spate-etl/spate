@@ -222,6 +222,9 @@ where
 {
     fn push(&mut self, rec: Record<F::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
+        // Records after a fatal are dropped until `take_fatal` drains the
+        // slot at the end of the payload. The latch below overwrites, so
+        // this return is what keeps the first reason.
         if self.fatal.0.is_some() {
             return Flow::Continue;
         }

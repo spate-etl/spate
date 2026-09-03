@@ -260,8 +260,8 @@ where
     fn push(&mut self, rec: Record<In>) -> Flow {
         self.meter.0.seen();
         if self.fatal.0.is_some() {
-            // Fatal pending: swallow the rest of the batch. The boundary
-            // fails the batch's ack, so nothing is lost.
+            // Fatal pending: swallow the rest of the payload. The
+            // boundary fails the batch's ack, so nothing is lost.
             return Flow::Continue;
         }
         let Record { payload, meta, ack } = rec;

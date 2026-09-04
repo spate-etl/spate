@@ -35,7 +35,10 @@ pub trait StageLifecycle {
     /// the chain figure, keeping the histograms comparable.
     fn on_batch_end(&mut self, elapsed: Duration);
 
-    /// Take the first fatal error recorded by any stage.
+    /// Take the fatal error any stage recorded first, draining every stage's
+    /// slot. An implementor that records one drops every later record until
+    /// its slot is drained; that is what lets a stage's position in the chain
+    /// stand in for when it recorded.
     fn take_fatal(&mut self) -> Option<FatalError>;
 
     /// Let the terminal stage drain parked output. [`Flow::Blocked`] means
@@ -435,7 +438,13 @@ impl<G, N: StageLifecycle> StageLifecycle for TryMap<G, N> {
         self.next.on_batch_end(elapsed);
     }
     fn take_fatal(&mut self) -> Option<FatalError> {
-        self.fatal.0.take().or_else(|| self.next.take_fatal())
+        // Downstream first: this stage swallows the rest of the payload once
+        // its own slot is occupied, so a slot still occupied downstream was
+        // filled before it. Both drain, since a stage left latched swallows a
+        // later batch's records too.
+        let downstream = self.next.take_fatal();
+        let own = self.fatal.0.take();
+        downstream.or(own)
     }
     fn relieve(&mut self) -> Flow {
         self.next.relieve()
@@ -623,10 +632,13 @@ where
                         );
                     }
                     _ => {
-                        return Step::Fatal(FatalError {
+                        // Every record this call emitted was pushed before it
+                        // returned, so a stage that latched on one of them
+                        // recorded ahead of this error and reports instead.
+                        return Step::Fatal(self.ops.take_fatal().unwrap_or_else(|| FatalError {
                             component: "deserializer".to_string(),
                             reason: e.to_string(),
-                        });
+                        }));
                     }
                 }
             }

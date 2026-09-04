@@ -249,6 +249,8 @@ pub struct SplitEmitter<'a> {
     ack: &'a AckRef,
     emitted: u32,
     flow: Flow,
+    /// The first branch observed holding a fatal after an [`emit`](Self::emit).
+    latched: Option<usize>,
 }
 
 impl std::fmt::Debug for SplitEmitter<'_> {
@@ -286,6 +288,12 @@ impl SplitEmitter<'_> {
             meta: self.meta,
             ack: self.ack.clone(),
         });
+        // Branches are siblings, so nothing about their order in the `Vec` says
+        // which recorded a fatal first; the emit that finds one occupied is the
+        // moment it was recorded.
+        if self.latched.is_none() && branch.fatal.0.is_some() {
+            self.latched = Some(handle.idx);
+        }
         self.emitted += 1;
         if self.flow != Flow::Blocked {
             self.flow = flow;
@@ -310,6 +318,9 @@ pub struct SplitTerminal<SrcF: RecFamily, G> {
     unmatched: ErrorPolicy,
     meter: OpMeterSlot,
     fatal: FatalSlot,
+    /// The branch that recorded a fatal first on the push path, which index
+    /// order cannot recover. Cleared with the branches' slots.
+    first_latched: Option<usize>,
     component: Arc<str>,
     _family: PhantomData<fn() -> SrcF>,
 }
@@ -328,6 +339,7 @@ impl<SrcF: RecFamily, G> SplitTerminal<SrcF, G> {
             unmatched,
             meter,
             fatal: FatalSlot(None),
+            first_latched: None,
             component,
             _family: PhantomData,
         }
@@ -351,7 +363,9 @@ where
     fn push(&mut self, rec: Record<SrcF::Rec<'buf>>) -> Flow {
         self.meter.0.seen();
         // A latched fatal short-circuits the rest of the payload, just like
-        // `SinkHandoff`. The chain drains it via `take_fatal`.
+        // `SinkHandoff`. The chain drains it via `take_fatal`. A branch's own
+        // latch does not stop this stage: the branch swallows what it is sent,
+        // and the other branches keep taking records.
         if self.fatal.0.is_some() {
             return Flow::Continue;
         }
@@ -364,9 +378,13 @@ where
             ack: &ack,
             emitted: 0,
             flow: Flow::Continue,
+            latched: None,
         };
         (self.route)(payload, &mut em);
-        let (emitted, flow) = (em.emitted, em.flow);
+        let (emitted, flow, latched) = (em.emitted, em.flow, em.latched);
+        if self.first_latched.is_none() {
+            self.first_latched = latched;
+        }
         if emitted == 0 {
             match self.unmatched {
                 // The record's ack share releases as success when `ack` drops
@@ -397,15 +415,22 @@ impl<SrcF: RecFamily, G> StageLifecycle for SplitTerminal<SrcF, G> {
     }
 
     fn take_fatal(&mut self) -> Option<FatalError> {
-        if let Some(fatal) = self.fatal.0.take() {
-            return Some(fatal);
-        }
-        for branch in &mut self.branches {
-            if let Some(fatal) = branch.take_fatal() {
-                return Some(fatal);
+        // Drain every slot, keeping the branch the push path recorded first and
+        // otherwise the lowest index, which is `flush_terminal`'s seal order.
+        // A branch outranks this stage's own slot, since this stage swallows the
+        // rest of the payload once that is occupied.
+        let first = self.first_latched.take();
+        let mut earliest = None;
+        for (idx, branch) in self.branches.iter_mut().enumerate() {
+            let Some(fatal) = branch.take_fatal() else {
+                continue;
+            };
+            if earliest.is_none() || first == Some(idx) {
+                earliest = Some(fatal);
             }
         }
-        None
+        let own = self.fatal.0.take();
+        earliest.or(own)
     }
 
     fn relieve(&mut self) -> Flow {

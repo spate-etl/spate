@@ -87,7 +87,7 @@ apache-avro = "0.22"
 object_store = "0.14"
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.
-async-nats = "0.49"
+async-nats = "0.50"
 url = "2.5"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.22.1"

@@ -41,7 +41,7 @@ exists to detect.
 
 | License | Crates |
 |---|---|
-| `MIT` | 308 |
+| `MIT` | 307 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -67,9 +67,9 @@ above from what is left. The elected license ids are unaffected either way.
 | Crate | Version | License |
 |---|---|---|
 | `apache-avro` | 0.22.0 | `Apache-2.0` |
-| `async-nats` | 0.49.1 | `Apache-2.0` |
+| `async-nats` | 0.50.0 | `Apache-2.0` |
 | `aws-lc-sys` | 0.42.0 | `Apache-2.0` |
-| `bytesize` | 2.4.2 | `Apache-2.0` |
+| `bytesize` | 2.7.0 | `Apache-2.0` |
 | `clang-sys` | 1.8.1 | `Apache-2.0` |
 | `dunce` | 1.0.5 | `Apache-2.0` |
 | `metrics-exporter-prometheus` | 0.18.3 | `Apache-2.0` |
@@ -98,7 +98,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `allocator-api2` | 0.2.21 | `MIT` |
 | `anstyle` | 1.0.14 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
-| `async-trait` | 0.1.91 | `MIT` |
+| `async-trait` | 0.1.92 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
 | `autocfg` | 1.5.1 | `MIT` |
 | `aws-lc-sys` | 0.42.0 | `MIT` |
@@ -123,8 +123,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `chacha20` | 0.10.2 | `MIT` |
 | `chrono` | 0.4.45 | `MIT` |
 | `cityhash-rs` | 1.0.1 | `MIT` |
-| `clap` | 4.6.1 | `MIT` |
-| `clap_builder` | 4.6.0 | `MIT` |
+| `clap` | 4.6.6 | `MIT` |
+| `clap_builder` | 4.6.6 | `MIT` |
 | `clap_lex` | 1.1.0 | `MIT` |
 | `clickhouse` | 0.15.1 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |
@@ -162,20 +162,20 @@ above from what is left. The elected license ids are unaffected either way.
 | `evmap` | 11.0.0 | `MIT` |
 | `fastrand` | 2.4.1 | `MIT` |
 | `find-msvc-tools` | 0.1.9 | `MIT` |
-| `flate2` | 1.1.9 | `MIT` |
+| `flate2` | 1.1.10 | `MIT` |
 | `float-cmp` | 0.10.0 | `MIT` |
 | `fnv` | 1.0.7 | `MIT` |
 | `form_urlencoded` | 1.2.2 | `MIT` |
 | `fs_extra` | 1.3.0 | `MIT` |
 | `futures` | 0.3.32 | `MIT` |
-| `futures-channel` | 0.3.32 | `MIT` |
-| `futures-core` | 0.3.32 | `MIT` |
+| `futures-channel` | 0.3.34 | `MIT` |
+| `futures-core` | 0.3.34 | `MIT` |
 | `futures-executor` | 0.3.32 | `MIT` |
-| `futures-io` | 0.3.32 | `MIT` |
-| `futures-macro` | 0.3.32 | `MIT` |
-| `futures-sink` | 0.3.32 | `MIT` |
-| `futures-task` | 0.3.32 | `MIT` |
-| `futures-util` | 0.3.32 | `MIT` |
+| `futures-io` | 0.3.34 | `MIT` |
+| `futures-macro` | 0.3.34 | `MIT` |
+| `futures-sink` | 0.3.34 | `MIT` |
+| `futures-task` | 0.3.34 | `MIT` |
+| `futures-util` | 0.3.34 | `MIT` |
 | `generic-array` | 0.14.7 | `MIT` |
 | `getrandom` | 0.2.17 | `MIT` |
 | `getrandom` | 0.3.4 | `MIT` |
@@ -193,13 +193,13 @@ above from what is left. The elected license ids are unaffected either way.
 | `higher-kinded-types` | 0.2.1 | `MIT` |
 | `http` | 1.4.2 | `MIT` |
 | `http-body` | 1.0.1 | `MIT` |
-| `http-body-util` | 0.1.4 | `MIT` |
+| `http-body-util` | 0.1.5 | `MIT` |
 | `httparse` | 1.10.1 | `MIT` |
 | `httpdate` | 1.0.3 | `MIT` |
 | `humantime` | 2.4.0 | `MIT` |
 | `humantime-serde` | 1.1.1 | `MIT` |
 | `hybrid-array` | 0.4.13 | `MIT` |
-| `hyper` | 1.10.1 | `MIT` |
+| `hyper` | 1.11.0 | `MIT` |
 | `hyper-rustls` | 0.27.9 | `MIT` |
 | `hyper-util` | 0.1.20 | `MIT` |
 | `iana-time-zone` | 0.1.65 | `MIT` |
@@ -214,7 +214,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `jobserver` | 0.1.34 | `MIT` |
 | `lazy_static` | 1.5.0 | `MIT` |
 | `left-right` | 0.11.7 | `MIT` |
-| `libc` | 0.2.186 | `MIT` |
+| `libc` | 0.2.189 | `MIT` |
 | `libm` | 0.2.16 | `MIT` |
 | `libproc` | 0.14.11 | `MIT` |
 | `libyaml-rs` | 0.3.0 | `MIT` |
@@ -234,7 +234,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `metrics-process` | 2.4.3 | `MIT` |
 | `metrics-util` | 0.20.4 | `MIT` |
 | `minimal-lexical` | 0.2.1 | `MIT` |
-| `miniz_oxide` | 0.8.9 | `MIT` |
 | `miniz_oxide` | 0.9.1 | `MIT` |
 | `mio` | 1.2.1 | `MIT` |
 | `never-say-never` | 6.6.666 | `MIT` |
@@ -352,10 +351,10 @@ above from what is left. The elected license ids are unaffected either way.
 | `syn` | 3.0.3 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
 | `tempfile` | 3.27.0 | `MIT` |
-| `thiserror` | 2.0.19 | `MIT` |
-| `thiserror-impl` | 2.0.19 | `MIT` |
+| `thiserror` | 2.0.20 | `MIT` |
+| `thiserror-impl` | 2.0.20 | `MIT` |
 | `thread_local` | 1.1.9 | `MIT` |
-| `time` | 0.3.54 | `MIT` |
+| `time` | 0.3.55 | `MIT` |
 | `time-core` | 0.1.9 | `MIT` |
 | `time-macros` | 0.2.32 | `MIT` |
 | `tokio` | 1.53.1 | `MIT` |
@@ -378,13 +377,13 @@ above from what is left. The elected license ids are unaffected either way.
 | `tracing-subscriber` | 0.3.23 | `MIT` |
 | `try-lock` | 0.2.5 | `MIT` |
 | `tryhard` | 0.5.2 | `MIT` |
-| `twox-hash` | 2.1.3 | `MIT` |
+| `twox-hash` | 2.1.4 | `MIT` |
 | `typenum` | 1.20.1 | `MIT` |
 | `unarray` | 0.1.4 | `MIT` |
 | `unicode-ident` | 1.0.24 | `MIT` |
 | `url` | 2.5.8 | `MIT` |
 | `utf8_iter` | 1.0.4 | `MIT` |
-| `uuid` | 1.24.0 | `MIT` |
+| `uuid` | 1.24.1 | `MIT` |
 | `value-trait` | 0.12.2 | `MIT` |
 | `vcpkg` | 0.2.15 | `MIT` |
 | `version_check` | 0.9.5 | `MIT` |

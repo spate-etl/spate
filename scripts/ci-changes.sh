@@ -28,8 +28,27 @@
 # A `pull_request` run executes the pull request's *own* copy of this script, so
 # a change here narrows the CI of the change proposing it. `.github/` and
 # `scripts/` are CODEOWNERS paths.
+#
+# Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, no
+# `${var,,}`.
 
 set -euo pipefail
+# Hold a command substitution to its exit status. Bash otherwise drops
+# `errexit` inside `$( )`. The option is bash 4.4 and later, hence the guard.
+shopt -s inherit_errexit 2>/dev/null || true
+
+# The words of $1, sorted and single-space separated, with no leading or
+# trailing space. Further arguments go to `sort`, so `-u` deduplicates. `tr -s`
+# collapses the blank lines a blank word list produces, so no stage exits
+# non-zero on one. A stage that fails is the return status.
+sorted_words() {
+    local list="$1"
+    shift
+    local out
+    out=$(printf '%s\n' "$list" | tr ' ' '\n' | sort "$@" | tr -s '\n' ' ') || return
+    out="${out# }"
+    printf '%s' "${out% }"
+}
 
 # Workspace packages that own `#[ignore]`d container tests. `--self-test`
 # derives this same set from the source tree and fails if the two disagree.
@@ -110,10 +129,13 @@ bench_pkgs_discovered=""
 bench_pkgs_discovery_done=0
 discover_bench_pkgs() {
     if [[ "$bench_pkgs_discovery_done" == "0" ]]; then
-        bench_pkgs_discovered=$(
+        if ! bench_pkgs_discovered=$(
             "$(git rev-parse --show-toplevel)/scripts/gungraun-benches.sh" |
                 cut -d' ' -f1 | sort -u
-        )
+        ); then
+            echo "::error::scripts/gungraun-benches.sh failed; the bench selection would be empty." >&2
+            exit 1
+        fi
         bench_pkgs_discovery_done=1
     fi
 }
@@ -287,6 +309,33 @@ if [[ "${1:-}" == "--self-test" ]]; then
         fi
     done
 
+    # `inherit_errexit` is on wherever the shell has it.
+    if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) &&
+        ! shopt -q inherit_errexit; then
+        echo "::error::inherit_errexit is off on a bash that has it."
+        exit 1
+    fi
+
+    # sorted_words against the shapes its callers hand it.
+    check_words() {
+        local want="$1" got
+        shift
+        if ! got=$(sorted_words "$@"); then
+            echo "::error::sorted_words '$*' exited non-zero."
+            exit 1
+        fi
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::sorted_words '$*' returned '$got', expected '$want'."
+            exit 1
+        fi
+    }
+    check_words "" ""
+    check_words "" "   "
+    check_words "spate" "spate"
+    check_words "spate spate-s3" "  spate-s3   spate "
+    check_words "spate spate spate-s3" "spate-s3 spate spate"
+    check_words "spate spate-s3" "spate-s3 spate spate" -u
+
     # Which crates own container tests, according to the source tree?
     derived_pkgs=""
     for dir in "$repo_root"/crates/*/; do
@@ -294,8 +343,8 @@ if [[ "${1:-}" == "--self-test" ]]; then
             derived_pkgs="$derived_pkgs $(basename "$dir")"
         fi
     done
-    want=$(echo "$CONTAINER_PKGS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-    got=$(echo "$derived_pkgs" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
+    want=$(sorted_words "$CONTAINER_PKGS")
+    got=$(sorted_words "$derived_pkgs")
     if [[ "$want" != "$got" ]]; then
         echo "::error::CONTAINER_PKGS no longer matches the crates carrying #[ignore]d tests."
         echo "  declared: $want"
@@ -313,8 +362,8 @@ if [[ "${1:-}" == "--self-test" ]]; then
     expected=$(
         while IFS= read -r crate; do
             [[ -z "$crate" ]] && continue
-            sorted=$(container_suites_for "$crate" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-            printf '%s\t%s\n' "$crate" "${sorted% }"
+            sorted=$(sorted_words "$(container_suites_for "$crate")")
+            printf '%s\t%s\n' "$crate" "$sorted"
         done <<<"$crates"
     )
 
@@ -381,8 +430,8 @@ for crate in sorted(names):
     semver_expected=$(
         while IFS= read -r crate; do
             [[ -z "$crate" ]] && continue
-            sorted=$(semver_closure_for "$crate" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-            printf '%s\t%s\n' "$crate" "${sorted% }"
+            sorted=$(sorted_words "$(semver_closure_for "$crate")")
+            printf '%s\t%s\n' "$crate" "$sorted"
         done <<<"$crates"
     )
 
@@ -436,10 +485,10 @@ print(" ".join(sorted(
     p["name"] for p in meta["packages"]
     if p.get("publish") != [] and "/crates/" in p["manifest_path"]
 )))')
-    published_expected=$(echo "$SEMVER_PKGS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-    if [[ "${published_expected% }" != "$published_actual" ]]; then
+    published_expected=$(sorted_words "$SEMVER_PKGS")
+    if [[ "$published_expected" != "$published_actual" ]]; then
         echo "::error::SEMVER_PKGS is not the set of publishable crates."
-        echo "  SEMVER_PKGS: ${published_expected% }"
+        echo "  SEMVER_PKGS: $published_expected"
         echo "  cargo says:  $published_actual"
         exit 1
     fi
@@ -815,8 +864,7 @@ if len(set(keys)) != len(keys):
     # The semver selection. `spate-test` is the row that fails if somebody
     # folds the two closures into one: the container table reaches four suites
     # from it through dev-dependencies, and no published API moves with them.
-    all_semver=$(echo "$SEMVER_PKGS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-    all_semver="${all_semver% }"
+    all_semver=$(sorted_words "$SEMVER_PKGS")
     check_semver "$all_semver" "a spate-core source file moves every published API" \
         "crates/spate-core/src/lib.rs"
     check_semver "spate spate-kafka" "a connector moves its own API and the facade" \
@@ -1110,11 +1158,7 @@ fi
 
 # Deduplicate: a change touching several files in one measured crate would
 # otherwise run its benches once per file.
-bench_pkgs_out=""
-if [[ -n "${bench_pkgs// /}" ]]; then
-    bench_pkgs_out=$(echo "$bench_pkgs" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
-    bench_pkgs_out="${bench_pkgs_out% }"
-fi
+bench_pkgs_out=$(sorted_words "$bench_pkgs" -u)
 
 # Cross the selection with the arm table. An empty `include:` is a workflow
 # *error* rather than a skipped job, so the boolean and the array have to
@@ -1126,20 +1170,15 @@ fi
 
 # Deduplicate. The semver gate takes bare names: it probes the sparse index
 # per crate, so it needs the name, not a cargo flag.
-semver_pkgs_out=""
-if [[ -n "${semver_pkgs// /}" ]]; then
-    semver_pkgs_out=$(echo "$semver_pkgs" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
-    semver_pkgs_out="${semver_pkgs_out% }"
-fi
+semver_pkgs_out=$(sorted_words "$semver_pkgs" -u)
 
 # Deduplicate and render as cargo -p arguments.
 container_args=""
-if [[ -n "${suites// /}" ]]; then
-    for pkg in $(echo "$suites" | tr ' ' '\n' | grep -v '^$' | sort -u); do
-        container_args="$container_args -p $pkg"
-    done
-    container_args="${container_args# }"
-fi
+container_pkgs=$(sorted_words "$suites" -u)
+for pkg in $container_pkgs; do
+    container_args="$container_args -p $pkg"
+done
+container_args="${container_args# }"
 
 # ---------------------------------------------------------------------------
 # Manifest reach, for the publish dry-run gate.

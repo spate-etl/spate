@@ -288,6 +288,34 @@ impl RowEncoder<Owned<Vec<u8>>> for SelectiveFinishEncoder {
     }
 }
 
+/// Appends each row in `encode`, then a trailer in `finish_chunk`: `PARTIAL`
+/// with a fatal error the first time, `|END` and success after. The shape of
+/// an encoder that writes into the chunk buffer before it fails to finalize
+/// and recovers on the next call.
+#[derive(Clone, Default)]
+struct RecoveringFinishEncoder {
+    failed_once: bool,
+}
+
+impl RowEncoder<Owned<Vec<u8>>> for RecoveringFinishEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        buf.extend_from_slice(&rec.payload);
+        Ok(())
+    }
+    fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
+        if self.failed_once {
+            buf.extend_from_slice(b"|END");
+            return Ok(());
+        }
+        self.failed_once = true;
+        buf.extend_from_slice(b"PARTIAL");
+        Err(SinkError::Client {
+            class: crate::error::ErrorClass::Fatal,
+            reason: "cannot finalize the block".into(),
+        })
+    }
+}
+
 /// Decode a [`ColumnarEncoder`] block: leading `u32` row count, then rows.
 fn decode_block(frame: &[u8]) -> Vec<Vec<u8>> {
     let count = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
@@ -1135,6 +1163,42 @@ fn a_flush_reports_the_first_shard_that_failed_to_finalize() {
         vec![b"s1:ok".to_vec()],
         "a shard that finalized cleanly must still ship its chunk"
     );
+}
+
+/// A finalize that fails after writing into the chunk buffer leaves the rows
+/// already encoded there and nothing else, so the frame a later finalize seals
+/// holds one complete block. That later chunk also carries the row the chain
+/// accepted after the flush drained the fatal.
+/// Regression for #366.
+#[test]
+fn a_failed_finalize_leaves_only_the_encoded_rows_in_the_buffer() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            RecoveringFinishEncoder::default(),
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let first = payloads(&["one"]);
+    let (mut batch, _rx) = TestBatch::new(&first);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+
+    // The driver's flush paths keep the chain alive, so the shard takes another
+    // row and seals again before the pipeline stops.
+    let second = payloads(&["two"]);
+    let (mut batch, _rx2) = TestBatch::new(&second);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let chunk = rxs[0].try_recv().expect("the second flush ships a chunk");
+    assert_eq!(&chunk.frame[..], b"onetwo|END");
+    assert_eq!(chunk.rows, 2);
+    chunk.acks.deliver();
 }
 
 // ---- backpressure / resume semantics ----------------------------------------
